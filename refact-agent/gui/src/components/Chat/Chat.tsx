@@ -204,6 +204,7 @@ export const Chat: React.FC<ChatProps> = ({
               <div className={styles.dockColumn}>
                 <div
                   className={styles.dockGroup}
+                  data-composer-surface=""
                   data-activity={composerActivity ?? undefined}
                 >
                   {showTerminalWorkbench ? (

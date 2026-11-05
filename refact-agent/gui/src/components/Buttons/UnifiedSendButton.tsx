@@ -9,7 +9,6 @@ type UnifiedSendButtonProps = {
   isStreaming?: boolean;
   hasText: boolean;
   hasMessages: boolean;
-  queuedCount?: number;
   onSend: () => void;
   onSendImmediately: () => void;
   onStop: () => void;
@@ -22,7 +21,6 @@ const SendShape: React.FC<{
   shortcut?: string;
   icon: LucideIcon;
   variant: "primary" | "stop";
-  queuedCount?: number;
   disabled?: boolean;
   onActivate: () => void;
 }> = ({
@@ -31,7 +29,6 @@ const SendShape: React.FC<{
   shortcut,
   icon: IconComponent,
   variant,
-  queuedCount = 0,
   disabled,
   onActivate,
 }) => (
@@ -48,14 +45,6 @@ const SendShape: React.FC<{
       }}
     >
       <IconComponent aria-hidden="true" />
-      {queuedCount > 0 ? (
-        <span
-          className={styles.queued}
-          title={`${queuedCount} message(s) queued`}
-        >
-          {queuedCount}
-        </span>
-      ) : null}
     </button>
   </KitTooltip>
 );
@@ -65,7 +54,6 @@ export const UnifiedSendButton: React.FC<UnifiedSendButtonProps> = ({
   isStreaming,
   hasText,
   hasMessages,
-  queuedCount = 0,
   onSend,
   onSendImmediately,
   onStop,
@@ -107,7 +95,6 @@ export const UnifiedSendButton: React.FC<UnifiedSendButtonProps> = ({
           tooltip="Stop generation"
           icon={Square}
           variant="stop"
-          queuedCount={queuedCount}
           onActivate={onStop}
         />
       </span>
@@ -129,9 +116,6 @@ export const UnifiedSendButton: React.FC<UnifiedSendButtonProps> = ({
             }}
           />
         </KitTooltip>
-        {queuedCount > 0 ? (
-          <span className={styles.queuedInline}>{queuedCount} queued</span>
-        ) : null}
       </span>
     );
   }
@@ -143,7 +127,6 @@ export const UnifiedSendButton: React.FC<UnifiedSendButtonProps> = ({
       shortcut="Enter"
       icon={Send}
       variant="primary"
-      queuedCount={queuedCount}
       disabled={disabled}
       onActivate={onSend}
     />

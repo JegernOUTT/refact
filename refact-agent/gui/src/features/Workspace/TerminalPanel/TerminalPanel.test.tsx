@@ -21,6 +21,7 @@ import {
   activeSessionChanged,
   FINISHED_SESSION_TTL_MS,
   sessionAdded,
+  selectTerminalWorkbenchOpen,
   setTerminalWorkbenchOpen,
 } from "./terminalSlice";
 import emptyStateStyles from "../../../components/ui/EmptyState/EmptyState.module.css";
@@ -167,9 +168,7 @@ describe("TerminalPanel", () => {
       DRAWER_MIN_HEIGHT,
     );
 
-    await view.user.click(
-      screen.getByRole("button", { name: "Collapse terminal workbench" }),
-    );
+    await view.user.click(screen.getByRole("button", { name: /^Terminal$/ }));
     expect(
       screen.queryByRole("separator", { name: "Resize terminal" }),
     ).toBeNull();
@@ -379,9 +378,7 @@ describe("TerminalPanel", () => {
       container.querySelector('[data-terminal-process-id="second-12345"]'),
     ).toBeInTheDocument();
 
-    await user.click(
-      screen.getByRole("button", { name: "Collapse terminal workbench" }),
-    );
+    await user.click(screen.getByRole("tab", { name: /\/bin\/zsh · second/i }));
     await waitFor(() =>
       expect(FakeEventSource.instances[1].close).toHaveBeenCalled(),
     );
@@ -445,14 +442,8 @@ describe("TerminalPanel", () => {
     expect(third).toHaveAttribute("aria-selected", "true");
     expect(screen.getByLabelText("Terminal input")).toHaveFocus();
     await view.user.click(third);
-    expect(screen.getByLabelText("Terminal input")).toHaveFocus();
-
-    await view.user.click(
-      screen.getByRole("button", { name: "Collapse terminal workbench" }),
-    );
-    await view.user.click(
-      screen.getByRole("button", { name: "Expand terminal workbench" }),
-    );
+    expect(screen.queryByLabelText("Terminal input")).toBeNull();
+    await view.user.click(third);
     expect(await screen.findByLabelText("Terminal input")).toHaveFocus();
   });
 
@@ -648,16 +639,13 @@ describe("TerminalPanel", () => {
 
     const { user } = renderTerminalPanel();
 
-    expect(
-      screen.getByRole("button", { name: "Expand terminal workbench" }),
-    ).toBeVisible();
+    const toggle = screen.getByRole("button", { name: /^Terminal$/ });
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
     expect(
       screen.queryByRole("heading", { name: "No terminal sessions" }),
     ).toBeNull();
 
-    await user.click(
-      screen.getByRole("button", { name: "Expand terminal workbench" }),
-    );
+    await user.click(toggle);
 
     const emptyTitle = await screen.findByText("No terminal sessions");
     expect(emptyTitle).toBeVisible();
@@ -666,16 +654,180 @@ describe("TerminalPanel", () => {
       terminalPanelStyles.emptyState,
     );
 
-    await user.click(
-      screen.getByRole("button", { name: "Collapse terminal workbench" }),
-    );
+    await user.click(toggle);
 
     expect(
       screen.queryByRole("heading", { name: "No terminal sessions" }),
     ).toBeNull();
-    expect(
-      screen.getByRole("button", { name: "Expand terminal workbench" }),
-    ).toBeVisible();
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+  });
+
+  describe("tab toggling", () => {
+    function useTwoSessions() {
+      server.use(
+        http.get("*/v1/exec/list", () =>
+          HttpResponse.json({
+            processes: ["first-123456", "second-12345"].map((process_id) => ({
+              process_id,
+              status: "running",
+              command_preview: "/bin/zsh",
+              created_at_ms: 1,
+              tty: true,
+              service_name: null,
+            })),
+          }),
+        ),
+        http.get("*/v1/exec/:processId/read", () =>
+          HttpResponse.json({ chunks: [], next_seq: 0, status: "running" }),
+        ),
+        http.post("*/v1/exec/:processId/resize", () => HttpResponse.json({})),
+      );
+    }
+
+    test("a tab expands a collapsed panel and activates itself", async () => {
+      useTwoSessions();
+      const { user, store } = renderTerminalPanel();
+      const second = await screen.findByRole("tab", { name: /second/i });
+      expect(second).toHaveAttribute("aria-expanded", "false");
+
+      await user.click(second);
+
+      expect(second).toHaveAttribute("aria-expanded", "true");
+      expect(second).toHaveAttribute("aria-selected", "true");
+      expect(selectTerminalWorkbenchOpen(store.getState(), "chat-a")).toBe(
+        true,
+      );
+    });
+
+    test("double-clicking a tab opens the panel once", async () => {
+      useTwoSessions();
+      const { user, store } = renderTerminalPanel();
+      const second = await screen.findByRole("tab", { name: /second/i });
+
+      await user.dblClick(second);
+
+      expect(second).toHaveAttribute("aria-expanded", "true");
+      expect(second).toHaveAttribute("aria-selected", "true");
+      expect(selectTerminalWorkbenchOpen(store.getState(), "chat-a")).toBe(
+        true,
+      );
+    });
+
+    test("the active tab collapses an expanded panel", async () => {
+      useTwoSessions();
+      const view = renderTerminalPanel();
+      openWorkbench(view);
+      const first = await screen.findByRole("tab", { name: /first/i });
+      expect(first).toHaveAttribute("aria-selected", "true");
+      expect(first).toHaveAttribute("aria-expanded", "true");
+
+      await view.user.click(first);
+
+      expect(first).toHaveAttribute("aria-expanded", "false");
+      expect(first).toHaveAttribute("aria-selected", "true");
+      expect(screen.queryByRole("separator")).toBeNull();
+    });
+
+    test("another tab switches and keeps the panel expanded", async () => {
+      useTwoSessions();
+      const view = renderTerminalPanel();
+      openWorkbench(view);
+      const first = await screen.findByRole("tab", { name: /first/i });
+      const second = screen.getByRole("tab", { name: /second/i });
+
+      await view.user.click(second);
+
+      expect(second).toHaveAttribute("aria-selected", "true");
+      expect(first).toHaveAttribute("aria-selected", "false");
+      expect(second).toHaveAttribute("aria-expanded", "true");
+      expect(
+        screen.getByRole("separator", { name: "Resize terminal" }),
+      ).toBeVisible();
+    });
+
+    test("Enter and Space on a tab toggle the panel", async () => {
+      useTwoSessions();
+      const view = renderTerminalPanel();
+      openWorkbench(view);
+      const first = await screen.findByRole("tab", { name: /first/i });
+
+      first.focus();
+      await view.user.keyboard("{Enter}");
+      expect(first).toHaveAttribute("aria-expanded", "false");
+      await view.user.keyboard(" ");
+      expect(first).toHaveAttribute("aria-expanded", "true");
+    });
+
+    test("closing a tab does not toggle the panel", async () => {
+      useTwoSessions();
+      server.use(
+        http.post("*/v1/exec/:processId/kill", () => HttpResponse.json({})),
+      );
+      const view = renderTerminalPanel();
+      openWorkbench(view);
+      const first = await screen.findByRole("tab", { name: /first/i });
+
+      await view.user.click(
+        screen.getByRole("button", { name: /^Close .*first/i }),
+      );
+
+      await waitFor(() =>
+        expect(screen.queryByRole("tab", { name: /first/i })).toBeNull(),
+      );
+      expect(screen.getByRole("tab", { name: /second/i })).toHaveAttribute(
+        "aria-expanded",
+        "true",
+      );
+      expect(first).not.toBeInTheDocument();
+    });
+
+    test("the Terminal title toggles the panel and exposes its state", async () => {
+      useTwoSessions();
+      const { user } = renderTerminalPanel();
+      const title = screen.getByRole("button", { name: /^Terminal$/ });
+      expect(title).toHaveAttribute("aria-expanded", "false");
+
+      await user.click(title);
+      expect(title).toHaveAttribute("aria-expanded", "true");
+      await user.click(title);
+      expect(title).toHaveAttribute("aria-expanded", "false");
+    });
+
+    test("no separate chevron toggle remains", async () => {
+      useTwoSessions();
+      const { user } = renderTerminalPanel();
+      await screen.findByRole("tab", { name: /first/i });
+      await user.click(screen.getByRole("tab", { name: /first/i }));
+
+      expect(
+        screen.queryByRole("button", { name: /(expand|collapse) terminal/i }),
+      ).toBeNull();
+    });
+
+    test("New terminal expands a collapsed panel", async () => {
+      useTwoSessions();
+      server.use(
+        http.post("*/v1/exec/spawn", () =>
+          HttpResponse.json({
+            process_id: "spawned-1234",
+            status: "running",
+            command_preview: "/bin/zsh",
+          }),
+        ),
+      );
+      const { user } = renderTerminalPanel();
+      await screen.findByRole("tab", { name: /first/i });
+      expect(screen.queryByRole("separator")).toBeNull();
+
+      await user.click(screen.getByRole("button", { name: "New terminal" }));
+
+      expect(
+        await screen.findByRole("tab", { name: /spawned/i }),
+      ).toHaveAttribute("aria-expanded", "true");
+      expect(
+        screen.getByRole("separator", { name: "Resize terminal" }),
+      ).toBeVisible();
+    });
   });
 
   test("spawns the backend-selected shell and kills it when closed", async () => {

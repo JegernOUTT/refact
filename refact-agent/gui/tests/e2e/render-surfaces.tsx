@@ -417,7 +417,7 @@ function Surface() {
       ) : null}
       {view === "goal" || view === "setup" ? <TaskProgressWidget /> : null}
       {view === "composer" || view === "combined" ? (
-        <div className={styles.dock}>
+        <div className={styles.dock} data-composer-surface="">
           {view === "combined" ? <TaskProgressWidget /> : null}
           <ChatForm
             embedded

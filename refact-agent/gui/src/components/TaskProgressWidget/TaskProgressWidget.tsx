@@ -505,6 +505,7 @@ const GoalEditorDialog: React.FC<GoalEditorDialogProps> = ({
 
   return (
     <KitDialog
+      data-composer-overlay=""
       open={open}
       onOpenChange={onOpenChange}
       title={isUpdate ? "Update goal" : "Set a goal"}
@@ -583,6 +584,7 @@ const GoalDetailsDialog: React.FC<GoalDetailsDialogProps> = ({
 
   return (
     <KitDialog
+      data-composer-overlay=""
       open={open}
       onOpenChange={onOpenChange}
       title="Goal details"

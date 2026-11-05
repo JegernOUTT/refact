@@ -1,11 +1,9 @@
 .panel {
-  --rf-queue-row-h: calc(var(--rf-control-h) + var(--rf-space-2xs));
-  --rf-queue-row-gap: var(--rf-space-1);
-  --rf-queue-position-w: var(--rf-space-4);
+  --rf-queue-row-h: var(--rf-transcript-row-h);
+  --rf-queue-position-w: var(--rf-transcript-icon);
   --rf-queue-fade-h: var(--rf-space-5);
   --rf-queue-text-inset: calc(
-    2 * var(--rf-space-1) + var(--rf-queue-position-w) + var(--rf-icon-sm) + 2 *
-      var(--rf-space-2)
+    2 * var(--rf-space-2) + var(--rf-queue-position-w)
   );
   --rf-queue-detail-max-h: calc(11 * var(--rf-line-2));
   --rf-queue-hint-min-w: calc(10 * var(--rf-space-5));
@@ -16,6 +14,12 @@
   gap: var(--rf-space-1);
   width: 100%;
   min-width: 0;
+}
+
+.disclosure.disclosure {
+  margin: 0;
+  padding: 0;
+  border: 0;
 }
 
 .liveStatus {
@@ -34,13 +38,8 @@
   composes: scrollbarThin from "../shared/scrollbar.module.css";
   display: flex;
   flex-direction: column;
-  gap: var(--rf-queue-row-gap);
   min-width: 0;
-  max-height: calc(
-    4 * var(--rf-queue-row-h) + 3 * var(--rf-queue-row-gap) + 2 *
-      var(--rf-space-2xs)
-  );
-  padding: var(--rf-space-2xs) 0;
+  max-height: calc(4 * var(--rf-queue-row-h));
   overflow-x: hidden;
   overflow-y: auto;
   overscroll-behavior: contain;
@@ -76,9 +75,9 @@
   display: flex;
   min-width: 0;
   align-items: center;
-  gap: var(--rf-space-1);
+  gap: var(--rf-space-2);
   min-height: var(--rf-queue-row-h);
-  padding: 0 var(--rf-space-1);
+  padding: 0 var(--rf-space-2);
   border-radius: inherit;
 }
 
@@ -92,8 +91,8 @@
   min-width: 0;
   align-items: center;
   gap: var(--rf-space-2);
-  min-height: calc(var(--rf-queue-row-h) - 2 * var(--rf-space-2xs));
-  padding: 0 var(--rf-space-1);
+  align-self: stretch;
+  padding: 0;
   color: inherit;
   background: none;
   border: 0;
@@ -222,7 +221,7 @@
   gap: var(--rf-space-1);
   align-items: flex-start;
   min-width: 0;
-  padding: 0 var(--rf-space-2) var(--rf-space-2) var(--rf-queue-text-inset);
+  padding: 0 var(--rf-space-2) var(--rf-space-1) var(--rf-queue-text-inset);
 }
 
 .detailText {
@@ -297,7 +296,7 @@
 
 .error {
   margin: 0;
-  padding: 0 var(--rf-space-2) var(--rf-space-2) var(--rf-space-3);
+  padding: 0 var(--rf-space-2) var(--rf-space-1) var(--rf-queue-text-inset);
   color: var(--rf-color-danger);
   font-size: var(--rf-text-1);
   line-height: var(--rf-line-1);
@@ -308,28 +307,6 @@
   .source,
   .chipLabel {
     display: none;
-  }
-
-  .list,
-  .row {
-    --rf-queue-row-h: calc(2 * var(--rf-line-1) + var(--rf-space-2));
-  }
-
-  .rowSurface {
-    flex-wrap: wrap;
-    row-gap: 0;
-  }
-
-  .title {
-    flex: 1 1 auto;
-    max-width: none;
-  }
-
-  .preview {
-    flex: 1 0 100%;
-    padding-left: calc(
-      var(--rf-queue-position-w) + var(--rf-icon-sm) + 2 * var(--rf-space-2)
-    );
   }
 }
 
@@ -345,7 +322,7 @@
 }
 .list[data-expanded-row="true"] {
   max-height: calc(
-    4 * var(--rf-queue-row-h) + 3 * var(--rf-queue-row-gap) + 2 *
-      var(--rf-space-2xs) + var(--rf-queue-detail-max-h) + 4 * var(--rf-line-2)
+    4 * var(--rf-queue-row-h) + var(--rf-queue-detail-max-h) + 4 *
+      var(--rf-line-2)
   );
 }

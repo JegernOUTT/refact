@@ -72,25 +72,25 @@
   border-bottom-color: var(--rf-border);
 }
 
-.panel[data-open="true"] .chevron > span {
-  transform: rotate(180deg);
-}
-
-@media (prefers-reduced-motion: no-preference) {
-  .chevron > span {
-    transition: transform var(--rf-dur-med) var(--rf-ease-standard);
-  }
-}
-
 .title {
   display: flex;
   flex: 0 0 auto;
   align-items: center;
   gap: var(--rf-space-xs);
   margin-inline-end: var(--rf-space-1);
+  padding: 0;
   color: var(--rf-color-fg);
+  background: none;
+  border: 0;
+  border-radius: var(--rf-radius-chip);
   font: var(--rf-weight-medium) var(--rf-transcript-title-size) / var(--rf-line)
     var(--rf-font-ui);
+  cursor: pointer;
+}
+
+.title:focus-visible {
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
+  outline-offset: var(--rf-focus-ring-offset);
 }
 
 .tabs {

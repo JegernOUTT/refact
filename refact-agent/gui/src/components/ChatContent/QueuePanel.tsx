@@ -89,6 +89,7 @@ const ThreadQueuePanel: React.FC<QueuePanelProps & { chatId: string }> = ({
         open={isOpen}
         onOpenChange={setIsOpen}
         sectionLabels={QUEUE_SECTION_LABELS}
+        panelClassName={styles.disclosure}
         output={
           <div
             className={styles.list}

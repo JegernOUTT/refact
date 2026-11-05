@@ -37,6 +37,10 @@ export interface PopoverContentProps extends AnchoredOverlayContentProps {
   onInteractOutside?: PopoverPrimitive.PopoverContentProps["onInteractOutside"];
   onEscapeKeyDown?: PopoverPrimitive.PopoverContentProps["onEscapeKeyDown"];
   onOpenAutoFocus?: PopoverPrimitive.PopoverContentProps["onOpenAutoFocus"];
+  onCloseAutoFocus?: PopoverPrimitive.PopoverContentProps["onCloseAutoFocus"];
+  onPointerEnter?: React.PointerEventHandler<HTMLDivElement>;
+  onPointerLeave?: React.PointerEventHandler<HTMLDivElement>;
+  onPointerDown?: React.PointerEventHandler<HTMLDivElement>;
   forceMount?: true;
 }
 export type PopoverCloseProps = PopoverPrimitive.PopoverCloseProps;
@@ -132,6 +136,10 @@ const PopoverContent = React.forwardRef<HTMLDivElement, PopoverContentProps>(
       onInteractOutside,
       onEscapeKeyDown,
       onOpenAutoFocus,
+      onCloseAutoFocus,
+      onPointerEnter,
+      onPointerLeave,
+      onPointerDown,
       forceMount,
       children,
     },
@@ -188,6 +196,10 @@ const PopoverContent = React.forwardRef<HTMLDivElement, PopoverContentProps>(
             style={{ ...overlayStyle(maxWidth, maxHeight), ...style }}
             onInteractOutside={onInteractOutside}
             onEscapeKeyDown={onEscapeKeyDown}
+            onCloseAutoFocus={onCloseAutoFocus}
+            onPointerEnter={onPointerEnter}
+            onPointerLeave={onPointerLeave}
+            onPointerDown={onPointerDown}
             onOpenAutoFocus={(event) => {
               if (forceMount) {
                 event.preventDefault();

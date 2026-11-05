@@ -20,6 +20,7 @@ import {
 } from "../../utils/calculateUsageInputTokens";
 import { ScrollArea } from "../ScrollArea";
 import { useUsageCounter } from "./useUsageCounter";
+import { useHoverPopover } from "./useHoverPopover";
 
 import {
   selectThreadCurrentMessageTokensById,
@@ -95,7 +96,7 @@ const CircularProgress: React.FC<CircularProgressProps> = ({
   );
 };
 
-type UsageCounterProps = { onOpenChange?: (open: boolean) => void } & (
+type UsageCounterProps = { onHoldChange?: (held: boolean) => void } & (
   | {
       isInline?: boolean;
       isMessageEmpty?: boolean;
@@ -260,9 +261,10 @@ const DefaultHoverTriggerContent: React.FC<{
   usdCacheRead?: number;
   usdCacheCreation?: number;
   tokenMap?: import("../../services/refact/chat").TokenMap | null;
-  onOpenChange?: (open: boolean) => void;
-}> = ({ tokenMap, onOpenChange, ...summary }) => {
+  onHoldChange?: (held: boolean) => void;
+}> = ({ tokenMap, onHoldChange, ...summary }) => {
   const [tab, setTab] = useState("summary");
+  const hover = useHoverPopover(onHoldChange);
   const { currentSessionTokens, maxContextTokens } = summary;
   const percentage =
     maxContextTokens > 0
@@ -270,8 +272,12 @@ const DefaultHoverTriggerContent: React.FC<{
       : 0;
 
   return (
-    <Popover responsive={false} onOpenChange={onOpenChange}>
-      <Popover.Trigger asChild>
+    <Popover
+      responsive={false}
+      open={hover.open}
+      onOpenChange={hover.onOpenChange}
+    >
+      <Popover.Trigger asChild {...hover.triggerProps}>
         <ComposerTrigger aria-label="Context usage details">
           <CircularProgress
             value={maxContextTokens > 0 ? currentSessionTokens : 0}
@@ -290,6 +296,7 @@ const DefaultHoverTriggerContent: React.FC<{
         align="end"
         maxWidth="300px"
         maxHeight="min(520px, calc(100dvh - var(--rf-space-5)))"
+        {...hover.contentProps}
       >
         <KitPanel>
           <KitHeader title="Context usage" meta={`${percentage}%`} metaStrong />
@@ -324,7 +331,7 @@ const DefaultHoverTriggerContent: React.FC<{
 export const UsageCounter: React.FC<UsageCounterProps> = ({
   isInline = false,
   isMessageEmpty,
-  onOpenChange,
+  onHoldChange,
 }) => {
   const [open, setOpen] = useState(false);
   const chatId = useThreadId();
@@ -451,7 +458,7 @@ export const UsageCounter: React.FC<UsageCounterProps> = ({
           usdCacheRead={usdCost?.cache_read_usd}
           usdCacheCreation={usdCost?.cache_creation_usd}
           tokenMap={tokenMap}
-          onOpenChange={onOpenChange}
+          onHoldChange={onHoldChange}
         />
       </Flex>
     );

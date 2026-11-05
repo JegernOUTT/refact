@@ -9,13 +9,18 @@ import { fireEvent, screen } from "@testing-library/react";
 import { render, waitFor } from "../../utils/test-utils";
 import * as voiceInput from "../../hooks/useVoiceInput";
 import { ChatForm, ChatFormProps } from "./ChatForm";
+import { QueuePanel } from "../ChatContent/QueuePanel";
 import { createDefaultChatState } from "../../utils/test-utils";
-import { applyChatEvent } from "../../features/Chat/Thread";
+import {
+  applyChatEvent,
+  clearThreadPauseReasons,
+} from "../../features/Chat/Thread";
 import type {
   ChatMessage,
   ChatMessages,
   GoalSnapshot,
 } from "../../services/refact/types";
+import type { QueuedItem } from "../../features/Chat";
 import type { ChatEventEnvelope } from "../../services/refact/chatSubscription";
 
 import {
@@ -237,6 +242,15 @@ const pausedGoal: GoalSnapshot = {
 };
 
 server.use(...handlers);
+
+const nextFrame = () =>
+  act(async () => {
+    await new Promise<void>((resolve) => {
+      requestAnimationFrame(() => {
+        resolve();
+      });
+    });
+  });
 
 const App: React.FC<Partial<ChatFormProps>> = ({ ...props }) => {
   const defaultProps: ChatFormProps = {
@@ -1012,10 +1026,390 @@ describe("ChatForm", () => {
     });
     fireEvent.pointerDown(document.body);
     textarea.blur();
+    fireEvent.pointerUp(document.body);
     await waitFor(() => {
       expect(form.className).toContain("chatFormCollapsed");
     });
-    expect(screen.queryByText("Dangerous commands auto-approved")).toBeNull();
+  });
+
+  test("auto-approved dangerous commands show only the pinned toggle", async () => {
+    const { user } = render(<App />, {
+      preloadedState: {
+        chat: chatStateWithThread({
+          model: "openai/gpt-4o",
+          auto_approve_dangerous_commands: true,
+        }),
+        ...engineConfigState,
+      },
+    });
+    const textarea = screen.getByTestId("chat-form-textarea");
+    const form = textarea.closest("form");
+    if (!form) throw new Error("Missing form");
+
+    const expectOnlyToggle = () => {
+      expect(screen.queryByText(/Dangerous commands auto-approved/)).toBeNull();
+      expect(
+        screen.queryByRole("button", { name: "Change permission" }),
+      ).toBeNull();
+      expect(
+        screen.getByRole("button", { name: "Auto-approve dangerous commands" }),
+      ).toHaveAttribute("aria-pressed", "true");
+    };
+
+    expect(form.className).toContain("chatFormCollapsed");
+    expectOnlyToggle();
+
+    await user.click(textarea);
+    await waitFor(() => {
+      expect(form.className).toContain("chatFormExpanded");
+    });
+    expectOnlyToggle();
+  });
+
+  test("clicks in a sibling block of the composer surface keep it expanded", async () => {
+    const onSibling = vi.fn();
+    const { user } = render(
+      <div data-composer-surface="">
+        <button type="button" onClick={onSibling}>
+          Sibling control
+        </button>
+        <App />
+      </div>,
+      {
+        preloadedState: {
+          chat: chatStateWithThread({ model: "openai/gpt-4o" }),
+          ...engineConfigState,
+        },
+      },
+    );
+    const textarea = screen.getByTestId("chat-form-textarea");
+    const form = textarea.closest("form");
+    if (!form) throw new Error("Missing form");
+    await user.click(textarea);
+    await waitFor(() => {
+      expect(form.className).toContain("chatFormExpanded");
+    });
+    await user.click(screen.getByRole("button", { name: "Sibling control" }));
+    expect(onSibling).toHaveBeenCalledTimes(1);
+    await nextFrame();
+    await nextFrame();
+    expect(form.className).toContain("chatFormExpanded");
+  });
+
+  test("a pointerdown outside the surface collapses only after pointerup", async () => {
+    const { user } = render(<App />, {
+      preloadedState: {
+        chat: chatStateWithThread({ model: "openai/gpt-4o" }),
+        ...engineConfigState,
+      },
+    });
+    const textarea = screen.getByTestId("chat-form-textarea");
+    const form = textarea.closest("form");
+    if (!form) throw new Error("Missing form");
+    await user.click(textarea);
+    await waitFor(() => {
+      expect(form.className).toContain("chatFormExpanded");
+    });
+    fireEvent.pointerDown(document.body);
+    textarea.blur();
+    await nextFrame();
+    await nextFrame();
+    expect(form.className).toContain("chatFormExpanded");
+    fireEvent.pointerUp(document.body);
+    await waitFor(() => {
+      expect(form.className).toContain("chatFormCollapsed");
+    });
+  });
+
+  test("focus in an unrelated overlay outside the surface collapses the composer", async () => {
+    const { user } = render(
+      <>
+        <div role="dialog" aria-label="Unrelated panel">
+          <button type="button">Panel action</button>
+        </div>
+        <div role="listbox" aria-label="Commits">
+          <div role="option" aria-selected="false" tabIndex={0}>
+            Commit
+          </div>
+        </div>
+        <App />
+      </>,
+      {
+        preloadedState: {
+          chat: chatStateWithThread({ model: "openai/gpt-4o" }),
+          ...engineConfigState,
+        },
+      },
+    );
+    const textarea = screen.getByTestId("chat-form-textarea");
+    const form = textarea.closest("form");
+    if (!form) throw new Error("Missing form");
+
+    await user.click(textarea);
+    await waitFor(() => {
+      expect(form.className).toContain("chatFormExpanded");
+    });
+    act(() => screen.getByRole("button", { name: "Panel action" }).focus());
+    await waitFor(() => {
+      expect(form.className).toContain("chatFormCollapsed");
+    });
+
+    await user.click(textarea);
+    await waitFor(() => {
+      expect(form.className).toContain("chatFormExpanded");
+    });
+    await user.click(screen.getByRole("option", { name: "Commit" }));
+    await waitFor(() => {
+      expect(form.className).toContain("chatFormCollapsed");
+    });
+  });
+
+  test("a composer-owned overlay keeps the composer expanded", async () => {
+    const { user } = render(
+      <>
+        <div role="dialog" aria-label="Goal" data-composer-overlay="">
+          <button type="button">Goal action</button>
+        </div>
+        <App />
+      </>,
+      {
+        preloadedState: {
+          chat: chatStateWithThread({ model: "openai/gpt-4o" }),
+          ...engineConfigState,
+        },
+      },
+    );
+    const textarea = screen.getByTestId("chat-form-textarea");
+    const form = textarea.closest("form");
+    if (!form) throw new Error("Missing form");
+    await user.click(textarea);
+    await waitFor(() => {
+      expect(form.className).toContain("chatFormExpanded");
+    });
+    await user.click(screen.getByRole("button", { name: "Goal action" }));
+    await nextFrame();
+    await nextFrame();
+    expect(form.className).toContain("chatFormExpanded");
+  });
+
+  test("choosing a queue row delivery mode keeps an empty composer expanded", async () => {
+    let patched: unknown = null;
+    server.use(
+      http.patch("*/v1/chats/:id/queue/:itemId", async ({ request }) => {
+        patched = await request.json();
+        return HttpResponse.json({ ok: true });
+      }),
+    );
+    const queued: QueuedItem = {
+      client_request_id: "queued-1",
+      command_type: "user_message",
+      priority: false,
+      preview: "Follow-up",
+      enqueued_at_ms: 1,
+    };
+    const { user } = render(
+      <div data-composer-surface="">
+        <QueuePanel queuedItems={[queued]} isBusy />
+        <App />
+      </div>,
+      {
+        preloadedState: {
+          chat: chatStateWithThread({ model: "openai/gpt-4o" }),
+          ...engineConfigState,
+        },
+      },
+    );
+    const textarea = screen.getByTestId("chat-form-textarea");
+    const form = textarea.closest("form");
+    if (!form) throw new Error("Missing form");
+    await user.click(textarea);
+    await waitFor(() => {
+      expect(form.className).toContain("chatFormExpanded");
+    });
+
+    const chip = screen.getByRole("combobox", { name: /In order/ });
+    act(() => chip.focus());
+    await user.keyboard(" ");
+    const option = await screen.findByRole("option", { name: /^Send next/ });
+    await waitFor(() => {
+      expect(
+        document.activeElement?.closest('[role="listbox"]'),
+      ).not.toBeNull();
+    });
+    await nextFrame();
+    await nextFrame();
+    expect(form.className).toContain("chatFormExpanded");
+    fireEvent.keyDown(option, { key: "Enter" });
+    await waitFor(() => {
+      expect(patched).toEqual({ priority: true });
+    });
+    await nextFrame();
+    await nextFrame();
+    expect(form.className).toContain("chatFormExpanded");
+  });
+
+  test("a right-click outside without pointerup does not block collapse", async () => {
+    const { user } = render(
+      <>
+        <button type="button">Elsewhere</button>
+        <App />
+      </>,
+      {
+        preloadedState: {
+          chat: chatStateWithThread({ model: "openai/gpt-4o" }),
+          ...engineConfigState,
+        },
+      },
+    );
+    const textarea = screen.getByTestId("chat-form-textarea");
+    const form = textarea.closest("form");
+    if (!form) throw new Error("Missing form");
+    await user.click(textarea);
+    await waitFor(() => {
+      expect(form.className).toContain("chatFormExpanded");
+    });
+    fireEvent.pointerDown(document.body, { button: 2 });
+    act(() => screen.getByRole("button", { name: "Elsewhere" }).focus());
+    await waitFor(() => {
+      expect(form.className).toContain("chatFormCollapsed");
+    });
+  });
+
+  test("collapse tracking attaches once the composer mounts after a pause", async () => {
+    const pauseReason = {
+      type: "confirmation" as const,
+      tool_name: "shell",
+      command: "rm -rf build",
+      rule: "rm*",
+      tool_call_id: "call-1",
+      integr_config_path: null,
+    };
+    const chat = chatStateWithThread({ model: "openai/gpt-4o" });
+    const id = chat.current_thread_id;
+    chat.threads[id].confirmation = {
+      pause: true,
+      pause_reasons: [pauseReason],
+      status: { wasInteracted: false, confirmationStatus: false },
+    };
+    const app = render(
+      <>
+        <button type="button">Elsewhere</button>
+        <App />
+      </>,
+      { preloadedState: { chat, ...engineConfigState } },
+    );
+    expect(screen.queryByTestId("chat-form-textarea")).toBeNull();
+    act(() => {
+      app.store.dispatch(clearThreadPauseReasons({ id }));
+    });
+    const textarea = await screen.findByTestId("chat-form-textarea");
+    const form = textarea.closest("form");
+    if (!form) throw new Error("Missing form");
+    await app.user.click(textarea);
+    await waitFor(() => {
+      expect(form.className).toContain("chatFormExpanded");
+    });
+    await app.user.click(screen.getByRole("button", { name: "Elsewhere" }));
+    await waitFor(() => {
+      expect(form.className).toContain("chatFormCollapsed");
+    });
+  });
+
+  test("hovering the context ring opens its popover without changing expansion", async () => {
+    const onExpandedChange = vi.fn();
+    render(<App onExpandedChange={onExpandedChange} />, {
+      preloadedState: {
+        chat: chatStateWithThread({ model: "openai/gpt-4o" }),
+        ...engineConfigState,
+      },
+    });
+    const form = screen.getByTestId("chat-form-textarea").closest("form");
+    if (!form) throw new Error("Missing form");
+    expect(form.className).toContain("chatFormCollapsed");
+    const calls = onExpandedChange.mock.calls.length;
+    const trigger = screen.getByRole("button", {
+      name: "Context usage details",
+    });
+    fireEvent.pointerEnter(trigger, { pointerType: "mouse" });
+    expect(await screen.findByText("Context usage")).toBeInTheDocument();
+    expect(form.className).toContain("chatFormCollapsed");
+    fireEvent.pointerLeave(trigger, { pointerType: "mouse" });
+    await waitFor(() => {
+      expect(screen.queryByText("Context usage")).toBeNull();
+    });
+    expect(form.className).toContain("chatFormCollapsed");
+    expect(onExpandedChange.mock.calls.slice(calls)).not.toContainEqual([true]);
+  });
+
+  test("keyboard focus inside a hover-opened ring popover holds it open", async () => {
+    const { user } = render(<App />, {
+      preloadedState: {
+        chat: chatStateWithThread({ model: "openai/gpt-4o" }),
+        ...engineConfigState,
+      },
+    });
+    const trigger = screen.getByRole("button", {
+      name: "Context usage details",
+    });
+    fireEvent.pointerEnter(trigger, { pointerType: "mouse" });
+    await screen.findByText("Context usage");
+    const tab = screen.getByRole("tab", { name: "Breakdown" });
+    act(() => tab.focus());
+    fireEvent.pointerLeave(trigger, { pointerType: "mouse" });
+    await new Promise((r) => setTimeout(r, 300));
+    expect(screen.getByText("Context usage")).toBeInTheDocument();
+    expect(tab).toHaveFocus();
+
+    await user.keyboard("{Escape}");
+    await waitFor(() => {
+      expect(screen.queryByText("Context usage")).toBeNull();
+    });
+    expect(trigger).toHaveFocus();
+  });
+
+  test("focus leaving a hover-opened ring popover lets it close", async () => {
+    render(<App />, {
+      preloadedState: {
+        chat: chatStateWithThread({ model: "openai/gpt-4o" }),
+        ...engineConfigState,
+      },
+    });
+    const trigger = screen.getByRole("button", {
+      name: "Context usage details",
+    });
+    const textarea = screen.getByTestId("chat-form-textarea");
+    fireEvent.pointerEnter(trigger, { pointerType: "mouse" });
+    await screen.findByText("Context usage");
+    act(() => screen.getByRole("tab", { name: "Summary" }).focus());
+    fireEvent.pointerLeave(trigger, { pointerType: "mouse" });
+    act(() => textarea.focus());
+    await waitFor(() => {
+      expect(screen.queryByText("Context usage")).toBeNull();
+    });
+    expect(textarea).toHaveFocus();
+  });
+
+  test("clicking outside a focus-held ring popover keeps the clicked focus", async () => {
+    const { user } = render(<App />, {
+      preloadedState: {
+        chat: chatStateWithThread({ model: "openai/gpt-4o" }),
+        ...engineConfigState,
+      },
+    });
+    const trigger = screen.getByRole("button", {
+      name: "Context usage details",
+    });
+    const textarea = screen.getByTestId("chat-form-textarea");
+    fireEvent.pointerEnter(trigger, { pointerType: "mouse" });
+    await screen.findByText("Context usage");
+    act(() => screen.getByRole("tab", { name: "Summary" }).focus());
+    fireEvent.pointerLeave(trigger, { pointerType: "mouse" });
+    await user.click(textarea);
+    await waitFor(() => {
+      expect(screen.queryByText("Context usage")).toBeNull();
+    });
+    await nextFrame();
+    expect(textarea).toHaveFocus();
   });
 
   test("the project information dialog keeps an empty composer expanded", async () => {
@@ -1044,14 +1438,6 @@ describe("ChatForm", () => {
     const textarea = screen.getByTestId("chat-form-textarea");
     const form = textarea.closest("form");
     if (!form) throw new Error("Missing form");
-    const nextFrame = () =>
-      act(async () => {
-        await new Promise<void>((resolve) => {
-          requestAnimationFrame(() => {
-            resolve();
-          });
-        });
-      });
 
     await user.click(textarea);
     await waitFor(() => {
@@ -1312,28 +1698,6 @@ describe("ChatForm", () => {
     ).toBeInTheDocument();
     await expect(window.navigator.clipboard.readText()).resolves.toBe(
       'restart_agent(card_id="T-7", mode="resume")',
-    );
-  });
-
-  test("dangerous auto-approval notice names the scope and links to the control", async () => {
-    const chat = chatStateWithThread({
-      model: "openai/gpt-4o",
-      auto_approve_dangerous_commands: true,
-    });
-    const { user } = render(<App />, {
-      preloadedState: { chat, ...engineConfigState },
-    });
-
-    expect(
-      screen.getByText(/Dangerous commands auto-approved for this chat/),
-    ).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "Change permission" }));
-    await waitFor(() =>
-      expect(
-        screen.getByRole("button", {
-          name: "Auto-approve dangerous commands",
-        }),
-      ).toHaveFocus(),
     );
   });
 

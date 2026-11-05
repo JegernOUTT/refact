@@ -1,7 +1,7 @@
 import "@xterm/xterm/css/xterm.css";
 
 import classNames from "classnames";
-import { ChevronDown, Plus, Search, SquareTerminal, X } from "lucide-react";
+import { Plus, Search, SquareTerminal, X } from "lucide-react";
 import {
   useCallback,
   useEffect,
@@ -136,6 +136,7 @@ function ChatTerminalPanel({ chatId }: { chatId: string }) {
   const liveHeightRef = useRef(drawer.height);
   const dragCleanupRef = useRef<(() => void) | null>(null);
   const tabListId = useId();
+  const bodyId = `${tabListId}-body`;
   const tabsRef = useRef<HTMLDivElement>(null);
   const tabRefs = useRef(new Map<string, HTMLButtonElement>());
   const [tabsOverflow, setTabsOverflow] = useState({
@@ -381,6 +382,22 @@ function ChatTerminalPanel({ chatId }: { chatId: string }) {
     [chatId, dispatch],
   );
 
+  const toggleWorkbench = useCallback(() => {
+    dispatch(setTerminalWorkbenchOpen({ chatId, open: !workbenchOpen }));
+  }, [chatId, dispatch, workbenchOpen]);
+
+  const handleTabClick = useCallback(
+    (processId: string) => {
+      if (workbenchOpen && processId === activeProcessId) {
+        dispatch(setTerminalWorkbenchOpen({ chatId, open: false }));
+        return;
+      }
+      dispatch(setTerminalWorkbenchOpen({ chatId, open: true }));
+      activateSession(processId);
+    },
+    [activateSession, activeProcessId, chatId, dispatch, workbenchOpen],
+  );
+
   const handleTabKeyDown = useCallback(
     (event: KeyboardEvent<HTMLButtonElement>, processId: string) => {
       const currentIndex = sessions.findIndex(
@@ -507,10 +524,17 @@ function ChatTerminalPanel({ chatId }: { chatId: string }) {
         </div>
       ) : null}
       <header className={styles.header}>
-        <div className={styles.title}>
+        <button
+          type="button"
+          className={styles.title}
+          aria-controls={bodyId}
+          aria-expanded={workbenchOpen}
+          aria-label="Terminal"
+          onClick={toggleWorkbench}
+        >
           <Icon icon={SquareTerminal} size="sm" tone="muted" />
           <span className={styles.titleText}>Terminal</span>
-        </div>
+        </button>
         <div
           ref={tabsRef}
           className={styles.tabs}
@@ -539,10 +563,14 @@ function ChatTerminalPanel({ chatId }: { chatId: string }) {
                   id={tabId}
                   aria-controls={panelId}
                   aria-selected={active}
+                  aria-expanded={workbenchOpen}
                   aria-label={`${session.title}, ${statusLabel}`}
                   title={session.title}
                   className={styles.tabSelect}
-                  onClick={() => activateSession(session.process_id)}
+                  onClick={(event) => {
+                    if (event.detail > 1) return;
+                    handleTabClick(session.process_id);
+                  }}
                   onKeyDown={(event) =>
                     handleTabKeyDown(event, session.process_id)
                   }
@@ -606,22 +634,6 @@ function ChatTerminalPanel({ chatId }: { chatId: string }) {
             loading={spawning}
             onClick={() => void handleNewSession()}
           />
-          <IconButton
-            className={styles.chevron}
-            icon={ChevronDown}
-            aria-label={
-              workbenchOpen
-                ? "Collapse terminal workbench"
-                : "Expand terminal workbench"
-            }
-            size="sm"
-            variant="plain"
-            onClick={() =>
-              dispatch(
-                setTerminalWorkbenchOpen({ chatId, open: !workbenchOpen }),
-              )
-            }
-          />
         </div>
       </header>
 
@@ -629,6 +641,7 @@ function ChatTerminalPanel({ chatId }: { chatId: string }) {
         <div
           className={styles.body}
           data-testid="terminal-workbench-body"
+          id={bodyId}
           hidden={!workbenchOpen}
           aria-hidden={!workbenchOpen}
         >

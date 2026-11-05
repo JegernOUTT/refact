@@ -546,3 +546,109 @@ test("composer respects reduced motion", async ({ page }) => {
       .evaluate((element) => getComputedStyle(element).animationName),
   ).toBe("none");
 });
+
+test("streaming composer keeps the dock top block clickable while expanded", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 768, height: 900 });
+  await page.goto("/tests/e2e/render-surfaces.html?view=combined&busy");
+  const input = page.getByTestId("chat-form-textarea");
+  const form = input.locator("xpath=ancestor::form");
+  await input.click();
+  await expect(form).toHaveClass(/chatFormExpanded/);
+  const toggle = page.getByTestId("transcript-toggle");
+  await expect(toggle).toHaveAttribute("aria-expanded", "false");
+  await toggle.click();
+  await expect(toggle).toHaveAttribute("aria-expanded", "true");
+  await expect(form).toHaveClass(/chatFormExpanded/);
+  const details = page.getByRole("button", {
+    name: "Goal details",
+    exact: true,
+  });
+  await details.click();
+  const dialog = page.getByRole("dialog");
+  await expect(dialog).toBeVisible();
+  await dialog.getByText("Close", { exact: true }).click();
+  await expect(dialog).toBeHidden();
+  await expect(details).toBeFocused();
+  await expect(form).toHaveClass(/chatFormExpanded/);
+  await toggle.click();
+  await expect(toggle).toHaveAttribute("aria-expanded", "false");
+  await expect(form).toHaveClass(/chatFormExpanded/);
+  await page
+    .getByRole("button", { name: "Outside composer", exact: true })
+    .click();
+  await expect(form).toHaveClass(/chatFormCollapsed/);
+});
+
+for (const expanded of [false, true]) {
+  test(`usage rings open on hover without changing a ${
+    expanded ? "expanded" : "collapsed"
+  } streaming composer`, async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await page.goto("/tests/e2e/render-surfaces.html?view=combined&busy");
+    const input = page.getByTestId("chat-form-textarea");
+    const form = input.locator("xpath=ancestor::form");
+    if (expanded) {
+      await input.click();
+      await expect(form).toHaveClass(/chatFormExpanded/);
+    } else {
+      await expect(form).toHaveClass(/chatFormCollapsed/);
+    }
+    const state = expanded ? /chatFormExpanded/ : /chatFormCollapsed/;
+    const rings = [
+      {
+        trigger: page.getByRole("button", {
+          name: "Context usage details",
+          exact: true,
+        }),
+        content: page.getByText("Context usage", { exact: true }),
+      },
+      {
+        trigger: page.getByRole("button", { name: /: 42% used$/ }),
+        content: page.getByText("Daily usage", { exact: true }),
+      },
+    ];
+    for (const ring of rings) {
+      await ring.trigger.hover();
+      await expect(ring.content).toBeVisible();
+      await expect(form).toHaveClass(state);
+      await page.waitForTimeout(400);
+      await expect(ring.content).toBeVisible();
+      await expect(form).toHaveClass(state);
+      await page.mouse.move(5, 5);
+      await expect(ring.content).toBeHidden();
+      await expect(form).toHaveClass(state);
+    }
+    if (expanded) await expect(input).toBeFocused();
+  });
+}
+
+test("hovered context popover stays open on click and its tabs work", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.goto("/tests/e2e/render-surfaces.html?view=combined&busy");
+  const form = page
+    .getByTestId("chat-form-textarea")
+    .locator("xpath=ancestor::form");
+  const trigger = page.getByRole("button", {
+    name: "Context usage details",
+    exact: true,
+  });
+  await trigger.hover();
+  const heading = page.getByText("Context usage", { exact: true });
+  await expect(heading).toBeVisible();
+  await trigger.click();
+  await page.waitForTimeout(300);
+  await expect(heading).toBeVisible();
+  await page.getByRole("tab", { name: "Breakdown" }).click();
+  await expect(page.getByRole("tab", { name: "Breakdown" })).toHaveAttribute(
+    "aria-selected",
+    "true",
+  );
+  await expect(heading).toBeVisible();
+  await expect(form).toHaveClass(/chatFormCollapsed/);
+  await page.keyboard.press("Escape");
+  await expect(heading).toBeHidden();
+});

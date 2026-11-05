@@ -29,6 +29,7 @@ import {
 } from "../../utils/providerQuota";
 import styles from "./UsageCounter.module.css";
 import { resolveSelectedProvider } from "./resolveSelectedProvider";
+import { useHoverPopover } from "./useHoverPopover";
 
 const CircularUsage: React.FC<{ pct?: number }> = ({ pct }) => {
   const size = 20;
@@ -212,8 +213,9 @@ export const ProviderUsageIndicatorContent: React.FC<{
   displayName: string;
   providerName: string;
   quotaQuery: ProviderQuotaIndicatorQuery;
-  onOpenChange?: (open: boolean) => void;
-}> = ({ displayName, providerName, quotaQuery, onOpenChange }) => {
+  onHoldChange?: (held: boolean) => void;
+}> = ({ displayName, providerName, quotaQuery, onHoldChange }) => {
+  const hover = useHoverPopover(onHoldChange);
   const snapshot = quotaQuery.data?.quota;
   const percent = snapshotPercent(snapshot);
   const stateLabel = quotaQuery.isLoading
@@ -231,8 +233,12 @@ export const ProviderUsageIndicatorContent: React.FC<{
               : "Quota unavailable";
 
   return (
-    <Popover responsive={false} onOpenChange={onOpenChange}>
-      <Popover.Trigger asChild>
+    <Popover
+      responsive={false}
+      open={hover.open}
+      onOpenChange={hover.onOpenChange}
+    >
+      <Popover.Trigger asChild {...hover.triggerProps}>
         <ComposerTrigger aria-label={`${displayName}: ${stateLabel}`}>
           <CircularUsage pct={percent} />
           <span className={kit.label} data-shrink-at="1">
@@ -246,6 +252,7 @@ export const ProviderUsageIndicatorContent: React.FC<{
         maxHeight="50vh"
         maxWidth="280px"
         side="top"
+        {...hover.contentProps}
       >
         <KitPanel>
           <KitHeader
@@ -273,8 +280,8 @@ export const ProviderUsageIndicatorContent: React.FC<{
 };
 
 export const ProviderUsageIndicator: React.FC<{
-  onOpenChange?: (open: boolean) => void;
-}> = ({ onOpenChange }) => {
+  onHoldChange?: (held: boolean) => void;
+}> = ({ onHoldChange }) => {
   const { currentModel } = useCapsForToolUse();
   const { data: providersData } = useGetConfiguredProvidersQuery();
   const selectedProvider = useMemo(
@@ -293,7 +300,7 @@ export const ProviderUsageIndicator: React.FC<{
       displayName={selectedProvider.display_name}
       providerName={selectedProvider.name}
       quotaQuery={quotaQuery}
-      onOpenChange={onOpenChange}
+      onHoldChange={onHoldChange}
     />
   );
 };

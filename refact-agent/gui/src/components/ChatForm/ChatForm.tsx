@@ -19,13 +19,11 @@ function isEditableElement(element: Element | null): boolean {
   );
 }
 
-function isInsideRadixPortal(element: Element | null): boolean {
-  if (!element) return false;
-  return Boolean(
-    element.closest(
-      '[data-radix-popper-content-wrapper], [data-radix-portal], [role="dialog"], [role="menu"], [role="listbox"]',
-    ),
-  );
+const OVERLAY_SELECTOR =
+  '[data-radix-popper-content-wrapper], [role="dialog"], [role="menu"], [role="listbox"]';
+
+function isInsideOverlay(element: Element | null): boolean {
+  return Boolean(element?.closest(OVERLAY_SELECTOR));
 }
 
 import {
@@ -89,7 +87,6 @@ import {
   selectIsStreamingById,
   selectRecoveryById,
   selectIsWaitingById,
-  selectQueuedItemsById,
   selectThreadImagesById,
   selectThreadModeById,
   selectManualPreviewItemsById,
@@ -203,17 +200,24 @@ export const ChatForm: React.FC<ChatFormProps> = ({
   const [focusWithin, setFocusWithin] = React.useState(false);
   const [openComposerMenus, setOpenComposerMenus] = React.useState(0);
   const openComposerMenusRef = React.useRef(0);
-  const pointerInsideRef = React.useRef(false);
+  const [heldExpanded, setHeldExpanded] = React.useState<boolean | null>(null);
+  const heldPopoversRef = React.useRef(0);
+  const expandedRef = React.useRef(false);
+  const pointerTargetRef = React.useRef<Element | null>(null);
   const syncFocusRef = React.useRef<() => void>();
-  const composerRef = React.useRef<HTMLDivElement>(null);
+  const composerRef = React.useRef<HTMLDivElement | null>(null);
+  const [composerRoot, setComposerRoot] = React.useState<HTMLDivElement | null>(
+    null,
+  );
+  const setComposerNode = useCallback((node: HTMLDivElement | null) => {
+    composerRef.current = node;
+    setComposerRoot(node);
+  }, []);
   const editorRef = React.useRef<HTMLDivElement>(null);
   const isOnline = useIsOnline();
   const { isContextFull, isWarning } = useUsageCounter();
   const hasMessages = useAppSelector((state) =>
     selectHasMessagesById(state, chatId),
-  );
-  const queuedItems = useAppSelector((state) =>
-    selectQueuedItemsById(state, chatId),
   );
   const threadMode = useAppSelector((state) =>
     selectThreadModeById(state, chatId),
@@ -526,26 +530,68 @@ export const ChatForm: React.FC<ChatFormProps> = ({
     if (!open) syncFocusRef.current?.();
   }, []);
 
+  const handleComposerPopoverHold = useCallback((open: boolean) => {
+    const previous = heldPopoversRef.current;
+    heldPopoversRef.current = Math.max(0, previous + (open ? 1 : -1));
+    if (previous === 0 && heldPopoversRef.current > 0) {
+      setHeldExpanded(expandedRef.current);
+    } else if (previous > 0 && heldPopoversRef.current === 0) {
+      setHeldExpanded(null);
+      syncFocusRef.current?.();
+    }
+  }, []);
+
   useEffect(() => {
-    const root = composerRef.current;
+    const root = composerRoot;
     if (!root) return;
+    const surface =
+      root.closest<HTMLElement>("[data-composer-surface]") ?? root;
     let frame: number | undefined;
-    const insideOpenMenu = (node: Element) =>
-      openComposerMenusRef.current > 0 &&
-      node.closest("[data-radix-popper-content-wrapper]") !== null;
+    let pointerPending = false;
+    const isControlledFromSurface = (node: Element) => {
+      if (!isInsideOverlay(node)) return false;
+      const controlled = new Set(
+        Array.from(surface.querySelectorAll("[aria-controls]")).flatMap(
+          (trigger) =>
+            (trigger.getAttribute("aria-controls") ?? "").split(/\s+/),
+        ),
+      );
+      for (
+        let current: Element | null = node;
+        current;
+        current = current.parentElement
+      ) {
+        if (current.id && controlled.has(current.id)) return true;
+      }
+      return false;
+    };
+    const isInside = (node: Element) =>
+      surface.contains(node) ||
+      Boolean(node.closest("[data-composer-overlay]")) ||
+      isControlledFromSurface(node) ||
+      ((openComposerMenusRef.current > 0 || heldPopoversRef.current > 0) &&
+        isInsideOverlay(node));
     const sync = () => {
       frame = undefined;
-      if (openComposerMenusRef.current > 0) return;
+      if (pointerPending) return;
+      if (openComposerMenusRef.current > 0 || heldPopoversRef.current > 0)
+        return;
       const active = document.activeElement;
+      const pointerTarget = pointerTargetRef.current;
       const inside =
         active && active !== document.body
-          ? root.contains(active)
-          : pointerInsideRef.current;
+          ? isInside(active)
+          : Boolean(pointerTarget?.isConnected && isInside(pointerTarget));
       if (!inside) setFocusWithin(false);
     };
     const schedule = () => {
       if (frame !== undefined) cancelAnimationFrame(frame);
       frame = requestAnimationFrame(sync);
+    };
+    const settlePointer = () => {
+      if (!pointerPending) return;
+      pointerPending = false;
+      schedule();
     };
     const handleFocusIn = (event: FocusEvent) => {
       if (frame !== undefined) cancelAnimationFrame(frame);
@@ -557,29 +603,38 @@ export const ChatForm: React.FC<ChatFormProps> = ({
     };
     const handlePointerDown = (event: PointerEvent) => {
       const target = event.target;
-      pointerInsideRef.current =
-        target instanceof Element &&
-        (root.contains(target) || insideOpenMenu(target));
+      const element = target instanceof Element ? target : null;
+      pointerTargetRef.current = element;
+      pointerPending =
+        event.button === 0 && !event.ctrlKey && !(element && isInside(element));
       if (target instanceof Node && editorRef.current?.contains(target)) {
         if (frame !== undefined) cancelAnimationFrame(frame);
         frame = undefined;
         setFocusWithin(true);
-      } else if (!pointerInsideRef.current) {
-        schedule();
       }
     };
     syncFocusRef.current = schedule;
-    root.addEventListener("focusin", handleFocusIn);
-    root.addEventListener("focusout", schedule);
+    surface.addEventListener("focusin", handleFocusIn);
+    surface.addEventListener("focusout", schedule);
     document.addEventListener("pointerdown", handlePointerDown, true);
+    document.addEventListener("pointerup", settlePointer, true);
+    document.addEventListener("pointercancel", settlePointer, true);
+    document.addEventListener("contextmenu", settlePointer, true);
+    document.addEventListener("keydown", settlePointer, true);
+    window.addEventListener("blur", settlePointer);
     return () => {
       syncFocusRef.current = undefined;
-      root.removeEventListener("focusin", handleFocusIn);
-      root.removeEventListener("focusout", schedule);
+      surface.removeEventListener("focusin", handleFocusIn);
+      surface.removeEventListener("focusout", schedule);
       document.removeEventListener("pointerdown", handlePointerDown, true);
+      document.removeEventListener("pointerup", settlePointer, true);
+      document.removeEventListener("pointercancel", settlePointer, true);
+      document.removeEventListener("contextmenu", settlePointer, true);
+      document.removeEventListener("keydown", settlePointer, true);
+      window.removeEventListener("blur", settlePointer);
       if (frame !== undefined) cancelAnimationFrame(frame);
     };
-  }, []);
+  }, [composerRoot]);
 
   const hasComposerContent =
     value.trim().length > 0 ||
@@ -588,7 +643,12 @@ export const ChatForm: React.FC<ChatFormProps> = ({
     attachedFiles.files.length > 0 ||
     manualPreviewItems.length > 0;
   const isComposerExpanded =
-    focusWithin || openComposerMenus > 0 || hasComposerContent || isVoiceActive;
+    heldExpanded ??
+    (focusWithin ||
+      openComposerMenus > 0 ||
+      hasComposerContent ||
+      isVoiceActive);
+  expandedRef.current = isComposerExpanded;
 
   useEffect(() => {
     onExpandedChange?.(isComposerExpanded);
@@ -625,7 +685,7 @@ export const ChatForm: React.FC<ChatFormProps> = ({
         const target = event.target;
         if (target instanceof Element) {
           if (isEditableElement(target)) return;
-          if (isInsideRadixPortal(target)) return;
+          if (isInsideOverlay(target)) return;
         }
         event.preventDefault();
         focusComposerInput();
@@ -635,17 +695,6 @@ export const ChatForm: React.FC<ChatFormProps> = ({
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [disableMicrophone, focusComposerInput, isCompanionChat, isVoiceActive]);
-
-  const focusDangerousApprovalControl = useCallback(() => {
-    setFocusWithin(true);
-    window.requestAnimationFrame(() => {
-      composerRef.current
-        ?.querySelector<HTMLButtonElement>(
-          'button[aria-label="Auto-approve dangerous commands"]',
-        )
-        ?.focus();
-    });
-  }, []);
 
   if (pauseReasonsWithPause.pause) {
     return (
@@ -671,7 +720,7 @@ export const ChatForm: React.FC<ChatFormProps> = ({
       : null;
 
   return (
-    <div ref={composerRef} className={styles.composerRoot}>
+    <div ref={setComposerNode} className={styles.composerRoot}>
       <InterruptionBanner chatId={chatId} />
       {visibleError && (
         <ErrorCallout
@@ -744,357 +793,330 @@ export const ChatForm: React.FC<ChatFormProps> = ({
             disabled={isBuddyChat}
             onDialogOpenChange={handleComposerMenuOpenChange}
             renderControls={(permissions, dangerous) => (
-              <>
-                {dangerous && (
-                  <div
-                    role="status"
-                    className={styles.dangerNotice}
-                    data-composer-no-expand="true"
-                  >
-                    Dangerous commands auto-approved for this chat.{" "}
-                    <button
-                      type="button"
-                      className={styles.inlineLink}
-                      onClick={focusDangerousApprovalControl}
-                    >
-                      Change permission
-                    </button>
-                  </div>
-                )}
-                <ComposerToolbar
-                  expanded={isComposerExpanded}
-                  menuCount={openComposerMenus}
-                  editor={
-                    <div ref={editorRef} className={styles.textareaWrapper}>
-                      <div className={styles.inputHeader}>
-                        <UnifiedAttachmentsTray
-                          attachedFiles={attachedFiles}
-                          previewFiles={previewFiles}
-                          manualPreviewItems={manualPreviewItems}
-                          onRemoveManualPreviewItem={
-                            chatId
-                              ? (index) =>
-                                  dispatch(
-                                    removeManualPreviewItem({ chatId, index }),
-                                  )
-                              : undefined
-                          }
-                          onOpenFile={queryPathThenOpenFile}
-                        />
-                      </div>
-
-                      <div
-                        className={styles.inputField}
-                        data-placeholder-overlay={
-                          placeholderOverlay ? "true" : undefined
+              <ComposerToolbar
+                expanded={isComposerExpanded}
+                menuCount={openComposerMenus}
+                editor={
+                  <div ref={editorRef} className={styles.textareaWrapper}>
+                    <div className={styles.inputHeader}>
+                      <UnifiedAttachmentsTray
+                        attachedFiles={attachedFiles}
+                        previewFiles={previewFiles}
+                        manualPreviewItems={manualPreviewItems}
+                        onRemoveManualPreviewItem={
+                          chatId
+                            ? (index) =>
+                                dispatch(
+                                  removeManualPreviewItem({ chatId, index }),
+                                )
+                            : undefined
                         }
-                      >
-                        <ComboBox
-                          key={inputResetKey}
-                          onHelpClick={handleHelpCommand}
-                          commands={commands}
-                          requestCommandsCompletion={
-                            isCompanionChat
-                              ? ignoreCompletion
-                              : requestCompletion
-                          }
-                          value={displayedInputValue}
-                          onChange={handleChange}
-                          onSubmit={(event) => {
-                            handleEnter(event);
-                          }}
-                          onArgumentPlaceholdersChange={(placeholders) => {
-                            argumentPlaceholdersRef.current = placeholders;
-                          }}
-                          placeholder={placeholder}
-                          render={(props) => (
-                            <TextAreaWithChips
-                              data-testid="chat-form-textarea"
-                              required={true}
-                              {...props}
-                              host={host}
-                              onOpenFile={queryPathThenOpenFile}
-                              autoFocus={autoFocus}
-                              readOnly={isVoiceActive}
-                              onPaste={handlePastingFile}
-                            />
-                          )}
-                        />
-                        {placeholderOverlay === "working" ? (
-                          <span
-                            aria-hidden="true"
-                            className={classNames(
-                              styles.placeholderOverlay,
-                              "rf-text-shimmer",
-                            )}
-                          >
-                            {placeholder}
-                          </span>
-                        ) : null}
-                        {placeholderOverlay === "loading" ? (
-                          <span
-                            aria-hidden="true"
-                            className={styles.placeholderOverlay}
-                            data-testid="composer-loading"
-                          >
-                            <span
-                              className={classNames(
-                                styles.placeholderSkeleton,
-                                "rf-shimmer",
-                              )}
-                            />
-                          </span>
-                        ) : null}
-                      </div>
+                        onOpenFile={queryPathThenOpenFile}
+                      />
                     </div>
-                  }
-                  items={[
-                    ...Object.entries(permissions).map(([id, content]) => {
-                      const pinnedDanger =
-                        id === "dangerousApproval" && dangerous;
-                      return {
-                        id,
-                        content,
-                        row: isComposerExpanded
-                          ? ("top" as const)
-                          : ("bottom" as const),
-                        side: isComposerExpanded
-                          ? ("left" as const)
-                          : ("right" as const),
-                        pinned: pinnedDanger,
-                        hidden:
-                          isBuddyChat || (!isComposerExpanded && !pinnedDanger),
-                      };
-                    }),
-                    {
-                      id: "model",
-                      row: "bottom",
-                      squeezable: true,
-                      hidden: isBuddyChat,
-                      content: (
-                        <ChatSettingsDropdown
-                          disabled={isBuddyChat}
-                          onOpenChange={handleComposerMenuOpenChange}
-                        />
-                      ),
-                    },
-                    {
-                      id: "mode",
-                      row: "bottom",
-                      hidden: isBuddyChat,
-                      content: (
-                        <ModeSelect
-                          selectedMode={threadMode ?? DEFAULT_MODE}
-                          onModeChange={onSetMode}
-                          disabled={isBuddyChat || isModeDisabled}
-                          onOpenChange={handleComposerMenuOpenChange}
-                        />
-                      ),
-                    },
-                    {
-                      id: "worktree",
-                      row: "bottom",
-                      hidden: isBuddyChat,
-                      content: (
-                        <WorktreeControl
-                          disabled={isBuddyChat}
-                          onOpenChange={handleComposerMenuOpenChange}
-                        />
-                      ),
-                    },
-                    {
-                      id: "skills",
-                      row: "bottom",
-                      side: "right",
-                      pinned: activeSkill !== null,
+
+                    <div
+                      className={styles.inputField}
+                      data-placeholder-overlay={
+                        placeholderOverlay ? "true" : undefined
+                      }
+                    >
+                      <ComboBox
+                        key={inputResetKey}
+                        onHelpClick={handleHelpCommand}
+                        commands={commands}
+                        requestCommandsCompletion={
+                          isCompanionChat ? ignoreCompletion : requestCompletion
+                        }
+                        value={displayedInputValue}
+                        onChange={handleChange}
+                        onSubmit={(event) => {
+                          handleEnter(event);
+                        }}
+                        onArgumentPlaceholdersChange={(placeholders) => {
+                          argumentPlaceholdersRef.current = placeholders;
+                        }}
+                        placeholder={placeholder}
+                        render={(props) => (
+                          <TextAreaWithChips
+                            data-testid="chat-form-textarea"
+                            required={true}
+                            {...props}
+                            host={host}
+                            onOpenFile={queryPathThenOpenFile}
+                            autoFocus={autoFocus}
+                            readOnly={isVoiceActive}
+                            onPaste={handlePastingFile}
+                          />
+                        )}
+                      />
+                      {placeholderOverlay === "working" ? (
+                        <span
+                          aria-hidden="true"
+                          className={classNames(
+                            styles.placeholderOverlay,
+                            "rf-text-shimmer",
+                          )}
+                        >
+                          {placeholder}
+                        </span>
+                      ) : null}
+                      {placeholderOverlay === "loading" ? (
+                        <span
+                          aria-hidden="true"
+                          className={styles.placeholderOverlay}
+                          data-testid="composer-loading"
+                        >
+                          <span
+                            className={classNames(
+                              styles.placeholderSkeleton,
+                              "rf-shimmer",
+                            )}
+                          />
+                        </span>
+                      ) : null}
+                    </div>
+                  </div>
+                }
+                items={[
+                  ...Object.entries(permissions).map(([id, content]) => {
+                    const pinnedDanger =
+                      id === "dangerousApproval" && dangerous;
+                    return {
+                      id,
+                      content,
+                      row: isComposerExpanded
+                        ? ("top" as const)
+                        : ("bottom" as const),
+                      side: isComposerExpanded
+                        ? ("left" as const)
+                        : ("right" as const),
+                      pinned: pinnedDanger,
                       hidden:
-                        isCompanionChat ||
-                        (!isComposerExpanded && activeSkill === null),
-                      content: (
-                        <ComposerSkillsControl
-                          chatId={chatId}
-                          disabled={isBuddyChat}
-                          onOpenChange={handleComposerMenuOpenChange}
-                        />
-                      ),
-                    },
-                    {
-                      id: "streaming",
-                      row: isComposerExpanded ? "top" : "bottom",
-                      side: "right",
-                      content: <StreamingTokenCounter />,
-                    },
-                    {
-                      id: "quota",
-                      row: isComposerExpanded ? "top" : "bottom",
-                      side: "right",
-                      content: (
-                        <ProviderUsageIndicator
-                          onOpenChange={handleComposerMenuOpenChange}
-                        />
-                      ),
-                    },
-                    {
-                      id: "context",
-                      row: isComposerExpanded ? "top" : "bottom",
-                      side: "right",
-                      pinned: isWarning,
-                      content: (
-                        <UsageCounter
-                          onOpenChange={handleComposerMenuOpenChange}
-                        />
-                      ),
-                    },
-                    {
-                      id: "trajectory",
-                      row: "top",
-                      side: "right",
-                      hidden: !isComposerExpanded || isCompanionChat,
-                      content: (
-                        <TrajectoryButton
-                          disabled={isBuddyChat}
-                          onOpenChange={handleComposerMenuOpenChange}
-                        />
-                      ),
-                    },
-                    {
-                      id: "browser",
-                      row: "bottom",
-                      side: "right",
-                      hidden: !isComposerExpanded || isCompanionChat,
-                      content: (
-                        <BrowserToggleButton
-                          chatId={chatId}
-                          disabled={isBuddyChat}
-                        />
-                      ),
-                    },
-                    {
-                      id: "enrichment",
-                      row: "bottom",
-                      side: "right",
-                      hidden: !isComposerExpanded || isCompanionChat,
-                      content: (
-                        <AutoEnrichmentToggleButton
-                          disabled={isStreaming || isWaiting}
-                        />
-                      ),
-                    },
-                    {
-                      id: "autoCompact",
-                      row: "bottom",
-                      side: "right",
-                      hidden: !isComposerExpanded || isCompanionChat,
-                      content: (
-                        <AutoCompactToggleButton disabled={isStreaming} />
-                      ),
-                    },
-                    {
-                      id: "wand",
-                      row: "bottom",
-                      side: "right",
-                      hidden: !isComposerExpanded || isCompanionChat,
-                      content: (
-                        <WandButton
-                          currentText={value}
-                          disabled={isStreaming || isWaiting}
-                          onUpdateText={handleChange}
-                        />
-                      ),
-                    },
-                    {
-                      id: "image",
-                      row: "bottom",
-                      side: "right",
-                      hidden:
-                        !isComposerExpanded ||
-                        isCompanionChat ||
-                        config.features?.images === false ||
-                        !isMultimodalitySupportedForCurrentModel,
-                      content: <AttachImagesButton />,
-                    },
-                    {
-                      id: "mic",
-                      row: "bottom",
-                      side: "right",
-                      pinned: isVoiceActive,
-                      hidden:
-                        !isVoiceActive &&
-                        (!isComposerExpanded || isCompanionChat),
-                      content: (
-                        <MicrophoneButton
-                          ref={microphoneRef}
-                          onTranscript={(text) =>
-                            setValue((prev) =>
-                              prev.trim() ? `${prev}\n${text}` : text,
-                            )
-                          }
-                          onLiveTranscript={handleLiveTranscript}
-                          onRecordingChange={handleRecordingChange}
-                          disabled={
-                            !isVoiceActive &&
-                            (disableMicrophone || isCompanionChat)
-                          }
-                        />
-                      ),
-                    },
-                    {
-                      id: "threadInfo",
-                      row: "bottom",
-                      side: "right",
-                      hidden: !isComposerExpanded || isCompanionChat,
-                      content: (
-                        <ThreadInfoButton
-                          chatId={chatId}
-                          onOpenChange={handleComposerMenuOpenChange}
-                        />
-                      ),
-                    },
-                    {
-                      id: "sidebar",
-                      row: "bottom",
-                      side: "right",
-                      hidden: !isComposerExpanded || !onClose,
-                      content: (
-                        <BackToSideBarButton
-                          disabled={isStreaming}
-                          onClick={onClose}
-                        />
-                      ),
-                    },
-                    {
-                      id: "send",
-                      row: "bottom",
-                      side: "right",
-                      pinned: true,
-                      content: (
-                        <UnifiedSendButton
-                          disabled={
-                            isVoiceActive ||
-                            !isOnline ||
-                            (!isCompanionChat && allDisabled) ||
-                            contextRebuildRequired
-                          }
-                          isStreaming={
-                            isStreaming || isWaiting || recoveryActive
-                          }
-                          hasText={
-                            value.trim().length > 0 ||
-                            attachedImages.length > 0 ||
-                            textFiles.length > 0
-                          }
-                          hasMessages={hasMessages && !isCompanionChat}
-                          queuedCount={queuedItems.length}
-                          onSend={() => handleSubmit("after_flow")}
-                          onSendImmediately={handleSendImmediately}
-                          onStop={() => void abort()}
-                          onResend={() => void regenerate()}
-                        />
-                      ),
-                    },
-                  ]}
-                />
-              </>
+                        isBuddyChat || (!isComposerExpanded && !pinnedDanger),
+                    };
+                  }),
+                  {
+                    id: "model",
+                    row: "bottom",
+                    squeezable: true,
+                    hidden: isBuddyChat,
+                    content: (
+                      <ChatSettingsDropdown
+                        disabled={isBuddyChat}
+                        onOpenChange={handleComposerMenuOpenChange}
+                      />
+                    ),
+                  },
+                  {
+                    id: "mode",
+                    row: "bottom",
+                    hidden: isBuddyChat,
+                    content: (
+                      <ModeSelect
+                        selectedMode={threadMode ?? DEFAULT_MODE}
+                        onModeChange={onSetMode}
+                        disabled={isBuddyChat || isModeDisabled}
+                        onOpenChange={handleComposerMenuOpenChange}
+                      />
+                    ),
+                  },
+                  {
+                    id: "worktree",
+                    row: "bottom",
+                    hidden: isBuddyChat,
+                    content: (
+                      <WorktreeControl
+                        disabled={isBuddyChat}
+                        onOpenChange={handleComposerMenuOpenChange}
+                      />
+                    ),
+                  },
+                  {
+                    id: "skills",
+                    row: "bottom",
+                    side: "right",
+                    pinned: activeSkill !== null,
+                    hidden:
+                      isCompanionChat ||
+                      (!isComposerExpanded && activeSkill === null),
+                    content: (
+                      <ComposerSkillsControl
+                        chatId={chatId}
+                        disabled={isBuddyChat}
+                        onOpenChange={handleComposerMenuOpenChange}
+                      />
+                    ),
+                  },
+                  {
+                    id: "streaming",
+                    row: isComposerExpanded ? "top" : "bottom",
+                    side: "right",
+                    content: <StreamingTokenCounter />,
+                  },
+                  {
+                    id: "quota",
+                    row: isComposerExpanded ? "top" : "bottom",
+                    side: "right",
+                    content: (
+                      <ProviderUsageIndicator
+                        onHoldChange={handleComposerPopoverHold}
+                      />
+                    ),
+                  },
+                  {
+                    id: "context",
+                    row: isComposerExpanded ? "top" : "bottom",
+                    side: "right",
+                    pinned: isWarning,
+                    content: (
+                      <UsageCounter onHoldChange={handleComposerPopoverHold} />
+                    ),
+                  },
+                  {
+                    id: "trajectory",
+                    row: "top",
+                    side: "right",
+                    hidden: !isComposerExpanded || isCompanionChat,
+                    content: (
+                      <TrajectoryButton
+                        disabled={isBuddyChat}
+                        onOpenChange={handleComposerMenuOpenChange}
+                      />
+                    ),
+                  },
+                  {
+                    id: "browser",
+                    row: "bottom",
+                    side: "right",
+                    hidden: !isComposerExpanded || isCompanionChat,
+                    content: (
+                      <BrowserToggleButton
+                        chatId={chatId}
+                        disabled={isBuddyChat}
+                      />
+                    ),
+                  },
+                  {
+                    id: "enrichment",
+                    row: "bottom",
+                    side: "right",
+                    hidden: !isComposerExpanded || isCompanionChat,
+                    content: (
+                      <AutoEnrichmentToggleButton
+                        disabled={isStreaming || isWaiting}
+                      />
+                    ),
+                  },
+                  {
+                    id: "autoCompact",
+                    row: "bottom",
+                    side: "right",
+                    hidden: !isComposerExpanded || isCompanionChat,
+                    content: <AutoCompactToggleButton disabled={isStreaming} />,
+                  },
+                  {
+                    id: "wand",
+                    row: "bottom",
+                    side: "right",
+                    hidden: !isComposerExpanded || isCompanionChat,
+                    content: (
+                      <WandButton
+                        currentText={value}
+                        disabled={isStreaming || isWaiting}
+                        onUpdateText={handleChange}
+                      />
+                    ),
+                  },
+                  {
+                    id: "image",
+                    row: "bottom",
+                    side: "right",
+                    hidden:
+                      !isComposerExpanded ||
+                      isCompanionChat ||
+                      config.features?.images === false ||
+                      !isMultimodalitySupportedForCurrentModel,
+                    content: <AttachImagesButton />,
+                  },
+                  {
+                    id: "mic",
+                    row: "bottom",
+                    side: "right",
+                    pinned: isVoiceActive,
+                    hidden:
+                      !isVoiceActive &&
+                      (!isComposerExpanded || isCompanionChat),
+                    content: (
+                      <MicrophoneButton
+                        ref={microphoneRef}
+                        onTranscript={(text) =>
+                          setValue((prev) =>
+                            prev.trim() ? `${prev}\n${text}` : text,
+                          )
+                        }
+                        onLiveTranscript={handleLiveTranscript}
+                        onRecordingChange={handleRecordingChange}
+                        disabled={
+                          !isVoiceActive &&
+                          (disableMicrophone || isCompanionChat)
+                        }
+                      />
+                    ),
+                  },
+                  {
+                    id: "threadInfo",
+                    row: "bottom",
+                    side: "right",
+                    hidden: !isComposerExpanded || isCompanionChat,
+                    content: (
+                      <ThreadInfoButton
+                        chatId={chatId}
+                        onOpenChange={handleComposerMenuOpenChange}
+                      />
+                    ),
+                  },
+                  {
+                    id: "sidebar",
+                    row: "bottom",
+                    side: "right",
+                    hidden: !isComposerExpanded || !onClose,
+                    content: (
+                      <BackToSideBarButton
+                        disabled={isStreaming}
+                        onClick={onClose}
+                      />
+                    ),
+                  },
+                  {
+                    id: "send",
+                    row: "bottom",
+                    side: "right",
+                    pinned: true,
+                    content: (
+                      <UnifiedSendButton
+                        disabled={
+                          isVoiceActive ||
+                          !isOnline ||
+                          (!isCompanionChat && allDisabled) ||
+                          contextRebuildRequired
+                        }
+                        isStreaming={isStreaming || isWaiting || recoveryActive}
+                        hasText={
+                          value.trim().length > 0 ||
+                          attachedImages.length > 0 ||
+                          textFiles.length > 0
+                        }
+                        hasMessages={hasMessages && !isCompanionChat}
+                        onSend={() => handleSubmit("after_flow")}
+                        onSendImmediately={handleSendImmediately}
+                        onStop={() => void abort()}
+                        onResend={() => void regenerate()}
+                      />
+                    ),
+                  },
+                ]}
+              />
             )}
           />
         </Form>
