@@ -245,8 +245,8 @@ pub async fn vecdb_background_reload(gcx: Arc<GlobalContext>) {
 pub async fn get_status(
     vec_db: Arc<AMutex<Option<Arc<dyn VecdbSearch>>>>,
 ) -> Result<Option<VecDbStatus>, String> {
-    let db_locked = vec_db.lock().await;
-    match db_locked.as_ref() {
+    let db = vec_db.lock().await.clone();
+    match db {
         None => Ok(None),
         Some(db) => Ok(Some(db.get_status().await?)),
     }

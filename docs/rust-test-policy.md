@@ -2,7 +2,7 @@
 
 Rust tests are a maintained regression budget, not an output quota. A test must detect a distinct important defect that the retained suite would otherwise miss. Coverage percentage, a production call, a plausible name, and successful execution do not independently justify admission.
 
-The workspace ceiling is **7,000 Rust test cases**, enforced against both physical definitions and declared meaningful cases, reduced from the audited 12,800 baseline. The historical desired retained range was 30–50% of that baseline; the approved ceiling is above that range. The ceiling is not a target to fill and cannot be raised merely to admit more tests. Any proposed budget change requires explicit maintainer approval and a coverage/cost trade-off review.
+The workspace ceiling is **8,000 Rust test cases**, enforced against both physical definitions and declared meaningful cases, reduced from the audited 12,800 baseline. The historical desired retained range was 30–50% of that baseline; the approved ceiling is above that range. The ceiling is not a target to fill and cannot be raised merely to admit more tests. Any proposed budget change requires explicit maintainer approval and a coverage/cost trade-off review.
 
 The recovery/main integration explicitly approved preserving all coverage and raising the prior
 6,400 ceiling to 6,500 rather than deleting tests. Independent review counted 16, 17 and 7
@@ -47,6 +47,12 @@ recovery. This changes the limit, not the recorded workload or admission rules:
 meaningful-case accounting, independent review, critical failure evidence and
 coverage preservation remain mandatory. Unused capacity is not an invitation to
 add tests without distinct important failure detection.
+
+During the concurrent-chat performance fixes, the maintainer explicitly approved
+an 8,000-case ceiling while preserving existing coverage. The change does not
+waive meaningful-case accounting, independent semantic admission, executed
+critical failure witnesses or verification. Performance workloads remain in the
+deliberate performance lane rather than the default correctness suite.
 
 ## Counting without loopholes
 

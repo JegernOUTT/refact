@@ -1404,16 +1404,64 @@ pub(crate) async fn index_dir_for_trajectory_file(
     file_path: &Path,
 ) -> Option<PathBuf> {
     let parent = file_path.parent()?;
-    let known_dirs = list_trajectory_dirs(&gcx).await;
-    if known_dirs.iter().any(|dir| dir == parent) {
+    let normal_dirs = get_all_trajectories_dirs(gcx.clone()).await;
+    if normal_dirs.iter().any(|dir| dir == parent) {
+        return Some(parent.to_path_buf());
+    }
+    let task_roots = get_all_task_roots(gcx).await;
+    if is_task_trajectory_index_dir(parent, &task_roots).await {
         return Some(parent.to_path_buf());
     }
     if let Some(grandparent) = parent.parent() {
-        if known_dirs.iter().any(|dir| dir == grandparent) {
+        if normal_dirs.iter().any(|dir| dir == grandparent)
+            || is_task_trajectory_index_dir(grandparent, &task_roots).await
+        {
             return Some(grandparent.to_path_buf());
         }
     }
     Some(parent.to_path_buf())
+}
+
+async fn is_task_trajectory_index_dir(dir: &Path, task_roots: &[PathBuf]) -> bool {
+    for root in task_roots {
+        let Ok(relative) = dir.strip_prefix(root) else {
+            continue;
+        };
+        let components: Vec<_> = relative.components().collect();
+        let [Component::Normal(task), Component::Normal(trajectories), Component::Normal(role), descendants @ ..] =
+            components.as_slice()
+        else {
+            continue;
+        };
+        if *trajectories != "trajectories"
+            || !["planner", "linked", "agents", "subchats"]
+                .iter()
+                .any(|name| *role == *name)
+            || descendants
+                .iter()
+                .any(|part| !matches!(part, Component::Normal(_)))
+            || !is_real_dir(&root.join(task)).await
+            || !is_real_dir(&root.join(task).join(trajectories)).await
+        {
+            continue;
+        }
+        let mut ancestor = root.join(task).join(trajectories).join(role);
+        if !is_real_dir(&ancestor).await {
+            continue;
+        }
+        let mut valid = true;
+        for component in descendants {
+            ancestor.push(component.as_os_str());
+            if !is_real_dir(&ancestor).await {
+                valid = false;
+                break;
+            }
+        }
+        if valid {
+            return true;
+        }
+    }
+    false
 }
 
 const TRAJECTORY_ID_MISMATCH_PREFIX: &str = "Existing trajectory file id mismatch";
@@ -1434,20 +1482,23 @@ pub fn chat_folder_name<'a>(chat_id: &'a str, root_chat_id: Option<&'a str>) -> 
 }
 
 pub(crate) async fn list_chat_folder_dirs(gcx: &Arc<GlobalContext>) -> Vec<PathBuf> {
-    let mut dirs = Vec::new();
-    for base in get_all_trajectories_dirs(gcx.clone()).await {
-        let mut entries = match fs::read_dir(&base).await {
-            Ok(entries) => entries,
-            Err(_) => continue,
-        };
-        while let Ok(Some(entry)) = entries.next_entry().await {
-            let path = entry.path();
-            if is_real_dir(&path).await {
-                dirs.push(path);
+    let roots = get_all_trajectories_dirs(gcx.clone()).await;
+    tokio::task::spawn_blocking(move || {
+        let mut dirs = Vec::new();
+        for root in roots {
+            let Ok(entries) = std::fs::read_dir(root) else {
+                continue;
+            };
+            for entry in entries.filter_map(Result::ok) {
+                if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                    dirs.push(entry.path());
+                }
             }
         }
-    }
-    dirs
+        dirs
+    })
+    .await
+    .unwrap_or_default()
 }
 
 pub async fn get_all_trajectories_dirs(gcx: Arc<GlobalContext>) -> Vec<PathBuf> {
@@ -1513,43 +1564,84 @@ async fn get_all_task_roots_from_weak(gcx_weak: &Weak<GlobalContext>) -> Vec<Pat
 }
 
 pub(crate) async fn list_task_trajectory_dirs(gcx: &Arc<GlobalContext>) -> Vec<PathBuf> {
+    let roots = get_all_task_roots(gcx.clone()).await;
+    tokio::task::spawn_blocking(move || task_trajectory_dirs_sync(&roots))
+        .await
+        .unwrap_or_default()
+}
+
+fn task_trajectory_dirs_sync(roots: &[PathBuf]) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
-    for tasks_dir in get_all_task_roots(gcx.clone()).await {
-        let mut task_entries = match fs::read_dir(&tasks_dir).await {
-            Ok(entries) => entries,
-            Err(_) => continue,
+    for tasks_dir in roots {
+        let Ok(entries) = std::fs::read_dir(tasks_dir) else {
+            continue;
         };
-        while let Ok(Some(task_entry)) = task_entries.next_entry().await {
-            let task_dir = task_entry.path();
-            if !is_real_dir(&task_dir).await {
+        for entry in entries.filter_map(Result::ok) {
+            if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                continue;
+            }
+            let trajectories = entry.path().join("trajectories");
+            if !is_real_dir_sync(&trajectories) {
                 continue;
             }
             for role in ["planner", "linked", "agents", "subchats"] {
-                collect_existing_dirs(task_dir.join("trajectories").join(role), &mut dirs).await;
+                let mut pending = vec![trajectories.join(role)];
+                while let Some(dir) = pending.pop() {
+                    if !is_real_dir_sync(&dir) {
+                        continue;
+                    }
+                    dirs.push(dir.clone());
+                    let Ok(children) = std::fs::read_dir(&dir) else {
+                        continue;
+                    };
+                    for child in children.filter_map(Result::ok) {
+                        if child.file_type().is_ok_and(|kind| kind.is_dir()) {
+                            pending.push(child.path());
+                        }
+                    }
+                }
             }
         }
     }
     dirs
 }
 
-async fn collect_existing_dirs(root: PathBuf, dirs: &mut Vec<PathBuf>) {
-    let mut pending = vec![root];
-    while let Some(dir) = pending.pop() {
-        if !is_real_dir(&dir).await {
-            continue;
-        }
-        dirs.push(dir.clone());
-        let mut entries = match fs::read_dir(&dir).await {
-            Ok(entries) => entries,
-            Err(_) => continue,
-        };
-        while let Ok(Some(entry)) = entries.next_entry().await {
-            let path = entry.path();
-            if is_real_dir(&path).await {
-                pending.push(path);
-            }
+async fn existing_trajectory_paths_in_dirs(dirs: Vec<PathBuf>, chat_id: &str) -> Vec<PathBuf> {
+    let file_name = format!("{chat_id}.json");
+    let hits = tokio::task::spawn_blocking(move || existing_trajectory_dirs_sync(dirs, &file_name))
+        .await
+        .unwrap_or_default();
+    validate_trajectory_dirs(hits, chat_id).await
+}
+
+fn existing_trajectory_dirs_sync(dirs: Vec<PathBuf>, file_name: &str) -> Vec<PathBuf> {
+    dirs.into_iter()
+        .filter(|dir| {
+            std::fs::symlink_metadata(dir.join(file_name))
+                .is_ok_and(|metadata| metadata.is_file() && !metadata.file_type().is_symlink())
+        })
+        .collect()
+}
+
+async fn validate_trajectory_dirs(dirs: Vec<PathBuf>, chat_id: &str) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    for dir in dirs {
+        if let Some(path) = safe_trajectory_file_in_dir(&dir, chat_id).await {
+            paths.push(path);
         }
     }
+    paths
+}
+
+async fn task_trajectory_candidate_paths(gcx: Arc<GlobalContext>, chat_id: &str) -> Vec<PathBuf> {
+    let roots = get_all_task_roots(gcx).await;
+    let file_name = format!("{chat_id}.json");
+    let hits = tokio::task::spawn_blocking(move || {
+        existing_trajectory_dirs_sync(task_trajectory_dirs_sync(&roots), &file_name)
+    })
+    .await
+    .unwrap_or_default();
+    validate_trajectory_dirs(hits, chat_id).await
 }
 
 pub(crate) async fn list_trajectory_dirs(gcx: &Arc<GlobalContext>) -> Vec<PathBuf> {
@@ -2069,7 +2161,10 @@ async fn unsynced_trajectory_dirs(gcx: &Arc<GlobalContext>, dirs: &[PathBuf]) ->
         .unsynced_directories(dirs)
 }
 
-async fn normal_trajectory_candidate_paths(gcx: Arc<GlobalContext>, chat_id: &str) -> Vec<PathBuf> {
+async fn direct_normal_trajectory_candidate_paths(
+    gcx: Arc<GlobalContext>,
+    chat_id: &str,
+) -> Vec<PathBuf> {
     let mut paths = Vec::new();
     let mut seen = std::collections::HashSet::new();
     let normal_dirs = get_all_trajectories_dirs(gcx.clone()).await;
@@ -2088,9 +2183,15 @@ async fn normal_trajectory_candidate_paths(gcx: Arc<GlobalContext>, chat_id: &st
             }
         }
     }
+    paths
+}
+
+async fn normal_trajectory_candidate_paths(gcx: Arc<GlobalContext>, chat_id: &str) -> Vec<PathBuf> {
+    let mut paths = direct_normal_trajectory_candidate_paths(gcx.clone(), chat_id).await;
+    let mut seen = paths.iter().cloned().collect();
     let indexed = indexed_candidate_paths_in_dirs(
         &gcx,
-        &normal_dirs,
+        &get_all_trajectories_dirs(gcx.clone()).await,
         chat_id,
         trajectory_index::TrajectoryIndexListingCaller::ChatPathLookup,
     )
@@ -2101,11 +2202,7 @@ async fn normal_trajectory_candidate_paths(gcx: Arc<GlobalContext>, chat_id: &st
 
 async fn trajectory_candidate_paths(gcx: Arc<GlobalContext>, chat_id: &str) -> Vec<PathBuf> {
     let mut candidates = normal_trajectory_candidate_paths(gcx.clone(), chat_id).await;
-    for dir in list_task_trajectory_dirs(&gcx).await {
-        if let Some(path) = safe_trajectory_file_in_dir(&dir, chat_id).await {
-            candidates.push(path);
-        }
-    }
+    candidates.extend(task_trajectory_candidate_paths(gcx, chat_id).await);
     candidates
 }
 
@@ -2113,13 +2210,7 @@ async fn nested_chat_folder_candidate_paths(
     gcx: Arc<GlobalContext>,
     chat_id: &str,
 ) -> Vec<PathBuf> {
-    let mut paths = Vec::new();
-    for dir in list_chat_folder_dirs(&gcx).await {
-        if let Some(path) = safe_trajectory_file_in_dir(&dir, chat_id).await {
-            paths.push(path);
-        }
-    }
-    paths
+    existing_trajectory_paths_in_dirs(list_chat_folder_dirs(&gcx).await, chat_id).await
 }
 
 struct ValidTrajectoryCandidate {
@@ -2212,6 +2303,32 @@ async fn find_normal_trajectory_file(
     None
 }
 
+async fn first_normal_trajectory_candidate(
+    gcx: Arc<GlobalContext>,
+    chat_id: &str,
+) -> Option<ValidTrajectoryCandidate> {
+    let direct = direct_normal_trajectory_candidate_paths(gcx.clone(), chat_id).await;
+    let seen: std::collections::HashSet<_> = direct.iter().cloned().collect();
+    if let Some(found) = first_valid_trajectory_candidate(direct, chat_id).await {
+        return Some(found);
+    }
+    let indexed = indexed_candidate_paths_in_dirs(
+        &gcx,
+        &get_all_trajectories_dirs(gcx.clone()).await,
+        chat_id,
+        trajectory_index::TrajectoryIndexListingCaller::ChatPathLookup,
+    )
+    .await;
+    first_valid_trajectory_candidate(
+        indexed
+            .into_iter()
+            .filter(|path| !seen.contains(path))
+            .collect(),
+        chat_id,
+    )
+    .await
+}
+
 async fn find_trajectory_file(
     gcx: Arc<GlobalContext>,
     chat_id: &str,
@@ -2237,13 +2354,15 @@ async fn find_trajectory_file(
         return Some(found);
     }
     let mut candidates = Vec::new();
-    // The id-map probe above is a replacement for sweeping every directory, not an extra attempt
-    // before one: for a directory the coordinator has fully listed, the probe already asked a
-    // complete index and came back empty. Only directories it has never listed still owe us an
-    // answer, so those are the only ones worth a listing here.
     let task_dirs = list_task_trajectory_dirs(&gcx).await;
+    let task_scoped = existing_trajectory_paths_in_dirs(task_dirs.clone(), chat_id).await;
     let mut all_dirs = get_all_trajectories_dirs(gcx.clone()).await;
-    all_dirs.extend(task_dirs.iter().cloned());
+    all_dirs.extend(task_dirs.into_iter().filter(|dir| {
+        task_scoped.iter().any(|path| {
+            path.parent() == Some(dir.as_path())
+                || path.parent().and_then(Path::parent) == Some(dir.as_path())
+        })
+    }));
     let unsynced = unsynced_trajectory_dirs(&gcx, &all_dirs).await;
     let indexed = indexed_candidate_paths_in_dirs(
         &gcx,
@@ -2253,15 +2372,6 @@ async fn find_trajectory_file(
     )
     .await;
     extend_unique_paths(&mut candidates, &mut seen, indexed);
-    // `trajectory_candidate_paths` would re-derive the normal candidates computed above, and
-    // `seen` already discards every one of them. Probing the task directories is the only part
-    // that can still contribute, and it is what resolves a file created since the last listing.
-    let mut task_scoped = Vec::new();
-    for dir in &task_dirs {
-        if let Some(path) = safe_trajectory_file_in_dir(dir, chat_id).await {
-            task_scoped.push(path);
-        }
-    }
     extend_unique_paths(&mut candidates, &mut seen, task_scoped);
     if let Some(found) = first_valid_trajectory_candidate(candidates, chat_id).await {
         return Some(found);
@@ -2370,7 +2480,10 @@ async fn find_trajectory_or_buddy_file(
     chat_id: &str,
 ) -> Option<ValidTrajectoryCandidate> {
     validate_trajectory_id(chat_id).ok()?;
-    let mut candidates = trajectory_candidate_paths(gcx.clone(), chat_id).await;
+    if let Some(found) = first_normal_trajectory_candidate(gcx.clone(), chat_id).await {
+        return Some(found);
+    }
+    let mut candidates = task_trajectory_candidate_paths(gcx.clone(), chat_id).await;
     if let Ok(buddy_dir) = get_buddy_conversations_dir(gcx.clone()).await {
         if let Some(buddy_path) = safe_trajectory_file_in_dir(&buddy_dir, chat_id).await {
             candidates.push(buddy_path);
@@ -7578,6 +7691,23 @@ async fn atomic_write_json(
     atomic_write_json_with_tmp_path(path, &tmp_path, json_result, None, Some(source)).await
 }
 
+async fn write_title_if_unchanged(
+    path: &PathBuf,
+    original: &[u8],
+    data: &TrajectoryData,
+    source: TrajectorySourceIdentity,
+) -> Result<bool, String> {
+    super::trajectory_archive::with_trajectory_mutation_lock(async {
+        let current = fs::read(path).await.map_err(|e| e.to_string())?;
+        if current != original {
+            return Ok(false);
+        }
+        atomic_write_json(path, data, source).await?;
+        Ok(true)
+    })
+    .await
+}
+
 fn is_placeholder_title(title: &str) -> bool {
     let normalized = title.trim().to_lowercase();
     normalized.is_empty() || normalized == "new chat" || normalized == "untitled"
@@ -7954,9 +8084,13 @@ async fn run_title_generation_task(
     data.updated_at = updated_at.clone();
     data.extra
         .insert("isTitleGenerated".to_string(), serde_json::json!(true));
-    if let Err(e) = atomic_write_json(&file_path, &data, source.clone()).await {
-        warn!("Failed to write trajectory with generated title: {}", e);
-        return;
+    match write_title_if_unchanged(&file_path, content.as_bytes(), &data, source.clone()).await {
+        Ok(true) => {}
+        Ok(false) => return,
+        Err(e) => {
+            warn!("Failed to write trajectory with generated title: {}", e);
+            return;
+        }
     }
     if let Some(dir) = index_dir_for_trajectory_file(gcx.clone(), &file_path).await {
         let value = match serde_json::to_value(&data) {
@@ -12352,6 +12486,87 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn missing_chat_lookup_does_not_reconcile_unrelated_task_indexes() {
+        let workspace = tempfile::tempdir().unwrap();
+        let (gcx, _) = make_app_with_workspace(workspace.path()).await;
+        let dirs = seed_agent_task_dirs(workspace.path(), 1).await;
+        assert_eq!(dirs.len(), 1);
+        for dir in &dirs {
+            assert!(dir.is_dir());
+            assert!(!dir.join("index.json").exists());
+        }
+        assert!(find_trajectory_path(gcx, "missing-agent-chat")
+            .await
+            .is_none());
+        for dir in dirs {
+            assert!(
+                !dir.join("index.json").exists(),
+                "a missing chat lookup must not rebuild an unrelated task index"
+            );
+        }
+    }
+
+    #[cfg(feature = "perf-tests")]
+    #[tokio::test]
+    async fn perf_trajectory_lookup_many_unrelated_dirs() {
+        let workspace = tempfile::tempdir().unwrap();
+        let (gcx, _) = make_app_with_workspace(workspace.path()).await;
+        let dirs = seed_agent_task_dirs(workspace.path(), 2000).await;
+        let chat_id = "perf-normal-chat";
+        let path = workspace
+            .path()
+            .join(".refact/trajectories")
+            .join(chat_id)
+            .join(format!("{chat_id}.json"));
+        write_trajectory_file(&path, chat_id, "Normal", "2024-01-01T00:00:01Z").await;
+        for number in 0..1000 {
+            std::fs::create_dir_all(
+                workspace
+                    .path()
+                    .join(".refact/trajectories")
+                    .join(format!("unrelated-{number}")),
+            )
+            .unwrap();
+        }
+        let started = Instant::now();
+        assert_eq!(
+            index_dir_for_trajectory_file(gcx.clone(), &path).await,
+            path.parent().and_then(Path::parent).map(Path::to_path_buf)
+        );
+        eprintln!(
+            "trajectory_perf index_root_us={}",
+            started.elapsed().as_micros()
+        );
+        let started = Instant::now();
+        assert!(find_trajectory_or_buddy_file(gcx.clone(), chat_id)
+            .await
+            .is_some());
+        eprintln!(
+            "trajectory_perf restore_hit_us={}",
+            started.elapsed().as_micros()
+        );
+        let started = Instant::now();
+        assert!(
+            find_trajectory_or_buddy_file(gcx.clone(), "perf-missing-chat")
+                .await
+                .is_none()
+        );
+        eprintln!(
+            "trajectory_perf restore_miss_us={}",
+            started.elapsed().as_micros()
+        );
+        let started = Instant::now();
+        assert!(find_trajectory_file(gcx, "perf-missing-chat")
+            .await
+            .is_none());
+        eprintln!(
+            "trajectory_perf path_miss_us={} task_dirs={}",
+            started.elapsed().as_micros(),
+            dirs.len()
+        );
+    }
+
     // Clears the process-wide metadata cache, so it must not run beside the tests that read it.
 
     #[test]
@@ -13748,6 +13963,49 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn symlinked_task_trajectory_container_does_not_escape_discovery() {
+        let workspace = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let (gcx, app) = make_app_with_workspace(workspace.path()).await;
+        let task_dir = workspace.path().join(".refact/tasks/container-task");
+        tokio::fs::create_dir_all(&task_dir).await.unwrap();
+        std::os::unix::fs::symlink(outside.path(), task_dir.join("trajectories")).unwrap();
+        let chat_id = "symlink-container-chat";
+        let outside_path = outside
+            .path()
+            .join("agents")
+            .join(format!("{chat_id}.json"));
+        write_trajectory_file(
+            &outside_path,
+            chat_id,
+            "Outside Container",
+            "2024-01-01T00:00:00Z",
+        )
+        .await;
+        let valid_dirs = seed_agent_task_dirs(workspace.path(), 1).await;
+        let discovered = list_task_trajectory_dirs(&gcx).await;
+        assert!(discovered.contains(&valid_dirs[0]));
+        assert!(!discovered
+            .iter()
+            .any(|path| path.starts_with(task_dir.join("trajectories"))));
+        assert!(
+            !is_task_trajectory_index_dir(
+                &task_dir.join("trajectories/agents"),
+                &get_all_task_roots(gcx.clone()).await,
+            )
+            .await
+        );
+        assert!(find_trajectory_path(gcx.clone(), chat_id).await.is_none());
+        assert!(load_trajectory_for_chat(gcx, chat_id).await.is_none());
+        let error = handle_v1_trajectories_delete(State(app), AxumPath(chat_id.into()))
+            .await
+            .unwrap_err();
+        assert_eq!(error.status_code, StatusCode::NOT_FOUND);
+        assert!(tokio::fs::try_exists(outside_path).await.unwrap());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn symlinked_task_trajectory_agent_dir_is_ignored_for_load_and_delete() {
         let dir = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
@@ -14814,6 +15072,27 @@ mod tests {
         let session = session_arc.lock().await;
         assert_eq!(session.thread.title, "Buddy Session Title");
         assert!(!session.thread.is_title_generated);
+        drop(session);
+
+        let original = tokio::fs::read(&path).await.unwrap();
+        let mut stale: TrajectoryData = serde_json::from_slice(&original).unwrap();
+        stale.title = "Stale generated title".to_string();
+        stale
+            .extra
+            .insert("isTitleGenerated".to_string(), json!(true));
+        let mut replacement: serde_json::Value = serde_json::from_slice(&original).unwrap();
+        replacement["created_at"] = json!("replacement-identity");
+        replacement["messages"] = json!([]);
+        let replacement = serde_json::to_vec(&replacement).unwrap();
+        let tmp = unique_trajectory_tmp_path(&path);
+        tokio::fs::write(&tmp, &replacement).await.unwrap();
+        atomic_write_file(&tmp, &path).await.unwrap();
+        let written =
+            write_title_if_unchanged(&path, &original, &stale, TrajectorySourceIdentity::Normal)
+                .await
+                .unwrap();
+        assert_eq!(tokio::fs::read(&path).await.unwrap(), replacement);
+        assert!(!written);
     }
 
     #[tokio::test]

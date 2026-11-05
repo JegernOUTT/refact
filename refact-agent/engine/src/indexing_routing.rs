@@ -48,7 +48,8 @@ pub async fn route_index_enqueue(
     let vec_db = gcx.vec_db.clone();
 
     if !memory_paths.is_empty() {
-        if let Some(ref mut db) = *vec_db.lock().await {
+        let db = vec_db.lock().await.clone();
+        if let Some(db) = db {
             db.vectorizer_enqueue_files(&memory_paths, process_immediately, roots.clone())
                 .await;
         }
@@ -86,6 +87,7 @@ mod tests {
     struct RecordingVecdb {
         enqueue_calls: Arc<AtomicUsize>,
         documents: Arc<Mutex<Vec<String>>>,
+        enqueue_gate: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
     }
 
     #[async_trait]
@@ -132,6 +134,10 @@ mod tests {
             self.enqueue_calls
                 .fetch_add(documents.len(), Ordering::SeqCst);
             self.documents.lock().unwrap().extend(documents.to_vec());
+            if let Some((entered, release)) = &self.enqueue_gate {
+                entered.notify_one();
+                release.notified().await;
+            }
         }
 
         fn current_constants(&self) -> (EmbeddingModelConfig, usize) {
@@ -304,9 +310,12 @@ mod tests {
             .expect("test workspace must resolve to a project dir");
         let enqueue_calls = Arc::new(AtomicUsize::new(0));
         let vecdb_documents = Arc::new(Mutex::new(Vec::new()));
+        let enqueue_entered = Arc::new(tokio::sync::Notify::new());
+        let enqueue_release = Arc::new(tokio::sync::Notify::new());
         *gcx.vec_db.lock().await = Some(Arc::new(RecordingVecdb {
             enqueue_calls: enqueue_calls.clone(),
             documents: vecdb_documents.clone(),
+            enqueue_gate: Some((enqueue_entered.clone(), enqueue_release.clone())),
         }));
         let codegraph = Arc::new(crate::codegraph::CodeGraphService::open_in_memory().unwrap());
         *gcx.codegraph.lock().await = Some(codegraph.clone());
@@ -338,7 +347,25 @@ mod tests {
             task_trajectory_tool.to_string_lossy().to_string(),
         ];
 
-        route_index_enqueue(gcx, &paths, false, false).await;
+        let enqueue = route_index_enqueue(gcx.clone(), &paths, false, false);
+        tokio::pin!(enqueue);
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            tokio::select! {
+                _ = &mut enqueue => panic!("enqueue completed before the service gate was released"),
+                _ = enqueue_entered.notified() => {}
+            }
+        })
+        .await
+        .expect("enqueue must reach the service gate");
+        let handle_available = gcx.vec_db.try_lock().is_ok();
+        enqueue_release.notify_one();
+        tokio::time::timeout(std::time::Duration::from_secs(10), &mut enqueue)
+            .await
+            .expect("enqueue must complete after the service gate is released");
+        assert!(
+            handle_available,
+            "global VecDB handle must remain available while service enqueue is pending"
+        );
 
         assert_eq!(enqueue_calls.load(Ordering::SeqCst), 2);
         let vecdb_documents = vecdb_documents.lock().unwrap();
@@ -370,6 +397,7 @@ mod tests {
         *gcx.vec_db.lock().await = Some(Arc::new(RecordingVecdb {
             enqueue_calls: enqueue_calls.clone(),
             documents: vecdb_documents.clone(),
+            enqueue_gate: None,
         }));
         let codegraph = Arc::new(crate::codegraph::CodeGraphService::open_in_memory().unwrap());
         *gcx.codegraph.lock().await = Some(codegraph.clone());
@@ -411,6 +439,7 @@ mod tests {
         *gcx.vec_db.lock().await = Some(Arc::new(RecordingVecdb {
             enqueue_calls: enqueue_calls.clone(),
             documents: vecdb_documents,
+            enqueue_gate: None,
         }));
         *gcx.codegraph.lock().await = None;
         let code_path = dir.path().join("src").join("main.rs");

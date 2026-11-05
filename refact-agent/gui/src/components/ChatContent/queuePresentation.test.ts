@@ -183,3 +183,17 @@ describe("queue presentation", () => {
     ).toBe("preempt");
   });
 });
+
+it("does not describe priority commands as interrupting deliveries", () => {
+  const items = [
+    { ...statusItem, command_type: "answer_questions", priority: true },
+    { ...statusItem, command_type: "user_message", priority: false },
+    { ...statusItem, push: "preempt" as const },
+  ];
+  expect(queueStatusText(items, true)).toBe(
+    "1 interrupting · 1 send next · 1 in order",
+  );
+  expect(queueStatusText(items, true, true)).toBe(
+    "1 interrupting · 1 send next · 1 in order",
+  );
+});

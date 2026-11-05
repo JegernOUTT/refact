@@ -1,3 +1,4 @@
+import * as chatSubscription from "../services/refact/chatSubscription";
 import { selectRuntimeById } from "../features/Chat/Thread/selectors";
 import { createElement, type ReactElement, type ReactNode } from "react";
 import { Provider } from "react-redux";
@@ -14,7 +15,12 @@ import {
   selectVisibleChatMountIds,
 } from "../features/Connection";
 import { setUpStore, type AppStore, type RootState } from "../app/store";
-import { applyChatEvent } from "../features/Chat/Thread/actions";
+import type { ChatEventEnvelope } from "../services/refact/chatSubscription";
+import {
+  newChatAction,
+  updateChatRuntimeFromSessionState,
+  applyChatEvent,
+} from "../features/Chat/Thread/actions";
 import {
   agentDisclosureDenied,
   agentRecoveryRequested,
@@ -51,6 +57,7 @@ function createSubscriptionStore() {
 
 afterEach(() => {
   vi.useRealTimers();
+  vi.restoreAllMocks();
   vi.clearAllMocks();
   vi.unstubAllGlobals();
 });
@@ -305,4 +312,104 @@ describe("pickDesiredChatSubscriptions", () => {
     expect(store.getState().agentsPanel.denied).toBe(true);
     unmount();
   });
+});
+
+it("hands hidden status to sidebar and ignores callbacks from retired attempts", () => {
+  const callbacks: Parameters<
+    typeof chatSubscription.subscribeToChatEvents
+  >[2][] = [];
+  vi.spyOn(chatSubscription, "subscribeToChatEvents").mockImplementation(
+    (_id, _config, handlers) => {
+      callbacks.push(handlers);
+      return () => undefined;
+    },
+  );
+  const store = createSubscriptionStore();
+  store.dispatch(newChatAction(undefined));
+  const chatId = store.getState().chat.current_thread_id;
+  const sidebar = () =>
+    store.dispatch(
+      updateChatRuntimeFromSessionState({
+        id: chatId,
+        session_state: "generating",
+        source: "sidebar",
+      }),
+    );
+  store.dispatch(registerVisibleChatMount({ chatId }));
+  const { unmount } = renderAllChatsSubscription(store);
+  const snapshot: ChatEventEnvelope = {
+    type: "snapshot",
+    chat_id: chatId,
+    seq: "0",
+    thread: {
+      id: chatId,
+      title: "Live",
+      model: "",
+      mode: "agent",
+      tool_use: "agent",
+      boost_reasoning: false,
+      context_tokens_cap: null,
+      include_project_info: true,
+      checkpoints_enabled: true,
+      is_title_generated: false,
+    },
+    runtime: {
+      state: "executing_tools",
+      paused: false,
+      error: null,
+      queue_size: 0,
+      pause_reasons: [],
+      queued_items: [],
+    },
+    messages: [],
+    background_agents: [],
+  };
+  syncAct(() => {
+    callbacks[0].onEvent(snapshot);
+    sidebar();
+  });
+  expect(selectRuntimeById(store.getState(), chatId)?.session_state).toBe(
+    "executing_tools",
+  );
+  vi.spyOn(document, "visibilityState", "get").mockReturnValue("hidden");
+  syncAct(() => {
+    document.dispatchEvent(new Event("visibilitychange"));
+  });
+  syncAct(sidebar);
+  expect(selectRuntimeById(store.getState(), chatId)?.session_state).toBe(
+    "generating",
+  );
+  expect(selectRuntimeById(store.getState(), chatId)?.snapshot_received).toBe(
+    true,
+  );
+  vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+  syncAct(() => {
+    document.dispatchEvent(new Event("visibilitychange"));
+  });
+  expect(callbacks).toHaveLength(2);
+  syncAct(() => {
+    callbacks[1].onEvent({
+      ...snapshot,
+      runtime: { ...snapshot.runtime, state: "idle" },
+    });
+    callbacks[0].onEvent(snapshot);
+    callbacks[0].onDisconnected?.();
+    callbacks[0].onError(new Error("retired"));
+    sidebar();
+  });
+  expect(selectRuntimeById(store.getState(), chatId)?.session_state).toBe(
+    "idle",
+  );
+  expect(selectRuntimeById(store.getState(), chatId)?.last_applied_seq).toBe(
+    "0",
+  );
+  expect(store.getState().connection.sseConnections[chatId]?.status).toBe(
+    "connected",
+  );
+  syncAct(() => store.dispatch(unregisterVisibleChatMount({ chatId })));
+  syncAct(sidebar);
+  expect(selectRuntimeById(store.getState(), chatId)?.session_state).toBe(
+    "generating",
+  );
+  unmount();
 });

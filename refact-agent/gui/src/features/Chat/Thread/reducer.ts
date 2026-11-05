@@ -1,3 +1,8 @@
+import {
+  setSseStatus,
+  removeSseConnection,
+  clearAllSseConnections,
+} from "../../Connection";
 import { createReducer, Draft } from "@reduxjs/toolkit";
 import {
   Chat,
@@ -1214,7 +1219,7 @@ export const chatReducer = createReducer(initialState, (builder) => {
 
     const sessionState = action.payload.session_state;
 
-    if (rt.snapshot_received && action.payload.source === "sidebar") {
+    if (rt.sse_status_authoritative && action.payload.source === "sidebar") {
       return;
     }
 
@@ -1456,6 +1461,21 @@ export const chatReducer = createReducer(initialState, (builder) => {
     }
   });
 
+  builder.addCase(setSseStatus, (state, action) => {
+    if (action.payload.status === "connected") return;
+    const rt = getRuntime(state, action.payload.chatId);
+    if (rt) rt.sse_status_authoritative = false;
+  });
+  builder.addCase(removeSseConnection, (state, action) => {
+    const rt = getRuntime(state, action.payload.chatId);
+    if (rt) rt.sse_status_authoritative = false;
+  });
+  builder.addCase(clearAllSseConnections, (state) => {
+    for (const rt of Object.values(state.threads)) {
+      if (rt) rt.sse_status_authoritative = false;
+    }
+  });
+
   builder.addCase(applyChatEvent, (state, action) => {
     const { chat_id, ...event } = action.payload;
 
@@ -1640,6 +1660,7 @@ export const chatReducer = createReducer(initialState, (builder) => {
             },
           },
           snapshot_received: true,
+          sse_status_authoritative: true,
           is_compressing:
             typeof event.runtime.is_compressing === "boolean"
               ? event.runtime.is_compressing

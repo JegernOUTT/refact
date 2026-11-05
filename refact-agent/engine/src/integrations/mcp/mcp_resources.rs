@@ -181,8 +181,8 @@ pub async fn index_mcp_resources(
     super::session_mcp::add_log_entry(logs.clone(), msg).await;
 
     let roots = crate::indexing_routing::memory_plane_roots(gcx.clone()).await;
-    let vec_db_locked = vec_db.lock().await;
-    if let Some(ref db) = *vec_db_locked {
+    let db = vec_db.lock().await.clone();
+    if let Some(db) = db {
         db.vectorizer_enqueue_files(&indexed_paths, false, roots)
             .await;
     }
@@ -218,8 +218,8 @@ pub async fn remove_indexed_resources(gcx_weak: Weak<GlobalContext>, config_path
 
     for path in md_paths {
         {
-            let vec_db_locked = vec_db.lock().await;
-            if let Some(ref db) = *vec_db_locked {
+            let db = vec_db.lock().await.clone();
+            if let Some(db) = db {
                 let _ = db.remove_file(&path).await;
             }
         }

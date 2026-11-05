@@ -757,7 +757,8 @@ pub async fn memories_add(
 
         let roots = crate::indexing_routing::memory_plane_roots(gcx.clone()).await;
         let vec_db = gcx.vec_db.clone();
-        if let Some(vecdb) = vec_db.lock().await.clone() {
+        let vecdb = vec_db.lock().await.clone();
+        if let Some(vecdb) = vecdb {
             vecdb
                 .vectorizer_enqueue_files(
                     &vec![file_path.to_string_lossy().to_string()],
@@ -2113,7 +2114,8 @@ pub async fn rewrite_memory_document(
 
         let roots = crate::indexing_routing::memory_plane_roots(gcx.clone()).await;
         let vec_db = gcx.vec_db.clone();
-        if let Some(vecdb) = vec_db.lock().await.clone() {
+        let vecdb = vec_db.lock().await.clone();
+        if let Some(vecdb) = vecdb {
             if frontmatter.is_archived() || frontmatter.is_deprecated() {
                 let _ = vecdb.remove_file(&path_buf).await;
             } else {
@@ -2198,7 +2200,8 @@ pub async fn delete_document_from_disk(
         gcx.knowledge_index.lock().await.remove_path(doc_path);
 
         let vec_db = gcx.vec_db.clone();
-        if let Some(vecdb) = vec_db.lock().await.clone() {
+        let vecdb = vec_db.lock().await.clone();
+        if let Some(vecdb) = vecdb {
             let _ = vecdb.remove_file(doc_path).await;
         }
 

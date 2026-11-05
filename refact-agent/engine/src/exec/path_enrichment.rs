@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 
 use regex::Regex;
 
+use crate::chat::perf_diagnostics::{self, PerfComponent, PerfOutcome};
+
 const MAX_SCAN_BYTES: usize = 128 * 1024;
 const MAX_SCAN_LINES: usize = 2_000;
 const MAX_REFERENCES: usize = 50;
@@ -101,15 +103,25 @@ pub(crate) async fn collect_async_with_truncation(
     let command = command.to_string();
     let cwd = cwd.to_path_buf();
     let workspace_roots = workspace_roots.to_vec();
+    let queue_span = perf_diagnostics::span(PerfComponent::ExecPathQueueWait, None, None);
     tokio::task::spawn_blocking(move || {
-        collect_with_truncation(
+        queue_span.finish_tool(PerfOutcome::Success, 1, 1, None);
+        let span = perf_diagnostics::span(PerfComponent::ExecPathCollect, None, None);
+        let collected = collect_with_truncation(
             &command,
             &cwd,
             &workspace_roots,
             &output,
             output_truncated,
             None,
-        )
+        );
+        span.finish_tool(
+            PerfOutcome::Success,
+            1,
+            collected.candidates.len() as u64,
+            None,
+        );
+        collected
     })
     .await
     .unwrap_or_else(|_| empty_collected(output_truncated))

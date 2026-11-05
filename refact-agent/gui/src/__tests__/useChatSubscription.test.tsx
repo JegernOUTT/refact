@@ -1,3 +1,5 @@
+import * as chatSubscription from "../services/refact/chatSubscription";
+import { updateChatRuntimeFromSessionState } from "../features/Chat/Thread/actions";
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { act as rtlAct, renderHook, waitFor } from "@testing-library/react";
 import { Provider } from "react-redux";
@@ -317,5 +319,106 @@ describe("useChatSubscription", () => {
     expect(result.current.error?.message).toBe("SSE connection failed: 403");
     expect(store.getState().agentsPanel.denied).toBe(true);
     unmount();
+  });
+  it("releases status on disconnect and unmount and rejects retired attempt callbacks", () => {
+    const callbacks: Parameters<
+      typeof chatSubscription.subscribeToChatEvents
+    >[2][] = [];
+    vi.spyOn(chatSubscription, "subscribeToChatEvents").mockImplementation(
+      (_id, _config, handlers) => {
+        callbacks.push(handlers);
+        return () => undefined;
+      },
+    );
+    const store = createTestStore();
+    store.dispatch(updateConfig({ host: "vscode", lspPort: 8123 }));
+    store.dispatch(createChatWithId({ id: "test-chat" }));
+    const { result, unmount } = renderHook(
+      () => useChatSubscription("test-chat", { autoReconnect: false }),
+      {
+        wrapper: ({ children }) => (
+          <Provider store={store}>{children}</Provider>
+        ),
+      },
+    );
+    const snapshot: chatSubscription.ChatEventEnvelope = {
+      type: "snapshot",
+      chat_id: "test-chat",
+      seq: "0",
+      thread: {
+        id: "test-chat",
+        title: "Live",
+        model: "",
+        mode: "agent",
+        tool_use: "agent",
+        boost_reasoning: false,
+        context_tokens_cap: null,
+        include_project_info: true,
+        checkpoints_enabled: true,
+        is_title_generated: false,
+      },
+      runtime: {
+        state: "idle",
+        paused: false,
+        error: null,
+        queue_size: 0,
+        pause_reasons: [],
+        queued_items: [],
+      },
+      messages: [],
+      background_agents: [],
+    };
+    const sidebar = () =>
+      store.dispatch(
+        updateChatRuntimeFromSessionState({
+          id: "test-chat",
+          source: "sidebar",
+          session_state: "generating",
+        }),
+      );
+    const runtime = () => store.getState().chat.threads["test-chat"];
+    syncAct(() => {
+      callbacks[0].onConnected?.();
+      callbacks[0].onEvent(snapshot);
+      sidebar();
+    });
+    expect(runtime()?.session_state).toBe("idle");
+    syncAct(() => {
+      callbacks[0].onDisconnected?.();
+      sidebar();
+    });
+    expect(runtime()?.session_state).toBe("generating");
+    expect(runtime()?.snapshot_received).toBe(true);
+    syncAct(() => result.current.connect());
+    syncAct(() => {
+      callbacks[1].onConnected?.();
+      callbacks[1].onEvent(snapshot);
+    });
+    syncAct(() => {
+      callbacks[0].onEvent({
+        ...snapshot,
+        runtime: { ...snapshot.runtime, state: "executing_tools" },
+      });
+      callbacks[0].onError(new Error("retired"));
+      callbacks[0].onDisconnected?.();
+      sidebar();
+    });
+    expect(runtime()?.session_state).toBe("idle");
+    expect(result.current.status).toBe("connected");
+    syncAct(() => {
+      result.current.disconnect();
+      sidebar();
+    });
+    expect(runtime()?.session_state).toBe("generating");
+    syncAct(() => result.current.connect());
+    syncAct(() => {
+      callbacks[2].onConnected?.();
+      callbacks[2].onEvent(snapshot);
+    });
+    unmount();
+    sidebar();
+    expect(runtime()?.session_state).toBe("generating");
+    callbacks[2].onEvent(snapshot);
+    expect(runtime()?.session_state).toBe("generating");
   });
 });

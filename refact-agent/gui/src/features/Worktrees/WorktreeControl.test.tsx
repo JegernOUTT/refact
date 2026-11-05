@@ -19,6 +19,12 @@ import { server } from "../../utils/mockServer";
 import { resetChatParamsSyncState } from "../../services/refact/chatCommands";
 import * as chatCommands from "../../services/refact/chatCommands";
 import { setCurrentProjectInfo } from "../Chat/currentProject";
+import {
+  getProjectStorageNamespace,
+  savePersistedChatTabs,
+  setProjectStorageNamespace,
+  setProjectStorageNamespaceFromProjectInfo,
+} from "../../utils/chatUiPersistence";
 
 type JsonObject = Record<string, unknown>;
 type Host = "web" | "ide" | "vscode" | "jetbrains";
@@ -566,6 +572,16 @@ describe("WorktreeControl", () => {
       source_workspace_root: "/other-repo",
       source_current_branch: "other-main",
     };
+    // This test intentionally keeps the attached chat open in the destination
+    // project. Seed its tabs before the real namespace hydration runs.
+    const previousNamespace = getProjectStorageNamespace();
+    setProjectStorageNamespaceFromProjectInfo({ projectRoot: "/other-repo" });
+    savePersistedChatTabs({
+      openThreadIds: ["chat-1"],
+      currentThreadId: "chat-1",
+      tabs: [{ id: "chat-1", mode: "agent" }],
+    });
+    setProjectStorageNamespace(previousNamespace ?? undefined);
     act(() => {
       store.dispatch(
         setCurrentProjectInfo({
@@ -574,6 +590,10 @@ describe("WorktreeControl", () => {
         }),
       );
     });
+    expect(store.getState().current_project.projectRoot).toBe("/other-repo");
+    expect(selectThreadWorktreeById(store.getState(), "chat-1")).toEqual(
+      record.meta,
+    );
     await user.click(screen.getByTestId("worktree-control-trigger"));
     const refresh = screen.getByRole("button", {
       name: "Refresh worktree list",
@@ -1014,79 +1034,129 @@ describe("WorktreeControl", () => {
     expect(selectThreadWorktreeById(store.getState(), "chat-1")).toBeNull();
   });
 
-  test("late applied attachment cannot mutate or report success in a changed pane or principal", async () => {
-    const first = makeWorktreeRecord("wt-first", "refact/chat/first");
-    const second = makeWorktreeRecord("wt-second", "refact/chat/second");
-    const target = makeWorktreeRecord("wt-late", "refact/chat/late");
-    const chat = makeChatState("first-chat", first.meta);
-    chat.threads["second-chat"] = makeChatState(
-      "second-chat",
-      second.meta,
-    ).threads["second-chat"];
-    const commandCalls: JsonObject[] = [];
-    const sendCommand = vi.spyOn(chatCommands, "sendChatCommand");
-    const onOpenChange = vi.fn();
-    let release: () => void = () => undefined;
-    const gate = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    server.use(
-      worktreesList([first, second, target]),
-      http.post("*/v1/chats/:id/commands", async ({ request }) => {
-        commandCalls.push((await request.json()) as JsonObject);
-        await gate;
-        return HttpResponse.json({ status: "applied" });
-      }),
-    );
-    const { user, store, rerender } = render(
-      <ChatThreadProvider chatId="first-chat">
-        <WorktreeControl onOpenChange={onOpenChange} />
-      </ChatThreadProvider>,
-      { preloadedState: { chat, config: configState() } },
-    );
-    try {
-      await user.click(screen.getByTestId("worktree-control-trigger"));
-      await user.click(
-        await screen.findByRole("button", {
-          name: "Select worktree refact/chat/late",
+  test.each(["pane", "source"] as const)(
+    "late applied attachment cannot mutate or report success after a %s change",
+    async (change) => {
+      const first = makeWorktreeRecord("wt-first", "refact/chat/first");
+      const second = makeWorktreeRecord("wt-second", "refact/chat/second");
+      const target = makeWorktreeRecord("wt-late", "refact/chat/late");
+      const chat = makeChatState("first-chat", first.meta);
+      chat.threads["second-chat"] = makeChatState(
+        "second-chat",
+        second.meta,
+      ).threads["second-chat"];
+      const commandCalls: JsonObject[] = [];
+      const sendCommand = vi.spyOn(chatCommands, "sendChatCommand");
+      const onOpenChange = vi.fn();
+      let release: () => void = () => undefined;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      server.use(
+        worktreesList([first, second, target]),
+        http.post("*/v1/chats/:id/commands", async ({ request }) => {
+          commandCalls.push((await request.json()) as JsonObject);
+          await gate;
+          return HttpResponse.json({ status: "applied" });
         }),
       );
-      await waitFor(() => expect(commandCalls).toHaveLength(1));
-      act(() => {
-        store.dispatch(
-          updateConfig({
-            apiKey: "different-principal",
-            lspUrl: "http://127.0.0.1:9999",
-          }),
-        );
-      });
-      rerender(
-        <ChatThreadProvider chatId="second-chat">
+      const { user, store, rerender } = render(
+        <ChatThreadProvider chatId="first-chat">
           <WorktreeControl onOpenChange={onOpenChange} />
         </ChatThreadProvider>,
+        { preloadedState: { chat, config: configState() } },
       );
-      onOpenChange.mockClear();
-    } finally {
-      await act(async () => {
-        release();
-        await sendCommand.mock.results[0]?.value;
-      });
-      sendCommand.mockRestore();
-    }
-    expect(selectThreadWorktreeById(store.getState(), "first-chat")).toEqual(
-      first.meta,
-    );
-    expect(selectThreadWorktreeById(store.getState(), "second-chat")).toEqual(
-      second.meta,
-    );
-    expect(screen.getByTestId("worktree-control-trigger")).toHaveTextContent(
-      "refact/chat/second",
-    );
-    expect(onOpenChange).not.toHaveBeenCalledWith(false);
-    await user.click(screen.getByTestId("worktree-control-trigger"));
-    expect(screen.queryByText("Worktree attached.")).not.toBeInTheDocument();
-    expect(commandCalls).toHaveLength(1);
-  });
+      try {
+        await user.click(screen.getByTestId("worktree-control-trigger"));
+        await user.click(
+          await screen.findByRole("button", {
+            name: "Select worktree refact/chat/late",
+          }),
+        );
+        await waitFor(() => expect(commandCalls).toHaveLength(1));
+        expect(commandCalls[0]).toMatchObject({
+          type: "set_params",
+          patch: { worktree_id: "wt-late" },
+        });
+        expect(
+          selectThreadWorktreeById(store.getState(), "first-chat"),
+        ).toEqual(first.meta);
+        expect(
+          selectThreadWorktreeById(store.getState(), "second-chat"),
+        ).toEqual(second.meta);
+        if (change === "source") {
+          // Only the destination pane is persisted in the new source. Hydration
+          // must remove the old chat before its pending command is acknowledged.
+          const previousNamespace = getProjectStorageNamespace();
+          setProjectStorageNamespaceFromProjectInfo({
+            projectRoot: "/new-source",
+          });
+          savePersistedChatTabs({
+            openThreadIds: ["second-chat"],
+            currentThreadId: "second-chat",
+            tabs: [{ id: "second-chat", mode: "agent" }],
+          });
+          setProjectStorageNamespace(previousNamespace ?? undefined);
+          act(() => {
+            store.dispatch(
+              setCurrentProjectInfo({
+                name: "new-source",
+                projectRoot: "/new-source",
+              }),
+            );
+            store.dispatch(
+              updateConfig({
+                apiKey: "different-principal",
+                lspUrl: "http://127.0.0.1:9999",
+              }),
+            );
+          });
+          expect(store.getState().config.apiKey).toBe("different-principal");
+          expect(store.getState().config.lspUrl).toBe("http://127.0.0.1:9999");
+          expect(store.getState().current_project.projectRoot).toBe(
+            "/new-source",
+          );
+          expect(store.getState().chat.threads["first-chat"]).toBeUndefined();
+        }
+        rerender(
+          <ChatThreadProvider chatId="second-chat">
+            <WorktreeControl onOpenChange={onOpenChange} />
+          </ChatThreadProvider>,
+        );
+        expect(
+          selectThreadWorktreeById(store.getState(), "second-chat"),
+        ).toEqual(second.meta);
+        expect(
+          screen.getByTestId("worktree-control-trigger"),
+        ).toHaveTextContent("refact/chat/second");
+        onOpenChange.mockClear();
+      } finally {
+        await act(async () => {
+          release();
+          await sendCommand.mock.results[0]?.value;
+        });
+        sendCommand.mockRestore();
+      }
+      if (change === "source") {
+        expect(store.getState().chat.threads["first-chat"]).toBeUndefined();
+        expect(store.getState().chat.open_thread_ids).toEqual(["second-chat"]);
+      } else {
+        expect(
+          selectThreadWorktreeById(store.getState(), "first-chat"),
+        ).toEqual(first.meta);
+      }
+      expect(selectThreadWorktreeById(store.getState(), "second-chat")).toEqual(
+        second.meta,
+      );
+      expect(screen.getByTestId("worktree-control-trigger")).toHaveTextContent(
+        "refact/chat/second",
+      );
+      expect(onOpenChange).not.toHaveBeenCalledWith(false);
+      await user.click(screen.getByTestId("worktree-control-trigger"));
+      expect(screen.queryByText("Worktree attached.")).not.toBeInTheDocument();
+      expect(commandCalls).toHaveLength(1);
+    },
+  );
 
   test("selecting existing shared worktree attaches it to current chat", async () => {
     const shared = makeWorktreeRecord("wt-shared", "refact/chat/shared", 2);

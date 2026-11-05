@@ -142,6 +142,7 @@ export function useAllChatsSubscription() {
   const [documentVisible, setDocumentVisible] = useState(isDocumentVisible);
 
   const subscriptionsRef = useRef<Map<string, () => void>>(new Map());
+  const attemptsRef = useRef(new Map<string, symbol>());
   const seqMapRef = useRef<Map<string, bigint>>(new Map());
   const manualCloseRef = useRef<Set<string>>(new Set());
   const desiredIdsRef = useRef<Set<string>>(new Set());
@@ -516,6 +517,10 @@ export function useAllChatsSubscription() {
       if (!hasEndpointRef.current) return;
       if (!desiredIdsRef.current.has(chatId)) return;
 
+      const attempt = Symbol(chatId);
+      attemptsRef.current.set(chatId, attempt);
+      const isCurrentAttempt = () =>
+        attemptsRef.current.get(chatId) === attempt;
       manualCloseRef.current.delete(chatId);
       seqMapRef.current.set(chatId, 0n);
 
@@ -529,6 +534,7 @@ export function useAllChatsSubscription() {
         connection.config,
         {
           onEvent: (envelope) => {
+            if (!isCurrentAttempt()) return;
             const seq = BigInt(envelope.seq);
             const lastSeq = seqMapRef.current.get(chatId) ?? 0n;
 
@@ -586,9 +592,11 @@ export function useAllChatsSubscription() {
             }
           },
           onConnected: () => {
+            if (!isCurrentAttempt()) return;
             dispatch(setSseStatus({ chatId, status: "connected" }));
           },
           onAgentRosterDenied: (event) => {
+            if (!isCurrentAttempt()) return;
             if (
               event.type === "background_agent_updated" &&
               BigInt(event.seq) === (seqMapRef.current.get(chatId) ?? 0n) + 1n
@@ -602,6 +610,7 @@ export function useAllChatsSubscription() {
             );
           },
           onError: (error) => {
+            if (!isCurrentAttempt()) return;
             chatDenied = isChatAuthorizationDenial(error);
             dispatch(rejectAgentRosterStream(rosterSource, error));
             invalidateChatParamsSyncState(chatId, configRef.current);
@@ -612,6 +621,7 @@ export function useAllChatsSubscription() {
             clearBackgroundAgentFlushForChat(chatId);
             flushPendingBackgroundAgentUpdatesForChat(chatId);
             dispatch(markThreadSseError({ id: chatId, error: error.message }));
+            attemptsRef.current.delete(chatId);
             subscriptionsRef.current.delete(chatId);
             clearChatStreamState(chatId);
             const count = (retryCountRef.current.get(chatId) ?? 0) + 1;
@@ -628,6 +638,7 @@ export function useAllChatsSubscription() {
             }
           },
           onDisconnected: () => {
+            if (!isCurrentAttempt()) return;
             dispatch(
               rejectAgentRosterStream(
                 rosterSource,
@@ -641,6 +652,7 @@ export function useAllChatsSubscription() {
             flushPendingSubchatUpdateForChat(chatId);
             clearBackgroundAgentFlushForChat(chatId);
             flushPendingBackgroundAgentUpdatesForChat(chatId);
+            attemptsRef.current.delete(chatId);
             subscriptionsRef.current.delete(chatId);
             clearChatStreamState(chatId);
             const count = (retryCountRef.current.get(chatId) ?? 0) + 1;
@@ -651,6 +663,7 @@ export function useAllChatsSubscription() {
             }
           },
           onActivity: () => {
+            if (!isCurrentAttempt()) return;
             const now = Date.now();
             lastActivityAtRef.current.set(chatId, now);
             const lastDispatch =
@@ -684,6 +697,7 @@ export function useAllChatsSubscription() {
 
   const unsubscribe = useCallback(
     (chatId: string) => {
+      attemptsRef.current.delete(chatId);
       manualCloseRef.current.add(chatId);
       clearPendingTimeout(chatId);
       clearStreamDeltaFlushForChat(chatId);
@@ -715,6 +729,7 @@ export function useAllChatsSubscription() {
 
   const unsubscribeAll = useCallback(() => {
     for (const chatId of subscriptionsRef.current.keys()) {
+      attemptsRef.current.delete(chatId);
       manualCloseRef.current.add(chatId);
     }
     for (const unsub of subscriptionsRef.current.values()) {

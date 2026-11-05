@@ -872,6 +872,24 @@ impl AppToolRegistry {
         Ok(())
     }
 
+    async fn take_or_expand_turn_tool_pool(
+        &self,
+        pool: &TurnToolPool,
+        gcx: SharedGlobalContext,
+        mode: &str,
+        model_id: Option<&str>,
+        catalog: &ToolCatalogSnapshot,
+        catalog_desc: &refact_tool_api::ToolDesc,
+    ) -> Result<Option<MutableTool>, String> {
+        let pool_impl = Self::app_turn_tool_pool(pool)?;
+        if let Some(tool) = pool_impl.take(catalog_desc).await {
+            return Ok(Some(tool));
+        }
+        self.add_turn_tool_pool_fallback(pool, gcx, mode, model_id, catalog)
+            .await?;
+        Ok(pool_impl.take(catalog_desc).await)
+    }
+
     async fn take_turn_tool(
         &self,
         pool: &TurnToolPool,
@@ -900,17 +918,17 @@ impl AppToolRegistry {
             {
                 let expansion_guard = ToolPoolExpansionGuard { pool: pool_impl };
                 let result = self
-                    .add_turn_tool_pool_fallback(pool, gcx.clone(), mode, model_id, catalog)
+                    .take_or_expand_turn_tool_pool(
+                        pool,
+                        gcx.clone(),
+                        mode,
+                        model_id,
+                        catalog,
+                        catalog_desc,
+                    )
                     .await;
-                let tool = match result {
-                    Ok(()) => pool_impl.take(catalog_desc).await,
-                    Err(error) => {
-                        drop(expansion_guard);
-                        return Err(error);
-                    }
-                };
                 drop(expansion_guard);
-                return Ok(tool);
+                return result;
             }
             let finished = pool_impl.expansion_finished.notified();
             if pool_impl.expansion_in_progress.load(Ordering::Acquire) {
@@ -2094,5 +2112,48 @@ mod tests {
             first.tool_description().description,
             second.tool_description().description
         );
+    }
+
+    #[serial(runtime_settings)]
+    #[tokio::test]
+    async fn expansion_claim_rechecks_instance_returned_after_initial_miss() {
+        let _env = ToolCatalogSnapshotsEnvGuard::enable();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let builds = Arc::new(AtomicUsize::new(0));
+        let registry = fixture_registry(gcx.clone(), builds.clone());
+        let catalog = registry
+            .snapshot_for_mode_for_test("agent", Some("provider/model"))
+            .await;
+        let pool = registry
+            .build_turn_tool_pool(gcx.clone(), "agent", Some("provider/model"), &catalog)
+            .await;
+        let desc = AppToolRegistry::find_catalog_descriptor(&catalog, "fixture").unwrap();
+        let pool_impl = AppToolRegistry::app_turn_tool_pool(&pool).unwrap();
+        let held = pool_impl.take(desc).await.unwrap();
+        let identity = held.tool_description().description;
+        assert!(pool_impl.take(desc).await.is_none());
+        pool_impl.return_tool(held).await;
+        assert!(pool_impl
+            .expansion_in_progress
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire,)
+            .is_ok());
+        let guard = ToolPoolExpansionGuard { pool: pool_impl };
+        let before = builds.load(Ordering::SeqCst);
+        let leased = registry
+            .take_or_expand_turn_tool_pool(
+                &pool,
+                gcx,
+                "agent",
+                Some("provider/model"),
+                &catalog,
+                desc,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        drop(guard);
+        assert_eq!(leased.tool_description().description, identity);
+        assert_eq!(builds.load(Ordering::SeqCst), before);
+        assert!(pool_impl.take(desc).await.is_none());
     }
 }

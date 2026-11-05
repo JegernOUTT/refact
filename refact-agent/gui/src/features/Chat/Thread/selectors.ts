@@ -26,7 +26,6 @@ import {
   ToolResult,
   ToolMessage,
 } from "../../../services/refact/types";
-import { takeFromLast } from "../../../utils/takeFromLast";
 import {
   ChatThreadRuntime,
   QueuedItem,
@@ -1372,35 +1371,37 @@ export const selectHasQueuedItems = createSelector(
   (queued) => queued.length > 0,
 );
 
-function hasUncalledToolsInMessages(
-  messages: ReturnType<typeof selectMessages>,
-): boolean {
-  if (messages.length === 0) return false;
-  const tailMessages = takeFromLast(messages, isUserMessage);
+const uncalledToolsCache = new WeakMap<ChatMessages, boolean>();
 
-  const toolCalls = tailMessages.reduce<string[]>((acc, cur) => {
-    if (!isAssistantMessage(cur)) return acc;
-    if (!cur.tool_calls || cur.tool_calls.length === 0) return acc;
-    const curToolCallIds = cur.tool_calls
-      .map((toolCall) => toolCall.id)
-      .filter(
-        (id): id is string => id !== undefined && !id.startsWith("srvtoolu_"),
-      );
-    return [...acc, ...curToolCallIds];
-  }, []);
+function hasUncalledToolsInMessages(messages: ChatMessages): boolean {
+  const cached = uncalledToolsCache.get(messages);
+  if (cached !== undefined) return cached;
 
-  if (toolCalls.length === 0) return false;
+  let start = messages.length - 1;
+  while (start >= 0 && !isUserMessage(messages[start])) start--;
+  if (start < 0) {
+    uncalledToolsCache.set(messages, false);
+    return false;
+  }
 
-  const toolMessages = tailMessages
-    .map((msg) => {
-      if (isToolMessage(msg)) return msg.tool_call_id;
-      if ("tool_call_id" in msg && typeof msg.tool_call_id === "string")
-        return msg.tool_call_id;
-      return undefined;
-    })
-    .filter((id): id is string => typeof id === "string");
-
-  return toolCalls.some((toolCallId) => !toolMessages.includes(toolCallId));
+  const calls = new Set<string>();
+  const results = new Set<string>();
+  for (let i = start + 1; i < messages.length; i++) {
+    const message = messages[i];
+    if (isAssistantMessage(message)) {
+      for (const call of message.tool_calls ?? []) {
+        if (call.id !== undefined && !call.id.startsWith("srvtoolu_")) {
+          calls.add(call.id);
+        }
+      }
+    }
+    if ("tool_call_id" in message && typeof message.tool_call_id === "string") {
+      results.add(message.tool_call_id);
+    }
+  }
+  const pending = Array.from(calls).some((id) => !results.has(id));
+  uncalledToolsCache.set(messages, pending);
+  return pending;
 }
 
 export const selectHasUncalledToolsById = (
@@ -1408,10 +1409,8 @@ export const selectHasUncalledToolsById = (
   chatId: string,
 ): boolean => hasUncalledToolsInMessages(selectMessagesById(state, chatId));
 
-export const selectHasUncalledTools = createSelector(
-  selectMessages,
-  hasUncalledToolsInMessages,
-);
+export const selectHasUncalledTools = (state: RootState): boolean =>
+  hasUncalledToolsInMessages(selectMessages(state));
 
 export const selectThreadConfirmation = (state: RootState) =>
   selectThreadConfirmationById(state, state.chat.current_thread_id);

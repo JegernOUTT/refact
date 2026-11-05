@@ -1,3 +1,4 @@
+import { setSseStatus, removeSseConnection } from "../features/Connection";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useAppDispatch } from "./useAppDispatch";
 import { useAppSelector } from "./useAppSelector";
@@ -149,6 +150,7 @@ export function useChatSubscription(
 
   const STALE_THRESHOLD_MS = 45_000;
 
+  const attemptRef = useRef<{ chatId: string; token: symbol } | null>(null);
   const unsubscribeRef = useRef<(() => void) | null>(null);
   const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(
     null,
@@ -375,6 +377,9 @@ export function useChatSubscription(
   );
 
   const cleanup = useCallback(() => {
+    const attempt = attemptRef.current;
+    attemptRef.current = null;
+    if (attempt) dispatch(removeSseConnection({ chatId: attempt.chatId }));
     if (reconnectTimeoutRef.current) {
       clearTimeout(reconnectTimeoutRef.current);
       reconnectTimeoutRef.current = null;
@@ -392,7 +397,12 @@ export function useChatSubscription(
       unsubscribeRef.current = null;
     }
     connectingRef.current = false;
-  }, [clearStreamDeltaFlush, clearSubchatFlush, clearBackgroundAgentFlush]);
+  }, [
+    dispatch,
+    clearStreamDeltaFlush,
+    clearSubchatFlush,
+    clearBackgroundAgentFlush,
+  ]);
 
   const markSseError = useCallback(
     (err: Error) => {
@@ -423,6 +433,10 @@ export function useChatSubscription(
 
     const connection = dispatch(captureAgentRosterConnection());
     cleanup();
+    const token = Symbol(chatId);
+    attemptRef.current = { chatId, token };
+    const isCurrentAttempt = () => attemptRef.current?.token === token;
+    dispatch(setSseStatus({ chatId, status: "connecting" }));
     connectingRef.current = true;
     lastSeqRef.current = 0n;
     setStatus("connecting");
@@ -435,6 +449,7 @@ export function useChatSubscription(
       connection.config,
       {
         onEvent: (envelope) => {
+          if (!isCurrentAttempt()) return;
           try {
             const seq = BigInt(envelope.seq);
             if (envelope.type === "snapshot") {
@@ -516,12 +531,15 @@ export function useChatSubscription(
           }
         },
         onConnected: () => {
+          if (!isCurrentAttempt()) return;
           connectingRef.current = false;
+          dispatch(setSseStatus({ chatId, status: "connected" }));
           setStatus("connected");
           setError(null);
           callbacksRef.current.onConnected?.();
         },
         onDisconnected: () => {
+          if (!isCurrentAttempt()) return;
           dispatch(
             rejectAgentRosterStream(
               rosterSource,
@@ -534,12 +552,15 @@ export function useChatSubscription(
           flushPendingSubchatUpdate();
           clearBackgroundAgentFlush();
           flushPendingBackgroundAgentUpdates();
+          dispatch(setSseStatus({ chatId, status: "disconnected" }));
           connectingRef.current = false;
           setStatus("disconnected");
+          cleanup();
           callbacksRef.current.onDisconnected?.();
           if (!chatDenied) scheduleReconnect(reconnectDelay);
         },
         onAgentRosterDenied: (event) => {
+          if (!isCurrentAttempt()) return;
           if (
             event.type === "background_agent_updated" &&
             BigInt(event.seq) === lastSeqRef.current + 1n
@@ -553,6 +574,7 @@ export function useChatSubscription(
           );
         },
         onError: (err) => {
+          if (!isCurrentAttempt()) return;
           chatDenied = isChatAuthorizationDenial(err);
           dispatch(rejectAgentRosterStream(rosterSource, err));
           invalidateChatParamsSyncState(chatId, subscriptionConfig);
@@ -562,6 +584,7 @@ export function useChatSubscription(
           clearBackgroundAgentFlush();
           flushPendingBackgroundAgentUpdates();
           markSseError(err);
+          dispatch(setSseStatus({ chatId, status: "disconnected" }));
           connectingRef.current = false;
           setStatus("disconnected");
           setError(err);
@@ -602,7 +625,9 @@ export function useChatSubscription(
   const reconnect = useCallback(() => {
     if (DEBUG)
       console.log("[SSE] Manual reconnect triggered for chat:", chatId); // eslint-disable-line no-console
-    setTimeout(() => {
+    if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
+    reconnectTimeoutRef.current = setTimeout(() => {
+      reconnectTimeoutRef.current = null;
       connect();
     }, 50);
   }, [connect, chatId]);

@@ -1,3 +1,8 @@
+import {
+  setSseStatus,
+  removeSseConnection,
+  clearAllSseConnections,
+} from "../../Connection";
 /* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-non-null-assertion */
 import { expect, test, describe, beforeEach, vi } from "vitest";
 import type { RootState } from "../../../app/store";
@@ -108,6 +113,41 @@ describe("Chat Thread Reducer - Edge Cases", () => {
       }),
     );
     expect(getChatActivity(state.threads[chatId])).toBe("completed");
+  });
+
+  test("hands status to sidebar only outside a snapshotted subscription", () => {
+    let state = chatReducer(initialState, applyChatEvent(createSnapshot()));
+    const sidebar = (session_state: "generating" | "executing_tools") =>
+      updateChatRuntimeFromSessionState({
+        id: chatId,
+        session_state,
+        source: "sidebar",
+      });
+    state = chatReducer(state, removeSseConnection({ chatId }));
+    state = chatReducer(state, sidebar("generating"));
+    expect(state.threads[chatId]?.session_state).toBe("generating");
+    expect(state.threads[chatId]?.snapshot_received).toBe(true);
+    state = chatReducer(state, setSseStatus({ chatId, status: "connecting" }));
+    state = chatReducer(state, setSseStatus({ chatId, status: "connected" }));
+    state = chatReducer(state, sidebar("executing_tools"));
+    expect(state.threads[chatId]?.session_state).toBe("executing_tools");
+    state = chatReducer(
+      state,
+      applyChatEvent({ ...createSnapshot(), seq: "0" }),
+    );
+    state = chatReducer(state, sidebar("generating"));
+    expect(state.threads[chatId]?.session_state).toBe("idle");
+    expect(state.threads[chatId]?.last_applied_seq).toBe("0");
+    state = chatReducer(
+      state,
+      setSseStatus({ chatId, status: "disconnected" }),
+    );
+    state = chatReducer(state, sidebar("generating"));
+    expect(state.threads[chatId]?.session_state).toBe("generating");
+    state = chatReducer(state, applyChatEvent(createSnapshot()));
+    state = chatReducer(state, clearAllSseConnections());
+    state = chatReducer(state, sidebar("executing_tools"));
+    expect(state.threads[chatId]?.session_state).toBe("executing_tools");
   });
 
   test("local request failures still report errors after a live snapshot", () => {

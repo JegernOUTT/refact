@@ -3433,9 +3433,7 @@ impl ChatSession {
     }
 
     fn mutable_message_start(&self) -> Option<usize> {
-        refact_core::active_context::active_context(&self.messages)
-            .ok()
-            .map(|active| active.report_index.map_or(0, |index| index + 1))
+        refact_core::active_context::active_context_mutable_start(&self.messages).ok()
     }
 
     pub fn update_message(&mut self, message_id: &str, message: ChatMessage) -> Option<usize> {
@@ -3964,7 +3962,7 @@ impl ChatSession {
         if crate::chat::context_rebuild::compression_attempt_active(self)
             || self.pending_context_rebuild.is_some()
             || self.pending_mode_handoff.is_some()
-            || refact_core::active_context::active_context(&self.messages).is_err()
+            || refact_core::active_context::active_context_mutable_start(&self.messages).is_err()
             || self.runtime.state == SessionState::ExecutingTools
             || self.draft_message.is_some()
         {

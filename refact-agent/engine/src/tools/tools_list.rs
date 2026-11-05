@@ -345,8 +345,12 @@ impl ToolAvailability {
                 .or_insert(0) += 1;
         }
 
+        let span = perf_diagnostics::span(PerfComponent::ToolAvailabilityVecdbWait, None, None);
         let vecdb_on = gcx.vec_db.lock().await.is_some();
+        span.finish_tool(PerfOutcome::Success, 1, 1, None);
+        let span = perf_diagnostics::span(PerfComponent::ToolAvailabilityCodegraphWait, None, None);
         let codegraph_on = gcx.codegraph.lock().await.is_some();
+        span.finish_tool(PerfOutcome::Success, 1, 1, None);
 
         let is_there_a_thinking_model =
             match try_load_caps_quickly_if_not_present(gcx.clone(), 0).await {
@@ -2279,7 +2283,10 @@ pub async fn get_tools_for_mode(
 
     let mode_id = map_legacy_mode_to_id(mode_id);
 
-    let mode_config = match get_mode_config(gcx.clone(), mode_id, model_id).await {
+    let span = perf_diagnostics::span(PerfComponent::ToolModeConfig, None, None);
+    let mode_config = get_mode_config(gcx.clone(), mode_id, model_id).await;
+    span.finish_tool(PerfOutcome::Success, 1, 1, None);
+    let mode_config = match mode_config {
         Some(config) => config,
         None => {
             tracing::warn!("Mode '{}' not found, returning empty tools", mode_id);
@@ -2291,6 +2298,7 @@ pub async fn get_tools_for_mode(
         return vec![];
     }
 
+    let span = perf_diagnostics::span(PerfComponent::ToolModelCaps, None, None);
     let model_supports_web_search = if let Some(mid) = model_id {
         match try_load_caps_quickly_if_not_present(gcx.clone(), 0).await {
             Ok(caps) => resolve_chat_model(caps, mid)
@@ -2302,6 +2310,7 @@ pub async fn get_tools_for_mode(
         false
     };
 
+    span.finish_tool(PerfOutcome::Success, 1, 1, None);
     let availability = ToolAvailability::from_gcx(gcx.clone()).await;
     let mut gated_tools = HashMap::new();
     let described_tools: Vec<DescribedTool> = get_available_tool_groups_with_availability(
@@ -2335,7 +2344,9 @@ pub async fn get_tools_for_mode(
 
     let mcp_access = match model_id {
         Some(mid) => {
+            let span = perf_diagnostics::span(PerfComponent::ToolAccessPolicy, None, None);
             let policy = tool_access_policy(gcx.clone()).await;
+            span.finish_tool(PerfOutcome::Success, 1, 1, None);
             if policy.tool_access.providers.is_empty() {
                 None
             } else {

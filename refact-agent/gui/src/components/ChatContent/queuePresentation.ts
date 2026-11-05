@@ -208,12 +208,26 @@ export function queueStatusText(
   waitingInterruptible = false,
 ): string {
   const count = (push: PushMode) =>
-    queuedItems.filter((item) => queuedItemPushMode(item) === push).length;
+    queuedItems.filter(
+      (item) =>
+        item.command_type === "delivery" && queuedItemPushMode(item) === push,
+    ).length;
+  const priorityCount = queuedItems.filter(
+    (item) => item.command_type !== "delivery" && item.priority,
+  ).length;
+  const orderedCount = queuedItems.filter(
+    (item) => item.command_type !== "delivery" && !item.priority,
+  ).length;
+  const commands = [
+    priorityCount ? `${priorityCount} send next` : "",
+    orderedCount ? `${orderedCount} in order` : "",
+  ];
   if (isBusy && waitingInterruptible) {
     const delivering = count("append") + count("when_idle");
     return [
       delivering ? `${delivering} delivering now` : "",
       count("preempt") ? `${count("preempt")} interrupting` : "",
+      ...commands,
     ]
       .filter(Boolean)
       .join(" · ");
@@ -230,6 +244,7 @@ export function queueStatusText(
         }`
       : "",
     count("when_idle") ? `${count("when_idle")} when idle` : "",
+    ...commands,
   ]
     .filter(Boolean)
     .join(" · ");

@@ -90,10 +90,24 @@ pub enum PerfComponent {
     TrajectorySaveMutexWait,
     TrajectoryMetricScan,
     ToolIntegrationToolsBuild,
+    ToolAvailabilityVecdbWait,
+    ToolAvailabilityCodegraphWait,
+    ToolModeConfig,
+    ToolModelCaps,
+    ToolAccessPolicy,
+    ToolRunnerCapacityWait,
+    ShellPrepare,
+    ShellApproval,
+    ShellRevalidate,
+    ShellSpawnWait,
+    ShellProgressDrain,
+    ShellPostprocess,
+    ExecPathQueueWait,
+    ExecPathCollect,
 }
 
 impl PerfComponent {
-    pub const ALL: [Self; 75] = [
+    pub const ALL: [Self; 89] = [
         Self::TrajectorySnapshot,
         Self::TrajectorySerialize,
         Self::TrajectoryAtomicWrite,
@@ -169,6 +183,20 @@ impl PerfComponent {
         Self::TrajectorySaveMutexWait,
         Self::TrajectoryMetricScan,
         Self::ToolIntegrationToolsBuild,
+        Self::ToolAvailabilityVecdbWait,
+        Self::ToolAvailabilityCodegraphWait,
+        Self::ToolModeConfig,
+        Self::ToolModelCaps,
+        Self::ToolAccessPolicy,
+        Self::ToolRunnerCapacityWait,
+        Self::ShellPrepare,
+        Self::ShellApproval,
+        Self::ShellRevalidate,
+        Self::ShellSpawnWait,
+        Self::ShellProgressDrain,
+        Self::ShellPostprocess,
+        Self::ExecPathQueueWait,
+        Self::ExecPathCollect,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -248,6 +276,20 @@ impl PerfComponent {
             Self::TrajectorySaveMutexWait => "trajectory.save_mutex_wait",
             Self::TrajectoryMetricScan => "trajectory.metric_scan",
             Self::ToolIntegrationToolsBuild => "tool.integration_tools_build",
+            Self::ToolAvailabilityVecdbWait => "tool.availability_vecdb_wait",
+            Self::ToolAvailabilityCodegraphWait => "tool.availability_codegraph_wait",
+            Self::ToolModeConfig => "tool.mode_config",
+            Self::ToolModelCaps => "tool.model_caps",
+            Self::ToolAccessPolicy => "tool.access_policy",
+            Self::ToolRunnerCapacityWait => "tool.runner_capacity_wait",
+            Self::ShellPrepare => "shell.prepare",
+            Self::ShellApproval => "shell.approval",
+            Self::ShellRevalidate => "shell.revalidate",
+            Self::ShellSpawnWait => "shell.spawn_wait",
+            Self::ShellProgressDrain => "shell.progress_drain",
+            Self::ShellPostprocess => "shell.postprocess",
+            Self::ExecPathQueueWait => "exec.path_queue_wait",
+            Self::ExecPathCollect => "exec.path_collect",
         }
     }
 

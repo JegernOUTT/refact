@@ -1,4 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { selectHasUncalledToolsById } from "./selectors";
+import type { ChatMessages } from "../../../services/refact/types";
+import { describe, expect, it, vi } from "vitest";
 import type { RootState } from "../../../app/store";
 import type { DiffMessage, ToolMessage } from "../../../services/refact/types";
 import type { WorktreeMeta } from "../../../services/refact/worktrees";
@@ -646,4 +648,55 @@ describe("thread-scoped selectors", () => {
       selectBackgroundDiffMessages(state),
     );
   });
+});
+
+it("checks only the latest user tail and caches by immutable message identity", () => {
+  const call = (id: string) => ({
+    role: "assistant" as const,
+    content: null,
+    tool_calls: [
+      { id, index: 0, function: { name: "shell", arguments: "{}" } },
+    ],
+  });
+  const messages: ChatMessages = [
+    call("old"),
+    { role: "user", content: "go", checkpoints: [] },
+    call("done"),
+    { role: "tool", tool_call_id: "done", content: "ok" },
+    call("srvtoolu_remote"),
+  ];
+  const makeState = (items: ChatMessages) =>
+    ({
+      chat: { threads: { test: { thread: { messages: items } } } },
+    }) as unknown as RootState;
+  const state = makeState(messages);
+  expect(selectHasUncalledToolsById(state, "test")).toBe(false);
+  const trap = vi.spyOn(messages[1], "role", "get");
+  expect(selectHasUncalledToolsById(makeState(messages), "test")).toBe(false);
+  expect(trap).not.toHaveBeenCalled();
+  trap.mockRestore();
+  expect(
+    selectHasUncalledToolsById(
+      makeState([...messages, call("pending")]),
+      "test",
+    ),
+  ).toBe(true);
+  expect(selectHasUncalledToolsById(makeState([call("orphan")]), "test")).toBe(
+    false,
+  );
+});
+
+it("does not inspect history before the latest user boundary", () => {
+  const archived = { role: "assistant" as const, content: null };
+  const access = vi.spyOn(archived, "role", "get");
+  const messages: ChatMessages = [
+    archived,
+    { role: "user", content: "latest", checkpoints: [] },
+  ];
+  const state = {
+    chat: { threads: { test: { thread: { messages } } } },
+  } as unknown as RootState;
+  expect(selectHasUncalledToolsById(state, "test")).toBe(false);
+  expect(access).not.toHaveBeenCalled();
+  access.mockRestore();
 });

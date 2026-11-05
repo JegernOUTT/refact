@@ -2075,8 +2075,9 @@ pub async fn on_did_delete(gcx: Arc<GlobalContext>, path: &PathBuf) {
 
     let delete_path = normalize_path_for_index_store(&gcx, path);
 
-    match *vec_db_module.lock().await {
-        Some(ref mut db) => match db.remove_file(&delete_path).await {
+    let vec_db = vec_db_module.lock().await.clone();
+    match vec_db {
+        Some(db) => match db.remove_file(&delete_path).await {
             Ok(_) => {}
             Err(err) => info!("VECDB Error removing: {}", err),
         },

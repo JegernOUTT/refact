@@ -3462,6 +3462,16 @@ async fn execute_single_tool(
         .with_tool_output(tool_output_text);
     let post_hook_span = perf_diagnostics::span(PerfComponent::ToolPostHook, None, None);
     let post_verdict = run_control_hooks(app.clone(), HookEvent::PostToolUse, post_payload).await;
+    post_hook_span.finish_tool(
+        if matches!(&post_verdict, ControlVerdict::Deny(_)) {
+            PerfOutcome::Failure
+        } else {
+            PerfOutcome::Success
+        },
+        batch_size as u64,
+        1,
+        Some(execution_class),
+    );
     drop(post_hook_permit);
     if let Some(runner) = post_hook_runner {
         if let Err(error) =
@@ -3471,12 +3481,6 @@ async fn execute_single_tool(
         }
     }
     if let ControlVerdict::Deny(reason) = post_verdict {
-        post_hook_span.finish_tool(
-            PerfOutcome::Failure,
-            batch_size as u64,
-            1,
-            Some(execution_class),
-        );
         return (
             idx,
             true,
@@ -3491,12 +3495,6 @@ async fn execute_single_tool(
             vec![],
         );
     }
-    post_hook_span.finish_tool(
-        PerfOutcome::Success,
-        batch_size as u64,
-        1,
-        Some(execution_class),
-    );
 
     (idx, had_corrections, msgs, files)
 }
@@ -3507,15 +3505,23 @@ async fn runner_capacity_wait<T>(
     execution: &crate::agents::execution::RunExecution,
     future: impl std::future::Future<Output = Result<T, refact_work_core::AdmissionError>>,
 ) -> Result<T, String> {
+    let span = perf_diagnostics::span(PerfComponent::ToolRunnerCapacityWait, None, None);
     let abort = ccx.lock().await.abort_flag.clone();
     tokio::pin!(future);
     loop {
         if abort.load(Ordering::Relaxed) || app.runtime.shutdown_flag.load(Ordering::Relaxed) {
             execution.cancel();
+            span.finish_tool(PerfOutcome::Cancelled, 1, 1, None);
             return Err("Aborted while waiting for execution capacity".into());
         }
         tokio::select! {
-            result = &mut future => return result.map_err(|error| error.to_string()),
+            result = &mut future => {
+                span.finish_tool(
+                    if result.is_ok() { PerfOutcome::Success } else { PerfOutcome::Failure },
+                    1, 1, None,
+                );
+                return result.map_err(|error| error.to_string());
+            },
             _ = tokio::time::sleep(refact_work_core::coordination_settings().lock_poll_interval()) => {}
         }
     }

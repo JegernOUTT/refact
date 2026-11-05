@@ -333,6 +333,21 @@ pub fn make_reconstruction_report(
     Ok(message)
 }
 
+/// Validate the active history and locate the mutable raw suffix without copying ordinary bodies.
+/// Reconstructed histories retain the full projection validation, including payload/suffix IDs.
+pub fn active_context_mutable_start(stored: &[ChatMessage]) -> Result<usize, ActiveContextError> {
+    if stored.iter().any(is_boundary_candidate) {
+        return active_context(stored)
+            .map(|active| active.report_index.map_or(0, |index| index + 1));
+    }
+    // Legacy rejection precedes ID validation, as it does in the owned projection.
+    if stored.iter().any(is_legacy_summary) {
+        return Err(ActiveContextError::NeedsExplicitRebuild);
+    }
+    validate_ids(stored, false)?;
+    Ok(0)
+}
+
 pub fn active_context(stored: &[ChatMessage]) -> Result<ActiveContext, ActiveContextError> {
     let report_index = stored.iter().rposition(is_boundary_candidate);
     let mut messages = Vec::new();
@@ -632,6 +647,80 @@ mod tests {
             }),
         );
         result
+    }
+
+    #[test]
+    fn mutable_start_preserves_projection_validation_and_error_precedence() {
+        let duplicate = || {
+            vec![
+                message("same", "user", "a"),
+                message("same", "assistant", "b"),
+            ]
+        };
+        let mut duplicate_legacy = duplicate();
+        duplicate_legacy.push(legacy("legacy"));
+        let boundary = || report(vec![message("payload", "user", "rebuilt")]);
+        let mut invalid = boundary();
+        invalid.extra.get_mut(COMPRESSION_REPORT_KEY).unwrap()["schema_version"] = json!(999);
+        let mut unknown = diagnostic("future");
+        unknown.extra.get_mut(COMPRESSION_REPORT_KEY).unwrap()["kind"] = json!("future_history");
+        let cases = [
+            (vec![], Ok(0)),
+            (
+                vec![
+                    message("", "user", "a"),
+                    message("", "assistant", "b"),
+                    diagnostic("static"),
+                ],
+                Ok(0),
+            ),
+            (
+                duplicate(),
+                Err(ActiveContextError::InvalidPayload(
+                    "duplicate active message ID".into(),
+                )),
+            ),
+            (
+                duplicate_legacy,
+                Err(ActiveContextError::NeedsExplicitRebuild),
+            ),
+            (
+                vec![
+                    legacy("archive"),
+                    boundary(),
+                    message("tail", "user", "next"),
+                ],
+                Ok(2),
+            ),
+            (
+                vec![boundary(), message("payload", "tool", "collision")],
+                Err(ActiveContextError::InvalidPayload(
+                    "duplicate active message ID".into(),
+                )),
+            ),
+            (
+                vec![boundary(), legacy("tail")],
+                Err(ActiveContextError::NeedsExplicitRebuild),
+            ),
+            (
+                vec![invalid, legacy("tail")],
+                Err(ActiveContextError::UnsupportedVersion(999)),
+            ),
+            (
+                vec![unknown],
+                Err(ActiveContextError::InvalidReport(
+                    "unknown kind or incorrect report role".into(),
+                )),
+            ),
+        ];
+        for (stored, expected) in cases {
+            assert_eq!(active_context_mutable_start(&stored), expected);
+            assert_eq!(
+                active_context_mutable_start(&stored),
+                active_context(&stored)
+                    .map(|active| active.report_index.map_or(0, |index| index + 1))
+            );
+        }
     }
 
     #[test]

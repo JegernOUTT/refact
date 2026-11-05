@@ -103,10 +103,10 @@ pub async fn execute_at_search(
         return Ok(hits_to_context_files(hits));
     }
 
-    let r = match *vec_db.lock().await {
-        Some(ref db) => {
+    let db = vec_db.lock().await.clone();
+    let r = match db {
+        Some(db) => {
             let top_n_twice_as_big = top_n * 2;  // top_n will be cut at postprocessing stage, and we really care about top_n files, not pieces
-            // TODO: this code sucks, release lock, don't hold anything during the search
             let search_result = db.vecdb_search(query.clone(), top_n_twice_as_big, vecdb_scope_filter_mb).await?;
             let results = search_result.results.clone();
             return Ok(results2message(&results));

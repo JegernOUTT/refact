@@ -1,3 +1,4 @@
+use crate::chat::perf_diagnostics::{self, PerfComponent, PerfOutcome};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -180,6 +181,7 @@ impl Tool for ToolShell {
         tool_call_id: &String,
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
+        let prepare_span = perf_diagnostics::span(PerfComponent::ShellPrepare, None, None);
         let (gcx, exec_registry, abort_flag, execution_scope, chat_id, derived_privacy_zones) = {
             let ccx_lock = ccx.lock().await;
             (
@@ -221,17 +223,35 @@ impl Tool for ToolShell {
             .filter(|scope| scope.is_enforced() && scope.worktree().kind == "task_agent")
             .map(|scope| scope.worktree().clone())
         {
-            crate::exec::command_policy::ensure_managed_task_execution(&ccx, &meta).await?;
+            if let Err(error) =
+                crate::exec::command_policy::ensure_managed_task_execution(&ccx, &meta).await
+            {
+                prepare_span.finish_tool(PerfOutcome::Failure, 1, 1, None);
+                return Err(error);
+            }
         }
-        let checkout = command_checkout::resolve(&ccx, args).await?;
-        let parsed = parse_args_with_filter(
+        let checkout = match command_checkout::resolve(&ccx, args).await {
+            Ok(checkout) => checkout,
+            Err(error) => {
+                prepare_span.finish_tool(PerfOutcome::Failure, 1, 1, None);
+                return Err(error);
+            }
+        };
+        let parsed = match parse_args_with_filter(
             gcx.clone(),
             args,
             &default_filter,
             execution_scope.as_ref(),
             checkout.as_ref(),
         )
-        .await?;
+        .await
+        {
+            Ok(parsed) => parsed,
+            Err(error) => {
+                prepare_span.finish_tool(PerfOutcome::Failure, 1, 1, None);
+                return Err(error);
+            }
+        };
         let timeout = parsed
             .timeout
             .unwrap_or(shell_policy.execution.foreground_timeout_secs);
@@ -300,6 +320,7 @@ impl Tool for ToolShell {
                 if let Some(audit) = error.audit {
                     queue_sandbox_audit(gcx.clone(), &chat_id, audit).await;
                 }
+                prepare_span.finish_tool(PerfOutcome::Failure, 1, 1, None);
                 return Err(error.message);
             }
         };
@@ -341,9 +362,12 @@ impl Tool for ToolShell {
                 if let Some(progress_task) = progress_task {
                     let _ = progress_task.await;
                 }
+                prepare_span.finish_tool(PerfOutcome::Failure, 1, 1, None);
                 return Err(error);
             }
         };
+        prepare_span.finish_tool(PerfOutcome::Success, 1, 1, None);
+        let approval_span = perf_diagnostics::span(PerfComponent::ShellApproval, None, None);
         let started = tokio::time::Instant::now();
         if let Err(error) = crate::agents::command_approval::enforce(
             &ccx,
@@ -360,14 +384,18 @@ impl Tool for ToolShell {
             if let Some(progress_task) = progress_task {
                 let _ = progress_task.await;
             }
+            approval_span.finish_tool(PerfOutcome::Failure, 1, 1, None);
             return Err(error);
         }
+        approval_span.finish_tool(PerfOutcome::Success, 1, 1, None);
+        let revalidate_span = perf_diagnostics::span(PerfComponent::ShellRevalidate, None, None);
         if let Some(checkout) = &checkout {
             if let Err(error) = checkout.revalidate(&ccx, args, &request).await {
                 drop(request);
                 if let Some(progress_task) = progress_task {
                     let _ = progress_task.await;
                 }
+                revalidate_span.finish_tool(PerfOutcome::Failure, 1, 1, None);
                 return Err(error);
             }
         }
@@ -377,22 +405,30 @@ impl Tool for ToolShell {
                 if let Some(progress_task) = progress_task {
                     let _ = progress_task.await;
                 }
+                revalidate_span.finish_tool(PerfOutcome::Failure, 1, 1, None);
                 return Err(error);
             }
         }
+        revalidate_span.finish_tool(PerfOutcome::Success, 1, 1, None);
+        let spawn_span = perf_diagnostics::span(PerfComponent::ShellSpawnWait, None, None);
         let result = match exec_registry.spawn(request).await {
             Ok(result) => result,
             Err(error) => {
                 if let Some(progress_task) = progress_task {
                     let _ = progress_task.await;
                 }
+                spawn_span.finish_tool(PerfOutcome::Failure, 1, 1, None);
                 return Err(error);
             }
         };
+        spawn_span.finish_tool(PerfOutcome::Success, 1, 1, None);
+        let progress_span = perf_diagnostics::span(PerfComponent::ShellProgressDrain, None, None);
         if let Some(progress_task) = progress_task {
             let _ = progress_task.await;
         }
+        progress_span.finish_tool(PerfOutcome::Success, 1, 1, None);
         let duration = started.elapsed();
+        let postprocess_span = perf_diagnostics::span(PerfComponent::ShellPostprocess, None, None);
         let read = exec_registry
             .read(&result.snapshot.meta.process_id, 0, None)
             .await;
@@ -433,7 +469,7 @@ impl Tool for ToolShell {
                     .await
                     .map(|reader| reader.status())
                     .unwrap_or(result.observation);
-                apply_shell_privacy(
+                if let Err(error) = apply_shell_privacy(
                     &gcx,
                     &parsed.command,
                     request_cwd(&result.snapshot),
@@ -442,8 +478,13 @@ impl Tool for ToolShell {
                     &derived_privacy_zones,
                     &mut message,
                 )
-                .await?;
+                .await
+                {
+                    postprocess_span.finish_tool(PerfOutcome::Failure, 1, 1, None);
+                    return Err(error);
+                }
             }
+            postprocess_span.finish_tool(PerfOutcome::Success, 1, 1, None);
             return Ok((false, vec![ContextEnum::ChatMessage(message)]));
         }
         let raw_output = exec_registry
@@ -507,7 +548,7 @@ impl Tool for ToolShell {
         )
         .await;
         if observe {
-            apply_shell_privacy(
+            if let Err(error) = apply_shell_privacy(
                 &gcx,
                 &parsed.command,
                 request_cwd(&result.snapshot),
@@ -516,9 +557,14 @@ impl Tool for ToolShell {
                 &derived_privacy_zones,
                 &mut message,
             )
-            .await?;
+            .await
+            {
+                postprocess_span.finish_tool(PerfOutcome::Failure, 1, 1, None);
+                return Err(error);
+            }
         }
 
+        postprocess_span.finish_tool(PerfOutcome::Success, 1, 1, None);
         Ok((false, vec![ContextEnum::ChatMessage(message)]))
     }
 
