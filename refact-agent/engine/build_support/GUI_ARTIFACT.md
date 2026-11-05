@@ -9,7 +9,9 @@ claimed by this document or by static formatting.
 ## Modes and prerequisites
 
 - Normal `cargo build` / `cargo build --release` remains an explicit local GUI build
-  request. There is no new consent flag. It requires already installed local Node,
+  request whenever Cargo runs the build script. Unchanged ordinary dev builds can
+  remain Cargo-Fresh without rerunning it; release builds refresh every invocation.
+  There is no new consent flag. A refresh requires already installed local Node,
   npm, `node_modules/typescript/bin/tsc` and `node_modules/vite/bin/vite.js`. Missing
   prerequisites fail clearly; the build script never runs `npm ci`, `npx`, an
   installer, a remote tool resolver or an automatic build/download fallback.
@@ -40,10 +42,41 @@ from the checked package manifest, preserving version injection in `vite.config.
 After build success it rechecks inputs, inventories `dist/chat`, and atomically
 writes `dist/gui-artifact.json`. It then stages and publishes the same manifest's
 bytes into engine assets. The producer is not a disconnected type/helper.
-An intentionally absent OUT_DIR rerun sentinel makes Cargo re-enter validation on
-every GUI-enabled invocation, including a newly added VITE_* variable or PATH
-tool replacement that file-mtime/env-name caching could otherwise miss. No warm
-build speed claim is made; skip mode retains its separate API-only behavior.
+Every actual build-script run retains full source/toolchain validation, local
+compilation (unless prebuilt), artifact validation and publication. There is no
+receipt or partial-validation fast path inside the script.
+
+### Development freshness versus strict validation
+
+Ordinary dev builds use Cargo's conventional file-mtime/environment freshness,
+not per-invocation integrity validation. They watch all inventoried source files
+and existing source directories, existing optional environment/config paths, known
+VITE_* environment names, the resolved Node/npm executable paths, exact installed
+TypeScript/Vite scripts and package manifests, and `node_modules/.package-lock.json`
+when present. They do not recursively watch the GUI root, `node_modules`, or excluded
+output directories. Generated outputs must stay in excluded output locations, not
+inside watched source directories. The engine build-support directory remains
+watched. Git HEAD, the current symbolic ref and existing packed-refs are resolved
+with worktree-aware `git rev-parse --path-format=absolute --git-path`; only existing
+files are watched, never the whole Git directory. An absent controller is not a dev
+watch. Unchanged ordinary dev builds may therefore remain Cargo-Fresh.
+
+This does not detect every possible change: newly created root `.env`/config files
+or root source directories, entirely new arbitrary VITE_* environment names,
+mtime-preserving edits, replacements behind an unchanged resolved tool path, and
+changes to other installed dependency files may evade these watches. Git ref
+creation can likewise be missed when no watched existing file changes. For an
+explicit full refresh use `REFACT_GUI_ALWAYS_BUILD=1 cargo build`. Setting this flag
+to `1` and later unsetting it triggers another rebuild because the flag is watched.
+
+For `PROFILE=release`, `REFACT_USE_PREBUILT_GUI=1`, or
+`REFACT_GUI_ALWAYS_BUILD=1`, an intentionally absent OUT_DIR sentinel forces the
+script to run on every GUI-enabled Cargo invocation, preserving strict validation
+of full current inputs, including newly added VITE_* names and mtime-preserving
+changes. Prebuilt mode retains its controller pin and full artifact checks;
+release/forced local mode retains full local compilation. Skip mode takes priority
+over all three, emits no GUI/controller watches and performs no GUI validation.
+No measured warm-build performance or security qualification is claimed here.
 
 The producer candidate records:
 

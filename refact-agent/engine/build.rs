@@ -14,6 +14,7 @@ fn main() {
     for name in [
         "REFACT_SKIP_GUI_BUILD",
         "REFACT_USE_PREBUILT_GUI",
+        "REFACT_GUI_ALWAYS_BUILD",
         "REFACT_GUI_DIR",
         "REFACT_OFFLINE_NETNS",
         "CARGO_NET_OFFLINE",
@@ -35,7 +36,6 @@ fn main() {
         "build_support",
         "assets/chat/index.html",
         "src/daemon/web_picker.html",
-        gui_artifact::CONTROLLER,
     ] {
         println!("cargo:rerun-if-changed={path}");
     }
@@ -48,8 +48,19 @@ fn main() {
         println!(
             "cargo:warning=GUI refresh skipped for API-only build; existing assets NOT validated"
         );
-    } else if let Err(error) = build_gui_assets(&gui_dir()) {
-        panic!("GUI artifact refusal: {error}. Prior assets retained; no install/download/build fallback. See build_support/GUI_ARTIFACT.md");
+    } else {
+        if env::var("PROFILE").as_deref() == Ok("release")
+            || env::var("REFACT_USE_PREBUILT_GUI").as_deref() == Ok("1")
+            || env::var("REFACT_GUI_ALWAYS_BUILD").as_deref() == Ok("1")
+        {
+            let watched = PathBuf::from(env::var_os("OUT_DIR").unwrap())
+                .join("gui-revalidate-every-invocation");
+            println!("cargo:rerun-if-changed={}", watched.display());
+            println!("cargo:rerun-if-changed={}", gui_artifact::CONTROLLER);
+        }
+        if let Err(error) = build_gui_assets(&gui_dir()) {
+            panic!("GUI artifact refusal: {error}. Prior assets retained; no install/download/build fallback. See build_support/GUI_ARTIFACT.md");
+        }
     }
     shadow_rs::ShadowBuilder::builder().build().unwrap();
 }
@@ -79,12 +90,25 @@ fn build_gui_assets(gui: &Path) -> gui_artifact::Result<()> {
     } else {
         let options = gui_artifact::merged_node_options(env::var_os("NODE_OPTIONS"));
         let node = gui_artifact::resolve_program(if cfg!(windows) { "node.exe" } else { "node" })?;
+        println!("cargo:rerun-if-changed={}", node.display());
+        let npm = gui_artifact::resolve_program(if cfg!(windows) { "npm.cmd" } else { "npm" })?;
+        println!("cargo:rerun-if-changed={}", npm.display());
         for tool in [
             "node_modules/typescript/bin/tsc",
             "node_modules/vite/bin/vite.js",
         ] {
             if !gui.join(tool).is_file() {
                 return Err(format!("Missing local GUI tool {tool}; explicitly prepare matching dependencies before cargo build (offline policy: {}). No npm ci or npx is invoked", gui_artifact::offline()).into());
+            }
+            println!("cargo:rerun-if-changed={}", gui.join(tool).display());
+        }
+        for path in [
+            "node_modules/typescript/package.json",
+            "node_modules/vite/package.json",
+            "node_modules/.package-lock.json",
+        ] {
+            if std::fs::symlink_metadata(gui.join(path)).is_ok() {
+                println!("cargo:rerun-if-changed={}", gui.join(path).display());
             }
         }
         gui_artifact::check_build_outputs(gui, &engine)?;
@@ -136,10 +160,6 @@ fn build_gui_assets(gui: &Path) -> gui_artifact::Result<()> {
 }
 
 fn watch_inputs(gui: &Path, inputs: &gui_artifact::Inputs) {
-    let watched =
-        PathBuf::from(env::var_os("OUT_DIR").unwrap()).join("gui-revalidate-every-invocation");
-    println!("cargo:rerun-if-changed={}", watched.display());
-    println!("cargo:rerun-if-changed={}", gui.display());
     for key in inputs
         .environment
         .keys()
@@ -163,6 +183,32 @@ fn watch_inputs(gui: &Path, inputs: &gui_artifact::Inputs) {
         "patches",
         ".npmrc",
     ] {
-        println!("cargo:rerun-if-changed={}", gui.join(name).display());
+        if std::fs::symlink_metadata(gui.join(name)).is_ok() {
+            println!("cargo:rerun-if-changed={}", gui.join(name).display());
+        }
+    }
+    let mut git_paths = vec!["HEAD".to_string(), "packed-refs".to_string()];
+    if let Ok(output) = Command::new("git")
+        .args(["symbolic-ref", "-q", "HEAD"])
+        .current_dir(gui)
+        .output()
+    {
+        if output.status.success() {
+            git_paths.push(String::from_utf8_lossy(&output.stdout).trim().to_string());
+        }
+    }
+    for path in git_paths {
+        if let Ok(output) = Command::new("git")
+            .args(["rev-parse", "--path-format=absolute", "--git-path", &path])
+            .current_dir(gui)
+            .output()
+        {
+            if output.status.success() {
+                let path = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+                if std::fs::symlink_metadata(&path).is_ok() {
+                    println!("cargo:rerun-if-changed={}", path.display());
+                }
+            }
+        }
     }
 }
