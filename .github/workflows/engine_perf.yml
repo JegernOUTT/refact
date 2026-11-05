@@ -24,6 +24,7 @@ defaults:
     working-directory: refact-agent/engine
 
 env:
+  RUSTUP_TOOLCHAIN: stable
   CARGO_INCREMENTAL: 0
   CARGO_NET_RETRY: 10
   RUSTUP_MAX_RETRIES: 10
@@ -50,8 +51,11 @@ jobs:
         working-directory: refact-agent/gui
         run: npm ci --include=dev
 
-      - name: Install Rust toolchain
-        run: rustup update --no-self-update stable
+      - name: Disable local development defaults and install stable Rust
+        shell: bash
+        run: |
+          rm -f ../../.cargo/config.toml
+          rustup toolchain install stable --profile minimal --component rust-src --no-self-update
 
       - name: Install build tools
         run: |

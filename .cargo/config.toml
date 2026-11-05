@@ -1,0 +1,11 @@
+[unstable]
+profile-rustflags = true
+
+[build]
+jobs = 4
+
+[profile.dev.package.refact-lsp]
+rustflags = ["-Zunstable-options", "--jobs-frontend=4"]
+
+[profile.ci-test.package.refact-lsp]
+rustflags = []

@@ -16,6 +16,21 @@ The engine is designed for local-first/BYOK usage: provider credentials and proj
 
 ## Build and run
 
+Development builds use the repository-pinned `nightly-2026-11-04` toolchain. Ordinary
+`cargo build`, `cargo run`, and `cargo test` compile `refact-lsp` with four frontend
+workers. All profiles use LLVM, including release and `ci-release`. Cranelift is
+not supported: the pinned backend failed panic-containment verification. The
+executable build peaked around 42 GiB RAM and test compilation around 48 GiB;
+leave at least 48 GiB available, allow extra headroom for tests, and avoid
+concurrent engine builds. Ordinary Cargo does not enforce a
+memory guard; `tools/dev/rust-dev.py` provides a guarded, API-only workflow.
+
+Use a rustup-managed toolchain in RustRover and reload the Cargo project after
+updating. An explicit IDE toolchain or `RUSTUP_TOOLCHAIN` overrides repository
+discovery. Stable Cargo cannot parse the development profile-rustflags configuration; CI
+explicitly disables that configuration and retains stable LLVM builds. Hosts
+must have the pinned nightly toolchain available for local development.
+
 ```bash
 cd refact-agent/engine
 

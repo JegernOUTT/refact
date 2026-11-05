@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Opt-in API-only Rust development builds; never installs toolchains or edits config."""
+"""API-only Rust builds using project fast defaults; never installs toolchains or edits config."""
 
 import argparse
 import json
@@ -25,10 +25,10 @@ def arguments(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mode", choices=("check", "build", "experimental-lib"), default="check")
     parser.add_argument("--package", default="refact-lsp", help="workspace package (check/library only)")
-    parser.add_argument("--toolchain", choices=("stable", NIGHTLY), help="default: ambient cargo toolchain")
+    parser.add_argument("--toolchain", choices=("stable", NIGHTLY), help="default: ambient project nightly; stable is incompatible with project profile-rustflags configuration")
     parser.add_argument("--jobs", type=positive, default=4, help="Cargo jobs; experimental frontend stays at 4")
-    parser.add_argument("--cranelift", action="store_true", help="experimental root library only; component must already be installed")
-    parser.add_argument("--allow-low-memory", action="store_true", help="override experimental 48 GiB available RAM guard")
+    parser.add_argument("--cranelift", action="store_true", help="blocked: Cranelift has a confirmed catch_unwind correctness failure")
+    parser.add_argument("--allow-low-memory", action="store_true", help="override project fast default's 48 GiB available RAM guard")
     parser.add_argument("--allow-wrapper", action="store_true", help="preserve explicitly configured compiler wrappers despite incremental incompatibility")
     parser.add_argument("--offline", dest="offline", action="store_true", default=True)
     parser.add_argument("--online", dest="offline", action="store_false", help="allow Cargo dependency downloads (never toolchain installs)")
@@ -40,8 +40,6 @@ def arguments(argv=None):
     experimental = args.mode == "experimental-lib"
     if args.cranelift and not experimental:
         parser.error("--cranelift requires --mode experimental-lib")
-    if not experimental and args.toolchain == NIGHTLY:
-        parser.error("nightly requires --mode experimental-lib")
     if experimental and args.toolchain == "stable":
         parser.error("experimental-lib requires the pinned nightly")
     if args.mode == "build" and args.package != "refact-lsp":
@@ -107,7 +105,7 @@ def plan(args, environ):
     toolchain = NIGHTLY if experimental else args.toolchain
     target = ENGINE / "target"
     if experimental:
-        target /= "rust-dev/nightlyCranelift" if args.cranelift else "rust-dev/nightlyLLVM"
+        target /= "rust-dev/nightlyLLVM"
     target = target.resolve()
     if not target.is_relative_to(ENGINE.resolve()):
         raise ValueError("target directory resolves outside this checkout's engine")
@@ -125,6 +123,10 @@ def plan(args, environ):
     updates = {"CARGO_INCREMENTAL": "1", "REFACT_SKIP_GUI_BUILD": "1", "RUSTUP_AUTO_INSTALL": "0"}
     warnings = ["API-only: GUI build skipped; embedded assets are unvalidated. Not a distribution build."]
     errors = []
+    if args.cranelift:
+        errors.append("Cranelift execution is disabled: confirmed catch_unwind correctness failure; use the default nightly LLVM backend")
+    if toolchain == "stable":
+        errors.append("project profile-rustflags configuration requires the pinned nightly; stable Cargo requires the unstable profile-rustflags feature")
     if environ.get("RUSTC_BOOTSTRAP"):
         errors.append("RUSTC_BOOTSTRAP is configured; run without it (helper never enables bootstrap)")
     wrappers = [key for key in ("RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER",
@@ -134,10 +136,10 @@ def plan(args, environ):
         warnings.append("Compiler wrappers preserved; incremental/sccache may be incompatible: " + ", ".join(wrappers))
         if not args.allow_wrapper:
             errors.append("configured compiler wrapper requires explicit --allow-wrapper")
-    if experimental:
+    if toolchain != "stable":
         memory = available_memory()
         if memory is None or memory < MIN_MEMORY:
-            warnings.append("Experimental builds measured ~42 GiB RAM; 48 GiB available required; available=" + ("unknown" if memory is None else f"{memory / 1024**3:.1f} GiB"))
+            warnings.append("Project fast defaults measured ~42 GiB RAM; 48 GiB available required; available=" + ("unknown" if memory is None else f"{memory / 1024**3:.1f} GiB"))
             if not args.allow_low_memory:
                 errors.append("insufficient/unknown available RAM; free memory or explicitly use --allow-low-memory")
     return command, updates, warnings, errors, toolchain
