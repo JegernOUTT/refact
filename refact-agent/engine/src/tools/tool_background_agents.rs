@@ -1407,12 +1407,7 @@ pub(crate) async fn execute_agents_wait(
             &targets,
         );
         let record = tokio::select! {
-            settled = app
-                .agents
-                .wait(&parent_chat_id, agent_id, Duration::from_millis(timeout_ms)) => {
-                settled.map_err(|error| map_registry_error(agent_id, error))?
-            }
-            report = waiting.refused() => return Err(report.to_string()),
+            biased;
             _ = interrupt.wait() => {
                 let mut statuses = Vec::new();
                 for agent_id in &targets {
@@ -1421,6 +1416,13 @@ pub(crate) async fn execute_agents_wait(
                 }
                 return Ok(tool_message(tool_call_id, json!({"target":"agents", "outcome":"interrupted", "statuses":statuses, "evidence":"Wait interrupted; no child was cancelled."}).to_string()));
             },
+            settled = app
+                .agents
+                .wait(&parent_chat_id, agent_id, Duration::from_millis(timeout_ms)) => {
+                settled.map_err(|error| map_registry_error(agent_id, error))?
+            }
+            report = waiting.refused() => return Err(report.to_string()),
+
         };
         let content = if record.status.is_terminal() {
             format_agent_result(&record, false).await?
@@ -1471,14 +1473,13 @@ pub(crate) async fn execute_agents_wait(
         })
     });
     let mut first_terminal = already_terminal;
-    if first_terminal.is_none() {
+    if first_terminal.is_none() || interrupt.interrupted() {
         let mut pending: Vec<_> = waits.collect();
         let refused = waiting.refused();
         tokio::pin!(refused);
         while !pending.is_empty() {
             let ((agent_id, result), _, rest) = tokio::select! {
-                settled = futures::future::select_all(pending) => settled,
-                report = &mut refused => return Err(report.to_string()),
+                biased;
             _ = interrupt.wait() => {
                 let mut statuses = Vec::new();
                 for agent_id in &targets {
@@ -1487,6 +1488,9 @@ pub(crate) async fn execute_agents_wait(
                 }
                 return Ok(tool_message(tool_call_id, json!({"target":"agents", "outcome":"interrupted", "statuses":statuses, "evidence":"Wait interrupted; no child was cancelled."}).to_string()));
             },
+                settled = futures::future::select_all(pending) => settled,
+                report = &mut refused => return Err(report.to_string()),
+
             };
             pending = rest;
             match result {

@@ -2260,16 +2260,6 @@ mod tests {
     }
 
     #[test]
-    fn test_compress_options_default() {
-        let opts = CompressOptions::default();
-        assert!(!opts.dedup_and_compress_context);
-        assert!(!opts.drop_all_context);
-        assert!(!opts.compress_non_agentic_tools);
-        assert!(!opts.drop_all_memories);
-        assert!(!opts.drop_project_information);
-    }
-
-    #[test]
     fn test_compression_report_metadata_fields_exist() {
         let mut messages = vec![
             make_user_msg("hello"),

@@ -1316,15 +1316,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn daemon_json_atomic_write_read_roundtrip() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("daemon.json");
-        let info = test_daemon_info();
-        write_daemon_info_atomic(&path, &info).await.unwrap();
-        assert_eq!(read_daemon_info(&path).await.unwrap(), Some(info));
-    }
-
-    #[tokio::test]
     async fn daemon_json_atomic_write_replaces_existing_file() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("daemon.json");

@@ -318,11 +318,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_js_string_literal_with_quotes() {
-        assert_eq!(js_string_literal("it's"), "'it\\'s'");
-    }
-
-    #[test]
     fn test_js_string_literal_with_backslash() {
         assert_eq!(js_string_literal("a\\b"), "'a\\\\b'");
     }

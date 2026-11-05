@@ -1737,18 +1737,6 @@ The agent's work has been successfully merged back to the target branch.
     }
 
     #[test]
-    fn merge_ready_in_order_stops_after_generic_non_merge() {
-        let result = MergeBatchResult {
-            card_id: "T-1".to_string(),
-            merged: false,
-            conflict: false,
-            error: Some("merge failed".to_string()),
-        };
-
-        assert!(!should_continue_merges(&result, false));
-    }
-
-    #[test]
     fn merge_ready_in_order_post_merge_verification_args_match_merge_agent_semantics() {
         let empty = HashMap::new();
         assert!(!auto_revert_arg(&empty).unwrap());

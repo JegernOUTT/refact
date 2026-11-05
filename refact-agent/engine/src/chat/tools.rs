@@ -4273,10 +4273,28 @@ mod interruptible_wait_tests {
     use super::*;
 
     #[tokio::test]
-    async fn live_sleep_execution_yields_to_append_and_when_idle() {
+    async fn live_sleep_execution_yields_to_all_queued_events() {
         use crate::tools::tools_description::Tool;
         use refact_core::chat_types::{PendingDelivery, PushMode};
-        for push in [Some(PushMode::Append), Some(PushMode::WhenIdle), None] {
+        for (push, source, fenced, process) in [
+            (Some(PushMode::Append), "test", false, false),
+            (Some(PushMode::WhenIdle), "test", false, false),
+            (None, "test", false, false),
+            (Some(PushMode::Preempt), "test", false, false),
+            (
+                Some(PushMode::Append),
+                crate::agents::push::NOTICE_PROGRESS,
+                false,
+                false,
+            ),
+            (
+                Some(PushMode::Append),
+                "exec.process_completed",
+                true,
+                false,
+            ),
+            (Some(PushMode::Append), "exec.subscribe", false, true),
+        ] {
             let gcx = crate::global_context::tests::make_test_gcx().await;
             let base_app = AppState::from_gcx(gcx).await;
             let app = AppState {
@@ -4293,6 +4311,19 @@ mod interruptible_wait_tests {
                 ),
                 ..base_app
             };
+            let registry = app.runtime.exec_registry.clone();
+            let process_id = registry
+                .register(
+                    refact_exec::ExecProcessMeta::new(
+                        refact_exec::ExecMode::Background,
+                        "pending".into(),
+                    )
+                    .with_chat_id("live-wait"),
+                    1024,
+                )
+                .await
+                .meta
+                .process_id;
             let session = Arc::new(AMutex::new(ChatSession::new("live-wait".into())));
             app.chat
                 .sessions
@@ -4334,8 +4365,12 @@ mod interruptible_wait_tests {
                 tool_type: "function".into(),
                 function: crate::call_validation::ChatToolFunction {
                     name: "wait".into(),
-                    arguments: serde_json::json!({"target":{"kind":"duration","duration_ms":30000},"description":"wait"})
-                        .to_string(),
+                    arguments: if process {
+                        serde_json::json!({"target":{"kind":"process","process_id": process_id}})
+                            .to_string()
+                    } else {
+                        serde_json::json!({"target":{"kind":"duration","duration_ms":30000},"description":"wait"}).to_string()
+                    },
                 },
                 extra_content: None,
                 started_at_ms: None,
@@ -4382,19 +4417,21 @@ mod interruptible_wait_tests {
             {
                 let mut locked = session.lock().await;
                 if let Some(push) = push {
-                    locked
-                        .enqueue_delivery(PendingDelivery::with_id(
-                            "incoming",
-                            vec![ChatMessage {
-                                role: "user".into(),
-                                content: ChatContent::SimpleText("wake up".into()),
-                                ..Default::default()
-                            }],
-                            push,
-                            "test",
-                            true,
-                        ))
-                        .unwrap();
+                    let mut delivery = PendingDelivery::with_id(
+                        "incoming",
+                        vec![ChatMessage {
+                            role: "user".into(),
+                            content: ChatContent::SimpleText("wake up".into()),
+                            ..Default::default()
+                        }],
+                        push,
+                        source,
+                        true,
+                    );
+                    if fenced {
+                        delivery.after_tool_call_id = Some("live-sleep".into());
+                    }
+                    locked.enqueue_delivery(delivery).unwrap();
                 } else {
                     assert_eq!(
                         locked.enqueue_command(crate::chat::types::CommandRequest {
@@ -4416,11 +4453,22 @@ mod interruptible_wait_tests {
                     .unwrap()
                     .unwrap();
             assert!(!corrected);
-            assert_eq!(messages[0].extra["wait"]["interrupted"], true);
-            assert!(messages[0].extra["wait"]["reason"]
-                .as_str()
-                .unwrap()
-                .contains("message arrived"));
+            if process {
+                assert!(messages[0]
+                    .content
+                    .content_text_only()
+                    .contains("outcome: interrupted"));
+                assert!(matches!(
+                    registry.get(&process_id).await.unwrap().status,
+                    refact_exec::ExecStatus::Starting
+                ));
+            } else {
+                assert_eq!(messages[0].extra["wait"]["interrupted"], true);
+                assert!(messages[0].extra["wait"]["reason"]
+                    .as_str()
+                    .unwrap()
+                    .contains("message arrived"));
+            }
             let mut locked = session.lock().await;
             assert!(!locked.abort_flag.load(Ordering::SeqCst));
             assert!(!locked.runtime.waiting_interruptible);

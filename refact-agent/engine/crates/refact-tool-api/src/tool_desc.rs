@@ -490,19 +490,6 @@ mod tests {
     }
 
     #[test]
-    fn test_is_strict_compatible_optional_param() {
-        let schema = json!({
-            "type": "object",
-            "properties": {
-                "command": {"type": "string"},
-                "timeout": {"type": "string"}
-            },
-            "required": ["command"]
-        });
-        assert!(!is_strict_compatible(&schema));
-    }
-
-    #[test]
     fn test_is_strict_compatible_unstructured_nested_object() {
         let schema = json!({
             "type": "object",

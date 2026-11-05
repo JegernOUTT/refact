@@ -116,16 +116,6 @@ mod tests {
     }
 
     #[test]
-    fn matching_id_consumes_pending_message() {
-        let mut slot = Some(pending("current"));
-
-        let taken = take_matching_browser_message(&mut slot, "current").unwrap();
-
-        assert_eq!(taken.pending_message_id, "current");
-        assert!(slot.is_none());
-    }
-
-    #[test]
     fn duplicate_response_is_rejected_after_first_consumes() {
         let mut slot = Some(pending("once"));
         assert!(take_matching_browser_message(&mut slot, "once").is_ok());

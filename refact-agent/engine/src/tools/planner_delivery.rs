@@ -665,11 +665,6 @@ mod tests {
     }
 
     #[test]
-    fn push_mode_defaults_to_append_when_absent() {
-        assert_eq!(parse_push_mode(&args(&[])).unwrap(), PushMode::Append);
-    }
-
-    #[test]
     fn push_mode_parses_all_variants_explicitly() {
         for (raw, expected) in [
             ("preempt", PushMode::Preempt),

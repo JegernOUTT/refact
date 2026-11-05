@@ -379,20 +379,22 @@ impl WaitInterrupt {
 
     pub(crate) async fn wait(&self) {
         loop {
-            // Polling also covers notification races and contexts without a session.
-            let notified = async {
-                if let Some(notify) = &self.notify {
-                    notify.notified().await;
-                } else {
-                    std::future::pending::<()>().await;
-                }
-            };
+            let notified = self.notify.as_ref().map(|notify| notify.notified());
             tokio::pin!(notified);
+            if let Some(notified) = notified.as_mut().as_pin_mut() {
+                notified.enable();
+            }
             if self.interrupted() {
                 return;
             }
             tokio::select! {
-                _ = &mut notified => {},
+                _ = async {
+                    if let Some(notified) = notified.as_mut().as_pin_mut() {
+                        notified.await;
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                } => {},
                 _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {},
             }
         }

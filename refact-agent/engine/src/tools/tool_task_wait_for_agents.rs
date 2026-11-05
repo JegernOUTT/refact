@@ -147,11 +147,17 @@ pub(crate) async fn execute_task_agents_wait(
         let sessions = app.chat.sessions.read().await;
         if let Some(session_arc) = sessions.get(&chat_id) {
             let mut session = session_arc.lock().await;
-            if !session.command_queue.is_empty() {
+            if !session.command_queue.is_empty()
+                || !session.pending_deliveries.is_empty()
+                || !session.runner_pending_deliveries.is_empty()
+                || session
+                    .wait_interrupt_flag
+                    .load(std::sync::atomic::Ordering::SeqCst)
+            {
                 return Ok((false, vec![ContextEnum::ChatMessage(ChatMessage {
                     role: "tool".into(),
                     tool_call_id: tool_call_id.clone(),
-                    content: ChatContent::SimpleText(json!({"outcome":"interrupted","target":"task_agents","reason":"queued command"}).to_string()),
+                    content: ChatContent::SimpleText(json!({"outcome":"interrupted","target":"task_agents","reason":"queued event"}).to_string()),
                     ..Default::default()
                 })]));
             }
@@ -268,6 +274,33 @@ mod tests {
             assert!(!locked.abort_flag.load(Ordering::SeqCst));
             assert!(!locked.user_interrupt_flag.load(Ordering::SeqCst));
             locked.command_queue.clear();
+        }
+        {
+            let mut locked = planner.lock().await;
+            locked.turn_depth = 1;
+            locked
+                .enqueue_delivery(refact_core::chat_types::PendingDelivery::with_id(
+                    "queued-event",
+                    vec![ChatMessage::new("event".into(), "incoming".into())],
+                    refact_core::chat_types::PushMode::WhenIdle,
+                    "exec.subscribe",
+                    true,
+                ))
+                .unwrap();
+        }
+        let (_, messages) = execute_task_agents_wait(ccx.clone(), &"event-wait".into(), &args)
+            .await
+            .unwrap();
+        let ContextEnum::ChatMessage(message) = &messages[0] else {
+            panic!("missing event interruption");
+        };
+        let result: Value = serde_json::from_str(&message.content.content_text_only()).unwrap();
+        assert_eq!(result["outcome"], "interrupted");
+        {
+            let mut locked = planner.lock().await;
+            assert!(locked.waiting_for_card_ids.is_empty());
+            assert!(locked.wake_up_at.is_none());
+            locked.pending_deliveries.clear();
         }
         let (_, messages) = execute_task_agents_wait(ccx, &"wait-again".into(), &args)
             .await

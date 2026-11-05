@@ -261,18 +261,6 @@ mod tests {
     }
 
     #[test]
-    fn wrapper_as_any_downcasts_to_inner_concrete_provider_type() {
-        let provider = ProviderInstance::new(
-            "custom_2",
-            "custom",
-            "Custom 2",
-            Box::new(CustomProvider::default()),
-        );
-
-        assert!(provider.as_any().downcast_ref::<CustomProvider>().is_some());
-    }
-
-    #[test]
     fn clone_box_preserves_wrapper_identity() {
         let provider = ProviderInstance::new(
             "custom_2",

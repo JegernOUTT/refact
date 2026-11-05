@@ -206,17 +206,18 @@ async fn sleep_with_ticks_interruptible(
         tokio::pin!(tick_sleep);
 
         tokio::select! {
-            _ = sleep_until(end) => {
-                return SleepOutcome {
-                    slept_ms: elapsed_ms(started),
-                    interrupted: false,
-                    ticks,
-                };
-            }
+            biased;
             _ = interrupt.wait() => {
                 return SleepOutcome {
                     slept_ms: elapsed_ms(started),
                     interrupted: true,
+                    ticks,
+                };
+            }
+            _ = sleep_until(end) => {
+                return SleepOutcome {
+                    slept_ms: elapsed_ms(started),
+                    interrupted: false,
                     ticks,
                 };
             }

@@ -856,11 +856,12 @@ pub(crate) async fn execute_process_wait(
         }
     };
     let (snapshot, timed_out, interrupted) = tokio::select! {
-        result = wait => { let (snapshot, timed_out) = result?; (snapshot, timed_out, false) },
+        biased;
         _ = interrupt.wait() => {
             let snapshot = authorize_process_access(gcx.clone(), exec_registry.as_ref(), execution_scope.as_ref(), &chat_id, &process_id).await?;
             (snapshot, false, true)
         }
+        result = wait => { let (snapshot, timed_out) = result?; (snapshot, timed_out, false) },
     };
     let read = exec_registry.read(&process_id, 0, None).await;
     let (title, timed_out) = process_wait_outcome(&snapshot.status, timed_out);

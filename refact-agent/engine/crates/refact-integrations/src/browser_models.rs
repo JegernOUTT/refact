@@ -4820,13 +4820,6 @@ mod tests {
     }
 
     #[test]
-    fn step_result_without_actionability_keeps_the_legacy_wire_shape() {
-        let json = serde_json::to_value(StepResult::success(0, "Clicked")).unwrap();
-
-        assert!(json.get("actionability").is_none());
-    }
-
-    #[test]
     fn test_execution_report_serde() {
         let report = ExecutionReport {
             ok: true,

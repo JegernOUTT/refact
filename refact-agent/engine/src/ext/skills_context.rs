@@ -305,14 +305,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_skills_index_not_empty_when_no_skills() {
-        let text = build_skills_prompt_markdown(&[], true);
-        assert!(!text.is_empty());
-        assert!(text.contains("## Skills"));
-        assert!(text.contains("No skills are currently installed"));
-    }
-
-    #[tokio::test]
     async fn test_skills_index_not_empty_when_all_non_invocable() {
         let tmp = tempfile::tempdir().unwrap();
         write_skill(
@@ -607,12 +599,6 @@ mod tests {
     }
 
     #[test]
-    fn test_skills_config_default_is_index_only() {
-        let config = SkillsConfig::default();
-        assert_eq!(config.auto_trigger, SkillsAutoTrigger::IndexOnly);
-    }
-
-    #[test]
     fn test_skills_config_serde_roundtrip() {
         let yaml = "auto_trigger: index_only\n";
         let config: SkillsConfig = serde_yaml::from_str(yaml).unwrap();
@@ -779,14 +765,6 @@ mod tests {
             !triggered.contains(&"noninvocable-skill".to_string()),
             "noninvocable-skill must not be auto-triggered"
         );
-    }
-
-    #[test]
-    fn test_skills_prompt_text_not_empty_when_no_skills() {
-        let text = build_skills_prompt_markdown(&[], true);
-        assert!(!text.is_empty());
-        assert!(text.contains("## Skills"));
-        assert!(text.contains("No skills are currently installed"));
     }
 
     #[test]

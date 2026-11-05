@@ -2645,15 +2645,7 @@ impl ChatSession {
                     .iter()
                     .chain(self.runner_pending_deliveries.iter())
                     .any(|delivery| {
-                        delivery.push != PushMode::Preempt
-                            && delivery.after_tool_call_id.is_none()
-                            && !(delivery.push == PushMode::Append
-                                && matches!(
-                                    delivery.source.as_str(),
-                                    crate::agents::push::NOTICE_PROGRESS
-                                        | crate::agents::push::NOTICE_SPAWN
-                                        | crate::agents::push::NOTICE_SIBLING
-                                ))
+                        !(delivery.source == "tool.wait" && delivery.after_tool_call_id.is_some())
                     }))
         {
             self.wait_delivery_boundary = true;
@@ -2701,7 +2693,10 @@ impl ChatSession {
             return false;
         }
         match push {
-            PushMode::Preempt => true,
+            PushMode::Preempt => {
+                !self.wait_tool_window_active
+                    || (self.draft_message.is_none() && !self.has_pending_tool_result_window())
+            }
             PushMode::Append => {
                 self.draft_message.is_none() && !self.has_pending_tool_result_window()
             }
@@ -2912,7 +2907,9 @@ impl ChatSession {
         self.supersede_pending(&delivery);
 
         if preempt_now {
-            self.preempt_for_delivery(&delivery.source);
+            if !self.wait_tool_window_active {
+                self.preempt_for_delivery(&delivery.source);
+            }
             self.append_delivery(&delivery);
             self.emit_queue_update();
             self.mark_persisted_runtime_changed();
@@ -2961,7 +2958,7 @@ impl ChatSession {
             if self.delivered_delivery_ids.contains(&delivery.id) {
                 continue;
             }
-            if delivery.push == PushMode::Preempt {
+            if delivery.push == PushMode::Preempt && !self.wait_tool_window_active {
                 self.preempt_for_delivery(&delivery.source);
             }
             self.append_delivery(&delivery);
@@ -5722,7 +5719,7 @@ mod tests {
     }
 
     #[test]
-    fn child_progress_is_absorbed_but_questions_and_completion_wake_wait() {
+    fn all_child_notices_yield_wait_without_aborting_turn() {
         let mut session = make_session();
         session.turn_depth = 1;
         session.start_stream().unwrap();
@@ -5738,10 +5735,13 @@ mod tests {
             session.enqueue_delivery(notice).unwrap(),
             DeliveryOutcome::Queued
         );
-        assert!(!session.wait_interrupt_flag.load(Ordering::SeqCst));
+        assert!(session.wait_interrupt_flag.load(Ordering::SeqCst));
         assert!(!session.abort_flag.load(Ordering::SeqCst));
         assert_eq!(session.pending_deliveries.len(), 1);
+        session.pending_deliveries.clear();
         for source in [
+            crate::agents::push::NOTICE_SPAWN,
+            crate::agents::push::NOTICE_SIBLING,
             crate::agents::push::NOTICE_NOTICE,
             crate::agents::push::NOTICE_COMPLETION,
             crate::agents::push::NOTICE_ERROR,
@@ -5761,13 +5761,15 @@ mod tests {
                 .pending_deliveries
                 .retain(|delivery| delivery.id != source);
         }
+        session.wait_interrupt_flag.store(false, Ordering::SeqCst);
         let mut preempt = delivery_fixture("child-preempt", PushMode::Preempt);
         preempt.source = crate::agents::push::NOTICE_NOTICE.into();
         assert_eq!(
             session.enqueue_delivery(preempt).unwrap(),
-            DeliveryOutcome::Delivered
+            DeliveryOutcome::Queued
         );
-        assert!(session.abort_flag.load(Ordering::SeqCst));
+        assert!(!session.abort_flag.load(Ordering::SeqCst));
+        assert!(session.wait_interrupt_flag.load(Ordering::SeqCst));
     }
 
     #[test]
