@@ -179,6 +179,59 @@ pub struct ToolGroup {
     pub tools: Vec<Box<dyn Tool + Send>>,
 }
 
+fn match_command_against_confirm_deny(
+    command_to_match: String,
+    rules: Option<IntegrationConfirmation>,
+) -> Result<MatchConfirmDeny, String> {
+    if !command_to_match.is_empty() {
+        if let Some(rules) = &rules {
+            tracing::info!(
+                "confirmation: match {:?} against {:?}",
+                command_to_match,
+                rules
+            );
+            let (is_denied, deny_rule) =
+                command_should_be_denied_segment_aware(&command_to_match, &rules.deny);
+            if is_denied {
+                return Ok(MatchConfirmDeny {
+                    result: MatchConfirmDenyResult::DENY,
+                    command: command_to_match.clone(),
+                    rule: deny_rule.clone(),
+                });
+            }
+            let (needs_confirmation, confirmation_rule) =
+                command_should_be_confirmed_by_user_segment_aware(
+                    &command_to_match,
+                    &rules.ask_user,
+                );
+            if needs_confirmation {
+                return Ok(MatchConfirmDeny {
+                    result: MatchConfirmDenyResult::CONFIRMATION,
+                    command: command_to_match.clone(),
+                    rule: confirmation_rule.clone(),
+                });
+            }
+        } else {
+            tracing::error!("No confirmation info available for {:?}", command_to_match);
+        }
+        if let Some(flag) = structural_flags(&extract_command_segments(&command_to_match))
+            .into_iter()
+            .next()
+        {
+            return Ok(MatchConfirmDeny {
+                result: MatchConfirmDenyResult::CONFIRMATION,
+                command: command_to_match.clone(),
+                rule: flag.to_string(),
+            });
+        }
+    }
+    Ok(MatchConfirmDeny {
+        result: MatchConfirmDenyResult::PASS,
+        command: command_to_match.clone(),
+        rule: "".to_string(),
+    })
+}
+
 #[async_trait]
 pub trait Tool: Send + Sync {
     async fn tool_execute(
@@ -200,53 +253,12 @@ pub trait Tool: Send + Sync {
             .await
             .map_err(|e| format!("Error getting tool command to match: {}", e))?;
 
-        if !command_to_match.is_empty() {
-            if let Some(rules) = &self.confirm_deny_rules() {
-                tracing::info!(
-                    "confirmation: match {:?} against {:?}",
-                    command_to_match,
-                    rules
-                );
-                let (is_denied, deny_rule) =
-                    command_should_be_denied_segment_aware(&command_to_match, &rules.deny);
-                if is_denied {
-                    return Ok(MatchConfirmDeny {
-                        result: MatchConfirmDenyResult::DENY,
-                        command: command_to_match.clone(),
-                        rule: deny_rule.clone(),
-                    });
-                }
-                let (needs_confirmation, confirmation_rule) =
-                    command_should_be_confirmed_by_user_segment_aware(
-                        &command_to_match,
-                        &rules.ask_user,
-                    );
-                if needs_confirmation {
-                    return Ok(MatchConfirmDeny {
-                        result: MatchConfirmDenyResult::CONFIRMATION,
-                        command: command_to_match.clone(),
-                        rule: confirmation_rule.clone(),
-                    });
-                }
-            } else {
-                tracing::error!("No confirmation info available for {:?}", command_to_match);
-            }
-            if let Some(flag) = structural_flags(&extract_command_segments(&command_to_match))
-                .into_iter()
-                .next()
-            {
-                return Ok(MatchConfirmDeny {
-                    result: MatchConfirmDenyResult::CONFIRMATION,
-                    command: command_to_match.clone(),
-                    rule: flag.to_string(),
-                });
-            }
-        }
-        Ok(MatchConfirmDeny {
-            result: MatchConfirmDenyResult::PASS,
-            command: command_to_match.clone(),
-            rule: "".to_string(),
-        })
+        let rules = if command_to_match.is_empty() {
+            None
+        } else {
+            self.confirm_deny_rules()
+        };
+        match_command_against_confirm_deny(command_to_match, rules)
     }
 
     async fn command_to_match_against_confirm_deny(

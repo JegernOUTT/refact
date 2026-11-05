@@ -2,6 +2,7 @@
 members = [
     ".",
     "crates/refact-core",
+    "crates/refact-scheduler-core",
     "crates/refact-claude-cloud",
     "crates/refact-chat-api",
     "crates/refact-vecdb",
@@ -293,6 +294,7 @@ clap.workspace = true
 aws-lc-sys = "=0.38.0"
 
 refact-core = { path = "crates/refact-core" }
+refact-scheduler-core = { path = "crates/refact-scheduler-core" }
 refact-claude-cloud = { path = "crates/refact-claude-cloud" }
 refact-chat-api = { path = "crates/refact-chat-api" }
 refact-vecdb = { path = "crates/refact-vecdb" }
@@ -342,7 +344,6 @@ backtrace = "0.3.71"
 base64.workspace = true
 chrono.workspace = true
 chrono-tz = "0.10"
-cron = "0.12"
 iana-time-zone = "0.1"
 diff = "0.1.13"
 dunce.workspace = true

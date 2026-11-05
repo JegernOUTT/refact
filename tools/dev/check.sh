@@ -87,6 +87,7 @@ for comp in $components; do
       run engine "cargo fmt --check" refact-agent/engine cargo fmt --check
       run engine "cargo check"       refact-agent/engine cargo check
       run engine "cargo test --lib"  refact-agent/engine env RUST_MIN_STACK=16777216 cargo test --lib
+      run engine "scheduler core tests" refact-agent/engine env RUST_MIN_STACK=16777216 cargo test -p refact-scheduler-core
       run engine "cargo test --doc"  refact-agent/engine cargo test --doc
       ;;
     gui)
