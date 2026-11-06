@@ -307,43 +307,14 @@ pub async fn verify(config: &ClaudeTransportConfig) -> Result<Value, String> {
     }).await.map_err(|_| "AWS setup verification timed out".to_string())?
 }
 
-// Only directly identifiable documented models; opaque application ARNs stay unknown.
 pub fn supports_1m(model_id: &str) -> bool {
-    native_1m(model_id) || requires_1m_beta(model_id)
-}
-
-fn native_1m(model_id: &str) -> bool {
-    let id = model_id
-        .rsplit(":foundation-model/")
-        .next()
-        .unwrap_or(model_id);
-    let id = ["us.", "eu.", "apac.", "global.", "jp.", "au.", "us-gov."]
-        .iter()
-        .find_map(|prefix| id.strip_prefix(prefix))
-        .unwrap_or(id);
-    matches!(
-        id,
-        "anthropic.claude-opus-4-7"
-            | "anthropic.claude-opus-4-8"
-            | "anthropic.claude-opus-5"
-            | "anthropic.claude-opus-5-5"
-            | "anthropic.claude-sonnet-5"
-    )
+    refact_core::claude_backend::bedrock_model(model_id)
+        .is_some_and(|model| model.context != refact_core::claude_backend::BedrockContext::Standard)
 }
 
 pub(crate) fn requires_1m_beta(model_id: &str) -> bool {
-    let id = model_id
-        .rsplit(":foundation-model/")
-        .next()
-        .unwrap_or(model_id);
-    let id = ["us.", "eu.", "apac.", "global.", "jp.", "au.", "us-gov."]
-        .iter()
-        .find_map(|prefix| id.strip_prefix(prefix))
-        .unwrap_or(id);
-    matches!(
-        id,
-        "anthropic.claude-opus-4-6" | "anthropic.claude-sonnet-4-6"
-    )
+    refact_core::claude_backend::bedrock_model(model_id)
+        .is_some_and(|model| model.context == refact_core::claude_backend::BedrockContext::Beta1m)
 }
 
 pub async fn probe(
@@ -455,3 +426,18 @@ async fn execute_probe(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod metadata_tests {
+    use super::*;
+
+    #[test]
+    fn context_recognition_distinguishes_beta_native_and_unknown_identities() {
+        assert!(supports_1m("au.anthropic.claude-opus-4-6-v1"));
+        assert!(requires_1m_beta("au.anthropic.claude-opus-4-6-v1"));
+        let native = "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-opus-4-7";
+        assert!(supports_1m(native));
+        assert!(!requires_1m_beta(native));
+        assert!(!supports_1m("au.anthropic.claude-unknown-9-v1"));
+    }
+}

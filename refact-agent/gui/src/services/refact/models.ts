@@ -273,6 +273,7 @@ export type CodeChatModel = {
   name: string;
   tokenizer: string;
   id: string;
+  display_name?: string | null;
 
   supports_tools: boolean;
   supports_multimodality: boolean;

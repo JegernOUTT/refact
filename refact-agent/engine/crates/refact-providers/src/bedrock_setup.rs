@@ -312,29 +312,6 @@ pub fn fingerprint(value: &impl Serialize) -> Result<String, String> {
     Ok(format!("{:x}", Sha256::digest(bytes)))
 }
 
-fn known_claude(id: &str) -> bool {
-    let id = id.rsplit(":foundation-model/").next().unwrap_or(id);
-    let id = ["us.", "eu.", "apac.", "global.", "jp.", "au.", "us-gov."]
-        .iter()
-        .find_map(|prefix| id.strip_prefix(prefix))
-        .unwrap_or(id);
-    matches!(
-        id,
-        "anthropic.claude-sonnet-4-6"
-            | "anthropic.claude-opus-4-6"
-            | "anthropic.claude-opus-4-7"
-            | "anthropic.claude-opus-4-8"
-            | "anthropic.claude-opus-5"
-            | "anthropic.claude-opus-5-5"
-            | "anthropic.claude-sonnet-5"
-            | "anthropic.claude-haiku-4-5-20251001-v1:0"
-            | "anthropic.claude-sonnet-4-5-20250929-v1:0"
-            | "anthropic.claude-sonnet-4-20250514-v1:0"
-            | "anthropic.claude-opus-4-1-20250805-v1:0"
-            | "anthropic.claude-opus-4-20250514-v1:0"
-    )
-}
-
 pub fn pin_models(
     existing: serde_yaml::Value,
     profile: &str,
@@ -366,18 +343,21 @@ pub fn pin_models(
                 if metadata.get("n_ctx") == Some(&json!(1_000_000)) {
                     metadata.insert(
                         "n_ctx".into(),
-                        json!(if known_claude(id) { 200_000 } else { 32_000 }),
+                        json!(refact_core::claude_backend::bedrock_model(id)
+                            .map_or(32_000, |model| model.default_n_ctx())),
                     );
                 }
             }
         }
     }
     for id in model_ids {
-        let known = known_claude(id);
+        let known = refact_core::claude_backend::bedrock_model(id);
         let entry = custom.entry(id.clone()).or_insert_with(|| {
-            json!({
-                "supports_tools": known, "supports_multimodality": known
-            })
+            if known.is_some() {
+                json!({})
+            } else {
+                json!({"supports_tools": false, "supports_multimodality": false})
+            }
         });
         let metadata = entry
             .as_object_mut()
@@ -389,7 +369,7 @@ pub fn pin_models(
             // tool/vision capability guarantee for an opaque application ARN.
             metadata
                 .entry("n_ctx".to_string())
-                .or_insert(json!(if known { 200_000 } else { 32_000 }));
+                .or_insert(json!(known.map_or(32_000, |model| model.default_n_ctx())));
         }
     }
     for (key, value) in [
@@ -460,6 +440,37 @@ impl SessionState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn new_bedrock_pins_infer_known_metadata_and_downgrade_native_context() {
+        let ids = vec![
+            "au.anthropic.claude-opus-4-6-v1".into(),
+            "opaque-application".into(),
+            "global.anthropic.claude-opus-4-7".into(),
+        ];
+        let original =
+            serde_yaml::from_str("backend: bedrock\nbase_provider: claude_code\n").unwrap();
+        let pinned = pin_models(original, "team", "us-east-1", &ids, false).unwrap();
+        assert!(pinned["custom_models"][&ids[0]]["supports_tools"].is_null());
+        assert_eq!(
+            pinned["custom_models"][&ids[0]]["n_ctx"].as_u64(),
+            Some(200_000)
+        );
+        assert_eq!(
+            pinned["custom_models"][&ids[1]]["supports_tools"].as_bool(),
+            Some(false)
+        );
+        assert_eq!(
+            pinned["custom_models"][&ids[1]]["n_ctx"].as_u64(),
+            Some(32_000)
+        );
+        let opted = pin_models(pinned, "team", "us-east-1", &[ids[2].clone()], true).unwrap();
+        let downgraded = pin_models(opted, "team", "us-east-1", &[ids[2].clone()], false).unwrap();
+        assert_eq!(
+            downgraded["custom_models"][&ids[2]]["n_ctx"].as_u64(),
+            Some(1_000_000)
+        );
+    }
 
     #[tokio::test]
     async fn session_evidence_invalidates_before_reprobe_and_fences_apply() {

@@ -40,6 +40,12 @@ function capsWithModelRoles(): CapsResponse {
         ...STUB_CAPS_RESPONSE.chat_models["openai/o3-mini"],
         pricing: { prompt: 1.1, generated: 4.4 },
       },
+      "au.anthropic.claude-sonnet-4-5-20250929-v1:0": {
+        ...STUB_CAPS_RESPONSE.chat_models["openai/gpt-4o"],
+        name: "anthropic.claude-sonnet-4-5-20250929-v1:0",
+        id: "au.anthropic.claude-sonnet-4-5-20250929-v1:0",
+        display_name: "Claude Sonnet 4.5",
+      },
       "refact/legacy-model": {
         n_ctx: 8192,
         name: "legacy-model",
@@ -196,5 +202,35 @@ describe("model selector caps pipeline", () => {
     );
 
     expect(onValueChange).toHaveBeenCalledWith("openai/gpt-4o-mini");
+  });
+
+  test("shows friendly display name while selecting the exact qualified id", async () => {
+    const onValueChange = vi.fn();
+
+    const { user } = render(
+      <ModelSelector
+        value="openai/gpt-4o"
+        onValueChange={onValueChange}
+        compact={false}
+      />,
+      { preloadedState: { config } },
+    );
+
+    await user.click(
+      await screen.findByRole("button", { name: "Select model" }),
+    );
+
+    const listbox = await screen.findByRole("listbox");
+    expect(
+      within(listbox).getByRole("option", { name: /openai\/gpt-4o-mini/ }),
+    ).toBeInTheDocument();
+
+    await user.click(
+      within(listbox).getByRole("option", { name: /Claude Sonnet 4\.5/ }),
+    );
+
+    expect(onValueChange).toHaveBeenCalledWith(
+      "au.anthropic.claude-sonnet-4-5-20250929-v1:0",
+    );
   });
 });

@@ -57,6 +57,162 @@ impl std::fmt::Debug for ClaudeTransportConfig {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BedrockContext {
+    Standard,
+    Beta1m,
+    Native1m,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct BedrockModel {
+    pub foundation_id: &'static str,
+    pub anthropic_id: &'static str,
+    pub display_name: &'static str,
+    pub context: BedrockContext,
+    pub adaptive_thinking: bool,
+}
+
+impl BedrockModel {
+    pub fn default_n_ctx(self) -> usize {
+        if self.context == BedrockContext::Native1m {
+            1_000_000
+        } else {
+            200_000
+        }
+    }
+
+    pub fn default_caps(self) -> crate::model_caps::ModelCapabilities {
+        crate::model_caps::ModelCapabilities {
+            n_ctx: self.default_n_ctx(),
+            supports_tools: true,
+            supports_vision: true,
+            supports_thinking_budget: !self.adaptive_thinking,
+            supports_adaptive_thinking_budget: self.adaptive_thinking,
+            supports_cache_control: true,
+            supports_temperature: true,
+            tokenizer: crate::model_caps::ANTHROPIC_CLOUD_TOKENIZER.into(),
+            ..Default::default()
+        }
+    }
+}
+
+pub fn bedrock_model(model_id: &str) -> Option<BedrockModel> {
+    let id = if model_id.starts_with("arn:") {
+        let resource = model_id.splitn(6, ':').nth(5)?;
+        resource
+            .strip_prefix("foundation-model/")
+            .or_else(|| resource.strip_prefix("inference-profile/"))?
+    } else {
+        model_id
+    };
+    let id = ["us.", "eu.", "apac.", "global.", "jp.", "au.", "us-gov."]
+        .iter()
+        .find_map(|prefix| id.strip_prefix(prefix))
+        .unwrap_or(id);
+    let (foundation_id, anthropic_id, display_name, context, adaptive_thinking) = match id {
+        "anthropic.claude-haiku-4-5-20251001-v1:0" => (
+            "anthropic.claude-haiku-4-5-20251001-v1:0",
+            "claude-haiku-4-5-20251001",
+            "Claude Haiku 4.5",
+            BedrockContext::Standard,
+            false,
+        ),
+        "anthropic.claude-sonnet-4-5-20250929-v1:0" => (
+            "anthropic.claude-sonnet-4-5-20250929-v1:0",
+            "claude-sonnet-4-5-20250929",
+            "Claude Sonnet 4.5",
+            BedrockContext::Standard,
+            false,
+        ),
+        "anthropic.claude-opus-4-5-20251101-v1:0" => (
+            "anthropic.claude-opus-4-5-20251101-v1:0",
+            "claude-opus-4-5-20251101",
+            "Claude Opus 4.5",
+            BedrockContext::Standard,
+            false,
+        ),
+        "anthropic.claude-sonnet-4-20250514-v1:0" => (
+            "anthropic.claude-sonnet-4-20250514-v1:0",
+            "claude-sonnet-4-20250514",
+            "Claude Sonnet 4",
+            BedrockContext::Standard,
+            false,
+        ),
+        "anthropic.claude-opus-4-1-20250805-v1:0" => (
+            "anthropic.claude-opus-4-1-20250805-v1:0",
+            "claude-opus-4-1-20250805",
+            "Claude Opus 4.1",
+            BedrockContext::Standard,
+            false,
+        ),
+        "anthropic.claude-opus-4-20250514-v1:0" => (
+            "anthropic.claude-opus-4-20250514-v1:0",
+            "claude-opus-4-20250514",
+            "Claude Opus 4",
+            BedrockContext::Standard,
+            false,
+        ),
+        "anthropic.claude-opus-4-6" | "anthropic.claude-opus-4-6-v1" => (
+            "anthropic.claude-opus-4-6",
+            "claude-opus-4-6",
+            "Claude Opus 4.6",
+            BedrockContext::Beta1m,
+            true,
+        ),
+        "anthropic.claude-sonnet-4-6" | "anthropic.claude-sonnet-4-6-v1" => (
+            "anthropic.claude-sonnet-4-6",
+            "claude-sonnet-4-6",
+            "Claude Sonnet 4.6",
+            BedrockContext::Beta1m,
+            true,
+        ),
+        "anthropic.claude-opus-4-7" => (
+            "anthropic.claude-opus-4-7",
+            "claude-opus-4-7",
+            "Claude Opus 4.7",
+            BedrockContext::Native1m,
+            true,
+        ),
+        "anthropic.claude-opus-4-8" => (
+            "anthropic.claude-opus-4-8",
+            "claude-opus-4-8",
+            "Claude Opus 4.8",
+            BedrockContext::Native1m,
+            true,
+        ),
+        "anthropic.claude-opus-5" => (
+            "anthropic.claude-opus-5",
+            "claude-opus-5",
+            "Claude Opus 5",
+            BedrockContext::Native1m,
+            true,
+        ),
+        "anthropic.claude-opus-5-5" => (
+            "anthropic.claude-opus-5-5",
+            "claude-opus-5-5",
+            "Claude Opus 5.5",
+            BedrockContext::Native1m,
+            true,
+        ),
+        "anthropic.claude-sonnet-5" => (
+            "anthropic.claude-sonnet-5",
+            "claude-sonnet-5",
+            "Claude Sonnet 5",
+            BedrockContext::Native1m,
+            true,
+        ),
+        _ => return None,
+    };
+    Some(BedrockModel {
+        foundation_id,
+        anthropic_id,
+        display_name,
+        context,
+        adaptive_thinking,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

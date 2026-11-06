@@ -49,6 +49,77 @@ impl std::fmt::Debug for ClaudeCodeProvider {
 }
 
 impl ClaudeCodeProvider {
+    fn custom_models_with_metadata(
+        &self,
+        model_caps: &HashMap<String, ModelCapabilities>,
+    ) -> Vec<AvailableModel> {
+        let enabled: HashSet<&str> = self.enabled_models.iter().map(String::as_str).collect();
+        let mut models = Vec::new();
+        if self.transport.backend == ClaudeBackend::Bedrock {
+            for id in self.custom_models.keys() {
+                let Some(identity) = refact_core::claude_backend::bedrock_model(id) else {
+                    continue;
+                };
+                let mut caps = model_caps
+                    .get(&format!("amazon-bedrock/{id}"))
+                    .or_else(|| {
+                        model_caps.get(&format!("amazon-bedrock/{}", identity.foundation_id))
+                    })
+                    .cloned()
+                    .or_else(|| {
+                        resolve_claude_code_api_model_caps(model_caps, identity.anthropic_id)
+                            .map(|resolved| resolved.caps)
+                    })
+                    .unwrap_or_else(|| identity.default_caps());
+                caps.n_ctx = if self.transport.bedrock_context_1m_models.contains(id)
+                    && identity.context != refact_core::claude_backend::BedrockContext::Standard
+                {
+                    1_000_000
+                } else {
+                    identity.default_n_ctx()
+                };
+                caps.tokenizer = refact_core::model_caps::ANTHROPIC_CLOUD_TOKENIZER.into();
+                caps.supports_tools = true;
+                caps.supports_vision = true;
+                caps.supports_thinking_budget = !identity.adaptive_thinking;
+                caps.supports_adaptive_thinking_budget = identity.adaptive_thinking;
+                caps.reasoning_effort_options = if identity.adaptive_thinking {
+                    Some(vec![
+                        "low".into(),
+                        "medium".into(),
+                        "high".into(),
+                        "max".into(),
+                    ])
+                } else if identity.anthropic_id == "claude-opus-4-5-20251101" {
+                    Some(vec!["low".into(), "medium".into(), "high".into()])
+                } else {
+                    Some(Vec::new())
+                };
+                let mut model =
+                    AvailableModel::from_caps(id, &caps, enabled.contains(id.as_str()), None);
+                model.display_name = Some(identity.display_name.into());
+                model.is_custom = true;
+                model.live_fields = LiveModelFields {
+                    display_name: model.display_name.clone(),
+                    n_ctx: Some(model.n_ctx),
+                    supports_tools: Some(model.supports_tools),
+                    supports_multimodality: Some(model.supports_multimodality),
+                    supports_thinking_budget: Some(model.supports_thinking_budget),
+                    supports_adaptive_thinking_budget: Some(
+                        model.supports_adaptive_thinking_budget,
+                    ),
+                    reasoning_effort_options: model.reasoning_effort_options.clone(),
+                    tokenizer: model.tokenizer.clone(),
+                    max_output_tokens: model.max_output_tokens,
+                    ..Default::default()
+                };
+                models.push(model);
+            }
+        }
+        merge_custom_models(&mut models, &self.custom_models, &enabled);
+        models.sort_by(|a, b| a.id.cmp(&b.id));
+        models
+    }
     pub async fn lock_refresh_guard() -> Result<MutexGuard<'static, ()>, String> {
         tokio::time::timeout(Duration::from_secs(30), CLAUDE_CODE_REFRESH_GUARD.lock())
             .await
@@ -1147,9 +1218,13 @@ impl ProviderTrait for ClaudeCodeProvider {
     /// model. Custom models only.
     fn get_available_models_from_caps(
         &self,
-        _model_caps: &HashMap<String, ModelCapabilities>,
+        model_caps: &HashMap<String, ModelCapabilities>,
     ) -> Vec<AvailableModel> {
-        self.get_custom_models_only()
+        self.custom_models_with_metadata(model_caps)
+    }
+
+    fn get_custom_models_only(&self) -> Vec<AvailableModel> {
+        self.custom_models_with_metadata(&HashMap::new())
     }
 
     async fn fetch_available_models(
@@ -1159,7 +1234,7 @@ impl ProviderTrait for ClaudeCodeProvider {
     ) -> Vec<AvailableModel> {
         // No catalog fallback: when the Anthropic API cannot be reached the only
         // models we can honestly offer are the user's own custom entries.
-        let custom_models_only = || self.get_custom_models_only();
+        let custom_models_only = || self.custom_models_with_metadata(model_caps);
         if !self.supports_live_discovery() {
             return custom_models_only();
         }
@@ -1616,6 +1691,109 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    #[test]
+    fn bedrock_custom_metadata_infers_identity_without_catalog_offers() {
+        let ids = [
+            (
+                "au.anthropic.claude-haiku-4-5-20251001-v1:0",
+                "Claude Haiku 4.5",
+                false,
+            ),
+            (
+                "au.anthropic.claude-sonnet-4-5-20250929-v1:0",
+                "Claude Sonnet 4.5",
+                false,
+            ),
+            (
+                "global.anthropic.claude-opus-4-5-20251101-v1:0",
+                "Claude Opus 4.5",
+                false,
+            ),
+            ("au.anthropic.claude-opus-4-6-v1", "Claude Opus 4.6", true),
+        ];
+        let mut provider = ClaudeCodeProvider::default();
+        provider.transport.backend = ClaudeBackend::Bedrock;
+        for (id, _, _) in ids {
+            provider
+                .custom_models
+                .insert(id.into(), CustomModelConfig::default());
+        }
+        let caps = HashMap::from([
+            (
+                format!("amazon-bedrock/{}", ids[3].0),
+                ModelCapabilities {
+                    n_ctx: 1_000_000,
+                    max_output_tokens: 12_345,
+                    tokenizer: "fake".into(),
+                    ..Default::default()
+                },
+            ),
+            (
+                "anthropic/claude-opus-4-6".into(),
+                ModelCapabilities {
+                    max_output_tokens: 999,
+                    ..Default::default()
+                },
+            ),
+            (
+                "amazon-bedrock/unoffered".into(),
+                ModelCapabilities::default(),
+            ),
+        ]);
+        let models = provider.get_available_models_from_caps(&caps);
+        assert_eq!(models.len(), 4);
+        for (id, name, adaptive) in ids {
+            let model = models.iter().find(|model| model.id == id).unwrap();
+            assert_eq!(model.display_name.as_deref(), Some(name));
+            assert_eq!(model.n_ctx, 200_000);
+            assert!(model.supports_tools && model.supports_multimodality);
+            assert!(model.is_custom);
+            assert_eq!(model.supports_thinking_budget, !adaptive);
+            assert_eq!(model.live_fields.supports_thinking_budget, Some(!adaptive));
+            assert_eq!(model.live_fields.tokenizer.as_deref(), Some("anthropic"));
+            assert_eq!(model.supports_adaptive_thinking_budget, adaptive);
+            assert_eq!(model.tokenizer.as_deref(), Some("anthropic"));
+            let expected_effort = if adaptive {
+                vec!["low", "medium", "high", "max"]
+            } else if id == ids[2].0 {
+                vec!["low", "medium", "high"]
+            } else {
+                Vec::new()
+            };
+            assert_eq!(
+                model
+                    .reasoning_effort_options
+                    .as_ref()
+                    .map(|options| options.iter().map(String::as_str).collect::<Vec<_>>()),
+                Some(expected_effort)
+            );
+        }
+        assert_eq!(
+            models
+                .iter()
+                .find(|m| m.id == ids[3].0)
+                .unwrap()
+                .max_output_tokens,
+            Some(12_345)
+        );
+        let config = provider.custom_models.get_mut(ids[3].0).unwrap();
+        config.supports_tools = Some(false);
+        config.supports_multimodality = Some(false);
+        config.supports_thinking_budget = Some(false);
+        config.reasoning_effort_options = Some(Vec::new());
+        config.n_ctx = Some(1234);
+        config.tokenizer = Some(String::new());
+        let overridden = provider.get_available_models_from_caps(&caps);
+        let model = overridden.iter().find(|m| m.id == ids[3].0).unwrap();
+        assert!(
+            !model.supports_tools
+                && !model.supports_multimodality
+                && !model.supports_thinking_budget
+        );
+        assert_eq!(model.reasoning_effort_options, Some(Vec::new()));
+        assert_eq!(model.tokenizer.as_deref(), Some(""));
+        assert_eq!(model.n_ctx, 1234);
+    }
     #[test]
     fn caps_path_never_contributes_a_catalog_id() {
         let mut provider = ClaudeCodeProvider::default();

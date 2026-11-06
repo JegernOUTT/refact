@@ -315,6 +315,12 @@ fn build_chat_model_record(
             n_ctx,
             name: model.id.clone(),
             id: model_id,
+            display_name: model
+                .display_name
+                .as_deref()
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .map(str::to_string),
             endpoint,
             endpoint_style,
             completion_endpoint_style: String::new(),
