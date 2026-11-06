@@ -9,11 +9,11 @@ export type WorkspaceDockAvailability = {
   dock: boolean;
   files: boolean;
   git: boolean;
-  tasks: boolean;
+  activity: boolean;
   terminal: boolean;
 };
 
-export type WorkspaceDockSectionId = "files" | "git" | "agents" | "tasks";
+export type WorkspaceDockSectionId = "files" | "git" | "agents" | "activity";
 
 export function isDockSectionAvailable(
   section: WorkspaceDockSectionId,
@@ -37,7 +37,7 @@ export function resolveWorkspaceDockAvailability(
     dock,
     files,
     git,
-    tasks: dock,
+    activity: dock,
     terminal:
       panelsForced || (capabilitiesEnabled && capabilities.terminalPanel),
   };

@@ -3,7 +3,7 @@ import { ChatThread } from "../../features/Chat/Thread/types";
 import { ChatMessages } from "./types";
 import { RootState } from "../../app/store";
 import type { WorktreeMeta } from "./worktrees";
-import { buildApiUrlFromState } from "./apiUrl";
+import { buildApiUrlFromState, getEngineEndpointIdentity } from "./apiUrl";
 
 export type TrajectoryMeta = {
   id: string;
@@ -117,6 +117,56 @@ export type PaginatedTrajectories = {
   total_count: number;
 };
 
+export type ChatActivity = {
+  id: string;
+  title: string;
+  updated_at_ms: number;
+  session_state: string | null;
+  recovery_state: string | null;
+  schedule_count: number;
+  paused_schedule_count: number;
+};
+
+export type ChatActivityResponse = {
+  chats: ChatActivity[];
+};
+
+export type ChatActivityArgs = { identity: string };
+
+type ChatActivityIdentityState = {
+  config: Parameters<typeof getEngineEndpointIdentity>[0] & {
+    apiKey?: string | null;
+  };
+  current_project?: { workspaceRoots?: unknown; name?: unknown };
+};
+
+const connectionTokens = new WeakMap<object, number>();
+let nextConnectionToken = 1;
+
+const connectionToken = (
+  config: ChatActivityIdentityState["config"],
+): number => {
+  const existing = connectionTokens.get(config);
+  if (existing !== undefined) return existing;
+  const token = nextConnectionToken++;
+  connectionTokens.set(config, token);
+  return token;
+};
+
+export const chatActivityIdentity = (
+  state: ChatActivityIdentityState,
+): string =>
+  JSON.stringify({
+    endpoint: getEngineEndpointIdentity(state.config),
+    roots: state.current_project?.workspaceRoots,
+    project: state.current_project?.name,
+    connection: connectionToken(state.config),
+  });
+
+const connectionChanged = () => ({
+  error: { status: "CUSTOM_ERROR" as const, error: "Connection changed" },
+});
+
 export type TrajectoriesListParams = {
   limit?: number;
   cursor?: string;
@@ -223,6 +273,24 @@ export const trajectoriesApi = createApi({
       },
       providesTags: ["Trajectory"],
     }),
+    listChatActivity: builder.query<ChatActivity[], ChatActivityArgs>({
+      queryFn: async (args, api, _opts, baseQuery) => {
+        const state = api.getState() as RootState;
+        if (chatActivityIdentity(state) !== args.identity) {
+          return connectionChanged();
+        }
+        const url = buildApiUrlFromState(state, "/v1/chats/activity");
+        const result = await baseQuery({ url });
+        if (
+          chatActivityIdentity(api.getState() as RootState) !== args.identity
+        ) {
+          return connectionChanged();
+        }
+        if (result.error) return { error: result.error };
+        const response = result.data as ChatActivityResponse;
+        return { data: response.chats };
+      },
+    }),
     getTrajectoryMetadata: builder.query<TrajectoryNavigationMetadata, string>({
       queryFn: async (id, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
@@ -308,6 +376,7 @@ export const {
   useListTrajectoriesFirstPageQuery,
   useListTrajectoriesPaginatedQuery,
   useListAllTrajectoriesQuery,
+  useListChatActivityQuery,
   useGetTrajectoryQuery,
   useGetTrajectoryPathQuery,
   useLazyGetTrajectoryQuery,

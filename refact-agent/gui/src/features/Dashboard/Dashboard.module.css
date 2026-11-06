@@ -8,8 +8,6 @@
   padding: 0 var(--rf-space-3) var(--rf-space-3);
 }
 
-/* Single scroll surface for the redesigned page: hero, filter bar, continue
-   cards, attention band, and the stream cascade inside one column. */
 .page {
   display: flex;
   flex-direction: column;

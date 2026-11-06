@@ -7,6 +7,7 @@ use std::sync::Mutex as StdMutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use chrono::Utc;
+use refact_core::recovery::{RecoveryRecord, RecoveryState};
 use serde::{Deserialize, Serialize};
 use tokio::fs;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
@@ -22,6 +23,7 @@ use crate::chat::types::{TrajectorySourceIdentity, WorktreeMeta};
 use crate::chat::perf_diagnostics::{self, PerfComponent, PerfOutcome};
 
 pub const TRAJECTORY_INDEX_SCHEMA_VERSION: u32 = 1;
+const RECOVERY_PROJECTION_VERSION: u32 = 1;
 pub const TRAJECTORY_INDEX_FILE: &str = "index.json";
 pub const TRAJECTORY_INDEX_JOURNAL_FILE: &str = "index.journal.jsonl";
 pub const TRAJECTORY_INDEX_JOURNAL_SCHEMA_VERSION: u32 = 1;
@@ -441,9 +443,23 @@ pub struct TrajectoryIndexSkippedFile {
     pub file_modified_unix_ms: i64,
 }
 
+fn recovery_projection_is_legacy(version: &u32) -> bool {
+    *version == 0
+}
+
+fn recovery_projection_is_valid(error: &bool) -> bool {
+    !*error
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TrajectoryIndexEntry {
     pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_state: Option<RecoveryState>,
+    #[serde(default, skip_serializing_if = "recovery_projection_is_legacy")]
+    pub recovery_projection_version: u32,
+    #[serde(default, skip_serializing_if = "recovery_projection_is_valid")]
+    pub recovery_projection_error: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub work: Option<CompactWorkMetadata>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -632,6 +648,9 @@ fn encode_journal_record(mut payload: TrajectoryIndexJournalPayload) -> Result<V
     // Keep journal entries byte-compatible; replay lazily resolves absent references.
     for entry in &mut payload.upserts {
         entry.work_ref = None;
+        entry.recovery_state = None;
+        entry.recovery_projection_version = 0;
+        entry.recovery_projection_error = false;
     }
     let checksum = journal_payload_checksum(&payload)?;
     let record = TrajectoryIndexJournalRecord {
@@ -721,7 +740,10 @@ fn scan_trajectory_index_journal(bytes: &[u8]) -> Result<JournalScan, String> {
         }
         records.push(record.payload);
     }
-    Ok(JournalScan { records, consumed })
+    Ok(JournalScan {
+        records,
+        consumed,
+    })
 }
 
 fn apply_journal_payload_to_index(
@@ -2310,24 +2332,41 @@ fn load_trajectory_index_for_coordinator_locked_sync(
         item_count,
     );
     match index_read {
-        Ok(Some(loaded)) if loaded.checkpoint_present => {
-            let generation = directory_generation_sync(dir, index_file_names(&loaded.index))?;
-            Ok(CoordinatorLoadResult {
-                index: loaded.index,
-                generation,
-                needs_flush: false,
-                source_hint,
-                cursor: loaded.cursor,
-            })
-        }
         Ok(Some(loaded)) => {
-            let generation = directory_generation_sync(dir, index_file_names(&loaded.index))?;
+            let needs_recovery_projection = loaded
+                .index
+                .entries
+                .iter()
+                .any(|entry| entry.recovery_projection_version == 0);
+            let (index, cursor, needs_flush) = if needs_recovery_projection {
+                let (index, _) = reconcile_trajectory_index_sync(
+                    dir,
+                    loaded.index,
+                    source_hint.clone(),
+                    listing_counter_scope,
+                )?;
+                let checkpointed = checkpoint_index_sync(
+                    dir,
+                    SyncedPersistedIndex {
+                        index,
+                        cursor: loaded.cursor,
+                        checkpoint_present: loaded.checkpoint_present,
+                        rebuilt: false,
+                    },
+                    None,
+                    listing_counter_scope,
+                )?;
+                (checkpointed.index, checkpointed.cursor, false)
+            } else {
+                (loaded.index, loaded.cursor, !loaded.checkpoint_present)
+            };
+            let generation = directory_generation_sync(dir, index_file_names(&index))?;
             Ok(CoordinatorLoadResult {
-                index: loaded.index,
+                index,
                 generation,
-                needs_flush: true,
+                needs_flush,
                 source_hint,
-                cursor: loaded.cursor,
+                cursor,
             })
         }
         Ok(None) | Err(_) => {
@@ -2443,7 +2482,8 @@ fn reconcile_trajectory_index_sync(
 
     for disk in &disk_files {
         if let Some(entry) = entries_by_file.get(&disk.file_name) {
-            if entry.file_len == disk.file_len
+            if entry.recovery_projection_version == RECOVERY_PROJECTION_VERSION
+                && entry.file_len == disk.file_len
                 && entry.file_modified_unix_ms == disk.file_modified_unix_ms
             {
                 entries.push(entry.clone());
@@ -2590,7 +2630,7 @@ fn sync_persisted_index_for_flush_sync(
                     let last_seq =
                         replay_journal_records(&mut index, &scan.records, cursor.last_seq);
                     finish_coordinator_span(index_read_span, PerfOutcome::Skipped, Some(0));
-                    return Ok(SyncedPersistedIndex {
+                    let synced = SyncedPersistedIndex {
                         index,
                         cursor: TrajectoryIndexJournalCursor {
                             checkpoint: checkpoint_stamp,
@@ -2599,7 +2639,25 @@ fn sync_persisted_index_for_flush_sync(
                         },
                         checkpoint_present: true,
                         rebuilt: false,
-                    });
+                    };
+                    if synced
+                        .index
+                        .entries
+                        .iter()
+                        .any(|entry| entry.recovery_projection_version == 0)
+                    {
+                        let (index, _) = reconcile_trajectory_index_sync(
+                            dir,
+                            synced.index,
+                            source_hint,
+                            listing_counter_scope,
+                        )?;
+                        return Ok(SyncedPersistedIndex {
+                            index,
+                            ..synced
+                        });
+                    }
+                    return Ok(synced);
                 }
             }
         }
@@ -3158,7 +3216,23 @@ pub(crate) fn entry_from_owned_trajectory_value(
         extra: data.extra.clone(),
     };
 
+    let (recovery_state, recovery_projection_error) = match data.extra.get("recovery") {
+        Some(value) if !value.is_null() => {
+            match serde_json::from_value::<RecoveryRecord>(value.clone()) {
+                Ok(mut record) => {
+                    record.interrupt_on_reload();
+                    (Some(record.state), false)
+                }
+                Err(_) => (None, true),
+            }
+        }
+        _ => (None, false),
+    };
+
     Ok(TrajectoryIndexEntry {
+        recovery_state,
+        recovery_projection_version: RECOVERY_PROJECTION_VERSION,
+        recovery_projection_error,
         work: Some(CompactWorkMetadata {
             records: [],
             provenance_complete: false,
@@ -4214,7 +4288,8 @@ async fn list_trajectory_entries_from_index_or_rebuild_with_counter_scope(
 
     for disk in &disk_files {
         if let Some(entry) = by_file.get(&disk.file_name) {
-            if entry.file_len == disk.file_len
+            if entry.recovery_projection_version == RECOVERY_PROJECTION_VERSION
+                && entry.file_len == disk.file_len
                 && entry.file_modified_unix_ms == disk.file_modified_unix_ms
             {
                 new_entries.push(entry.clone());
@@ -4429,6 +4504,221 @@ mod tests {
         path
     }
 
+    #[tokio::test]
+    async fn current_recovery_projection_hydrates_legacy_once_and_survives_restart() {
+        for coordinated in [true, false] {
+            let temp = tempfile::tempdir().unwrap();
+            let dir = temp.path().join("trajectories");
+            let cases = if coordinated {
+                vec![
+                    (
+                        "waiting",
+                        Some("waiting"),
+                        Some(RecoveryState::NeedsAction),
+                        false,
+                    ),
+                    (
+                        "succeeded",
+                        Some("succeeded"),
+                        Some(RecoveryState::Succeeded),
+                        false,
+                    ),
+                    (
+                        "exhausted",
+                        Some("exhausted"),
+                        Some(RecoveryState::Exhausted),
+                        false,
+                    ),
+                    ("null", None, None, false),
+                    ("malformed", None, None, true),
+                    (
+                        "invalid-policy",
+                        Some("succeeded"),
+                        Some(RecoveryState::NeedsAction),
+                        false,
+                    ),
+                ]
+            } else {
+                vec![
+                    (
+                        "waiting",
+                        Some("waiting"),
+                        Some(RecoveryState::NeedsAction),
+                        false,
+                    ),
+                    ("null", None, None, false),
+                ]
+            };
+            let mut legacy_entries = Vec::new();
+            for (id, state, _, _) in &cases {
+                let path = write_trajectory(&dir, id, id, "agent").await;
+                let mut value: serde_json::Value =
+                    serde_json::from_slice(&fs::read(&path).await.unwrap()).unwrap();
+                value["messages"].as_array_mut().unwrap().push(json!({
+                    "role": "event", "content": "archived recovery",
+                    "extra": {"recovery": {"state": "needs_action"}}
+                }));
+                if let Some(state) = state {
+                    value["recovery"] = json!({
+                        "operation_id": "op", "run_id": "run", "revision": 1,
+                        "state": state, "policy": {"mode": "transient", "max_retries": 2,
+                            "delay_ms": 10000, "total_timeout_ms": 600000},
+                        "policy_source": "global", "manual": false, "retries_used": 0,
+                        "latest_error": {"category": "network", "title": "Offline",
+                            "explanation": "offline", "suggested_action": "retry",
+                            "is_retryable": true, "raw_error": "private"},
+                        "attempts": []
+                    });
+                }
+                if *id == "null" {
+                    value["recovery"] = serde_json::Value::Null;
+                } else if *id == "malformed" {
+                    value["recovery"] = json!({"state": "needs_action"});
+                } else if *id == "invalid-policy" {
+                    value["recovery"]["policy"]["max_retries"] = json!(101);
+                }
+                fs::write(&path, serde_json::to_vec(&value).unwrap())
+                    .await
+                    .unwrap();
+                let entry = entry_from_trajectory_value(&dir, &path, &value, None, None).unwrap();
+                let mut legacy = serde_json::to_value(entry).unwrap();
+                for field in [
+                    "recovery_state",
+                    "recovery_projection_version",
+                    "recovery_projection_error",
+                ] {
+                    legacy.as_object_mut().unwrap().remove(field);
+                }
+                legacy_entries.push(legacy);
+            }
+            fs::write(
+                trajectory_index_path(&dir),
+                serde_json::to_vec(&json!({
+                    "schema_version": TRAJECTORY_INDEX_SCHEMA_VERSION,
+                    "updated_at": "2026-01-01T00:00:00Z", "entries": legacy_entries
+                }))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+            let scope = TrajectoryIndexListingCounterScope::local();
+            let coordinator = TrajectoryIndexCoordinator::with_listing_counter_scope(scope.clone())
+                .with_generation_ttl(Duration::from_secs(30));
+            let cold = if coordinated {
+                coordinator.list_entries(&dir, None).await.unwrap()
+            } else {
+                list_trajectory_entries_from_index_or_rebuild_with_counter_scope(&dir, None, &scope)
+                    .await
+                    .unwrap()
+            };
+            assert_eq!(cold.len(), cases.len());
+            if coordinated {
+                assert_eq!(scope.snapshot().checkpoint_writes, 1);
+            }
+            for (id, _, expected, error) in &cases {
+                let entry = cold.iter().find(|entry| entry.id == *id).unwrap();
+                assert_eq!(entry.recovery_state, *expected, "{id}");
+                assert_eq!(
+                    entry.recovery_projection_version, RECOVERY_PROJECTION_VERSION,
+                    "{id}"
+                );
+                assert_eq!(entry.recovery_projection_error, *error, "{id}");
+            }
+            let persisted = read_trajectory_index(&dir).await.unwrap().unwrap();
+            assert_eq!(persisted.entries.len(), cases.len());
+            assert!(persisted
+                .entries
+                .iter()
+                .all(|entry| entry.recovery_projection_version == RECOVERY_PROJECTION_VERSION));
+            scope.reset();
+            let warm = if coordinated {
+                coordinator.list_entries(&dir, None).await.unwrap()
+            } else {
+                list_trajectory_entries_from_index_or_rebuild_with_counter_scope(&dir, None, &scope)
+                    .await
+                    .unwrap()
+            };
+            assert_eq!(warm, cold);
+            assert_eq!(scope.snapshot().directory_scans, 0);
+            assert_eq!(scope.snapshot().index_reads, 0);
+            if coordinated {
+                scope.reset();
+                let restarted =
+                    TrajectoryIndexCoordinator::with_listing_counter_scope(scope.clone());
+                assert_eq!(restarted.list_entries(&dir, None).await.unwrap(), cold);
+                assert_eq!(scope.snapshot().directory_scans, 0);
+                assert_eq!(scope.snapshot().checkpoint_writes, 0);
+                let path = write_trajectory(&dir, "foreign", "Foreign", "agent").await;
+                let mut value: serde_json::Value =
+                    serde_json::from_slice(&fs::read(&path).await.unwrap()).unwrap();
+                let waiting_path = dir.join("waiting.json");
+                let waiting: serde_json::Value =
+                    serde_json::from_slice(&fs::read(waiting_path).await.unwrap()).unwrap();
+                value["recovery"] = waiting["recovery"].clone();
+                fs::write(&path, serde_json::to_vec(&value).unwrap())
+                    .await
+                    .unwrap();
+                coordinator
+                    .upsert(&dir, entry_for_path(&dir, &path).await)
+                    .await
+                    .unwrap();
+                coordinator.flush_all().await.unwrap();
+                let persisted = read_persisted_trajectory_index_sync(&dir).unwrap().unwrap();
+                assert!(persisted.cursor.journal_offset > 0);
+                let cached = SyncedPersistedIndex {
+                    index: TrajectoryIndex {
+                        entries: cold.clone(),
+                        ..persisted.index
+                    },
+                    cursor: TrajectoryIndexJournalCursor {
+                        journal_offset: 0,
+                        last_seq: 0,
+                        ..persisted.cursor
+                    },
+                    checkpoint_present: true,
+                    rebuilt: false,
+                };
+                let synced =
+                    sync_persisted_index_for_flush_sync(&dir, Some(cached), None, None, &scope)
+                        .unwrap();
+                assert_eq!(
+                    synced
+                        .index
+                        .entries
+                        .iter()
+                        .find(|entry| entry.id == "foreign")
+                        .unwrap()
+                        .recovery_state,
+                    Some(RecoveryState::NeedsAction)
+                );
+                let path = write_trajectory(&dir, "local", "Local", "agent").await;
+                restarted
+                    .upsert(&dir, entry_for_path(&dir, &path).await)
+                    .await
+                    .unwrap();
+                restarted.flush_all().await.unwrap();
+                let merged = restarted.list_entries(&dir, None).await.unwrap();
+                assert_eq!(merged.len(), cold.len() + 2);
+                assert!(merged
+                    .iter()
+                    .all(|entry| entry.recovery_projection_version == RECOVERY_PROJECTION_VERSION));
+                assert_eq!(
+                    merged
+                        .iter()
+                        .find(|entry| entry.id == "foreign")
+                        .unwrap()
+                        .recovery_state,
+                    Some(RecoveryState::NeedsAction)
+                );
+                scope.reset();
+                assert_eq!(restarted.list_entries(&dir, None).await.unwrap(), merged);
+                assert_eq!(scope.snapshot().directory_scans, 0);
+                assert_eq!(scope.snapshot().index_reads, 0);
+                assert_eq!(scope.snapshot().checkpoint_writes, 0);
+            }
+        }
+    }
+
     #[serial_test::serial(trajectory_perf)]
     #[tokio::test]
     async fn coordinator_advisory_lock_wait_is_recorded_for_a_contended_flush() {
@@ -4621,7 +4911,9 @@ mod tests {
         }
         let temp = tempfile::tempdir().unwrap();
         let path = write_trajectory(temp.path(), "compat", "Compatible", "agent").await;
-        let entry = entry_for_path(temp.path(), &path).await;
+        let mut entry = entry_for_path(temp.path(), &path).await;
+        entry.recovery_state = Some(RecoveryState::NeedsAction);
+        entry.recovery_projection_error = true;
         assert!(entry.work_ref.is_some());
         let bytes = encode_journal_record(TrajectoryIndexJournalPayload {
             seq: 1,

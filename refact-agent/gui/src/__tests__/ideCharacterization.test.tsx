@@ -184,7 +184,7 @@ function renderApp(
   return render(<InnerApp />, { store });
 }
 
-const RAIL_SECTIONS = ["Files", "Git", "Agents", "Tasks"] as const;
+const RAIL_SECTIONS = ["Files", "Git", "Agents", "Active chats"] as const;
 
 function expectNoDashboardChrome() {
   expect(screen.queryByTestId("daemon-dashboard-shell")).toBeNull();

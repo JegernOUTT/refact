@@ -166,6 +166,7 @@ pub mod bug_report;
 pub mod caps;
 mod causal;
 pub mod chat_based_handlers;
+mod chat_activity;
 mod chat_modes;
 pub mod code_completion;
 mod code_edit;
@@ -807,6 +808,7 @@ fn trajectories_routes() -> Router<AppState> {
 
 fn chats_routes() -> Router<AppState> {
     Router::new()
+        .route("/chats/activity", get(chat_activity::handle_v1_chats_activity))
         .route("/chats/subscribe", get(handle_v1_chat_subscribe))
         .route("/chats/:chat_id/commands", post(handle_v1_chat_command))
         .route(

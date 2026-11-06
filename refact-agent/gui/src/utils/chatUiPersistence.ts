@@ -475,12 +475,7 @@ function normalizePersistedDock(value: unknown): WorkspaceDockState {
   return normalizeWorkspaceDock({
     open: typeof value.open === "boolean" ? value.open : undefined,
     width: typeof value.width === "number" ? value.width : undefined,
-    section:
-      value.section === "files" ||
-      value.section === "git" ||
-      value.section === "tasks"
-        ? value.section
-        : undefined,
+    section: value.section,
   });
 }
 

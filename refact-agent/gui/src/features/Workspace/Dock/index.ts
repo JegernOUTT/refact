@@ -1,2 +1,5 @@
 export { Dock } from "./Dock";
-export { TasksSection, TasksSectionView } from "./TasksSection";
+export {
+  ActiveChatsSection,
+  ActiveChatsSectionView,
+} from "./ActiveChatsSection";

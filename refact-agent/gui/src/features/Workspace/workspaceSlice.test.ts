@@ -38,6 +38,7 @@ import {
   setActiveTab,
   setDockOpen,
   setDockSection,
+  normalizeWorkspaceDock,
   setDockWidth,
   setDrawerHeight,
   setDrawerOpen,
@@ -176,19 +177,29 @@ describe("workspaceSlice", () => {
   test("updates normalized dock and drawer layout state", () => {
     let state = reducer(undefined, setDockOpen(false));
     state = reducer(state, setDockWidth(1000));
-    state = reducer(state, setDockSection("tasks"));
+    state = reducer(state, setDockSection("activity"));
     state = reducer(state, setDrawerOpen(true));
     state = reducer(state, setDrawerHeight(40));
 
     expect(selectWorkspaceDock(rootState(state))).toEqual({
       open: false,
       width: 640,
-      section: "tasks",
+      section: "activity",
     });
     expect(selectWorkspaceDrawer(rootState(state))).toEqual({
       open: true,
       height: 160,
     });
+  });
+
+  test("migrates the legacy saved tasks dock section to active chats", () => {
+    expect(
+      normalizeWorkspaceDock({ open: true, width: 300, section: "tasks" }),
+    ).toEqual({ open: true, width: 300, section: "activity" });
+    expect(normalizeWorkspaceDock({ section: "activity" }).section).toBe(
+      "activity",
+    );
+    expect(normalizeWorkspaceDock({ section: "bogus" }).section).toBe("files");
   });
 
   test("migrates a legacy Terminal center tab into the drawer", () => {

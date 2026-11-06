@@ -51,7 +51,7 @@ describe("useWorkspaceShortcuts", () => {
     expect(store.getState().workspace.dock?.open).toBe(true);
   });
 
-  it("maps digits 1-4 to files, git, agents, and tasks", () => {
+  it("maps digits 1-4 to files, git, agents, and active chats", () => {
     const { store } = renderShortcuts();
 
     fireEvent.keyDown(window, { key: "1", ctrlKey: true });
@@ -69,7 +69,7 @@ describe("useWorkspaceShortcuts", () => {
     fireEvent.keyDown(window, { key: "4", metaKey: true });
     expect(store.getState().workspace.dock).toMatchObject({
       open: true,
-      section: "tasks",
+      section: "activity",
     });
   });
 
@@ -117,11 +117,11 @@ describe("useWorkspaceShortcuts", () => {
     const wrapper = ({ children }: { children: ReactNode }) => (
       <Provider store={store}>{children}</Provider>
     );
-    store.dispatch(setDockSection("tasks"));
+    store.dispatch(setDockSection("activity"));
     renderHook(() => useWorkspaceShortcuts(), { wrapper });
 
     fireEvent.keyDown(window, { key: "1", ctrlKey: true });
-    expect(store.getState().workspace.dock?.section).toBe("tasks");
+    expect(store.getState().workspace.dock?.section).toBe("activity");
     fireEvent.keyDown(window, { key: "2", ctrlKey: true });
     expect(store.getState().workspace.dock?.section).toBe("git");
   });
@@ -203,7 +203,7 @@ describe("useWorkspaceShortcuts", () => {
     fireEvent.keyDown(window, { key: "4", metaKey: true });
     expect(store.getState().workspace.dock).toMatchObject({
       open: true,
-      section: "tasks",
+      section: "activity",
     });
   });
 
@@ -241,7 +241,7 @@ describe("useWorkspaceShortcuts", () => {
         },
       }),
     );
-    store.dispatch(setDockSection("tasks"));
+    store.dispatch(setDockSection("activity"));
     store.dispatch(setDockOpen(false));
     rerender();
 
@@ -253,7 +253,7 @@ describe("useWorkspaceShortcuts", () => {
     });
 
     fireEvent.keyDown(window, { key: "4", ctrlKey: true });
-    expect(store.getState().workspace.dock?.section).toBe("tasks");
+    expect(store.getState().workspace.dock?.section).toBe("activity");
     fireEvent.keyDown(window, { key: "1", ctrlKey: true });
     fireEvent.keyDown(window, { key: "2", ctrlKey: true });
     fireEvent.keyDown(window, { key: "j", ctrlKey: true });
@@ -274,7 +274,7 @@ describe("useWorkspaceShortcuts", () => {
         },
       }),
     );
-    store.dispatch(setDockSection("tasks"));
+    store.dispatch(setDockSection("activity"));
     store.dispatch(setDockOpen(false));
     rerender();
 
@@ -286,7 +286,7 @@ describe("useWorkspaceShortcuts", () => {
     });
 
     fireEvent.keyDown(window, { key: "4", metaKey: true });
-    expect(store.getState().workspace.dock?.section).toBe("tasks");
+    expect(store.getState().workspace.dock?.section).toBe("activity");
     fireEvent.keyDown(window, { key: "2", metaKey: true });
     fireEvent.keyDown(window, { key: "1", metaKey: true });
     fireEvent.keyDown(window, { key: "j", metaKey: true });
@@ -334,7 +334,7 @@ describe("useWorkspaceShortcuts", () => {
     fireEvent.keyDown(radio, { key: "2", ctrlKey: true });
     expect(store.getState().workspace.dock?.section).toBe("git");
     fireEvent.keyDown(checkbox, { key: "4", ctrlKey: true });
-    expect(store.getState().workspace.dock?.section).toBe("tasks");
+    expect(store.getState().workspace.dock?.section).toBe("activity");
     fireEvent.keyDown(radio, { key: "3", ctrlKey: true });
     expect(store.getState().workspace.dock?.section).toBe("agents");
     fireEvent.keyDown(radio, { key: "1", ctrlKey: true });
@@ -425,7 +425,7 @@ describe("useWorkspaceShortcuts", () => {
           },
         }),
       );
-      store.dispatch(setDockSection("tasks"));
+      store.dispatch(setDockSection("activity"));
       store.dispatch(setDockOpen(false));
       rerender();
 
@@ -435,7 +435,7 @@ describe("useWorkspaceShortcuts", () => {
 
       expect(store.getState().workspace.dock).toMatchObject({
         open: false,
-        section: "tasks",
+        section: "activity",
       });
       expect(
         store.getState().terminal.workbenchOpenByChat["chat-a"],
@@ -466,7 +466,7 @@ describe("useWorkspaceShortcuts", () => {
     const { store, rerender } = renderShortcuts();
     store.dispatch(updateConfig({ host: "vscode" }));
     store.dispatch(setPanelsForced(true));
-    store.dispatch(setDockSection("tasks"));
+    store.dispatch(setDockSection("activity"));
     store.dispatch(setDockOpen(false));
     rerender();
 
@@ -476,7 +476,7 @@ describe("useWorkspaceShortcuts", () => {
 
     expect(store.getState().workspace.dock).toMatchObject({
       open: false,
-      section: "tasks",
+      section: "activity",
     });
     expect(
       store.getState().terminal.workbenchOpenByChat["chat-a"],

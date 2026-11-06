@@ -1,7 +1,8 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { render, screen } from "../../../../utils/test-utils";
+import { act } from "react-dom/test-utils";
+import { fireEvent, render, screen } from "../../../../utils/test-utils";
 import { FilterBar } from "./FilterBar";
 import type { ChatHistoryItem } from "../../../History/historySlice";
 
@@ -81,74 +82,91 @@ describe("FilterBar narrow-width layout contract", () => {
     expect(searchField).toContain("min-width: 0;");
   });
 
-  it("right-aligns the attention chip and New button on the trailing row", () => {
-    const narrow = block(css, "@container (max-width: 420px) {");
-
-    expect(block(narrow, ".attentionChip {")).toContain("margin-left: auto;");
-    expect(block(narrow, ".newButton {")).toContain("margin-left: auto;");
-    expect(block(narrow, ".attentionChip ~ .newButton {")).toContain(
-      "margin-left: 0;",
-    );
-  });
-
-  it("orders the chip and New button after the search field when narrow", () => {
-    const narrow = block(css, "@container (max-width: 420px) {");
-
-    expect(block(narrow, ".attentionChip {")).toContain("order: 1;");
-    expect(block(narrow, ".newButton {")).toContain("order: 1;");
-  });
-
-  it("keeps hiding the aggregate in the existing container query", () => {
-    expect(block(css, "@container (max-width: 700px) {")).toContain(
-      "display: none;",
-    );
-  });
-
   it("uses spacing tokens rather than magic numbers for the row gap", () => {
     expect(block(css, ".filterBar {")).toContain("gap: var(--rf-space-2);");
   });
 });
 
 describe("FilterBar controls", () => {
-  it("renders the segmented control, search field and New button", () => {
-    render(
-      <FilterBar
-        filter={ALL_FILTER}
-        attentionActive={false}
-        onFilterChange={vi.fn()}
-        onToggleAttention={vi.fn()}
-      />,
-      { preloadedState: preloadedStateWith([makeChat({ id: "a" })]) },
-    );
+  it("renders only kind filters and search even when chats need attention", () => {
+    render(<FilterBar filter={ALL_FILTER} onFilterChange={vi.fn()} />, {
+      preloadedState: preloadedStateWith([
+        makeChat({ id: "a" }),
+        makeChat({ id: "b", session_state: "error" }),
+      ]),
+    });
 
     expect(screen.getByRole("radiogroup")).toBeInTheDocument();
-    expect(screen.getByRole("radio", { name: "All" })).toBeInTheDocument();
-    expect(screen.getByLabelText("Search chats and tasks")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "New" })).toBeInTheDocument();
+    expect(screen.getAllByRole("radio")).toHaveLength(3);
+    expect(screen.getByRole("radio", { name: "All" })).toBeChecked();
+    expect(screen.getByRole("radio", { name: "Chats 2" })).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: "Tasks 0" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("searchbox", { name: "Search chats and tasks" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button")).not.toBeInTheDocument();
+    expect(screen.queryByText(/today/)).not.toBeInTheDocument();
   });
 
-  it("also renders the attention chip when items need attention", () => {
-    render(
+  it("changes kind while preserving the current search query", async () => {
+    const onFilterChange = vi.fn();
+    const { user } = render(
       <FilterBar
-        filter={ALL_FILTER}
-        attentionActive={false}
-        onFilterChange={vi.fn()}
-        onToggleAttention={vi.fn()}
+        filter={{ kind: "all", query: "existing" }}
+        onFilterChange={onFilterChange}
       />,
-      {
-        preloadedState: preloadedStateWith([
-          makeChat({ id: "a" }),
-          makeChat({
-            id: "b",
-            session_state: "error",
-          } as Partial<ChatHistoryItem> & { id: string }),
-        ]),
-      },
     );
 
-    expect(screen.getByRole("button", { pressed: false })).toBeInTheDocument();
-    expect(screen.getByRole("radiogroup")).toBeInTheDocument();
-    expect(screen.getByLabelText("Search chats and tasks")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "New" })).toBeInTheDocument();
+    await user.click(screen.getByRole("radio", { name: /^Chats/ }));
+    expect(onFilterChange).toHaveBeenLastCalledWith({
+      kind: "chat",
+      query: "existing",
+    });
+    await user.click(screen.getByRole("radio", { name: /^Tasks/ }));
+    expect(onFilterChange).toHaveBeenLastCalledWith({
+      kind: "task",
+      query: "existing",
+    });
+  });
+
+  it("debounces search and uses the latest selected kind", () => {
+    vi.useFakeTimers();
+    try {
+      const onFilterChange = vi.fn();
+      const { rerender, unmount } = render(
+        <FilterBar filter={ALL_FILTER} onFilterChange={onFilterChange} />,
+      );
+      const input = screen.getByRole("searchbox");
+      fireEvent.change(input, { target: { value: "first" } });
+      act(() => {
+        vi.advanceTimersByTime(100);
+      });
+      fireEvent.change(input, { target: { value: "latest" } });
+      rerender(
+        <FilterBar
+          filter={{ kind: "task", query: "" }}
+          onFilterChange={onFilterChange}
+        />,
+      );
+      act(() => {
+        vi.advanceTimersByTime(199);
+      });
+      expect(onFilterChange).not.toHaveBeenCalled();
+      act(() => {
+        vi.advanceTimersByTime(1);
+      });
+      expect(onFilterChange).toHaveBeenCalledExactlyOnceWith({
+        kind: "task",
+        query: "latest",
+      });
+      fireEvent.change(input, { target: { value: "cancelled" } });
+      unmount();
+      act(() => {
+        vi.advanceTimersByTime(200);
+      });
+      expect(onFilterChange).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

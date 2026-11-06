@@ -23,6 +23,9 @@ import { makeSurfaceKey } from "../../src/features/Workspace/surfaceKey";
 import {
   openTab,
   setActiveTab,
+  setDockOpen,
+  setDockSection,
+  setPanelsForced,
 } from "../../src/features/Workspace/workspaceSlice";
 import {
   openGitDiff,
@@ -566,6 +569,54 @@ const chatRoute =
 const chatDndRoute = route === "chat-dnd";
 const queueRoute = route === "queue";
 const multiChatRoute = route === "chat-split" || chatDndRoute;
+const homeActivityRoute = route === "home-activity";
+const homeActivityChats = [
+  {
+    id: "activity-streaming",
+    title: "Streaming refactor of the dock",
+    updated_at_ms: Date.parse("2026-06-07T09:59:00Z"),
+    session_state: "generating",
+    recovery_state: null,
+    schedule_count: 0,
+    paused_schedule_count: 0,
+  },
+  {
+    id: "activity-recovering",
+    title: "Recovering provider timeout",
+    updated_at_ms: Date.parse("2026-06-07T09:58:00Z"),
+    session_state: null,
+    recovery_state: "waiting",
+    schedule_count: 0,
+    paused_schedule_count: 0,
+  },
+  {
+    id: "activity-attention",
+    title: "Recovery needs your decision",
+    updated_at_ms: Date.parse("2026-06-07T09:50:00Z"),
+    session_state: null,
+    recovery_state: "needs_action",
+    schedule_count: 0,
+    paused_schedule_count: 0,
+  },
+  {
+    id: "activity-scheduled",
+    title: "Nightly dependency audit",
+    updated_at_ms: Date.parse("2026-06-07T08:00:00Z"),
+    session_state: "idle",
+    recovery_state: null,
+    schedule_count: 2,
+    paused_schedule_count: 1,
+  },
+  {
+    id: "activity-paused",
+    title: "Paused weekly report",
+    updated_at_ms: Date.parse("2026-06-06T08:00:00Z"),
+    session_state: null,
+    recovery_state: null,
+    schedule_count: 1,
+    paused_schedule_count: 1,
+  },
+];
 
 // Legacy layout is the default so an absent/failed status never implies
 // compatibility. `?operator=enabled|unavailable` opts into the operator surface
@@ -2043,6 +2094,9 @@ window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
     }
   }
   showcaseRequests.push({ path, method, body });
+  if (path === "/v1/chats/activity") {
+    return jsonResponse({ chats: homeActivityRoute ? homeActivityChats : [] });
+  }
   if (path.startsWith("/v1/chats/")) {
     if (init?.body) {
       try {
@@ -3126,6 +3180,11 @@ function advanceQueueBoundary(
 }
 
 store.dispatch(setBackendStatus({ status: "online" }));
+if (homeActivityRoute) {
+  store.dispatch(setPanelsForced(true));
+  store.dispatch(setDockSection("activity"));
+  store.dispatch(setDockOpen(true));
+}
 for (const section of ["workspace", "chats", "tasks", "buddy"] as const) {
   store.dispatch(sidebarSectionSnapshotReceived({ section, status: "ready" }));
 }
@@ -3358,6 +3417,13 @@ const ShowcaseSurface = () => {
   }
 
   if (route === "work") return <WorkPanel />;
+  if (homeActivityRoute) {
+    return (
+      <WorkspaceShell>
+        <Dashboard />
+      </WorkspaceShell>
+    );
+  }
   if (route === "agent-approval")
     return <ToolContent toolCalls={[approvalCall]} threadId={chatId} />;
   if (route === "agent-resume")

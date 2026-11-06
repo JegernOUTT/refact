@@ -1,11 +1,5 @@
 import classNames from "classnames";
-import {
-  Bot,
-  CheckSquare,
-  Files,
-  GitBranch,
-  type LucideIcon,
-} from "lucide-react";
+import { Activity, Bot, Files, GitBranch, type LucideIcon } from "lucide-react";
 import { skipToken } from "@reduxjs/toolkit/query";
 import { useCallback, useId } from "react";
 
@@ -20,6 +14,8 @@ import {
 import { selectActiveBackgroundAgents } from "../../Chat/Thread";
 import { selectCapabilities, selectHost } from "../../Config/configSlice";
 import { changedFileCount } from "../GitPanel";
+import { activeChatsNeedAttention } from "../Dock/activeChatsModel";
+import { useActiveChats } from "../Dock/useActiveChats";
 import {
   selectFocusedChatWorkspaceRoots,
   selectFocusedWorkspaceChatId,
@@ -54,12 +50,25 @@ const RAIL_ITEMS: RailItem[] = [
   { id: "git", icon: GitBranch, label: "Git", shortcut: `${modifierLabel}2` },
   { id: "agents", icon: Bot, label: "Agents", shortcut: `${modifierLabel}3` },
   {
-    id: "tasks",
-    icon: CheckSquare,
-    label: "Tasks",
+    id: "activity",
+    icon: Activity,
+    label: "Active chats",
     shortcut: `${modifierLabel}4`,
   },
 ];
+
+const countDescriptionFor = (
+  section: WorkspaceDockSection,
+  count: number,
+): string => {
+  if (section === "git") {
+    return `${count} changed ${count === 1 ? "file" : "files"}`;
+  }
+  if (section === "activity") {
+    return `${count} active ${count === 1 ? "chat" : "chats"}`;
+  }
+  return `${count} active ${count === 1 ? "agent" : "agents"}`;
+};
 
 export function ActivityRail() {
   const railId = useId();
@@ -81,6 +90,9 @@ export function ActivityRail() {
   const activeAgents = useAppSelector((state) =>
     focusedChatId ? selectActiveBackgroundAgents(state, focusedChatId) : null,
   );
+  const activeChats = useActiveChats(availability.activity);
+  const activeChatCount = activeChats.entries.length;
+  const activeChatsAttention = activeChatsNeedAttention(activeChats.entries);
   const changedCount =
     gitStatus?.roots.reduce(
       (count, root) => count + changedFileCount(root),
@@ -125,11 +137,23 @@ export function ActivityRail() {
             ? agentCount
             : item.id === "git"
               ? changedCount
-              : 0;
-        const countDescription =
-          item.id === "git"
-            ? `${badgeCount} changed ${badgeCount === 1 ? "file" : "files"}`
-            : `${badgeCount} active ${badgeCount === 1 ? "agent" : "agents"}`;
+              : item.id === "activity"
+                ? activeChatCount
+                : 0;
+        const activitySuffix =
+          item.id !== "activity"
+            ? ""
+            : `${activeChatsAttention ? ", needs attention" : ""}${
+                activeChats.staleReason === "offline"
+                  ? ", last known (engine offline)"
+                  : activeChats.staleReason === "refresh_failed"
+                    ? ", last known (refresh failed)"
+                    : ""
+              }`;
+        const countDescription = `${countDescriptionFor(
+          item.id,
+          badgeCount,
+        )}${activitySuffix}`;
         const descriptionId = `${railId}-${item.id}-count`;
         return (
           <div className={styles.slot} key={item.id}>
@@ -155,7 +179,11 @@ export function ActivityRail() {
                 className={classNames(styles.badge, "rf-enter-scale")}
                 key={badgeCount}
                 size="xs"
-                tone="accent"
+                tone={
+                  item.id === "activity" && activeChatsAttention
+                    ? "danger"
+                    : "accent"
+                }
               >
                 {badgeCount > 99 ? "99+" : badgeCount}
               </Badge>

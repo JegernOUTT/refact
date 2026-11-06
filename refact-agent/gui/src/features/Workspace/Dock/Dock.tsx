@@ -33,7 +33,7 @@ import {
   type WorkspaceDockSection,
 } from "../workspaceSlice";
 import styles from "./Dock.module.css";
-import { TasksSection } from "./TasksSection";
+import { ActiveChatsSection } from "./ActiveChatsSection";
 
 type DockStyle = CSSProperties & {
   "--workspace-dock-w": string;
@@ -59,7 +59,7 @@ export function Dock() {
     const result: WorkspaceDockSection[] = [];
     if (capabilities.filesPanel || panelsForced) result.push("files");
     if (capabilities.gitPanel || panelsForced) result.push("git");
-    result.push("agents", "tasks");
+    result.push("agents", "activity");
     return result;
   }, [capabilities.filesPanel, capabilities.gitPanel, panelsForced]);
   const activeSection = availableSections.includes(dock.section)
@@ -178,7 +178,9 @@ export function Dock() {
             onAgentNavigate={handleAgentNavigation}
           />
         ) : null}
-        {activeSection === "tasks" ? <TasksSection /> : null}
+        {activeSection === "activity" ? (
+          <ActiveChatsSection onOpenChat={handleNavigation} />
+        ) : null}
       </div>
     </div>
   );

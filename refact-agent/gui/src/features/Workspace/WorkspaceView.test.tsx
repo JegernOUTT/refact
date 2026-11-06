@@ -168,7 +168,7 @@ describe("WorkspaceView", () => {
     expect(
       screen.getByRole("navigation", { name: "Workspace sections" }),
     ).toBeVisible();
-    for (const label of ["Files", "Git", "Agents", "Tasks"]) {
+    for (const label of ["Files", "Git", "Agents", "Active chats"]) {
       expect(screen.getByRole("button", { name: label })).toBeInTheDocument();
     }
   });

@@ -81,6 +81,7 @@ export const server = setupServer(
       },
     }),
   ),
+  http.get("*/v1/chats/activity", () => HttpResponse.json({ chats: [] })),
   http.get("*/v1/buddy/approvals/current", () =>
     HttpResponse.json({
       schema_version: 1,

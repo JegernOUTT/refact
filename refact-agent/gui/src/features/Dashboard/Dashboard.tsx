@@ -5,10 +5,7 @@ import React, {
   useRef,
   useState,
 } from "react";
-import { HeroBlock } from "./components/HeroBlock/HeroBlock";
 import { FilterBar } from "./components/FilterBar/FilterBar";
-import { AttentionBand } from "./components/AttentionBand/AttentionBand";
-import { ContinueSection } from "./components/ContinueSection/ContinueSection";
 import { StreamSection } from "./components/Stream";
 import styles from "./Dashboard.module.css";
 import { ErrorState, LoadingState } from "../../components/ui";
@@ -59,7 +56,6 @@ export const Dashboard: React.FC = () => {
     kind: "all",
     query: "",
   });
-  const [attentionOnly, setAttentionOnly] = useState(false);
 
   const isOffline = backendStatus !== "online";
   const chatsLoading = chatsSection.status === "loading" || historyLoading;
@@ -67,8 +63,6 @@ export const Dashboard: React.FC = () => {
   const tasksError = tasksSection.error;
   const chatsError = historyError;
 
-  // The old TasksSection pulled the task list itself once its sidebar section
-  // was ready but no SSE snapshot had seeded the RTK Query cache.
   const shouldFetchTasks =
     !isOffline && !tasksLoading && !tasksError && tasks.length === 0;
   useEffect(() => {
@@ -97,10 +91,6 @@ export const Dashboard: React.FC = () => {
     [dispatch],
   );
 
-  const handleToggleAttention = useCallback(() => {
-    setAttentionOnly((prev) => !prev);
-  }, []);
-
   const streamFilter = useMemo<StreamFilter>(
     () => ({ kind: filter.kind, query: filter.query }),
     [filter.kind, filter.query],
@@ -115,21 +105,7 @@ export const Dashboard: React.FC = () => {
         <OfflineState />
       ) : (
         <div className={`${styles.page} rf-stagger`}>
-          <HeroBlock />
-
-          <FilterBar
-            filter={filter}
-            attentionActive={attentionOnly}
-            onFilterChange={setFilter}
-            onToggleAttention={handleToggleAttention}
-          />
-
-          {attentionOnly ? (
-            <AttentionBand
-              onOpenChat={handleOpenChat}
-              onOpenTask={handleOpenTask}
-            />
-          ) : null}
+          <FilterBar filter={filter} onFilterChange={setFilter} />
 
           {loadError ? (
             <ErrorState
@@ -140,17 +116,11 @@ export const Dashboard: React.FC = () => {
           ) : isLoading ? (
             <LoadingState label="Loading" className={styles.stateBlock} />
           ) : (
-            <>
-              <ContinueSection
-                onOpenChat={handleOpenChat}
-                onOpenTask={handleOpenTask}
-              />
-              <StreamSection
-                filter={streamFilter}
-                onOpenChat={handleOpenChat}
-                onOpenTask={handleOpenTask}
-              />
-            </>
+            <StreamSection
+              filter={streamFilter}
+              onOpenChat={handleOpenChat}
+              onOpenTask={handleOpenTask}
+            />
           )}
         </div>
       )}

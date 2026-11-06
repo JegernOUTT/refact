@@ -271,6 +271,36 @@ describe("chatUiPersistence", () => {
     expect(loadPersistedWorkspace()).toEqual(workspace);
   });
 
+  it("restores the active chats dock section and migrates legacy tasks", () => {
+    savePersistedChatTabs({
+      openThreadIds: ["chat-a", "chat-b"],
+      currentThreadId: "chat-b",
+      tabs: [{ id: "chat-a" }, { id: "chat-b" }],
+    });
+    for (const [saved, restored] of [
+      ["activity", "activity"],
+      ["agents", "agents"],
+      ["tasks", "activity"],
+    ] as const) {
+      savePersistedWorkspace(splitWorkspace());
+      const stored = JSON.parse(
+        localStorage.getItem(workspaceStorageKey()) ?? "{}",
+      ) as Record<string, unknown>;
+      localStorage.setItem(
+        workspaceStorageKey(),
+        JSON.stringify({
+          ...stored,
+          dock: { open: true, width: 300, section: saved },
+        }),
+      );
+      expect(loadPersistedWorkspace().dock).toEqual({
+        open: true,
+        width: 300,
+        section: restored,
+      });
+    }
+  });
+
   it("prunes restored contextual surfaces for closed chats", () => {
     savePersistedChatTabs({
       openThreadIds: ["chat-a"],

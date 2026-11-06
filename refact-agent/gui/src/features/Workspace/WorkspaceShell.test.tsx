@@ -174,7 +174,7 @@ describe("WorkspaceShell", () => {
     goTo(store, { name: "task workspace", taskId: "task-1" });
     const view = renderShell(store);
 
-    for (const label of ["Agents", "Tasks", "Git", "Files"]) {
+    for (const label of ["Agents", "Active chats", "Git", "Files"]) {
       await view.user.click(screen.getByRole("button", { name: label }));
     }
 

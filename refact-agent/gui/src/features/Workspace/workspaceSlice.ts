@@ -45,7 +45,21 @@ export type WorkspaceState = {
   drawer?: WorkspaceDrawerState;
 };
 
-export type WorkspaceDockSection = "files" | "git" | "agents" | "tasks";
+export type WorkspaceDockSection = "files" | "git" | "agents" | "activity";
+
+export const normalizeWorkspaceDockSection = (
+  section: unknown,
+): WorkspaceDockSection | undefined => {
+  if (
+    section === "files" ||
+    section === "git" ||
+    section === "agents" ||
+    section === "activity"
+  ) {
+    return section;
+  }
+  return section === "tasks" ? "activity" : undefined;
+};
 
 export type WorkspaceDockState = {
   open: boolean;
@@ -115,18 +129,18 @@ export const clampDrawerHeight = (
 };
 
 export const normalizeWorkspaceDock = (
-  dock?: Partial<WorkspaceDockState> | null,
+  dock?:
+    | (Partial<Omit<WorkspaceDockState, "section">> & {
+        section?: unknown;
+      })
+    | null,
 ): WorkspaceDockState => ({
   open:
     typeof dock?.open === "boolean" ? dock.open : DEFAULT_WORKSPACE_DOCK.open,
   width: normalizeDockWidth(dock?.width ?? DOCK_DEFAULT_WIDTH),
   section:
-    dock?.section === "files" ||
-    dock?.section === "git" ||
-    dock?.section === "agents" ||
-    dock?.section === "tasks"
-      ? dock.section
-      : DEFAULT_WORKSPACE_DOCK.section,
+    normalizeWorkspaceDockSection(dock?.section) ??
+    DEFAULT_WORKSPACE_DOCK.section,
 });
 
 export const normalizeWorkspaceDrawer = (

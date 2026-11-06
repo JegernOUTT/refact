@@ -317,11 +317,11 @@ describe("Dock", () => {
       );
     });
 
-    view.store.dispatch(setDockSection("tasks"));
+    view.store.dispatch(setDockSection("activity"));
     await waitFor(() => {
       expect(screen.getByTestId("workspace-dock-section")).toHaveAttribute(
         "data-section",
-        "tasks",
+        "activity",
       );
     });
   });
@@ -364,7 +364,7 @@ describe("Dock", () => {
     expect(view.store.getState().workspace.dock?.section).toBe("git");
   });
 
-  it("keeps agents and tasks available with no panel capabilities", async () => {
+  it("keeps agents and active chats available with no panel capabilities", async () => {
     mockNarrow(false);
     stubFileTree();
     const view = render(<Dock />);

@@ -12,31 +12,6 @@
   flex-shrink: 0;
 }
 
-.attentionChip {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--rf-space-1);
-  flex-shrink: 0;
-  height: var(--rf-control-h);
-  padding: 0 var(--rf-space-2);
-  border: var(--rf-hairline) solid var(--rf-color-warning);
-  border-radius: var(--rf-radius-pill);
-  background: transparent;
-  color: var(--rf-color-warning);
-  cursor: pointer;
-  font-size: var(--rf-text-1);
-  font-weight: var(--rf-weight-semibold);
-}
-
-.attentionChip[data-active] {
-  background: var(--rf-surface-2);
-}
-
-.attentionChip:focus-visible {
-  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
-  outline-offset: var(--rf-hairline);
-}
-
 .searchField {
   display: flex;
   align-items: center;
@@ -66,23 +41,6 @@
   outline: none;
 }
 
-.aggregate {
-  flex-shrink: 0;
-  color: var(--rf-color-faint);
-  font-size: var(--rf-text-1);
-  white-space: nowrap;
-}
-
-.newButton {
-  flex-shrink: 0;
-}
-
-@container (max-width: 700px) {
-  .aggregate {
-    display: none;
-  }
-}
-
 @container (max-width: 420px) {
   .segmented {
     flex: 1 1 100%;
@@ -91,19 +49,5 @@
   .searchField {
     flex-basis: 100%;
     min-width: 0;
-  }
-
-  .attentionChip {
-    order: 1;
-    margin-left: auto;
-  }
-
-  .newButton {
-    order: 1;
-    margin-left: auto;
-  }
-
-  .attentionChip ~ .newButton {
-    margin-left: 0;
   }
 }

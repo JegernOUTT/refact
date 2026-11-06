@@ -11,6 +11,7 @@ import {
   waitFor,
 } from "../../../utils/test-utils";
 import { updateConfig } from "../../Config/configSlice";
+import { setBrowserOnline } from "../../Connection/connectionSlice";
 import { createChatWithId } from "../../Chat/Thread";
 import {
   openTab,
@@ -93,7 +94,7 @@ describe("ActivityRail", () => {
 
     const rail = screen.getByRole("navigation", { name: "Workspace sections" });
     expect(rail).toBeInTheDocument();
-    for (const label of ["Files", "Git", "Agents", "Tasks"]) {
+    for (const label of ["Files", "Git", "Agents", "Active chats"]) {
       expect(screen.getByRole("button", { name: label })).toBeInTheDocument();
     }
   });
@@ -120,7 +121,7 @@ describe("ActivityRail", () => {
     store.dispatch(setDockOpen(false));
     renderRail(store);
 
-    for (const label of ["Files", "Git", "Agents", "Tasks"]) {
+    for (const label of ["Files", "Git", "Agents", "Active chats"]) {
       expect(screen.getByRole("button", { name: label })).toHaveAttribute(
         "aria-pressed",
         "false",
@@ -160,11 +161,11 @@ describe("ActivityRail", () => {
     store.dispatch(setDockOpen(true));
     const view = renderRail(store);
 
-    await view.user.click(screen.getByRole("button", { name: "Tasks" }));
+    await view.user.click(screen.getByRole("button", { name: "Active chats" }));
 
     expect(store.getState().workspace.dock).toMatchObject({
       open: true,
-      section: "tasks",
+      section: "activity",
     });
   });
 
@@ -410,5 +411,107 @@ describe("ActivityRail", () => {
     expect(
       screen.getByRole("button", { name: "Agents" }),
     ).toHaveAccessibleDescription("1 active agent");
+  });
+  it("badges the Active chats slot from the shared engine activity feed", async () => {
+    server.use(
+      http.get("*/v1/chats/activity", () =>
+        HttpResponse.json({
+          chats: [
+            {
+              id: "a",
+              title: "Alpha",
+              updated_at_ms: 2,
+              session_state: "generating",
+              recovery_state: null,
+              schedule_count: 0,
+              paused_schedule_count: 0,
+            },
+            {
+              id: "b",
+              title: "Beta",
+              updated_at_ms: 1,
+              session_state: null,
+              recovery_state: "needs_action",
+              schedule_count: 1,
+              paused_schedule_count: 1,
+            },
+            {
+              id: "c",
+              title: "Idle",
+              updated_at_ms: 3,
+              session_state: "idle",
+              recovery_state: null,
+              schedule_count: 0,
+              paused_schedule_count: 0,
+            },
+          ],
+        }),
+      ),
+    );
+    const store = createRailStore();
+    store.dispatch(setPanelsForced(true));
+    renderRail(store);
+
+    const button = screen.getByRole("button", { name: "Active chats" });
+    await waitFor(() =>
+      expect(button).toHaveAccessibleDescription(
+        "2 active chats, needs attention",
+      ),
+    );
+    const slot = button.closest("div");
+    expect(slot?.querySelector(`.${styles.badge}`)).toHaveTextContent("2");
+  });
+
+  it("labels a last-known Active chats badge as stale while offline", async () => {
+    server.use(
+      http.get("*/v1/chats/activity", () =>
+        HttpResponse.json({
+          chats: [
+            {
+              id: "a",
+              title: "Alpha",
+              updated_at_ms: 2,
+              session_state: "generating",
+              recovery_state: null,
+              schedule_count: 0,
+              paused_schedule_count: 0,
+            },
+          ],
+        }),
+      ),
+    );
+    const store = createRailStore();
+    store.dispatch(setPanelsForced(true));
+    renderRail(store);
+
+    const button = screen.getByRole("button", { name: "Active chats" });
+    await waitFor(() =>
+      expect(button).toHaveAccessibleDescription("1 active chat"),
+    );
+    store.dispatch(setBrowserOnline(false));
+    await waitFor(() =>
+      expect(button).toHaveAccessibleDescription(
+        "1 active chat, last known (engine offline)",
+      ),
+    );
+  });
+
+  it("does not poll chat activity when the dock is unavailable", async () => {
+    let calls = 0;
+    server.use(
+      http.get("*/v1/chats/activity", () => {
+        calls += 1;
+        return HttpResponse.json({ chats: [] });
+      }),
+    );
+    const store = createRailStore();
+    store.dispatch(updateConfig({ host: "vscode" }));
+    renderRail(store);
+
+    expect(
+      screen.getByRole("button", { name: "Active chats" }),
+    ).toBeInTheDocument();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(calls).toBe(0);
   });
 });
