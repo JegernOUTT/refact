@@ -11,9 +11,7 @@ use crate::chat::worktree_lifecycle::{
     check_ordinary_worktree_ancestry, is_ordinary_worktree_lineage, check_unchanged_attachment,
     transition_lock,
 };
-use crate::tools::tools_description::{
-    MatchConfirmDeny, MatchConfirmDenyResult, Tool, ToolDesc, ToolSource, ToolSourceType,
-};
+use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
 use crate::worktrees::{scope::ExecutionScope, service::WorktreeService};
 
 pub struct ToolWorktreeCreate;
@@ -48,23 +46,11 @@ impl Tool for ToolWorktreeCreate {
             name: "worktree_create".into(), display_name: "Create and Attach Worktree".into(),
             source: ToolSource { source_type: ToolSourceType::Builtin, config_path: String::new() },
             experimental: false, allow_parallel: false,
-            description: "Create a registered isolated worktree and immediately attach it to this ordinary root chat. Later tools in this batch and future turns use it. Reuses this chat's existing active worktree; never nests worktrees. Uses the trusted current project and default refact/chat branch convention. Requires confirmation. Not available to task, delegated, or background child executions. No shell commands are needed.".into(),
+            description: "Create a registered isolated worktree and immediately attach it to this ordinary root chat. Later tools in this batch and future turns use it. Reuses this chat's existing active worktree; never nests worktrees. Uses the trusted current project and default refact/chat branch convention. No confirmation is needed by default. Not available to task, delegated, or background child executions. No shell commands are needed.".into(),
             input_schema: json!({"type":"object","properties":{},"required":[],"additionalProperties":false}),
             output_schema: None,
             annotations: Some(json!({"readOnlyHint":false,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false})),
         }
-    }
-
-    async fn match_against_confirm_deny(
-        &self,
-        _ccx: Arc<Mutex<AtCommandsContext>>,
-        _args: &HashMap<String, Value>,
-    ) -> Result<MatchConfirmDeny, String> {
-        Ok(MatchConfirmDeny {
-            result: MatchConfirmDenyResult::CONFIRMATION,
-            command: "Create and attach a worktree to the current chat".into(),
-            rule: "worktree scope change requires confirmation".into(),
-        })
     }
 
     async fn tool_execute(
@@ -285,6 +271,57 @@ mod tests {
         let (_temp, context, session, service) = fixture().await;
         let mut events = session.lock().await.event_tx.subscribe();
         let mut tool = ToolWorktreeCreate;
+        let decision = tool
+            .match_against_confirm_deny(context.clone(), &HashMap::new())
+            .await
+            .unwrap();
+        assert_eq!(
+            decision.result,
+            refact_tool_api::MatchConfirmDenyResult::PASS
+        );
+        let app = context.lock().await.app.clone();
+        let call = crate::call_validation::ChatToolCall {
+            id: "create".into(),
+            index: None,
+            function: crate::call_validation::ChatToolFunction {
+                name: "worktree_create".into(),
+                arguments: "{}".into(),
+            },
+            tool_type: "function".into(),
+            extra_content: None,
+            started_at_ms: None,
+            completed_at_ms: None,
+        };
+        for mode in ["agent", "solo"] {
+            let mut thread = session.lock().await.thread.clone();
+            thread.mode = mode.into();
+            thread.auto_approve_editing_tools = false;
+            thread.auto_approve_dangerous_commands = false;
+            thread.autonomous_no_confirm = false;
+            let catalog = app
+                .tool_registry
+                .acquire_tool_catalog(mode, None, None)
+                .await;
+            assert!(catalog
+                .index
+                .tools
+                .iter()
+                .any(|tool| tool.name == "worktree_create"));
+            let (confirmations, denials) = crate::chat::tools::check_tools_confirmation(
+                app.clone(),
+                std::slice::from_ref(&call),
+                &[],
+                &thread,
+                Some(&catalog),
+                mode,
+                None,
+                &[],
+                "",
+            )
+            .await;
+            assert!(confirmations.is_empty(), "{mode}: {confirmations:?}");
+            assert!(denials.is_empty(), "{mode}: {denials:?}");
+        }
         tool.tool_execute(context.clone(), &"create".into(), &HashMap::new())
             .await
             .unwrap();

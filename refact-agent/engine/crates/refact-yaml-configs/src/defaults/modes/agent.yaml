@@ -1,4 +1,4 @@
-schema_version: 29
+schema_version: 30
 id: agent
 title: Agent
 description: Full multi-step workflow with tools and editing capabilities
@@ -408,7 +408,7 @@ tool_confirm:
     - match: "task_done"
       action: auto
     - match: "worktree_create"
-      action: ask
+      action: auto
     - match: "ask_questions"
       action: auto
     - match: "handoff_to_mode"

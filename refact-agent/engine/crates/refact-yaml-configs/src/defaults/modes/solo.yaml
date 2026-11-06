@@ -1,4 +1,4 @@
-schema_version: 1
+schema_version: 2
 id: solo
 title: Solo
 description: Full coding workflow in one chat, without subagents or orchestration tools
@@ -230,7 +230,7 @@ tool_confirm:
     - match: "task_done"
       action: auto
     - match: "worktree_create"
-      action: ask
+      action: auto
     - match: "ask_questions"
       action: auto
     - match: "process_list"
