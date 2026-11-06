@@ -13,11 +13,11 @@ import {
 } from "../ChatPanes/panesTree";
 import {
   isChatSurface,
+  isSplittableSurface,
   isDesignSurface,
   isFileSurface,
   isFilesSurface,
   isMainSurface,
-  isMainSurfaceEnabled,
   isTerminalSurface,
   isWorkspaceSurface,
   isWorkspaceSurfaceEnabled,
@@ -91,6 +91,7 @@ export type WorkspaceHydrationState = Pick<
 export const INITIAL_WORKSPACE_LEAF_ID = "root";
 export const MAX_WORKSPACE_TABS = 30;
 export const MAX_GROUP_LEAVES = 6;
+export const MAX_WORKSPACE_SURFACES = MAX_WORKSPACE_TABS * MAX_WORKSPACE_TABS;
 export const DOCK_MIN_WIDTH = 240;
 export const DOCK_MAX_WIDTH = 640;
 export const DOCK_DEFAULT_WIDTH = 280;
@@ -310,12 +311,18 @@ const contextTabForSurface = (
   return surfaceKey;
 };
 
+const isContextChatSurface = (key: SurfaceKey): boolean =>
+  isChatSurface(key) ||
+  isFileSurface(key) ||
+  isDesignSurface(key) ||
+  isMainSurface(key);
+
 const setContextChatForTab = (
   state: WorkspaceState,
   tabId: SurfaceKey,
   chatId: string | null,
 ): void => {
-  if (!chatId) return;
+  if (!chatId || !isContextChatSurface(tabId)) return;
   state.contextChatByTab = {
     ...state.contextChatByTab,
     [tabId]: chatId,
@@ -328,8 +335,17 @@ const bindContextChatForSurface = (
   chatId: string | null,
 ): void => {
   if (!chatId) return;
+  if (!isContextChatSurface(surfaceKey)) return;
+  if (!isChatSurface(surfaceKey)) {
+    setContextChatForTab(state, surfaceKey, chatId);
+    return;
+  }
   const tabId = contextTabForSurface(state, surfaceKey);
-  if (tabId === surfaceKey && isChatSurface(surfaceKey)) return;
+  if (
+    !isChatSurface(tabId) ||
+    (tabId === surfaceKey && isChatSurface(surfaceKey))
+  )
+    return;
   const group = state.groups[tabId];
   if (group && !collectTabIds(group.root).includes(`chat:${chatId}`)) return;
   setContextChatForTab(state, tabId, chatId);
@@ -351,10 +367,11 @@ const setContextChatForFocusedLeaf = (
 ): void => {
   const group = state.groups[tabId];
   const leaf = group ? findLeaf(group.root, leafId) : null;
-  const chatId = chatIdFromSurface(
-    leaf?.activeTabId ?? leaf?.tabIds[0] ?? null,
-  );
-  setContextChatForTab(state, tabId, chatId);
+  const surface = leaf?.activeTabId ?? leaf?.tabIds[0] ?? null;
+  const chatId =
+    chatIdFromSurface(surface) ??
+    (surface ? state.contextChatByTab?.[surface] ?? null : null);
+  if (isChatSurface(tabId)) setContextChatForTab(state, tabId, chatId);
 };
 
 const sanitizeContextChatByTab = (
@@ -365,10 +382,17 @@ const sanitizeContextChatByTab = (
 ): WorkspaceState["contextChatByTab"] => {
   if (!contextChatByTab) return undefined;
   const entries = Object.entries(contextChatByTab).filter(([tabId, chatId]) => {
-    if (!tabs.includes(tabId) || !chatId.trim()) return false;
+    if (
+      !tabs.includes(tabId) &&
+      !Object.values(groups).some(
+        (group) => group && collectTabIds(group.root).includes(tabId),
+      )
+    )
+      return false;
+    if (!isContextChatSurface(tabId)) return false;
+    if (!chatId.trim()) return isFileSurface(tabId);
     if (openThreadIds && !openThreadIds.has(chatId)) return false;
-    const group = groups[tabId];
-    return !group || collectTabIds(group.root).includes(`chat:${chatId}`);
+    return true;
   });
   return entries.length > 0 ? Object.fromEntries(entries) : undefined;
 };
@@ -381,7 +405,12 @@ const focusedWorkspaceChatId = (state: WorkspaceState): string | null => {
     group ? focusedSurfaceKey(group) : activeTabId,
   );
   if (focusedChatId) return focusedChatId;
-  return state.contextChatByTab?.[activeTabId] ?? null;
+  const surface = group ? focusedSurfaceKey(group) : activeTabId;
+  if (surface && !isChatSurface(surface) && isContextChatSurface(surface))
+    return state.contextChatByTab?.[surface]?.trim()
+      ? state.contextChatByTab[surface]
+      : null;
+  return null;
 };
 
 const pruneContextChatByTab = (
@@ -397,7 +426,8 @@ const pruneContextChatByTab = (
   if (contextChatByTab) state.contextChatByTab = contextChatByTab;
   else delete state.contextChatByTab;
   for (const [tabId, group] of Object.entries(state.groups)) {
-    if (!group || state.contextChatByTab?.[tabId]) continue;
+    if (!group || !isChatSurface(tabId) || state.contextChatByTab?.[tabId])
+      continue;
     const groupSurfaces = collectTabIds(group.root);
     if (
       !groupSurfaces.some((key) => isFileSurface(key) || isDesignSurface(key))
@@ -665,35 +695,6 @@ const insertTabAt = (
   return next;
 };
 
-const replaceTabWithSurfaceKeys = (
-  state: WorkspaceState,
-  tabId: SurfaceKey,
-  surfaceKeys: SurfaceKey[],
-  preferredSurfaceKey: SurfaceKey | null,
-): void => {
-  const tabIndex = tabIndexOrEnd(state.tabs, tabId);
-  const uniqueSurfaceKeys = unique(surfaceKeys);
-  const nextTabs = state.tabs.filter(
-    (key) => key !== tabId && !uniqueSurfaceKeys.includes(key),
-  );
-  const slotsAvailable = Math.max(0, MAX_WORKSPACE_TABS - nextTabs.length);
-  const insertedKeys = uniqueSurfaceKeys.slice(0, slotsAvailable);
-
-  nextTabs.splice(Math.min(tabIndex, nextTabs.length), 0, ...insertedKeys);
-  state.tabs = nextTabs;
-
-  if (
-    state.activeTabId === tabId ||
-    !state.activeTabId ||
-    !state.tabs.includes(state.activeTabId)
-  ) {
-    state.activeTabId =
-      preferredSurfaceKey && state.tabs.includes(preferredSurfaceKey)
-        ? preferredSurfaceKey
-        : insertedKeys[0] ?? state.tabs[0];
-  }
-};
-
 const removeTopLevelTab = (
   state: WorkspaceState,
   key: SurfaceKey,
@@ -731,7 +732,7 @@ const writeGroup = (
   tabId: SurfaceKey,
   group: PaneGroup,
   collapseEmpty: boolean,
-  dropEmptyTab = false,
+  _dropEmptyTab = false,
 ): void => {
   const contextChatId = state.contextChatByTab?.[tabId] ?? null;
   const normalizedGroup = normalizeGroup({
@@ -745,36 +746,7 @@ const writeGroup = (
   if (surfaceCount === 0) {
     state.groups = withoutGroup(state.groups, tabId);
     removeContextChatForTab(state, tabId);
-    if (dropEmptyTab) {
-      removeTopLevelTab(state, tabId);
-    }
-    return;
-  }
-
-  if (leafCount <= 1) {
-    const remainingSurfaceKeys = allSurfaceKeys(normalizedGroup.root);
-    const remainingSurface = firstSurfaceKey(normalizedGroup.root);
-    const remainingContextChatId =
-      contextChatId && remainingSurfaceKeys.includes(`chat:${contextChatId}`)
-        ? contextChatId
-        : chatIdFromSurface(remainingSurfaceKeys.find(isChatSurface) ?? null);
-    state.groups = withoutGroup(state.groups, tabId);
-    removeContextChatForTab(state, tabId);
-    replaceTabWithSurfaceKeys(
-      state,
-      tabId,
-      remainingSurfaceKeys,
-      remainingSurface,
-    );
-    for (const surfaceKey of remainingSurfaceKeys) {
-      if (isChatSurface(surfaceKey)) continue;
-      setContextChatForTab(
-        state,
-        surfaceKey,
-        chatIdFromSurface(surfaceKey) ?? remainingContextChatId,
-      );
-    }
-
+    removeTopLevelTab(state, tabId);
     return;
   }
 
@@ -784,18 +756,29 @@ const writeGroup = (
     return;
   }
 
-  if (!state.tabs.includes(tabId)) {
-    const replacementKey = firstSurfaceKey(normalizedGroup.root);
+  if (
+    !state.tabs.includes(tabId) ||
+    !collectTabIds(normalizedGroup.root).includes(tabId)
+  ) {
+    removeTopLevelTab(state, tabId);
+    const replacementKey =
+      collectTabIds(normalizedGroup.root).find(isChatSurface) ??
+      firstSurfaceKey(normalizedGroup.root);
     if (!replacementKey) {
       state.groups = withoutGroup(state.groups, tabId);
       return;
     }
 
     state.groups = withoutGroup(state.groups, tabId);
-    removeContextChatForTab(state, tabId);
+    if (
+      isChatSurface(tabId) ||
+      !collectTabIds(normalizedGroup.root).includes(tabId)
+    )
+      removeContextChatForTab(state, tabId);
     state.tabs = insertTabAt(state.tabs, replacementKey, tabIndex);
     state.groups[replacementKey] = normalizedGroup;
-    setContextChatForTab(state, replacementKey, contextChatId);
+    if (isChatSurface(replacementKey) && isChatSurface(tabId))
+      setContextChatForTab(state, replacementKey, contextChatId);
     if (state.activeTabId === tabId) {
       state.activeTabId = replacementKey;
     }
@@ -805,6 +788,7 @@ const writeGroup = (
   state.groups[tabId] = normalizedGroup;
   const groupSurfaces = collectTabIds(normalizedGroup.root);
   if (
+    isChatSurface(tabId) &&
     groupSurfaces.some((key) => isFileSurface(key) || isDesignSurface(key)) &&
     (!contextChatId || !groupSurfaces.includes(`chat:${contextChatId}`))
   ) {
@@ -842,7 +826,8 @@ const closeWorkspaceSurface = (
   surfaceKey: SurfaceKey,
 ): void => {
   const neighbor = removeTopLevelTab(state, surfaceKey);
-  state.groups = withoutGroup(state.groups, surfaceKey);
+  if (state.groups[surfaceKey])
+    state.tabs = insertTabAt(state.tabs, surfaceKey, 0);
   removeContextChatForTab(state, surfaceKey);
   removeSurfaceFromGroups(state, surfaceKey);
 
@@ -860,25 +845,12 @@ const closeContextSurfacesForChat = (
   state: WorkspaceState,
   chatId: string,
 ): void => {
-  const ownedTabIds = Object.entries(state.contextChatByTab ?? {})
-    .filter(([, contextChatId]) => contextChatId === chatId)
-    .map(([tabId]) => tabId);
-  const ownedSurfaceKeys = unique(
-    ownedTabIds.flatMap((tabId) => {
-      const group = state.groups[tabId];
-      if (group) {
-        return collectTabIds(group.root).filter((key) => !isChatSurface(key));
-      }
-      return isChatSurface(tabId) ? [] : [tabId];
-    }),
-  );
-
-  for (const surfaceKey of ownedSurfaceKeys) {
-    closeWorkspaceSurface(state, surfaceKey);
-  }
-  for (const tabId of ownedTabIds) {
-    removeContextChatForTab(state, tabId);
-  }
+  Object.assign(state, ensureSingleWorkspaceLayout(state));
+  const ownedSurfaceKeys = Object.entries(state.contextChatByTab ?? {})
+    .filter(([key, owner]) => owner === chatId && isFileSurface(key))
+    .map(([key]) => key);
+  for (const key of unique(ownedSurfaceKeys)) closeWorkspaceSurface(state, key);
+  pruneContextChatByTab(state);
 };
 
 const detachSurfaceForGroup = (
@@ -930,14 +902,13 @@ const openChatSurface = (
 const pruneNodeToOpenThreads = (
   node: PaneNode,
   openThreadIds: ReadonlySet<string>,
-  filesEnabled: boolean,
+  capabilities: WorkspaceCapabilities,
 ): { node: PaneNode; changed: boolean } => {
   if (node.kind === "leaf") {
     const tabIds = node.tabIds.filter(
       (key) =>
         openChatSurface(key, openThreadIds) ||
-        isDesignSurface(key) ||
-        (filesEnabled && isFileSurface(key)),
+        (!isChatSurface(key) && isWorkspaceSurfaceEnabled(key, capabilities)),
     );
     const activeTabId = tabIds.includes(node.activeTabId ?? "")
       ? node.activeTabId
@@ -952,7 +923,7 @@ const pruneNodeToOpenThreads = (
   }
 
   const children = node.children.map((child) =>
-    pruneNodeToOpenThreads(child, openThreadIds, filesEnabled),
+    pruneNodeToOpenThreads(child, openThreadIds, capabilities),
   );
   const changed = children.some((child) => child.changed);
 
@@ -968,22 +939,24 @@ const pruneNodeToOpenThreads = (
 };
 
 const normalizeHydratedGroup = (group: PaneGroup): PaneGroup | null => {
-  const normalized = normalizeGroup(group);
+  const emptied: string[] = [];
+  let root = mapLeaves(group.root, (leaf) => {
+    const tabIds = leaf.tabIds.filter(isSplittableSurface);
+    if (leaf.tabIds.length > 0 && tabIds.length === 0) emptied.push(leaf.id);
+    return { ...leaf, tabIds };
+  });
+  for (const id of emptied)
+    if (root.kind === "split") root = closeLeaf(root, id);
+  const normalized = normalizeGroup({ ...group, root });
   const leafCount = collectLeafIds(normalized.root).length;
   const surfaces = collectTabIds(normalized.root);
-  const uniqueSurfaceCount = unique(surfaces).length;
   const surfaceCount = surfaces.length;
 
   if (
-    leafCount < 2 ||
     leafCount > MAX_GROUP_LEAVES ||
     surfaceCount === 0 ||
-    surfaceCount > MAX_WORKSPACE_TABS ||
-    uniqueSurfaceCount !== surfaceCount ||
-    surfaces.some(
-      (key) =>
-        !isChatSurface(key) && !isFileSurface(key) && !isDesignSurface(key),
-    )
+    surfaceCount > MAX_WORKSPACE_SURFACES ||
+    surfaces.some((key) => !isSplittableSurface(key))
   ) {
     return null;
   }
@@ -1075,11 +1048,108 @@ const workspaceStatesEqual = (
   );
 };
 
+export const ensureSingleWorkspaceLayout = (
+  state: WorkspaceState,
+): WorkspaceState => {
+  const candidates: SurfaceKey[] = state.tabs.filter(isSplittableSurface);
+  if (candidates.length === 0) return state;
+  const primary = candidates.includes(state.activeTabId ?? "")
+    ? state.activeTabId ?? candidates[0]
+    : candidates[0];
+  const order = [primary, ...candidates.filter((key) => key !== primary)];
+  const seen = new Set<string>();
+  const owners = { ...state.contextChatByTab };
+  const clean = (node: PaneNode, owner?: string): PaneNode =>
+    mapLeaves(node, (leaf) => ({
+      ...leaf,
+      tabIds: leaf.tabIds.filter((key) => {
+        if (seen.has(key)) return false;
+        seen.add(key);
+        if (isFileSurface(key) && owner && !(key in owners))
+          owners[key] = owner;
+        return true;
+      }),
+    }));
+  const base = state.groups[primary] ?? {
+    root: createLeaf(INITIAL_WORKSPACE_LEAF_ID, [primary]),
+    focusedLeafId: INITIAL_WORKSPACE_LEAF_ID,
+  };
+  const group = ensureGroupFocus({
+    ...base,
+    root: clean(base.root, owners[primary]),
+  });
+  for (const key of order.slice(1)) {
+    const other = state.groups[key];
+    if (!other) {
+      if (!seen.has(key)) {
+        seen.add(key);
+        const focused = findLeaf(group.root, group.focusedLeafId);
+        group.root = mapLeaves(group.root, (leaf) =>
+          leaf.id === focused?.id
+            ? { ...leaf, tabIds: [...leaf.tabIds, key] }
+            : leaf,
+        );
+      }
+      continue;
+    }
+    let root = collapseEmptyLeaves(clean(other.root, owners[key]));
+    if (collectTabIds(root).length === 0) continue;
+    if (
+      root.kind === "split" &&
+      collectLeafIds(root).length + collectLeafIds(group.root).length <=
+        MAX_GROUP_LEAVES
+    ) {
+      const rename = (node: PaneNode): PaneNode => {
+        const id = uniquePaneNodeId(group.root, `merged:${key}:${node.id}`);
+        return node.kind === "leaf"
+          ? { ...node, id }
+          : { ...node, id, children: node.children.map(rename) };
+      };
+      root = rename(root);
+      group.root = {
+        kind: "split",
+        id: uniquePaneNodeId(group.root, `merged:${key}`),
+        dir: "row",
+        children: [group.root, root],
+        sizes: [0.5, 0.5],
+      };
+    } else {
+      const added = collectTabIds(root);
+      group.root = mapLeaves(group.root, (leaf) =>
+        leaf.id === group.focusedLeafId
+          ? { ...leaf, tabIds: [...leaf.tabIds, ...added] }
+          : leaf,
+      );
+    }
+  }
+  const groups = Object.fromEntries(
+    Object.entries(state.groups).filter(([key]) => !candidates.includes(key)),
+  );
+  const rootKey =
+    isChatSurface(primary) && collectTabIds(group.root).includes(primary)
+      ? primary
+      : collectTabIds(group.root).find(isChatSurface) ?? primary;
+  groups[rootKey] = group;
+  const tabs = state.tabs
+    .filter((key) => key === primary || !candidates.includes(key))
+    .map((key) => (key === primary ? rootKey : key));
+  const next = {
+    ...state,
+    tabs,
+    groups,
+    contextChatByTab: owners,
+    activeTabId: candidates.includes(state.activeTabId ?? "")
+      ? rootKey
+      : state.activeTabId,
+  };
+  return workspaceStatesEqual(state, next) ? state : next;
+};
+
 export const sanitizeWorkspaceSurfaceUniqueness = (
   state: WorkspaceState,
   workspaceCapabilities: WorkspaceCapabilities = DEFAULT_WORKSPACE_CAPABILITIES,
 ): WorkspaceState => {
-  const effectiveCapabilities = effectiveWorkspaceCapabilities(
+  const capabilities = effectiveWorkspaceCapabilities(
     state,
     workspaceCapabilities,
   );
@@ -1087,76 +1157,88 @@ export const sanitizeWorkspaceSurfaceUniqueness = (
     .filter(
       (key) =>
         !isFilesSurface(key) &&
-        isWorkspaceSurfaceEnabled(key, effectiveCapabilities),
+        (isWorkspaceSurfaceEnabled(key, capabilities) ||
+          (isSplittableSurface(key) && !!state.groups[key])),
     )
     .slice(0, MAX_WORKSPACE_TABS);
-  const topLevelSurfaces = new Set(tabs);
-  const claimedGroupSurfaces = new Set<SurfaceKey>();
   const groups: WorkspaceGroups = {};
-
-  for (const tabId of tabs) {
-    if (!isChatSurface(tabId)) continue;
-    const group = state.groups[tabId];
-    if (!group) continue;
-
+  for (const key of tabs) {
+    const group = state.groups[key];
+    if (!group || !isSplittableSurface(key)) continue;
     const normalized = normalizeHydratedGroup(group);
-    if (!normalized) continue;
-
-    const rawGroupSurfaces = collectTabIds(normalized.root);
-    const groupSurfaces = unique(rawGroupSurfaces);
-    const missingGroupKey = !groupSurfaces.includes(tabId);
-    const hasDisabledSurface = groupSurfaces.some(
-      (key) => !isWorkspaceSurfaceEnabled(key, effectiveCapabilities),
-    );
-    const hasTopLevelCollision = groupSurfaces.some(
-      (key) => key !== tabId && topLevelSurfaces.has(key),
-    );
-    const hasGroupCollision = groupSurfaces.some((key) =>
-      claimedGroupSurfaces.has(key),
-    );
-
-    if (
-      missingGroupKey ||
-      hasDisabledSurface ||
-      hasTopLevelCollision ||
-      hasGroupCollision
-    ) {
-      continue;
-    }
-
-    groups[tabId] = normalized;
-    for (const key of groupSurfaces) {
-      claimedGroupSurfaces.add(key);
+    if (normalized) {
+      const emptied: string[] = [];
+      let root = mapLeaves(normalized.root, (leaf) => {
+        const tabIds = leaf.tabIds.filter((surface) =>
+          isWorkspaceSurfaceEnabled(surface, capabilities),
+        );
+        if (leaf.tabIds.length > 0 && tabIds.length === 0)
+          emptied.push(leaf.id);
+        return { ...leaf, tabIds };
+      });
+      for (const id of emptied)
+        if (root.kind === "split") root = closeLeaf(root, id);
+      groups[key] = ensureGroupFocus({ ...normalized, root });
     }
   }
-
-  const activeTabId =
-    state.activeTabId &&
-    isWorkspaceSurfaceEnabled(state.activeTabId, effectiveCapabilities) &&
-    tabs.includes(state.activeTabId)
-      ? state.activeTabId
-      : tabs[0] ?? null;
-  const nextState: WorkspaceState = {
+  const prepared = {
+    ...state,
     tabs,
-    activeTabId,
     groups,
-    ...(sanitizeContextChatByTab(state.contextChatByTab, tabs, groups)
-      ? {
-          contextChatByTab: sanitizeContextChatByTab(
-            state.contextChatByTab,
-            tabs,
-            groups,
-          ),
-        }
-      : {}),
-    panelsForced: state.panelsForced === true ? true : undefined,
-    liveEditsByChat: state.liveEditsByChat,
-    liveEditsDefault: state.liveEditsDefault,
-    dock: normalizeWorkspaceDock(state.dock),
-    drawer: normalizeWorkspaceDrawer(state.drawer),
+    activeTabId: tabs.includes(state.activeTabId ?? "")
+      ? state.activeTabId
+      : tabs[0] ?? null,
   };
+  for (const [key, group] of Object.entries(groups))
+    if (
+      group &&
+      (!isWorkspaceSurfaceEnabled(key, capabilities) ||
+        !collectTabIds(group.root).includes(key))
+    )
+      writeGroup(prepared, key, group, false);
+  const next = ensureSingleWorkspaceLayout(prepared);
+  const mutable = { ...next, contextChatByTab: { ...next.contextChatByTab } };
+  pruneContextChatByTab(mutable);
+  return workspaceStatesEqual(state, mutable) ? state : mutable;
+};
 
-  return workspaceStatesEqual(state, nextState) ? state : nextState;
+const openLocalSurface = (state: WorkspaceState, key: SurfaceKey): void => {
+  Object.assign(state, ensureSingleWorkspaceLayout(state));
+  if (isFileSurface(key) && !(key in (state.contextChatByTab ?? {})))
+    state.contextChatByTab = {
+      ...state.contextChatByTab,
+      [key]: focusedWorkspaceChatId(state) ?? "",
+    };
+  const tabId = state.tabs.find(isSplittableSurface);
+  const group = tabId ? state.groups[tabId] : undefined;
+  if (!tabId || !group) {
+    state.tabs.push(key);
+    state.activeTabId = key;
+    state.groups[key] = {
+      root: createLeaf(INITIAL_WORKSPACE_LEAF_ID, [key]),
+      focusedLeafId: INITIAL_WORKSPACE_LEAF_ID,
+    };
+    return;
+  }
+  const existing = findLeafByTab(group.root, key);
+  if (
+    !existing &&
+    isFileSurface(key) &&
+    collectTabIds(group.root).filter(isFileSurface).length >= MAX_WORKSPACE_TABS
+  )
+    return;
+  if (!existing && collectTabIds(group.root).length >= MAX_WORKSPACE_SURFACES)
+    return;
+  const leafId = existing?.id ?? group.focusedLeafId;
+  state.groups[tabId] = {
+    root: existing
+      ? setLeafActiveSurface(group.root, leafId, key)
+      : addSurfaceToLeaf(group.root, leafId, key),
+    focusedLeafId: leafId,
+  };
+  state.activeTabId = tabId;
+  setContextChatForFocusedLeaf(state, tabId, leafId);
+  Object.assign(state, ensureSingleWorkspaceLayout(state));
 };
 
 export const reconcileWorkspaceState = (
@@ -1179,12 +1261,13 @@ export const reconcileWorkspaceState = (
     tabs: unique(state.tabs)
       .filter(
         (key) =>
-          openChatSurface(key, openThreads) ||
-          (contextOwnerIsOpen(key) &&
-            (isDesignSurface(key) ||
-              (isFileSurface(key) && effectiveCapabilities.filesPanel) ||
-              (!isFilesSurface(key) &&
-                isMainSurfaceEnabled(key, effectiveCapabilities)))),
+          (isWorkspaceSurfaceEnabled(key, effectiveCapabilities) ||
+            !!state.groups[key]) &&
+          (isChatSurface(key)
+            ? openChatSurface(key, openThreads) || !!state.groups[key]
+            : !isFileSurface(key) ||
+              !!state.groups[key] ||
+              contextOwnerIsOpen(key)),
       )
       .slice(0, MAX_WORKSPACE_TABS),
     activeTabId: state.activeTabId,
@@ -1201,20 +1284,34 @@ export const reconcileWorkspaceState = (
 
   for (const [tabId, group] of Object.entries(state.groups)) {
     if (!group) continue;
-    if (!openChatSurface(tabId, openThreads)) continue;
+    if (!nextState.tabs.includes(tabId) || !isSplittableSurface(tabId))
+      continue;
 
     const pruned = pruneNodeToOpenThreads(
       group.root,
       openThreads,
-      effectiveCapabilities.filesPanel && contextOwnerIsOpen(tabId),
+      effectiveCapabilities,
     );
     const nextGroup = {
-      root: pruned.node,
+      root: mapLeaves(pruned.node, (leaf) => ({
+        ...leaf,
+        tabIds: leaf.tabIds.filter(
+          (key) => !isFileSurface(key) || contextOwnerIsOpen(key),
+        ),
+      })),
       focusedLeafId: group.focusedLeafId,
     };
-    if (!collectTabIds(nextGroup.root).includes(tabId)) continue;
     nextState.groups[tabId] = nextGroup;
-    writeGroup(nextState, tabId, nextGroup, pruned.changed);
+    const ownerPruned =
+      collectTabIds(nextGroup.root).length !==
+      collectTabIds(pruned.node).length;
+    writeGroup(
+      nextState,
+      tabId,
+      nextGroup,
+      pruned.changed || ownerPruned,
+      true,
+    );
   }
 
   if (
@@ -1238,6 +1335,7 @@ export const workspaceSlice = createSlice({
   reducerPath: "workspace",
   initialState,
   reducers: {
+    consolidateWorkspaceTabs: (state) => ensureSingleWorkspaceLayout(state),
     setPanelsForced: (state, action: PayloadAction<boolean>) => {
       state.panelsForced = action.payload;
     },
@@ -1322,38 +1420,33 @@ export const workspaceSlice = createSlice({
     },
     openTab: (state, action: PayloadAction<SurfaceKey>) => {
       if (!isWorkspaceSurface(action.payload)) return;
-      const contextChatId =
-        chatIdFromSurface(action.payload) ?? focusedWorkspaceChatId(state);
-      if (isFileSurface(action.payload) || isDesignSurface(action.payload)) {
-        for (const [tabId, group] of Object.entries(state.groups)) {
-          if (!group) continue;
-          const leaf = findLeafByTab(group.root, action.payload);
-          if (!leaf) continue;
-          state.groups[tabId] = ensureGroupFocus(
-            {
-              root: setLeafActiveSurface(group.root, leaf.id, action.payload),
-              focusedLeafId: group.focusedLeafId,
-            },
-            leaf.id,
-          );
-          bindContextChatForSurface(state, action.payload, contextChatId);
-          state.activeTabId = tabId;
-          return;
-        }
-      }
-      if (!state.tabs.includes(action.payload)) {
-        if (state.tabs.length >= MAX_WORKSPACE_TABS) return;
-        state.tabs.push(action.payload);
-      }
-
-      state.activeTabId = action.payload;
-      bindContextChatForSurface(state, action.payload, contextChatId);
+      openLocalSurface(state, action.payload);
+    },
+    openSurfaceInNewTab: (state, action: PayloadAction<SurfaceKey>) => {
+      if (isSplittableSurface(action.payload))
+        openLocalSurface(state, action.payload);
     },
     closeTab: (state, action: PayloadAction<SurfaceKey>) => {
       closeWorkspaceSurface(state, action.payload);
       pruneContextChatByTab(state);
     },
+    activateWorkspaceLayout: (state) => {
+      Object.assign(state, ensureSingleWorkspaceLayout(state));
+      const root = state.tabs.find(isSplittableSurface);
+      if (root) state.activeTabId = root;
+    },
     setActiveTab: (state, action: PayloadAction<SurfaceKey>) => {
+      for (const [key, group] of Object.entries(state.groups)) {
+        const leaf = group ? findLeafByTab(group.root, action.payload) : null;
+        if (!leaf || !group) continue;
+        state.groups[key] = {
+          root: setLeafActiveSurface(group.root, leaf.id, action.payload),
+          focusedLeafId: leaf.id,
+        };
+        state.activeTabId = key;
+        setContextChatForFocusedLeaf(state, key, leaf.id);
+        return;
+      }
       if (!state.tabs.includes(action.payload)) return;
       state.activeTabId = action.payload;
     },
@@ -1382,7 +1475,7 @@ export const workspaceSlice = createSlice({
         placement,
         surfaceKey: draggedSurfaceKey,
       } = action.payload;
-      if (!isChatSurface(tabId)) return;
+      if (!isSplittableSurface(tabId)) return;
       if (!state.tabs.includes(tabId)) return;
 
       const currentGroup =
@@ -1400,11 +1493,19 @@ export const workspaceSlice = createSlice({
       );
       const surfaceKey =
         focusedLeaf?.activeTabId ?? focusedLeaf?.tabIds[0] ?? null;
-      if (surfaceKey && !isChatSurface(surfaceKey)) return;
+      if (surfaceKey && !isSplittableSurface(surfaceKey)) return;
       if (!focusedLeaf || !surfaceKey) return;
       if (draggedSurfaceKey) {
-        if (!isChatSurface(draggedSurfaceKey)) return;
+        if (!isSplittableSurface(draggedSurfaceKey)) return;
         if (draggedSurfaceKey === surfaceKey) return;
+        if (
+          !collectTabIds(currentGroup.root).includes(draggedSurfaceKey) &&
+          (collectTabIds(currentGroup.root).length >= MAX_WORKSPACE_SURFACES ||
+            (isFileSurface(draggedSurfaceKey) &&
+              collectTabIds(currentGroup.root).filter(isFileSurface).length >=
+                MAX_WORKSPACE_TABS))
+        )
+          return;
       }
 
       const splitResult = splitLeafWithEmptySibling(
@@ -1416,7 +1517,9 @@ export const workspaceSlice = createSlice({
       );
       if (!splitResult) return;
 
-      const nextRoot = splitResult.root;
+      const nextRoot = draggedSurfaceKey
+        ? removeSurfaceFromTree(splitResult.root, draggedSurfaceKey)
+        : splitResult.root;
       const nextLeafIds = collectLeafIds(nextRoot);
       if (nextLeafIds.length === leafCount) return;
 
@@ -1451,22 +1554,27 @@ export const workspaceSlice = createSlice({
         const group = state.groups[key];
         return group ? collectTabIds(group.root).includes(chatKey) : false;
       });
-      if (!tabId || !isChatSurface(tabId)) return;
+      if (!tabId || !isSplittableSurface(tabId)) return;
 
-      detachSurfaceForGroup(state, tabId, fileKey);
       const currentGroup =
         state.groups[tabId] ??
         normalizeGroup({
           root: createLeaf(INITIAL_WORKSPACE_LEAF_ID, [chatKey], chatKey),
           focusedLeafId: INITIAL_WORKSPACE_LEAF_ID,
         });
+      const existingSurfaces = collectTabIds(currentGroup.root);
+      if (
+        !existingSurfaces.includes(fileKey) &&
+        (existingSurfaces.length >= MAX_WORKSPACE_SURFACES ||
+          existingSurfaces.filter(isFileSurface).length >= MAX_WORKSPACE_TABS)
+      )
+        return;
       const fileLeaf = findFirstFileLeaf(currentGroup.root);
 
       if (fileLeaf) {
+        detachSurfaceForGroup(state, tabId, fileKey);
         const nextRoot = mapLeaves(currentGroup.root, (leaf) => {
-          const tabIds = leaf.tabIds.filter(
-            (key) => !isFileSurface(key) && key !== fileKey,
-          );
+          const tabIds = leaf.tabIds.filter((key) => key !== fileKey);
           if (leaf.id !== fileLeaf.id) {
             return {
               ...leaf,
@@ -1486,7 +1594,9 @@ export const workspaceSlice = createSlice({
           { root: nextRoot, focusedLeafId: currentGroup.focusedLeafId },
           fileLeaf.id,
         );
-        setContextChatForTab(state, tabId, action.payload.chatId);
+        setContextChatForTab(state, fileKey, action.payload.chatId);
+        if (isChatSurface(tabId) || isFileSurface(tabId))
+          setContextChatForTab(state, tabId, action.payload.chatId);
         state.activeTabId = tabId;
         return;
       }
@@ -1506,6 +1616,7 @@ export const workspaceSlice = createSlice({
         "after",
       );
       if (!splitResult) return;
+      detachSurfaceForGroup(state, tabId, fileKey);
       state.groups[tabId] = ensureGroupFocus(
         {
           root: addSurfaceToLeaf(
@@ -1517,7 +1628,9 @@ export const workspaceSlice = createSlice({
         },
         splitResult.siblingLeafId,
       );
-      setContextChatForTab(state, tabId, action.payload.chatId);
+      setContextChatForTab(state, fileKey, action.payload.chatId);
+      if (isChatSurface(tabId) || isFileSurface(tabId))
+        setContextChatForTab(state, tabId, action.payload.chatId);
       state.activeTabId = tabId;
     },
     closePane: (
@@ -1569,6 +1682,71 @@ export const workspaceSlice = createSlice({
       );
       setContextChatForFocusedLeaf(state, tabId, leafId);
     },
+    reorderPaneTabs: (
+      state,
+      action: PayloadAction<{
+        tabId: SurfaceKey;
+        leafId: string;
+        fromIndex: number;
+        toIndex: number;
+      }>,
+    ) => {
+      const { tabId, leafId, fromIndex, toIndex } = action.payload;
+      const group = state.groups[tabId];
+      const leaf = group ? findLeaf(group.root, leafId) : null;
+      if (
+        !group ||
+        !leaf ||
+        !Number.isInteger(fromIndex) ||
+        !Number.isInteger(toIndex) ||
+        fromIndex < 0 ||
+        toIndex < 0 ||
+        fromIndex >= leaf.tabIds.length ||
+        toIndex >= leaf.tabIds.length
+      )
+        return;
+      state.groups[tabId] = {
+        ...group,
+        root: mapLeaves(group.root, (pane) =>
+          pane.id === leafId
+            ? {
+                ...pane,
+                tabIds: reorderItems(
+                  pane.tabIds,
+                  pane.tabIds[fromIndex],
+                  pane.tabIds[toIndex],
+                ),
+              }
+            : pane,
+        ),
+      };
+    },
+    closePaneTab: (
+      state,
+      action: PayloadAction<{
+        tabId: SurfaceKey;
+        leafId: string;
+        surfaceKey: SurfaceKey;
+      }>,
+    ) => {
+      const { tabId, leafId, surfaceKey } = action.payload;
+      const group = state.groups[tabId];
+      if (!group || !findLeaf(group.root, leafId)?.tabIds.includes(surfaceKey))
+        return;
+      writeGroup(
+        state,
+        tabId,
+        {
+          root: removeSurfaceFromTree(group.root, surfaceKey),
+          focusedLeafId: group.focusedLeafId,
+        },
+        true,
+        true,
+      );
+      if (state.activeTabId && !state.tabs.includes(state.activeTabId))
+        state.activeTabId = state.tabs[0] ?? null;
+      pruneContextChatByTab(state);
+    },
     focusPane: (
       state,
       action: PayloadAction<{ tabId: SurfaceKey; leafId: string }>,
@@ -1595,9 +1773,38 @@ export const workspaceSlice = createSlice({
       }>,
     ) => {
       const { tabId, leafId, surfaceKey } = action.payload;
-      if (!isChatSurface(tabId) || !isChatSurface(surfaceKey)) return;
-      const group = state.groups[tabId];
-      if (!group || !findLeaf(group.root, leafId)) return;
+      if (!isSplittableSurface(tabId) || !isSplittableSurface(surfaceKey))
+        return;
+      if (!state.tabs.includes(tabId)) return;
+      const group = state.groups[tabId] ?? {
+        root: createLeaf(INITIAL_WORKSPACE_LEAF_ID, [tabId], tabId),
+        focusedLeafId: INITIAL_WORKSPACE_LEAF_ID,
+      };
+      if (!findLeaf(group.root, leafId)) return;
+      if (
+        !collectTabIds(group.root).includes(surfaceKey) &&
+        (collectTabIds(group.root).length >= MAX_WORKSPACE_SURFACES ||
+          (isFileSurface(surfaceKey) &&
+            collectTabIds(group.root).filter(isFileSurface).length >=
+              MAX_WORKSPACE_TABS))
+      )
+        return;
+      if (
+        isFileSurface(surfaceKey) &&
+        !collectTabIds(group.root).includes(surfaceKey) &&
+        collectTabIds(group.root).filter(isFileSurface).length >=
+          MAX_WORKSPACE_TABS
+      )
+        return;
+      if (
+        isFileSurface(surfaceKey) &&
+        !(surfaceKey in (state.contextChatByTab ?? {}))
+      )
+        state.contextChatByTab = {
+          ...state.contextChatByTab,
+          [surfaceKey]: focusedWorkspaceChatId(state) ?? "",
+        };
+      state.groups = { ...state.groups, [tabId]: group };
 
       detachSurfaceForGroup(state, tabId, surfaceKey);
 
@@ -1634,12 +1841,29 @@ export const workspaceSlice = createSlice({
       }>,
     ) => {
       const { tabId, leafId, surfaceKey, dir, placement } = action.payload;
-      if (!isChatSurface(tabId) || !isChatSurface(surfaceKey)) return;
+      if (!isSplittableSurface(tabId) || !isSplittableSurface(surfaceKey))
+        return;
       const group = state.groups[tabId];
       if (!group || !findLeaf(group.root, leafId)) return;
 
       const leafCount = collectLeafIds(group.root).length;
       if (leafCount >= MAX_GROUP_LEAVES) return;
+      if (
+        !collectTabIds(group.root).includes(surfaceKey) &&
+        (collectTabIds(group.root).length >= MAX_WORKSPACE_SURFACES ||
+          (isFileSurface(surfaceKey) &&
+            collectTabIds(group.root).filter(isFileSurface).length >=
+              MAX_WORKSPACE_TABS))
+      )
+        return;
+      if (
+        isFileSurface(surfaceKey) &&
+        !(surfaceKey in (state.contextChatByTab ?? {}))
+      )
+        state.contextChatByTab = {
+          ...state.contextChatByTab,
+          [surfaceKey]: focusedWorkspaceChatId(state) ?? "",
+        };
 
       detachSurfaceForGroup(state, tabId, surfaceKey);
 
@@ -1654,17 +1878,18 @@ export const workspaceSlice = createSlice({
       );
       if (!splitResult) return;
 
+      let splitRoot = addSurfaceToLeaf(
+        splitResult.root,
+        splitResult.siblingLeafId,
+        surfaceKey,
+      );
+      const previousSurface = findLeaf(nextGroup.root, leafId)?.activeTabId;
+      if (previousSurface && previousSurface !== surfaceKey)
+        splitRoot = setLeafActiveSurface(splitRoot, leafId, previousSurface);
       writeGroup(
         state,
         tabId,
-        {
-          root: addSurfaceToLeaf(
-            splitResult.root,
-            splitResult.siblingLeafId,
-            surfaceKey,
-          ),
-          focusedLeafId: nextGroup.focusedLeafId,
-        },
+        { root: splitRoot, focusedLeafId: nextGroup.focusedLeafId },
         true,
       );
 
@@ -1728,18 +1953,22 @@ export const workspaceSlice = createSlice({
       const workspaceCapabilities = panelsForced
         ? DEFAULT_WORKSPACE_CAPABILITIES
         : baseWorkspaceCapabilities;
+      const hydrationCapabilities = action.payload.openThreadIds
+        ? { ...workspaceCapabilities, filesPanel: true }
+        : workspaceCapabilities;
       const legacyTerminalTab = action.payload.tabs.some(isTerminalSurface);
       const tabs = unique(action.payload.tabs)
         .filter(
           (key) =>
             !isFilesSurface(key) &&
-            isWorkspaceSurfaceEnabled(key, workspaceCapabilities),
+            (isWorkspaceSurfaceEnabled(key, hydrationCapabilities) ||
+              (isSplittableSurface(key) && !!action.payload.groups[key])),
         )
         .slice(0, MAX_WORKSPACE_TABS);
       const groups: Record<SurfaceKey, PaneGroup> = {};
 
       for (const [tabId, group] of Object.entries(action.payload.groups)) {
-        if (!isChatSurface(tabId)) continue;
+        if (!isSplittableSurface(tabId)) continue;
         if (!tabs.includes(tabId) || !group) continue;
         const normalized = normalizeHydratedGroup(group);
         if (!normalized) continue;
@@ -1758,10 +1987,7 @@ export const workspaceSlice = createSlice({
           tabs,
           activeTabId:
             activeTabId &&
-            (isChatSurface(activeTabId) ||
-              isDesignSurface(activeTabId) ||
-              isFileSurface(activeTabId) ||
-              isMainSurface(activeTabId)) &&
+            isSplittableSurface(activeTabId) &&
             tabs.includes(activeTabId)
               ? activeTabId
               : tabs[0] ?? null,
@@ -1790,14 +2016,48 @@ export const workspaceSlice = createSlice({
               normalizeWorkspaceDrawer(action.payload.drawer).open,
           },
         },
-        workspaceCapabilities,
+        hydrationCapabilities,
       );
+      const restoredActiveTabId = hydratedState.activeTabId;
+      const restoredGroup = restoredActiveTabId
+        ? hydratedState.groups[restoredActiveTabId]
+        : undefined;
+      const restoredLeafId = restoredGroup?.focusedLeafId;
+      const restoredSurface = restoredGroup
+        ? focusedSurfaceKey(restoredGroup)
+        : null;
+      for (const id of action.payload.openThreadIds ?? []) {
+        const key = `chat:${id}`;
+        if (
+          !hydratedState.tabs.includes(key) &&
+          !Object.values(hydratedState.groups).some(
+            (group) => group && collectTabIds(group.root).includes(key),
+          )
+        )
+          openLocalSurface(hydratedState, key);
+      }
+      if (restoredActiveTabId) {
+        hydratedState.activeTabId = restoredActiveTabId;
+        const group = hydratedState.groups[restoredActiveTabId];
+        if (group && restoredLeafId && restoredSurface)
+          hydratedState.groups[restoredActiveTabId] = {
+            root: setLeafActiveSurface(
+              group.root,
+              restoredLeafId,
+              restoredSurface,
+            ),
+            focusedLeafId: restoredLeafId,
+          };
+      }
       return action.payload.openThreadIds
         ? reconcileWorkspaceState(
             persistedContextChatByTab
               ? {
                   ...hydratedState,
-                  contextChatByTab: persistedContextChatByTab,
+                  contextChatByTab: {
+                    ...persistedContextChatByTab,
+                    ...hydratedState.contextChatByTab,
+                  },
                 }
               : hydratedState,
             action.payload.openThreadIds,
@@ -1811,6 +2071,7 @@ export const workspaceSlice = createSlice({
 
 export const {
   clearWorkspaceChatState,
+  consolidateWorkspaceTabs,
   setPanelsForced,
   setLiveEditsForChat,
   setDockOpen,
@@ -1824,10 +2085,14 @@ export const {
   openTab,
   closeTab,
   setActiveTab,
+  activateWorkspaceLayout,
   reorderTabs,
   splitTab,
   ensureLiveEditSplit,
   closePane,
+  closePaneTab,
+  reorderPaneTabs,
+  openSurfaceInNewTab,
   setPaneActive,
   focusPane,
   addSurfaceToPane,
@@ -1964,6 +2229,12 @@ export const selectTaskPageChatId = (
 export const selectFocusedWorkspaceChatId = (
   state: WorkspaceRootState,
 ): string | null => {
+  const surface = selectFocusedWorkspaceSurfaceKey(state);
+  if (surface?.startsWith("task:"))
+    return (
+      state.tasksUI?.openTasks.find(({ id }) => id === surface.slice(5))
+        ?.activeChat?.chatId ?? null
+    );
   const taskChatId = selectTaskPageChatId(state);
   return taskChatId === undefined
     ? selectWorkspaceFocusedChatId(state)
@@ -2002,11 +2273,12 @@ export const selectSurfaceChatId = (
   state: WorkspaceRootState,
   surfaceKey: SurfaceKey,
 ): string | null => {
-  const tabId = contextTabForSurface(state.workspace, surfaceKey);
+  if (!isContextChatSurface(surfaceKey)) return null;
   return (
     chatIdFromSurface(surfaceKey) ??
-    state.workspace.contextChatByTab?.[tabId] ??
-    null
+    (state.workspace.contextChatByTab?.[surfaceKey]?.trim()
+      ? state.workspace.contextChatByTab[surfaceKey]
+      : null)
   );
 };
 

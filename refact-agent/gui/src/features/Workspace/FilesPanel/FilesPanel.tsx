@@ -6,9 +6,11 @@ import { useAppDispatch, useAppSelector } from "../../../hooks";
 import { filesApi } from "../../../services/refact/files";
 import {
   selectFocusedWorkspaceChatId,
+  selectFocusedChatWorkspaceRoot,
   selectLiveEditsForChat,
   setLiveEditsForChat,
 } from "../workspaceSlice";
+import { parentDirectoryPath } from "./fileTreeModel";
 import { FileTree } from "./FileTree";
 import {
   hydrateShowIgnored,
@@ -42,6 +44,24 @@ export function FilesPanel() {
     },
     [dispatch, focusedChatId],
   );
+
+  const contextRoot = useAppSelector(selectFocusedChatWorkspaceRoot);
+  const [browse, setBrowse] = useState<{
+    contextRoot: string;
+    path: string;
+  } | null>(null);
+  const browsePath =
+    browse?.contextRoot === contextRoot ? browse.path : undefined;
+  const browseParent = browsePath ? parentDirectoryPath(browsePath) : null;
+  const onBrowsePath = () => {
+    const result = validateAbsoluteFilePath(manualPath, true);
+    if (!result.ok) {
+      setManualPathError(result.error);
+      return;
+    }
+    setManualPathError(null);
+    setBrowse({ contextRoot, path: result.path });
+  };
 
   const inputId = useId();
   const errorId = useId();
@@ -125,13 +145,41 @@ export function FilesPanel() {
               Open
             </Button>
           </div>
+          <Button size="sm" type="button" onClick={onBrowsePath}>
+            Browse folder
+          </Button>
           {manualPathError ? (
             <p className={styles.openPathError} id={errorId} role="alert">
               {manualPathError}
             </p>
           ) : null}
         </form>
-        <FileTree />
+        {browsePath ? (
+          <div className={styles.openPathForm}>
+            <span className="rf-wrap-anywhere">{browsePath}</span>
+            <div className={styles.openPathRow}>
+              <Button
+                size="sm"
+                disabled={!browseParent || browseParent === browsePath}
+                onClick={() =>
+                  setBrowse({
+                    contextRoot,
+                    path: browseParent ?? browsePath,
+                  })
+                }
+              >
+                Parent folder
+              </Button>
+              <Button size="sm" onClick={() => setBrowse(null)}>
+                Current worktree
+              </Button>
+            </div>
+          </div>
+        ) : null}
+        <FileTree
+          key={`${contextRoot}:${browsePath ?? ""}`}
+          browsePath={browsePath}
+        />
       </aside>
     </div>
   );

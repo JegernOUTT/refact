@@ -26,6 +26,7 @@ import { ScrollArea } from "../../components/ScrollArea";
 import { ChatLoading } from "../../components/ChatContent/ChatLoading";
 import { useAppDispatch, useAppSelector } from "../../hooks";
 import { pop } from "../Pages/pagesSlice";
+import { usePaneSurfaceActive } from "../Workspace/PaneHeaderContext";
 import { KanbanBoard } from "./KanbanBoard";
 import {
   useGetTaskQuery,
@@ -47,6 +48,7 @@ import cardManagementStyles from "./CardManagement.module.css";
 import { Chat } from "../Chat";
 import { selectConfig } from "../Config/configSlice";
 import {
+  ChatThreadProvider,
   createChatWithId,
   setThreadWorktree,
   switchToThread,
@@ -1191,11 +1193,15 @@ const CardDetail: React.FC<CardDetailProps> = ({
 interface TaskWorkspaceProps {
   taskId: string;
   cardId?: string;
+  embedded?: boolean;
+  focused?: boolean;
+  onBack?: () => void;
 }
 
 export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({
   taskId,
   cardId,
+  ...paneProps
 }) => {
   const config = useAppSelector(selectConfig);
   return (
@@ -1205,6 +1211,7 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({
       }`}
       taskId={taskId}
       cardId={cardId}
+      {...paneProps}
     />
   );
 };
@@ -1212,7 +1219,11 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({
 const TaskWorkspaceContent: React.FC<TaskWorkspaceProps> = ({
   taskId,
   cardId: linkedCardId,
+  embedded = false,
+  focused = true,
+  onBack,
 }) => {
+  const activePane = usePaneSurfaceActive();
   const [goalOpen, setGoalOpen] = useState(false);
   const dispatch = useAppDispatch();
   const config = useAppSelector(selectConfig);
@@ -1586,6 +1597,7 @@ const TaskWorkspaceContent: React.FC<TaskWorkspaceProps> = ({
         title: formatAgentChatTitle(card.id, card.title),
         isTaskChat: true,
         openTab: false,
+        activate: false,
         mode: "TASK_AGENT",
         taskMeta: {
           task_id: taskId,
@@ -1616,14 +1628,22 @@ const TaskWorkspaceContent: React.FC<TaskWorkspaceProps> = ({
   }, [task]);
 
   useEffect(() => {
-    if (!activeChat || !hasActiveChatRuntime) return;
+    if (!focused || !activePane || !activeChat || !hasActiveChatRuntime) return;
     if (currentThreadId === activeChat.chatId) return;
     dispatch(switchToThread({ id: activeChat.chatId, openTab: false }));
-  }, [dispatch, activeChat, hasActiveChatRuntime, currentThreadId]);
+  }, [
+    dispatch,
+    activeChat,
+    hasActiveChatRuntime,
+    currentThreadId,
+    focused,
+    activePane,
+  ]);
 
   const handleBack = useCallback(() => {
-    dispatch(pop());
-  }, [dispatch]);
+    if (onBack) onBack();
+    else if (!embedded) dispatch(pop());
+  }, [dispatch, embedded, onBack]);
 
   const handleCardClick = useCallback((card: BoardCard) => {
     setSelectedCardId(card.id);
@@ -1727,6 +1747,7 @@ const TaskWorkspaceContent: React.FC<TaskWorkspaceProps> = ({
               title: "",
               isTaskChat: true,
               openTab: false,
+              activate: false,
               mode: resolvedMode,
               taskMeta: {
                 task_id: taskId,
@@ -2044,6 +2065,7 @@ const TaskWorkspaceContent: React.FC<TaskWorkspaceProps> = ({
             ),
             isTaskChat: true,
             openTab: false,
+            activate: false,
             mode: "TASK_AGENT",
             taskMeta: {
               task_id: taskId,
@@ -2072,7 +2094,8 @@ const TaskWorkspaceContent: React.FC<TaskWorkspaceProps> = ({
         );
       }
       openChatTab();
-      dispatch(switchToThread({ id: chatId, openTab: false }));
+      if (focused && activePane)
+        dispatch(switchToThread({ id: chatId, openTab: false }));
       if (mergeTarget.worktree.meta) {
         dispatch(
           setThreadWorktree({ chatId, worktree: mergeTarget.worktree.meta }),
@@ -2089,6 +2112,8 @@ const TaskWorkspaceContent: React.FC<TaskWorkspaceProps> = ({
     },
     [
       activeChat,
+      focused,
+      activePane,
       plannerChats,
       config,
       dispatch,
@@ -2313,12 +2338,14 @@ const TaskWorkspaceContent: React.FC<TaskWorkspaceProps> = ({
               {activeChat ? (
                 hasActiveChatRuntime ? (
                   <InternalLinkProvider onInternalLink={handleInternalLink}>
-                    <Chat
-                      host={config.host}
-                      tabbed={false}
-                      backFromChat={handleBack}
-                      chatId={activeChat.chatId}
-                    />
+                    <ChatThreadProvider chatId={activeChat.chatId}>
+                      <Chat
+                        host={config.host}
+                        tabbed={false}
+                        backFromChat={handleBack}
+                        chatId={activeChat.chatId}
+                      />
+                    </ChatThreadProvider>
                   </InternalLinkProvider>
                 ) : (
                   <Flex

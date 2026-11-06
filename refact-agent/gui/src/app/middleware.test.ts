@@ -31,6 +31,8 @@ import {
   closeTab as closeWorkspaceTab,
   focusPane as focusWorkspacePane,
   selectFocusedWorkspaceChatId,
+  selectFocusedWorkspaceSurfaceKey,
+  selectVisibleSurfaceKeys,
   setPaneActive as setWorkspacePaneActive,
   workspaceSlice,
   type WorkspaceState,
@@ -105,12 +107,11 @@ const chatSurface = (id: string) => makeSurfaceKey("chat", id);
 
 type MessageAddedEvent = Extract<ChatEventEnvelope, { type: "message_added" }>;
 
-const workspaceSurfaceKeys = (workspace: WorkspaceState): string[] => [
-  ...workspace.tabs,
-  ...Object.values(workspace.groups).flatMap((group) =>
-    group ? collectTabIds(group.root) : [],
-  ),
-];
+const workspaceSurfaceKeys = (workspace: WorkspaceState): string[] =>
+  workspace.tabs.flatMap((key) => {
+    const group = workspace.groups[key];
+    return group ? collectTabIds(group.root) : [key];
+  });
 
 const setWorkspaceActionType = "test/setWorkspace";
 
@@ -308,7 +309,12 @@ describe("workspace routing middleware", () => {
     store.dispatch(closeThread({ id: "chat-b" }));
 
     await waitFor(() => {
-      expect(store.getState().workspace.groups).toEqual({});
+      expect(
+        store.getState().workspace.groups[chatSurface("chat-a")]?.root.kind,
+      ).toBe("leaf");
+      expect(selectVisibleSurfaceKeys(store.getState())).toEqual([
+        chatSurface("chat-a"),
+      ]);
       expect(store.getState().workspace.tabs).toEqual([chatSurface("chat-a")]);
       expect(store.getState().chat.current_thread_id).toBe("chat-a");
     });
@@ -415,11 +421,11 @@ describe("workspace routing middleware", () => {
     store.dispatch(switchToThread({ id: "chat-b" }));
 
     await waitFor(() => {
-      expect(store.getState().workspace.tabs).toEqual([
+      expect(workspaceSurfaceKeys(store.getState().workspace)).toEqual([
         chatSurface("chat-a"),
         chatSurface("chat-b"),
       ]);
-      expect(store.getState().workspace.activeTabId).toBe(
+      expect(selectFocusedWorkspaceSurfaceKey(store.getState())).toBe(
         chatSurface("chat-b"),
       );
       expect(store.getState().chat.current_thread_id).toBe("chat-b");
@@ -604,7 +610,12 @@ describe("workspace routing middleware", () => {
       expect(store.getState().workspace.activeTabId).toBe(
         chatSurface("chat-a"),
       );
-      expect(store.getState().workspace.groups).toEqual({});
+      expect(
+        store.getState().workspace.groups[chatSurface("chat-a")]?.root.kind,
+      ).toBe("leaf");
+      expect(selectVisibleSurfaceKeys(store.getState())).toEqual([
+        chatSurface("chat-a"),
+      ]);
       expect(
         store.getState().filesPanel.liveUpdatesByChat["chat-a"]?.[filePath],
       ).toMatchObject({
@@ -906,6 +917,7 @@ describe("workspace routing middleware", () => {
       }
       expect(group ? collectTabIds(group.root) : []).toEqual([
         chatSurface("chat-a"),
+        chatSurface("chat-b"),
         "file:/workspace/one.ts",
       ]);
       expect(
@@ -921,6 +933,8 @@ describe("workspace routing middleware", () => {
       const group = store.getState().workspace.groups[chatSurface("chat-a")];
       expect(group ? collectTabIds(group.root) : []).toEqual([
         chatSurface("chat-a"),
+        chatSurface("chat-b"),
+        "file:/workspace/one.ts",
         "file:/workspace/two.ts",
       ]);
     });
@@ -1311,7 +1325,10 @@ describe("workspace routing middleware", () => {
     store.dispatch(closeWorkspaceTab(chatA));
 
     await waitFor(() => {
-      expect(store.getState().workspace.tabs).toEqual([chatB, chatC]);
+      expect(workspaceSurfaceKeys(store.getState().workspace)).toEqual([
+        chatB,
+        chatC,
+      ]);
       expect(store.getState().chat.open_thread_ids).toEqual([
         "chat-b",
         "chat-c",
@@ -1321,7 +1338,7 @@ describe("workspace routing middleware", () => {
     });
   });
 
-  it("closing a grouped workspace chat tab closes all grouped threads without ghosts", async () => {
+  it("closing a grouped chat surface preserves the other local threads without ghosts", async () => {
     const store = setUpStore({
       config: { host: "web", lspPort: 8001, themeProps: {} },
       chat: makeChatState("chat-b", ["chat-a", "chat-b", "chat-c"]),
@@ -1359,15 +1376,20 @@ describe("workspace routing middleware", () => {
     store.dispatch(closeWorkspaceTab(chatSurface("chat-a")));
 
     await waitFor(() => {
-      expect(store.getState().workspace).toEqual({
-        tabs: [chatSurface("chat-c")],
-        activeTabId: chatSurface("chat-c"),
-        groups: {},
-      });
-      expect(store.getState().chat.open_thread_ids).toEqual(["chat-c"]);
+      expect(workspaceSurfaceKeys(store.getState().workspace)).toEqual([
+        chatSurface("chat-b"),
+        chatSurface("chat-c"),
+      ]);
+      expect(selectFocusedWorkspaceSurfaceKey(store.getState())).toBe(
+        chatSurface("chat-b"),
+      );
+      expect(store.getState().chat.open_thread_ids).toEqual([
+        "chat-b",
+        "chat-c",
+      ]);
       expect(store.getState().chat.threads["chat-a"]).toBeUndefined();
-      expect(store.getState().chat.threads["chat-b"]).toBeUndefined();
-      expect(store.getState().chat.current_thread_id).toBe("chat-c");
+      expect(store.getState().chat.threads["chat-b"]).toBeDefined();
+      expect(store.getState().chat.current_thread_id).toBe("chat-b");
     });
   });
 
@@ -1415,7 +1437,11 @@ describe("workspace routing middleware", () => {
     store.dispatch(closeWorkspacePane({ tabId: chatA, leafId: "left" }));
 
     await waitFor(() => {
-      expect(store.getState().workspace.tabs).toEqual([chatA, chatB, chatC]);
+      expect(workspaceSurfaceKeys(store.getState().workspace)).toEqual([
+        chatA,
+        chatB,
+        chatC,
+      ]);
       expect(store.getState().chat.open_thread_ids).toEqual([
         "chat-a",
         "chat-b",
@@ -1466,7 +1492,10 @@ describe("workspace routing middleware", () => {
     store.dispatch(closeWorkspacePane({ tabId: chatA, leafId: "right" }));
 
     await waitFor(() => {
-      expect(store.getState().workspace.tabs).toEqual([chatA, chatC]);
+      expect(workspaceSurfaceKeys(store.getState().workspace)).toEqual([
+        chatA,
+        chatC,
+      ]);
       expect(store.getState().chat.open_thread_ids).toEqual([
         "chat-a",
         "chat-c",

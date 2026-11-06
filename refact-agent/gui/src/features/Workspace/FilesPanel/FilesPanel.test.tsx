@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 
 import { EditorView } from "@codemirror/view";
+import { act } from "react-dom/test-utils";
 import { http, HttpResponse } from "msw";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -20,6 +21,11 @@ import { applyChatEvent } from "../../Chat/Thread";
 import { FilesPanel } from "./FilesPanel";
 import { FileViewer } from "./FileViewer";
 import {
+  PaneHeaderActions,
+  PaneHeaderProvider,
+  PaneSurfaceActivityProvider,
+} from "../PaneHeaderContext";
+import {
   applyLiveFileUpdate,
   enqueueEditPlayerSteps,
   markLiveFileUpdateAuthoritative,
@@ -28,6 +34,7 @@ import {
 import { createChatWithId } from "../../Chat/Thread/actions";
 import {
   openTab,
+  closeTab,
   setActiveTab,
   setDockOpen,
   setDockSection,
@@ -154,6 +161,130 @@ describe("FilesPanel", () => {
     localStorage.clear();
     setProjectStorageNamespace(undefined);
     vi.restoreAllMocks();
+  });
+
+  it("portals compact controls into one pane header and moves details into information", async () => {
+    const markdownPath = `${sourcePath}/notes.md`;
+    server.use(
+      http.get("*/v1/files/read", () =>
+        HttpResponse.json(
+          readResponse({
+            path: markdownPath,
+            content: "# Compact\n",
+            language: "markdown",
+            can_edit: false,
+          }),
+        ),
+      ),
+    );
+    const { user, store } = render(
+      <PaneHeaderProvider>
+        <header data-testid="pane-header">
+          <span>notes.md</span>
+          <PaneHeaderActions />
+        </header>
+        <FileViewer path={markdownPath} />
+      </PaneHeaderProvider>,
+    );
+    act(() => {
+      store.dispatch(openTab(`file:${markdownPath}`));
+    });
+    expect(
+      await screen.findByRole("heading", { name: "Compact" }),
+    ).toBeVisible();
+    const header = screen.getByTestId("pane-header");
+    expect(
+      within(header).getByRole("button", { name: "Show Markdown source" }),
+    ).toBeVisible();
+    expect(screen.getAllByTestId("pane-header")).toHaveLength(1);
+    expect(
+      screen
+        .getByRole("region", { name: "File viewer" })
+        .querySelector("header"),
+    ).toBeNull();
+    expect(screen.queryByRole("navigation", { name: "File path" })).toBeNull();
+    expect(
+      within(header).getByRole("status", { name: "Read-only" }),
+    ).toBeVisible();
+    await user.click(
+      screen.getByRole("button", { name: "Show Markdown source" }),
+    );
+    expect(
+      await screen.findByRole("textbox", { name: "notes.md file contents" }),
+    ).toBeVisible();
+    await user.click(
+      screen.getByRole("button", { name: "Show rendered Markdown" }),
+    );
+    expect(
+      await screen.findByRole("heading", { name: "Compact" }),
+    ).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "File information" }));
+    expect(await screen.findByText(markdownPath)).toBeVisible();
+    expect(screen.getByText("markdown")).toBeVisible();
+    expect(screen.getByText("34 bytes")).toBeVisible();
+    expect(
+      screen.getByRole("button", { name: "Copy file path" }),
+    ).toBeVisible();
+    expect(screen.getByRole("button", { name: "Reload" })).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "Split pane right" }));
+    expect(
+      store.getState().workspace.groups[`file:${markdownPath}`]?.root.kind,
+    ).toBe("split");
+  });
+
+  it("retains a draft while inactive without leaking controls and keeps discard actions in the pane header", async () => {
+    server.use(
+      http.get("*/v1/files/read", () => HttpResponse.json(readResponse())),
+    );
+    const contents = (active: boolean) => (
+      <PaneHeaderProvider>
+        <header data-testid="pane-header">
+          <PaneHeaderActions />
+        </header>
+        <PaneSurfaceActivityProvider active={active}>
+          <FileViewer path={filePath} />
+        </PaneSurfaceActivityProvider>
+      </PaneHeaderProvider>
+    );
+    const view = render(contents(true));
+    await view.user.click(
+      await screen.findByRole("button", { name: "Edit this file" }),
+    );
+    setEditorContent(
+      await screen.findByRole("textbox", { name: "Edit main.ts" }),
+      "retained draft\n",
+    );
+    view.rerender(contents(false));
+    expect(
+      within(screen.getByTestId("pane-header")).queryByRole("button"),
+    ).toBeNull();
+    view.rerender(contents(true));
+    expect(
+      EditorView.findFromDOM(
+        screen.getByRole("textbox", { name: "Edit main.ts" }),
+      )?.state.doc.toString(),
+    ).toBe("retained draft\n");
+    const header = screen.getByTestId("pane-header");
+    expect(within(header).getByRole("button", { name: "Save" })).toBeVisible();
+    await view.user.click(
+      within(header).getByRole("button", { name: "Cancel" }),
+    );
+    expect(within(header).getByRole("alert")).toHaveTextContent(
+      "Discard changes?",
+    );
+    await view.user.click(
+      within(header).getByRole("button", { name: "Keep editing" }),
+    );
+    await view.user.click(
+      within(header).getByRole("button", { name: "Cancel" }),
+    );
+    await view.user.click(
+      within(header).getByRole("button", { name: "Discard" }),
+    );
+    expect(screen.queryByRole("textbox", { name: "Edit main.ts" })).toBeNull();
+    expect(
+      within(header).getByRole("button", { name: "Edit this file" }),
+    ).toBeVisible();
   });
 
   it("renders one file icon with an empty chevron slot", async () => {
@@ -638,6 +769,83 @@ describe("FilesPanel", () => {
     expect(breadcrumbs).not.toHaveTextContent("worktrees");
   });
 
+  it("keeps noncollapsed editor selections while recording the caret", async () => {
+    server.use(
+      http.get("*/v1/files/read", () => HttpResponse.json(readResponse())),
+    );
+    const view = render(<FileViewer path={filePath} />);
+    await view.user.click(
+      await screen.findByRole("button", { name: "Edit this file" }),
+    );
+    const editor = await screen.findByRole("textbox", { name: "Edit main.ts" });
+    const editorView = EditorView.findFromDOM(editor);
+    if (!editorView) throw new Error("Missing editor view");
+    editorView.contentDOM.blur();
+
+    act(() => editorView.dispatch({ selection: { anchor: 0, head: 5 } }));
+    fireEvent.keyUp(editor, { key: "ArrowRight", shiftKey: true });
+    await waitFor(() => {
+      expect(editorView.state.selection.main.anchor).toBe(0);
+      expect(editorView.state.selection.main.head).toBe(5);
+    });
+    act(() => editorView.dispatch({ selection: { anchor: 2, head: 10 } }));
+    fireEvent.mouseUp(editor);
+    await waitFor(() => {
+      expect(editorView.state.selection.main.anchor).toBe(2);
+      expect(editorView.state.selection.main.head).toBe(10);
+    });
+  });
+
+  it("retains an editor draft and conflict base across structural remounts and clears on actual close", async () => {
+    const writes: unknown[] = [];
+    server.use(
+      http.get("*/v1/files/read", () => HttpResponse.json(readResponse())),
+      http.post("*/v1/files/write", async ({ request }) => {
+        writes.push(await request.json());
+        return HttpResponse.json({ path: filePath, size: 6, mtime_ms: 2 });
+      }),
+    );
+    const view = render(<FileViewer key="before" path={filePath} />);
+    view.store.dispatch(openTab(`file:${filePath}`));
+    await view.user.click(
+      await screen.findByRole("button", { name: "Edit this file" }),
+    );
+    setEditorContent(
+      await screen.findByRole("textbox", { name: "Edit main.ts" }),
+      "unsaved remount draft",
+    );
+    view.rerender(<FileViewer key="after" path={filePath} />);
+    expect(
+      EditorView.findFromDOM(
+        await screen.findByRole("textbox", { name: "Edit main.ts" }),
+      )?.state.doc.toString(),
+    ).toBe("unsaved remount draft");
+    await view.user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() =>
+      expect(writes).toEqual([
+        expect.objectContaining({
+          content: "unsaved remount draft",
+          expected_digest: "loaded-content-digest",
+        }),
+      ]),
+    );
+    await view.user.click(
+      screen.getByRole("button", { name: "Edit this file" }),
+    );
+    setEditorContent(
+      await screen.findByRole("textbox", { name: "Edit main.ts" }),
+      "must clear",
+    );
+    view.rerender(<div />);
+    view.store.dispatch(closeTab(`file:${filePath}`));
+    view.store.dispatch(openTab(`file:${filePath}`));
+    view.rerender(<FileViewer path={filePath} />);
+    expect(
+      await screen.findByRole("button", { name: "Edit this file" }),
+    ).toBeEnabled();
+    expect(screen.queryByRole("textbox", { name: "Edit main.ts" })).toBeNull();
+  });
+
   it("saves an edited file with the loaded mtime as the conflict token", async () => {
     const writes: unknown[] = [];
     server.use(
@@ -841,6 +1049,66 @@ describe("FilesPanel", () => {
       await screen.findByLabelText(/notes\.md file contents/),
     ).toBeInTheDocument();
   });
+
+  it.each(["page.html", "PAGE.HTM"])(
+    "previews %s in an isolated sandbox and toggles source",
+    async (filename) => {
+      const htmlPath = `${sourcePath}/${filename}`;
+      const content =
+        '<!doctype html><html><head><base href="http://localhost:8001/"><meta http-equiv="refresh" content="0;url=https://example.com"></head><body><h1>Preview</h1><img src="/v1/private"><script>window.preview = true</script></body></html>';
+      server.use(
+        http.get("*/v1/files/read", () =>
+          HttpResponse.json(
+            readResponse({ path: htmlPath, content, language: null }),
+          ),
+        ),
+      );
+      const view = render(<FileViewer path={htmlPath} />);
+      const frame = await screen.findByTitle("HTML preview");
+      expect(frame).toHaveAttribute("sandbox", "allow-scripts");
+      expect(frame).toHaveAttribute("referrerpolicy", "no-referrer");
+      const document = new DOMParser().parseFromString(
+        frame.getAttribute("srcdoc") ?? "",
+        "text/html",
+      );
+      expect(document.querySelectorAll("base")).toHaveLength(1);
+      expect(document.querySelector("base")).toHaveAttribute(
+        "href",
+        "about:srcdoc",
+      );
+      expect(document.querySelector('meta[http-equiv="refresh" i]')).toBeNull();
+      expect(document.head.firstElementChild).toHaveAttribute(
+        "http-equiv",
+        "Content-Security-Policy",
+      );
+      expect(
+        document.head.firstElementChild?.getAttribute("content"),
+      ).toContain("default-src 'none'");
+      expect(
+        document.head.firstElementChild?.getAttribute("content"),
+      ).toContain("img-src data: blob:");
+      expect(
+        document.querySelector("[data-refact-artifact-bootstrap]"),
+      ).not.toBeNull();
+      expect(document.body.textContent).toContain("Preview");
+      await view.user.click(
+        screen.getByRole("button", { name: "Show HTML source" }),
+      );
+      expect(screen.queryByTitle("HTML preview")).toBeNull();
+      await expectEditorText("window.preview = true");
+      await view.user.click(
+        screen.getByRole("button", { name: "Show rendered HTML" }),
+      );
+      expect(await screen.findByTitle("HTML preview")).toBeInTheDocument();
+      await view.user.click(
+        screen.getByRole("button", { name: "Edit this file" }),
+      );
+      expect(screen.queryByTitle("HTML preview")).toBeNull();
+      expect(
+        await screen.findByRole("textbox", { name: `Edit ${filename}` }),
+      ).toBeInTheDocument();
+    },
+  );
 
   it("confirms before discarding unsaved edits and cancels cleanly when untouched", async () => {
     server.use(
@@ -1300,6 +1568,39 @@ describe("FilesPanel", () => {
       manual: true,
     });
     expect(screen.getByText("Read-only")).toBeVisible();
+    expect(
+      screen.getByRole("button", { name: "Edit this file" }),
+    ).toBeDisabled();
+  });
+
+  it("restores an external tab through protected open without remembered target metadata", async () => {
+    let readCalls = 0;
+    let openBody: unknown = null;
+    server.use(
+      http.get("*/v1/files/read", () => {
+        readCalls += 1;
+        return HttpResponse.json(
+          { detail: "Outside workspace" },
+          { status: 403 },
+        );
+      }),
+      http.post("*/v1/files/open", async ({ request }) => {
+        openBody = await request.json();
+        return HttpResponse.json(
+          readResponse({ path: "/tmp/restored.txt", can_edit: false }),
+        );
+      }),
+    );
+    const { store } = render(<FileViewer path="/tmp/restored.txt" />, {
+      preloadedState: {
+        current_project: { name: "workspace", workspaceRoots: [rootPath] },
+      },
+    });
+
+    await expectEditorText("const first = 1;");
+    expect(openBody).toEqual({ path: "/tmp/restored.txt" });
+    expect(readCalls).toBe(0);
+    expect(store.getState().filesPanel.viewerTargets).toEqual({});
     expect(
       screen.getByRole("button", { name: "Edit this file" }),
     ).toBeDisabled();

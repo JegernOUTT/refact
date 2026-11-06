@@ -28,10 +28,18 @@
   gap: var(--rf-space-1);
 }
 
-.toolbarSpacer {
+.toolbarTabs {
+  display: flex;
+  align-items: flex-end;
   flex: 1 1 auto;
   min-width: 0;
   height: 100%;
+}
+
+.toolbarTabs > * {
+  flex: 1 1 auto;
+  width: 100%;
+  background: transparent;
 }
 
 .iconButton {
@@ -75,13 +83,14 @@
 }
 
 @container toolbar (max-width: 320px) {
+  .toolbarDivider,
   .connectionDivider,
   .connectionSection {
     display: none;
   }
 }
 
-@media (max-width: 360px) {
+@media (width <= 360px) {
   .toolbar {
     padding: 0 var(--rf-space-1);
   }

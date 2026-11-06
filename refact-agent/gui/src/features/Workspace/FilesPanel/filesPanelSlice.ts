@@ -10,6 +10,7 @@ import { makeSurfaceKey } from "../surfaceKey";
 import type { WorkspaceState } from "../workspaceSlice";
 import {
   bindSurfaceToChat,
+  openSurfaceInNewTab,
   openTab,
   selectFocusedWorkspaceChatId,
   selectFocusedChatWorktreeRoot,
@@ -20,6 +21,7 @@ export type FileViewerTarget = {
   path: string;
   line?: number;
   manual?: boolean;
+  openInNewTab?: boolean;
 };
 
 export type LiveFileUpdate = {
@@ -324,6 +326,7 @@ type FilesPanelDispatch = (
   action:
     | ReturnType<typeof openTab>
     | ReturnType<typeof bindSurfaceToChat>
+    | ReturnType<typeof openSurfaceInNewTab>
     | ReturnType<typeof expandDirectory>
     | ReturnType<typeof resetFileTree>
     | ReturnType<typeof setViewerTarget>
@@ -360,6 +363,7 @@ export const MAX_MANUAL_PATH_LENGTH = 4096;
 
 export const validateAbsoluteFilePath = (
   input: string,
+  allowDirectory = false,
 ): { ok: true; path: string } | { ok: false; error: string } => {
   const path = input.trim();
   if (path.length === 0) {
@@ -381,7 +385,7 @@ export const validateAbsoluteFilePath = (
       error: "Use an absolute path, such as /home/user/file.txt.",
     };
   }
-  if (/[\\/]$/u.test(path)) {
+  if (!allowDirectory && /[\\/]$/u.test(path)) {
     return { ok: false, error: "Enter a file path, not a directory." };
   }
   return { ok: true, path };
@@ -437,8 +441,13 @@ export const openFileInFilesPanel =
       : state.current_project.workspaceRoots ?? [];
     const surfaceKey = makeSurfaceKey("file", target.path);
     dispatch(setViewerTarget(target));
-    dispatch(openTab(surfaceKey));
-    if (chatId) dispatch(bindSurfaceToChat({ surfaceKey, chatId }));
+    dispatch(
+      target.openInNewTab
+        ? openSurfaceInNewTab(surfaceKey)
+        : openTab(surfaceKey),
+    );
+    if (chatId && !(surfaceKey in (state.workspace.contextChatByTab ?? {})))
+      dispatch(bindSurfaceToChat({ surfaceKey, chatId }));
     for (const directory of parentDirectories(target.path)) {
       if (isPathWithinWorkspaceRoots(directory, workspaceRoots)) {
         dispatch(expandDirectory(directory));

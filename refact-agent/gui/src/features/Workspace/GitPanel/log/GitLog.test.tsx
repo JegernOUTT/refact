@@ -11,6 +11,7 @@ import type {
 } from "../../../../services/refact/gitRead";
 import { GitPanel } from "../GitPanel";
 import { gitDiffDescriptorFromSurfaceKey } from "../../surfaceKey";
+import { selectFocusedWorkspaceSurfaceKey } from "../../workspaceSlice";
 import { LOG_PAGE_SIZE } from "./useCommitLog";
 
 const ROOT = "/repo";
@@ -355,7 +356,7 @@ describe("Git log tool window", () => {
     );
     expect(
       gitDiffDescriptorFromSurfaceKey(
-        store.getState().workspace.activeTabId ?? "",
+        selectFocusedWorkspaceSurfaceKey(store.getState()) ?? "",
       ),
     ).toMatchObject({
       root: ROOT,
@@ -371,7 +372,7 @@ describe("Git log tool window", () => {
     await user.keyboard("{Enter}");
     expect(
       gitDiffDescriptorFromSurfaceKey(
-        store.getState().workspace.activeTabId ?? "",
+        selectFocusedWorkspaceSurfaceKey(store.getState()) ?? "",
       ),
     ).toMatchObject({
       path: "docs/guide.md",

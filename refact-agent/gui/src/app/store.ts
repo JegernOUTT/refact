@@ -1,3 +1,4 @@
+import { surfaceSessionMiddleware } from "../features/Workspace/surfaceSessionState";
 import { combineSlices, configureStore } from "@reduxjs/toolkit";
 import { storage } from "./storage";
 import { pruneStaleDraftMessages } from "../utils/threadStorage";
@@ -367,7 +368,7 @@ export function setUpStore(preloadedState?: Partial<RootState>) {
           backgroundAgentsApi.middleware,
         )
         .prepend(historyMiddleware.middleware)
-        .prepend(listenerMiddleware.middleware);
+        .prepend(surfaceSessionMiddleware, listenerMiddleware.middleware);
     },
   });
 

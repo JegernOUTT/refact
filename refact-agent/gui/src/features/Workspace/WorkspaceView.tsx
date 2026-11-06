@@ -11,7 +11,7 @@ import {
 } from "../Chat/Thread";
 import { collectTabIds } from "../ChatPanes/panesTree";
 import {
-  hasTabDragType,
+  hasSplittableTabDrag,
   readTabDragSurfaceKey,
   surfaceKeyFromTabDragPayload,
 } from "../ChatPanes/tabDrag";
@@ -21,8 +21,9 @@ import {
 } from "../ChatPanes/usePointerDrag";
 import { GroupSplitView } from "./GroupSplitView";
 import { SurfacePane } from "./SurfacePane";
-import { isChatSurface, makeSurfaceKey } from "./surfaceKey";
+import { isSplittableSurface, makeSurfaceKey } from "./surfaceKey";
 import {
+  consolidateWorkspaceTabs,
   openTab,
   selectActiveTabId,
   selectWorkspaceFocusedChatId,
@@ -61,9 +62,20 @@ export function WorkspaceView() {
   const isSplit = useAppSelector((state) =>
     activeTabId ? selectIsTabSplit(state, activeTabId) : false,
   );
-  const activeTabCanSplit = activeTabId ? isChatSurface(activeTabId) : false;
+  const activeTabCanSplit = activeTabId
+    ? isSplittableSurface(activeTabId)
+    : false;
   const isNarrow = useMediaQuery(WORKSPACE_NARROW_QUERY);
   const splitAffordanceVisible = activeTabCanSplit && !isNarrow;
+
+  useEffect(() => {
+    const workspaceTabs = tabs.filter(isSplittableSurface);
+    if (
+      workspaceTabs.length > 1 ||
+      (workspaceTabs[0] && !groups[workspaceTabs[0]])
+    )
+      dispatch(consolidateWorkspaceTabs());
+  }, [dispatch, groups, tabs]);
 
   useEffect(() => {
     if (
@@ -95,7 +107,7 @@ export function WorkspaceView() {
 
   const handleUnsplitDragEnter = useCallback(
     (event: DragEvent) => {
-      if (!activeTabCanSplit || !hasTabDragType(event.dataTransfer, "chat")) {
+      if (!activeTabCanSplit || !hasSplittableTabDrag(event.dataTransfer)) {
         return;
       }
       setUnsplitDragActive(true);
@@ -105,7 +117,7 @@ export function WorkspaceView() {
 
   const handleUnsplitDragOver = useCallback(
     (event: DragEvent) => {
-      if (!activeTabCanSplit || !hasTabDragType(event.dataTransfer, "chat")) {
+      if (!activeTabCanSplit || !hasSplittableTabDrag(event.dataTransfer)) {
         return;
       }
       event.preventDefault();
@@ -136,7 +148,7 @@ export function WorkspaceView() {
         !activeTabId ||
         !activeTabCanSplit ||
         !draggedSurfaceKey ||
-        !isChatSurface(draggedSurfaceKey) ||
+        !isSplittableSurface(draggedSurfaceKey) ||
         draggedSurfaceKey === activeTabId
       ) {
         setUnsplitDragActive(false);
@@ -169,7 +181,7 @@ export function WorkspaceView() {
         return (
           Boolean(activeTabId) &&
           draggedSurfaceKey !== null &&
-          isChatSurface(draggedSurfaceKey) &&
+          isSplittableSurface(draggedSurfaceKey) &&
           draggedSurfaceKey !== activeTabId
         );
       },
@@ -201,7 +213,6 @@ export function WorkspaceView() {
             styles.body,
             !isSplit && styles.unsplitBody,
             isSplit && styles.splitBody,
-            isSplit ? "rf-enter-scale" : "rf-enter",
           )}
         >
           {activeTabId && activeTabCanSplit && isSplit ? (

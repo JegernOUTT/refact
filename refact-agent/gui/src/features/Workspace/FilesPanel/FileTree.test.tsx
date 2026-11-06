@@ -6,7 +6,7 @@ import type { PrivacyPolicyResponse } from "../../../services/refact/privacy";
 import { fireEvent, render, screen, waitFor } from "../../../utils/test-utils";
 import { server } from "../../../utils/mockServer";
 import { FilesPanel } from "./FilesPanel";
-import { movePathToPrivacyZone } from "./fileTreeModel";
+import { parentDirectoryPath, movePathToPrivacyZone } from "./fileTreeModel";
 
 const rootPath = "/workspace";
 const secretPath = `${rootPath}/.env`;
@@ -194,5 +194,20 @@ describe("FileTree privacy zones", () => {
 
     await waitFor(() => expect(treeRequests).toBe(2));
     expect(inspectRequests).toBe(0);
+  });
+});
+
+describe("folder navigation parents", () => {
+  it.each([
+    ["/", null],
+    ["/home/user", "/home"],
+    ["/home", "/"],
+    ["C:/", null],
+    ["C:/folder", "C:/"],
+    ["C:/folder/child/", "C:/folder"],
+    ["//host/share", null],
+    ["//host/share/folder", "//host/share"],
+  ])("navigates %s without creating a relative parent", (path, parent) => {
+    expect(parentDirectoryPath(path)).toBe(parent);
   });
 });

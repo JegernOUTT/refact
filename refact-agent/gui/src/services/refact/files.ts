@@ -93,8 +93,13 @@ export const filesApi = createApi({
     },
   }),
   endpoints: (builder) => ({
-    getFilesTree: builder.query<FilesTreeResponse, string>({
-      queryFn: async (path, api, _extraOptions, baseQuery) => {
+    getFilesTree: builder.query<
+      FilesTreeResponse,
+      string | { path: string; manual: true }
+    >({
+      queryFn: async (request, api, _extraOptions, baseQuery) => {
+        const path = typeof request === "string" ? request : request.path;
+        const manual = typeof request !== "string";
         const state = api.getState() as RootState;
         const controller = new AbortController();
         const timeoutState = { expired: false };
@@ -107,7 +112,13 @@ export const filesApi = createApi({
         let result: Awaited<ReturnType<typeof baseQuery>>;
         try {
           result = await baseQuery({
-            url: buildApiUrlFromState(state, "/v1/files/tree", { path }),
+            url: buildApiUrlFromState(
+              state,
+              manual ? "/v1/files/browse" : "/v1/files/tree",
+              manual ? undefined : { path },
+            ),
+            method: manual ? "POST" : "GET",
+            body: manual ? { path } : undefined,
             credentials: "same-origin",
             redirect: "follow",
             signal: controller.signal,
@@ -129,7 +140,12 @@ export const filesApi = createApi({
         if (result.error) return { error: result.error };
         return { data: result.data as FilesTreeResponse };
       },
-      providesTags: (_result, _error, path) => [{ type: "Tree", id: path }],
+      providesTags: (_result, _error, request) => [
+        {
+          type: "Tree",
+          id: typeof request === "string" ? request : request.path,
+        },
+      ],
     }),
     readFile: builder.query<ReadFileResponse, ReadFileRequest>({
       queryFn: async (request, api, _extraOptions, baseQuery) => {

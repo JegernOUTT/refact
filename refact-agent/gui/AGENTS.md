@@ -561,6 +561,19 @@ Chat can proceed when ALL true: `snapshot_received && !streaming && !waiting_for
 2. Register in `combineSlices` + add `.middleware` in store
 3. Use auto-generated hooks
 
+### True tab appearance
+
+True tabsets use `components/ui/Tabs`; legacy LongTail Tabs forwards to it.
+`Tabs/TabAppearance.module.css` is the shared compact editor appearance contract:
+compose `strip` for one `--rf-control-h` band, `item` for regular text-2 tab
+geometry with upper-rounded transparent selection, `active` for selection on custom tab wrappers, and
+`action` / `close` for overflow and close controls. Custom workspace strips own
+layout, drag, closing and measurement, not a separate glass/pill skin. Keep hidden
+measurement widths identical to rendered tab padding, gaps, icons and separators.
+Canonical Tabs retains its measured indicator and Radix behavior. Local classes
+may adapt layout/width, not tab typography, roundness, active or hover appearance.
+This contract does not apply to Settings navigation or segmented filters/toggles.
+
 ### Adding Component
 
 `Component.tsx` + `Component.module.css` + `index.ts`. Use Radix primitives + CSS Modules + design tokens.

@@ -25,6 +25,7 @@ import {
   switchToThread,
 } from "../Chat/Thread";
 import { push } from "../Pages/pagesSlice";
+import { PaneSurfaceActivityProvider } from "../Workspace/PaneHeaderContext";
 import {
   loadTaskWorkspaceTab,
   saveTaskWorkspaceTab,
@@ -1732,6 +1733,7 @@ describe("TaskWorkspace layout and chat surfaces", () => {
     });
 
     await screen.findAllByText(card.title);
+    setProjectStorageNamespace("ds-204-layout");
     await user.click(screen.getByRole("tab", { name: "Memories" }));
 
     await waitFor(() => expect(loadTaskWorkspaceTab(TASK_ID)).toBe("memories"));
@@ -3730,4 +3732,55 @@ describe("TaskWorkspace new-chat mode picker", () => {
         ?.plannerChats.some((p) => p.id === "planner-new"),
     ).toBe(true);
   });
+});
+
+describe("TaskWorkspace embedded focus ownership", () => {
+  it.each([
+    { focused: false, active: true },
+    { focused: true, active: false },
+  ])(
+    "does not steal a Chat pane thread when focused=$focused active=$active",
+    async ({ focused, active }) => {
+      clearWorkspaceStorage();
+      saveTaskWorkspaceTab(TASK_ID, "board");
+      server.use(...taskWorkspaceHandlers(makeCard(), []));
+      const { store, rerender } = render(
+        <PaneSurfaceActivityProvider active={active}>
+          <TaskWorkspace taskId={TASK_ID} embedded focused={focused} />
+        </PaneSurfaceActivityProvider>,
+        {
+          preloadedState: {
+            ...workspacePreloadedState("unrelated-chat"),
+            tasksUI: {
+              openTasks: [
+                {
+                  id: TASK_ID,
+                  name: "Task",
+                  plannerChats: [],
+                  activeChat: {
+                    type: "agent",
+                    cardId: CARD_ID,
+                    chatId: "agent-T-1",
+                  },
+                },
+              ],
+            },
+          },
+        },
+      );
+      await screen.findByRole("tab", { name: /^Board/ });
+      await waitFor(() =>
+        expect(store.getState().chat.threads["agent-T-1"]).toBeDefined(),
+      );
+      expect(store.getState().chat.current_thread_id).toBe("unrelated-chat");
+      rerender(
+        <PaneSurfaceActivityProvider active>
+          <TaskWorkspace taskId={TASK_ID} embedded focused />
+        </PaneSurfaceActivityProvider>,
+      );
+      await waitFor(() =>
+        expect(store.getState().chat.current_thread_id).toBe("agent-T-1"),
+      );
+    },
+  );
 });

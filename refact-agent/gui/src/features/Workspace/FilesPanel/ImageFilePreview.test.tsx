@@ -1,12 +1,14 @@
+import { readFileSync } from "node:fs";
+import { act } from "react-dom/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { fireEvent, render, screen } from "../../../utils/test-utils";
 import {
-  DEFAULT_PREVIEW_HEIGHT,
   ImageFilePreview,
   MAX_ZOOM,
   MIN_PREVIEW_HEIGHT,
 } from "./ImageFilePreview";
+import { openTab, splitTab } from "../workspaceSlice";
 import { imageDataUrl } from "../../../services/refact/files";
 
 const PNG_DATA = "iVBORw0KGgo=";
@@ -45,13 +47,86 @@ describe("imageDataUrl", () => {
 });
 
 describe("ImageFilePreview", () => {
+  let paneHeight = 600;
+  let viewportHeight = 100;
+  let resize: () => void = () => undefined;
   beforeEach(() => {
     vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockReturnValue(200);
-    vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockReturnValue(100);
+    paneHeight = 600;
+    viewportHeight = 100;
+    vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockImplementation(
+      function (this: HTMLElement) {
+        return this.dataset.testid === "image-preview"
+          ? paneHeight
+          : viewportHeight;
+      },
+    );
+    vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockReturnValue(0);
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        constructor(callback: () => void) {
+          resize = callback;
+        }
+        observe() {
+          return;
+        }
+        disconnect() {
+          return;
+        }
+      },
+    );
   });
 
   afterEach(() => {
     vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it("retains image transforms and manual height across structural remounts", async () => {
+    const view = render(
+      <ImageFilePreview key="before" alt="photo.png" src={pngSrc} />,
+    );
+    view.store.dispatch(openTab("file:photo.png"));
+    loadImage(400, 200);
+    await view.user.click(
+      screen.getByRole("button", { name: "Rotate clockwise" }),
+    );
+    await view.user.click(screen.getByRole("button", { name: "Actual size" }));
+    fireEvent.keyDown(screen.getByRole("separator"), { key: "Home" });
+    view.store.dispatch(splitTab({ tabId: "file:photo.png", dir: "row" }));
+    view.rerender(
+      <ImageFilePreview key="after" alt="photo.png" src={pngSrc} />,
+    );
+    const image = loadImage(400, 200);
+    expect(image).toHaveAttribute("data-rotation", "90");
+    expect(zoomText()).toBe("100%");
+    expect(screen.getByTestId("image-preview-viewport")).toHaveAttribute(
+      "data-resized",
+      "true",
+    );
+    view.rerender(<ImageFilePreview alt="photo.png" src={`${pngSrc}AA==`} />);
+    expect(screen.getByRole("img")).toHaveAttribute("data-rotation", "0");
+  });
+
+  it("floats discoverable controls without reserving a metadata row", async () => {
+    const { user } = render(<ImageFilePreview alt="photo.png" src={pngSrc} />);
+    const toolbar = screen.getByRole("toolbar", { name: "Image controls" });
+    expect(toolbar.parentElement).toBe(
+      screen.getByTestId("image-preview-viewport").parentElement,
+    );
+    await user.tab();
+    expect(screen.getByRole("button", { name: "Zoom out" })).toHaveFocus();
+    const css = readFileSync(
+      "src/features/Workspace/FilesPanel/ImageFilePreview.module.css",
+      "utf8",
+    );
+    expect(css).toMatch(/position: absolute/u);
+    expect(css).toMatch(/\.preview:focus-within \.toolbar/u);
+    expect(css).toMatch(/\(pointer: coarse\)/u);
+    expect(
+      screen.getByRole("separator", { name: "Resize image preview" }),
+    ).toBeVisible();
   });
 
   it("fits large images below the manual zoom minimum", () => {
@@ -108,21 +183,79 @@ describe("ImageFilePreview", () => {
       name: "Resize image preview",
     });
     const viewport = screen.getByTestId("image-preview-viewport");
-    expect(viewport.style.height).toBe(`${String(DEFAULT_PREVIEW_HEIGHT)}px`);
+    expect(viewport.style.height).toBe("");
 
-    fireEvent.keyDown(handle, { key: "ArrowDown" });
-    expect(handle).toHaveAttribute(
-      "aria-valuenow",
-      String(DEFAULT_PREVIEW_HEIGHT + 40),
-    );
+    fireEvent.keyDown(handle, { key: "ArrowUp" });
+    expect(handle).toHaveAttribute("aria-valuenow", "560");
     fireEvent.keyDown(handle, { key: "Home" });
     expect(viewport.style.height).toBe(`${String(MIN_PREVIEW_HEIGHT)}px`);
     fireEvent.keyDown(handle, { key: "ArrowUp" });
     expect(handle).toHaveAttribute("aria-valuenow", String(MIN_PREVIEW_HEIGHT));
 
+    fireEvent.keyDown(handle, { key: "End" });
+    expect(viewport.style.height).toBe("");
+    fireEvent.keyDown(handle, { key: "Home" });
     fireEvent.pointerDown(handle, { button: 2, clientY: 0, pointerId: 1 });
     fireEvent.pointerMove(handle, { clientY: 300, pointerId: 1 });
     expect(handle).toHaveAttribute("aria-valuenow", String(MIN_PREVIEW_HEIGHT));
+    const capture = vi.fn();
+    const release = vi.fn();
+    handle.setPointerCapture = capture;
+    handle.hasPointerCapture = () => true;
+    handle.releasePointerCapture = release;
+    fireEvent.pointerDown(handle, { button: 0, clientY: 100, pointerId: 2 });
+    fireEvent.pointerMove(handle, { clientY: 180, pointerId: 2 });
+    expect(handle).toHaveAttribute("aria-valuenow", "240");
+    fireEvent.pointerUp(handle, { pointerId: 2 });
+    expect(capture).toHaveBeenCalledWith(2);
+    expect(release).toHaveBeenCalledWith(2);
+  });
+
+  it("tracks pane resizing in fit mode and clamps manually resized height", () => {
+    render(<ImageFilePreview alt="photo.png" src={pngSrc} />);
+    loadImage(100, 400);
+    const handle = screen.getByRole("separator");
+    const viewport = screen.getByTestId("image-preview-viewport");
+    expect(viewport.style.height).toBe("");
+    expect(zoomText()).toBe("25%");
+    act(() => {
+      paneHeight = 900;
+      viewportHeight = 300;
+      resize();
+    });
+    expect(zoomText()).toBe("75%");
+    expect(handle).toHaveAttribute("aria-valuemax", "900");
+    fireEvent.keyDown(handle, { key: "ArrowUp" });
+    expect(viewport.style.height).toBe("860px");
+    act(() => {
+      paneHeight = 200;
+      viewportHeight = 200;
+      resize();
+    });
+    expect(viewport.style.height).toBe("200px");
+    fireEvent.keyDown(handle, { key: "End" });
+    expect(viewport.style.height).toBe("");
+  });
+
+  it("cancels wheel scrolling and zooms both directions below the initial fit", () => {
+    const listener = vi.spyOn(HTMLElement.prototype, "addEventListener");
+    render(<ImageFilePreview alt="huge.png" src={pngSrc} />);
+    const image = loadImage(20000, 100);
+    const viewport = screen.getByTestId("image-preview-viewport");
+    expect(listener).toHaveBeenCalledWith("wheel", expect.any(Function), {
+      passive: false,
+    });
+    expect(fireEvent.wheel(viewport, { deltaY: 100, cancelable: true })).toBe(
+      false,
+    );
+    expect(image.style.width).toBe("160px");
+    fireEvent.wheel(viewport, { deltaY: -100, cancelable: true });
+    expect(image.style.width).toBe("200px");
+    fireEvent.wheel(viewport, { deltaY: 100, cancelable: true });
+    expect(image.style.width).toBe("160px");
+    for (let index = 0; index < 40; index += 1)
+      fireEvent.wheel(viewport, { deltaY: -100 });
+    expect(zoomText()).toBe("800%");
   });
 
   it("shows a decode failure and resets state when the source changes", async () => {

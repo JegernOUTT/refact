@@ -20,6 +20,7 @@ import {
   setProjectStorageNamespaceFromProjectInfo,
 } from "../chatUiPersistence";
 import { makeSurfaceKey } from "../../features/Workspace/surfaceKey";
+import { collectTabIds } from "../../features/ChatPanes/panesTree";
 import type { WorkspaceState } from "../../features/Workspace/workspaceSlice";
 
 const LEGACY_PANE_LAYOUT_STORAGE_KEY = "refact:chat-ui:panes:v1";
@@ -68,6 +69,33 @@ function splitWorkspace(): WorkspaceState {
 }
 
 describe("chatUiPersistence", () => {
+  it("restores ordered local file tabs and selection in a single pane", () => {
+    const first = makeSurfaceKey("file", "/workspace/first.txt");
+    const second = makeSurfaceKey("file", "/outside/second.html");
+    const workspace: WorkspaceState = {
+      tabs: [first],
+      activeTabId: first,
+      groups: {
+        [first]: {
+          root: {
+            kind: "leaf",
+            id: "local-files",
+            tabIds: [second, first],
+            activeTabId: second,
+          },
+          focusedLeafId: "local-files",
+        },
+      },
+    };
+    savePersistedWorkspace(workspace);
+
+    const restored = loadPersistedWorkspace();
+
+    expect(restored.groups[first]).toEqual(workspace.groups[first]);
+    expect(restored.tabs).toEqual([first]);
+    expect(restored.activeTabId).toBe(first);
+  });
+
   beforeEach(() => {
     localStorage.clear();
     sessionStorage.clear();
@@ -325,8 +353,12 @@ describe("chatUiPersistence", () => {
       }),
     );
 
-    expect(loadPersistedWorkspace()).toMatchObject({
-      tabs: [chatSurface("chat-a"), file],
+    const restored = loadPersistedWorkspace();
+    const group = restored.groups[chatSurface("chat-a")];
+    if (!group) throw new Error("missing canonical restored group");
+    expect(collectTabIds(group.root)).toEqual([chatSurface("chat-a"), file]);
+    expect(restored).toMatchObject({
+      tabs: [chatSurface("chat-a")],
       activeTabId: chatSurface("chat-a"),
       contextChatByTab: { [file]: "chat-a" },
     });
@@ -366,7 +398,17 @@ describe("chatUiPersistence", () => {
     expect(loadPersistedWorkspace()).toEqual({
       tabs: [chatSurface("chat-a")],
       activeTabId: chatSurface("chat-a"),
-      groups: {},
+      groups: {
+        [chatSurface("chat-a")]: {
+          root: {
+            kind: "leaf",
+            id: "root",
+            tabIds: [chatSurface("chat-a")],
+            activeTabId: chatSurface("chat-a"),
+          },
+          focusedLeafId: "root",
+        },
+      },
       panelsForced: undefined,
       liveEditsByChat: undefined,
       dock: { open: true, width: 280, section: "files" },
@@ -374,7 +416,7 @@ describe("chatUiPersistence", () => {
     });
   });
 
-  it("derives task and buddy navigation tabs outside persisted workspace panes", () => {
+  it("restores task and buddy tabs into the canonical workspace pane", () => {
     savePersistedChatTabs({
       openThreadIds: ["chat-a", "chat-b"],
       currentThreadId: "chat-b",
@@ -397,9 +439,20 @@ describe("chatUiPersistence", () => {
     expect(loadPersistedWorkspace()).toEqual({
       tabs: [chatSurface("chat-a")],
       activeTabId: chatSurface("chat-a"),
-      groups: {},
+      groups: {
+        [chatSurface("chat-a")]: {
+          root: {
+            kind: "leaf",
+            id: "root",
+            tabIds: ["task:task-a", chatSurface("chat-a"), "buddy:home"],
+            activeTabId: "task:task-a",
+          },
+          focusedLeafId: "root",
+        },
+      },
       panelsForced: undefined,
       liveEditsByChat: undefined,
+      liveEditsDefault: undefined,
       dock: { open: true, width: 280, section: "files" },
       drawer: { open: false, height: 220 },
     });
@@ -501,9 +554,19 @@ describe("chatUiPersistence", () => {
     );
 
     expect(loadPersistedWorkspace()).toEqual({
-      tabs: [chatSurface("chat-a"), chatSurface("chat-b")],
+      tabs: [chatSurface("chat-a")],
       activeTabId: chatSurface("chat-a"),
-      groups: {},
+      groups: {
+        [chatSurface("chat-a")]: {
+          root: {
+            kind: "leaf",
+            id: "root",
+            tabIds: [chatSurface("chat-a"), chatSurface("chat-b")],
+            activeTabId: chatSurface("chat-a"),
+          },
+          focusedLeafId: "root",
+        },
+      },
       panelsForced: undefined,
       liveEditsByChat: undefined,
       dock: { open: true, width: 280, section: "files" },
@@ -554,7 +617,17 @@ describe("chatUiPersistence", () => {
     expect(loadPersistedWorkspace()).toEqual({
       tabs: [chatSurface("chat-a")],
       activeTabId: chatSurface("chat-a"),
-      groups: {},
+      groups: {
+        [chatSurface("chat-a")]: {
+          root: {
+            kind: "leaf",
+            id: "left",
+            tabIds: [chatSurface("chat-a")],
+            activeTabId: chatSurface("chat-a"),
+          },
+          focusedLeafId: "left",
+        },
+      },
       panelsForced: undefined,
       liveEditsByChat: undefined,
       dock: { open: true, width: 280, section: "files" },
@@ -631,12 +704,15 @@ describe("chatUiPersistence", () => {
     );
 
     const workspace = loadPersistedWorkspace();
-    expect(workspace.tabs).toEqual([
+    expect(workspace.tabs).toEqual([chatSurface("chat-a")]);
+    expect(Object.keys(workspace.groups)).toEqual([chatSurface("chat-a")]);
+    const group = workspace.groups[chatSurface("chat-a")];
+    if (!group) throw new Error("missing merged legacy groups");
+    expect(collectTabIds(group.root)).toEqual([
       chatSurface("chat-a"),
       chatSurface("chat-c"),
+      chatSurface("chat-d"),
     ]);
-    expect(workspace.groups[chatSurface("chat-a")]).toBeUndefined();
-    expect(workspace.groups[chatSurface("chat-c")]).toBeDefined();
   });
 
   it("persists task management tabs and their active child chat", () => {

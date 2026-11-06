@@ -2,7 +2,16 @@ import { describe, expect, it } from "vitest";
 
 import { setUpStore } from "../../../app/store";
 import { createChatWithId } from "../../Chat/Thread";
-import { openTab, selectFocusedWorkspaceChatId } from "../workspaceSlice";
+import {
+  openTab,
+  splitTab,
+  focusPane,
+  closePaneTab,
+  clearWorkspaceChatState,
+  selectFocusedWorkspaceChatId,
+  selectSurfaceChatId,
+} from "../workspaceSlice";
+import { collectTabIds } from "../../ChatPanes/panesTree";
 import { makeSurfaceKey } from "../surfaceKey";
 import {
   applyLiveFileUpdate,
@@ -14,6 +23,28 @@ import {
 } from "./filesPanelSlice";
 
 describe("openFileInFilesPanel", () => {
+  it("does not assign an explicitly unbound file when reopened from another chat", () => {
+    const store = setUpStore();
+    const file = "file:/unbound.txt";
+    store.dispatch(
+      openFileInFilesPanel({ path: "/unbound.txt", manual: true }),
+    );
+    expect(selectSurfaceChatId(store.getState(), file)).toBeNull();
+    store.dispatch(createChatWithId({ id: "later-chat" }));
+    store.dispatch(openTab("chat:later-chat"));
+    store.dispatch(
+      openFileInFilesPanel({ path: "/unbound.txt", manual: true }),
+    );
+    expect(selectSurfaceChatId(store.getState(), file)).toBeNull();
+    store.dispatch(clearWorkspaceChatState("later-chat"));
+    expect(
+      Object.values(store.getState().workspace.groups).flatMap((group) =>
+        group ? collectTabIds(group.root) : [],
+      ),
+    ).toContain(file);
+    expect(selectSurfaceChatId(store.getState(), file)).toBeNull();
+  });
+
   it("opens and focuses a deduplicated file viewer tab", () => {
     const store = setUpStore({
       current_project: {
@@ -49,6 +80,52 @@ describe("openFileInFilesPanel", () => {
         .getState()
         .workspace.tabs.filter((tab) => tab === "file:/workspace/src/main.ts"),
     ).toHaveLength(1);
+  });
+
+  it("opens new files in the focused leaf, activates existing locations, and keeps explicit new tabs in the same local layer", () => {
+    const store = setUpStore();
+    store.dispatch(createChatWithId({ id: "pane-chat", title: "Pane chat" }));
+    store.dispatch(openTab("chat:pane-chat"));
+    store.dispatch(openFileInFilesPanel({ path: "/a" }));
+    expect(store.getState().workspace.tabs).toEqual(["chat:pane-chat"]);
+    expect(
+      store.getState().workspace.groups["chat:pane-chat"]?.root,
+    ).toMatchObject({
+      kind: "leaf",
+      tabIds: ["chat:pane-chat", "file:/a"],
+      activeTabId: "file:/a",
+    });
+    store.dispatch(splitTab({ tabId: "chat:pane-chat", dir: "row" }));
+    const siblingId =
+      store.getState().workspace.groups["chat:pane-chat"]?.focusedLeafId ??
+      "missing";
+    store.dispatch(openFileInFilesPanel({ path: "/b" }));
+    expect(
+      store.getState().workspace.groups["chat:pane-chat"]?.focusedLeafId,
+    ).toBe(siblingId);
+    store.dispatch(focusPane({ tabId: "chat:pane-chat", leafId: "root" }));
+    store.dispatch(openFileInFilesPanel({ path: "/b", line: 5 }));
+    expect(
+      store.getState().workspace.groups["chat:pane-chat"]?.focusedLeafId,
+    ).toBe(siblingId);
+    store.dispatch(openFileInFilesPanel({ path: "/b", openInNewTab: true }));
+    expect(store.getState().workspace.tabs).toEqual(["chat:pane-chat"]);
+    store.dispatch(openFileInFilesPanel({ path: "/c" }));
+    const group = store.getState().workspace.groups["chat:pane-chat"];
+    expect(group?.focusedLeafId).toBe(siblingId);
+    store.dispatch(openFileInFilesPanel({ path: "/b", openInNewTab: true }));
+    expect(store.getState().workspace.tabs).toEqual(["chat:pane-chat"]);
+    expect(
+      store.getState().workspace.groups["chat:pane-chat"]?.root,
+    ).toMatchObject({ kind: "split" });
+    store.dispatch(
+      closePaneTab({
+        tabId: "chat:pane-chat",
+        leafId: "root",
+        surfaceKey: "chat:pane-chat",
+      }),
+    );
+    expect(store.getState().chat.open_thread_ids).not.toContain("pane-chat");
   });
 
   it("expands only ancestors at or below a deep workspace root", () => {
@@ -124,10 +201,12 @@ describe("openFileInFilesPanel", () => {
       openFileInFilesPanel({ path: "/worktrees/chat-b/src/main.ts" }),
     );
 
-    const fileSurface = makeSurfaceKey("file", "/worktrees/chat-b/src/main.ts");
-    expect(store.getState().workspace.contextChatByTab).toEqual({
-      [fileSurface]: "chat-b",
-    });
+    expect(
+      selectSurfaceChatId(
+        store.getState(),
+        "file:/worktrees/chat-b/src/main.ts",
+      ),
+    ).toBe("chat-b");
     expect(selectFocusedWorkspaceChatId(store.getState())).toBe("chat-b");
     expect(store.getState().filesPanel.expandedDirectories).toEqual([
       "/worktrees/chat-b",

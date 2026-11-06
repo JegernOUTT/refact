@@ -92,7 +92,8 @@ use crate::http::routers::v1::v1_integrations::{
 };
 use crate::http::routers::v1::file_edit_tools::handle_v1_file_edit_tool_dry_run;
 use crate::http::routers::v1::files::{
-    handle_v1_files_open, handle_v1_files_read, handle_v1_files_tree, handle_v1_files_write,
+    handle_v1_files_browse, handle_v1_files_open, handle_v1_files_read, handle_v1_files_tree,
+    handle_v1_files_write,
 };
 use crate::http::routers::v1::code_edit::handle_v1_code_edit;
 use crate::http::routers::v1::workspace::handle_v1_get_app_searchable_id;
@@ -607,6 +608,7 @@ fn files_routes() -> Router<AppState> {
         .route("/files/tree", get(handle_v1_files_tree))
         .route("/files/read", get(handle_v1_files_read))
         .route("/files/open", post(handle_v1_files_open))
+        .route("/files/browse", post(handle_v1_files_browse))
         .route("/files/write", post(handle_v1_files_write))
         .route("/code-edit", post(handle_v1_code_edit))
 }

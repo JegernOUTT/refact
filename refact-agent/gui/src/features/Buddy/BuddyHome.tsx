@@ -17,7 +17,12 @@ import {
 import { Settings } from "lucide-react";
 import classNames from "classnames";
 import { useAppDispatch, useAppSelector } from "../../hooks";
-import { pop, push, selectCurrentPage } from "../Pages/pagesSlice";
+import {
+  pop,
+  push,
+  selectCurrentPage,
+  type BuddyPage as BuddyRouteContext,
+} from "../Pages/pagesSlice";
 import { BuddySettingsPanel } from "./BuddySettingsPanel";
 import { BuddyWorld } from "./BuddyWorld";
 import { BuddyErrorBoundary } from "./BuddyErrorBoundary";
@@ -167,9 +172,20 @@ function isGroupedRecentError(event: RecentBuddyError): boolean {
   return (event.relatedIds?.length ?? 0) > 1 || (event.occurrences ?? 1) > 1;
 }
 
-const BuddyHomeContent: React.FC = () => {
+export interface BuddyHomeProps {
+  embedded?: boolean;
+  routeContext?: BuddyRouteContext;
+  onBack?: () => void;
+}
+
+const BuddyHomeContent: React.FC<BuddyHomeProps> = ({
+  embedded = false,
+  routeContext,
+  onBack,
+}) => {
   const dispatch = useAppDispatch();
-  const currentPage = useAppSelector(selectCurrentPage);
+  const globalPage = useAppSelector(selectCurrentPage);
+  const currentPage = routeContext ?? (embedded ? undefined : globalPage);
   const draftId =
     currentPage?.name === "buddy" ? currentPage.draftId : undefined;
   const snapshot = useAppSelector(selectBuddySnapshot);
@@ -353,8 +369,9 @@ const BuddyHomeContent: React.FC = () => {
   }, [statsData]);
 
   const handleBack = useCallback(() => {
-    dispatch(pop());
-  }, [dispatch]);
+    if (onBack) onBack();
+    else if (!embedded) dispatch(pop());
+  }, [dispatch, embedded, onBack]);
 
   const handleEnable = useCallback(() => {
     void updateSettings({ enabled: true });
@@ -1273,8 +1290,8 @@ const BuddyHomeContent: React.FC = () => {
   );
 };
 
-export const BuddyHome: React.FC = () => (
+export const BuddyHome: React.FC<BuddyHomeProps> = (props) => (
   <BuddyPresenceProvider>
-    <BuddyHomeContent />
+    <BuddyHomeContent {...props} />
   </BuddyPresenceProvider>
 );

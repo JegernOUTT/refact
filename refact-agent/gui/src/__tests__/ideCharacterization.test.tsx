@@ -242,8 +242,10 @@ describe("IDE characterization: zero new chrome", () => {
       expectNoDashboardChrome();
       expectNoPanelChrome();
       expect(
-        screen.getByRole("tablist", { name: "Open workspace tabs" }),
+        screen.getByRole("tablist", { name: "Workspace tabs" }),
       ).toBeInTheDocument();
+      expect(screen.getAllByRole("tablist")).toHaveLength(1);
+      expect(screen.queryByRole("tablist", { name: "Pane tabs" })).toBeNull();
       expect(store.getState().workspace.tabs).toEqual([
         makeSurfaceKey("chat", "chat-a"),
       ]);
@@ -354,7 +356,7 @@ describe("IDE characterization: zero new chrome", () => {
     expect(selectSurface(store.getState())).toBe("dashboard");
     expect(screen.getByTestId("daemon-dashboard-shell")).toBeInTheDocument();
     expect(
-      screen.queryByRole("tablist", { name: "Open workspace tabs" }),
+      screen.queryByRole("tablist", { name: "Workspace tabs" }),
     ).toBeNull();
   });
 

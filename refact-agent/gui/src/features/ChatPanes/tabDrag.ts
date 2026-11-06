@@ -1,6 +1,10 @@
-import { makeSurfaceKey, type SurfaceKey } from "../Workspace/surfaceKey";
+import {
+  isSplittableSurface,
+  makeSurfaceKey,
+  type SurfaceKey,
+} from "../Workspace/surfaceKey";
 
-export type TabDragKind = "chat" | "task" | "buddy" | "surface";
+export type TabDragKind = "chat" | "file" | "task" | "buddy" | "surface";
 
 export type TabDragPayload = {
   type: TabDragKind;
@@ -10,6 +14,7 @@ export type TabDragPayload = {
 
 const tabDragMimeTypes: Record<TabDragKind, string> = {
   chat: "application/x-refact-chat-tab",
+  file: "application/x-refact-file-tab",
   task: "application/x-refact-task-tab",
   buddy: "application/x-refact-buddy-tab",
   surface: "application/x-refact-surface-tab",
@@ -50,6 +55,7 @@ export function parseTabDragData(value: string): TabDragPayload | null {
   const id = idParts.join(":");
   if (
     (type === "chat" ||
+      type === "file" ||
       type === "task" ||
       type === "buddy" ||
       type === "surface") &&
@@ -81,9 +87,12 @@ export function surfaceKeyFromTabDragPayload(
   payload: TabDragPayload | null,
 ): SurfaceKey | null {
   if (!payload) return null;
-  if (payload.surfaceKey) return payload.surfaceKey;
-  if (payload.type === "surface") return payload.id;
-  return makeSurfaceKey(payload.type, payload.id);
+  const key =
+    payload.surfaceKey ??
+    (payload.type === "surface"
+      ? payload.id
+      : makeSurfaceKey(payload.type, payload.id));
+  return isSplittableSurface(key) ? key : null;
 }
 
 export function readTabDragSurfaceKey(
@@ -105,4 +114,10 @@ export function hasTabDragType(
   const payload = readTabDragData(dataTransfer);
   if (payload) return payload.type === type;
   return false;
+}
+
+export function hasSplittableTabDrag(dataTransfer: DataTransfer): boolean {
+  // Native dragover runs in protected mode: payload bytes are unavailable.
+  // Accept only our MIME gate here; validate the full canonical key on drop.
+  return hasKnownTabDragMimeType(dataTransfer);
 }

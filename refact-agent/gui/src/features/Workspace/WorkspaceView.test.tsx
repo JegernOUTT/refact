@@ -24,7 +24,9 @@ import { makeSurfaceKey, type SurfaceKey } from "./surfaceKey";
 import { updateConfig } from "../Config/configSlice";
 import { WORKSPACE_NARROW_QUERY } from "./workspaceBreakpoints";
 import { WorkspaceView } from "./WorkspaceView";
+import { Toolbar } from "../../components/Toolbar/Toolbar";
 import { WorkspaceShell } from "./WorkspaceShell";
+import { panePanelId, paneTabId } from "./paneTabIds";
 
 const groupSplitViewCss = readFileSync(
   "src/features/Workspace/GroupSplitView.module.css",
@@ -40,8 +42,21 @@ function tokenNumber(name: string): number {
   return Number(new RegExp(`${name}:\\s*(\\d+)`).exec(tokensCss)?.[1]);
 }
 
+function getChatGroup(store: AppStore) {
+  const group =
+    store.getState().workspace.groups[makeSurfaceKey("chat", "chat-a")];
+  if (!group) throw new Error("Missing canonical chat group");
+  return group;
+}
+
 const chat = (id: string): SurfaceKey => makeSurfaceKey("chat", id);
 const task = (id: string): SurfaceKey => makeSurfaceKey("task", id);
+
+vi.mock("../Tasks/TaskWorkspace", () => ({
+  TaskWorkspace: ({ taskId }: { taskId: string }) => (
+    <div data-testid="task-workspace">{taskId}</div>
+  ),
+}));
 
 function createDataTransferStub(): DataTransfer {
   const data = new Map<string, string>();
@@ -68,8 +83,43 @@ function createDataTransferStub(): DataTransfer {
   } as DataTransfer;
 }
 
+function mockPaneGeometry(pane: Element): void {
+  pane.getBoundingClientRect = () => new DOMRect(100, 100, 400, 300);
+  const controls = pane.querySelector("[data-pane-controls]");
+  if (!controls) throw new Error("missing floating pane controls");
+  controls.getBoundingClientRect = () => new DOMRect(450, 100, 50, 28);
+}
+
+function dragToPane(
+  pane: HTMLElement,
+  dataTransfer: DataTransfer,
+  target: "right" | "center",
+) {
+  mockPaneGeometry(pane);
+  const coordinates = {
+    dataTransfer,
+    clientX: target === "right" ? 490 : 300,
+    clientY: 250,
+  };
+  const dispatchDrag = (type: "dragover" | "drop") => {
+    const event = new MouseEvent(type, {
+      ...coordinates,
+      bubbles: true,
+      cancelable: true,
+    });
+    Object.defineProperty(event, "dataTransfer", { value: dataTransfer });
+    fireEvent(pane, event);
+  };
+  dispatchDrag("dragover");
+  expect(
+    within(pane).getByTestId("workspace-pane-drop-preview"),
+  ).toHaveAttribute("data-drop-target", target);
+  expect(screen.getAllByTestId("workspace-pane-drop-preview")).toHaveLength(1);
+  dispatchDrag("drop");
+}
+
 function createWorkspaceStore(): AppStore {
-  const store = setUpStore();
+  const store = setUpStore({ pages: [{ name: "chat" }] });
   store.dispatch(createChatWithId({ id: "chat-a", title: "Chat Alpha" }));
   store.dispatch(createChatWithId({ id: "chat-b", title: "Chat Beta" }));
   store.dispatch(openTab(chat("chat-a")));
@@ -101,9 +151,17 @@ function createEmptySplitWorkspaceStore(): AppStore {
 
 function renderWorkspaceView(store: AppStore) {
   return render(
-    <WorkspaceShell>
-      <WorkspaceView />
-    </WorkspaceShell>,
+    <>
+      <Toolbar
+        activeTab={{
+          type: "chat",
+          id: store.getState().chat.current_thread_id,
+        }}
+      />
+      <WorkspaceShell>
+        <WorkspaceView />
+      </WorkspaceShell>
+    </>,
     { store },
   );
 }
@@ -325,18 +383,16 @@ describe("WorkspaceView", () => {
     expect(screen.getByRole("button", { name: "Git" })).toBeInTheDocument();
   });
 
-  it("renders an unsplit surface without pane chrome", () => {
+  it("renders an unsplit surface with one global toolbar tab row", () => {
     renderWorkspaceView(createWorkspaceStore());
 
     expectSurface(chat("chat-a"));
     expect(screen.getByLabelText("Terminal sessions")).toBeInTheDocument();
-    expect(screen.queryByLabelText("Workspace pane controls")).toBeNull();
+    expect(screen.getAllByLabelText("Workspace pane controls")).toHaveLength(1);
     expect(screen.queryByRole("button", { name: "Close Pane" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Split Right" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Split Down" })).toBeNull();
-    expect(
-      screen.getByRole("button", { name: "Split active tab" }),
-    ).toBeVisible();
+    expect(screen.getByRole("button", { name: "Pane actions" })).toBeVisible();
     expect(workspaceViewCss).toMatch(
       /\.unsplitSplitAffordance\s*\{[^}]*opacity: var\(--rf-motion-opacity-visible\)/u,
     );
@@ -368,12 +424,10 @@ describe("WorkspaceView", () => {
     mockNarrow(false);
     renderWorkspaceView(createWorkspaceStore());
 
-    expect(
-      screen.getByRole("button", { name: "Split active tab" }),
-    ).toBeVisible();
+    expect(screen.getByRole("button", { name: "Pane actions" })).toBeVisible();
   });
 
-  it("does not render a pane or split affordance for a non-chat active tab", () => {
+  it("renders an actual task pane with split controls", () => {
     const store = setUpStore({
       workspace: {
         tabs: [task("task-a")],
@@ -385,11 +439,11 @@ describe("WorkspaceView", () => {
 
     expect(
       document.querySelector(`[data-surface-key="${task("task-a")}"]`),
-    ).toBeNull();
-    expect(screen.queryByLabelText("Workspace pane controls")).toBeNull();
+    ).toBeInTheDocument();
     expect(
-      screen.queryByRole("button", { name: "Split active tab" }),
-    ).toBeNull();
+      screen.getByLabelText("Workspace pane controls"),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Pane actions" })).toBeVisible();
   });
 
   it("leaves the rail and dock to the shared workspace shell", () => {
@@ -442,7 +496,8 @@ describe("WorkspaceView", () => {
       expect(store.getState().chat.current_thread_id).toBe("chat-a");
     });
     expect(store.getState().workspace.activeTabId).toBe(chat("chat-a"));
-    expect(store.getState().workspace.tabs).toEqual([
+    expect(store.getState().workspace.tabs).toEqual([chat("chat-a")]);
+    expect(collectTabIds(getChatGroup(store).root)).toEqual([
       chat("chat-a"),
       chat("chat-b"),
     ]);
@@ -454,15 +509,51 @@ describe("WorkspaceView", () => {
     expectSurface(chat("chat-a"));
     expectSurface(chat("chat-b"));
     expect(screen.getAllByLabelText("Workspace pane controls")).toHaveLength(2);
-    expect(screen.getAllByRole("button", { name: "Close Pane" })).toHaveLength(
-      2,
+    expect(
+      screen.getAllByRole("button", { name: "Pane actions" }),
+    ).toHaveLength(2);
+    expect(
+      screen.getAllByRole("tablist", { name: "Workspace tabs" }),
+    ).toHaveLength(1);
+    expect(screen.queryByRole("tablist", { name: "Pane tabs" })).toBeNull();
+    const row = screen.getByRole("tablist", { name: "Workspace tabs" });
+    expect(within(row).getAllByRole("tab")).toHaveLength(2);
+    expect(row.closest("[data-workspace-leaf-id]")).toBeNull();
+    for (const pane of document.querySelectorAll("[data-workspace-leaf-id]")) {
+      expect(
+        within(pane as HTMLElement).queryByRole("tablist", {
+          name: "Workspace tabs",
+        }),
+      ).toBeNull();
+      expect(
+        within(pane as HTMLElement).queryByRole("tablist", {
+          name: "Pane tabs",
+        }),
+      ).toBeNull();
+    }
+  });
+
+  it("renders single-leaf groups as global tabs and keeps the active panel", () => {
+    const store = createWorkspaceStore();
+    store.dispatch(
+      addSurfaceToPane({
+        tabId: chat("chat-a"),
+        leafId: "root",
+        surfaceKey: chat("chat-b"),
+      }),
     );
-    expect(screen.getAllByRole("button", { name: "Split Right" })).toHaveLength(
-      2,
+    renderWorkspaceView(store);
+    expect(
+      screen.getByRole("tablist", { name: "Workspace tabs" }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: /Chat Beta/ })).toHaveAttribute(
+      "aria-selected",
+      "true",
     );
-    expect(screen.getAllByRole("button", { name: "Split Down" })).toHaveLength(
-      2,
-    );
+    expect(screen.getByRole("tabpanel")).toBeVisible();
+    expect(
+      document.querySelector("[data-workspace-unsplit-drop-target]"),
+    ).toBeNull();
   });
 
   it("uses a vertically scrollable stacked layout at narrow breakpoints", async () => {
@@ -498,13 +589,11 @@ describe("WorkspaceView", () => {
     const dataTransfer = createDataTransferStub();
     setTabDragData(dataTransfer, "chat", "chat-b", chat("chat-b"));
     const dropTarget = document.querySelector(
-      "[data-workspace-unsplit-drop-target='true']",
+      "[data-workspace-leaf-id='root']",
     );
     if (!dropTarget) throw new Error("missing unsplit drop target");
 
-    fireEvent.dragEnter(dropTarget, { dataTransfer });
-    fireEvent.dragOver(dropTarget, { dataTransfer });
-    fireEvent.drop(dropTarget, { dataTransfer });
+    dragToPane(dropTarget as HTMLElement, dataTransfer, "right");
 
     const group = store.getState().workspace.groups[chat("chat-a")];
     expect(group).toBeDefined();
@@ -515,7 +604,76 @@ describe("WorkspaceView", () => {
     expect(screen.getAllByLabelText("Workspace pane controls")).toHaveLength(2);
   });
 
-  it("clicking a pane close ungroups the split and closes the removed chat", async () => {
+  it("offers file splits and accepts native file drops on files and pane edges", async () => {
+    const store = createWorkspaceStore();
+    store.dispatch(setPanelsForced(true));
+    const fileA = "file:/project/a.ts";
+    const fileB = "file:/project/b.ts";
+    store.dispatch(openTab(fileA));
+    store.dispatch(openTab(fileB));
+    store.dispatch(setActiveTab(fileA));
+    const view = renderWorkspaceView(store);
+    await view.user.click(screen.getByRole("tab", { name: "a.ts" }));
+    expect(screen.getByRole("button", { name: "Pane actions" })).toBeVisible();
+    const dataTransfer = createDataTransferStub();
+    setTabDragData(dataTransfer, "file", "/project/b.ts", fileB);
+    const dropTarget = document.querySelector(
+      "[data-workspace-leaf-id='root']",
+    );
+    if (!dropTarget) throw new Error("missing file drop target");
+    dragToPane(dropTarget as HTMLElement, dataTransfer, "right");
+    expect(screen.getByRole("tab", { name: "a.ts" })).toHaveAttribute(
+      "aria-selected",
+      "false",
+    );
+    expect(screen.getByRole("tab", { name: "b.ts" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    expect(screen.getByRole("tab", { name: "a.ts" })).toHaveAttribute(
+      "aria-controls",
+      panePanelId("root", fileA),
+    );
+    expect(screen.getByRole("tab", { name: "a.ts" })).toHaveAttribute(
+      "id",
+      paneTabId("toolbar", fileA),
+    );
+    expectSurface(fileA);
+    expectSurface(fileB);
+    const group = store.getState().workspace.groups[chat("chat-a")];
+    if (!group) throw new Error("missing file split");
+    expect(collectTabIds(group.root)).toEqual([
+      chat("chat-a"),
+      chat("chat-b"),
+      fileA,
+      fileB,
+    ]);
+    const pane = screen.getByLabelText("Workspace pane root");
+    const chatDrag = createDataTransferStub();
+    setTabDragData(chatDrag, "chat", "chat-b", chat("chat-b"));
+    dragToPane(pane, chatDrag, "right");
+    const mixedGroup = store.getState().workspace.groups[chat("chat-a")];
+    if (!mixedGroup) throw new Error("missing mixed group");
+    expect(collectTabIds(mixedGroup.root)).toEqual([
+      chat("chat-a"),
+      fileA,
+      chat("chat-b"),
+      fileB,
+    ]);
+    const filePane = document
+      .querySelector(`[data-surface-key="${fileB}"]`)
+      ?.closest("section");
+    if (!filePane) throw new Error("missing file pane");
+    await view.user.click(
+      within(filePane).getByRole("button", { name: "Pane actions" }),
+    );
+    await view.user.click(screen.getByRole("menuitem", { name: "Close Pane" }));
+    const remainingGroup = store.getState().workspace.groups[chat("chat-a")];
+    if (!remainingGroup) throw new Error("missing remaining group");
+    expect(collectTabIds(remainingGroup.root)).not.toContain(fileB);
+  });
+
+  it("clicking a pane close retains the canonical singleton and closes the removed chat", async () => {
     const store = createSplitWorkspaceStore();
     const view = renderWorkspaceView(store);
     const siblingPane = screen.getByLabelText(
@@ -526,15 +684,25 @@ describe("WorkspaceView", () => {
     expect(store.getState().chat.threads["chat-b"]).toBeDefined();
 
     await view.user.click(
-      within(siblingPane).getByRole("button", { name: "Close Pane" }),
+      within(siblingPane).getByRole("button", { name: "Pane actions" }),
     );
+    await view.user.click(screen.getByRole("menuitem", { name: "Close Pane" }));
 
-    expect(store.getState().workspace.groups[chat("chat-a")]).toBeUndefined();
+    expect(store.getState().workspace.groups[chat("chat-a")]?.root).toEqual({
+      kind: "leaf",
+      id: "root",
+      tabIds: [chat("chat-a")],
+      activeTabId: chat("chat-a"),
+    });
     expect(store.getState().workspace.tabs).toEqual([chat("chat-a")]);
     expect(store.getState().chat.open_thread_ids).toEqual(["chat-a"]);
     expect(store.getState().chat.threads["chat-a"]).toBeDefined();
     expect(store.getState().chat.threads["chat-b"]).toBeUndefined();
-    expect(screen.queryByLabelText("Workspace pane controls")).toBeNull();
+    await waitFor(() =>
+      expect(screen.getAllByLabelText("Workspace pane controls")).toHaveLength(
+        1,
+      ),
+    );
     expectSurface(chat("chat-a"));
   });
 
@@ -545,12 +713,7 @@ describe("WorkspaceView", () => {
     setTabDragData(dataTransfer, "chat", "chat-b", chat("chat-b"));
     const targetPane = screen.getByLabelText("Workspace pane root");
 
-    fireEvent.dragEnter(targetPane, { dataTransfer });
-    const edgeDropZone = within(targetPane).getByTestId(
-      "workspace-pane-edge-drop-root-right",
-    );
-    fireEvent.dragOver(edgeDropZone, { dataTransfer });
-    fireEvent.drop(edgeDropZone, { dataTransfer });
+    dragToPane(targetPane, dataTransfer, "right");
 
     const group = store.getState().workspace.groups[chat("chat-a")];
     expect(group).toBeDefined();
@@ -570,9 +733,7 @@ describe("WorkspaceView", () => {
       "Workspace pane root:sibling:chat:chat-a",
     );
 
-    fireEvent.dragEnter(emptyPane, { dataTransfer });
-    fireEvent.dragOver(emptyPane, { dataTransfer });
-    fireEvent.drop(emptyPane, { dataTransfer });
+    dragToPane(emptyPane, dataTransfer, "center");
 
     const group = store.getState().workspace.groups[chat("chat-a")];
     expect(group).toBeDefined();
@@ -587,7 +748,7 @@ describe("WorkspaceView", () => {
     expectSurface(chat("chat-b"));
   });
 
-  it("dropping a workspace tab on an occupied pane center creates a sibling pane", () => {
+  it("dropping a workspace tab on an occupied pane center joins local tabs", () => {
     const store = createSplitWorkspaceStore();
     store.dispatch(createChatWithId({ id: "chat-c", title: "Chat Gamma" }));
     store.dispatch(openTab(chat("chat-c")));
@@ -597,19 +758,17 @@ describe("WorkspaceView", () => {
     setTabDragData(dataTransfer, "chat", "chat-c", chat("chat-c"));
     const occupiedPane = screen.getByLabelText("Workspace pane root");
 
-    fireEvent.dragEnter(occupiedPane, { dataTransfer });
-    fireEvent.dragOver(occupiedPane, { dataTransfer });
-    fireEvent.drop(occupiedPane, { dataTransfer });
+    dragToPane(occupiedPane, dataTransfer, "center");
 
     const group = store.getState().workspace.groups[chat("chat-a")];
     expect(group).toBeDefined();
     if (!group) throw new Error("missing split group");
     const leafIds = collectLeafIds(group.root);
-    expect(leafIds).toHaveLength(3);
+    expect(leafIds).toHaveLength(2);
     expect(
       leafIds.every((leafId) => {
         const leaf = findLeaf(group.root, leafId);
-        return Boolean(leaf && leaf.tabIds.length <= 1);
+        return Boolean(leaf && leaf.tabIds.length <= 2);
       }),
     ).toBe(true);
     expect(collectTabIds(group.root).sort()).toEqual(
@@ -619,7 +778,11 @@ describe("WorkspaceView", () => {
     expectSurface(chat("chat-a"));
     expectSurface(chat("chat-b"));
     expectSurface(chat("chat-c"));
-    expect(screen.getAllByLabelText("Workspace pane controls")).toHaveLength(3);
+    expect(screen.getAllByLabelText("Workspace pane controls")).toHaveLength(2);
+    expect(findLeaf(group.root, "root")?.tabIds).toEqual([
+      chat("chat-a"),
+      chat("chat-c"),
+    ]);
   });
 
   it("keeps split sizes unchanged for non-finite resize input", async () => {

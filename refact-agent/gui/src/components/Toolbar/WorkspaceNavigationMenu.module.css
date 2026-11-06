@@ -1,0 +1,18 @@
+.trigger {
+  flex-shrink: 0;
+  color: var(--rf-color-muted);
+  border-color: transparent;
+}
+
+.trigger:hover:not(:disabled) {
+  color: var(--rf-color-fg);
+  background: var(--rf-surface-1);
+  border-color: transparent;
+}
+
+.label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

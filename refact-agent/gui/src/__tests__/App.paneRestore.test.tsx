@@ -16,7 +16,7 @@ import {
   setProjectStorageNamespace,
   setProjectStorageNamespaceFromProjectInfo,
 } from "../utils/chatUiPersistence";
-import { render, waitFor } from "../utils/test-utils";
+import { render, screen, waitFor } from "../utils/test-utils";
 import {
   chatLinks,
   chatSessionAbort,
@@ -34,15 +34,17 @@ import {
   sidebarSubscribe,
 } from "../utils/mockServer";
 
-vi.mock("../features/Tasks", async () => {
-  const React = await vi.importActual<typeof import("react")>("react");
-  const actual =
-    await vi.importActual<typeof import("../features/Tasks")>(
-      "../features/Tasks",
-    );
+vi.hoisted(() => {
+  vi.resetModules();
+});
 
+vi.mock("../features/Chat/Chat", () => ({
+  Chat: ({ chatId }: { chatId?: string }) => <section data-chat-id={chatId} />,
+}));
+
+vi.mock("../features/Tasks/TaskWorkspace", async () => {
+  const React = await vi.importActual<typeof import("react")>("react");
   return {
-    ...actual,
     TaskWorkspace: ({ taskId }: { taskId: string }) =>
       React.createElement(
         "section",
@@ -339,9 +341,20 @@ describe("App workspace restore", () => {
       expect(store.getState().workspace).toEqual({
         tabs: [chatA],
         activeTabId: chatA,
-        groups: {},
+        groups: {
+          [chatA]: {
+            root: {
+              kind: "leaf",
+              id: "root",
+              tabIds: [chatA],
+              activeTabId: chatA,
+            },
+            focusedLeafId: "root",
+          },
+        },
         panelsForced: undefined,
         liveEditsByChat: undefined,
+        liveEditsDefault: undefined,
         dock: { open: true, width: 280, section: "files" },
         drawer: { open: false, height: 220 },
       });
@@ -349,7 +362,7 @@ describe("App workspace restore", () => {
     });
   });
 
-  it("restores task nav tabs from tasks UI without adding pane surfaces", async () => {
+  it("restores task navigation as an actual canonical pane surface", async () => {
     server.use(
       ...appHandlers,
       createSidebarSnapshotHandler([{ id: "task-a", name: "Task Alpha" }]),
@@ -387,15 +400,26 @@ describe("App workspace restore", () => {
       namespace ?? "",
     );
 
-    const { store } = renderApp();
+    const { store, user } = renderApp();
 
     await waitFor(() => {
       expect(store.getState().workspace).toEqual({
         tabs: [chatA],
         activeTabId: chatA,
-        groups: {},
+        groups: {
+          [chatA]: {
+            root: {
+              kind: "leaf",
+              id: "root",
+              tabIds: [chatA, "task:task-a"],
+              activeTabId: "task:task-a",
+            },
+            focusedLeafId: "root",
+          },
+        },
         panelsForced: undefined,
         liveEditsByChat: undefined,
+        liveEditsDefault: undefined,
         dock: { open: true, width: 280, section: "files" },
         drawer: { open: false, height: 220 },
       });
@@ -407,10 +431,33 @@ describe("App workspace restore", () => {
           activeChat: null,
         },
       ]);
-      expect(store.getState().pages.at(-1)).toEqual({
-        name: "task workspace",
-        taskId: "task-a",
-      });
+      expect(store.getState().pages.at(-1)).toEqual({ name: "chat" });
+    });
+    expect(await screen.findByTestId("task-workspace")).toHaveTextContent(
+      "task-a",
+    );
+    expect(
+      screen.getByRole("tablist", { name: "Workspace tabs" }),
+    ).toBeInTheDocument();
+    expect(screen.getAllByRole("tablist")).toHaveLength(1);
+    expect(screen.getByRole("tab", { name: /Task Alpha/ })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    expect(screen.getByRole("tab", { name: /Task Alpha/ })).toBeInTheDocument();
+    await user.click(screen.getByRole("tab", { name: /Chat A/ }));
+    expect(
+      await screen.findByRole("tablist", { name: "Workspace tabs" }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: /Chat A/ })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    expect(store.getState().workspace.tabs).toEqual([chatA]);
+    expect(store.getState().workspace.groups[chatA]?.root).toMatchObject({
+      kind: "leaf",
+      tabIds: [chatA, "task:task-a"],
+      activeTabId: chatA,
     });
   });
 
@@ -479,9 +526,20 @@ describe("App workspace restore", () => {
       expect(nextStore.getState().workspace).toEqual({
         tabs: [chatA],
         activeTabId: chatA,
-        groups: {},
+        groups: {
+          [chatA]: {
+            root: {
+              kind: "leaf",
+              id: "root",
+              tabIds: [chatA],
+              activeTabId: chatA,
+            },
+            focusedLeafId: "root",
+          },
+        },
         panelsForced: undefined,
         liveEditsByChat: undefined,
+        liveEditsDefault: undefined,
         dock: { open: true, width: 280, section: "files" },
         drawer: { open: false, height: 220 },
       });

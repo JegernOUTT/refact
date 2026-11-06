@@ -3,10 +3,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { setUpStore } from "../app/store";
 import { InnerApp } from "../features/App";
-import { restoreChat } from "../features/Chat/Thread";
+import { createChatWithId, restoreChat } from "../features/Chat/Thread";
 import type { ChatHistoryItem } from "../features/History/historySlice";
 import { setBackendStatus } from "../features/Connection";
-import { render, screen } from "../utils/test-utils";
+import { render, screen, waitFor } from "../utils/test-utils";
+import { openTab, setActiveTab } from "../features/Workspace/workspaceSlice";
 import { openTask } from "../features/Tasks";
 import {
   setProjectStorageNamespace,
@@ -27,6 +28,10 @@ import {
   server,
   sidebarSubscribe,
 } from "../utils/mockServer";
+
+vi.hoisted(() => {
+  vi.resetModules();
+});
 
 vi.mock("../features/Chat/Chat", async () => {
   const React = await vi.importActual<typeof import("react")>("react");
@@ -67,53 +72,9 @@ vi.mock("../features/Chat/Chat", async () => {
   };
 });
 
-vi.mock("../features/Workspace/WorkspaceView", async () => {
+vi.mock("../features/Tasks/TaskWorkspace", async () => {
   const React = await vi.importActual<typeof import("react")>("react");
-  const thread = await vi.importActual<
-    typeof import("../features/Chat/Thread")
-  >("../features/Chat/Thread");
-  const selectorHook = await vi.importActual<
-    typeof import("../hooks/useAppSelector")
-  >("../hooks/useAppSelector");
-
   return {
-    WorkspaceView: () => {
-      const currentThreadId = selectorHook.useAppSelector(
-        thread.selectCurrentThreadId,
-      );
-      const messages = selectorHook.useAppSelector((state) =>
-        thread.selectMessagesById(state, currentThreadId),
-      );
-
-      return React.createElement(
-        "section",
-        { "data-testid": "workspace-view", "data-chat-id": currentThreadId },
-        messages.map((message, index) =>
-          React.createElement(
-            "p",
-            {
-              key:
-                "message_id" in message && message.message_id
-                  ? message.message_id
-                  : index,
-            },
-            typeof message.content === "string" ? message.content : "",
-          ),
-        ),
-      );
-    },
-  };
-});
-
-vi.mock("../features/Tasks", async () => {
-  const React = await vi.importActual<typeof import("react")>("react");
-  const actual =
-    await vi.importActual<typeof import("../features/Tasks")>(
-      "../features/Tasks",
-    );
-
-  return {
-    ...actual,
     TaskWorkspace: ({ taskId }: { taskId: string }) =>
       React.createElement(
         "section",
@@ -253,6 +214,11 @@ function renderChatPage(item: ChatHistoryItem) {
 
 function renderAppWithNavigationTabs() {
   server.use(...appHandlers);
+  setProjectStorageNamespaceFromProjectInfo({
+    workspaceRoots: ["/tmp/refact-test"],
+    projectName: "refact-test",
+  });
+
   const store = setUpStore({
     config: baseConfig,
     current_project: {
@@ -262,11 +228,12 @@ function renderAppWithNavigationTabs() {
     pages: [{ name: "history" }, { name: "buddy" }, { name: "chat" }],
   });
   store.dispatch(setBackendStatus({ status: "online" }));
+  store.dispatch(
+    createChatWithId({ id: "navigation-chat", title: "Navigation chat" }),
+  );
   store.dispatch(openTask({ id: "task-a", name: "Task Alpha" }));
-  setProjectStorageNamespaceFromProjectInfo({
-    workspaceRoots: ["/tmp/refact-test"],
-    projectName: "refact-test",
-  });
+  store.dispatch(openTab("buddy:home"));
+  store.dispatch(setActiveTab("chat:navigation-chat"));
 
   return render(<InnerApp />, { store });
 }
@@ -288,13 +255,16 @@ describe("App buddy chat page rendering", () => {
       }),
     );
 
-    const workspaceView = await screen.findByTestId("workspace-view");
+    const workspaceView = await screen.findByTestId("single-chat");
 
     expect(workspaceView).toHaveAttribute("data-chat-id", "buddy-chat-1");
     expect(workspaceView).toHaveTextContent(
       "Buddy investigation transcript squeak",
     );
-    expect(screen.queryByTestId("single-chat")).not.toBeInTheDocument();
+    expect(workspaceView.closest("[data-surface-key]")).toHaveAttribute(
+      "data-surface-key",
+      `chat:${workspaceView.getAttribute("data-chat-id") ?? ""}`,
+    );
   });
 
   it("keeps normal current chats on the workspace view", async () => {
@@ -306,32 +276,45 @@ describe("App buddy chat page rendering", () => {
       }),
     );
 
-    const workspaceView = await screen.findByTestId("workspace-view");
+    const workspaceView = await screen.findByTestId("single-chat");
 
     expect(workspaceView).toHaveAttribute("data-chat-id", "normal-chat-1");
-    expect(screen.queryByTestId("single-chat")).not.toBeInTheDocument();
+    expect(workspaceView.closest("[data-surface-key]")).toHaveAttribute(
+      "data-surface-key",
+      `chat:${workspaceView.getAttribute("data-chat-id") ?? ""}`,
+    );
   });
 
-  it("routes task and buddy tabs to their existing full pages", async () => {
+  it("renders task and Buddy inside workspace panes from global tabs", async () => {
     const { store, user } = renderAppWithNavigationTabs();
 
-    await screen.findByTestId("workspace-view");
+    await screen.findByTestId("single-chat");
+    await screen.findByRole("tab", { name: /Task Alpha/ });
+    expect(
+      screen.getByRole("tablist", { name: "Workspace tabs" }),
+    ).toBeInTheDocument();
     await user.click(screen.getByRole("tab", { name: /Task Alpha/ }));
 
-    expect(store.getState().pages.at(-1)).toEqual({
-      name: "task workspace",
-      taskId: "task-a",
-    });
+    expect(store.getState().pages.at(-1)).toEqual({ name: "chat" });
+    await waitFor(() =>
+      expect(
+        document.querySelector('[data-surface-key="task:task-a"]'),
+      ).toBeInTheDocument(),
+    );
     expect(await screen.findByTestId("task-workspace")).toHaveAttribute(
       "data-task-id",
       "task-a",
     );
-    expect(screen.queryByTestId("workspace-view")).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Pane actions" }),
+    ).toBeInTheDocument();
 
     await user.click(screen.getByRole("tab", { name: /Buddy/ }));
 
-    expect(store.getState().pages.at(-1)).toEqual({ name: "buddy" });
+    expect(store.getState().pages.at(-1)).toEqual({ name: "chat" });
     expect(await screen.findByTestId("buddy-home")).toBeInTheDocument();
-    expect(screen.queryByTestId("workspace-view")).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Pane actions" }),
+    ).toBeInTheDocument();
   });
 });

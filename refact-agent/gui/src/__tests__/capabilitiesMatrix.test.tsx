@@ -10,6 +10,8 @@ import {
   hydrateWorkspace,
   openTab,
   reconcileWorkspace,
+  selectActiveGroup,
+  selectFocusedWorkspaceSurfaceKey,
   setActiveTab,
 } from "../features/Workspace/workspaceSlice";
 import {
@@ -18,6 +20,8 @@ import {
 } from "../hooks/useOpenFileInApp";
 import { resolveCapabilities } from "../utils/capabilities";
 import { render, screen } from "../utils/test-utils";
+
+import { collectTabIds } from "../features/ChatPanes/panesTree";
 
 const WEB_CAPABILITIES: Capabilities = {
   filesPanel: true,
@@ -313,11 +317,11 @@ describe("persisted panel tabs respect capability revocation", () => {
       }),
     );
 
-    expect(store.getState().workspace.tabs).toEqual([
-      chat("chat-a"),
-      "git:main",
-    ]);
-    expect(store.getState().workspace.activeTabId).toBe("git:main");
+    expect(store.getState().workspace.tabs).toEqual([chat("chat-a")]);
+    const group = selectActiveGroup(store.getState());
+    if (!group) throw new Error("Expected a hydrated workspace group");
+    expect(collectTabIds(group.root)).toEqual(["git:main", chat("chat-a")]);
+    expect(selectFocusedWorkspaceSurfaceKey(store.getState())).toBe("git:main");
     expect(store.getState().workspace.drawer?.open).toBe(true);
   });
 

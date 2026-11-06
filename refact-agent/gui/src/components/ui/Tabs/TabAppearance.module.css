@@ -1,0 +1,175 @@
+.strip {
+  box-sizing: border-box;
+  height: var(--rf-control-h);
+  min-height: var(--rf-control-h);
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.item {
+  position: relative;
+  box-sizing: border-box;
+  height: var(--rf-control-h);
+  min-height: var(--rf-control-h);
+  padding: 0 var(--rf-space-2);
+  border: var(--rf-hairline) solid transparent;
+  border-radius: var(--rf-radius-ctl) var(--rf-radius-ctl) 0 0;
+  background: transparent;
+  color: var(--rf-color-muted);
+  font: var(--rf-weight-regular) var(--rf-text-2) / var(--rf-line-2)
+    var(--rf-font-ui);
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.item::after {
+  position: absolute;
+  inset: var(--rf-space-2) 0 var(--rf-space-2) auto;
+  width: var(--rf-hairline);
+  background: var(--rf-border);
+  pointer-events: none;
+  content: "";
+}
+
+.item:last-child::after,
+.item:hover::after,
+.item:focus-within::after,
+.active::after,
+.item[data-state="active"]::after,
+.item[aria-selected="true"]::after,
+.item:has(
+    + :is(.active, [data-state="active"], [aria-selected="true"])
+  )::after {
+  opacity: var(--rf-motion-opacity-hidden);
+}
+
+.item:disabled,
+.item[data-disabled] {
+  color: var(--rf-color-faint);
+  cursor: not-allowed;
+}
+
+.item:focus-visible {
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
+  outline-offset: calc(-1 * var(--rf-focus-ring-w));
+}
+
+.item:hover:not(:disabled, [data-disabled]) {
+  background: transparent;
+  color: var(--rf-color-fg);
+}
+
+.item:global(.rf-pressable):is(:hover, :active) {
+  transform: none;
+}
+
+.active,
+.item[data-state="active"],
+.item[aria-selected="true"],
+.active:hover:not(:disabled, [data-disabled]),
+.item:is([data-state="active"], [aria-selected="true"]):hover:not(
+    :disabled,
+    [data-disabled]
+  ) {
+  background: transparent;
+  border-color: var(--rf-border-strong);
+  color: var(--rf-color-fg);
+  box-shadow: none;
+}
+
+.action {
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: var(--rf-control-h);
+  padding: 0 var(--rf-space-2);
+  border: 0;
+  border-radius: var(--rf-radius-chip);
+  background: transparent;
+  color: var(--rf-color-muted);
+  font: var(--rf-weight-regular) var(--rf-text-2) / var(--rf-line-2)
+    var(--rf-font-ui);
+  cursor: pointer;
+}
+
+.action:focus-visible {
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
+  outline-offset: calc(-1 * var(--rf-focus-ring-w));
+}
+
+.action:hover:not(:disabled) {
+  background: var(--rf-surface-3);
+  color: var(--rf-color-fg);
+}
+
+.close {
+  position: relative;
+  width: var(--rf-control-h-icon-sm);
+  min-width: var(--rf-control-h-icon-sm);
+  padding: 0;
+  border-radius: var(--rf-radius-pill);
+  opacity: var(--rf-motion-opacity-hidden);
+}
+
+.close::before {
+  position: absolute;
+  inset: var(--rf-space-1);
+  border-radius: var(--rf-radius-pill);
+  background: transparent;
+  content: "";
+}
+
+.close > svg {
+  position: relative;
+}
+
+.close:focus-visible {
+  opacity: var(--rf-motion-opacity-visible);
+}
+
+.close:hover:not(:disabled) {
+  background: transparent;
+}
+
+.close:hover:not(:disabled)::before {
+  background: var(--rf-surface-3);
+}
+
+@media (hover: none), (pointer: coarse) {
+  .close {
+    opacity: var(--rf-motion-opacity-visible);
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .item,
+  .item:global(.rf-pressable),
+  .action,
+  .close::before {
+    transition:
+      background-color var(--rf-dur-fast) var(--rf-ease-standard),
+      border-color var(--rf-dur-fast) var(--rf-ease-standard),
+      color var(--rf-dur-fast) var(--rf-ease-standard),
+      box-shadow var(--rf-dur-fast) var(--rf-ease-standard),
+      opacity var(--rf-dur-fast) var(--rf-ease-standard);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .item,
+  .item:global(.rf-pressable),
+  .action,
+  .close,
+  .close::before {
+    transition: none;
+  }
+}
+
+:global(html[data-reduced-motion="on"]) :is(.item, .action, .close),
+:global(html[data-reduced-motion="on"]) .close.close::before {
+  transition: none;
+}

@@ -54,7 +54,9 @@ function indexDotStatus(
   return indexDotStatusFromAlive(alive ?? "");
 }
 
-export const EngineStatusChip: React.FC = () => {
+export const EngineStatusChip: React.FC<{ compact?: boolean }> = ({
+  compact = false,
+}) => {
   const dispatch = useAppDispatch();
   const config = useAppSelector(selectConfig);
   const openUrl = useOpenUrl();
@@ -97,7 +99,11 @@ export const EngineStatusChip: React.FC = () => {
             <button
               type="button"
               aria-label="Engine status"
-              className={classNames(styles.chip, "rf-pressable")}
+              className={classNames(
+                styles.chip,
+                compact && styles.compact,
+                "rf-pressable",
+              )}
             >
               <StatusDot status={connectionStatus} size="small" />
               <StatusDot status={indexStatus} size="small" />

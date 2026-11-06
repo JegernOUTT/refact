@@ -9,7 +9,7 @@
   color: var(--rf-color-fg);
 }
 
-.page :is(button, [role="tab"], select, input, summary) {
+.page :is(button, select, input, summary):not([role="tab"]) {
   min-height: var(--rf-hit-min);
   min-width: var(--rf-hit-min);
 }
@@ -66,21 +66,6 @@
 
 .tabsList [role="tab"] {
   scroll-snap-align: start;
-}
-
-.tabsList [role="tab"]:hover:not([data-state="active"]) {
-  background: var(--rf-surface-1);
-}
-
-@media (max-width: 480px) {
-  .sections > .tabsList {
-    padding: var(--rf-space-2xs);
-  }
-
-  .tabsList [role="tab"] {
-    padding: 0 var(--rf-space-1);
-    font-size: var(--rf-text-1);
-  }
 }
 
 @media (max-width: 359px) {

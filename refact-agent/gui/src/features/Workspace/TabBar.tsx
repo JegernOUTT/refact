@@ -1,3 +1,4 @@
+import { displayInfoForSurface } from "./tabDisplay";
 import classNames from "classnames";
 import {
   FileDiff,
@@ -30,11 +31,7 @@ import {
   selectCurrentPage,
   selectPages,
 } from "../Pages/pagesSlice";
-import {
-  selectAllThreads,
-  selectTabsDisplayData,
-  type TabDisplayData,
-} from "../Chat/Thread";
+import { selectAllThreads, selectTabsDisplayData } from "../Chat/Thread";
 import {
   collectLeafIds,
   collectTabIds,
@@ -46,6 +43,7 @@ import {
   setTabDragData,
   surfaceKeyFromTabDragPayload,
   type TabDragPayload,
+  type TabDragKind,
 } from "../ChatPanes/tabDrag";
 import {
   beginPointerDragGesture,
@@ -57,7 +55,6 @@ import {
   closeTask,
   reorderOpenTasks,
   selectOpenTasksFromRoot,
-  type OpenTask,
 } from "../Tasks/tasksSlice";
 import {
   closeTab,
@@ -72,69 +69,18 @@ import {
   type PaneGroup,
 } from "./workspaceSlice";
 import {
-  gitDiffDescriptorFromSurfaceKey,
   isMainSurfaceKind,
   makeSurfaceKey,
   parseSurfaceKey,
-  type MainSurfaceKind,
   type SurfaceKey,
 } from "./surfaceKey";
-import {
-  gitDiffTitle,
-  gitDiffTooltip,
-} from "./GitPanel/diff/gitDiffDescriptor";
 import { resolveWorkspaceDockAvailability } from "./workspaceAvailability";
-import {
-  activityFromSessionState,
-  getChatActivity,
-  type ChatActivity,
-} from "../../utils/chatActivity";
+import { activityFromSessionState } from "../../utils/chatActivity";
 import { ChatActivityStatus } from "../../components/ChatActivity/ChatActivityStatus";
 import styles from "./TabBar.module.css";
 
 const BUDDY_SURFACE_KEY = makeSurfaceKey("buddy", "home");
 const TAB_CLOSE_FALLBACK_MS = 250;
-
-type TabSurfaceKind =
-  | "chat"
-  | "task"
-  | "buddy"
-  | "dashboard"
-  | "design"
-  | "file"
-  | "gitdiff"
-  | MainSurfaceKind;
-
-const MAIN_SURFACE_INFO = { git: { title: "Git" } } as const;
-
-const pathBasename = (path: string): string => {
-  const normalized = path.replace(/\\/g, "/");
-  return normalized.slice(normalized.lastIndexOf("/") + 1) || path;
-};
-
-type DisplayInfo = {
-  title: string;
-  tooltip?: string;
-  kind: TabSurfaceKind;
-  session_state?: string;
-  activity?: ChatActivity;
-  is_buddy_chat?: boolean;
-  is_task_chat?: boolean;
-  unreadNotificationCount: number;
-};
-
-function fallbackSurfaceTitle(surfaceKey: SurfaceKey): string {
-  try {
-    const parsed = parseSurfaceKey(surfaceKey);
-    if (parsed.kind === "dashboard") return "Dashboard";
-    if (parsed.kind === "buddy") return "Buddy";
-    if (parsed.kind === "gitdiff") return "Diff";
-    const prefix = parsed.kind[0].toUpperCase();
-    return `${prefix}${parsed.kind.slice(1)} ${parsed.id}`;
-  } catch {
-    return surfaceKey;
-  }
-}
 
 function activeGroupSurfaceKey(group: PaneGroup): SurfaceKey | null {
   const focusedLeaf = findLeaf(group.root, group.focusedLeafId);
@@ -152,18 +98,8 @@ function uniqueSurfaceKeys(keys: SurfaceKey[]): SurfaceKey[] {
   });
 }
 
-function taskSessionState(task: OpenTask | undefined): string | undefined {
-  const activeChat = task?.activeChat;
-  if (activeChat?.type === "planner") {
-    return task?.plannerChats.find(
-      (planner) => planner.id === activeChat.chatId,
-    )?.sessionState;
-  }
-  return task?.plannerChats[0]?.sessionState;
-}
-
 function tabDragPayloadForSurface(surfaceKey: SurfaceKey): {
-  type: "chat" | "task" | "buddy" | "surface";
+  type: TabDragKind;
   id: string;
 } {
   try {
@@ -171,7 +107,6 @@ function tabDragPayloadForSurface(surfaceKey: SurfaceKey): {
     if (
       parsed.kind === "dashboard" ||
       parsed.kind === "design" ||
-      parsed.kind === "file" ||
       parsed.kind === "gitdiff" ||
       isMainSurfaceKind(parsed.kind)
     ) {
@@ -181,101 +116,6 @@ function tabDragPayloadForSurface(surfaceKey: SurfaceKey): {
   } catch {
     return { type: "surface", id: surfaceKey };
   }
-}
-
-function displayInfoForSurface(
-  surfaceKey: SurfaceKey,
-  tabsById: ReadonlyMap<string, TabDisplayData>,
-  threads: ReturnType<typeof selectAllThreads>,
-  tasksById: ReadonlyMap<string, OpenTask>,
-): DisplayInfo {
-  let parsed: ReturnType<typeof parseSurfaceKey>;
-  try {
-    parsed = parseSurfaceKey(surfaceKey);
-  } catch {
-    return {
-      title: fallbackSurfaceTitle(surfaceKey),
-      kind: "dashboard",
-      unreadNotificationCount: 0,
-    };
-  }
-
-  if (parsed.kind === "task") {
-    const task = tasksById.get(parsed.id);
-    return {
-      title: task?.name ?? fallbackSurfaceTitle(surfaceKey),
-      kind: "task",
-      session_state: taskSessionState(task),
-      unreadNotificationCount: 0,
-    };
-  }
-
-  if (parsed.kind === "buddy") {
-    return {
-      title: "Buddy",
-      kind: "buddy",
-      unreadNotificationCount: 0,
-    };
-  }
-
-  if (parsed.kind === "dashboard") {
-    return {
-      title: "Dashboard",
-      kind: "dashboard",
-      unreadNotificationCount: 0,
-    };
-  }
-
-  if (parsed.kind === "design") {
-    return {
-      title: parsed.id === "main" ? "Design" : `Design ${parsed.id}`,
-      kind: "design",
-      unreadNotificationCount: 0,
-    };
-  }
-
-  if (parsed.kind === "file") {
-    return {
-      title: pathBasename(parsed.id),
-      kind: "file",
-      unreadNotificationCount: 0,
-    };
-  }
-
-  if (parsed.kind === "gitdiff") {
-    const descriptor = gitDiffDescriptorFromSurfaceKey(surfaceKey);
-    return {
-      title: descriptor ? gitDiffTitle(descriptor) : "Diff",
-      tooltip: descriptor ? gitDiffTooltip(descriptor) : undefined,
-      kind: "gitdiff",
-      unreadNotificationCount: 0,
-    };
-  }
-
-  if (isMainSurfaceKind(parsed.kind)) {
-    return {
-      title: MAIN_SURFACE_INFO[parsed.kind].title,
-      kind: parsed.kind,
-      unreadNotificationCount: 0,
-    };
-  }
-
-  const chatId = surfaceKey.slice("chat:".length);
-  const tab = tabsById.get(chatId);
-  if (tab) {
-    return { ...tab, kind: "chat" };
-  }
-
-  const runtime = threads[chatId];
-  return {
-    title: runtime?.thread.title ?? fallbackSurfaceTitle(surfaceKey),
-    kind: "chat",
-    session_state: runtime?.session_state,
-    activity: getChatActivity(runtime),
-    is_buddy_chat: Boolean(runtime?.thread.buddy_meta?.is_buddy_chat),
-    is_task_chat: Boolean(runtime?.thread.is_task_chat),
-    unreadNotificationCount: 0,
-  };
 }
 
 function sameKindLabel(title: string, kind: string): boolean {

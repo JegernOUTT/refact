@@ -591,12 +591,12 @@ export const KitTabs: React.FC<{
   label?: string;
 }> = ({ value, onValueChange, tabs, label }) => (
   <TabsPrimitive.Root value={value} onValueChange={onValueChange}>
-    <TabsPrimitive.List className={styles.segmented} aria-label={label}>
+    <TabsPrimitive.List className={styles.tabsList} aria-label={label}>
       {tabs.map((tab) => (
         <TabsPrimitive.Trigger
           key={tab.value}
           value={tab.value}
-          className={styles.segment}
+          className={styles.tabTrigger}
         >
           {tab.label}
         </TabsPrimitive.Trigger>

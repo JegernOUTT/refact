@@ -1,26 +1,18 @@
 .tabBar {
+  composes: strip from "../../components/ui/Tabs/TabAppearance.module.css";
+
   --tab-min-w: 96px;
 
   display: flex;
   align-items: center;
   width: 100%;
   min-width: 0;
-  min-height: var(--rf-control-h-lg);
-  padding: var(--rf-space-1) var(--rf-space-2);
   color: var(--rf-color-fg);
-  background: var(--rf-surface-glass);
-  border-bottom: var(--rf-hairline) solid var(--rf-border);
-  backdrop-filter: blur(var(--rf-blur-overlay));
 }
 
 .toolbarTabBar {
   flex: 1 1 auto;
-  min-height: 100%;
-  height: 100%;
   padding: 0;
-  background: transparent;
-  border-bottom: 0;
-  backdrop-filter: none;
 }
 
 :global(.radix-themes[data-host="jetbrains"]).tabBar {
@@ -55,9 +47,9 @@
   display: flex;
   align-items: center;
   flex: 0 0 auto;
-  gap: var(--rf-space-1);
+  gap: 0;
   min-width: min-content;
-  min-height: calc(var(--rf-control-h-lg) - var(--rf-space-1));
+  min-height: var(--rf-control-h);
 }
 
 .toolbarTabBar .tabList {
@@ -65,6 +57,8 @@
 }
 
 .tabWrap {
+  composes: item from "../../components/ui/Tabs/TabAppearance.module.css";
+  padding: 0;
   position: relative;
   display: flex;
   align-items: center;
@@ -81,22 +75,6 @@
 .toolbarTabBar .tabWrap {
   flex-basis: calc(var(--rf-nav-w-min) - var(--rf-space-6));
   max-width: var(--rf-nav-w);
-}
-
-.tabWrap::after {
-  position: absolute;
-  inset-inline: var(--rf-space-2)
-    calc(var(--rf-control-h-sm) + var(--rf-space-2));
-  bottom: calc(-1 * var(--rf-space-1));
-  height: var(--rf-hairline);
-  background: var(--rf-color-accent);
-  border-radius: var(--rf-radius-pill);
-  content: "";
-  opacity: var(--rf-motion-opacity-hidden);
-  pointer-events: none;
-  transform: translateX(calc(-1 * var(--rf-motion-distance-sm)))
-    scaleX(var(--rf-motion-scale-none));
-  transform-origin: left center;
 }
 
 .tabWrapDragging {
@@ -118,52 +96,26 @@
 }
 
 .tabButton {
-  display: flex;
-  align-items: center;
+  composes: action from "../../components/ui/Tabs/TabAppearance.module.css";
   width: 100%;
   min-width: 0;
-  min-height: var(--rf-control-h);
+  justify-content: flex-start;
   gap: var(--rf-space-1);
   padding: 0 calc(var(--rf-control-h-sm) + var(--rf-space-1)) 0
     var(--rf-space-2);
-  color: var(--rf-color-muted);
+  color: inherit;
+}
+
+.tabWrap .tabButton:hover:not(:disabled) {
   background: transparent;
-  border: var(--rf-hairline) solid transparent;
-  border-radius: var(--rf-radius-card);
-  font: var(--rf-weight-semibold) var(--rf-text-2) / var(--rf-line)
-    var(--rf-font-ui);
-  cursor: pointer;
 }
 
-.tabButton:hover,
-.tabWrapDropTarget .tabButton {
-  color: var(--rf-color-fg);
-  background: var(--rf-surface-1);
-}
-
-.tabButton:focus-visible {
-  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
-  outline-offset: calc(-1 * var(--rf-hairline));
-}
-
-.tabWrapActive::after {
-  opacity: var(--rf-motion-opacity-visible);
-  transform: translateX(var(--rf-motion-distance-none))
-    scaleX(var(--rf-motion-scale-active));
-}
-
-.tabWrapActive .tabButton {
-  color: var(--rf-color-fg);
-  background: var(--rf-surface-2);
-  border-color: var(--rf-border);
-}
-
-.tabWrapGroup .tabButton {
-  border-color: var(--rf-color-accent);
-}
-
-.tabWrapActive.tabWrapGroup .tabButton {
+.tabWrapDropTarget {
   background: var(--rf-color-accent-soft);
+}
+
+.tabWrapActive {
+  composes: active from "../../components/ui/Tabs/TabAppearance.module.css";
 }
 
 .tabStatus {
@@ -193,37 +145,21 @@
 }
 
 .tabClose {
+  composes: action close from "../../components/ui/Tabs/TabAppearance.module.css";
   position: absolute;
   inset-inline-end: var(--rf-space-1);
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
   width: var(--rf-control-h-sm);
   height: var(--rf-control-h-sm);
   padding: 0;
-  color: var(--rf-color-muted);
-  background: transparent;
-  border: 0;
-  border-radius: var(--rf-radius-ctl);
-  cursor: pointer;
-  opacity: var(--rf-motion-opacity-soft);
 }
 
-.tabClose:hover,
-.tabClose:focus-visible {
-  color: var(--rf-color-fg);
-  background: var(--rf-surface-2);
+.tabWrap:hover .tabClose,
+.tabWrap:focus-within .tabClose {
   opacity: var(--rf-motion-opacity-visible);
 }
 
-.tabClose:focus-visible {
-  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
-  outline-offset: calc(-1 * var(--rf-hairline));
-}
-
 @media (prefers-reduced-motion: no-preference) {
-  .tabWrap,
-  .tabWrap::after {
+  .tabWrap {
     transition:
       opacity var(--rf-dur-fast) var(--rf-ease-standard),
       transform var(--rf-dur-fast) var(--rf-ease-standard);
@@ -241,7 +177,6 @@
 
 @media (prefers-reduced-motion: reduce) {
   .tabWrap,
-  .tabWrap::after,
   .tabButton,
   .tabClose,
   .groupBadge {
@@ -255,17 +190,6 @@
     opacity: var(--rf-motion-opacity-visible);
     transform: translateX(var(--rf-motion-distance-none))
       scale(var(--rf-motion-scale-active));
-  }
-}
-
-@media (prefers-reduced-transparency: reduce) {
-  .tabBar {
-    background: var(--rf-surface-2);
-    backdrop-filter: none;
-  }
-
-  .toolbarTabBar {
-    background: transparent;
   }
 }
 

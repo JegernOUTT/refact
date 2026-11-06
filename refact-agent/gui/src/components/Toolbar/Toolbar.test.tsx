@@ -17,6 +17,7 @@ import {
   setPanelsForced,
   setDockOpen,
   setActiveTab,
+  selectFocusedWorkspaceSurfaceKey,
 } from "../../features/Workspace";
 import type { TaskMeta } from "../../services/refact/tasks";
 
@@ -203,7 +204,7 @@ describe("Dropdown navigation", () => {
   });
 });
 
-describe("Toolbar single workspace tab row", () => {
+describe("Toolbar pane-only workspace navigation", () => {
   it("does not render the standalone Agents toolbar badge", () => {
     useToolbarHandlers();
     const view = renderToolbar({ type: "chat", id: "chat-1" });
@@ -297,7 +298,7 @@ describe("Toolbar single workspace tab row", () => {
     });
   });
 
-  it("renders the unified workspace tab bar on chat and task pages without legacy KitTabs", () => {
+  it("keeps chat and task navigation in the top rich tab row", async () => {
     useToolbarHandlers();
     const activeTab = { type: "chat" as const, id: "chat-a" };
     const view = renderToolbar(activeTab);
@@ -313,12 +314,16 @@ describe("Toolbar single workspace tab row", () => {
     });
     rerenderToolbar(view, activeTab);
 
-    expect(screen.getAllByRole("tablist")).toHaveLength(1);
     expect(
-      screen.getByRole("tablist", { name: "Open workspace tabs" }),
+      screen.getByRole("tablist", { name: "Workspace tabs" }),
     ).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: /Chat Alpha/ })).toBeInTheDocument();
-    expect(screen.getByRole("tab", { name: /Task Alpha/ })).toBeInTheDocument();
+    await view.user.click(screen.getByRole("tab", { name: /Task Alpha/ }));
+    expect(view.store.getState().pages.at(-1)).toEqual({ name: "chat" });
+    expect(selectFocusedWorkspaceSurfaceKey(view.store.getState())).toBe(
+      makeSurfaceKey("task", "task-a"),
+    );
+    expect(view.store.getState().workspace.activeTabId).toBe(chatA);
 
     act(() => {
       view.store.dispatch(push({ name: "task workspace", taskId: "task-a" }));
@@ -329,14 +334,16 @@ describe("Toolbar single workspace tab row", () => {
       taskName: "Task Alpha",
     });
 
-    expect(screen.getAllByRole("tablist")).toHaveLength(1);
-    expect(screen.getByRole("tab", { name: /Task Alpha/ })).toHaveAttribute(
-      "aria-selected",
-      "true",
-    );
+    expect(
+      screen.getByRole("tablist", { name: "Workspace tabs" }),
+    ).toBeInTheDocument();
+    await view.user.click(screen.getByRole("tab", { name: /Chat Alpha/ }));
+    expect(view.store.getState().pages.at(-1)).toEqual({ name: "chat" });
+    expect(view.store.getState().workspace.activeTabId).toBe(chatA);
+    expect(selectFocusedWorkspaceSurfaceKey(view.store.getState())).toBe(chatA);
   });
 
-  it("renders the unified workspace tab bar on dashboard when tabs are open", () => {
+  it("offers chat and task navigation on dashboard in the top rich row", async () => {
     useToolbarHandlers();
     const view = renderToolbar({ type: "dashboard" });
     const chatA = makeSurfaceKey("chat", "chat-a");
@@ -351,12 +358,12 @@ describe("Toolbar single workspace tab row", () => {
     });
     rerenderToolbar(view, { type: "dashboard" });
 
-    expect(screen.getAllByRole("tablist")).toHaveLength(1);
     expect(
-      screen.getByRole("tablist", { name: "Open workspace tabs" }),
+      screen.getByRole("tablist", { name: "Workspace tabs" }),
     ).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: /Chat Alpha/ })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: /Task Alpha/ })).toBeInTheDocument();
+    await view.user.keyboard("{Escape}");
     expect(screen.getByRole("button", { name: "Home" })).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "New Chat" }),
@@ -366,7 +373,7 @@ describe("Toolbar single workspace tab row", () => {
     ).toBeInTheDocument();
   });
 
-  it("renders only the panel launcher in the tab strip on dashboard with no tabs", () => {
+  it("keeps the empty dashboard free of tabs and legacy panel launchers", () => {
     useToolbarHandlers();
     renderToolbar({ type: "dashboard" });
 
@@ -392,15 +399,20 @@ describe("Toolbar single workspace tab row", () => {
     });
   });
 
-  it("renders a launcher-only tab strip instead of a spacer when no tabs are open", () => {
+  it("renders Open views and a spacer without an empty tab strip", () => {
     useToolbarHandlers();
     renderToolbar({ type: "dashboard" });
 
     expect(screen.queryByRole("tab")).not.toBeInTheDocument();
-    expect(screen.getByRole("tablist")).toBeInTheDocument();
+    expect(
+      screen.getByRole("tablist", { name: "Workspace tabs" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("tablist", { name: "Workspace tabs" }),
+    ).toBeInTheDocument();
   });
 
-  it("drops the spacer when the workspace tab bar takes over the row", () => {
+  it("retains the toolbar spacer when workspace panes contain open tabs", () => {
     useToolbarHandlers();
     const view = renderToolbar({ type: "dashboard" });
     const chatA = makeSurfaceKey("chat", "chat-a");
@@ -414,10 +426,12 @@ describe("Toolbar single workspace tab row", () => {
     });
     rerenderToolbar(view, { type: "dashboard" });
 
-    expect(screen.getByRole("tablist")).toBeInTheDocument();
     expect(
-      view.container.querySelector('[data-element="ToolbarSpacer"]'),
-    ).not.toBeInTheDocument();
+      screen.getByRole("tablist", { name: "Workspace tabs" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("tablist", { name: "Workspace tabs" }),
+    ).toBeInTheDocument();
   });
 
   it("keeps Home, New Chat, New Task, theme, and menu actions functional", async () => {
@@ -589,7 +603,7 @@ describe("Toolbar chrome containment", () => {
       resolve(process.cwd(), "src", "components/Toolbar/Toolbar.module.css"),
       "utf8",
     );
-    const match = /\.toolbarSpacer \{[^}]*\}/.exec(css);
+    const match = /\.toolbarTabs \{[^}]*\}/.exec(css);
     expect(match).not.toBeNull();
     const block = match?.[0] ?? "";
     expect(block).toContain("flex: 1 1 auto");

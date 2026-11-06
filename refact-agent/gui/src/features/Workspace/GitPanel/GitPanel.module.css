@@ -58,8 +58,6 @@
 
 .tabList {
   width: auto;
-  padding: var(--rf-space-2xs);
-  box-shadow: none;
 }
 
 .rootPicker {

@@ -1,0 +1,169 @@
+.header {
+  composes: strip from "../../components/ui/Tabs/TabAppearance.module.css";
+  container-type: inline-size;
+  position: relative;
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+  min-width: 0;
+  overflow: clip;
+}
+
+.tabs {
+  position: relative;
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.tab {
+  composes: item from "../../components/ui/Tabs/TabAppearance.module.css";
+  position: relative;
+  transform-origin: center;
+  transition:
+    transform var(--rf-dur-med) var(--rf-ease-standard),
+    opacity var(--rf-dur-med) var(--rf-ease-standard),
+    background-color var(--rf-dur-fast) var(--rf-ease-standard),
+    color var(--rf-dur-fast) var(--rf-ease-standard),
+    box-shadow var(--rf-dur-fast) var(--rf-ease-standard);
+  padding: 0;
+  display: flex;
+  align-items: center;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: calc(var(--rf-space-6) * 8);
+}
+
+.tabButton {
+  composes: action from "../../components/ui/Tabs/TabAppearance.module.css";
+  height: 100%;
+  min-width: 0;
+  gap: var(--rf-space-2);
+  flex: 1 1 auto;
+  color: inherit;
+}
+
+.overflow {
+  composes: action from "../../components/ui/Tabs/TabAppearance.module.css";
+}
+
+.title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.active {
+  composes: active from "../../components/ui/Tabs/TabAppearance.module.css";
+}
+
+.tab .tabButton:hover:not(:disabled) {
+  background: transparent;
+}
+
+.tabButton[aria-selected="true"] {
+  color: var(--rf-color-fg);
+}
+
+.close {
+  composes: action close from "../../components/ui/Tabs/TabAppearance.module.css";
+  height: 100%;
+  flex: 0 0 auto;
+  padding-inline: 0;
+}
+
+.active .close,
+.tab:hover .close,
+.tab:focus-within .close {
+  opacity: var(--rf-motion-opacity-visible);
+}
+
+.previewActions,
+.actions,
+.overflow {
+  flex: 0 0 auto;
+}
+
+@container (max-width: 240px) {
+  .close {
+    display: none;
+  }
+}
+
+.actions {
+  padding-inline: var(--rf-space-1);
+}
+
+.dropTarget {
+  background: var(--rf-color-accent-soft);
+}
+
+.measure {
+  position: absolute;
+  visibility: hidden;
+  pointer-events: none;
+  display: flex;
+  width: max-content;
+  inset: 0 auto auto 0;
+}
+
+.measure .tab {
+  flex: none;
+}
+
+.entering {
+  animation: tab-enter var(--rf-dur-med) var(--rf-ease-standard) backwards;
+}
+
+.ghost {
+  position: absolute;
+  pointer-events: none;
+  user-select: none;
+  flex: none;
+  animation: tab-exit var(--rf-dur-med) var(--rf-ease-standard) forwards;
+}
+
+@keyframes tab-exit {
+  from {
+    transform: translateY(var(--rf-motion-distance-none))
+      scale(var(--rf-motion-scale-active));
+    opacity: var(--rf-motion-opacity-visible);
+  }
+
+  to {
+    transform: translateY(calc(-1 * var(--rf-motion-distance-sm)))
+      scale(var(--rf-motion-scale-enter));
+    opacity: var(--rf-motion-opacity-hidden);
+  }
+}
+
+@keyframes tab-enter {
+  from {
+    transform: translateY(var(--rf-motion-distance-sm))
+      scale(var(--rf-motion-scale-enter));
+    opacity: var(--rf-motion-opacity-hidden);
+  }
+
+  to {
+    transform: translateY(var(--rf-motion-distance-none))
+      scale(var(--rf-motion-scale-active));
+    opacity: var(--rf-motion-opacity-visible);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tab {
+    animation: none;
+    transition: none;
+    transform: none;
+  }
+}
+
+:global(html[data-reduced-motion="true"]) .tab,
+:global(html[data-reduced-motion="on"]) .tab {
+  animation: none;
+  transition: none;
+  transform: none;
+}

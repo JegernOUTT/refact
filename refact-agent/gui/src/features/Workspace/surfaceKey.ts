@@ -18,6 +18,15 @@ export type PrefixedSurfaceKind =
   | "gitdiff";
 export type SurfaceKind = PrefixedSurfaceKind | "dashboard" | MainSurfaceKind;
 export type SurfaceKey = string;
+export type TaskSurfaceKey = `task:${string}`;
+export type BuddySurfaceKey = "buddy:home";
+export type PaneSurfaceKey =
+  | ChatSurfaceKey
+  | FileSurfaceKey
+  | TaskSurfaceKey
+  | BuddySurfaceKey
+  | DesignSurfaceKey
+  | MainSurfaceKey;
 export type ChatSurfaceKey = `chat:${string}`;
 export type DesignSurfaceKey = `design:${string}`;
 export type FileSurfaceKey = `file:${string}`;
@@ -92,7 +101,10 @@ export function parseSurfaceKey(key: SurfaceKey): ParsedSurfaceKey {
     throw new Error(`invalid surface key: ${key}`);
   }
 
-  if (kind === "gitdiff" && !decodeGitDiffDescriptor(id)) {
+  if (
+    (kind === "buddy" && id !== "home") ||
+    (kind === "gitdiff" && !decodeGitDiffDescriptor(id))
+  ) {
     throw new Error(`invalid surface key: ${key}`);
   }
 
@@ -111,13 +123,21 @@ export const gitDiffDescriptorFromSurfaceKey = (
     : null;
 
 export const isGitDiffSurface = (key: SurfaceKey): key is GitDiffSurfaceKey =>
-  key.startsWith("gitdiff:") && key.length > "gitdiff:".length;
+  gitDiffDescriptorFromSurfaceKey(key) !== null;
 
 export const isChatSurface = (key: SurfaceKey): key is ChatSurfaceKey =>
   key.startsWith("chat:") && key.length > "chat:".length;
 
 export const isFileSurface = (key: SurfaceKey): key is FileSurfaceKey =>
   key.startsWith("file:") && key.length > "file:".length;
+
+export const isSplittableSurface = (key: SurfaceKey): key is PaneSurfaceKey => {
+  try {
+    return parseSurfaceKey(key).kind !== "dashboard";
+  } catch {
+    return false;
+  }
+};
 
 export const isDesignSurface = (key: SurfaceKey): key is DesignSurfaceKey =>
   key.startsWith("design:") && key.length > "design:".length;
@@ -134,23 +154,18 @@ export const isGitSurface = (key: SurfaceKey): key is "git:main" =>
 export const isTerminalSurface = (key: SurfaceKey): boolean =>
   key === "terminal:main";
 
-export const isWorkspaceSurface = (
-  key: SurfaceKey,
-): key is ChatSurfaceKey | DesignSurfaceKey | FileSurfaceKey | MainSurfaceKey =>
-  isChatSurface(key) ||
-  isDesignSurface(key) ||
-  isFileSurface(key) ||
-  isGitSurface(key) ||
-  isGitDiffSurface(key);
+export const isWorkspaceSurface = (key: SurfaceKey): key is PaneSurfaceKey =>
+  isSplittableSurface(key);
 
 export const isWorkspaceSurfaceEnabled = (
   key: SurfaceKey,
   capabilities: WorkspaceCapabilities,
-): boolean =>
-  isChatSurface(key) ||
-  isDesignSurface(key) ||
-  (isFileSurface(key) && capabilities.filesPanel) ||
-  isMainSurfaceEnabled(key, capabilities);
+): boolean => {
+  if (!isWorkspaceSurface(key)) return false;
+  if (isFileSurface(key)) return capabilities.filesPanel;
+  if (isMainSurface(key)) return isMainSurfaceEnabled(key, capabilities);
+  return true;
+};
 
 export const isMainSurfaceEnabled = (
   key: SurfaceKey,

@@ -31,11 +31,18 @@ export const flattenVisibleTree = (
 };
 
 export const parentDirectoryPath = (path: string): string | null => {
-  const normalized = path.replace(/\\/g, "/").replace(/\/$/, "");
+  const normalized = path.replace(/\\/g, "/").replace(/\/+$/u, "");
+  if (
+    !normalized ||
+    /^[A-Za-z]:$/u.test(normalized) ||
+    /^\/\/[^/]+\/[^/]+$/u.test(normalized)
+  )
+    return null;
   const index = normalized.lastIndexOf("/");
   if (index < 0) return null;
   if (index === 0) return "/";
-  return normalized.slice(0, index);
+  const parent = normalized.slice(0, index);
+  return /^[A-Za-z]:$/u.test(parent) ? `${parent}/` : parent;
 };
 
 export const pathBasename = (path: string): string => {

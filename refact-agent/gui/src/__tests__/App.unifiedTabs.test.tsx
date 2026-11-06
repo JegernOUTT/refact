@@ -1,3 +1,4 @@
+import { openFileInFilesPanel } from "../features/Workspace/FilesPanel/filesPanelSlice";
 import { http, HttpResponse } from "msw";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -11,7 +12,13 @@ import {
 import { setBackendStatus } from "../features/Connection";
 import { push } from "../features/Pages/pagesSlice";
 import { openTask } from "../features/Tasks";
-import { makeSurfaceKey, setActiveTab } from "../features/Workspace";
+import { collectTabIds, findLeaf } from "../features/ChatPanes/panesTree";
+import {
+  makeSurfaceKey,
+  setPanelsForced,
+  setActiveTab,
+  openTab,
+} from "../features/Workspace";
 import {
   setProjectStorageNamespace,
   setProjectStorageNamespaceFromProjectInfo,
@@ -34,6 +41,10 @@ import {
   sidebarSubscribe,
 } from "../utils/mockServer";
 
+vi.hoisted(() => {
+  vi.resetModules();
+});
+
 vi.mock("../features/Chat/Chat", async () => {
   const React = await vi.importActual<typeof import("react")>("react");
 
@@ -47,15 +58,9 @@ vi.mock("../features/Chat/Chat", async () => {
   };
 });
 
-vi.mock("../features/Tasks", async () => {
+vi.mock("../features/Tasks/TaskWorkspace", async () => {
   const React = await vi.importActual<typeof import("react")>("react");
-  const actual =
-    await vi.importActual<typeof import("../features/Tasks")>(
-      "../features/Tasks",
-    );
-
   return {
-    ...actual,
     TaskWorkspace: ({ taskId }: { taskId: string }) =>
       React.createElement(
         "section",
@@ -135,6 +140,13 @@ const baseConfig = {
   themeProps: {},
 };
 
+function getChatGroup(store: AppStore) {
+  const group =
+    store.getState().workspace.groups[makeSurfaceKey("chat", "chat-a")];
+  if (!group) throw new Error("Missing canonical chat group");
+  return group;
+}
+
 const chat = (id: string) => makeSurfaceKey("chat", id);
 
 function createChat(store: AppStore, id: string, title: string) {
@@ -198,18 +210,22 @@ describe("App unified tab regression", () => {
 
     expect(screen.getAllByRole("tablist")).toHaveLength(1);
     expect(
-      screen.getByRole("tablist", { name: "Open workspace tabs" }),
+      screen.getByRole("tablist", { name: "Workspace tabs" }),
     ).toBeInTheDocument();
     expect(screen.getAllByRole("tab", { name: /Chat Alpha/ })).toHaveLength(1);
-    expect(screen.getAllByText("Chat Alpha")).toHaveLength(1);
     expect(
-      await screen.findByRole("button", { name: "Split active tab" }),
+      screen
+        .getAllByText("Chat Alpha")
+        .filter((node) => !node.closest('[aria-hidden="true"]')),
+    ).toHaveLength(1);
+    expect(
+      await screen.findByRole("button", { name: "Pane actions" }),
     ).toBeInTheDocument();
     expect(screen.queryByText("No surface selected")).not.toBeInTheDocument();
     expect(store.getState().workspace.tabs).toEqual([chat("chat-a")]);
   });
 
-  it("creates exactly one selected top-level tab for a new chat", async () => {
+  it("creates exactly one selected global tab for a new chat", async () => {
     const { store, user } = renderApp((appStore) => {
       createChat(appStore, "chat-a", "Chat Alpha");
       keepChatOpenOnNewChat(appStore, "chat-a");
@@ -225,17 +241,52 @@ describe("App unified tab regression", () => {
     const newSurfaceKey = chat(newChatId);
 
     await waitFor(() => {
-      expect(store.getState().workspace.activeTabId).toBe(newSurfaceKey);
+      expect(findLeaf(getChatGroup(store).root, "root")?.activeTabId).toBe(
+        newSurfaceKey,
+      );
     });
 
-    expect(store.getState().workspace.tabs).toEqual([
+    expect(store.getState().workspace.tabs).toEqual([chat("chat-a")]);
+    expect(collectTabIds(getChatGroup(store).root)).toEqual([
       chat("chat-a"),
       newSurfaceKey,
     ]);
-    expect(new Set(store.getState().workspace.tabs).size).toBe(2);
     expect(screen.getAllByRole("tablist")).toHaveLength(1);
     expect(screen.getAllByRole("tab")).toHaveLength(2);
     expect(selectedTabs()).toHaveLength(1);
+  });
+
+  it("keeps both local file tabs when Toolbar New Chat replaces an empty chat", async () => {
+    const files = ["file:/project/first.ts", "file:/project/second.ts"];
+    const { store, user } = renderApp((appStore) => {
+      createChat(appStore, "chat-a", "Empty chat");
+      appStore.dispatch(setPanelsForced(true));
+      files.forEach((key) =>
+        appStore.dispatch(openFileInFilesPanel({ path: key.slice(5) })),
+      );
+      selectChat(appStore, "chat-a");
+    });
+    await screen.findByRole("tab", { name: /Empty chat/ });
+    expect(screen.getByRole("tab", { name: "first.ts" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "second.ts" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "New Chat" }));
+    await waitFor(() =>
+      expect(store.getState().chat.current_thread_id).not.toBe("chat-a"),
+    );
+    const group = Object.values(store.getState().workspace.groups)[0];
+    expect(group).toBeDefined();
+    expect(group && collectTabIds(group.root)).toEqual(
+      expect.arrayContaining(files),
+    );
+    expect(screen.getByRole("tab", { name: "first.ts" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "second.ts" })).toBeInTheDocument();
+    expect(
+      screen.getAllByRole("tablist", { name: "Workspace tabs" }),
+    ).toHaveLength(1);
+    expect(selectedTabs()).toHaveLength(1);
+    expect(
+      group && findLeaf(group.root, group.focusedLeafId)?.activeTabId,
+    ).toBe(chat(store.getState().chat.current_thread_id));
   });
 
   it("switches an existing chat through one selected tab without adding a ghost tab", async () => {
@@ -249,11 +300,14 @@ describe("App unified tab regression", () => {
     await user.click(screen.getByRole("tab", { name: /Chat Beta/ }));
 
     await waitFor(() => {
-      expect(store.getState().workspace.activeTabId).toBe(chat("chat-b"));
+      expect(findLeaf(getChatGroup(store).root, "root")?.activeTabId).toBe(
+        chat("chat-b"),
+      );
       expect(store.getState().chat.current_thread_id).toBe("chat-b");
     });
 
-    expect(store.getState().workspace.tabs).toEqual([
+    expect(store.getState().workspace.tabs).toEqual([chat("chat-a")]);
+    expect(collectTabIds(getChatGroup(store).root)).toEqual([
       chat("chat-a"),
       chat("chat-b"),
     ]);
@@ -261,76 +315,108 @@ describe("App unified tab regression", () => {
     expect(screen.getAllByRole("tab")).toHaveLength(2);
     expect(selectedTabs()).toHaveLength(1);
     expect(selectedTabs()[0]).toHaveTextContent("Chat Beta");
-    expect(screen.getAllByText("Chat Beta")).toHaveLength(1);
+    expect(
+      screen
+        .getAllByText("Chat Beta")
+        .filter((node) => !node.closest('[aria-hidden="true"]')),
+    ).toHaveLength(1);
   });
 
-  it("keeps task and buddy entries as navigation-only tabs in the unified bar", async () => {
+  it("keeps task and Buddy entries in the same tab band without changing pane ownership", async () => {
     const { store, user } = renderApp((appStore) => {
       createChat(appStore, "chat-a", "Chat Alpha");
       appStore.dispatch(openTask({ id: "task-a", name: "Task Alpha" }));
-      appStore.dispatch(push({ name: "buddy" }));
+      appStore.dispatch(openTab("buddy:home"));
       appStore.dispatch(push({ name: "chat" }));
     });
 
-    await screen.findByRole("tab", { name: /Task Alpha/ });
-    expect(screen.getByRole("tab", { name: /Buddy/ })).toBeInTheDocument();
+    await screen.findByRole("tab", { name: /Chat Alpha/ });
+    const paneRow = screen.getByRole("tablist", { name: "Workspace tabs" });
+    expect(screen.getAllByRole("tablist")).toHaveLength(1);
+    expect(
+      within(paneRow).getByRole("tab", { name: /Task Alpha/ }),
+    ).toBeInTheDocument();
+    expect(
+      within(paneRow).getByRole("tab", { name: /Buddy/ }),
+    ).toBeInTheDocument();
     expect(store.getState().workspace.tabs).toEqual([chat("chat-a")]);
 
+    const paneOrder = collectTabIds(getChatGroup(store).root);
     await user.click(screen.getByRole("tab", { name: /Task Alpha/ }));
 
     expect(await screen.findByTestId("task-workspace")).toHaveAttribute(
       "data-task-id",
       "task-a",
     );
-    expect(store.getState().pages.at(-1)).toEqual({
-      name: "task workspace",
-      taskId: "task-a",
-    });
-    expect(screen.getAllByRole("tablist")).toHaveLength(1);
+    expect(store.getState().pages.at(-1)).toEqual({ name: "chat" });
+    expect(findLeaf(getChatGroup(store).root, "root")?.activeTabId).toBe(
+      "task:task-a",
+    );
+    expect(selectedTabs()).toHaveLength(1);
     expect(screen.getByRole("tab", { name: /Task Alpha/ })).toHaveAttribute(
       "aria-selected",
       "true",
     );
+    expect(screen.getAllByRole("tablist")).toHaveLength(1);
     expect(
-      screen.queryByRole("button", { name: "Split active tab" }),
-    ).toBeNull();
+      screen.getByRole("tablist", { name: "Workspace tabs" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Pane actions" }),
+    ).toBeInTheDocument();
     expect(screen.queryByText("No surface selected")).not.toBeInTheDocument();
     expect(store.getState().workspace.tabs).toEqual([chat("chat-a")]);
-    expect(store.getState().workspace.groups).toEqual({});
+    expect(collectTabIds(getChatGroup(store).root)).toEqual(paneOrder);
 
     await user.click(screen.getByRole("tab", { name: /Buddy/ }));
 
     expect(await screen.findByTestId("buddy-home")).toBeInTheDocument();
-    expect(store.getState().pages.at(-1)).toEqual({ name: "buddy" });
-    expect(screen.getAllByRole("tablist")).toHaveLength(1);
+    expect(store.getState().pages.at(-1)).toEqual({ name: "chat" });
+    expect(findLeaf(getChatGroup(store).root, "root")?.activeTabId).toBe(
+      "buddy:home",
+    );
+    expect(collectTabIds(getChatGroup(store).root)).toEqual(paneOrder);
+    expect(selectedTabs()).toHaveLength(1);
     expect(screen.getByRole("tab", { name: /Buddy/ })).toHaveAttribute(
       "aria-selected",
       "true",
     );
+    expect(screen.getAllByRole("tablist")).toHaveLength(1);
     expect(
-      screen.queryByRole("button", { name: "Split active tab" }),
-    ).toBeNull();
+      screen.getByRole("tablist", { name: "Workspace tabs" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Pane actions" }),
+    ).toBeInTheDocument();
     expect(screen.queryByText("No surface selected")).not.toBeInTheDocument();
     expect(store.getState().workspace.tabs).toEqual([chat("chat-a")]);
   });
 
-  it("turns a split chat into one group tab in the same tab row", async () => {
+  it("keeps one global toolbar row when splitting a chat", async () => {
     const { store, user } = renderApp((appStore) => {
       createChat(appStore, "chat-a", "Chat Alpha");
     });
 
     await screen.findByRole("tab", { name: /Chat Alpha/ });
-    await user.click(screen.getByRole("button", { name: "Split active tab" }));
+    await user.click(screen.getByRole("button", { name: "Pane actions" }));
+    await user.click(screen.getByRole("menuitem", { name: "Split Right" }));
 
     await waitFor(() => {
       expect(store.getState().workspace.groups[chat("chat-a")]).toBeDefined();
     });
 
     expect(screen.getAllByRole("tablist")).toHaveLength(1);
-    expect(screen.getAllByRole("tab")).toHaveLength(1);
-    const groupTab = screen.getByRole("tab", { name: /Chat Alpha/ });
-    expect(within(groupTab).getByLabelText("2 panes")).toHaveTextContent("2");
-    expect(groupTab).toHaveAttribute("aria-selected", "true");
+    const row = screen.getByRole("tablist", { name: "Workspace tabs" });
+    expect(within(row).getAllByRole("tab")).toHaveLength(1);
+    expect(row.closest("[data-workspace-leaf-id]")).toBeNull();
+    expect(screen.getAllByLabelText("Workspace pane controls")).toHaveLength(2);
+    for (const pane of document.querySelectorAll("[data-workspace-leaf-id]")) {
+      expect(within(pane as HTMLElement).queryByRole("tablist")).toBeNull();
+    }
+    expect(screen.getByRole("tab", { name: /Chat Alpha/ })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
     expect(store.getState().workspace.tabs).toEqual([chat("chat-a")]);
   });
 });

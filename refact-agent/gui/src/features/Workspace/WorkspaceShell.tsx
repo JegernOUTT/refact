@@ -1,4 +1,4 @@
-import { addListener } from "@reduxjs/toolkit";
+import { addListener, isAnyOf } from "@reduxjs/toolkit";
 import { type ReactNode, useEffect } from "react";
 
 import { useAppDispatch, useAppSelector } from "../../hooks";
@@ -15,6 +15,8 @@ import {
   resolveWorkspaceDockAvailability,
 } from "./workspaceAvailability";
 import {
+  addSurfaceToPane,
+  openSurfaceInNewTab,
   openTab,
   selectFocusedWorkspaceSurfaceKey,
   selectPanelsForced,
@@ -34,9 +36,18 @@ function useWorkspaceSurfaceNavigation() {
     () =>
       dispatch(
         addListener({
-          actionCreator: openTab,
+          matcher: isAnyOf(openTab, addSurfaceToPane, openSurfaceInNewTab),
           effect: (action, listenerApi) => {
-            if (!opensInChatWorkspace(action.payload)) return;
+            if (
+              !openTab.match(action) &&
+              !addSurfaceToPane.match(action) &&
+              !openSurfaceInNewTab.match(action)
+            )
+              return;
+            const surfaceKey = addSurfaceToPane.match(action)
+              ? action.payload.surfaceKey
+              : action.payload;
+            if (!opensInChatWorkspace(surfaceKey)) return;
             const state = listenerApi.getState() as Parameters<
               typeof selectCurrentPage
             >[0] &
@@ -44,7 +55,7 @@ function useWorkspaceSurfaceNavigation() {
               Parameters<typeof selectFocusedWorkspaceSurfaceKey>[0];
             if (selectCurrentPage(state)?.name === "chat") return;
             if (selectEditPlayer(state).status === "playing") return;
-            if (selectFocusedWorkspaceSurfaceKey(state) !== action.payload) {
+            if (selectFocusedWorkspaceSurfaceKey(state) !== surfaceKey) {
               return;
             }
             listenerApi.dispatch(push({ name: "chat" }));

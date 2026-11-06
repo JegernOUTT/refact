@@ -10,6 +10,8 @@ import {
   bindSurfaceToChat,
   clearWorkspaceChatState,
   closePane,
+  closePaneTab,
+  reorderPaneTabs,
   closeTab,
   ensureLiveEditSplit,
   focusPane,
@@ -18,18 +20,17 @@ import {
   hydrateWorkspace,
   openTab,
   reconcileWorkspace,
-  reorderTabs,
   selectActiveGroup,
   selectActiveTabId,
   selectFocusedChatWorkspaceRoot,
   selectFocusedWorkspaceChatId,
+  selectFocusedWorkspaceSurfaceKey,
   selectGroupForTab,
   selectSurfaceChatId,
   selectWorkspaceContextChatIds,
   selectWorkspaceFocusedChatId,
   selectIsTabSplit,
   selectLiveEditsForChat,
-  selectTabs,
   selectWorkspaceDock,
   selectWorkspaceDrawer,
   selectVisibleSurfaceKeys,
@@ -59,6 +60,7 @@ import {
   isMainSurface,
   isTerminalSurface,
   makeSurfaceKey,
+  makeGitDiffSurfaceKey,
   parseSurfaceKey,
   type SurfaceKey,
 } from "./surfaceKey";
@@ -66,7 +68,6 @@ import {
 const reducer = workspaceSlice.reducer;
 
 const chat = (id: string): SurfaceKey => makeSurfaceKey("chat", id);
-const task = (id: string): SurfaceKey => makeSurfaceKey("task", id);
 const files = "files:main";
 const git = makeSurfaceKey("git", "main");
 const terminal = "terminal:main";
@@ -226,8 +227,8 @@ describe("workspaceSlice", () => {
     state = reducer(state, openTab(terminal));
     state = reducer(state, openTab(file));
 
-    expect(state.tabs).toEqual([chatA, file]);
-    expect(state.activeTabId).toBe(file);
+    expect(renderedSurfaces(state)).toEqual([chatA, file]);
+    expect(selectFocusedWorkspaceSurfaceKey(rootState(state))).toBe(file);
 
     state = reducer(state, closeTab(file));
     expect(state.tabs).toEqual([chatA]);
@@ -258,34 +259,23 @@ describe("workspaceSlice", () => {
     expect(hydrated.activeTabId).toBe(chatA);
   });
 
-  test("opens, binds, and hydrates design surfaces", () => {
-    const chatA = chat("a");
-    const designA = makeSurfaceKey("design", "a");
-    let state = reducer(undefined, openTab(chatA));
-    state = reducer(state, openTab(designA));
+  test("opens independent design surfaces and binds chat ownership only explicitly", () => {
+    let state = reducer(undefined, openTab(chat("a")));
+    state = reducer(state, openTab("design:a"));
+    expect(selectWorkspaceFocusedChatId({ workspace: state })).toBeNull();
+    expect(state.contextChatByTab?.["design:a"]).toBeUndefined();
     state = reducer(
       state,
-      bindSurfaceToChat({ surfaceKey: designA, chatId: "a" }),
+      bindSurfaceToChat({ surfaceKey: "design:a", chatId: "a" }),
     );
-
-    expect(state.tabs).toEqual([chatA, designA]);
-    expect(state.activeTabId).toBe(designA);
-    expect(state.contextChatByTab).toEqual({ [designA]: "a" });
-
-    const hydrated = reducer(
+    expect(renderedSurfaces(state)).toEqual([chat("a"), "design:a"]);
+    expect(selectWorkspaceFocusedChatId({ workspace: state })).toBe("a");
+    expect(state.contextChatByTab?.["design:a"]).toBe("a");
+    const restored = reducer(
       undefined,
-      hydrateWorkspace({
-        tabs: state.tabs,
-        activeTabId: state.activeTabId,
-        groups: state.groups,
-        contextChatByTab: state.contextChatByTab,
-        openThreadIds: ["a"],
-      }),
+      hydrateWorkspace({ ...state, openThreadIds: [] }),
     );
-
-    expect(hydrated.tabs).toEqual([chatA, designA]);
-    expect(hydrated.activeTabId).toBe(designA);
-    expect(hydrated.contextChatByTab).toEqual({ [designA]: "a" });
+    expect(renderedSurfaces(restored)).toEqual(["design:a"]);
   });
 
   test("opens, activates, reorders, and closes tabs", () => {
@@ -297,111 +287,43 @@ describe("workspaceSlice", () => {
     state = reducer(state, openTab(chatB));
     state = reducer(state, openTab(chatC));
 
-    expect(selectTabs(rootState(state))).toEqual([chatA, chatB, chatC]);
-    expect(selectActiveTabId(rootState(state))).toBe(chatC);
+    expect(state.tabs).toEqual([chatA]);
+    expect(renderedSurfaces(state)).toEqual([chatA, chatB, chatC]);
+    expect(selectFocusedWorkspaceSurfaceKey(rootState(state))).toBe(chatC);
 
     state = reducer(state, setActiveTab(chatA));
     expect(selectActiveTabId(rootState(state))).toBe(chatA);
 
-    state = reducer(state, reorderTabs({ sourceKey: chatA, targetKey: chatC }));
-    expect(state.tabs).toEqual([chatB, chatC, chatA]);
+    state = reducer(
+      state,
+      reorderPaneTabs({
+        tabId: chatA,
+        leafId: "root",
+        fromIndex: 0,
+        toIndex: 2,
+      }),
+    );
+    expect(renderedSurfaces(state)).toEqual([chatB, chatC, chatA]);
 
     state = reducer(state, closeTab(chatA));
-    expect(state.tabs).toEqual([chatB, chatC]);
-    expect(state.activeTabId).toBe(chatC);
+    expect(renderedSurfaces(state)).toEqual([chatB, chatC]);
+    expect(selectFocusedWorkspaceSurfaceKey(rootState(state))).toBe(chatB);
   });
 
-  test("keeps task and buddy surfaces out of pane-backed workspace state", () => {
-    const chatA = chat("a");
-    const taskA = task("a");
-    const buddyHome = makeSurfaceKey("buddy", "home");
-    let state = reducer(undefined, openTab(taskA));
-    state = reducer(state, openTab(buddyHome));
-
-    expect(state.tabs).toEqual([]);
-    expect(state.activeTabId).toBeNull();
-
-    state = reducer(state, openTab(chatA));
-    state = reducer(state, splitTab({ tabId: taskA, dir: "row" }));
-    state = reducer(state, splitTab({ tabId: chatA, dir: "row" }));
-    const leafIdsBefore = collectLeafIds(groupFor(state, chatA).root);
-
+  test("keeps task and buddy panes through hydration and chat pruning", () => {
+    let state = reducer(undefined, openTab("task:a"));
+    state = reducer(state, openTab("buddy:home"));
+    state = reducer(state, openTab(chat("a")));
     state = reducer(
-      state,
-      addSurfaceToPane({
-        tabId: chatA,
-        leafId: "root:sibling:chat:a",
-        surfaceKey: taskA,
-      }),
-    );
-    state = reducer(
-      state,
-      splitPaneWithSurface({
-        tabId: chatA,
-        leafId: "root:sibling:chat:a",
-        surfaceKey: buddyHome,
-        dir: "row",
-      }),
-    );
-
-    expect(state.tabs).toEqual([chatA]);
-    expect(collectLeafIds(groupFor(state, chatA).root)).toEqual(leafIdsBefore);
-    expect(collectTabIds(groupFor(state, chatA).root)).toEqual([chatA]);
-  });
-
-  test("hydrate and reconcile defensively drop non-chat pane state", () => {
-    const chatA = chat("a");
-    const taskA = task("a");
-    const buddyHome = makeSurfaceKey("buddy", "home");
-    const hydrated = reducer(
       undefined,
-      hydrateWorkspace({
-        tabs: [chatA, taskA, buddyHome],
-        activeTabId: taskA,
-        groups: {
-          [chatA]: {
-            focusedLeafId: "right",
-            root: {
-              kind: "split",
-              id: "root:split:row",
-              dir: "row",
-              sizes: [0.5, 0.5],
-              children: [
-                leaf("left", [chatA], chatA),
-                leaf("right", [taskA], taskA),
-              ],
-            },
-          },
-        },
-      }),
+      hydrateWorkspace({ ...state, openThreadIds: [] }),
     );
-
-    expect(hydrated.tabs).toEqual([chatA]);
-    expect(hydrated.activeTabId).toBe(chatA);
-    expect(hydrated.groups).toEqual({});
-
-    const reconciled = reducer(
-      {
-        tabs: [chatA, taskA],
-        activeTabId: taskA,
-        groups: {
-          [taskA]: {
-            focusedLeafId: "root",
-            root: leaf("root", [taskA], taskA),
-          },
-        },
-      },
-      reconcileWorkspace({ openThreadIds: ["a"] }),
-    );
-
-    expect(reconciled).toMatchObject({
-      tabs: [chatA],
-      activeTabId: chatA,
-      groups: {},
-    });
+    expect(renderedSurfaces(state)).toEqual(["task:a", "buddy:home"]);
+    expect(state.tabs).toEqual(["task:a"]);
+    expect(selectWorkspaceFocusedChatId({ workspace: state })).toBeNull();
   });
 
-  test("hydrateWorkspace drops duplicate surface groups back to unsplit tabs", () => {
+  test("hydrateWorkspace merges legacy groups into one unique pane tree", () => {
     const chatA = chat("a");
     const chatB = chat("b");
     const chatC = chat("c");
@@ -457,10 +379,8 @@ describe("workspaceSlice", () => {
       }),
     );
 
-    expect(hydrated.tabs).toEqual([chatA, chatB, chatC, chatD]);
-    expect(hydrated.groups[chatA]).toBeUndefined();
-    expect(hydrated.groups[chatB]).toBeUndefined();
-    expect(hydrated.groups[chatD]).toBeDefined();
+    expect(hydrated.tabs).toEqual([chatA]);
+    expect(Object.keys(hydrated.groups)).toEqual([chatA]);
     expect(renderedSurfaces(hydrated)).toEqual([
       chatA,
       chatB,
@@ -524,7 +444,7 @@ describe("workspaceSlice", () => {
     );
 
     expect(state.tabs).toEqual([chatA]);
-    expect(state.groups[chatA]).toBeUndefined();
+    expect(state.groups[chatA]?.root).toEqual(leaf("root", [chatA], chatA));
     expect(state.activeTabId).toBe(chatA);
     expect(selectVisibleSurfaceKeys(rootState(state))).toEqual([chatA]);
   });
@@ -638,7 +558,7 @@ describe("workspaceSlice", () => {
     expect(state.tabs).toEqual([chatA]);
   });
 
-  test("closing a last pane with multiple surfaces ungroups into normal tabs", () => {
+  test("closing a last split preserves local tabs in the remaining pane", () => {
     const chatA = chat("a");
     const chatB = chat("b");
     const chatC = chat("c");
@@ -665,9 +585,11 @@ describe("workspaceSlice", () => {
       closePane({ tabId: chatA, leafId: "root:sibling:chat:a" }),
     );
 
-    expect(state.groups[chatA]).toBeUndefined();
-    expect(state.tabs).toEqual([chatA, chatC]);
-    expect(state.activeTabId).toBe(chatC);
+    expect(state.groups[chatA]?.root).toEqual(
+      leaf("root", [chatA, chatC], chatC),
+    );
+    expect(state.tabs).toEqual([chatA]);
+    expect(state.activeTabId).toBe(chatA);
   });
 
   test("closePane removes dangling empty non-root leaves", () => {
@@ -692,7 +614,7 @@ describe("workspaceSlice", () => {
       closePane({ tabId: chatA, leafId: "root:sibling:chat:a" }),
     );
 
-    expect(state.groups[chatA]).toBeUndefined();
+    expect(state.groups[chatA]?.root).toEqual(leaf("root", [chatA], chatA));
     expect(state.tabs).toEqual([chatA]);
     expect(state.activeTabId).toBe(chatA);
   });
@@ -836,8 +758,9 @@ describe("workspaceSlice", () => {
 
     const next = reducer(state, clearWorkspaceChatState("a"));
 
-    expect(next.tabs).toEqual([chatA, chatB]);
-    expect(next.activeTabId).toBe(chatB);
+    expect(next.tabs).toEqual([chatA]);
+    expect(renderedSurfaces(next)).toEqual([chatA, chatB]);
+    expect(selectFocusedWorkspaceSurfaceKey(rootState(next))).toBe(chatA);
     expect(next.liveEditsByChat).toEqual({ b: false });
     expect(next.contextChatByTab).toBeUndefined();
   });
@@ -869,7 +792,8 @@ describe("workspaceSlice", () => {
     const next = reducer(state, clearWorkspaceChatState("a"));
 
     expect(next.tabs).toEqual([chatA]);
-    expect(next.groups).toEqual({});
+    expect(collectTabIds(groupFor(next, chatA).root)).toEqual([chatA]);
+    expect(groupFor(next, chatA).root.kind).toBe("leaf");
     expect(next.activeTabId).toBe(chatA);
     expect(next.contextChatByTab).toBeUndefined();
   });
@@ -889,10 +813,12 @@ describe("workspaceSlice", () => {
 
     const next = reducer(state, clearWorkspaceChatState("a"));
 
-    expect(next.tabs).toEqual([chatA, chatB, fileB]);
-    expect(next.activeTabId).toBe(fileB);
+    expect(next.tabs).toEqual([chatA]);
+    expect(renderedSurfaces(next)).toEqual([fileB, chatA, chatB]);
+    expect(selectFocusedWorkspaceSurfaceKey(rootState(next))).toBe(fileB);
     expect(next.liveEditsByChat).toEqual({ b: false });
-    expect(next.contextChatByTab).toEqual({ [fileB]: "b" });
+    expect(next.contextChatByTab?.[fileB]).toBe("b");
+    expect(next.contextChatByTab?.[fileA]).toBeUndefined();
   });
 
   test("live edit split reuses one horizontal file pane and follows paths", () => {
@@ -923,8 +849,12 @@ describe("workspaceSlice", () => {
     expect(collectLeafIds(second.root)).toHaveLength(2);
     expect(collectTabIds(second.root)).toEqual([
       chatA,
+      "file:/workspace/one.ts",
       "file:/workspace/two.ts",
     ]);
+    expect(findLeaf(second.root, second.focusedLeafId)?.activeTabId).toBe(
+      "file:/workspace/two.ts",
+    );
   });
 
   test("reconcileWorkspace prunes stale chat surfaces and drops or ungroups groups", () => {
@@ -951,7 +881,8 @@ describe("workspaceSlice", () => {
 
     expect(state.tabs).toEqual([chatA]);
     expect(state.activeTabId).toBe(chatA);
-    expect(state.groups).toEqual({});
+    expect(collectTabIds(groupFor(state, chatA).root)).toEqual([chatA]);
+    expect(groupFor(state, chatA).root.kind).toBe("leaf");
     expect(selectVisibleThreadIds(rootState(state))).toEqual(["a"]);
   });
 
@@ -1009,11 +940,12 @@ describe("workspaceSlice", () => {
     let state = reducer(undefined, openTab(chatA));
     state = reducer(state, openTab(file));
 
-    expect(state.contextChatByTab).toEqual({ [file]: "a" });
+    expect(state.contextChatByTab?.[file]).toBe("a");
     expect(selectFocusedWorkspaceChatId(rootState(state))).toBe("a");
 
     state = reducer(state, closeTab(file));
-    expect(state.contextChatByTab).toBeUndefined();
+    expect(state.contextChatByTab?.[file]).toBeUndefined();
+    expect(selectFocusedWorkspaceChatId(rootState(state))).toBe("a");
   });
 
   test("focused files in a multi-chat group retain the most recently associated chat", () => {
@@ -1043,7 +975,7 @@ describe("workspaceSlice", () => {
       bindSurfaceToChat({ surfaceKey: file, chatId: "b" }),
     );
 
-    expect(state.contextChatByTab).toEqual({ [chatA]: "b" });
+    expect(state.contextChatByTab).toEqual({ [chatA]: "b", [file]: "b" });
     expect(selectFocusedWorkspaceChatId(rootState(state))).toBe("b");
     expect(
       selectFocusedChatWorkspaceRoot(
@@ -1068,7 +1000,8 @@ describe("workspaceSlice", () => {
       }),
     );
 
-    expect(state.contextChatByTab).toEqual({ [file]: "a" });
+    expect(state.contextChatByTab?.[file]).toBe("a");
+    expect(state.contextChatByTab?.missing).toBeUndefined();
     expect(selectFocusedWorkspaceChatId(rootState(state))).toBe("a");
   });
 
@@ -1102,7 +1035,8 @@ describe("workspaceSlice", () => {
 
     expect(state.tabs).toEqual([chatA]);
     expect(state.activeTabId).toBe(chatA);
-    expect(state.groups).toEqual({});
+    expect(collectTabIds(groupFor(state, chatA).root)).toEqual([chatA]);
+    expect(groupFor(state, chatA).root.kind).toBe("leaf");
     expect(state.contextChatByTab).toBeUndefined();
   });
 
@@ -1132,16 +1066,34 @@ describe("workspaceSlice", () => {
     );
   });
 
-  test("openTab enforces the top-level tab cap", () => {
+  test("openTab enforces file admission limits without dropping open chats", () => {
     let state = reducer(undefined, { type: "@@INIT" });
-
-    for (let index = 0; index < MAX_WORKSPACE_TABS + 1; index += 1) {
+    for (let index = 0; index <= MAX_WORKSPACE_TABS; index += 1) {
+      state = reducer(state, openTab(makeSurfaceKey("file", `/file-${index}`)));
+    }
+    expect(state.tabs).toEqual(["file:/file-0"]);
+    expect(renderedSurfaces(state)).toEqual(
+      Array.from(
+        { length: MAX_WORKSPACE_TABS },
+        (_, index) => `file:/file-${index}`,
+      ),
+    );
+    expect(selectFocusedWorkspaceSurfaceKey(rootState(state))).toBe(
+      `file:/file-${MAX_WORKSPACE_TABS - 1}`,
+    );
+    for (let index = 0; index < 50; index += 1) {
       state = reducer(state, openTab(chat(String(index))));
     }
-
-    expect(state.tabs).toHaveLength(MAX_WORKSPACE_TABS);
-    expect(state.tabs.at(-1)).toBe(chat(String(MAX_WORKSPACE_TABS - 1)));
-    expect(state.activeTabId).toBe(chat(String(MAX_WORKSPACE_TABS - 1)));
+    expect(renderedSurfaces(state)).toEqual([
+      ...Array.from(
+        { length: MAX_WORKSPACE_TABS },
+        (_, index) => `file:/file-${index}`,
+      ),
+      ...Array.from({ length: 50 }, (_, index) => chat(String(index))),
+    ]);
+    state = reducer(state, openTab(chat("25")));
+    expect(renderedSurfaces(state)).toHaveLength(MAX_WORKSPACE_TABS + 50);
+    expect(selectFocusedWorkspaceSurfaceKey(rootState(state))).toBe(chat("25"));
   });
 
   test("splitTab enforces the group leaf cap", () => {
@@ -1241,7 +1193,7 @@ describe("task-aware workspace context", () => {
       state,
       reconcileWorkspace({ openThreadIds: ["chat-a"] }),
     );
-    expect(dropped.tabs).not.toContain(fileKey);
+    expect(renderedSurfaces(dropped)).toEqual([chat("chat-a")]);
 
     const kept = reducer(
       state,
@@ -1250,7 +1202,544 @@ describe("task-aware workspace context", () => {
         contextChatIds: ["agent-1"],
       }),
     );
-    expect(kept.tabs).toContain(fileKey);
+    expect(renderedSurfaces(kept)).toEqual([chat("chat-a"), fileKey]);
     expect(selectSurfaceChatId({ workspace: kept }, fileKey)).toBe("agent-1");
   });
+});
+
+describe("file split groups", () => {
+  const fileA = "file:/project/a.ts";
+  const fileB = "file:/project/b.ts";
+
+  test("hydrates and reconciles file-rooted mixed and file-only groups", () => {
+    for (const other of [chat("a"), fileB]) {
+      const group: PaneGroup = {
+        focusedLeafId: "other",
+        root: {
+          kind: "split",
+          id: "split",
+          dir: "row",
+          sizes: [0.4, 0.6],
+          children: [leaf("file", [fileA]), leaf("other", [other])],
+        },
+      };
+      const state = reducer(
+        undefined,
+        hydrateWorkspace({
+          tabs: [fileA],
+          activeTabId: fileA,
+          groups: { [fileA]: group },
+          openThreadIds: other === chat("a") ? ["a"] : [],
+        }),
+      );
+      expect(state.groups[other === chat("a") ? other : fileA]).toEqual(group);
+      expect(selectVisibleSurfaceKeys({ workspace: state })).toEqual([
+        fileA,
+        other,
+      ]);
+      expect(
+        reducer(state, reconcileWorkspace({ openThreadIds: ["a"] })),
+      ).toEqual(state);
+    }
+  });
+
+  test("live edits preserve the file-rooted split across hydration and reconciliation", () => {
+    let state = reducer(undefined, openTab(fileA));
+    state = reducer(
+      state,
+      splitTab({ tabId: fileA, surfaceKey: chat("a"), dir: "row" }),
+    );
+    state = reducer(
+      state,
+      ensureLiveEditSplit({ chatId: "a", filePath: "/project/b.ts" }),
+    );
+
+    expect(state.tabs).toEqual([fileA]);
+    expect(collectTabIds(groupFor(state, fileA).root)).toEqual([
+      fileA,
+      fileB,
+      chat("a"),
+    ]);
+    expect(selectFocusedWorkspaceSurfaceKey({ workspace: state })).toBe(fileB);
+    expect(state.contextChatByTab).toEqual({ [fileA]: "a", [fileB]: "a" });
+    const hydrated = reducer(
+      undefined,
+      hydrateWorkspace({ ...state, openThreadIds: ["a"] }),
+    );
+    expect(groupFor(hydrated, chat("a")).root).toEqual(
+      groupFor(state, fileA).root,
+    );
+    const reconciled = reducer(
+      state,
+      reconcileWorkspace({ openThreadIds: ["a"] }),
+    );
+    expect(reconciled.tabs).toEqual([chat("a")]);
+    expect(groupFor(reconciled, chat("a")).root).toEqual(
+      groupFor(state, fileA).root,
+    );
+    expect(selectFocusedWorkspaceSurfaceKey({ workspace: reconciled })).toBe(
+      fileB,
+    );
+    expect(reconciled.contextChatByTab?.[fileA]).toBe("a");
+    expect(reconciled.contextChatByTab?.[fileB]).toBe("a");
+    expect(selectFocusedWorkspaceSurfaceKey(rootState(reconciled))).toBe(fileB);
+  });
+
+  test.each(["clear", "reconcile", "hydrate"] as const)(
+    "%s chat cleanup preserves unrelated chats in a file-rooted group",
+    (operation) => {
+      let state = reducer(undefined, openTab(fileA));
+      state = reducer(
+        state,
+        splitTab({ tabId: fileA, surfaceKey: chat("a"), dir: "row" }),
+      );
+      state = reducer(
+        state,
+        splitTab({ tabId: fileA, surfaceKey: chat("b"), dir: "col" }),
+      );
+      state = reducer(
+        state,
+        bindSurfaceToChat({ surfaceKey: fileA, chatId: "a" }),
+      );
+      expect(state.contextChatByTab).toEqual({ [fileA]: "a" });
+      const next =
+        operation === "clear"
+          ? reducer(state, clearWorkspaceChatState("a"))
+          : operation === "reconcile"
+            ? reducer(state, reconcileWorkspace({ openThreadIds: ["b"] }))
+            : reducer(
+                undefined,
+                hydrateWorkspace({ ...state, openThreadIds: ["b"] }),
+              );
+
+      expect(renderedSurfaces(next)).toEqual(
+        operation === "clear" ? [chat("a"), chat("b")] : [chat("b")],
+      );
+      expect(next.tabs).not.toContain(fileA);
+      expect(next.activeTabId).toBe(chat(operation === "clear" ? "a" : "b"));
+      expect(next.contextChatByTab?.[fileA]).toBeUndefined();
+      expect(Object.values(next.contextChatByTab ?? {})).not.toContain("a");
+    },
+  );
+
+  test.each(["reconcile", "hydrate"] as const)(
+    "%s removes empty file groups and keeps chats when files are disabled",
+    (operation) => {
+      let state = reducer(undefined, openTab(fileA));
+      state = reducer(
+        state,
+        splitTab({ tabId: fileA, surfaceKey: fileB, dir: "row" }),
+      );
+      const workspaceCapabilities = {
+        filesPanel: false,
+        gitPanel: true,
+        terminalPanel: true,
+      };
+      const empty =
+        operation === "reconcile"
+          ? reducer(
+              state,
+              reconcileWorkspace({ openThreadIds: [], workspaceCapabilities }),
+            )
+          : reducer(
+              undefined,
+              hydrateWorkspace({
+                ...state,
+                openThreadIds: [],
+                workspaceCapabilities,
+              }),
+            );
+      expect(empty.tabs).toEqual([]);
+      expect(empty.groups).toEqual({});
+      expect(empty.activeTabId).toBeNull();
+
+      state = reducer(
+        state,
+        addSurfaceToPane({
+          tabId: fileA,
+          leafId: "root",
+          surfaceKey: chat("a"),
+        }),
+      );
+      const withChat =
+        operation === "reconcile"
+          ? reducer(
+              state,
+              reconcileWorkspace({
+                openThreadIds: ["a"],
+                workspaceCapabilities,
+              }),
+            )
+          : reducer(
+              undefined,
+              hydrateWorkspace({
+                ...state,
+                openThreadIds: ["a"],
+                workspaceCapabilities,
+              }),
+            );
+      expect(withChat.tabs).toEqual([chat("a")]);
+      expect(groupFor(withChat, chat("a")).root.kind).toBe("leaf");
+      expect(renderedSurfaces(withChat)).toEqual([chat("a")]);
+      expect(withChat.activeTabId).toBe(chat("a"));
+    },
+  );
+
+  test("closing the canonical file surface preserves the other pane", () => {
+    let state = reducer(undefined, openTab(fileA));
+    state = reducer(
+      state,
+      splitTab({ tabId: fileA, surfaceKey: chat("a"), dir: "row" }),
+    );
+    state = reducer(state, closeTab(fileA));
+
+    expect(state.tabs).toEqual([chat("a")]);
+    expect(renderedSurfaces(state)).toEqual([chat("a")]);
+    expect(groupFor(state, chat("a")).root.kind).toBe("leaf");
+    expect(state.activeTabId).toBe(chat("a"));
+  });
+
+  test("splits files, focuses deduplicated opens and closes the file pane cleanly", () => {
+    let state = reducer(undefined, openTab(fileA));
+    state = reducer(state, openTab(fileB));
+    state = reducer(state, setActiveTab(fileA));
+    state = reducer(
+      state,
+      splitTab({ tabId: fileA, surfaceKey: fileB, dir: "row" }),
+    );
+    const group = state.groups[fileA];
+    if (!group) throw new Error("missing file group");
+    expect(state.tabs).toEqual([fileA]);
+    expect(collectTabIds(group.root)).toEqual([fileA, fileB]);
+    state = reducer(state, openTab(fileB));
+    expect(state.tabs).toEqual([fileA]);
+    expect(selectFocusedWorkspaceSurfaceKey({ workspace: state })).toBe(fileB);
+    state = reducer(
+      state,
+      closePane({ tabId: fileA, leafId: group.focusedLeafId }),
+    );
+    expect(groupFor(state, fileA).root).toEqual(leaf("root", [fileA], fileA));
+    expect(state.tabs).toEqual([fileA]);
+    expect(state.activeTabId).toBe(fileA);
+  });
+
+  test("closing an interior file leaves no dangling surface or group references", () => {
+    let state = reducer(undefined, openTab(chat("a")));
+    state = reducer(
+      state,
+      splitTab({ tabId: chat("a"), surfaceKey: fileA, dir: "row" }),
+    );
+    const group = state.groups[chat("a")];
+    if (!group) throw new Error("missing mixed group");
+    state = reducer(
+      state,
+      splitPaneWithSurface({
+        tabId: chat("a"),
+        leafId: group.focusedLeafId,
+        surfaceKey: fileB,
+        dir: "col",
+      }),
+    );
+    state = reducer(state, closeTab(fileA));
+    const remaining = state.groups[chat("a")];
+    if (!remaining) throw new Error("missing remaining group");
+    expect(collectTabIds(remaining.root)).toEqual([chat("a"), fileB]);
+    state = reducer(state, closeTab(fileB));
+    expect(groupFor(state, chat("a")).root).toEqual(
+      leaf("root", [chat("a")], chat("a")),
+    );
+    expect(state.tabs).toEqual([chat("a")]);
+  });
+});
+
+describe("durable pane-local tabs", () => {
+  test("retains ordering and selection through reorder, root close, rekey and hydration", () => {
+    let state = reducer(undefined, openTab(chat("a")));
+    for (const surfaceKey of ["file:/a", "file:/b"]) {
+      state = reducer(
+        state,
+        addSurfaceToPane({ tabId: chat("a"), leafId: "root", surfaceKey }),
+      );
+    }
+    state = reducer(
+      state,
+      reorderPaneTabs({
+        tabId: chat("a"),
+        leafId: "root",
+        fromIndex: 2,
+        toIndex: 0,
+      }),
+    );
+    state = reducer(
+      state,
+      setPaneActive({
+        tabId: chat("a"),
+        leafId: "root",
+        surfaceKey: "file:/a",
+      }),
+    );
+    expect(state.tabs).toEqual([chat("a")]);
+    expect(state.groups[chat("a")]?.root).toEqual(
+      leaf("root", ["file:/b", chat("a"), "file:/a"], "file:/a"),
+    );
+    state = reducer(
+      state,
+      closePaneTab({ tabId: chat("a"), leafId: "root", surfaceKey: chat("a") }),
+    );
+    expect(state.tabs).toEqual(["file:/a"]);
+    expect(state.activeTabId).toBe("file:/a");
+    expect(state.groups["file:/a"]?.root).toEqual(
+      leaf("root", ["file:/b", "file:/a"], "file:/a"),
+    );
+    const hydrated = reducer(
+      undefined,
+      hydrateWorkspace({ ...state, openThreadIds: [], contextChatIds: ["a"] }),
+    );
+    expect(hydrated.groups).toEqual(state.groups);
+    expect(hydrated.tabs).toEqual(state.tabs);
+    state = reducer(
+      state,
+      closePaneTab({ tabId: "file:/a", leafId: "root", surfaceKey: "file:/a" }),
+    );
+    expect(state.tabs).toEqual(["file:/b"]);
+    expect(state.activeTabId).toBe("file:/b");
+    expect(groupFor(state, "file:/b").root).toEqual(
+      leaf("root", ["file:/b"], "file:/b"),
+    );
+  });
+
+  test("closing the final split preserves a remaining multi-tab leaf and moves deduplicated surfaces", () => {
+    let state = reducer(undefined, openTab(chat("a")));
+    state = reducer(
+      state,
+      addSurfaceToPane({
+        tabId: chat("a"),
+        leafId: "root",
+        surfaceKey: "file:/a",
+      }),
+    );
+    state = reducer(
+      state,
+      splitTab({ tabId: chat("a"), dir: "row", surfaceKey: chat("b") }),
+    );
+    const splitLeafId = state.groups[chat("a")]?.focusedLeafId ?? "missing";
+    state = reducer(
+      state,
+      closePaneTab({
+        tabId: chat("a"),
+        leafId: splitLeafId,
+        surfaceKey: chat("b"),
+      }),
+    );
+    expect(state.tabs).toEqual([chat("a")]);
+    expect(state.groups[chat("a")]?.root).toEqual(
+      leaf("root", [chat("a"), "file:/a"], "file:/a"),
+    );
+    state = reducer(state, openTab("file:/b"));
+    state = reducer(
+      state,
+      addSurfaceToPane({
+        tabId: chat("a"),
+        leafId: "root",
+        surfaceKey: "file:/b",
+      }),
+    );
+    state = reducer(
+      state,
+      addSurfaceToPane({
+        tabId: chat("a"),
+        leafId: "root",
+        surfaceKey: "file:/b",
+      }),
+    );
+    expect(state.tabs).toEqual([chat("a")]);
+    expect(renderedSurfaces(state)).toEqual([chat("a"), "file:/a", "file:/b"]);
+    expect(selectVisibleSurfaceKeys(rootState(state))).toEqual(["file:/b"]);
+  });
+});
+
+describe("all seven pane-capable surfaces", () => {
+  const keys = [
+    "chat:a",
+    "file:/a",
+    "task:a",
+    "buddy:home",
+    "design:a",
+    makeGitDiffSurfaceKey({
+      root: "/repo",
+      path: "a",
+      old_path: null,
+      left: { rev: "HEAD", path: "a" },
+      right: { rev: "WORKTREE", path: "a" },
+      kind: "working",
+    }),
+    "git:main",
+  ];
+  test.each(
+    keys.flatMap((source) =>
+      keys
+        .filter((target) => target !== source)
+        .flatMap((target) =>
+          (["row", "col"] as const).map((dir) => ({ source, target, dir })),
+        ),
+    ),
+  )(
+    "splits $source into $target ($dir), moves, deduplicates, reorders and closes UI only",
+    ({ source, target, dir }) => {
+      let state = reducer(undefined, openTab(target));
+      state = reducer(
+        state,
+        splitPaneWithSurface({
+          tabId: target,
+          leafId: "root",
+          surfaceKey: source,
+          dir,
+        }),
+      );
+      expect(collectLeafIds(groupFor(state, target).root)).toHaveLength(2);
+      expect(renderedSurfaces(state)).toEqual([target, source]);
+      state = reducer(
+        state,
+        addSurfaceToPane({ tabId: target, leafId: "root", surfaceKey: source }),
+      );
+      expect(renderedSurfaces(state)).toEqual([target, source]);
+      expect(collectLeafIds(groupFor(state, target).root)).toHaveLength(1);
+      state = reducer(
+        state,
+        addSurfaceToPane({ tabId: target, leafId: "root", surfaceKey: source }),
+      );
+      state = reducer(
+        state,
+        reorderPaneTabs({
+          tabId: target,
+          leafId: "root",
+          fromIndex: 1,
+          toIndex: 0,
+        }),
+      );
+      expect(renderedSurfaces(state)).toEqual([source, target]);
+      state = reducer(
+        state,
+        closePaneTab({ tabId: target, leafId: "root", surfaceKey: source }),
+      );
+      expect(renderedSurfaces(state)).toEqual([target]);
+    },
+  );
+  test.each(keys)(
+    "restores root %s without requiring open chat threads",
+    (key) => {
+      const state = reducer(undefined, openTab(key));
+      const restored = reducer(
+        undefined,
+        hydrateWorkspace({
+          ...state,
+          openThreadIds: key === "chat:a" ? ["a"] : [],
+        }),
+      );
+      expect(renderedSurfaces(restored)).toEqual([key]);
+    },
+  );
+  test("file capacity does not block other kinds and rejection does not detach source", () => {
+    let state = reducer(undefined, openTab("chat:a"));
+    for (let index = 0; index < 30; index++)
+      state = reducer(state, openTab(`file:/${index}`));
+    for (const surfaceKey of keys.filter((key) => !key.startsWith("file:")))
+      state = reducer(
+        state,
+        addSurfaceToPane({ tabId: "chat:a", leafId: "root", surfaceKey }),
+      );
+    const source: WorkspaceState = {
+      ...state,
+      tabs: [...state.tabs, "file:/overflow"],
+      groups: {
+        ...state.groups,
+        "file:/overflow": {
+          root: leaf("source", ["file:/overflow"]),
+          focusedLeafId: "source",
+        },
+      },
+    };
+    expect(
+      reducer(
+        source,
+        addSurfaceToPane({
+          tabId: "chat:a",
+          leafId: "root",
+          surfaceKey: "file:/overflow",
+        }),
+      ),
+    ).toEqual(source);
+    expect(
+      reducer(
+        source,
+        splitPaneWithSurface({
+          tabId: "chat:a",
+          leafId: "root",
+          surfaceKey: "file:/overflow",
+          dir: "row",
+        }),
+      ),
+    ).toEqual(source);
+  });
+  test("prunes only closed chats and explicit owned files, preserves independent surfaces", () => {
+    let state = reducer(undefined, openTab("chat:a"));
+    for (const key of keys.slice(1)) state = reducer(state, openTab(key));
+    const next = reducer(state, reconcileWorkspace({ openThreadIds: [] }));
+    expect(renderedSurfaces(next)).toEqual(
+      keys.filter((key) => key !== "chat:a" && key !== "file:/a"),
+    );
+    expect(selectWorkspaceFocusedChatId({ workspace: next })).toBeNull();
+    for (const key of keys.slice(2))
+      expect(selectSurfaceChatId({ workspace: next }, key)).toBeNull();
+  });
+  test("focused task resolves its actual active chat without an ownership mapping", () => {
+    const workspace = reducer(undefined, openTab("task:a"));
+    expect(
+      selectFocusedWorkspaceChatId({
+        workspace,
+        tasksUI: {
+          openTasks: [{ id: "a", activeChat: { chatId: "planner" } }],
+        },
+      }),
+    ).toBe("planner");
+    expect(workspace.contextChatByTab).toBeUndefined();
+  });
+});
+
+describe("independent pane capability pruning", () => {
+  test.each(["file:/a", "git:main"])(
+    "disabled root %s retains enabled nested Task/Buddy/Design",
+    (root) => {
+      let state = reducer(undefined, openTab(root));
+      for (const key of ["task:a", "buddy:home", "design:a"])
+        state = reducer(state, openTab(key));
+      const workspaceCapabilities = {
+        filesPanel: false,
+        gitPanel: false,
+        terminalPanel: false,
+      };
+      for (const next of [
+        reducer(
+          state,
+          reconcileWorkspace({ openThreadIds: [], workspaceCapabilities }),
+        ),
+        reducer(
+          undefined,
+          hydrateWorkspace({
+            ...state,
+            openThreadIds: [],
+            workspaceCapabilities,
+          }),
+        ),
+      ]) {
+        expect(renderedSurfaces(next)).toEqual([
+          "task:a",
+          "buddy:home",
+          "design:a",
+        ]);
+        expect(next.tabs).toEqual(["design:a"]);
+        expect(next.contextChatByTab).toBeUndefined();
+      }
+    },
+  );
 });

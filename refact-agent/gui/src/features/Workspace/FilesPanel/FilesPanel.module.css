@@ -365,3 +365,57 @@
   clip: rect(0 0 0 0);
   white-space: nowrap;
 }
+
+.htmlPreview {
+  flex: 1 1 0;
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+  border: 0;
+  background: var(--rf-bg);
+}
+
+.viewerControls {
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: var(--rf-space-1);
+}
+
+.fileInfo {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-2);
+  min-width: 0;
+}
+
+.fullPath {
+  overflow-wrap: anywhere;
+  color: var(--rf-color-fg);
+  font-size: var(--rf-text-2);
+}
+
+.fileInfoMeta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--rf-space-2);
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-1);
+}
+
+.readOnlyIndicator {
+  display: inline-flex;
+  align-items: center;
+  color: var(--rf-color-muted);
+}
+
+.readOnlyIndicator > svg {
+  width: var(--rf-icon-sm);
+  height: var(--rf-icon-sm);
+}
+
+@container (max-width: 240px) {
+  .unavailableEdit {
+    display: none;
+  }
+}

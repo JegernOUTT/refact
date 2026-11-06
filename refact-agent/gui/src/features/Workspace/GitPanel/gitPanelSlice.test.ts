@@ -3,7 +3,13 @@ import { describe, expect, it } from "vitest";
 import { setUpStore } from "../../../app/store";
 import { createChatWithId } from "../../Chat/Thread";
 import { gitDiffDescriptorFromSurfaceKey } from "../surfaceKey";
-import { openTab, setActiveTab } from "../workspaceSlice";
+import {
+  openTab,
+  selectActiveGroup,
+  selectFocusedWorkspaceSurfaceKey,
+  setActiveTab,
+} from "../workspaceSlice";
+import { collectTabIds } from "../../ChatPanes/panesTree";
 import {
   DEFAULT_GIT_ROOT_VIEW,
   openGitCommitDiff,
@@ -32,7 +38,7 @@ const target = (
 });
 
 function activeDescriptor(store: ReturnType<typeof setUpStore>) {
-  const key = store.getState().workspace.activeTabId ?? "";
+  const key = selectFocusedWorkspaceSurfaceKey(store.getState()) ?? "";
   expect(key.startsWith("gitdiff:")).toBe(true);
   return gitDiffDescriptorFromSurfaceKey(key);
 }
@@ -45,12 +51,19 @@ describe("gitPanelSlice", () => {
 
     const appKey = store.dispatch(openGitDiff(target("src/app.ts")));
     const libKey = store.dispatch(openGitDiff(target("src/lib.ts")));
-    expect(store.getState().workspace.tabs).toEqual([appKey, libKey]);
-    expect(store.getState().workspace.activeTabId).toBe(libKey);
+    expect(store.getState().workspace.tabs).toEqual([appKey]);
+    const group = selectActiveGroup(store.getState());
+    if (!group) throw new Error("Expected an active workspace group");
+    expect(collectTabIds(group.root)).toEqual([appKey, libKey]);
+    expect(selectFocusedWorkspaceSurfaceKey(store.getState())).toBe(libKey);
 
     expect(store.dispatch(openGitDiff(target("src/app.ts")))).toBe(appKey);
-    expect(store.getState().workspace.tabs).toEqual([appKey, libKey]);
-    expect(store.getState().workspace.activeTabId).toBe(appKey);
+    expect(store.getState().workspace.tabs).toEqual([appKey]);
+    const refocusedGroup = selectActiveGroup(store.getState());
+    if (!refocusedGroup)
+      throw new Error("Expected the refocused workspace group");
+    expect(collectTabIds(refocusedGroup.root)).toEqual([appKey, libKey]);
+    expect(selectFocusedWorkspaceSurfaceKey(store.getState())).toBe(appKey);
     expect(selectGitDiffTargetForChat(store.getState(), null)).toEqual(
       target("src/app.ts"),
     );

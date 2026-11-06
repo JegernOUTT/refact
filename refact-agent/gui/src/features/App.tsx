@@ -47,7 +47,7 @@ import { Tab } from "../components/Toolbar/Toolbar";
 import { PageWrapper } from "../components/PageWrapper";
 
 import { LoginPage } from "./Login";
-import { selectOpenTasksFromRoot, TaskList, TaskWorkspace } from "./Tasks";
+import { selectOpenTasksFromRoot, TaskList } from "./Tasks";
 import { KnowledgeWorkspace } from "./Knowledge";
 import { CodeIntelWorkspace } from "./CodeIntel";
 
@@ -57,7 +57,7 @@ import { RefactDaemonPage } from "./RefactDaemon";
 import { BugReportPage, installWebuiConsoleCapture } from "./BugReport";
 import { Dashboard } from "./Dashboard";
 import { SettingsHub, isSettingsPage } from "./Settings";
-import { BuddyHome } from "./Buddy/BuddyHome";
+import { WorkspaceSurfaceRoutes } from "./Workspace/WorkspaceSurfaceRoutes";
 import { BuddyCompanion } from "./Buddy/Companion/BuddyCompanion";
 import { BuddyErrorBoundary } from "./Buddy/BuddyErrorBoundary";
 
@@ -271,15 +271,19 @@ const WorkspaceApp: React.FC<AppProps> = ({ style }: AppProps) => {
     };
   }, [chatId]);
 
-  const desiredPage = pages[pages.length - 1];
+  const routePage = pages[pages.length - 1];
+  const desiredPage = useMemo(
+    () =>
+      routePage.name === "task workspace" || routePage.name === "buddy"
+        ? { name: "chat" as const }
+        : routePage,
+    [routePage],
+  );
   const [renderedPage, setRenderedPage] = useState(desiredPage);
 
   useEffect(() => {
     if (desiredPage === renderedPage) return;
-    if (
-      desiredPage.name === renderedPage.name &&
-      desiredPage.name !== "task workspace"
-    ) {
+    if (desiredPage.name === renderedPage.name) {
       setRenderedPage(desiredPage);
       return;
     }
@@ -289,7 +293,9 @@ const WorkspaceApp: React.FC<AppProps> = ({ style }: AppProps) => {
     return () => cancelAnimationFrame(rafId);
   }, [desiredPage, renderedPage]);
 
-  const pageSwitching = desiredPage !== renderedPage;
+  const pageSwitching =
+    desiredPage !== renderedPage &&
+    !(desiredPage.name === "chat" && renderedPage.name === "chat");
 
   const isLoggedIn =
     isPageInHistory("history") ||
@@ -427,18 +433,6 @@ const WorkspaceApp: React.FC<AppProps> = ({ style }: AppProps) => {
         type: "dashboard",
       };
     }
-    if (desiredPage.name === "task workspace") {
-      return {
-        type: "task",
-        taskId: desiredPage.taskId,
-        taskName: "",
-      };
-    }
-    if (desiredPage.name === "buddy") {
-      return {
-        type: "buddy",
-      };
-    }
     if (
       desiredPage.name === "knowledge graph" ||
       desiredPage.name === "code intel" ||
@@ -489,16 +483,6 @@ const WorkspaceApp: React.FC<AppProps> = ({ style }: AppProps) => {
     if (!restoredActiveTabRef.current) return;
     if (!activeTab) return;
     if (activeTab.type === "chat" && !activeTab.id) return;
-
-    if (activeTab.type === "task") {
-      savePersistedActiveTab({ type: "task", taskId: activeTab.taskId });
-      return;
-    }
-
-    if (activeTab.type === "buddy") {
-      savePersistedActiveTab({ type: "buddy" });
-      return;
-    }
 
     savePersistedActiveTab(activeTab);
   }, [activeTab]);
@@ -640,13 +624,6 @@ const WorkspaceApp: React.FC<AppProps> = ({ style }: AppProps) => {
               {!pageHidden && renderedPage.name === "tasks list" && (
                 <TaskList backFromTasks={goBack} />
               )}
-              {!pageHidden && renderedPage.name === "task workspace" && (
-                <TaskWorkspace
-                  key={renderedPage.taskId}
-                  taskId={renderedPage.taskId}
-                  cardId={renderedPage.cardId}
-                />
-              )}
               {!pageHidden && renderedPage.name === "knowledge graph" && (
                 <KnowledgeWorkspace />
               )}
@@ -677,8 +654,6 @@ const WorkspaceApp: React.FC<AppProps> = ({ style }: AppProps) => {
               {!pageHidden && renderedPage.name === "bug report" && (
                 <BugReportPage onBack={goBack} />
               )}
-
-              {!pageHidden && renderedPage.name === "buddy" && <BuddyHome />}
             </PageWrapper>
           </MaybeWorkspaceShell>
           {renderedPage.name !== "login page" && (
@@ -700,7 +675,11 @@ const WorkspaceApp: React.FC<AppProps> = ({ style }: AppProps) => {
 export const InnerApp: React.FC<AppProps> = (props) => {
   const surface = useAppSelector(selectSurface);
   if (surface === "dashboard") return <DaemonDashboardShell />;
-  return <WorkspaceApp {...props} />;
+  return (
+    <WorkspaceSurfaceRoutes>
+      <WorkspaceApp {...props} />
+    </WorkspaceSurfaceRoutes>
+  );
 };
 
 // TODO: move this to the `app` directory.

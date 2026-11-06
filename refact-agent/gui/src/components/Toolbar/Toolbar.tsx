@@ -12,24 +12,26 @@ import {
   setThreadConfirmationStatus,
   switchToThread,
 } from "../../features/Chat/Thread";
-import { popBackTo, push, selectPages } from "../../features/Pages/pagesSlice";
-import { openTask, selectOpenTasksFromRoot } from "../../features/Tasks";
-import { selectCapabilities } from "../../features/Config/configSlice";
+import { popBackTo, push } from "../../features/Pages/pagesSlice";
+import { openTask } from "../../features/Tasks";
 import {
-  selectWorkspaceFocusedChatId,
-  selectPanelsForced,
   selectTabs,
-} from "../../features/Workspace";
-import { TabBar } from "../../features/Workspace/TabBar";
+  selectWorkspaceGroups,
+  selectWorkspaceFocusedChatId,
+} from "../../features/Workspace/workspaceSlice";
+import {
+  collectLeafIds,
+  collectTabIds,
+} from "../../features/ChatPanes/panesTree";
+import { isFileSurface } from "../../features/Workspace/surfaceKey";
 import { useAppDispatch } from "../../hooks/useAppDispatch";
 import { useAppSelector } from "../../hooks/useAppSelector";
-import { useConfig } from "../../hooks/useConfig";
 import { useEventsBusForIDE } from "../../hooks/useEventBusForIDE";
 import { useCreateTaskMutation } from "../../services/refact/tasks";
-import { resolveWorkspaceDockAvailability } from "../../features/Workspace/workspaceAvailability";
 import { IconButton, Tooltip } from "../ui";
 import { EngineStatusChip } from "../ConnectionStatus";
 import { NewSplitButton } from "./NewSplitButton";
+import { WorkspaceToolbarTabs } from "../../features/Workspace/WorkspacePaneTabs";
 import styles from "./Toolbar.module.css";
 
 export type DashboardTab = {
@@ -87,20 +89,19 @@ const ToolbarIconButton = ({
 
 export const Toolbar = ({ activeTab }: ToolbarProps) => {
   const dispatch = useAppDispatch();
-  const { host } = useConfig();
   const allThreads = useAppSelector(selectAllThreads);
   const currentChatId = useAppSelector(selectChatId);
   const focusedWorkspaceChatId = useAppSelector(selectWorkspaceFocusedChatId);
   const workspaceTabs = useAppSelector(selectTabs);
-  const openTasks = useAppSelector(selectOpenTasksFromRoot);
-  const pages = useAppSelector(selectPages);
-  const capabilities = useAppSelector(selectCapabilities);
-  const panelsForced = useAppSelector(selectPanelsForced);
-  const workspaceAvailability = resolveWorkspaceDockAvailability(
-    host,
-    capabilities,
-    panelsForced,
+  const workspaceGroups = useAppSelector(selectWorkspaceGroups);
+  const hasSplitPanes = Object.values(workspaceGroups).some((group) =>
+    group ? collectLeafIds(group.root).length > 1 : false,
   );
+  const hasOpenFiles =
+    workspaceTabs.some(isFileSurface) ||
+    Object.values(workspaceGroups).some((group) =>
+      group ? collectTabIds(group.root).some(isFileSurface) : false,
+    );
   const { openSettings } = useEventsBusForIDE();
   const toolbarChatId =
     activeTab.type === "chat"
@@ -108,23 +109,22 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
       : focusedWorkspaceChatId ?? currentChatId;
   const shouldCleanToolbarChat =
     activeTab.type === "chat" || focusedWorkspaceChatId !== null;
-  const showTabBar =
-    workspaceTabs.length > 0 ||
-    openTasks.length > 0 ||
-    pages.some((page) => page.name === "buddy") ||
-    workspaceAvailability.dock;
   const [createTask] = useCreateTaskMutation();
 
   const goHome = useCallback(() => {
     if (activeTab.type === "chat") {
       const currentThread = allThreads[activeTab.id];
-      if (currentThread && currentThread.thread.messages.length === 0) {
+      if (
+        currentThread &&
+        currentThread.thread.messages.length === 0 &&
+        !hasOpenFiles
+      ) {
         dispatch(closeThread({ id: activeTab.id }));
       }
     }
 
     dispatch(popBackTo({ name: "history" }));
-  }, [activeTab, allThreads, dispatch]);
+  }, [activeTab, allThreads, dispatch, hasOpenFiles]);
 
   const handleNavigation = useCallback(
     (to: DropdownNavigationOptions | "chat") => {
@@ -172,7 +172,11 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
       );
     }
 
-    if (currentThread && currentThread.thread.messages.length === 0) {
+    if (
+      currentThread &&
+      currentThread.thread.messages.length === 0 &&
+      !hasOpenFiles
+    ) {
       dispatch(closeThread({ id: toolbarChatId }));
     }
 
@@ -185,6 +189,7 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
     toolbarChatId,
     dispatch,
     handleNavigation,
+    hasOpenFiles,
   ]);
 
   const onCreateNewTask = useCallback(() => {
@@ -198,7 +203,11 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
   }, [createTask, dispatch]);
 
   return (
-    <div className={styles.toolbar}>
+    <div
+      className={styles.toolbar}
+      role="toolbar"
+      aria-label="Workspace toolbar"
+    >
       <div className={styles.toolbarSection}>
         <ToolbarIconButton
           label="Home"
@@ -208,14 +217,9 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
         />
       </div>
 
-      {showTabBar ? (
-        <>
-          <div className={styles.toolbarDivider} />
-          <TabBar placement="toolbar" />
-        </>
-      ) : (
-        <div className={styles.toolbarSpacer} data-element="ToolbarSpacer" />
-      )}
+      <div className={styles.toolbarTabs}>
+        <WorkspaceToolbarTabs />
+      </div>
 
       <div
         className={classNames(styles.toolbarDivider, styles.connectionDivider)}
@@ -224,7 +228,7 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
       <div
         className={classNames(styles.toolbarSection, styles.connectionSection)}
       >
-        <EngineStatusChip />
+        <EngineStatusChip compact={hasSplitPanes} />
       </div>
 
       <div className={styles.toolbarDivider} />

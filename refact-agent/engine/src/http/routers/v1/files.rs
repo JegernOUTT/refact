@@ -815,32 +815,31 @@ fn port_default(scheme: &str) -> u16 {
     }
 }
 
-pub async fn handle_v1_files_open(
-    State(app): State<AppState>,
-    headers: axum::http::HeaderMap,
-    Json(request): Json<OpenRequest>,
-) -> Result<Json<ReadResponse>, ScratchError> {
+async fn explicit_browse_path(
+    gcx: Arc<GlobalContext>,
+    headers: &axum::http::HeaderMap,
+    requested: &PathBuf,
+) -> Result<PathBuf, ScratchError> {
     if !trusted_open_origin(&headers) {
         return Err(ScratchError::new(
             StatusCode::FORBIDDEN,
             "Opening files is not allowed from this origin".to_string(),
         ));
     }
-    let requested = PathBuf::from(&request.path);
     if !requested.is_absolute() {
         return Err(ScratchError::new(
             StatusCode::BAD_REQUEST,
             "Path must be absolute".to_string(),
         ));
     }
-    let canonical = tokio::fs::canonicalize(&requested)
+    let canonical = tokio::fs::canonicalize(requested)
         .await
         .map(|path| dunce::simplified(&path).to_path_buf())
-        .map_err(|error| io_error(StatusCode::NOT_FOUND, "resolve path", &requested, error))?;
-    let privacy = crate::privacy::load_privacy_if_needed(app.gcx.clone()).await;
+        .map_err(|error| io_error(StatusCode::NOT_FOUND, "resolve path", requested, error))?;
+    let privacy = crate::privacy::load_privacy_if_needed(gcx.clone()).await;
     crate::privacy::check_file_privacy(
         privacy,
-        &requested,
+        requested,
         &crate::privacy::FilePrivacyLevel::AllowToSendAnywhere,
     )
     .map_err(|error| {
@@ -849,8 +848,42 @@ pub async fn handle_v1_files_open(
             format!("{PRIVACY_BLOCKED_PREFIX} {error}"),
         )
     })?;
-    privacy_checked_path(app.gcx.clone(), &requested).await?;
-    privacy_checked_path(app.gcx.clone(), &canonical).await?;
+    privacy_checked_path(gcx.clone(), requested).await?;
+    privacy_checked_path(gcx.clone(), &canonical).await?;
+    Ok(canonical)
+}
+
+pub async fn handle_v1_files_browse(
+    State(app): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Json(request): Json<TreeQuery>,
+) -> Result<Json<TreeResponse>, ScratchError> {
+    let requested = PathBuf::from(request.path.unwrap_or_default());
+    let path = explicit_browse_path(app.gcx.clone(), &headers, &requested).await?;
+    if !path.is_dir() {
+        return Err(ScratchError::new(
+            StatusCode::BAD_REQUEST,
+            format!("Path '{}' is not a directory", path.display()),
+        ));
+    }
+    let privacy = TreePrivacyResolver::new(app.gcx.clone()).await?;
+    let indexing = crate::files_blocklist::reload_indexing_everywhere_if_needed(app.gcx).await;
+    let entries = list_dir_core(&path, &indexing, &privacy).await?;
+    let (entries, truncated) = truncate_entries(entries, clamped_tree_limit(request.max_entries));
+    Ok(Json(TreeResponse {
+        path: path.to_string_lossy().to_string(),
+        entries,
+        truncated,
+    }))
+}
+
+pub async fn handle_v1_files_open(
+    State(app): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Json(request): Json<OpenRequest>,
+) -> Result<Json<ReadResponse>, ScratchError> {
+    let requested = PathBuf::from(&request.path);
+    let canonical = explicit_browse_path(app.gcx.clone(), &headers, &requested).await?;
     let can_edit = validated_existing_path(app.gcx.clone(), &requested)
         .await
         .is_ok_and(|validated| validated == canonical);
@@ -1566,6 +1599,142 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(late["content"], "last\n");
         assert_eq!(late["truncated"], false);
+    }
+
+    #[tokio::test]
+    async fn browse_external_directory_without_widening_tree_scope() {
+        let workspace = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        tokio::fs::create_dir(outside.path().join("child"))
+            .await
+            .unwrap();
+        tokio::fs::write(outside.path().join("note.txt"), "outside")
+            .await
+            .unwrap();
+        let (_gcx, router) = test_router(&[workspace.path()]).await;
+        let (status, listed) = post_json(
+            router.clone(),
+            "/v1/files/browse",
+            serde_json::json!({ "path": outside.path(), "max_entries": 1 }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{listed:?}");
+        let canonical = tokio::fs::canonicalize(outside.path()).await.unwrap();
+        assert_eq!(
+            listed["path"],
+            dunce::simplified(&canonical).to_string_lossy().as_ref()
+        );
+        assert_eq!(listed["entries"].as_array().unwrap().len(), 1);
+        assert_eq!(listed["entries"][0]["name"], "child");
+        assert_eq!(listed["entries"][0]["kind"], "dir");
+        assert_eq!(listed["entries"][0]["privacy_zone"]["name"], "normal");
+        assert_eq!(listed["truncated"], true);
+        let (status, _) = get_json(
+            router,
+            query_uri(
+                "/v1/files/tree",
+                &[("path", outside.path().to_string_lossy().to_string())],
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn browse_rejects_untrusted_origin_before_listing() {
+        let outside = tempfile::tempdir().unwrap();
+        tokio::fs::write(outside.path().join("private-name.txt"), "data")
+            .await
+            .unwrap();
+        let (_gcx, router) = test_router(&[]).await;
+        let (status, listed) = post_json(
+            router.clone(),
+            "/v1/files/browse",
+            serde_json::json!({ "path": outside.path() }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(listed["entries"][0]["name"], "private-name.txt");
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/files/browse")
+                    .header("content-type", "application/json")
+                    .header("origin", "https://evil.example")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({ "path": outside.path() })).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body = hyper::body::to_bytes(response.into_body()).await.unwrap();
+        assert!(!String::from_utf8_lossy(&body).contains("private-name.txt"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn browse_checks_requested_and_canonical_directory_privacy() {
+        use std::os::unix::fs::symlink;
+        let outside = tempfile::tempdir().unwrap();
+        let secret = outside.path().join("hidden.secret");
+        let plain = outside.path().join("plain");
+        tokio::fs::create_dir(&secret).await.unwrap();
+        tokio::fs::create_dir(&plain).await.unwrap();
+        tokio::fs::write(secret.join("private-name.txt"), "secret")
+            .await
+            .unwrap();
+        tokio::fs::write(plain.join("public.txt"), "public")
+            .await
+            .unwrap();
+        let canonical_alias = outside.path().join("alias");
+        let requested_alias = outside.path().join("alias.secret");
+        symlink(&secret, &canonical_alias).unwrap();
+        symlink(&plain, &requested_alias).unwrap();
+        let (gcx, router) = test_router(&[]).await;
+        set_privacy(gcx, vec!["*.secret".to_string()]);
+        let (status, listed) = post_json(
+            router.clone(),
+            "/v1/files/browse",
+            serde_json::json!({ "path": plain }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(listed["entries"][0]["name"], "public.txt");
+        let (status, blocked) = post_json(
+            router.clone(),
+            "/v1/files/browse",
+            serde_json::json!({ "path": canonical_alias }),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "canonical privacy must prevent listing"
+        );
+        assert!(blocked["detail"]
+            .as_str()
+            .unwrap()
+            .starts_with(super::PRIVACY_BLOCKED_PREFIX));
+        assert!(blocked.get("entries").is_none());
+        let (status, blocked) = post_json(
+            router,
+            "/v1/files/browse",
+            serde_json::json!({ "path": requested_alias }),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "requested privacy must prevent listing"
+        );
+        assert!(blocked["detail"]
+            .as_str()
+            .unwrap()
+            .starts_with(super::PRIVACY_BLOCKED_PREFIX));
+        assert!(blocked.get("entries").is_none());
     }
 
     #[tokio::test]

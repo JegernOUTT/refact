@@ -6,6 +6,7 @@ import { setUpStore } from "../app/store";
 import { setCurrentProjectInfo } from "./Chat/currentProject";
 import { setBackendStatus } from "./Connection";
 import { InnerApp } from "./App";
+import { selectFocusedWorkspaceSurfaceKey } from "./Workspace/workspaceSlice";
 import { makeSurfaceKey } from "./Workspace/surfaceKey";
 import {
   getProjectStorageNamespace,
@@ -33,12 +34,10 @@ import {
   server,
 } from "../utils/mockServer";
 
-vi.mock("./Tasks", async () => {
+vi.mock("./Tasks/TaskWorkspace", async () => {
   const React = await vi.importActual<typeof import("react")>("react");
-  const actual = await vi.importActual<typeof import("./Tasks")>("./Tasks");
 
   return {
-    ...actual,
     TaskWorkspace: ({ taskId }: { taskId: string }) =>
       React.createElement(
         "section",
@@ -304,10 +303,10 @@ describe("App active tab restore", () => {
     });
 
     await waitFor(() => {
-      expect(store.getState().pages.at(-1)).toEqual({
-        name: "task workspace",
-        taskId: "task-b",
-      });
+      expect(store.getState().pages.at(-1)).toEqual({ name: "chat" });
+      expect(selectFocusedWorkspaceSurfaceKey(store.getState())).toBe(
+        "task:task-b",
+      );
     });
     expect(await screen.findByTestId("task-workspace")).toHaveTextContent(
       "task-b",
@@ -350,10 +349,10 @@ describe("App active tab restore", () => {
     });
 
     await waitFor(() => {
-      expect(store.getState().pages.at(-1)).toEqual({
-        name: "task workspace",
-        taskId: "task-b",
-      });
+      expect(store.getState().pages.at(-1)).toEqual({ name: "chat" });
+      expect(selectFocusedWorkspaceSurfaceKey(store.getState())).toBe(
+        "task:task-b",
+      );
     });
     expect(await screen.findByTestId("task-workspace")).toHaveTextContent(
       "task-b",

@@ -16,16 +16,44 @@ import {
   parseSurfaceKey,
   type SurfaceKey,
 } from "./surfaceKey";
+import type { BuddyPage, TaskWorkspacePage } from "../Pages/pagesSlice";
+import { useWorkspaceSurfaceRouteContext } from "./WorkspaceSurfaceRoutes";
 import { selectPanelsForced } from "./workspaceSlice";
 import styles from "./SurfacePane.module.css";
+
+const TaskWorkspace = lazy(() =>
+  import("../Tasks/TaskWorkspace").then((module) => ({
+    default: module.TaskWorkspace,
+  })),
+);
+const BuddyHome = lazy(() =>
+  import("../Buddy/BuddyHome").then((module) => ({
+    default: module.BuddyHome,
+  })),
+);
 
 const GitDiffViewer = lazy(() => import("./GitPanel/diff/GitDiffViewer"));
 
 export type SurfacePaneProps = {
   surfaceKey?: SurfaceKey | null;
+  focused?: boolean;
+  buddyRouteContext?: BuddyPage;
+  taskRouteContext?: TaskWorkspacePage;
 };
 
-export function SurfacePane({ surfaceKey }: SurfacePaneProps) {
+export function SurfacePane({
+  surfaceKey,
+  focused = true,
+  buddyRouteContext,
+  taskRouteContext,
+}: SurfacePaneProps) {
+  const routeContext = useWorkspaceSurfaceRouteContext(surfaceKey);
+  const taskContext =
+    taskRouteContext ??
+    (routeContext?.name === "task workspace" ? routeContext : undefined);
+  const buddyContext =
+    buddyRouteContext ??
+    (routeContext?.name === "buddy" ? routeContext : undefined);
   const config = useConfig();
   const capabilities = useAppSelector(selectCapabilities);
   const panelsForced = useAppSelector(selectPanelsForced);
@@ -46,6 +74,29 @@ export function SurfacePane({ surfaceKey }: SurfacePaneProps) {
 
   try {
     const parsed = parseSurfaceKey(surfaceKey);
+
+    if (parsed.kind === "task" || parsed.kind === "buddy") {
+      return (
+        <div className={styles.surfacePane} data-surface-key={surfaceKey}>
+          <Suspense fallback={<Spinner label="Loading workspace" />}>
+            {parsed.kind === "task" ? (
+              <TaskWorkspace
+                taskId={parsed.id}
+                cardId={
+                  taskContext?.taskId === parsed.id
+                    ? taskContext.cardId
+                    : undefined
+                }
+                embedded
+                focused={focused}
+              />
+            ) : (
+              <BuddyHome embedded routeContext={buddyContext} />
+            )}
+          </Suspense>
+        </div>
+      );
+    }
 
     if (parsed.kind === "chat") {
       return (

@@ -6,6 +6,7 @@ import {
   DEFAULT_WORKSPACE_DRAWER,
   MAX_GROUP_LEAVES,
   MAX_WORKSPACE_TABS,
+  MAX_WORKSPACE_SURFACES,
   normalizeWorkspaceDock,
   normalizeWorkspaceDrawer,
   reconcileWorkspaceState,
@@ -19,9 +20,11 @@ import {
 } from "../features/Workspace/workspaceSlice";
 import {
   isChatSurface,
+  isDesignSurface,
+  isMainSurface,
   isFileSurface,
   isFilesSurface,
-  isMainSurface,
+  isSplittableSurface,
   isTerminalSurface,
   parseSurfaceKey,
   type SurfaceKey,
@@ -461,13 +464,11 @@ function isOpenWorkspaceSurface(
   surfaceKey: SurfaceKey,
   openThreadIds: ReadonlySet<string>,
 ): boolean {
-  return isFilesSurface(surfaceKey)
-    ? false
-    : isFileSurface(surfaceKey) ||
-        (isMainSurface(surfaceKey) && !isTerminalSurface(surfaceKey))
-      ? true
-      : isChatSurface(surfaceKey) &&
-        openThreadIds.has(surfaceKey.slice("chat:".length));
+  return (
+    isSplittableSurface(surfaceKey) &&
+    (!isChatSurface(surfaceKey) ||
+      openThreadIds.has(surfaceKey.slice("chat:".length)))
+  );
 }
 
 function normalizePersistedDock(value: unknown): WorkspaceDockState {
@@ -521,9 +522,10 @@ function normalizePersistedWorkspaceNode(
     for (const rawSurfaceKey of value.tabIds) {
       const surfaceKey = normalizeSurfaceKey(rawSurfaceKey);
       if (!surfaceKey) return null;
-      if (!isChatSurface(surfaceKey) && !isFileSurface(surfaceKey)) return null;
+      if (!isSplittableSurface(surfaceKey)) return null;
       context.surfacePlacementCount.value += 1;
-      if (context.surfacePlacementCount.value > MAX_WORKSPACE_TABS) return null;
+      if (context.surfacePlacementCount.value > MAX_WORKSPACE_SURFACES)
+        return null;
       if (tabIds.includes(surfaceKey)) continue;
       tabIds.push(surfaceKey);
     }
@@ -605,8 +607,8 @@ function normalizePersistedWorkspaceGroup(
 
   const leafIds = collectPaneLeafIds(root);
   const surfaceCount = collectTabIds(root).length;
-  if (leafIds.length < 2 || leafIds.length > MAX_GROUP_LEAVES) return null;
-  if (surfaceCount === 0 || surfaceCount > MAX_WORKSPACE_TABS) return null;
+  if (leafIds.length > MAX_GROUP_LEAVES) return null;
+  if (surfaceCount === 0 || surfaceCount > MAX_WORKSPACE_SURFACES) return null;
 
   const rawFocusedLeafId = stringOrUndefined(value.focusedLeafId)?.trim();
   const focusedLeafId =
@@ -650,7 +652,15 @@ export function loadPersistedWorkspace(
       continue;
     }
     if (isFilesSurface(surfaceKey)) continue;
-    if (!isOpenWorkspaceSurface(surfaceKey, openThreadIds)) continue;
+    if (
+      !isOpenWorkspaceSurface(surfaceKey, openThreadIds) &&
+      !(
+        isChatSurface(surfaceKey) &&
+        isRecord(record.groups) &&
+        record.groups[surfaceKey]
+      )
+    )
+      continue;
     if (tabs.includes(surfaceKey)) continue;
     tabs.push(surfaceKey);
   }
@@ -663,6 +673,7 @@ export function loadPersistedWorkspace(
 
   const totalNodeCount = { value: 0 };
   const groups: WorkspaceGroups = {};
+  const aggregateSurfaces = new Set<string>();
   for (const [rawTabId, rawGroup] of Object.entries(record.groups)) {
     const tabId = normalizeSurfaceKey(rawTabId);
     if (!tabId) continue;
@@ -676,6 +687,8 @@ export function loadPersistedWorkspace(
     );
     if (!group) continue;
     groups[tabId] = group;
+    for (const key of collectTabIds(group.root)) aggregateSurfaces.add(key);
+    if (aggregateSurfaces.size > MAX_WORKSPACE_SURFACES) return fallback;
   }
 
   if (
@@ -693,9 +706,16 @@ export function loadPersistedWorkspace(
   const contextChatEntries = isRecord(record.contextChatByTab)
     ? Object.entries(record.contextChatByTab).filter(
         (entry): entry is [string, string] =>
-          tabs.includes(entry[0]) &&
+          (tabs.includes(entry[0]) ||
+            Object.values(groups).some(
+              (group) => group && collectTabIds(group.root).includes(entry[0]),
+            )) &&
+          (isChatSurface(entry[0]) ||
+            isFileSurface(entry[0]) ||
+            isDesignSurface(entry[0]) ||
+            isMainSurface(entry[0])) &&
           typeof entry[1] === "string" &&
-          entry[1].trim().length > 0,
+          (entry[1].trim().length > 0 || isFileSurface(entry[0])),
       )
     : [];
   const contextChatByTab =
@@ -732,7 +752,13 @@ export function loadPersistedWorkspace(
   });
   return reconcileWorkspaceState(
     contextChatByTab
-      ? { ...sanitizedWorkspace, contextChatByTab }
+      ? {
+          ...sanitizedWorkspace,
+          contextChatByTab: {
+            ...contextChatByTab,
+            ...sanitizedWorkspace.contextChatByTab,
+          },
+        }
       : sanitizedWorkspace,
     persistedTabs.openThreadIds,
   );

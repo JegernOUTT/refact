@@ -110,15 +110,21 @@ describe("SurfacePane", () => {
     ).toBeInTheDocument();
   });
 
-  it("renders nothing for non-chat surface keys", () => {
-    const surfaceKey = makeSurfaceKey("task", "task-a");
+  it.each([
+    "dashboard",
+    "files:main",
+    "terminal:main",
+    "chat:",
+    "git:other",
+    "gitdiff:invalid",
+  ])(
+    "renders nothing for unsupported or malformed surface %s",
+    (surfaceKey) => {
+      const { container } = render(<SurfacePane surfaceKey={surfaceKey} />);
 
-    expect(parseSurfaceKey(surfaceKey)).toEqual({ kind: "task", id: "task-a" });
-
-    const { container } = render(<SurfacePane surfaceKey={surfaceKey} />);
-
-    expect(container.firstElementChild).toBeEmptyDOMElement();
-    expect(screen.queryByTestId("chat-surface")).not.toBeInTheDocument();
-    expect(screen.queryByText("No surface selected")).not.toBeInTheDocument();
-  });
+      expect(container.firstElementChild).toBeEmptyDOMElement();
+      expect(screen.queryByTestId("chat-surface")).not.toBeInTheDocument();
+      expect(screen.queryByText("No surface selected")).not.toBeInTheDocument();
+    },
+  );
 });

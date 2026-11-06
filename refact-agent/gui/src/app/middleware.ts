@@ -160,6 +160,10 @@ import {
 import {
   addSurfaceToPane as addSurfaceToWorkspacePane,
   bindSurfaceToChat,
+  closePaneTab,
+  consolidateWorkspaceTabs,
+  reorderPaneTabs,
+  openSurfaceInNewTab,
   closePane as closeWorkspacePane,
   ensureLiveEditSplit,
   closeTab as closeWorkspaceTab,
@@ -518,6 +522,10 @@ startListening({
 startListening({
   matcher: isAnyOf(
     openWorkspaceTab,
+    consolidateWorkspaceTabs,
+    closePaneTab,
+    reorderPaneTabs,
+    openSurfaceInNewTab,
     bindSurfaceToChat,
     closeWorkspaceTab,
     setWorkspaceActiveTab,
@@ -852,10 +860,7 @@ function closeWorkspaceChatTab(
 ): void {
   const originalWorkspace = listenerApi.getOriginalState().workspace;
   if (!originalWorkspace.tabs.includes(surfaceKey)) return;
-  const group = originalWorkspace.groups[surfaceKey];
-  const surfaceKeys = group
-    ? [surfaceKey, ...collectTabIds(group.root)]
-    : [surfaceKey];
+  const surfaceKeys = [surfaceKey];
 
   closeRemovedWorkspaceChats(listenerApi, surfaceKeys);
 }
@@ -881,6 +886,8 @@ function closeWorkspacePaneChats(
 startListening({
   matcher: isAnyOf(
     setWorkspaceActiveTab,
+    closePaneTab,
+    openSurfaceInNewTab,
     closeWorkspaceTab,
     closeWorkspacePane,
     setWorkspacePaneActive,
@@ -2969,3 +2976,55 @@ listenerMiddleware.startListening({
 // cloud until the user dismisses them or another speech overwrites them.
 // `registerBuddySpeechTtlListener` honors the TTL — see `buddySpeechTtl.ts`.
 registerBuddySpeechTtlListener(listenerMiddleware);
+
+startListening({
+  actionCreator: closePaneTab,
+  effect: (action, listenerApi) => {
+    const { tabId, leafId, surfaceKey } = action.payload;
+    const group = listenerApi.getOriginalState().workspace.groups[tabId];
+    if (!group || !findLeaf(group.root, leafId)?.tabIds.includes(surfaceKey))
+      return;
+    if (!isChatSurface(surfaceKey)) return;
+    const state = listenerApi.getState();
+    if (collectWorkspaceSurfaceKeys(state.workspace).has(surfaceKey)) return;
+    const chatId = surfaceKey.slice("chat:".length);
+    listenerApi.dispatch(closeThread({ id: chatId }));
+  },
+});
+
+// Tasks UI actions are lifecycle-only; neither direction deletes engine tasks,
+// planner trajectories, worktrees, or running agents.
+startListening({
+  actionCreator: openTask,
+  effect: (action, api) => {
+    const key = makeSurfaceKey("task", action.payload.id);
+    if (!collectWorkspaceSurfaceKeys(api.getState().workspace).has(key))
+      api.dispatch(openWorkspaceTab(key));
+  },
+});
+startListening({
+  actionCreator: closeTask,
+  effect: (action, api) => {
+    const key = makeSurfaceKey("task", action.payload);
+    for (const [tabId, group] of Object.entries(
+      api.getState().workspace.groups,
+    )) {
+      const leaf = group && findLeafByTab(group.root, key);
+      if (leaf)
+        api.dispatch(closePaneTab({ tabId, leafId: leaf.id, surfaceKey: key }));
+    }
+  },
+});
+startListening({
+  matcher: isAnyOf(closePaneTab, closeWorkspaceTab, closeWorkspacePane),
+  effect: (_action, api) => {
+    const before = collectWorkspaceSurfaceKeys(
+      api.getOriginalState().workspace,
+    );
+    const after = collectWorkspaceSurfaceKeys(api.getState().workspace);
+    for (const key of before) {
+      if (key.startsWith("task:") && !after.has(key))
+        api.dispatch(closeTask(key.slice("task:".length)));
+    }
+  },
+});

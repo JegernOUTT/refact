@@ -37,6 +37,10 @@
   white-space: nowrap;
 }
 
+.compact .chipLabel {
+  display: none;
+}
+
 .panel {
   display: flex;
   flex-direction: column;

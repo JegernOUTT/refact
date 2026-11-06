@@ -535,6 +535,19 @@ button.row:disabled {
   outline-offset: calc(-1 * var(--rf-focus-ring-w));
 }
 
+.tabsList {
+  composes: strip from "../ui/Tabs/TabAppearance.module.css";
+  display: flex;
+  margin: 0 0 var(--rf-space-1);
+  overflow-x: auto;
+}
+
+.tabTrigger {
+  composes: item from "../ui/Tabs/TabAppearance.module.css";
+  min-width: max-content;
+  flex: 1;
+}
+
 .tabPanel {
   display: flex;
   min-width: 0;

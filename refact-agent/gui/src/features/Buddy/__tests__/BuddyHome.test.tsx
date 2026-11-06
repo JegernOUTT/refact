@@ -10,6 +10,7 @@ import {
   resetBuddyForWorkspaceChange,
   setBuddySnapshot,
 } from "../buddySlice";
+import { push } from "../../Pages/pagesSlice";
 import { BuddyHome } from "../BuddyHome";
 import { setCurrentProjectInfo } from "../../Chat/currentProject";
 import {
@@ -453,5 +454,40 @@ describe("BuddyHome", () => {
     expect(buddyState.loaded).toBe(false);
     expect(buddyState.pendingSettingsRequests).toEqual([]);
     expect(buddyState.seenNotificationIds["opp-1"]).toBeGreaterThan(0);
+  });
+});
+
+describe("BuddyHome embedded route context", () => {
+  it("retains its deep link after global navigation and embedded Back never pops pages", async () => {
+    installBuddyHomeHandlers();
+    const store = setUpStore({ ...CONFIG_STATE });
+    store.dispatch(setBuddySnapshot(makeSnapshot()));
+    store.dispatch(push({ name: "buddy", draftId: "wrong-global-draft" }));
+    const { user } = render(
+      <BuddyHome
+        embedded
+        routeContext={{
+          name: "buddy",
+          workId: "pane-work",
+          workProjectId: "pane-project",
+        }}
+      />,
+      { store },
+    );
+    expect(await screen.findByTestId("buddy-home-content")).toHaveAttribute(
+      "data-section",
+      "reports",
+    );
+    act(() => {
+      store.dispatch(push({ name: "chat" }));
+    });
+    const pages = store.getState().pages;
+    await user.click(screen.getByRole("button", { name: "Back" }));
+    expect(store.getState().pages).toEqual(pages);
+    expect(screen.getByTestId("buddy-home-content")).toHaveAttribute(
+      "data-section",
+      "reports",
+    );
+    expect(screen.queryByText("wrong-global-draft")).not.toBeInTheDocument();
   });
 });

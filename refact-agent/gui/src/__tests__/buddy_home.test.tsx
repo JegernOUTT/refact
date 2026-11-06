@@ -817,13 +817,13 @@ describe("BuddyHome_layout_contract", () => {
     expect(offenders).toEqual([]);
   });
 
-  it("gives every Buddy control a hit-area floor", async () => {
+  it("gives Buddy controls a hit-area floor without overriding shared tab sizing", async () => {
     const css = await readGuiSource("features/Buddy/BuddyHome.module.css");
 
     expect(
       readCssBlock(
         css,
-        '.page :is(button, [role="tab"], select, input, summary)',
+        '.page :is(button, select, input, summary):not([role="tab"])',
       ),
     ).toContain("min-height: var(--rf-hit-min)");
     expect(css).toContain("--rf-hit-min: var(--rf-hit-min-touch)");

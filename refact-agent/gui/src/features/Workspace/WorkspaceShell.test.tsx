@@ -16,6 +16,7 @@ import {
   selectFocusedWorkspaceChatId,
   selectFocusedWorkspaceSurfaceKey,
   selectSurfaceChatId,
+  selectVisibleSurfaceKeys,
   selectWorkspaceFocusedChatId,
   setActiveTab,
   setDockOpen,
@@ -155,7 +156,10 @@ describe("WorkspaceShell", () => {
     goTo(store, { name: "task workspace", taskId: "task-1" });
 
     expect(selectFocusedWorkspaceChatId(store.getState())).toBe("planner-1");
-    expect(selectWorkspaceFocusedChatId(store.getState())).toBe("chat-a");
+    expect(selectWorkspaceFocusedChatId(store.getState())).toBeNull();
+    expect(selectFocusedWorkspaceSurfaceKey(store.getState())).toBe(
+      "task:task-1",
+    );
 
     store.dispatch(
       setTaskActiveChat({
@@ -166,6 +170,8 @@ describe("WorkspaceShell", () => {
     expect(selectFocusedWorkspaceChatId(store.getState())).toBe("agent-1");
 
     goTo(store, { name: "tasks list" });
+    expect(selectFocusedWorkspaceChatId(store.getState())).toBe("agent-1");
+    store.dispatch(setActiveTab(chat("chat-a")));
     expect(selectFocusedWorkspaceChatId(store.getState())).toBe("chat-a");
   });
 
@@ -210,7 +216,7 @@ describe("WorkspaceShell", () => {
         }),
       );
     });
-    expect(store.getState().workspace.tabs).toContain(fileKey);
+    expect(selectVisibleSurfaceKeys(store.getState())).toContain(fileKey);
     expect(selectSurfaceChatId(store.getState(), fileKey)).toBe("planner-1");
   });
 
@@ -236,7 +242,7 @@ describe("WorkspaceShell", () => {
       );
     });
 
-    expect(store.getState().workspace.tabs).toContain(fileKey);
+    expect(selectVisibleSurfaceKeys(store.getState())).toContain(fileKey);
     expect(selectSurfaceChatId(store.getState(), fileKey)).toBe("agent-1");
   });
 
@@ -258,6 +264,7 @@ describe("WorkspaceShell", () => {
   it("does not navigate when chat-page surfaces open", () => {
     const store = createStore();
     goTo(store, { name: "chat" });
+    store.dispatch(setActiveTab(chat("chat-a")));
     renderShell(store);
     const pagesBefore = store.getState().pages;
 

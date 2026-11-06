@@ -1,3 +1,9 @@
+import { configureStore } from "@reduxjs/toolkit";
+import { chatReducer } from "../Chat/Thread";
+import { tasksSlice } from "../Tasks/tasksSlice";
+import { pagesSlice } from "../Pages/pagesSlice";
+import { reducer as configReducer } from "../Config/configSlice";
+import { notificationsSlice } from "../Notifications/notificationsSlice";
 import { act } from "react-dom/test-utils";
 import { describe, expect, it, vi } from "vitest";
 
@@ -19,6 +25,7 @@ import { push } from "../Pages/pagesSlice";
 import { updateConfig } from "../Config/configSlice";
 import { openTask, reorderOpenTasks } from "../Tasks/tasksSlice";
 import {
+  workspaceSlice,
   addSurfaceToPane,
   closeTab,
   openTab,
@@ -34,6 +41,32 @@ import styles from "./TabBar.module.css";
 
 const chat = (id: string): SurfaceKey => makeSurfaceKey("chat", id);
 const task = (id: string): SurfaceKey => makeSurfaceKey("task", id);
+
+function createLegacyTabBarStore(base: AppStore, tabs: SurfaceKey[]): AppStore {
+  const initial = base.getState();
+  return configureStore({
+    preloadedState: {
+      ...initial,
+      workspace: {
+        ...initial.workspace,
+        tabs,
+        activeTabId: tabs[0] ?? null,
+        groups: {},
+      },
+    },
+    reducer: (state = initial, action) => ({
+      ...state,
+      workspace: workspaceSlice.reducer(state.workspace, action),
+      chat: chatReducer(state.chat, action),
+      tasksUI: tasksSlice.reducer(state.tasksUI, action),
+      pages: pagesSlice.reducer(state.pages, action),
+      config: configReducer(state.config, action),
+      notifications: notificationsSlice.reducer(state.notifications, action),
+    }),
+    middleware: (getDefaultMiddleware) =>
+      getDefaultMiddleware({ serializableCheck: false, immutableCheck: false }),
+  });
+}
 
 function renderTabBar(store: AppStore) {
   return render(<TabBar />, { store });
@@ -104,7 +137,11 @@ function createStoreWithChatTabs(): AppStore {
   store.dispatch(openTab(chat("chat-b")));
   store.dispatch(openTab(chat("chat-c")));
   store.dispatch(setActiveTab(chat("chat-a")));
-  return store;
+  return createLegacyTabBarStore(store, [
+    chat("chat-a"),
+    chat("chat-b"),
+    chat("chat-c"),
+  ]);
 }
 
 function createStoreWithGroupedTabs(): AppStore {
@@ -278,6 +315,28 @@ describe("TabBar", () => {
 
     expect(dispatchSpy).toHaveBeenCalledWith(setActiveTab(chat("chat-b")));
     expect(store.getState().workspace.activeTabId).toBe(chat("chat-b"));
+  });
+
+  it("reactivates a file tab after switching to a chat", async () => {
+    let store = createStoreWithChatTabs();
+    const file = makeSurfaceKey("file", "/workspace/photo.png");
+    store.dispatch(setPanelsForced(true));
+    store.dispatch(openTab(file));
+    store = createLegacyTabBarStore(store, [
+      chat("chat-a"),
+      chat("chat-b"),
+      chat("chat-c"),
+      file,
+    ]);
+    const view = renderTabBar(store);
+
+    await view.user.click(screen.getByRole("tab", { name: "photo.png" }));
+
+    expect(store.getState().workspace.activeTabId).toBe(file);
+    expect(screen.getByRole("tab", { name: "photo.png" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
   });
 
   it("does not render the live-edits control in the tab bar", () => {
@@ -458,12 +517,12 @@ describe("TabBar", () => {
   });
 
   it("navigates home when the last workspace tab is closed from the chat page", async () => {
-    const store = setUpStore();
+    let store = setUpStore();
     store.dispatch(
       createChatWithId({ id: "chat-a", title: "Chat Alpha", mode: "agent" }),
     );
     store.dispatch(openTab(chat("chat-a")));
-    store.dispatch(setActiveTab(chat("chat-a")));
+    store = createLegacyTabBarStore(store, [chat("chat-a")]);
     store.dispatch(push({ name: "history" }));
     store.dispatch(push({ name: "chat" }));
     const view = renderTabBar(store);
@@ -497,12 +556,13 @@ describe("TabBar", () => {
   });
 
   it("does not redirect home when the last chat tab is closed from a non-chat page", async () => {
-    const store = setUpStore();
+    let store = setUpStore();
     store.dispatch(
       createChatWithId({ id: "chat-a", title: "Chat Alpha", mode: "agent" }),
     );
     store.dispatch(openTab(chat("chat-a")));
     store.dispatch(setActiveTab(chat("chat-a")));
+    store = createLegacyTabBarStore(store, [chat("chat-a")]);
     store.dispatch(openTask({ id: "task-a", name: "Task Alpha" }));
     store.dispatch(push({ name: "history" }));
     store.dispatch(push({ name: "task workspace", taskId: "task-a" }));
@@ -706,7 +766,7 @@ describe("TabBar", () => {
   });
 
   it("keeps tab labels readable with a min-width wrap and a full-title tooltip", () => {
-    const store = setUpStore();
+    let store = setUpStore();
     store.dispatch(
       createChatWithId({
         id: "chat-long",
@@ -715,7 +775,7 @@ describe("TabBar", () => {
       }),
     );
     store.dispatch(openTab(chat("chat-long")));
-    store.dispatch(setActiveTab(chat("chat-long")));
+    store = createLegacyTabBarStore(store, [chat("chat-long")]);
     renderTabBar(store);
 
     const tab = screen.getByRole("tab", { name: /Terminal Adjacent/ });
