@@ -130,6 +130,29 @@ impl<'a> Element<'a> {
     /// document.querySelector(selector)
     /// ```
     ///
+    /// ```rust
+    /// # use anyhow::Result;
+    /// # // Awful hack to get access to testing utils common between integration, doctest, and unit tests
+    /// # mod server {
+    /// #     include!("../../../testing_utils/server.rs");
+    /// # }
+    /// # fn main() -> Result<()> {
+    /// #
+    /// use headless_chrome::Browser;
+    ///
+    /// let browser = Browser::default()?;
+    /// let initial_tab = browser.new_tab()?;
+    ///
+    /// let file_server = server::Server::with_dumb_html(include_str!("../../../../tests/simple.html"));
+    /// let containing_element = initial_tab.navigate_to(&file_server.url())?
+    ///     .wait_until_navigated()?
+    ///     .find_element("div#position-test")?;
+    /// let inner_divs = containing_element.find_elements("div")?;
+    /// assert_eq!(inner_divs.len(), 5);
+    /// #
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn find_elements(&self, selector: &str) -> Result<Vec<Self>> {
         self.parent
             .run_query_selector_all_on_node(self.node_id, selector)
