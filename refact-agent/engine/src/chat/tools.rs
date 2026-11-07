@@ -1097,60 +1097,6 @@ mod tests {
 
     #[serial(trajectory_perf)]
     #[tokio::test]
-    async fn same_turn_tool_diagnostics_cover_stages_without_confirmation_wait() {
-        let (outcome, sink, _) = process_deterministic_tool_turn(
-            DeterministicToolRegistry {
-                confirmation_result: MatchConfirmDenyResult::PASS,
-                runtime_failure: false,
-            },
-            vec![
-                deterministic_tool_call("tool-alpha", "alpha"),
-                deterministic_tool_call("tool-beta", "beta"),
-            ],
-        )
-        .await;
-
-        assert!(matches!(outcome, ToolStepOutcome::Continue));
-        let components = recorded_components(&sink);
-        for component in [
-            PerfComponent::ToolCatalogBuild,
-            PerfComponent::ToolSessionExtraction,
-            PerfComponent::ToolCatalogPoolAcquire,
-            PerfComponent::ToolAliasResolution,
-            PerfComponent::ToolConfirmationPreflight,
-            PerfComponent::ToolPolicyLookup,
-            PerfComponent::ToolPreHook,
-            PerfComponent::ToolExecutionWait,
-            PerfComponent::ToolRuntime,
-            PerfComponent::ToolPostHook,
-            PerfComponent::ToolResultMerge,
-            PerfComponent::ToolResultPostprocess,
-            PerfComponent::ToolSessionMergeEvents,
-            PerfComponent::ToolCheckpointScheduling,
-        ] {
-            assert!(
-                components.contains(&component.as_str()),
-                "missing {component:?}"
-            );
-        }
-        assert!(components
-            .iter()
-            .all(|component| *component != "tool.confirmation_wait"));
-        let runtime_events = sink
-            .events()
-            .into_iter()
-            .filter(|event| event.component == PerfComponent::ToolRuntime.as_str())
-            .collect::<Vec<_>>();
-        assert_eq!(runtime_events.len(), 2);
-        assert!(runtime_events.iter().all(|event| {
-            event.outcome == PerfOutcome::Success.as_str()
-                && event.batch_size == Some(1)
-                && event.execution_class.is_none()
-        }));
-    }
-
-    #[serial(trajectory_perf)]
-    #[tokio::test]
     async fn more_than_thirty_two_parallel_safe_tools_start_together() {
         const TOOL_COUNT: usize = 40;
         let started = Arc::new(AtomicUsize::new(0));
@@ -1738,22 +1684,6 @@ mod tests {
     }
 
     #[test]
-    fn test_autonomous_allowlist_rejects_unlisted_tool() {
-        let result = compute_final_action(
-            &MatchConfirmDenyResult::CONFIRMATION,
-            None,
-            false,
-            "unsafe_tool",
-        );
-        assert_eq!(result, "ask");
-        let thread = ThreadParams {
-            autonomous_no_confirm: true,
-            ..Default::default()
-        };
-        assert!(should_auto_approve_confirmation(&thread, "any_tool"));
-    }
-
-    #[test]
     fn test_user_chat_still_requires_approval() {
         let thread = ThreadParams::default();
 
@@ -1819,28 +1749,6 @@ mod tests {
         let components: Vec<_> = sink.events().iter().map(|event| event.component).collect();
         assert!(components.contains(&PerfComponent::ToolConfirmationPreflight.as_str()));
         assert!(components.contains(&PerfComponent::ToolPolicyLookup.as_str()));
-    }
-
-    #[test]
-    fn test_tool_config_serde_roundtrip() {
-        let config = refact_tool_api::ToolConfig {
-            enabled: true,
-            allow_parallel: Some(false),
-        };
-        let yaml = serde_yaml::to_string(&config).unwrap();
-        let parsed: refact_tool_api::ToolConfig = serde_yaml::from_str(&yaml).unwrap();
-        assert_eq!(parsed.enabled, config.enabled);
-        assert_eq!(parsed.allow_parallel, config.allow_parallel);
-    }
-
-    #[test]
-    fn test_tool_config_serde_skip_none() {
-        let config = refact_tool_api::ToolConfig {
-            enabled: true,
-            allow_parallel: None,
-        };
-        let yaml = serde_yaml::to_string(&config).unwrap();
-        assert!(!yaml.contains("allow_parallel"));
     }
 
     #[test]

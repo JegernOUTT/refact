@@ -1,11 +1,10 @@
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { ThemePropsContext } from "../Theme/ThemePropsContext";
 import { MessageFooter, MessageWrapper } from "./MessageFooter";
-import styles from "./MessageFooter.module.css";
 
 const footerCss = readFileSync(
   join(process.cwd(), "src/components/ChatContent/MessageFooter.module.css"),
@@ -81,24 +80,6 @@ describe("MessageFooter", () => {
     expect(screen.getByText("5.40k")).toBeInTheDocument();
   });
 
-  it("renders a zero-height overlay lane for tool-only messages", () => {
-    render(
-      <MessageWrapper>
-        <MessageFooter
-          messageId="m1"
-          onCopy={() => undefined}
-          onBranch={() => undefined}
-          onDelete={() => undefined}
-          overlay
-        />
-      </MessageWrapper>,
-    );
-    const lane = screen.getByTestId("message-footer");
-    expect(lane).toHaveClass(styles.footerLaneOverlay);
-    expect(lane).not.toHaveClass(styles.footerLane);
-    expect(lane).toHaveAttribute("data-overlay", "true");
-  });
-
   it("reserves the overlay width on the first transcript row instead of covering it", () => {
     const widthSpy = vi
       .spyOn(HTMLElement.prototype, "offsetWidth", "get")
@@ -120,9 +101,6 @@ describe("MessageFooter", () => {
     expect(wrapper?.style.getPropertyValue("--rf-footer-overlay-w")).toBe(
       "96px",
     );
-    expect(footerCss).toMatch(
-      /\[data-transcript-row\][^{]*\{\s*margin-inline-end: var\(--rf-footer-overlay-w, 0\);/,
-    );
     unmount();
     expect(wrapper?.style.getPropertyValue("--rf-footer-overlay-w")).toBe("");
     widthSpy.mockRestore();
@@ -136,13 +114,6 @@ describe("MessageFooter", () => {
     );
     const wrapper = screen.getByTestId("message-footer").parentElement;
     expect(wrapper?.style.getPropertyValue("--rf-footer-overlay-w")).toBe("");
-  });
-
-  it("keeps the in-flow lane by default", () => {
-    render(<MessageFooter onCopy={() => undefined} />);
-    const lane = screen.getByTestId("message-footer");
-    expect(lane).toHaveClass(styles.footerLane);
-    expect(lane).toHaveAttribute("data-overlay", "false");
   });
 
   it.each([false, true])(

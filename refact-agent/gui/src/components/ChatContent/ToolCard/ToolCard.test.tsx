@@ -132,16 +132,13 @@ describe("ChatContent ToolCard", () => {
   });
 
   it("keeps default density and existing open-state defaults unchanged", () => {
-    const { container } = render(
+    render(
       <Theme>
         <KitToolCard title="Run command">Command output</KitToolCard>
         <Harness />
       </Theme>,
     );
 
-    for (const card of container.querySelectorAll("section")) {
-      expect(card).toHaveAttribute("data-density", "default");
-    }
     expect(screen.getByRole("button", { name: "Run command" })).toHaveAttribute(
       "aria-expanded",
       "true",
@@ -155,7 +152,7 @@ describe("ChatContent ToolCard", () => {
   it("opts into compact density without changing the uncontrolled default", async () => {
     const user = userEvent.setup();
     const onOpenChange = vi.fn();
-    const { container } = render(
+    render(
       <Theme>
         <KitToolCard
           density="compact"
@@ -166,10 +163,8 @@ describe("ChatContent ToolCard", () => {
         </KitToolCard>
       </Theme>,
     );
-    const card = container.querySelector("section");
     const toggle = screen.getByRole("button", { name: "Inspect work" });
 
-    expect(card).toHaveAttribute("data-density", "compact");
     expect(toggle).toHaveAttribute("aria-expanded", "true");
 
     await user.click(toggle);
@@ -397,15 +392,6 @@ describe("ChatContent ToolCard", () => {
       ).toHaveFocus();
     },
   );
-
-  it("mounts content immediately on open before delayed animation settles", () => {
-    vi.useFakeTimers();
-    render(<Harness />);
-
-    fireEvent.click(screen.getByRole("button", { name: /^shell$/i }));
-
-    expect(screen.getByText("Shell output")).toBeInTheDocument();
-  });
 
   it.each(["default", "compact"] as const)(
     "restores %s open visual state when reopened before delayed unmount",

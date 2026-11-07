@@ -1,27 +1,27 @@
+use axum::extract::Path;
+use axum::extract::State;
+use axum::http::{Response, StatusCode};
+use hyper::Body;
+use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
-use serde::Serialize;
-use axum::extract::Path;
-use axum::http::{Response, StatusCode};
-use axum::extract::State;
-use hyper::Body;
-use tokio::sync::broadcast;
 use std::time::Instant;
+use tokio::sync::broadcast;
 
 use crate::app_state::AppState;
 use crate::custom_error::ScratchError;
 
+use super::content::{validate_content_with_attachments, validate_context_files};
 use super::perf_diagnostics::{self, PerfComponent, PerfOutcome};
-use super::types::*;
+use super::queue::process_command_queue;
 use super::queue::{
     add_mode_switch_event_and_plan_if_changed, resolve_worktree_setparams_update,
     worktree_activation_message, worktree_disabled_message,
 };
 use super::session::{get_or_create_session_with_trajectory, snapshot_with_agents_mode};
-use super::content::{validate_content_with_attachments, validate_context_files};
-use super::queue::process_command_queue;
-use super::trajectory_ops::sanitize_messages_for_model_switch;
 use super::trajectories::validate_trajectory_id;
+use super::trajectory_ops::sanitize_messages_for_model_switch;
+use super::types::*;
 use crate::yaml_configs::customization_registry::{get_mode_config, map_legacy_mode_to_id};
 
 #[derive(serde::Deserialize)]
@@ -1317,8 +1317,8 @@ pub async fn handle_v1_chat_reprioritize_queued(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chat::perf_diagnostics::{self, MemoryPerfSink, PerfClock, PerfRecorder};
     use crate::call_validation::{ChatContent, ChatMessage, ChatToolCall, ChatToolFunction};
+    use crate::chat::perf_diagnostics::{self, MemoryPerfSink, PerfClock, PerfRecorder};
     use crate::chat::types::SessionState;
     use serde_json::json;
     use std::sync::atomic::{AtomicU64, Ordering};

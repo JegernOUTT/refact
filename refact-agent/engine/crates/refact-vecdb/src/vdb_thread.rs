@@ -155,8 +155,10 @@ impl LatestPathQueue {
         if self.coalescing_enabled {
             self.pending_regular.insert(path, pending);
         } else {
-            self.legacy_regular
-                .push_back(QueuedRegular { path, pending });
+            self.legacy_regular.push_back(QueuedRegular {
+                path,
+                pending,
+            });
         }
     }
 
@@ -332,7 +334,10 @@ impl VecdbDeferredQueueProbe {
             .unwrap_or_else(SystemTime::now);
         while let Some(work) = self.queue.take_next(ready_at) {
             match work {
-                VecdbWork::RegularDocument { path, generation } => {
+                VecdbWork::RegularDocument {
+                    path,
+                    generation,
+                } => {
                     self.processed_paths = self.processed_paths.saturating_add(1);
                     self.queue.complete_regular(&path, generation);
                 }
@@ -637,9 +642,10 @@ async fn vectorize_thread(
         }
         let (cpath, regular_generation) = {
             match work_on_one.as_ref() {
-                Some(VecdbWork::RegularDocument { path, generation }) => {
-                    (path.clone(), Some(*generation))
-                }
+                Some(VecdbWork::RegularDocument {
+                    path,
+                    generation,
+                }) => (path.clone(), Some(*generation)),
                 Some(VecdbWork::ImmediatelyRegularDocument(cpath)) => (cpath.clone(), None),
                 None if vecdb_queue.lock().await.is_idle() => {
                     assert!(run_actual_model_on_these.is_empty());
@@ -1092,8 +1098,9 @@ mod tests {
             .unwrap();
 
         queue.enqueue_regular(path.clone(), expired);
-        let VecdbWork::RegularDocument { generation, .. } =
-            queue.take_next(SystemTime::now()).unwrap()
+        let VecdbWork::RegularDocument {
+            generation, ..
+        } = queue.take_next(SystemTime::now()).unwrap()
         else {
             panic!("regular document should be selected");
         };

@@ -637,7 +637,10 @@ async fn production_maintenance_driver_stops_while_repository_is_blocked() {
         })
         .await
         .expect("native tick progresses while repository is blocked");
-        let BuddyEvent::StateUpdated { state } = native_event else {
+        let BuddyEvent::StateUpdated {
+            state,
+        } = native_event
+        else {
             panic!("expected native pet tick, got {native_event:?}");
         };
         assert_eq!(state.pet.evolution.open_seconds, PET_DECAY_INTERVAL_SECS);

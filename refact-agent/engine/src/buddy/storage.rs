@@ -441,7 +441,9 @@ fn cap_automated_final_records(records: Vec<MemoryOpsRecord>, max: usize) -> Vec
         .iter()
         .enumerate()
         .filter_map(|(index, record)| {
-            let MemoryOpsRecord::Op { op } = record;
+            let MemoryOpsRecord::Op {
+                op,
+            } = record;
             (memory_op_is_final_status(op.status) && memory_source_is_automated(op.source))
                 .then(|| (memory_op_timestamp(op), index))
         })
@@ -472,7 +474,9 @@ fn compact_memory_ops_records(
             continue;
         }
         if op.op_id.trim().is_empty() {
-            without_op_id.push(MemoryOpsRecord::Op { op });
+            without_op_id.push(MemoryOpsRecord::Op {
+                op,
+            });
             continue;
         }
         by_op_id
@@ -485,7 +489,9 @@ fn compact_memory_ops_records(
             .or_insert(op);
     }
     let mut records = without_op_id;
-    records.extend(by_op_id.into_values().map(|op| MemoryOpsRecord::Op { op }));
+    records.extend(by_op_id.into_values().map(|op| MemoryOpsRecord::Op {
+        op,
+    }));
     let records = cap_automated_final_records(records, MEMORY_OPS_AUTOMATED_FINAL_MAX);
     MemoryOpsState::from_records(records)
 }
@@ -508,7 +514,10 @@ fn parse_memory_ops_content(content: &str) -> MemoryOpsFileRead {
             Err(err) => malformed.push((idx + 1, raw.to_string(), err.to_string())),
         }
     }
-    MemoryOpsFileRead { records, malformed }
+    MemoryOpsFileRead {
+        records,
+        malformed,
+    }
 }
 
 fn read_memory_ops_file_sync(project_root: &Path) -> Result<MemoryOpsFileRead, String> {
@@ -705,7 +714,9 @@ fn enqueue_memory_op_locked(
 
     let path = memory_ops_path(project_root);
     create_parent_dir(&path)?;
-    let record = MemoryOpsRecord::Op { op };
+    let record = MemoryOpsRecord::Op {
+        op,
+    };
     let serialized = serde_json::to_string(&record)
         .map_err(|e| format!("Failed to serialize memory op record: {}", e))?;
     let replayed = serde_json::from_str::<MemoryOpsRecord>(&serialized)
@@ -866,7 +877,12 @@ fn claim_memory_op_ids(
             claimed.insert(op_id.clone());
         }
     }
-    (claimed, MemoryOpClaimGuard { ids })
+    (
+        claimed,
+        MemoryOpClaimGuard {
+            ids,
+        },
+    )
 }
 
 async fn revalidation_snapshot(
@@ -927,7 +943,9 @@ fn merge_processed_ops_and_rewrite_locked(
         }
     }
     let state = MemoryOpsState::from_records_with_malformed(
-        state.ops.into_iter().map(|op| MemoryOpsRecord::Op { op }),
+        state.ops.into_iter().map(|op| MemoryOpsRecord::Op {
+            op,
+        }),
         malformed_lines,
     );
     rewrite_memory_ops_records_locked(
@@ -1262,7 +1280,9 @@ mod tests {
     async fn write_memory_ops_records_for_test(root: &Path, ops: Vec<MemoryLifecycleOp>) {
         let records = ops
             .into_iter()
-            .map(|op| MemoryOpsRecord::Op { op })
+            .map(|op| MemoryOpsRecord::Op {
+                op,
+            })
             .collect::<Vec<_>>();
         rewrite_memory_ops_records(root, records).await.unwrap();
     }

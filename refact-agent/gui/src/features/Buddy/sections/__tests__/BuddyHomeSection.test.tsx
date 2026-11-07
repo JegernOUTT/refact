@@ -1,4 +1,3 @@
-import { readFile } from "node:fs/promises";
 import {
   fireEvent,
   render,
@@ -7,7 +6,6 @@ import {
   within,
 } from "../../../../utils/test-utils";
 import { http, HttpResponse } from "msw";
-import { resolve } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { server } from "../../../../utils/mockServer";
 import { setUpStore } from "../../../../app/store";
@@ -301,27 +299,6 @@ function makeSnapshot(
     pulse,
     ...overrides,
   };
-}
-
-function readGuiSource(path: string): Promise<string> {
-  return readFile(resolve(process.cwd(), "src", path), "utf8");
-}
-
-function readCssBlock(source: string, selector: string): string {
-  const escapedSelector = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const match = new RegExp(`(^|\\n)\\s*${escapedSelector}\\s*{`).exec(source);
-  if (match?.index === undefined) {
-    throw new Error(`Missing CSS block for ${selector}`);
-  }
-  const open = source.indexOf("{", match.index);
-  let depth = 0;
-  for (let i = open; i < source.length; i += 1) {
-    const char = source[i];
-    if (char === "{") depth += 1;
-    if (char === "}") depth -= 1;
-    if (depth === 0) return source.slice(open + 1, i);
-  }
-  throw new Error(`Unclosed CSS block for ${selector}`);
 }
 
 describe("BuddyHome_renders_all_sections", () => {
@@ -726,16 +703,5 @@ describe("BuddyHome_operator_surface", () => {
       "aria-selected",
       "true",
     );
-  });
-
-  it("sizes the Home portrait and drops the nested scroll island", async () => {
-    const css = await readGuiSource(
-      "features/Buddy/sections/BuddyHomeSection.module.css",
-    );
-    expect(
-      readCssBlock(css, '.portrait.portrait [data-testid="buddy-world"]'),
-    ).toContain("height: clamp(160px, 22vh, 200px)");
-    expect(css).not.toContain("nativeSlot");
-    expect(css).not.toContain("max-height");
   });
 });

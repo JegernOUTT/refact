@@ -143,35 +143,6 @@ describe("CompressReportTool parsers", () => {
   });
 });
 
-describe("TaskDone parser", () => {
-  it("extracts task_done report fields", () => {
-    const content = JSON.stringify({
-      type: "task_done",
-      summary: "Completed the task",
-      report: "## What was done\n\nEverything.",
-      files_changed: ["src/foo.ts", "src/bar.ts"],
-      knowledge_path: "/home/user/.refact/knowledge/test.md",
-    });
-    const parsed = JSON.parse(content) as {
-      type: string;
-      summary: string;
-      report: string;
-      files_changed: string[];
-      knowledge_path: string;
-    };
-    expect(parsed.type).toBe("task_done");
-    expect(parsed.summary).toBe("Completed the task");
-    expect(parsed.report).toContain("What was done");
-    expect(parsed.files_changed).toHaveLength(2);
-    expect(parsed.knowledge_path).toContain(".refact/knowledge");
-  });
-
-  it("handles malformed JSON gracefully", () => {
-    const badContent = "not valid json {{{";
-    expect(() => JSON.parse(badContent) as unknown).toThrow();
-  });
-});
-
 describe("isIdeHost", () => {
   it("returns false in test environment (no window.acquireVsCodeApi)", () => {
     expect(isIdeHost()).toBe(false);

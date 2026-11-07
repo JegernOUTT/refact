@@ -163,7 +163,9 @@ pub async fn index_mcp_resources(
                         }
                     }
                 }
-                ResourceContents::BlobResourceContents { .. } => {}
+                ResourceContents::BlobResourceContents {
+                    ..
+                } => {}
             }
         }
     }

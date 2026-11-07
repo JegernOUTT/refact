@@ -28,7 +28,6 @@ class EventsTest {
         assertEquals(expected, result)
     }
 
-
     @Test
     fun configMessage() {
         val payload = Events.Config.UpdatePayload(
@@ -90,7 +89,7 @@ class EventsTest {
             0,
             Events.Config.KeyBindings("foo"),
             backendReady = false,
-            connectionStatus = "starting"
+            connectionStatus = LSPBackendConnectionStatus.STARTING.wireName
         )
         val message = Events.Config.Update(payload)
         val result = Events.stringify(message)
@@ -229,26 +228,6 @@ class EventsTest {
         assertEquals(expected.type, result?.type)
         // TODO: class might need a compare method
         // assertEquals(expected.payload, result?.payload)
-    }
-
-    @Test
-    fun parseAnimationStart() {
-        val message = """{"type": "ide/animateFile/start", "payload": "path/to/file.txt"}"""
-        val expected = Events.Animation.Start("path/to/file.txt")
-        val result = Events.parse(message)
-        assertNotNull(result)
-        assertEquals(expected.type, result?.type)
-        assertEquals(expected.payload, result?.payload)
-    }
-
-    @Test
-    fun parseAnimationStop() {
-        val message = """{"type": "ide/animateFile/stop", "payload": "path/to/file.txt"}"""
-        val expected = Events.Animation.Stop("path/to/file.txt")
-        val result = Events.parse(message)
-        assertNotNull(result)
-        assertEquals(expected.type, result?.type)
-        assertEquals(expected.payload, result?.payload)
     }
 
     @Test

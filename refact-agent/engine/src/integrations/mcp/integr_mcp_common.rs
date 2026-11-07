@@ -259,10 +259,14 @@ fn describe_connection_status(status: &MCPConnectionStatus) -> String {
     match status {
         MCPConnectionStatus::Connected => "connected".to_string(),
         MCPConnectionStatus::Connecting => "connecting".to_string(),
-        MCPConnectionStatus::Reconnecting { attempt } => {
+        MCPConnectionStatus::Reconnecting {
+            attempt,
+        } => {
             format!("reconnecting, attempt {}", attempt)
         }
-        MCPConnectionStatus::Failed { message } => message.clone(),
+        MCPConnectionStatus::Failed {
+            message,
+        } => message.clone(),
         MCPConnectionStatus::Disconnected => "disconnected".to_string(),
         MCPConnectionStatus::NeedsAuth => "needs authentication".to_string(),
     }
@@ -1936,7 +1940,9 @@ mod tests {
         assert!(
             matches!(
                 mcp_session.connection_status,
-                MCPConnectionStatus::Reconnecting { attempt: 2 }
+                MCPConnectionStatus::Reconnecting {
+                    attempt: 2
+                }
             ),
             "Final status should be Reconnecting with last attempt index"
         );

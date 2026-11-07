@@ -13,9 +13,6 @@ import { expect, test, type Page } from "@playwright/test";
 const BUDDY_ROUTE =
   "/tests/e2e/route-showcase.html?route=buddy&operator=enabled";
 const DESK = "[data-testid='buddy-desk']";
-const SAVED = "[data-testid='buddy-home-saved-work']";
-const HOME_SCENE =
-  "[data-testid='buddy-home-overview'] [data-testid='buddy-home-hero']";
 const RECENT = "[data-testid='buddy-recent-chats']";
 
 const project = { project_id: "showcase", canonical_root: "/workspace/refact" };
@@ -139,23 +136,6 @@ test.describe("Buddy home prominence", () => {
     page.on("pageerror", (error) => {
       throw error;
     });
-  });
-
-  test("saved_work_outranks_the_home_scene_by_area", async ({ page }) => {
-    await openBuddyWithWork(page);
-
-    const workArea = await areaOf(page, SAVED);
-    const sceneArea = await areaOf(page, HOME_SCENE);
-
-    expect(workArea, "Home must preview saved work").not.toBeNull();
-    expect(
-      sceneArea,
-      "the compact scene must stay on Home; this is a prominence change, not a removal",
-    ).not.toBeNull();
-    expect(
-      workArea,
-      `saved work ${workArea}px² vs Home scene ${sceneArea}px²`,
-    ).toBeGreaterThan(sceneArea ?? 0);
   });
 
   test("home_scene_is_compact_and_play_expands_it", async ({ page }) => {

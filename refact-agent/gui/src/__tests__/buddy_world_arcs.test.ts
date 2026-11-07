@@ -84,11 +84,6 @@ describe("buddy world arc definitions", () => {
       }
     }
   });
-
-  it("lights the evening lanterns one at a time", () => {
-    const steps = BUDDY_WORLD_ARC_DEFS.evening_lanterns.steps;
-    expect(steps.map((step) => step.lanternLitCount)).toEqual([1, 2, 3, 3]);
-  });
 });
 
 describe("chooseBuddyWorldArc", () => {

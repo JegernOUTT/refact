@@ -112,7 +112,10 @@ impl RouteRegistry {
             .map(|route| masked_route_info(&route.info))
             .chain(state.har_replay.as_ref().map(har_route_info))
             .enumerate()
-            .map(|(order, info)| RouteInfo { order, ..info })
+            .map(|(order, info)| RouteInfo {
+                order,
+                ..info
+            })
             .collect()
     }
 
@@ -134,7 +137,10 @@ impl RouteRegistry {
             .into_iter()
             .map(|info| {
                 let matcher = matcher_for_pattern(&info.pattern)?;
-                Ok(RegisteredRoute { info, matcher })
+                Ok(RegisteredRoute {
+                    info,
+                    matcher,
+                })
             })
             .collect::<Result<Vec<_>, String>>()?;
         let mut state = self.state.lock().unwrap();
@@ -313,7 +319,9 @@ fn execute_handler(
             content_type.clone(),
             *body_base64,
         ),
-        RouteHandler::Abort { reason } => HandlerOutcome {
+        RouteHandler::Abort {
+            reason,
+        } => HandlerOutcome {
             decision: RequestPausedDecision::Fail(Fetch::FailRequest {
                 request_id,
                 error_reason: parse_error_reason(reason).unwrap_or(Network::ErrorReason::Failed),
@@ -671,7 +679,10 @@ fn merge_request_headers(
 fn matcher_for_pattern(pattern: &UrlPattern) -> Result<UrlMatcher, String> {
     match pattern {
         UrlPattern::Text(value) => UrlMatcher::text(value),
-        UrlPattern::Regex { source, flags } => UrlMatcher::regex(source, flags),
+        UrlPattern::Regex {
+            source,
+            flags,
+        } => UrlMatcher::regex(source, flags),
     }
 }
 
@@ -692,7 +703,9 @@ fn validate_handler(handler: &RouteHandler) -> Result<(), String> {
         }
     }
     match handler {
-        RouteHandler::Fulfill { status, .. }
+        RouteHandler::Fulfill {
+            status, ..
+        }
         | RouteHandler::FetchAndFulfill {
             status: Some(status),
             ..
@@ -712,7 +725,9 @@ fn validate_handler(handler: &RouteHandler) -> Result<(), String> {
             .decode(body)
             .map(|_| ())
             .map_err(|error| format!("Invalid base64 route body: {error}")),
-        RouteHandler::Abort { reason } => parse_error_reason(reason)
+        RouteHandler::Abort {
+            reason,
+        } => parse_error_reason(reason)
             .map(|_| ())
             .ok_or_else(|| format!("Unsupported route abort reason: {reason}")),
         _ => Ok(()),
@@ -856,7 +871,9 @@ fn masked_route_info(info: &RouteInfo) -> RouteInfo {
             content_type: content_type.clone(),
             body_base64: *body_base64,
         },
-        RouteHandler::Abort { reason } => RouteHandler::Abort {
+        RouteHandler::Abort {
+            reason,
+        } => RouteHandler::Abort {
             reason: reason.clone(),
         },
         RouteHandler::Continue {
@@ -930,7 +947,10 @@ fn har_route_info(replay: &HarReplay) -> RouteInfo {
 fn mask_pattern(pattern: &UrlPattern) -> UrlPattern {
     match pattern {
         UrlPattern::Text(value) => UrlPattern::Text(mask_text(value)),
-        UrlPattern::Regex { source, flags } => UrlPattern::Regex {
+        UrlPattern::Regex {
+            source,
+            flags,
+        } => UrlPattern::Regex {
             source: mask_text(source),
             flags: flags.clone(),
         },
@@ -1451,7 +1471,10 @@ mod tests {
         );
 
         let allowed = fulfill_from_path(&in_workspace, &artifacts, &[workspace.clone()]).unwrap();
-        let RouteHandler::Fulfill { body, .. } = allowed else {
+        let RouteHandler::Fulfill {
+            body, ..
+        } = allowed
+        else {
             panic!("expected a fulfill handler");
         };
         assert_eq!(body.as_deref(), Some(r#"{"ws":true}"#));

@@ -424,14 +424,18 @@ impl LlmWireAdapter for OpenAiChatAdapter {
 
         if let Some(usage) = json.get("usage") {
             if let Some(u) = parse_openai_usage(usage) {
-                deltas.push(LlmStreamDelta::SetUsage { usage: u });
+                deltas.push(LlmStreamDelta::SetUsage {
+                    usage: u,
+                });
             }
         }
 
         // Extract Refact-specific extra fields (metering, billing, etc.)
         let extra = extract_extra_fields(&json);
         if !extra.is_empty() {
-            deltas.push(LlmStreamDelta::MergeExtra { extra });
+            deltas.push(LlmStreamDelta::MergeExtra {
+                extra,
+            });
         }
 
         Ok(deltas)
@@ -683,7 +687,9 @@ fn tool_choice_to_openai(choice: &CanonicalToolChoice) -> Value {
         CanonicalToolChoice::Auto => json!("auto"),
         CanonicalToolChoice::None => json!("none"),
         CanonicalToolChoice::Required => json!("required"),
-        CanonicalToolChoice::Function { name } => json!({
+        CanonicalToolChoice::Function {
+            name,
+        } => json!({
             "type": "function",
             "function": {"name": name}
         }),
@@ -1216,7 +1222,9 @@ mod tests {
 
         assert_eq!(deltas.len(), 1);
         match &deltas[0] {
-            LlmStreamDelta::AppendContent { text, .. } => assert_eq!(text, "Hello"),
+            LlmStreamDelta::AppendContent {
+                text, ..
+            } => assert_eq!(text, "Hello"),
             _ => panic!("expected AppendContent"),
         }
     }
@@ -1230,7 +1238,9 @@ mod tests {
 
         assert_eq!(deltas.len(), 1);
         match &deltas[0] {
-            LlmStreamDelta::AppendContent { text, .. } => {
+            LlmStreamDelta::AppendContent {
+                text, ..
+            } => {
                 assert_eq!(text, "I can’t help with that.")
             }
             _ => panic!("expected AppendContent"),
@@ -1255,7 +1265,9 @@ mod tests {
 
         assert_eq!(deltas.len(), 1);
         match &deltas[0] {
-            LlmStreamDelta::SetThinkingBlocks { blocks } => assert_eq!(blocks, &expected),
+            LlmStreamDelta::SetThinkingBlocks {
+                blocks,
+            } => assert_eq!(blocks, &expected),
             _ => panic!("expected SetThinkingBlocks"),
         }
     }
@@ -1277,7 +1289,9 @@ mod tests {
 
         assert_eq!(deltas.len(), 1);
         match &deltas[0] {
-            LlmStreamDelta::SetThinkingBlocks { blocks } => assert_eq!(blocks, &expected),
+            LlmStreamDelta::SetThinkingBlocks {
+                blocks,
+            } => assert_eq!(blocks, &expected),
             _ => panic!("expected SetThinkingBlocks"),
         }
     }
@@ -1311,11 +1325,15 @@ mod tests {
 
         assert_eq!(deltas.len(), 2);
         match &deltas[0] {
-            LlmStreamDelta::SetThinkingBlocks { blocks } => assert_eq!(blocks, &delta_blocks),
+            LlmStreamDelta::SetThinkingBlocks {
+                blocks,
+            } => assert_eq!(blocks, &delta_blocks),
             _ => panic!("expected delta SetThinkingBlocks"),
         }
         match &deltas[1] {
-            LlmStreamDelta::SetThinkingBlocks { blocks } => assert_eq!(blocks, &final_blocks),
+            LlmStreamDelta::SetThinkingBlocks {
+                blocks,
+            } => assert_eq!(blocks, &final_blocks),
             _ => panic!("expected final SetThinkingBlocks"),
         }
     }
@@ -1337,7 +1355,9 @@ mod tests {
         let deltas = adapter.parse_stream_chunk(chunk).unwrap();
 
         match &deltas[0] {
-            LlmStreamDelta::SetToolCalls { tool_calls } => {
+            LlmStreamDelta::SetToolCalls {
+                tool_calls,
+            } => {
                 assert_eq!(tool_calls[0]["index"], 2);
                 assert_eq!(tool_calls[0]["function"]["arguments"], "{\"q\"");
             }

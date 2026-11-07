@@ -126,7 +126,9 @@ impl AttentionError {
     pub fn code(&self) -> &'static str {
         match self {
             Self::Invalid(_) => "invalid_attention_request",
-            Self::Backpressure { .. } => "attention_backpressure",
+            Self::Backpressure {
+                ..
+            } => "attention_backpressure",
             Self::NotTracked => "question_not_tracked",
             Self::Question(error) => error.code(),
         }

@@ -105,7 +105,9 @@ impl ActionabilityDriver for FormActionabilityDriver<'_> {
         self.world
             .element_states(self.tab, self.handle)
             .map_err(|error| match error {
-                HandleError::Invalidated { .. } => ActionabilityDiagnostic::Detached,
+                HandleError::Invalidated {
+                    ..
+                } => ActionabilityDiagnostic::Detached,
                 _ => ActionabilityDiagnostic::PrecheckFailed {
                     description: error.to_string(),
                 },
@@ -167,8 +169,12 @@ fn trusted_click(
     };
     match hit_target.expect_hit_target(tab, world, handle, hit_target_point) {
         Ok(HitTargetResult::Done | HitTargetResult::Skipped) => {}
-        Ok(HitTargetResult::Intercepted { description }) => {
-            return Err(ActionabilityDiagnostic::InterceptsPointerEvents { description });
+        Ok(HitTargetResult::Intercepted {
+            description,
+        }) => {
+            return Err(ActionabilityDiagnostic::InterceptsPointerEvents {
+                description,
+            });
         }
         Ok(HitTargetResult::NotConnected) => return Err(ActionabilityDiagnostic::Detached),
         Err(error) => {
@@ -191,9 +197,11 @@ fn trusted_click(
     })?;
     match hit_result {
         Ok(HitTargetResult::Done | HitTargetResult::Skipped) => Ok(()),
-        Ok(HitTargetResult::Intercepted { description }) => {
-            Err(ActionabilityDiagnostic::InterceptsPointerEvents { description })
-        }
+        Ok(HitTargetResult::Intercepted {
+            description,
+        }) => Err(ActionabilityDiagnostic::InterceptsPointerEvents {
+            description,
+        }),
         Ok(HitTargetResult::NotConnected) => Err(ActionabilityDiagnostic::Detached),
         Err(error) => Err(ActionabilityDiagnostic::PrecheckFailed {
             description: error.to_string(),

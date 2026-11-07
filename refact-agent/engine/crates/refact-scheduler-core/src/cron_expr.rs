@@ -19,7 +19,9 @@ pub fn parse_cron(expr: &str) -> Result<CronSchedule, String> {
     let normalized = normalize_five_field_cron(expr)?;
     let schedule = Schedule::from_str(&normalized)
         .map_err(|error| format!("Invalid cron expression: {error}"))?;
-    Ok(CronSchedule { schedule })
+    Ok(CronSchedule {
+        schedule,
+    })
 }
 
 pub fn next_run_ms(expr: &str, from_ms: u64, tz: Tz) -> Option<u64> {

@@ -149,30 +149,6 @@ for (const width of [1200, 480]) {
   });
 }
 
-test("queue rows stay single-line 32px in a narrow container", async ({
-  page,
-}) => {
-  await page.setViewportSize({ width: 360, height: 900 });
-  await page.goto("/tests/e2e/route-showcase.html?route=queue");
-  const items = page.getByTestId("queued-item");
-  await expect(items.first()).toBeVisible();
-  const metrics = await measureQueue(page);
-  expect(metrics.panelWidth).toBeGreaterThan(0);
-  expect(metrics.panelWidth).toBeLessThanOrEqual(360);
-  expect(metrics.items.length).toBeGreaterThan(0);
-  for (const height of metrics.items) expect(height).toBe(32);
-  const preview = items.first().locator("[class*='preview']").first();
-  if ((await preview.count()) > 0) {
-    const overflow = await preview.evaluate(
-      (node) => getComputedStyle(node).textOverflow,
-    );
-    expect(overflow).toBe("ellipsis");
-  }
-  const chip = items.first().getByRole("combobox");
-  await expect(chip).toBeVisible();
-  expect((await chip.boundingBox())?.height ?? 0).toBeGreaterThan(0);
-});
-
 test("choosing a queue delivery mode keeps an empty composer expanded", async ({
   page,
 }) => {

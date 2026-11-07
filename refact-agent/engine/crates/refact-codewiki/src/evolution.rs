@@ -147,7 +147,10 @@ pub fn build_decision_graph(mut decisions: Vec<Decision>) -> DecisionGraph {
         }
     }
 
-    DecisionGraph { decisions, edges }
+    DecisionGraph {
+        decisions,
+        edges,
+    }
 }
 
 /// Confidence that an evolution edge is a supersession, bounded to [0, 0.99].

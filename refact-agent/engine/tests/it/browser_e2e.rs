@@ -121,7 +121,10 @@ impl WsEchoServer {
                 });
             }
         });
-        Ok(Self { address, task })
+        Ok(Self {
+            address,
+            task,
+        })
     }
 
     fn url(&self) -> String {
@@ -1045,17 +1048,31 @@ async fn expect_retries_matchers_report_received_and_soft_failure_continues() {
             false,
         )
         .unwrap();
-    case.tab
-        .evaluate(
-            "const delayed = document.querySelector('#delayed'); delayed.style.display = 'none'; setTimeout(() => delayed.style.display = 'inline-block', 1500)",
-            false,
-        )
-        .unwrap();
+    let initial_observations = case.runtime.world_manager.eval_in_utility(
+        &case.tab,
+        r#"(() => {
+            const target = document.createElement('button');
+            target.id = 'retry-visibility';
+            target.textContent = 'Retry visibility';
+            document.body.append(target);
+            const nativeCheckVisibility = target.checkVisibility.bind(target);
+            const observations = [];
+            sessionStorage.setItem('retry-visibility-observations', '[]');
+            target.checkVisibility = () => {
+                const visible = observations.length > 0 && nativeCheckVisibility();
+                observations.push(visible);
+                sessionStorage.setItem('retry-visibility-observations', JSON.stringify(observations));
+                return visible;
+            };
+            return observations;
+        })()"#,
+    ).unwrap();
+    assert_eq!(initial_observations, json!([]));
     let report = execute_steps_with_runtime(
         &mut case.runtime,
         &[
             BrowserStep::Expect {
-                locator: Some(BrowserLocator::css("#delayed")),
+                locator: Some(BrowserLocator::css("#retry-visibility")),
                 matcher: BrowserExpectation::ToBeVisible,
                 timeout_ms: Some(3_000),
                 soft: false,
@@ -1090,7 +1107,9 @@ async fn expect_retries_matchers_report_received_and_soft_failure_continues() {
             },
             BrowserStep::Expect {
                 locator: Some(BrowserLocator::css(".assertion-item")),
-                matcher: BrowserExpectation::ToHaveCount { expected: 3 },
+                matcher: BrowserExpectation::ToHaveCount {
+                    expected: 3,
+                },
                 timeout_ms: None,
                 soft: false,
                 not: None,
@@ -1152,7 +1171,27 @@ async fn expect_retries_matchers_report_received_and_soft_failure_continues() {
         "soft assertion should not fail the batch: {report:?}"
     );
     assert_eq!(report.steps.len(), 9);
-    assert!(report.steps[0].retries > 0);
+    assert!(report.steps[0].retries > 0, "{report:?}");
+    let observations = case
+        .tab
+        .evaluate(
+            "sessionStorage.getItem('retry-visibility-observations')",
+            false,
+        )
+        .unwrap()
+        .value
+        .expect("visibility observations must return a primitive JSON string");
+    let observations: Vec<bool> = serde_json::from_str(
+        observations
+            .as_str()
+            .expect("visibility observations must be a JSON string"),
+    )
+    .expect("visibility observations must be a boolean array");
+    assert_eq!(observations.first(), Some(&false));
+    assert!(observations.iter().skip(1).any(|value| *value));
+    let retried = report.steps[0].assertion.as_ref().unwrap();
+    assert!(retried.passed);
+    assert_eq!(retried.received, json!(true));
     let failed = report.steps[7].assertion.as_ref().unwrap();
     assert!(!failed.passed);
     assert!(failed.soft);
@@ -1286,7 +1325,9 @@ async fn expect_option_parity_covers_negation_indeterminate_pseudo_presence_and_
             },
             BrowserStep::Expect {
                 locator: Some(BrowserLocator::css("#status")),
-                matcher: BrowserExpectation::ToBeInViewport { ratio: Some(1.0) },
+                matcher: BrowserExpectation::ToBeInViewport {
+                    ratio: Some(1.0),
+                },
                 timeout_ms: None,
                 soft: false,
                 not: None,
@@ -1530,7 +1571,9 @@ async fn checkbox_actions_are_verified_and_idempotent() {
             BrowserStep::Uncheck {
                 locator: locator.clone(),
             },
-            BrowserStep::Uncheck { locator },
+            BrowserStep::Uncheck {
+                locator,
+            },
         ],
     );
     assert!(report.ok, "checkbox actions failed: {report:?}");
@@ -1678,7 +1721,9 @@ async fn network_and_cpu_throttling_apply_and_reset_clears_them() {
                 upload_kbps: None,
                 preset: Some("slow-3g".to_string()),
             },
-            BrowserStep::SetCpuThrottling { rate: 4.0 },
+            BrowserStep::SetCpuThrottling {
+                rate: 4.0,
+            },
         ],
         &ImagePolicy::browser_capture(),
     );
@@ -1845,7 +1890,10 @@ async fn hit_target_preliminary_check_names_covering_overlay() {
             },
         )
         .unwrap();
-    let HitTargetResult::Intercepted { description } = result else {
+    let HitTargetResult::Intercepted {
+        description,
+    } = result
+    else {
         panic!("expected overlay interception, got {result:?}");
     };
     assert!(description.contains("<div class=\"overlay\"></div>"));
@@ -1929,7 +1977,10 @@ async fn hit_target_interceptor_suppresses_overlay_appearing_after_precheck() {
     let result = controller
         .take_result(&case.tab, &case.runtime.world_manager, token)
         .unwrap();
-    let HitTargetResult::Intercepted { description } = result else {
+    let HitTargetResult::Intercepted {
+        description,
+    } = result
+    else {
         panic!("expected event-time overlay interception, got {result:?}");
     };
     assert!(description.contains("class=\"overlay\""));
@@ -2781,7 +2832,9 @@ async fn switch_tab_retargets_later_steps() {
         &mut case.runtime,
         &[
             BrowserStep::SwitchTab {
-                tab: TabTarget::Id { id: popup_id },
+                tab: TabTarget::Id {
+                    id: popup_id,
+                },
             },
             BrowserStep::Eval {
                 expression: "document.querySelector('h1').textContent".to_string(),
@@ -2854,7 +2907,9 @@ async fn wait_for_popup_click_and_popup_action_share_one_batch() {
                     expression: "document.querySelector('h1').textContent".to_string(),
                     timeout_ms: None,
                 },
-                BrowserStep::CloseTab { tab: None },
+                BrowserStep::CloseTab {
+                    tab: None,
+                },
             ],
             block_service_workers: None,
             continue_on_error: false,
@@ -2992,7 +3047,9 @@ async fn network_routes_fulfill_abort_modify_redirects_unroute_and_reach_popups(
             page_context: None,
             network: NetworkReportMode::Full,
             steps: vec![
-                BrowserStep::Unroute { pattern: None },
+                BrowserStep::Unroute {
+                    pattern: None,
+                },
                 BrowserStep::Route {
                     pattern: api_pattern.clone(),
                     handler: RouteHandler::Continue {
@@ -3051,7 +3108,9 @@ async fn network_routes_fulfill_abort_modify_redirects_unroute_and_reach_popups(
             page_context: None,
             network: NetworkReportMode::default(),
             steps: vec![
-                BrowserStep::Unroute { pattern: None },
+                BrowserStep::Unroute {
+                    pattern: None,
+                },
                 BrowserStep::Eval {
                     expression: "document.querySelector('#result').textContent = 'idle'"
                         .to_string(),
@@ -4719,7 +4778,9 @@ async fn production_ref_errors_distinguish_stale_and_navigation_generations() {
     let stale = execute_steps_with_runtime(
         &mut case.runtime,
         &[
-            BrowserStep::AccessibilitySnapshot { options },
+            BrowserStep::AccessibilitySnapshot {
+                options,
+            },
             BrowserStep::Click {
                 locator: BrowserLocator::reference(&save_ref),
                 timeout_ms: None,
@@ -5403,7 +5464,9 @@ async fn screencast_sessions_compose_a_filmstrip_on_stop() {
                 expression: "playAnimation()".to_string(),
                 timeout_ms: None,
             },
-            BrowserStep::WaitSeconds { seconds: 1.5 },
+            BrowserStep::WaitSeconds {
+                seconds: 1.5,
+            },
             BrowserStep::ScreencastStop {
                 compose: Some(true),
             },
@@ -5419,7 +5482,9 @@ async fn screencast_sessions_compose_a_filmstrip_on_stop() {
 
     let already_stopped = execute_steps_with_runtime(
         &mut case.runtime,
-        &[BrowserStep::ScreencastStop { compose: None }],
+        &[BrowserStep::ScreencastStop {
+            compose: None,
+        }],
         &policy,
     );
     assert!(!already_stopped.ok);
@@ -5697,7 +5762,9 @@ async fn clock_resume_restarts_real_time_and_reset_restores_native_timers() {
     let resumed = case
         .run(vec![
             BrowserStep::ClockResume,
-            BrowserStep::WaitSeconds { seconds: 1.5 },
+            BrowserStep::WaitSeconds {
+                seconds: 1.5,
+            },
             probe_state(),
         ])
         .await;
@@ -5753,7 +5820,9 @@ async fn clock_steps_report_clear_errors_when_used_out_of_order() {
     let unpaused = execute_request_with_runtime(
         runtime,
         clock_request(vec![
-            BrowserStep::ClockInstall { time: None },
+            BrowserStep::ClockInstall {
+                time: None,
+            },
             BrowserStep::ClockResume,
         ]),
         &ImagePolicy::browser_capture(),
@@ -6051,7 +6120,9 @@ async fn init_script_survives_navigation_and_clears_on_remove_and_reset() {
             page_context: None,
             network: NetworkReportMode::default(),
             steps: vec![
-                BrowserStep::RemoveInitScript { id },
+                BrowserStep::RemoveInitScript {
+                    id,
+                },
                 BrowserStep::Navigate {
                     url: server_url.clone(),
                     timeout_ms: None,
@@ -6676,7 +6747,9 @@ async fn contrast_audit_composites_real_computed_styles() {
     };
     let ratio_of = |kind: &str, selector: &str| match measure_contrast_sample(find(kind, selector))
     {
-        ContrastSampleOutcome::Measured { ratio, .. } => ratio,
+        ContrastSampleOutcome::Measured {
+            ratio, ..
+        } => ratio,
         other => panic!("{selector}: expected a measurement, got {other:?}"),
     };
 

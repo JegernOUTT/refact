@@ -17,7 +17,7 @@ use crate::worktrees::service::WorktreeService;
 pub const ADAPTER: &str = "candidate_artifact";
 pub const ACTION: &str = "stage_exact_artifact";
 const NAMESPACE: &str = "improvement_artifacts";
-const MAX_BYTES: u64 = 256 * 1024 * 1024;
+pub(super) const MAX_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_FILES: usize = 4096;
 const MAX_RETAINED: usize = 8;
 const COMPATIBILITY_STATUS: &str = "structure_checked; metadata explicitly operator-attested, not build proof; ELF System V/Linux ABI is not OS proof; runtime compatibility and build provenance unverified; not installed or running";
@@ -2083,7 +2083,10 @@ impl ArtifactCleanupAdapter {
         runtime: OutcomeRuntime,
         drafts: Arc<dyn DraftRegistry<ArtifactCleanupDraft>>,
     ) -> Self {
-        Self { runtime, drafts }
+        Self {
+            runtime,
+            drafts,
+        }
     }
     fn bound(&self, spec: &ActionSpec) -> Result<ArtifactCleanupDraft, ResourceError> {
         use crate::buddy::improvement_evaluation::valid_digest;

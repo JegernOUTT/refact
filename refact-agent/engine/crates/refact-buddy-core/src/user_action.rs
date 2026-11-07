@@ -54,15 +54,33 @@ pub enum UserAction {
 impl UserAction {
     pub fn ts(&self) -> DateTime<Utc> {
         match self {
-            UserAction::FileOpened { ts, .. }
-            | UserAction::SnippetSelected { ts, .. }
-            | UserAction::ToolApproved { ts, .. }
-            | UserAction::ToolRejected { ts, .. }
-            | UserAction::CommandRun { ts, .. }
-            | UserAction::WorkspaceChanged { ts, .. }
-            | UserAction::CommitMade { ts, .. }
-            | UserAction::TaskFailed { ts, .. }
-            | UserAction::ChatStarted { ts, .. } => *ts,
+            UserAction::FileOpened {
+                ts, ..
+            }
+            | UserAction::SnippetSelected {
+                ts, ..
+            }
+            | UserAction::ToolApproved {
+                ts, ..
+            }
+            | UserAction::ToolRejected {
+                ts, ..
+            }
+            | UserAction::CommandRun {
+                ts, ..
+            }
+            | UserAction::WorkspaceChanged {
+                ts, ..
+            }
+            | UserAction::CommitMade {
+                ts, ..
+            }
+            | UserAction::TaskFailed {
+                ts, ..
+            }
+            | UserAction::ChatStarted {
+                ts, ..
+            } => *ts,
         }
     }
 }

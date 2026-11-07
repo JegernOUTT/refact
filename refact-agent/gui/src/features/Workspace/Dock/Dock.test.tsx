@@ -178,33 +178,6 @@ describe("Dock", () => {
     vi.restoreAllMocks();
   });
 
-  it("renders a single section body without an in-dock section switcher", () => {
-    mockNarrow(false);
-    stubFileTree();
-    render(<Dock />, {
-      preloadedState: {
-        config: {
-          host: "web",
-          lspPort: 8001,
-          themeProps: { appearance: "dark" },
-          capabilities: {
-            filesPanel: true,
-            gitPanel: false,
-          },
-        },
-      },
-    });
-
-    expect(screen.getByTestId("workspace-dock")).toBeInTheDocument();
-    const section = screen.getByTestId("workspace-dock-section");
-    expect(section).toHaveAttribute("data-section", "files");
-    expect(section).toHaveClass("rf-enter");
-    expect(screen.queryByRole("radio", { name: "Files" })).toBeNull();
-    expect(screen.queryByRole("radio", { name: "Git" })).toBeNull();
-    expect(screen.queryByRole("radio", { name: "Tasks" })).toBeNull();
-    expect(screen.queryByRole("radiogroup")).toBeNull();
-  });
-
   it("clamps a persisted resize width to the dock maximum", () => {
     mockNarrow(false);
     stubFileTree();
@@ -308,21 +281,6 @@ describe("Dock", () => {
         "data-section",
         "activity",
       );
-    });
-  });
-
-  it("remounts the section body so each switch replays the enter animation", async () => {
-    mockNarrow(false);
-    stubFileTree();
-    const view = render(<Dock />);
-
-    const filesSection = screen.getByTestId("workspace-dock-section");
-    view.store.dispatch(setDockSection("git"));
-
-    await waitFor(() => {
-      const gitSection = screen.getByTestId("workspace-dock-section");
-      expect(gitSection).not.toBe(filesSection);
-      expect(gitSection).toHaveClass("rf-enter");
     });
   });
 

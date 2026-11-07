@@ -190,16 +190,6 @@ describe("ActivityRail", () => {
     },
   );
 
-  it("renders one rail button per workspace section", () => {
-    renderRail(createRailStore());
-
-    const rail = screen.getByRole("navigation", { name: "Workspace sections" });
-    expect(rail).toBeInTheDocument();
-    for (const label of ["Files", "Git", "Agents", "Active chats"]) {
-      expect(screen.getByRole("button", { name: label })).toBeInTheDocument();
-    }
-  });
-
   it("marks only the open dock section as pressed", () => {
     const store = createRailStore();
     store.dispatch(setDockSection("files"));

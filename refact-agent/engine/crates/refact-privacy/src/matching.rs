@@ -16,10 +16,15 @@ pub enum PolicyError {
 impl fmt::Display for PolicyError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::InvalidGlob { pattern, message } => {
+            Self::InvalidGlob {
+                pattern,
+                message,
+            } => {
                 write!(formatter, "invalid glob pattern {pattern:?}: {message}")
             }
-            Self::InvalidZoneName { name } => {
+            Self::InvalidZoneName {
+                name,
+            } => {
                 write!(formatter, "invalid privacy zone name {name:?}")
             }
         }

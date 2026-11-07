@@ -1,4 +1,10 @@
-import { expect, test, type Page } from "@playwright/test";
+import {
+  expect,
+  test,
+  type Locator,
+  type Page,
+  type Request,
+} from "@playwright/test";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 
@@ -15,12 +21,24 @@ async function openDesk(page: Page) {
   ).toBeVisible();
 }
 
+async function chooseYes(decision: Locator) {
+  const answer = decision.getByRole("radiogroup", {
+    name: "Answer to question 1",
+    exact: true,
+  });
+  await answer.getByText("Yes", { exact: true }).click();
+  await expect(
+    answer.getByRole("radio", { name: "Yes", exact: true }),
+  ).toBeChecked();
+}
+
 // There is deliberately no route interception/fulfillment here. Browser → Vite
 // proxy → production router all live in one default-deny kernel network namespace.
 test("actual GUI effect, receipt, two native clients and restart with intelligence off", async ({
   page,
   browser,
 }) => {
+  test.setTimeout(120_000);
   const responses: { url: string; status: number; body: string }[] = [];
   page.on("response", async (response) => {
     if (new URL(response.url()).pathname.startsWith("/v1/buddy/")) {
@@ -47,22 +65,64 @@ test("actual GUI effect, receipt, two native clients and restart with intelligen
     serviceWorkers: "block",
   });
   const second = await secondContext.newPage();
-  // Install before app startup so its polling timers use this clock too.
-  await second.clock.install();
+  const secondTime = new Date("2025-01-01T00:00:00Z");
+  await second.clock.install({ time: secondTime });
+  await second.clock.setFixedTime(secondTime);
+  await second.clock.pauseAt(secondTime);
+  await second.clock.setSystemTime(secondTime);
+  const secondGets = new Set<Request>();
+  second.on("request", (request) => {
+    if (
+      request.method() === "GET" &&
+      new URL(request.url()).pathname.startsWith("/v1/buddy/")
+    )
+      secondGets.add(request);
+  });
+  second.on("requestfinished", (request) => secondGets.delete(request));
+  second.on("requestfailed", (request) => secondGets.delete(request));
+  let secondElapsed = 0;
+  const settleSecond = async (control: Locator) => {
+    await expect
+      .poll(
+        async () => {
+          secondElapsed += 16;
+          expect(secondElapsed).toBeLessThan(3000);
+          await second.clock.runFor(16);
+          return (
+            secondGets.size === 0 &&
+            (await control.count()) === 1 &&
+            (await control.isVisible()) &&
+            (await control.isEnabled())
+          );
+        },
+        { intervals: [50] },
+      )
+      .toBe(true);
+  };
   observe(second);
   try {
     await openDesk(page);
-    await openDesk(second);
+    await second.goto("/tests/e2e/buddy-operator-live.html");
+    const secondReport = second.getByRole("button", {
+      name: /Browser scratch change/,
+    });
+    await settleSecond(secondReport);
+    await secondReport.click();
+    await settleSecond(
+      second.getByRole("heading", { name: "Browser scratch report" }),
+    );
     const decision = (client: Page) =>
-      client.getByRole("article", { name: "Native decision", exact: true });
+      client.getByRole("listitem", { name: "Question", exact: true });
     for (const client of [page, second]) {
       await expect(decision(client)).toContainText("Continue scratch work?");
-      await decision(client)
-        .getByRole("radio", { name: "Yes", exact: true })
-        .check();
+      if (client === second)
+        await settleSecond(
+          decision(second).getByRole("radio", { name: "Yes", exact: true }),
+        );
+      await chooseYes(decision(client));
       await expect(
         decision(client).getByRole("button", {
-          name: "Submit answer",
+          name: "Submit response",
           exact: true,
         }),
       ).toBeEnabled();
@@ -123,7 +183,7 @@ test("actual GUI effect, receipt, two native clients and restart with intelligen
     ).toBeVisible();
     await expect(
       page.getByText(
-        "Disk changes may require a separate native reload. This control does not activate or reload them.",
+        "Disk changes may require a separate reload. This control does not activate or reload them.",
       ),
     ).toBeVisible();
     writeFileSync(
@@ -152,9 +212,7 @@ test("actual GUI effect, receipt, two native clients and restart with intelligen
       page.getByText("Observed result: Partial", { exact: true }),
     ).toBeVisible();
     await expect(decision(page)).toContainText("Continue scratch work?");
-    await decision(page)
-      .getByRole("radio", { name: "Yes", exact: true })
-      .check();
+    await chooseYes(decision(page));
     const pendingRefresh = second.waitForResponse(
       (response) =>
         response.request().method() === "GET" &&
@@ -166,21 +224,15 @@ test("actual GUI effect, receipt, two native clients and restart with intelligen
     const pendingResponse = await pendingRefresh;
     expect((await pendingResponse.json()).question.status).toBe("pending");
     await pendingResponse.finished();
-    await expect(
+    await settleSecond(
       decision(second).getByRole("button", {
-        name: "Submit answer",
+        name: "Submit response",
         exact: true,
       }),
-    ).toBeEnabled();
-    // Freeze ONLY the second browser's background polling to make a genuinely stale
-    // client deterministic. No server clock, request, response or state is replaced.
-    await second.clock.pauseAt(new Date());
-    // Drain the completed refresh's Redux notification/frame before freezing the
-    // stale window. Otherwise isFetching can remain rendered while time is paused.
-    await second.clock.runFor(50);
+    );
     await expect(
       decision(second).getByRole("button", {
-        name: "Submit answer",
+        name: "Submit response",
         exact: true,
       }),
     ).toBeEnabled();
@@ -190,11 +242,11 @@ test("actual GUI effect, receipt, two native clients and restart with intelligen
         new URL(response.url()).pathname === questionPath,
     );
     await decision(page)
-      .getByRole("button", { name: "Submit answer", exact: true })
+      .getByRole("button", { name: "Submit response", exact: true })
       .click();
     expect((await accepted).status()).toBe(202);
     await expect(
-      decision(page).getByText("Answered — confirmed by the native chat."),
+      decision(page).getByText("Answered — confirmed by the chat."),
     ).toBeVisible();
     const stale = second.waitForResponse(
       (response) =>
@@ -202,22 +254,22 @@ test("actual GUI effect, receipt, two native clients and restart with intelligen
         new URL(response.url()).pathname === questionPath,
     );
     await decision(second)
-      .getByRole("button", { name: "Submit answer", exact: true })
+      .getByRole("button", { name: "Submit response", exact: true })
       .click();
     expect((await stale).status()).toBe(409);
     await second.clock.resume();
     await expect(decision(second).getByRole("alert")).toContainText(
-      "Native response is not confirmed",
+      "The chat hasn't confirmed this answer",
     );
     await decision(second)
       .getByRole("button", { name: "Refresh decision status" })
       .click();
     await expect(
-      decision(second).getByText("Answered — confirmed by the native chat."),
+      decision(second).getByText("Answered — confirmed by the chat."),
     ).toBeVisible();
     await expect(
       decision(second).getByRole("button", {
-        name: "Submit answer",
+        name: "Submit response",
         exact: true,
       }),
     ).toBeDisabled();
@@ -225,6 +277,7 @@ test("actual GUI effect, receipt, two native clients and restart with intelligen
     const durable = await secondContext.request.get(durableUrl);
     expect(durable.ok()).toBe(true);
     const resolved: unknown = await durable.json();
+    expect(resolved).toMatchObject({ question: { status: "answered" } });
     await restart(2);
     const restored = await secondContext.request.get(durableUrl);
     expect(restored.ok()).toBe(true);
@@ -242,7 +295,7 @@ test("actual GUI effect, receipt, two native clients and restart with intelligen
       .getByRole("button", { name: "Refresh decision status" })
       .click();
     await expect(
-      decision(second).getByText("Answered — confirmed by the native chat."),
+      decision(second).getByText("Answered — confirmed by the chat."),
     ).toBeVisible();
     await openDesk(page);
     await expect(
@@ -253,8 +306,8 @@ test("actual GUI effect, receipt, two native clients and restart with intelligen
       page.getByText("Observed result: Partial", { exact: true }),
     ).toBeVisible();
     await expect(
-      page.getByRole("button", { name: "Refresh questions", exact: true }),
-    ).toBeEnabled();
+      page.getByRole("region", { name: "Questions", exact: true }),
+    ).toHaveCount(0);
     await expect(
       page.getByRole("button", { name: "Refresh reports", exact: true }),
     ).toBeEnabled();

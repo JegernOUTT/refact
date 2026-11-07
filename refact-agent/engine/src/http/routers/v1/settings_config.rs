@@ -44,7 +44,10 @@ pub enum IndexingSettingsPost {
 impl IndexingSettingsPost {
     fn into_config(self) -> IndexingSettingsConfig {
         match self {
-            Self::Direct(config) | Self::Wrapped { config } => config,
+            Self::Direct(config)
+            | Self::Wrapped {
+                config,
+            } => config,
         }
     }
 }
@@ -401,7 +404,10 @@ pub enum TrajectorySettingsPost {
 impl TrajectorySettingsPost {
     fn into_config(self) -> crate::runtime_settings::TrajectoryRuntimeSettings {
         match self {
-            Self::Direct(config) | Self::Wrapped { config } => config,
+            Self::Direct(config)
+            | Self::Wrapped {
+                config,
+            } => config,
         }
     }
 }

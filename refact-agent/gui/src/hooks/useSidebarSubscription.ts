@@ -829,7 +829,7 @@ export function useSidebarSubscription() {
 
   /**
    * Authoritative native listing, polled only while this host is still showing
-   * a decision. It is what lets an answer given in the Desk, the TUI, a browser
+   * a decision. It is what lets an answer given in the Desk, a browser
    * tab or another IDE window clear the notification here.
    */
   const nativeDecisions = useGetBuddyNativeDecisionsQuery(

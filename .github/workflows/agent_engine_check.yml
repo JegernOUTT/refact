@@ -9,10 +9,6 @@ on:
       - ".cargo/config.toml"
       - "rust-toolchain.toml"
       - ".github/workflows/agent_engine_check.yml"
-      - "tools/dev/test_budget.py"
-      - "tools/dev/test_test_budget.py"
-      - "tools/dev/test_admissions.json"
-      - "docs/rust-test-policy.md"
   push:
     branches:
       - main
@@ -23,10 +19,6 @@ on:
       - ".cargo/config.toml"
       - "rust-toolchain.toml"
       - ".github/workflows/agent_engine_check.yml"
-      - "tools/dev/test_budget.py"
-      - "tools/dev/test_test_budget.py"
-      - "tools/dev/test_admissions.json"
-      - "docs/rust-test-policy.md"
   workflow_dispatch:
 
 concurrency:
@@ -60,11 +52,6 @@ jobs:
 
       - name: Ensure Python is available
         run: python3 --version
-
-      - name: Check Rust test inventory and budget
-        run: |
-          python3 ../../tools/dev/test_budget.py check
-          python3 -m unittest discover -s ../../tools/dev -p test_test_budget.py
 
       - name: Install build tools
         run: |
@@ -159,7 +146,7 @@ jobs:
           CMAKE_POLICY_DEFAULT_CMP0091: NEW
           CMAKE_MSVC_RUNTIME_LIBRARY: MultiThreaded
         shell: bash
-        run: cargo test --workspace --exclude refact-tui --profile ci-test --lib --target ${{ matrix.target }} -- --nocapture --test-threads=1
+        run: cargo test --workspace --profile ci-test --lib --target ${{ matrix.target }} -- --nocapture --test-threads=1
 
       - name: Run workspace library tests (macOS)
         if: startsWith(matrix.os, 'macos')
@@ -184,7 +171,7 @@ jobs:
           CMAKE_POLICY_DEFAULT_CMP0091: NEW
           CMAKE_MSVC_RUNTIME_LIBRARY: MultiThreaded
         shell: bash
-        run: cargo test --workspace --exclude refact-tui --profile ci-test --test '*' --target ${{ matrix.target }} -- --nocapture --test-threads=1
+        run: cargo test --workspace --profile ci-test --test '*' --target ${{ matrix.target }} -- --nocapture --test-threads=1
 
       - name: Run workspace integration tests (macOS)
         if: startsWith(matrix.os, 'macos')

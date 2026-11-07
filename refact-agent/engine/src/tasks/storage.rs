@@ -437,7 +437,13 @@ impl PlannerProof {
                     ..Default::default()
                 })
             }
-            (PlannerOrigin::Persisted { path, digest }, None) => {
+            (
+                PlannerOrigin::Persisted {
+                    path,
+                    digest,
+                },
+                None,
+            ) => {
                 if !path.starts_with(task_dir) {
                     return Err(
                         "Saved planner does not belong to the accepted task directory".into(),

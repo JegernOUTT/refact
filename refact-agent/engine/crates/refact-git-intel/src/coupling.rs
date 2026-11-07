@@ -52,7 +52,10 @@ pub fn build_coupling_graph(intel: &GitIntel, top_n: usize) -> CouplingGraph {
         })
         .collect();
 
-    CouplingGraph { edges, nodes }
+    CouplingGraph {
+        edges,
+        nodes,
+    }
 }
 
 pub fn hidden_coupling(

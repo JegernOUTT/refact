@@ -360,7 +360,9 @@ impl BrowserBuffers {
                             &mut self.last_send_mutation_cursor,
                         );
                     }
-                    RecorderEvent::ToolbarAction { action, .. } => {
+                    RecorderEvent::ToolbarAction {
+                        action, ..
+                    } => {
                         if self.toolbar_action_queue.len() < 50 {
                             self.toolbar_action_queue.push(action.clone());
                         }
@@ -1283,7 +1285,10 @@ fn tab_opener(
     opener_id: Option<String>,
     frame_id: Option<String>,
 ) -> Option<refact_integrations::browser_models::TabOpener> {
-    opener_id.map(|tab_id| refact_integrations::browser_models::TabOpener { tab_id, frame_id })
+    opener_id.map(|tab_id| refact_integrations::browser_models::TabOpener {
+        tab_id,
+        frame_id,
+    })
 }
 
 impl Drop for BrowserRuntime {
@@ -1750,7 +1755,9 @@ pub fn setup_network_capture(
                         &entry,
                         Box::new(move || {
                             body_tab
-                                .call_method(Network::GetResponseBody { request_id })
+                                .call_method(Network::GetResponseBody {
+                                    request_id,
+                                })
                                 .ok()
                                 .map(|response| {
                                     har::normalize_response_body(
@@ -2320,7 +2327,9 @@ mod tests {
         let values = masked
             .iter()
             .map(|event| match event {
-                RecorderEvent::Input { value, .. } => value.clone(),
+                RecorderEvent::Input {
+                    value, ..
+                } => value.clone(),
                 _ => panic!("expected input"),
             })
             .collect::<Vec<_>>();

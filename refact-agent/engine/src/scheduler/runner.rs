@@ -505,7 +505,10 @@ impl CronRunner {
         if !matches!(task.delivery, Delivery::Chat) {
             return true;
         }
-        let AgentTarget::ExistingChat { chat_id } = &cmd.target else {
+        let AgentTarget::ExistingChat {
+            chat_id,
+        } = &cmd.target
+        else {
             return true;
         };
         if chat_id.is_empty() {
@@ -1319,14 +1322,31 @@ fn runnable_chat_id(job: &Job) -> Result<&str, &'static str> {
     match (&job.action, &job.delivery) {
         (
             Action::AgentTurn {
-                target: AgentTarget::ExistingChat { chat_id },
+                target: AgentTarget::ExistingChat {
+                    chat_id,
+                },
                 ..
             },
             Delivery::Chat,
         ) if !chat_id.is_empty() => Ok(chat_id),
-        (Action::AgentTurn { .. }, Delivery::Chat) => Err("missing chat_id"),
-        (Action::AgentTurn { .. }, _) => Err("non-chat delivery is not supported yet"),
-        (Action::Command { .. }, _) => Err("command actions use the command runner"),
+        (
+            Action::AgentTurn {
+                ..
+            },
+            Delivery::Chat,
+        ) => Err("missing chat_id"),
+        (
+            Action::AgentTurn {
+                ..
+            },
+            _,
+        ) => Err("non-chat delivery is not supported yet"),
+        (
+            Action::Command {
+                ..
+            },
+            _,
+        ) => Err("command actions use the command runner"),
     }
 }
 
@@ -1342,9 +1362,24 @@ fn runnable_isolated_job(job: &Job) -> Result<(), &'static str> {
             },
             Delivery::Chat,
         ) => Ok(()),
-        (Action::AgentTurn { .. }, Delivery::Chat) => Err("target is not isolated"),
-        (Action::AgentTurn { .. }, _) => Err("non-chat delivery is not supported yet"),
-        (Action::Command { .. }, _) => Err("command actions use the command runner"),
+        (
+            Action::AgentTurn {
+                ..
+            },
+            Delivery::Chat,
+        ) => Err("target is not isolated"),
+        (
+            Action::AgentTurn {
+                ..
+            },
+            _,
+        ) => Err("non-chat delivery is not supported yet"),
+        (
+            Action::Command {
+                ..
+            },
+            _,
+        ) => Err("command actions use the command runner"),
     }
 }
 
@@ -1353,17 +1388,39 @@ fn runnable_command_job(job: &Job) -> Result<(), &'static str> {
         return Err("trigger is not supported by the command runner yet");
     }
     match (&job.action, &job.delivery) {
-        (Action::Command { argv, .. }, _) if argv.is_empty() => Err("command argv is empty"),
         (
             Action::Command {
-                target: AgentTarget::ExistingChat { chat_id },
+                argv, ..
+            },
+            _,
+        ) if argv.is_empty() => Err("command argv is empty"),
+        (
+            Action::Command {
+                target: AgentTarget::ExistingChat {
+                    chat_id,
+                },
                 ..
             },
             Delivery::Chat,
         ) if chat_id.is_empty() => Err("missing chat_id"),
-        (Action::Command { .. }, Delivery::Chat) => Ok(()),
-        (Action::Command { .. }, _) => Ok(()),
-        (Action::AgentTurn { .. }, _) => Err("action is not command"),
+        (
+            Action::Command {
+                ..
+            },
+            Delivery::Chat,
+        ) => Ok(()),
+        (
+            Action::Command {
+                ..
+            },
+            _,
+        ) => Ok(()),
+        (
+            Action::AgentTurn {
+                ..
+            },
+            _,
+        ) => Err("action is not command"),
     }
 }
 
@@ -1416,21 +1473,29 @@ fn task_can_use_cron_lane(task: &Job) -> bool {
 
 fn job_model(task: &Job) -> Option<&str> {
     match &task.action {
-        Action::AgentTurn { model, .. } => model.as_deref().filter(|model| !model.is_empty()),
+        Action::AgentTurn {
+            model, ..
+        } => model.as_deref().filter(|model| !model.is_empty()),
         _ => None,
     }
 }
 
 #[cfg(test)]
 fn set_job_isolated(task: &mut Job) {
-    if let Action::AgentTurn { target, .. } = &mut task.action {
+    if let Action::AgentTurn {
+        target, ..
+    } = &mut task.action
+    {
         *target = AgentTarget::Isolated;
     }
 }
 
 #[cfg(test)]
 fn set_job_model(task: &mut Job, value: Option<String>) {
-    if let Action::AgentTurn { model, .. } = &mut task.action {
+    if let Action::AgentTurn {
+        model, ..
+    } = &mut task.action
+    {
         *model = value;
     }
 }
@@ -1567,14 +1632,25 @@ pub(crate) fn scheduled_fire_at_ms(
         return recurring_state.map(|state| state.next_future_ms);
     }
     let scheduled = match &task.trigger {
-        Trigger::Cron { .. } if task.recurring => {
-            jittered_next_run_ms_for(task, from_ms, &task.id, jitter_cfg, tz)
+        Trigger::Cron {
+            ..
+        } if task.recurring => jittered_next_run_ms_for(task, from_ms, &task.id, jitter_cfg, tz),
+        Trigger::Cron {
+            ..
+        } => one_shot_jittered_next_run_ms_for(task, from_ms, &task.id, jitter_cfg, tz),
+        Trigger::Interval {
+            ..
         }
-        Trigger::Cron { .. } => {
-            one_shot_jittered_next_run_ms_for(task, from_ms, &task.id, jitter_cfg, tz)
+        | Trigger::Once {
+            ..
+        } => next_run_ms(task, from_ms, tz),
+        Trigger::Manual
+        | Trigger::Webhook {
+            ..
         }
-        Trigger::Interval { .. } | Trigger::Once { .. } => next_run_ms(task, from_ms, tz),
-        Trigger::Manual | Trigger::Webhook { .. } | Trigger::OnProcessExit { .. } => None,
+        | Trigger::OnProcessExit {
+            ..
+        } => None,
     };
     let scheduled = if task.recurring || task.last_fired_at_ms.is_none() {
         scheduled
@@ -1747,7 +1823,9 @@ mod tests {
 
     fn interval_task(id: &str, now: u64, every_ms: u64) -> Job {
         let mut task = task(id, now);
-        task.trigger = Trigger::Interval { every_ms };
+        task.trigger = Trigger::Interval {
+            every_ms,
+        };
         task.recurring = true;
         task.created_at_ms = now - every_ms * 2;
         task.last_fired_at_ms = Some(now - every_ms);

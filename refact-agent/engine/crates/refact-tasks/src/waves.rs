@@ -188,13 +188,18 @@ pub fn pipeline_cursor(board: &TaskBoard, stages: &[LaneStage]) -> PipelineCurso
             };
         }
         if !is_terminal_column(column) {
-            return PipelineCursor::At { position };
+            return PipelineCursor::At {
+                position,
+            };
         }
         match advance_pipeline(stages, position) {
-            PipelineAdvance::Next { position: next, .. } => position = next,
-            PipelineAdvance::Complete | PipelineAdvance::OutOfRange { .. } => {
-                return PipelineCursor::Complete
-            }
+            PipelineAdvance::Next {
+                position: next, ..
+            } => position = next,
+            PipelineAdvance::Complete
+            | PipelineAdvance::OutOfRange {
+                ..
+            } => return PipelineCursor::Complete,
         }
     }
 }
@@ -664,7 +669,12 @@ fn lane_not_run_reason(outcome: &LaneOutcome) -> String {
     match outcome.stages.first() {
         None => format!("lane '{}' declares no stages", outcome.lane),
         Some(stage) => match &stage.decision {
-            StageDecision::NotRun { reason } | StageDecision::Blocked { reason } => reason.clone(),
+            StageDecision::NotRun {
+                reason,
+            }
+            | StageDecision::Blocked {
+                reason,
+            } => reason.clone(),
             StageDecision::Dispatch => unreachable!("a dispatched stage marks its lane dispatched"),
         },
     }
@@ -854,7 +864,9 @@ mod tests {
 
         assert_eq!(
             pipeline_cursor(&board, &stages),
-            PipelineCursor::At { position: 3 }
+            PipelineCursor::At {
+                position: 3
+            }
         );
     }
 

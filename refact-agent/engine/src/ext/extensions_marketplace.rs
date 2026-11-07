@@ -622,9 +622,9 @@ async fn load_manifest(dir: &Path) -> Result<ExtensionsMarketplaceManifest, Stri
         let plugin_market = load_marketplace_json(dir).await?;
         return Ok(ExtensionsMarketplaceManifest {
             name: plugin_market.name,
-            owner: plugin_market
-                .owner
-                .map(|o| ExtensionsMarketplaceOwner { name: o.name }),
+            owner: plugin_market.owner.map(|o| ExtensionsMarketplaceOwner {
+                name: o.name,
+            }),
             ..Default::default()
         });
     }
@@ -1469,7 +1469,10 @@ pub async fn resolve_marketplace_item(
         )
     })?;
     let abs_path = resolve_repo_path(&repo_dir, &item.path)?;
-    Ok(ResolvedMarketplaceItem { item, abs_path })
+    Ok(ResolvedMarketplaceItem {
+        item,
+        abs_path,
+    })
 }
 
 async fn resolve_scope_dir(app: AppState, scope: &str) -> Result<(PathBuf, String), String> {
@@ -1493,8 +1496,10 @@ pub async fn install_marketplace_item(
     kind: MarketplaceKind,
     req: InstallMarketplaceItemRequest,
 ) -> Result<InstallMarketplaceItemResponse, String> {
-    let ResolvedMarketplaceItem { item, abs_path } =
-        resolve_marketplace_item(app.clone(), kind, &req.source_id, &req.item_id).await?;
+    let ResolvedMarketplaceItem {
+        item,
+        abs_path,
+    } = resolve_marketplace_item(app.clone(), kind, &req.source_id, &req.item_id).await?;
     let (base_dir, scope_name) = resolve_scope_dir(app.clone(), &req.scope).await?;
 
     let (target, file_path) = match kind {

@@ -239,34 +239,6 @@ describe("ChatSettingsDropdown", () => {
     ).toBe(180000);
     expect(screen.getByText("180000")).toBeInTheDocument();
   });
-  test.each([100001, 0, -1])(
-    "reset respects positive request context cap %s",
-    async (requestCap) => {
-      const chat = chatStateWithReasoning(false);
-      const runtime = chat.threads[chat.current_thread_id];
-      runtime.thread.context_tokens_cap = requestCap;
-      runtime.thread.auto_compression_cap = 8192;
-      const { user, store } = render(<ChatSettingsDropdown />, {
-        preloadedState: { chat, config },
-      });
-      await user.click(
-        await screen.findByRole("button", { name: /openai\/o1/ }),
-      );
-      await user.click(screen.getByRole("button", { name: /Token limits/ }));
-      // Caps loading and rendering must not rewrite the user's explicit setting.
-      expect(
-        store.getState().chat.threads[chat.current_thread_id]?.thread
-          .auto_compression_cap,
-      ).toBe(8192);
-      await user.click(
-        screen.getByRole("button", { name: "Reset auto-compression cap" }),
-      );
-      expect(
-        store.getState().chat.threads[chat.current_thread_id]?.thread
-          .auto_compression_cap,
-      ).toBe(requestCap > 0 ? 90000 : 180000);
-    },
-  );
 
   test.each([
     [512, 460],

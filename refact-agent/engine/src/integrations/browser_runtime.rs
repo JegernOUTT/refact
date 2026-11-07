@@ -257,9 +257,10 @@ pub enum ShutdownTarget {
 pub fn shutdown_target(own_pid: Option<u32>, lock_owner: Option<u32>) -> ShutdownTarget {
     match (own_pid, lock_owner) {
         (Some(own), _) if pid_is_alive(own) => ShutdownTarget::Own(own),
-        (own, Some(lock_owner)) if own != Some(lock_owner) => {
-            ShutdownTarget::LeaveReplacement { own, lock_owner }
-        }
+        (own, Some(lock_owner)) if own != Some(lock_owner) => ShutdownTarget::LeaveReplacement {
+            own,
+            lock_owner,
+        },
         _ => ShutdownTarget::Nothing,
     }
 }
@@ -382,7 +383,10 @@ pub fn clear_stale_profile_lock(profile_dir: &Path) -> Result<(), String> {
 fn shutdown_runtime_process(pid: Option<u32>, profile_dir: &Path, delete_profile: bool) {
     match shutdown_target(pid, profile_lock_is_live(profile_dir)) {
         ShutdownTarget::Own(own) => terminate_process(own),
-        ShutdownTarget::LeaveReplacement { own, lock_owner } => warn!(
+        ShutdownTarget::LeaveReplacement {
+            own,
+            lock_owner,
+        } => warn!(
             "Profile {} is now locked by live Chrome {lock_owner}, not by the removed \
              runtime's process {own:?}; leaving the replacement alive",
             profile_dir.display()

@@ -280,7 +280,11 @@ impl LlmWireAdapter for AnthropicAdapter {
             settings.endpoint.clone()
         };
 
-        Ok(HttpParts { url, headers, body })
+        Ok(HttpParts {
+            url,
+            headers,
+            body,
+        })
     }
 
     fn parse_stream_chunk(&self, data: &str) -> Result<Vec<LlmStreamDelta>, StreamParseError> {
@@ -368,7 +372,9 @@ impl LlmWireAdapter for AnthropicAdapter {
                                         json!(block_index),
                                     );
                                 }
-                                deltas.push(LlmStreamDelta::AddCitation { citation: enriched });
+                                deltas.push(LlmStreamDelta::AddCitation {
+                                    citation: enriched,
+                                });
                             }
                         }
                         _ => {}
@@ -379,7 +385,9 @@ impl LlmWireAdapter for AnthropicAdapter {
                 if let Some(message) = json.get("message") {
                     if let Some(usage) = message.get("usage") {
                         if let Some(u) = parse_anthropic_usage(usage) {
-                            deltas.push(LlmStreamDelta::SetUsage { usage: u });
+                            deltas.push(LlmStreamDelta::SetUsage {
+                                usage: u,
+                            });
                         }
                     }
                 }
@@ -400,7 +408,9 @@ impl LlmWireAdapter for AnthropicAdapter {
                 }
                 if let Some(usage) = json.get("usage") {
                     if let Some(u) = parse_anthropic_usage(usage) {
-                        deltas.push(LlmStreamDelta::SetUsage { usage: u });
+                        deltas.push(LlmStreamDelta::SetUsage {
+                            usage: u,
+                        });
                     }
                 }
                 if has_stop_reason {
@@ -449,7 +459,9 @@ impl LlmWireAdapter for AnthropicAdapter {
                                     obj.insert("_order_index".to_string(), index.clone());
                                 }
                             }
-                            deltas.push(LlmStreamDelta::AddServerContentBlock { block });
+                            deltas.push(LlmStreamDelta::AddServerContentBlock {
+                                block,
+                            });
                         }
                         _ => {}
                     }
@@ -468,7 +480,9 @@ impl LlmWireAdapter for AnthropicAdapter {
         // Extract Refact-specific extra fields on ALL events consistently
         let extra = extract_extra_fields(&json);
         if !extra.is_empty() {
-            deltas.push(LlmStreamDelta::MergeExtra { extra });
+            deltas.push(LlmStreamDelta::MergeExtra {
+                extra,
+            });
         }
 
         Ok(deltas)
@@ -1424,7 +1438,9 @@ fn tool_choice_to_anthropic(choice: &CanonicalToolChoice) -> Value {
         CanonicalToolChoice::Auto => json!({"type": "auto"}),
         CanonicalToolChoice::None => json!({"type": "none"}),
         CanonicalToolChoice::Required => json!({"type": "any"}),
-        CanonicalToolChoice::Function { name } => json!({"type": "tool", "name": name}),
+        CanonicalToolChoice::Function {
+            name,
+        } => json!({"type": "tool", "name": name}),
     }
 }
 
@@ -2200,7 +2216,9 @@ mod tests {
 
         assert_eq!(deltas.len(), 1);
         match &deltas[0] {
-            LlmStreamDelta::SetToolCalls { tool_calls } => {
+            LlmStreamDelta::SetToolCalls {
+                tool_calls,
+            } => {
                 assert_eq!(tool_calls.len(), 1);
                 assert_eq!(tool_calls[0]["id"], "toolu_123");
                 assert_eq!(tool_calls[0]["function"]["name"], "get_weather");
@@ -2218,7 +2236,9 @@ mod tests {
 
         assert_eq!(deltas.len(), 1);
         match &deltas[0] {
-            LlmStreamDelta::SetToolCalls { tool_calls } => {
+            LlmStreamDelta::SetToolCalls {
+                tool_calls,
+            } => {
                 assert_eq!(tool_calls.len(), 1);
                 assert_eq!(tool_calls[0]["index"], 0);
                 assert_eq!(tool_calls[0]["function"]["arguments"], "{\"loc");

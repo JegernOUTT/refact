@@ -60,7 +60,10 @@ pub struct Intermediate {
 
 impl Intermediate {
     pub fn new(cap: usize) -> Self {
-        Self { cap, used: 0 }
+        Self {
+            cap,
+            used: 0,
+        }
     }
 
     pub fn used(&self) -> usize {
@@ -241,8 +244,12 @@ async fn run_worker(
     Ok(CodeModeRun {
         calls,
         exit_code: match spawned.snapshot.status {
-            ExecStatus::Exited { exit_code } => exit_code,
-            ExecStatus::SandboxLauncherFailed { exit_code } => Some(exit_code),
+            ExecStatus::Exited {
+                exit_code,
+            } => exit_code,
+            ExecStatus::SandboxLauncherFailed {
+                exit_code,
+            } => Some(exit_code),
             _ => None,
         },
         intermediate,

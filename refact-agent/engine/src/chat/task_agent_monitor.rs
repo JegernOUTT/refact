@@ -1025,10 +1025,18 @@ impl AgentFailureKind {
             return AgentFailureKind::Unknown;
         }
         match classify_llm_error_for_retry(error_message) {
-            RetryDecision::Retry { .. } => AgentFailureKind::TransientExhausted,
-            RetryDecision::ContextLimit { .. } => AgentFailureKind::ContextLimit,
-            RetryDecision::DoNotRetry { .. } => AgentFailureKind::Permanent,
-            RetryDecision::UserCancelled { .. } => AgentFailureKind::Cancelled,
+            RetryDecision::Retry {
+                ..
+            } => AgentFailureKind::TransientExhausted,
+            RetryDecision::ContextLimit {
+                ..
+            } => AgentFailureKind::ContextLimit,
+            RetryDecision::DoNotRetry {
+                ..
+            } => AgentFailureKind::Permanent,
+            RetryDecision::UserCancelled {
+                ..
+            } => AgentFailureKind::Cancelled,
         }
     }
 

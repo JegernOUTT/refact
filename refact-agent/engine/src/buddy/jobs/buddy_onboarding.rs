@@ -71,10 +71,14 @@ fn should_skip_top_level(name: &str) -> bool {
 
 fn scan_onboarding(project_root: &Path) -> OnboardingScanResult {
     let Some(agents_mtime) = agents_modified(project_root) else {
-        return OnboardingScanResult { candidates: vec![] };
+        return OnboardingScanResult {
+            candidates: vec![],
+        };
     };
     let Ok(entries) = std::fs::read_dir(project_root) else {
-        return OnboardingScanResult { candidates: vec![] };
+        return OnboardingScanResult {
+            candidates: vec![],
+        };
     };
     let mut candidates = Vec::new();
     let mut entries = entries.flatten().collect::<Vec<_>>();
@@ -101,7 +105,9 @@ fn scan_onboarding(project_root: &Path) -> OnboardingScanResult {
             break;
         }
     }
-    OnboardingScanResult { candidates }
+    OnboardingScanResult {
+        candidates,
+    }
 }
 
 fn render_evidence(scan: &OnboardingScanResult) -> String {
@@ -138,7 +144,9 @@ async fn current_scan(ctx: &BuddyJobContext) -> OnboardingScanResult {
     let project_root = ctx.project_root.clone();
     tokio::task::spawn_blocking(move || scan_onboarding(&project_root))
         .await
-        .unwrap_or(OnboardingScanResult { candidates: vec![] })
+        .unwrap_or(OnboardingScanResult {
+            candidates: vec![],
+        })
 }
 
 #[async_trait::async_trait]

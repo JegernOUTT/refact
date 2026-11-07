@@ -422,7 +422,10 @@ pub async fn handle_v1_git_branch_checkout(
     let plan = run_blocking(move || plan_checkout(&plan_root, &name, &kind)).await?;
     let args = match plan {
         CheckoutPlan::SwitchLocal(name) => git_args(["switch".into(), OsString::from(name)]),
-        CheckoutPlan::TrackRemote { local, remote_ref } => git_args([
+        CheckoutPlan::TrackRemote {
+            local,
+            remote_ref,
+        } => git_args([
             OsString::from("switch"),
             "--create".into(),
             local.into(),
@@ -540,7 +543,9 @@ pub async fn handle_v1_git_branch_rename(
     })
     .await?;
     if old_name == new_name {
-        return Ok(Json(GitBranchRenameResponse { name: new_name }));
+        return Ok(Json(GitBranchRenameResponse {
+            name: new_name,
+        }));
     }
     // `git branch -m` (unlike git2's rename) also rewrites HEAD of every linked worktree that
     // has the branch checked out, so no worktree is left on a dangling branch.
@@ -565,7 +570,9 @@ pub async fn handle_v1_git_branch_rename(
         }
         return Err(internal_error(format!("git branch -m failed: {}", tail)));
     }
-    Ok(Json(GitBranchRenameResponse { name: new_name }))
+    Ok(Json(GitBranchRenameResponse {
+        name: new_name,
+    }))
 }
 
 pub async fn handle_v1_git_branch_delete(
@@ -623,7 +630,9 @@ pub async fn handle_v1_git_branch_delete(
             flag, tail
         )));
     }
-    Ok(Json(GitBranchDeleteResponse { deleted: name }))
+    Ok(Json(GitBranchDeleteResponse {
+        deleted: name,
+    }))
 }
 
 pub async fn handle_v1_git_fetch(

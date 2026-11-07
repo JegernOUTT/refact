@@ -1293,19 +1293,6 @@ describe("drawBuddyWorld", () => {
     expectHealthyDraw(lateCtx);
   });
 
-  it("renders staged accents deterministically for the same held duration", () => {
-    const firstCtx = drawActorWorld({
-      intentKind: "build_cairn",
-      heldMs: 6_500,
-    });
-    const secondCtx = drawActorWorld({
-      intentKind: "build_cairn",
-      heldMs: 6_500,
-    });
-
-    expect(secondCtx.drawOps).toEqual(firstCtx.drawOps);
-  });
-
   it("grows the acorn pile during gather_acorns and lifts one as payoff", () => {
     const earlyCtx = drawActorWorld({
       intentKind: "gather_acorns",

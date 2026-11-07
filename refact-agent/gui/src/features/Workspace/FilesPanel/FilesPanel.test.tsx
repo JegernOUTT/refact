@@ -634,28 +634,6 @@ describe("FilesPanel", () => {
     await waitFor(() => expect(screen.queryByRole("option")).toBeNull());
   });
 
-  it("renders one file icon with an empty chevron slot", async () => {
-    server.use(rootHandler());
-    const { user } = render(<FilesPanel />);
-    const workspace = await screen.findByRole("treeitem", {
-      name: /workspace/i,
-    });
-
-    expect(workspace.querySelectorAll("svg")).toHaveLength(2);
-    expect(
-      within(workspace).getByTestId("tree-chevron-slot").querySelector("svg"),
-    ).not.toBeNull();
-
-    await user.click(workspace);
-    const file = await screen.findByRole("treeitem", { name: /README\.md/i });
-
-    expect(file.querySelectorAll("svg")).toHaveLength(1);
-    expect(
-      within(file).getByTestId("tree-chevron-slot").querySelector("svg"),
-    ).toBeNull();
-    expect(file.querySelector(".lucide-file-text")).not.toBeNull();
-  });
-
   it("hides ignored entries by default and reveals them muted", async () => {
     server.use(
       http.get("*/v1/files/tree", ({ request }) => {

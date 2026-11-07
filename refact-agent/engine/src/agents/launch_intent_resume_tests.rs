@@ -252,15 +252,19 @@ async fn completed_resume_persists_new_generation_boundaries_without_mutating_ge
     let fixture = fixture("resume-boundaries", CoordinationSettings::default()).await;
     let attempts = Arc::new(AtomicUsize::new(0));
     let resumed_started = Arc::new(Notify::new());
+    let resumed_release = Arc::new(Notify::new());
     let _runner = {
         let attempts = attempts.clone();
         let resumed_started = resumed_started.clone();
+        let resumed_release = resumed_release.clone();
         crate::agents::spawn::install_test_runner(Arc::new(move |gcx, messages, config| {
             let attempt = attempts.fetch_add(1, Ordering::SeqCst);
             let resumed_started = resumed_started.clone();
+            let resumed_release = resumed_release.clone();
             Box::pin(async move {
                 if attempt == 1 {
                     resumed_started.notify_one();
+                    resumed_release.notified().await;
                 }
                 Ok(complete_run(
                     gcx,
@@ -295,10 +299,10 @@ async fn completed_resume_persists_new_generation_boundaries_without_mutating_ge
         .cloned()
         .unwrap();
     let guard = session.lock().await;
-    start.send(()).unwrap();
     let run_two = RunKey::new(WorkKey::background_agent(&first.agent_id), 2);
     let persisted = wait_for_intent_state(&fixture, &run_two, IntentState::Persisted).await;
     assert_eq!(persisted.generation, 0);
+    start.send(()).unwrap();
     let dispatched = wait_for_intent_state(&fixture, &run_two, IntentState::Dispatched).await;
     assert_eq!(dispatched.generation, 1);
     drop(guard);
@@ -307,6 +311,7 @@ async fn completed_resume_persists_new_generation_boundaries_without_mutating_ge
     tokio::time::timeout(Duration::from_secs(30), resumed_started.notified())
         .await
         .expect("resumed runner started after acknowledgement");
+    resumed_release.notify_one();
     let completed = tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             let record = fixture.app.agents.get_any(&first.agent_id).await.unwrap();

@@ -506,7 +506,9 @@ mod tests {
 
     fn file_content(candidate: &ImportCandidate) -> &str {
         match &candidate.artifact {
-            ImportArtifact::FileContent { content } => content,
+            ImportArtifact::FileContent {
+                content,
+            } => content,
             _ => panic!("expected file content"),
         }
     }

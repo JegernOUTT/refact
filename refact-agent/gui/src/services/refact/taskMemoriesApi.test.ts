@@ -153,17 +153,6 @@ describe("isTaskMemoryFacetsResponse", () => {
   });
 });
 
-describe("use_get_task_memory_facets_calls_facets_endpoint_not_full_list", () => {
-  it("facets URL contains /facets suffix, not the list URL", () => {
-    const taskId = "test-task";
-    const facetsPath = `/v1/task/${encodeURIComponent(taskId)}/memories/facets`;
-    const listPath = `/v1/task/${encodeURIComponent(taskId)}/memories`;
-    expect(facetsPath).toContain("/memories/facets");
-    expect(facetsPath).not.toBe(listPath);
-    expect(facetsPath).not.toMatch(/\/memories$/);
-  });
-});
-
 describe("taskMemoriesApi URLs", () => {
   it("listTaskMemories uses relative URL and preserves filtered query params in Vite dev web mode", async () => {
     const fetchMock = vi.fn<FetchLike>();

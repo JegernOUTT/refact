@@ -94,8 +94,12 @@ impl SpecAuthority {
     pub fn label(&self) -> String {
         match self {
             SpecAuthority::CardInstructions => "card_instructions".to_string(),
-            SpecAuthority::AgentProposal { agent } => format!("agent_proposal:{agent}"),
-            SpecAuthority::Operator { operator } => format!("operator:{operator}"),
+            SpecAuthority::AgentProposal {
+                agent,
+            } => format!("agent_proposal:{agent}"),
+            SpecAuthority::Operator {
+                operator,
+            } => format!("operator:{operator}"),
         }
     }
 }
@@ -416,7 +420,10 @@ pub struct EvidenceService {
 
 impl EvidenceService {
     pub fn new(policy: VerifyCommandPolicy, context: EvidenceContext) -> Self {
-        Self { policy, context }
+        Self {
+            policy,
+            context,
+        }
     }
 
     /// Execute an already-accepted spec. An unaccepted proposal is blocked here and

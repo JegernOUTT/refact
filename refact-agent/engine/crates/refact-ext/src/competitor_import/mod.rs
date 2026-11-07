@@ -130,10 +130,15 @@ pub async fn run_project_import_with_paths_and_filter_for_source(
     let mut summary = ImportSummary::default();
 
     for scope in discovered_scopes {
-        let ImportScope::Project { root } = scope else {
+        let ImportScope::Project {
+            root,
+        } = scope
+        else {
             continue;
         };
-        let scope = ImportScope::Project { root: root.clone() };
+        let scope = ImportScope::Project {
+            root: root.clone(),
+        };
         let mut scope_summary = ImportSummary::from_scopes(vec![scope.clone()]);
         scope_summary.discovered_sources = sources::discover_project_sources(&root)
             .into_iter()
@@ -300,7 +305,9 @@ pub fn runtime_scope_label(report: &ImportReport) -> &'static str {
     if let Some(scope) = report.discovered_scopes.first() {
         return match scope {
             ImportScope::Global => "global settings",
-            ImportScope::Project { .. } => "project workspace",
+            ImportScope::Project {
+                ..
+            } => "project workspace",
         };
     }
     match report.reported_scopes.first().map(|scope| scope.scope_kind) {
@@ -314,7 +321,9 @@ pub fn runtime_dedupe_key(report: &ImportReport) -> String {
     if let Some(scope) = report.discovered_scopes.first() {
         return match scope {
             ImportScope::Global => "competitor_import:global".to_string(),
-            ImportScope::Project { root } => {
+            ImportScope::Project {
+                root,
+            } => {
                 let hash = manifest::hash_string(&root.to_string_lossy());
                 format!("competitor_import:project:{}", &hash[..16])
             }
@@ -394,7 +403,9 @@ pub fn sanitize_log_path(path: &Path) -> String {
 pub fn scope_label(scope: &ImportScope) -> String {
     match scope {
         ImportScope::Global => "global".to_string(),
-        ImportScope::Project { .. } => "project:<redacted>".to_string(),
+        ImportScope::Project {
+            ..
+        } => "project:<redacted>".to_string(),
     }
 }
 

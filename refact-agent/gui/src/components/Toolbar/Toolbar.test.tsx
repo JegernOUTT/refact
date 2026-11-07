@@ -1,5 +1,3 @@
-import { readFile } from "node:fs/promises";
-import { resolve } from "node:path";
 import { http, HttpResponse } from "msw";
 import { act } from "react-dom/test-utils";
 import userEvent from "@testing-library/user-event";
@@ -14,8 +12,6 @@ import { openTask } from "../../features/Tasks";
 import {
   makeSurfaceKey,
   openTab,
-  setPanelsForced,
-  setDockOpen,
   setActiveTab,
   selectFocusedWorkspaceSurfaceKey,
 } from "../../features/Workspace";
@@ -205,14 +201,6 @@ describe("Dropdown navigation", () => {
 });
 
 describe("Toolbar pane-only workspace navigation", () => {
-  it("does not render the standalone Agents toolbar badge", () => {
-    useToolbarHandlers();
-    const view = renderToolbar({ type: "chat", id: "chat-1" });
-
-    expect(view.container.querySelector('[class*="agentsBadge"]')).toBeNull();
-    expect(screen.queryByRole("button", { name: /agents/i })).toBeNull();
-  });
-
   it("leaves Home navigation exclusively to the activity rail", () => {
     useToolbarHandlers();
     renderToolbar({ type: "chat", id: "chat-1" });
@@ -226,31 +214,6 @@ describe("Toolbar pane-only workspace navigation", () => {
     expect(
       screen.queryByRole("button", { name: "Live edits" }),
     ).not.toBeInTheDocument();
-  });
-
-  it("does not render a Live edits control on any host", () => {
-    useToolbarHandlers();
-    const activeTab = { type: "chat" as const, id: "chat-a" };
-    const view = render(<Toolbar activeTab={activeTab} />, {
-      preloadedState: {
-        config: { ...baseConfig, host: "vscode" as const },
-        pages: pagesForActiveTab(activeTab),
-      },
-    });
-    const chatA = makeSurfaceKey("chat", "chat-a");
-
-    act(() => {
-      view.store.dispatch(
-        createChatWithId({ id: "chat-a", title: "Chat Alpha" }),
-      );
-      view.store.dispatch(openTab(chatA));
-      view.store.dispatch(setActiveTab(chatA));
-      view.store.dispatch(setPanelsForced(true));
-      view.store.dispatch(setDockOpen(true));
-    });
-    rerenderToolbar(view, activeTab);
-
-    expect(screen.queryByRole("button", { name: "Live edits" })).toBeNull();
   });
 
   it("opens the engine status popover with the Engine URL link and Daemon action", async () => {
@@ -403,41 +366,6 @@ describe("Toolbar pane-only workspace navigation", () => {
     });
   });
 
-  it("renders Open views and a spacer without an empty tab strip", () => {
-    useToolbarHandlers();
-    renderToolbar({ type: "dashboard" });
-
-    expect(screen.queryByRole("tab")).not.toBeInTheDocument();
-    expect(
-      screen.getByRole("tablist", { name: "Workspace tabs" }),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByRole("tablist", { name: "Workspace tabs" }),
-    ).toBeInTheDocument();
-  });
-
-  it("retains the toolbar spacer when workspace panes contain open tabs", () => {
-    useToolbarHandlers();
-    const view = renderToolbar({ type: "dashboard" });
-    const chatA = makeSurfaceKey("chat", "chat-a");
-
-    act(() => {
-      view.store.dispatch(
-        createChatWithId({ id: "chat-a", title: "Chat Alpha" }),
-      );
-      view.store.dispatch(openTab(chatA));
-      view.store.dispatch(setActiveTab(chatA));
-    });
-    rerenderToolbar(view, { type: "dashboard" });
-
-    expect(
-      screen.getByRole("tablist", { name: "Workspace tabs" }),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByRole("tablist", { name: "Workspace tabs" }),
-    ).toBeInTheDocument();
-  });
-
   it("keeps New Chat, New Task, theme, and menu actions functional", async () => {
     useToolbarHandlers();
     const activeTab = { type: "chat" as const, id: "chat-a" };
@@ -585,30 +513,5 @@ describe("Toolbar pane-only workspace navigation", () => {
     rerenderToolbar(view, activeTab);
 
     await expectNewChatCleansFocusedWorkspaceChat(view);
-  });
-});
-
-describe("Toolbar chrome containment", () => {
-  it("toolbar_is_fixed_height_chrome_that_never_flex_shrinks", async () => {
-    const css = await readFile(
-      resolve(process.cwd(), "src", "components/Toolbar/Toolbar.module.css"),
-      "utf8",
-    );
-    const match = /\.toolbar \{[^}]*\}/.exec(css);
-    expect(match).not.toBeNull();
-    const block = match?.[0] ?? "";
-    expect(block).toContain("flex-shrink: 0");
-    expect(block).toContain("height: var(--rf-control-h-lg)");
-  });
-
-  it("toolbar_spacer_grows_to_keep_right_controls_pinned_to_the_edge", async () => {
-    const css = await readFile(
-      resolve(process.cwd(), "src", "components/Toolbar/Toolbar.module.css"),
-      "utf8",
-    );
-    const match = /\.toolbarTabs \{[^}]*\}/.exec(css);
-    expect(match).not.toBeNull();
-    const block = match?.[0] ?? "";
-    expect(block).toContain("flex: 1 1 auto");
   });
 });

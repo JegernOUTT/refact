@@ -137,7 +137,8 @@ export function useWorkStream(
             : failure,
         );
         const shouldReconnect =
-          failure.kind === "transport" && attempts.current < 3;
+          (failure.kind === "transport" || failure.kind === "reset") &&
+          attempts.current < 3;
         setReconnecting(shouldReconnect);
         if (shouldReconnect) {
           attempts.current += 1;

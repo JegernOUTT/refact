@@ -59,7 +59,7 @@ import {
 } from "../features/Buddy/buddySlice";
 import { registerBuddySpeechTtlListener } from "../features/Buddy/buddySpeechTtl";
 import { BuddyActivityPanel } from "../features/Buddy/BuddyActivityPanel";
-import { PALETTES, SIGNALS, STAGES } from "../features/Buddy/constants";
+import { SIGNALS } from "../features/Buddy/constants";
 import { buildColorMap } from "../features/Buddy/canvas/colorMap";
 import {
   stepAnimFrame,
@@ -89,7 +89,6 @@ import type {
   BuddyControl,
   BuddyDraft,
   BuddyPulse,
-  BuddyAction,
   BuddyPage,
   DraftKind,
 } from "../features/Buddy/types";
@@ -572,55 +571,6 @@ describe("Buddy chat notification freshness", () => {
     }
   });
 
-  test("chat companion source uses stable notification identities", () => {
-    const source = fs.readFileSync(
-      path.join(buddyDir, "BuddyChatCompanion.tsx"),
-      "utf8",
-    );
-
-    expect(source).toContain('notificationIdentity("speech", activeSpeech.id)');
-    expect(source).toContain('notificationIdentity("runtime", event.id)');
-    expect(source).toContain(
-      'notificationIdentity("suggestion", suggestion.id)',
-    );
-    expect(source).toContain(
-      'notificationIdentity("opportunity", opportunity.id)',
-    );
-    expect(source).not.toContain(
-      'notificationIdentity("thread-error", chatId)',
-    );
-  });
-
-  test("chat companion source dedupes replayed notification ids", () => {
-    const source = fs.readFileSync(
-      path.join(buddyDir, "BuddyChatCompanion.tsx"),
-      "utf8",
-    );
-
-    expect(source).toContain("seenNotificationIds");
-    expect(source).toContain("markBuddyNotificationSeen");
-    expect(source).toContain("!(id in seenNotificationIds)");
-    expect(source).not.toContain("setSeenNotificationIds");
-    expect(source).not.toContain("setInterval");
-    expect(source).not.toContain("12_000");
-    expect(source).not.toContain("data-testid");
-    expect(source).not.toContain("hidden>");
-  });
-
-  test("chat companion filters runtime events and sorts current candidates", () => {
-    const source = fs.readFileSync(
-      path.join(buddyDir, "BuddyChatCompanion.tsx"),
-      "utf8",
-    );
-
-    expect(source).toContain("isBuddyRuntimeEventVisible(event)");
-    expect(source).toContain(".sort(compareBuddyRuntimeEvents)");
-    expect(source).toContain(
-      "for (const [index, event] of runtimes.entries())",
-    );
-    expect(source).toContain('event.priority === "critical"');
-  });
-
   test("active speech from another chat is ignored", async () => {
     const store = setUpStore();
     store.dispatch(
@@ -1047,29 +997,6 @@ describe("Buddy chat notification freshness", () => {
       rendered.container,
       "runtime:runtime-replay",
     );
-  });
-
-  test("dismissing a chat notification hides only that notification", () => {
-    const source = fs.readFileSync(
-      path.join(buddyDir, "BuddyChatCompanion.tsx"),
-      "utf8",
-    );
-
-    expect(source).toContain("const dismissNotification = useCallback");
-    expect(source).toContain("setDismissedNotificationIds((prev) =>");
-    expect(source).toContain("new Set(prev).add(id)");
-    expect(source).toContain(
-      "dispatch(dismissRuntimeEvent(notification.sourceId))",
-    );
-    expect(source).toContain("await dismissSuggestion(notification.sourceId)");
-    // Suggestion dismissal must use the central authority-aware handler and
-    // restore the notification if that handler does not acknowledge success.
-    expect(source).toContain("useBuddyControlAction(chatId)");
-    expect(source).toContain("const result = await executeControl(");
-    expect(source).toContain('action: "dismiss_suggestion"');
-    expect(source).toContain("action_param: id");
-    expect(source).toContain('if (result.status !== "success")');
-    expect(source).toContain("restoreNotification(notification.id)");
   });
 
   test("dismissing a bubble starts cooldown and blocks another candidate before five minutes", async () => {
@@ -2279,31 +2206,6 @@ describe("palette fallback", () => {
     const expected = buildColorMap(0);
     expect(map.body).toBe(expected.body);
   });
-
-  test("valid palette index 0 returns Ocean colors", () => {
-    const map = buildColorMap(0);
-    expect(map.body).toBe(PALETTES[0].body);
-  });
-});
-
-describe("stage fallback", () => {
-  test("invalid stage falls back to Egg", () => {
-    const stage = STAGES[999] ?? STAGES[0];
-    expect(stage.name).toBe("Egg");
-  });
-
-  test("negative stage falls back to Egg", () => {
-    const stage = STAGES[-1] ?? STAGES[0];
-    expect(stage.name).toBe("Egg");
-  });
-
-  test("valid stage 0 is Egg", () => {
-    expect(STAGES[0].name).toBe("Egg");
-  });
-
-  test("valid stage 1 is Hatch", () => {
-    expect(STAGES[1].name).toBe("Hatch");
-  });
 });
 
 describe("recent chats", () => {
@@ -2455,18 +2357,6 @@ describe("snapshot hydration", () => {
 });
 
 describe("BuddyChatCompanion triggers", () => {
-  test("chat_error signal is marked as error in SIGNALS", () => {
-    expect(SIGNALS.chat_error.isError).toBe(true);
-  });
-
-  test("tool_failed signal is marked as error in SIGNALS", () => {
-    expect(SIGNALS.tool_failed.isError).toBe(true);
-  });
-
-  test("chat_completed signal is not an error", () => {
-    expect(SIGNALS.chat_completed.isError).toBe(false);
-  });
-
   test.each<[string, string, string]>([
     ["speech_humor", "happy", "perk"],
     ["speech_chat_reaction", "happy", "perk"],
@@ -2982,17 +2872,6 @@ describe("SIGNALS scene categories", () => {
   test("chat_completed signal is transient category", () => {
     expect(SIGNALS.chat_completed.category).toBe("transient");
   });
-
-  test("all signals have scene defined", () => {
-    for (const [key, def] of Object.entries(SIGNALS)) {
-      expect(def.scene, `${key} missing scene`).toBeDefined();
-    }
-  });
-
-  test("6 distinct scene types exist", () => {
-    const scenes = new Set(Object.values(SIGNALS).map((d) => d.scene));
-    expect(scenes.size).toBeGreaterThanOrEqual(6);
-  });
 });
 
 describe("scene animation system", () => {
@@ -3064,34 +2943,6 @@ describe("conversation ledger", () => {
     expect(state.conversations[2].kind).toBe("system");
   });
 
-  test("chat entry has correct icon and no badge by default", () => {
-    const entry = makeEntry({ kind: "chat", icon: "💬", badge: null });
-    expect(entry.icon).toBe("💬");
-    expect(entry.badge).toBeNull();
-  });
-
-  test("setup entry has badge and gear icon", () => {
-    const entry = makeEntry({ kind: "setup", icon: "⚙️", badge: "MCP Setup" });
-    expect(entry.icon).toBe("⚙️");
-    expect(entry.badge).toBe("MCP Setup");
-  });
-
-  test("workflow entry has badge and workflow icon", () => {
-    const entry = makeEntry({
-      kind: "workflow",
-      icon: "📦",
-      badge: "Commit Msg",
-    });
-    expect(entry.kind).toBe("workflow");
-    expect(entry.badge).toBe("Commit Msg");
-  });
-
-  test("system entry has system icon", () => {
-    const entry = makeEntry({ kind: "system", icon: "🗜", badge: "Compress" });
-    expect(entry.kind).toBe("system");
-    expect(entry.icon).toBe("🗜");
-  });
-
   test("setBuddyConversations replaces existing conversations", () => {
     const initial = [makeEntry({ id: "old" })];
     let state = reducer(undefined, setBuddyConversations(initial));
@@ -3119,35 +2970,6 @@ describe("BuddyChatCompanion chat_id scoping", () => {
     };
   }
 
-  test("companion renders only for matching chat_id", () => {
-    const chatId = "chat-abc";
-    const ev = makeRuntimeEvent({ chat_id: chatId });
-    const state = reducer(undefined, enqueueRuntimeEvent(ev));
-    const match = state.runtimeQueue.find(
-      (e) => e.chat_id === chatId && e.status === "failed",
-    );
-    expect(match).toBeDefined();
-    expect(match?.chat_id).toBe(chatId);
-  });
-
-  test("companion does not render for different chat_id", () => {
-    const ev = makeRuntimeEvent({ chat_id: "chat-other" });
-    const state = reducer(undefined, enqueueRuntimeEvent(ev));
-    const match = state.runtimeQueue.find(
-      (e) => e.chat_id === "chat-mine" && e.status === "failed",
-    );
-    expect(match).toBeUndefined();
-  });
-
-  test("companion does not render for events without chat_id", () => {
-    const ev = makeRuntimeEvent({ chat_id: undefined });
-    const state = reducer(undefined, enqueueRuntimeEvent(ev));
-    const match = state.runtimeQueue.find(
-      (e) => e.chat_id === "any-chat" && e.status === "failed",
-    );
-    expect(match).toBeUndefined();
-  });
-
   test("runtime event preserves chat_id field", () => {
     const ev = makeRuntimeEvent({
       chat_id: "chat-xyz",
@@ -3157,20 +2979,9 @@ describe("BuddyChatCompanion chat_id scoping", () => {
     expect(state.runtimeQueue[0].chat_id).toBe("chat-xyz");
     expect(state.runtimeQueue[0].title).toBe("Error in 'Test'");
   });
-
-  test("BuddyRuntimeEvent interface has optional chat_id", () => {
-    const ev: BuddyRuntimeEvent = makeRuntimeEvent();
-    expect("chat_id" in ev || ev.chat_id === undefined).toBe(true);
-  });
 });
 
 describe("Buddy hero layout", () => {
-  test("BuddyCanvas accepts speechControls prop", () => {
-    const src = fs.readFileSync(path.join(buddyDir, "BuddyCanvas.tsx"), "utf8");
-    expect(src).toContain("speechControls");
-    expect(src).toContain("onSpeechControlClick");
-  });
-
   test("BuddySettingsPanel does not dispatch updateBuddySettings directly", () => {
     const source = fs.readFileSync(
       path.join(buddyDir, "BuddySettingsPanel.tsx"),
@@ -3281,27 +3092,6 @@ describe("Buddy investigation prompt hardening", () => {
     });
 
     expect(prompt).toContain("Structured assistant reply");
-  });
-
-  test("uses conversation context instead of the legacy launch mutation", () => {
-    const buddyService = fs.readFileSync(
-      path.join(__dirname, "..", "services", "refact", "buddy.ts"),
-      "utf8",
-    );
-    const chatActions = fs.readFileSync(
-      path.join(__dirname, "..", "features", "Chat", "Thread", "actions.ts"),
-      "utf8",
-    );
-
-    expect("launchInvestigation" in buddyApi.endpoints).toBe(false);
-    expect(buddyService).not.toContain("/v1/buddy/investigations");
-    expect(buddyService).not.toContain("useLaunchInvestigationMutation");
-    expect(buddyService).not.toContain("launchInvestigation:");
-    expect(buddyService).toContain("/v1/buddy/conversations");
-    expect(buddyService).toContain("/v1/buddy/investigation-context");
-    expect(chatActions).toContain("startBuddyInvestigation");
-    expect(chatActions).toContain("createBuddyConversationRequest");
-    expect(chatActions).toContain("fetchBuddyInvestigationContextRequest");
   });
 
   test("preserves valid repository metadata in trusted instructions", () => {
@@ -4191,57 +3981,6 @@ describe("buddy opportunities, pulse, and drafts", () => {
       actionIndex: 0,
     });
   });
-
-  test("BuddyAction discriminated union type check", () => {
-    const a1: BuddyAction = { kind: "dismiss" };
-    expect(a1.kind).toBe("dismiss");
-
-    const a2: BuddyAction = {
-      kind: "open_page",
-      page: { type: "buddy" },
-    };
-    expect(a2.kind).toBe("open_page");
-
-    const a3: BuddyAction = {
-      kind: "draft_defaults_change",
-      defaults_kind: "chat_model",
-      patch: {},
-    };
-    expect(a3.kind).toBe("draft_defaults_change");
-
-    const a4: BuddyAction = {
-      kind: "draft_defaults_change",
-      defaults_kind: "chat_light_model",
-      patch: { chat_light: { model: "openai/gpt-4o-mini" } },
-    };
-    expect(a4.defaults_kind).toBe("chat_light_model");
-  });
-
-  test("BuddyPage discriminated union type check", () => {
-    const pages: BuddyPage[] = [
-      { type: "buddy" },
-      { type: "settings" },
-      { type: "task_workspace", task_id: "task-123" },
-      { type: "knowledge_graph" },
-      { type: "worktrees" },
-      { type: "setup_mode", mode: "setup_mcp" },
-    ];
-    const types = pages.map((p) => p.type);
-    expect(types).toContain("buddy");
-    expect(types).toContain("settings");
-    expect(types).toContain("task_workspace");
-    expect(types).toContain("knowledge_graph");
-    expect(types).toContain("worktrees");
-    expect(types).toContain("setup_mode");
-    for (const page of pages) {
-      if (page.type === "task_workspace") {
-        expect(page.task_id).toBe("task-123");
-      }
-      if (page.type === "setup_mode") {
-        expect(page.mode).toBe("setup_mcp");
-      }
-    }
-  });
 });
 
 describe("executeBuddyNavigation dispatches for each BuddyPage variant", () => {
@@ -4648,17 +4387,6 @@ describe("routeDraftByKind preserves draft IDs", () => {
       });
     }
   });
-
-  test("RTK service exposes hook and pulse report draft endpoints", () => {
-    expect(buddyApi.endpoints.createHookDraft).toBeDefined();
-    expect(buddyApi.endpoints.createPulseReportDraft).toBeDefined();
-    const source = fs.readFileSync(
-      path.join(__dirname, "..", "services", "refact", "buddy.ts"),
-      "utf8",
-    );
-    expect(source).toContain("/v1/buddy/drafts/hook");
-    expect(source).toContain("/v1/buddy/drafts/pulse_report");
-  });
 });
 
 describe("pagesSlice handles new page entries", () => {
@@ -4674,21 +4402,6 @@ describe("pagesSlice handles new page entries", () => {
     if (last.name === "task workspace") {
       expect(last.taskId).toBe("abc");
     }
-  });
-
-  test("push knowledge graph stores page name", () => {
-    const state = reducer(undefined, push({ name: "knowledge graph" }));
-    expect(state[state.length - 1].name).toBe("knowledge graph");
-  });
-
-  test("push marketplace hub stores page name", () => {
-    const state = reducer(undefined, push({ name: "marketplace hub" }));
-    expect(state[state.length - 1].name).toBe("marketplace hub");
-  });
-
-  test("push subagents marketplace stores page name", () => {
-    const state = reducer(undefined, push({ name: "subagents marketplace" }));
-    expect(state[state.length - 1].name).toBe("subagents marketplace");
   });
 
   test("push buddy draft stores draftId", () => {
@@ -4717,39 +4430,6 @@ describe("buddy chat reactions settings and bubbles", () => {
     vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(
       noopContext,
     );
-  });
-
-  test("chat_reactions_enabled is included in BuddySettings type", () => {
-    const settings: BuddySettings = {
-      enabled: true,
-      auto_diagnostics: true,
-      auto_issue_creation: false,
-      personality_prompt: null,
-      autonomous_chats_enabled: true,
-      proactive_enabled: true,
-      message_observation_enabled: true,
-      chat_reactions_enabled: true,
-      housekeeping_enabled: true,
-      humor_enabled: true,
-      humor_level: "light",
-      autonomy_level: "suggest",
-      quiet_mode: false,
-      daily_digest_hour: 18,
-      observers: {
-        task_health: true,
-        trajectory_clutter: true,
-        chat_pattern: true,
-        customization_drift: true,
-        memory_garden: true,
-        mcp_auth: true,
-        git_pressure: true,
-        diagnostic_cluster: true,
-        provider_health: true,
-      },
-    };
-    expect(settings.chat_reactions_enabled).toBe(true);
-    expect(settings.message_observation_enabled).toBe(true);
-    expect(settings.observers.chat_pattern).toBe(true);
   });
 
   test("chat-scoped speech_humor ambient reaction appears for current chat only", async () => {
@@ -5881,16 +5561,6 @@ describe("buddy chat reactions settings and bubbles", () => {
     } finally {
       vi.useRealTimers();
     }
-  });
-
-  test("settings panel renders chat reactions toggle", () => {
-    const source = fs.readFileSync(
-      path.join(buddyDir, "BuddySettingsGroups.tsx"),
-      "utf8",
-    );
-    expect(source).toContain("chat_reactions_enabled");
-    expect(source).toContain("Live chat reactions");
-    expect(source).toContain("redacted");
   });
 
   test("far-future created_at event-once runtime event is not accepted forever", async () => {

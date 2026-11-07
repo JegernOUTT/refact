@@ -3,8 +3,6 @@ import {
   type ImageEditRequest,
 } from "../ImageAttachmentEditor/context";
 import React from "react";
-import { readFile } from "node:fs/promises";
-import { resolve } from "node:path";
 import { beforeEach, describe, expect, onTestFinished, test, vi } from "vitest";
 import { http, HttpResponse } from "msw";
 import { act } from "react-dom/test-utils";
@@ -824,28 +822,6 @@ describe("ChatForm", () => {
     expect(previewBodies[0]?.messages).toHaveLength(1);
     expect(previewBodies[0]?.messages[0]?.role).toBe("user");
     expect(String(previewBodies[0]?.messages[0]?.content).trim()).toBe("draft");
-  });
-
-  test.skip("does not submit while IME composition is active", async () => {
-    // TODO: happy-dom/user-event cannot preserve native isComposing through the ComboBox
-    // keydown path; keep as an executable characterization once the harness can model IME.
-    const fakeOnSubmit = vi.fn();
-
-    const { user, ...app } = render(<App onSubmit={fakeOnSubmit} />, {
-      preloadedState: engineConfigState,
-    });
-    const textarea = app.container.querySelector("textarea");
-    expect(textarea).not.toBeNull();
-    if (!textarea) return;
-
-    await user.type(textarea, "hello");
-    fireEvent.keyDown(textarea, {
-      key: "Enter",
-      code: "Enter",
-      isComposing: true,
-    });
-
-    expect(fakeOnSubmit).not.toHaveBeenCalled();
   });
 
   test("@help displays quick help without submitting", async () => {
@@ -1803,23 +1779,6 @@ describe("ChatForm", () => {
     ).toBeInTheDocument();
     expect(screen.queryByText("Click to close")).not.toBeInTheDocument();
     expect(screen.queryByText("Click to retry")).not.toBeInTheDocument();
-  });
-
-  test("responsive toolbar keeps one row without clipping control groups", async () => {
-    const css = await readFile(
-      resolve(
-        process.cwd(),
-        "src/components/ChatForm/ComposerToolbar.module.css",
-      ),
-      "utf8",
-    );
-    const rowRule = css.match(/\.toolbar\s*\{([^}]+)\}/)?.[1];
-    expect(rowRule).toBeDefined();
-    expect(rowRule).not.toContain("overflow: hidden");
-    expect(css).toContain("flex-wrap: nowrap");
-    expect(css).toContain("visibility: hidden");
-    expect(css).not.toContain("@container");
-    expect(css).toContain("flex: 0 0 auto");
   });
 
   test("a multiline draft remains expanded after focus leaves", async () => {

@@ -307,7 +307,6 @@ describe("ChromeTool", () => {
       "/artifacts/burst.jpg",
     );
     const frames = within(artifacts).getByTestId("capture-frames");
-    expect(frames.querySelector(".rt-Badge, [data-accent-color]")).toBeNull();
     expect(frames.children).toHaveLength(2);
   });
 

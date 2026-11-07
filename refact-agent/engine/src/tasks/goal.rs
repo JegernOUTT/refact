@@ -17,7 +17,9 @@ impl TaskGoalRecord {
         if let Some(state) = refact_chat_api::reduce_goal_ledger(&self.ledger) {
             state.apply_to_snapshot(&mut goal);
         }
-        goal.owner = Some(GoalOwner::Task { id: task_id.into() });
+        goal.owner = Some(GoalOwner::Task {
+            id: task_id.into(),
+        });
         goal.revision = self.revision;
         Some(goal)
     }
@@ -1014,15 +1016,18 @@ impl TaskGoalPartialWrite {
                 return Err("Task goal partial write ledger sequence superseded".into());
             }
             match &entry.op {
-                refact_chat_api::GoalLedgerOp::StatusChanged { from, to, reason }
-                    if *from == held.status
-                        && matches!(
-                            to,
-                            refact_chat_api::GoalStatus::Paused
-                                | refact_chat_api::GoalStatus::Stopped
-                                | refact_chat_api::GoalStatus::BudgetExhausted
-                                | refact_chat_api::GoalStatus::NoProgress
-                        ) =>
+                refact_chat_api::GoalLedgerOp::StatusChanged {
+                    from,
+                    to,
+                    reason,
+                } if *from == held.status
+                    && matches!(
+                        to,
+                        refact_chat_api::GoalStatus::Paused
+                            | refact_chat_api::GoalStatus::Stopped
+                            | refact_chat_api::GoalStatus::BudgetExhausted
+                            | refact_chat_api::GoalStatus::NoProgress
+                    ) =>
                 {
                     held.status = *to;
                     if *to == refact_chat_api::GoalStatus::Stopped {
@@ -1599,8 +1604,12 @@ pub async fn preflight_planner_transition(
         return board.require_owner(source_chat_id).map(|_| None);
     }
     let canonical = resolve_task_goal(gcx, task_id).await?;
-    let same_goal =
-        source_goal.is_some_and(|goal| goal.owner == Some(GoalOwner::Task { id: task_id.into() }));
+    let same_goal = source_goal.is_some_and(|goal| {
+        goal.owner
+            == Some(GoalOwner::Task {
+                id: task_id.into(),
+            })
+    });
     if canonical.is_some() && !same_goal && source_goal.is_some_and(|goal| goal.active) {
         return Err("Cannot replace an existing task goal with an independent source goal".into());
     }
@@ -3331,7 +3340,9 @@ mod tests {
                 .unwrap();
             base.extra["goal"]["budget"] = serde_json::to_value(&budget).unwrap();
             session.rebuild_goal_projection_from_messages();
-            session.goal_ledger_append(refact_chat_api::GoalLedgerOp::BudgetSet { budget });
+            session.goal_ledger_append(refact_chat_api::GoalLedgerOp::BudgetSet {
+                budget,
+            });
             TaskGoalSessionEpoch::state(&session).unwrap()
         };
         let own_bytes = tokio::fs::read(&goal_path).await.unwrap();

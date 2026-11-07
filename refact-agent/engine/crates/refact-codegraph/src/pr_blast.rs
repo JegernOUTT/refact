@@ -90,7 +90,13 @@ pub fn blast_radius_from_data(
         let (id, name, path) = (*id, name.clone(), path.clone());
         let index = *id_to_index.entry(id).or_insert_with(|| graph.add_node(id));
         graph[index] = id;
-        info_by_id.insert(id, NodeInfo { name, path });
+        info_by_id.insert(
+            id,
+            NodeInfo {
+                name,
+                path,
+            },
+        );
     }
 
     for (src, dst, kind) in &data.edges {

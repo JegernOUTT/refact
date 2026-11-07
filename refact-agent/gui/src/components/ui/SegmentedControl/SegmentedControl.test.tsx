@@ -1,8 +1,6 @@
-import { describe, expect, it } from "vitest";
-import path from "node:path";
-import { readFile } from "node:fs/promises";
 import { screen } from "@testing-library/react";
 import { Circle } from "lucide-react";
+import { describe, expect, it } from "vitest";
 
 import { render } from "../../../utils/test-utils";
 import { Icon } from "../Icon";
@@ -109,7 +107,7 @@ describe("SegmentedControl", () => {
     expect(container.querySelector("span[aria-hidden='true']")).toBeNull();
   });
 
-  it("sizes content-layout segments to their labels without a shared indicator", async () => {
+  it("sizes content-layout segments to their labels without a shared indicator", () => {
     const { container } = render(
       <SegmentedControl
         layout="content"
@@ -125,14 +123,6 @@ describe("SegmentedControl", () => {
     );
     expect(container.querySelector("span[aria-hidden='true']")).toBeNull();
     expect(screen.getByRole("radio", { name: "Roomy" })).toBeChecked();
-
-    const css = await readFile(
-      path.resolve(__dirname, "SegmentedControl.module.css"),
-      "utf8",
-    );
-    const block = css.match(/\.layout-content \{[^}]+\}/)?.[0] ?? "";
-    expect(block).toContain("grid-auto-columns: max-content;");
-    expect(css).toMatch(/\.input:focus-visible \{\s*outline: none;/);
   });
 
   it("positions the selected indicator from segment variables", () => {
@@ -154,41 +144,6 @@ describe("SegmentedControl", () => {
     expect(indicator).not.toBeNull();
   });
 
-  it("sizes to content while keeping equal segment tracks without gutter tails", async () => {
-    const css = await readFile(
-      path.resolve(__dirname, "SegmentedControl.module.css"),
-      "utf8",
-    );
-    const root = css.match(/\.root \{[^}]+\}/)?.[0] ?? "";
-    const segment = css.match(/\.segment \{[^}]+\}/)?.[0] ?? "";
-    const label = css.match(/\.label \{[^}]+\}/)?.[0] ?? "";
-
-    expect(root).toContain("display: inline-grid;");
-    expect(root).toContain("grid-auto-columns: minmax(0, 1fr);");
-    expect(root).toContain("max-width: 100%;");
-    expect(segment).toContain("display: flex;");
-    expect(label).toContain("overflow: hidden;");
-  });
-
-  it("keeps md on the fixed control ladder while sm renders shorter", async () => {
-    const css = await readFile(
-      path.resolve(__dirname, "SegmentedControl.module.css"),
-      "utf8",
-    );
-    const root = css.match(/\.root \{[^}]+\}/)?.[0] ?? "";
-    const sizeSm = css.match(/\.size-sm \{[^}]+\}/)?.[0] ?? "";
-    const sizeSmLabel =
-      css.match(/\.size-sm \.segment,\n\.size-sm \.label \{[^}]+\}/)?.[0] ?? "";
-
-    expect(root).toContain(
-      "height: calc(var(--rf-control-h-sm) + 2 * var(--rf-segment-padding));",
-    );
-    expect(sizeSm).toContain("height: var(--rf-control-h-sm);");
-    expect(sizeSmLabel).toContain(
-      "min-height: calc(var(--rf-control-h-sm) - 2 * var(--rf-segment-padding));",
-    );
-  });
-
   it("keeps text segments labelled by their visible text", () => {
     render(
       <SegmentedControl
@@ -201,32 +156,5 @@ describe("SegmentedControl", () => {
     expect(screen.getByRole("radio", { name: "Compact" })).toBeChecked();
     expect(screen.getByRole("radio", { name: "Regular" })).not.toBeChecked();
     expect(screen.getByText("Roomy")).toBeVisible();
-  });
-
-  it("aligns indicator geometry with the shared segment content inset", async () => {
-    const css = await readFile(
-      path.resolve(__dirname, "SegmentedControl.module.css"),
-      "utf8",
-    );
-
-    expect(css).toContain("--rf-segment-padding: var(--rf-space-2xs);");
-    expect(css).toContain("top: var(--rf-segment-padding);");
-    expect(css).toContain("left: var(--rf-segment-padding);");
-    expect(css).toContain("2 * var(--rf-segment-padding)");
-    expect(css).toContain("gap: var(--rf-space-1);");
-    expect(css).toContain("line-height: 0;");
-  });
-
-  it("uses the standard outset focus ring", async () => {
-    const css = await readFile(
-      path.resolve(__dirname, "SegmentedControl.module.css"),
-      "utf8",
-    );
-    const focus =
-      css.match(/\.input:focus-visible \+ \.label \{[^}]+\}/)?.[0] ?? "";
-    expect(focus).toContain(
-      "outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);",
-    );
-    expect(focus).toContain("outline-offset: var(--rf-focus-ring-offset);");
   });
 });

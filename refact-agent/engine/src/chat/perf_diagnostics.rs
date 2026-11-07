@@ -445,7 +445,11 @@ impl PerfRecorder {
     pub fn new(clock: Arc<dyn PerfClock>, sink: Arc<dyn PerfSink>) -> Self {
         let mut salt = [0; 32];
         rand::thread_rng().fill_bytes(&mut salt);
-        Self { clock, sink, salt }
+        Self {
+            clock,
+            sink,
+            salt,
+        }
     }
 
     #[cfg(any(test, feature = "bench"))]
@@ -454,7 +458,11 @@ impl PerfRecorder {
         sink: Arc<dyn PerfSink>,
         salt: [u8; 32],
     ) -> Self {
-        Self { clock, sink, salt }
+        Self {
+            clock,
+            sink,
+            salt,
+        }
     }
 
     fn hash_bytes(&self, value: &[u8]) -> String {

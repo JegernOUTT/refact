@@ -47,12 +47,23 @@ pub trait ScheduleTarget {
 impl ScheduleTarget for Job {
     fn schedule_next_run_ms(&self, from_ms: u64, default_tz: Tz) -> Option<u64> {
         match &self.trigger {
-            Trigger::Cron { expr, tz } => {
-                cron_next_run_ms(self, expr, tz.as_deref(), from_ms, default_tz)
+            Trigger::Cron {
+                expr,
+                tz,
+            } => cron_next_run_ms(self, expr, tz.as_deref(), from_ms, default_tz),
+            Trigger::Interval {
+                every_ms,
+            } => interval_next_run_ms(self, from_ms, *every_ms),
+            Trigger::Once {
+                at_ms,
+            } => once_next_run_ms(self, *at_ms),
+            Trigger::Manual
+            | Trigger::Webhook {
+                ..
             }
-            Trigger::Interval { every_ms } => interval_next_run_ms(self, from_ms, *every_ms),
-            Trigger::Once { at_ms } => once_next_run_ms(self, *at_ms),
-            Trigger::Manual | Trigger::Webhook { .. } | Trigger::OnProcessExit { .. } => None,
+            | Trigger::OnProcessExit {
+                ..
+            } => None,
         }
     }
 }
@@ -137,7 +148,9 @@ fn missed_fast_forward_anchor_ms(
         return Some(due_ms);
     }
     match job.trigger {
-        Trigger::Interval { every_ms } if every_ms > 0 => {
+        Trigger::Interval {
+            every_ms,
+        } if every_ms > 0 => {
             let base_ms = job.last_fired_at_ms.unwrap_or(job.created_at_ms);
             if now_ms <= base_ms {
                 return Some(base_ms);
@@ -145,7 +158,9 @@ fn missed_fast_forward_anchor_ms(
             let ticks = now_ms.saturating_sub(base_ms) / every_ms;
             base_ms.checked_add(ticks.checked_mul(every_ms)?)
         }
-        Trigger::Cron { .. } if should_fire => {
+        Trigger::Cron {
+            ..
+        } if should_fire => {
             let mut anchor_ms = due_ms;
             let mut next_ms = after_due_ms;
             while next_ms <= now_ms {
@@ -157,7 +172,9 @@ fn missed_fast_forward_anchor_ms(
             }
             Some(anchor_ms)
         }
-        Trigger::Cron { .. } => Some(now_ms),
+        Trigger::Cron {
+            ..
+        } => Some(now_ms),
         _ => None,
     }
 }
@@ -206,7 +223,9 @@ pub fn parse_schedule(
         return Err("exactly one of cron, every, or at must be set".to_string());
     };
     let at_ms = parse_at_ms(at, now_ms)?;
-    Ok(Trigger::Once { at_ms })
+    Ok(Trigger::Once {
+        at_ms,
+    })
 }
 
 fn parse_at_ms(value: &str, now_ms: u64) -> Result<u64, String> {
@@ -350,7 +369,9 @@ mod tests {
         ] {
             assert_eq!(
                 parse_schedule(None, Some(raw), None, None, 1_000).unwrap(),
-                Trigger::Interval { every_ms: expected }
+                Trigger::Interval {
+                    every_ms: expected
+                }
             );
         }
     }
@@ -362,7 +383,9 @@ mod tests {
 
         assert_eq!(
             parse_schedule(None, None, Some("2026-01-01T00:05:00Z"), None, now).unwrap(),
-            Trigger::Once { at_ms }
+            Trigger::Once {
+                at_ms
+            }
         );
     }
 
@@ -393,7 +416,9 @@ mod tests {
 
     #[test]
     fn interval_advances_to_next_future_tick() {
-        let mut job = job(Trigger::Interval { every_ms: 10 });
+        let mut job = job(Trigger::Interval {
+            every_ms: 10,
+        });
         job.created_at_ms = 1_000;
 
         assert_eq!(next_run_ms(&job, 1_000, chrono_tz::UTC), Some(1_010));
@@ -405,14 +430,18 @@ mod tests {
 
     #[test]
     fn interval_zero_never_schedules() {
-        let job = job(Trigger::Interval { every_ms: 0 });
+        let job = job(Trigger::Interval {
+            every_ms: 0,
+        });
 
         assert_eq!(next_run_ms(&job, 1_000, chrono_tz::UTC), None);
     }
 
     #[test]
     fn once_returns_at_ms_until_fired() {
-        let mut job = job(Trigger::Once { at_ms: 5_000 });
+        let mut job = job(Trigger::Once {
+            at_ms: 5_000,
+        });
 
         assert_eq!(next_run_ms(&job, 1_000, chrono_tz::UTC), Some(5_000));
         assert_eq!(next_run_ms(&job, 6_000, chrono_tz::UTC), Some(5_000));

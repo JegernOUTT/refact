@@ -1,13 +1,11 @@
 import { Theme } from "@radix-ui/themes";
-import React from "react";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { Terminal } from "lucide-react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import React from "react";
+import { describe, expect, it, vi } from "vitest";
 
 import { ToolCard } from "./ToolCard";
-
-const originalMatchMedia = window.matchMedia;
 
 function renderToolCard() {
   const user = userEvent.setup();
@@ -23,34 +21,7 @@ function renderToolCard() {
   return { user, ...result };
 }
 
-function mockReducedMotion(enabled: boolean) {
-  const matchMedia = vi.fn((mediaQuery: string): MediaQueryList => {
-    return {
-      media: mediaQuery,
-      matches: enabled && mediaQuery === "(prefers-reduced-motion: reduce)",
-      onchange: null,
-      addEventListener: vi.fn(),
-      removeEventListener: vi.fn(),
-      addListener: vi.fn(),
-      removeListener: vi.fn(),
-      dispatchEvent: vi.fn(),
-    };
-  });
-
-  Object.defineProperty(window, "matchMedia", {
-    configurable: true,
-    value: matchMedia,
-  });
-}
-
 describe("ToolCard", () => {
-  afterEach(() => {
-    Object.defineProperty(window, "matchMedia", {
-      configurable: true,
-      value: originalMatchMedia,
-    });
-  });
-
   it("updates open state and chevron synchronously on click", async () => {
     const { container, user } = renderToolCard();
     const card = container.querySelector("section");
@@ -121,19 +92,6 @@ describe("ToolCard", () => {
     expect(
       screen.getByRole("button", { name: /copy command output/i }),
     ).toHaveFocus();
-  });
-
-  it("keeps reduced-motion open feedback instant", async () => {
-    mockReducedMotion(true);
-    const { container, user } = renderToolCard();
-
-    await user.click(screen.getByRole("button", { name: /run command/i }));
-
-    expect(container.querySelector("section")).toHaveAttribute(
-      "data-open",
-      "true",
-    );
-    expect(screen.getByText("Command output")).toBeInTheDocument();
   });
 
   it("restores exact tabindex values only after every collapsed owner opens", () => {

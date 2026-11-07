@@ -111,7 +111,9 @@ impl LlmWireAdapter for GoogleCloudCodeAdapter {
                         json!({"functionCallingConfig": {"mode": "VALIDATED"}}),
                     );
                 }
-                Some(CanonicalToolChoice::Function { name }) => {
+                Some(CanonicalToolChoice::Function {
+                    name,
+                }) => {
                     inner.insert(
                         "toolConfig".to_string(),
                         json!({
@@ -352,7 +354,9 @@ impl LlmWireAdapter for GoogleCloudCodeAdapter {
                 "_google_cloud_code_parts".to_string(),
                 Value::Array(replay_parts),
             );
-            deltas.push(LlmStreamDelta::MergeExtra { extra });
+            deltas.push(LlmStreamDelta::MergeExtra {
+                extra,
+            });
         }
         if !response_extra.is_empty() {
             let mut extra = Map::new();
@@ -360,7 +364,9 @@ impl LlmWireAdapter for GoogleCloudCodeAdapter {
                 "google_cloud_code".to_string(),
                 Value::Object(response_extra),
             );
-            deltas.push(LlmStreamDelta::MergeExtra { extra });
+            deltas.push(LlmStreamDelta::MergeExtra {
+                extra,
+            });
         }
 
         let mut is_finished = false;
@@ -1535,7 +1541,9 @@ mod tests {
         let tool_call = deltas
             .iter()
             .find_map(|delta| match delta {
-                LlmStreamDelta::FinalizeToolCalls { tool_calls } => tool_calls.first(),
+                LlmStreamDelta::FinalizeToolCalls {
+                    tool_calls,
+                } => tool_calls.first(),
                 _ => None,
             })
             .unwrap();
@@ -1545,7 +1553,9 @@ mod tests {
         let thinking = deltas
             .iter()
             .find_map(|delta| match delta {
-                LlmStreamDelta::SetThinkingBlocks { blocks } => blocks.first(),
+                LlmStreamDelta::SetThinkingBlocks {
+                    blocks,
+                } => blocks.first(),
                 _ => None,
             })
             .unwrap();
@@ -1565,7 +1575,9 @@ mod tests {
         let usage = deltas
             .iter()
             .find_map(|delta| match delta {
-                LlmStreamDelta::SetUsage { usage } => Some(usage),
+                LlmStreamDelta::SetUsage {
+                    usage,
+                } => Some(usage),
                 _ => None,
             })
             .unwrap();
@@ -1576,9 +1588,9 @@ mod tests {
         let extra = deltas
             .iter()
             .find_map(|delta| match delta {
-                LlmStreamDelta::MergeExtra { extra } if extra.contains_key("google_cloud_code") => {
-                    Some(extra)
-                }
+                LlmStreamDelta::MergeExtra {
+                    extra,
+                } if extra.contains_key("google_cloud_code") => Some(extra),
                 _ => None,
             })
             .unwrap();
@@ -1591,7 +1603,9 @@ mod tests {
         let replay_extra = deltas
             .iter()
             .filter_map(|delta| match delta {
-                LlmStreamDelta::MergeExtra { extra } => extra
+                LlmStreamDelta::MergeExtra {
+                    extra,
+                } => extra
                     .get("_google_cloud_code_parts")
                     .and_then(Value::as_array),
                 _ => None,

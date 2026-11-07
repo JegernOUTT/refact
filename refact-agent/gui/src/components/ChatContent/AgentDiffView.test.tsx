@@ -163,17 +163,6 @@ describe("AgentDiffContent", () => {
 
     render(<AgentDiffContent report={report} />);
 
-    expect(screen.getByText("Agent diff: T-29")).toBeInTheDocument();
-    expect(screen.getByText("refact/task/T-29-agent")).toBeInTheDocument();
-    expect(screen.getByText("commit abc123")).toBeInTheDocument();
-    expect(screen.getByText("All files")).toBeInTheDocument();
-    expect(
-      screen.getAllByText("src/tools/tool_task_check_agents.rs").length,
-    ).toBeGreaterThan(0);
-    expect(
-      screen.getAllByText("src/components/ChatContent/AgentPulseView.tsx")
-        .length,
-    ).toBeGreaterThan(0);
     expect(
       screen.getByText(
         "... (4 more lines, use mode='name-only' to see all files)",

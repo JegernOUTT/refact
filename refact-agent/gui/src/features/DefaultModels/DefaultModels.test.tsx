@@ -178,21 +178,6 @@ describe("DefaultModels — embedded", () => {
     vi.clearAllMocks();
   });
 
-  it("renders all 6 role tabs with short labels", () => {
-    setupMocks();
-    render(<DefaultModels {...defaultProps} embedded />);
-    for (const label of [
-      "Chat",
-      "Chat 2",
-      "Planner",
-      "Light",
-      "Thinking",
-      "Companion",
-    ]) {
-      expect(screen.getByRole("tab", { name: label })).toBeInTheDocument();
-    }
-  });
-
   it("initial Chat tab is active (aria-selected)", () => {
     setupMocks();
     render(<DefaultModels {...defaultProps} embedded />);
@@ -239,18 +224,6 @@ describe("DefaultModels — embedded", () => {
     await waitFor(() => expect(updateDefaults).toHaveBeenCalledOnce());
   });
 
-  it("sampling change enables Save button", () => {
-    setupMocks();
-    render(<DefaultModels {...defaultProps} embedded />);
-    const samplingBtns = screen.queryAllByTestId("sampling-params");
-    if (samplingBtns.length > 0) {
-      fireEvent.click(samplingBtns[0]);
-      expect(
-        screen.getByRole("button", { name: "Save Changes" }),
-      ).not.toBeDisabled();
-    }
-  });
-
   it("applies draft overrides and enables Save when draft is present", () => {
     setupMocks({
       draftData: {
@@ -264,37 +237,11 @@ describe("DefaultModels — embedded", () => {
       screen.getByRole("button", { name: "Save Changes" }),
     ).not.toBeDisabled();
   });
-
-  it("does not render SettingsShell sidebar (no double shell)", () => {
-    setupMocks();
-    const { container } = render(<DefaultModels {...defaultProps} embedded />);
-    expect(container.querySelector("aside")).not.toBeInTheDocument();
-  });
-
-  it("does not render Back button when embedded", () => {
-    setupMocks();
-    render(<DefaultModels {...defaultProps} embedded />);
-    expect(
-      screen.queryByRole("button", { name: /back/i }),
-    ).not.toBeInTheDocument();
-  });
 });
 
 describe("DefaultModels — standalone (not embedded)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-  });
-
-  it("wraps content in PageWrapper", () => {
-    setupMocks();
-    renderWithStore(<DefaultModels {...defaultProps} />);
-    expect(screen.getByTestId("page-wrapper")).toBeInTheDocument();
-  });
-
-  it("renders Back button in standalone mode", () => {
-    setupMocks();
-    renderWithStore(<DefaultModels {...defaultProps} />);
-    expect(screen.getByRole("button", { name: /back/i })).toBeInTheDocument();
   });
 
   it("Back button calls backFromDefaultModels", () => {

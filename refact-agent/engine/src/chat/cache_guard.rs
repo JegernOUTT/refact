@@ -774,7 +774,9 @@ pub async fn check_or_pause_cache_guard(
         summary
     };
 
-    Ok(CacheGuardOutcome::Paused { reason })
+    Ok(CacheGuardOutcome::Paused {
+        reason,
+    })
 }
 
 fn cache_guard_outcome_if_snapshot_changed(
@@ -1322,7 +1324,10 @@ mod tests {
         .await
         .unwrap();
 
-        let CacheGuardOutcome::Paused { reason } = outcome else {
+        let CacheGuardOutcome::Paused {
+            reason,
+        } = outcome
+        else {
             panic!("cache guard should pause on changed prefix");
         };
         assert!(reason.contains("Prompt cache append-only prefix check failed"));
@@ -1371,7 +1376,10 @@ mod tests {
         .await
         .unwrap();
 
-        let CacheGuardOutcome::Paused { reason } = outcome else {
+        let CacheGuardOutcome::Paused {
+            reason,
+        } = outcome
+        else {
             panic!("cache guard should pause on changed prefix");
         };
         assert!(reason.chars().count() < CACHE_GUARD_DIFF_MAX_CHARS / 2);

@@ -91,7 +91,10 @@ pub(crate) async fn write_candidates_for_scope_with_issues_and_filter(
     for candidate in candidates {
         match write_candidate(scope_root, &mut manifest, candidate).await {
             CandidateWriteResult::Outcome(outcome) => summary.add_outcome(outcome),
-            CandidateWriteResult::Error { outcome, issue } => {
+            CandidateWriteResult::Error {
+                outcome,
+                issue,
+            } => {
                 summary.add_outcome(outcome);
                 summary.issues.push(issue.clone());
                 summary.errors.push(issue);
@@ -436,14 +439,20 @@ fn validate_source_containment(scope_root: &Path, candidate: &ImportCandidate) -
         &candidate.source_path,
         &candidate.source_root,
     )?;
-    if let ImportArtifact::DirectoryCopy { source_dir } = &candidate.artifact {
+    if let ImportArtifact::DirectoryCopy {
+        source_dir,
+    } = &candidate.artifact
+    {
         validate_directory_source_path(scope_root, source_dir, &candidate.source_root)?;
     }
     Ok(())
 }
 
 fn validate_project_source_root(candidate: &ImportCandidate) -> Result<()> {
-    let ImportScope::Project { root } = &candidate.scope else {
+    let ImportScope::Project {
+        root,
+    } = &candidate.scope
+    else {
         return Ok(());
     };
     match existing_path_is_under_root(&candidate.source_root, root)? {
@@ -653,10 +662,12 @@ fn hash_existing_path(path: &Path) -> Result<String> {
 
 async fn write_artifact(candidate: &ImportCandidate, dest_path: &Path) -> Result<()> {
     match &candidate.artifact {
-        ImportArtifact::FileContent { content } => write_string_atomic(dest_path, content).await,
-        ImportArtifact::DirectoryCopy { source_dir } => {
-            copy_directory_atomically(source_dir, dest_path).await
-        }
+        ImportArtifact::FileContent {
+            content,
+        } => write_string_atomic(dest_path, content).await,
+        ImportArtifact::DirectoryCopy {
+            source_dir,
+        } => copy_directory_atomically(source_dir, dest_path).await,
     }
 }
 
@@ -1017,7 +1028,9 @@ mod tests {
             destination_path: dest_path,
             source_hash: hash_directory(&source_dir).unwrap(),
             artifact_hash: hash_directory(&source_dir).unwrap(),
-            artifact: ImportArtifact::DirectoryCopy { source_dir },
+            artifact: ImportArtifact::DirectoryCopy {
+                source_dir,
+            },
             metadata: serde_json::json!({"original_name": "skill"}),
         }
     }
@@ -1334,7 +1347,9 @@ mod tests {
 
         let summary = write_candidates_for_scope(
             &scope_root,
-            &ImportScope::Project { root: workspace },
+            &ImportScope::Project {
+                root: workspace,
+            },
             &[candidate.clone()],
         )
         .await;
@@ -1640,7 +1655,9 @@ mod tests {
             destination_path: dest_rel,
             source_hash: hash_string("source"),
             artifact_hash: hash_string("artifact"),
-            artifact: ImportArtifact::DirectoryCopy { source_dir },
+            artifact: ImportArtifact::DirectoryCopy {
+                source_dir,
+            },
             metadata: serde_json::json!({"original_name": "skill"}),
         };
 

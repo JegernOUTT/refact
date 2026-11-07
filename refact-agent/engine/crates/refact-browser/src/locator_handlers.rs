@@ -15,14 +15,18 @@ impl LocatorHandlerOperation {
     pub fn label(&self) -> &'static str {
         match self {
             Self::Action(LocatorHandlerAction::Click) => "click",
-            Self::Action(LocatorHandlerAction::Steps { .. }) => "steps",
+            Self::Action(LocatorHandlerAction::Steps {
+                ..
+            }) => "steps",
             Self::DismissOverlays => "dismiss_overlays",
         }
     }
 
     pub fn steps(&self) -> Option<&[BrowserStep]> {
         match self {
-            Self::Action(LocatorHandlerAction::Steps { steps }) => Some(steps),
+            Self::Action(LocatorHandlerAction::Steps {
+                steps,
+            }) => Some(steps),
             _ => None,
         }
     }
@@ -48,7 +52,10 @@ impl LocatorHandler {
         if name.trim().is_empty() {
             return Err("Locator handler name must not be empty".to_string());
         }
-        if let LocatorHandlerAction::Steps { steps } = &action {
+        if let LocatorHandlerAction::Steps {
+            steps,
+        } = &action
+        {
             if steps.is_empty() {
                 return Err("Locator handler step list must not be empty".to_string());
             }
@@ -192,7 +199,9 @@ impl LocatorHandlerRegistry {
             .find(|handler| handler.name == name && handler.remaining_times != Some(0))?
             .clone();
         self.running += 1;
-        Some(LocatorHandlerLease { handler })
+        Some(LocatorHandlerLease {
+            handler,
+        })
     }
 
     pub fn finish(
@@ -316,7 +325,9 @@ mod tests {
     #[test]
     fn handler_steps_cannot_drive_the_session_clock() {
         for step in [
-            BrowserStep::ClockInstall { time: None },
+            BrowserStep::ClockInstall {
+                time: None,
+            },
             BrowserStep::ClockResume,
             BrowserStep::ClockRunFor {
                 ticks: refact_integrations::browser_models::ClockTicks::Millis(1000),
@@ -325,7 +336,9 @@ mod tests {
             let error = LocatorHandler::registered(
                 "banner".to_string(),
                 BrowserLocator::css("#banner"),
-                LocatorHandlerAction::Steps { steps: vec![step] },
+                LocatorHandlerAction::Steps {
+                    steps: vec![step],
+                },
                 None,
                 false,
             )

@@ -32,7 +32,10 @@ pub struct DisagreementLedger {
 impl DisagreementLedger {
     pub fn new(store: Arc<CoordinationStore>, project: ProjectKey) -> Self {
         let access = store.authorize(project);
-        DisagreementLedger { store, access }
+        DisagreementLedger {
+            store,
+            access,
+        }
     }
 
     pub fn project(&self) -> &ProjectKey {

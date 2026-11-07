@@ -563,7 +563,9 @@ impl LlmWireAdapter for OpenAiResponsesAdapter {
                     reason: finish_reason.to_string(),
                 });
                 if let Some(usage) = extract_usage(&json) {
-                    deltas.push(LlmStreamDelta::SetUsage { usage });
+                    deltas.push(LlmStreamDelta::SetUsage {
+                        usage,
+                    });
                 }
                 rehydrate_response_output(&json, &mut deltas, event_type);
                 deltas.push(LlmStreamDelta::Done);
@@ -596,7 +598,9 @@ impl LlmWireAdapter for OpenAiResponsesAdapter {
                     reason: finish_reason.to_string(),
                 });
                 if let Some(usage) = extract_usage(&json) {
-                    deltas.push(LlmStreamDelta::SetUsage { usage });
+                    deltas.push(LlmStreamDelta::SetUsage {
+                        usage,
+                    });
                 }
                 rehydrate_response_output(&json, &mut deltas, event_type);
                 deltas.push(LlmStreamDelta::Done);
@@ -613,7 +617,9 @@ impl LlmWireAdapter for OpenAiResponsesAdapter {
                         }
                     ]),
                 );
-                deltas.push(LlmStreamDelta::MergeExtra { extra });
+                deltas.push(LlmStreamDelta::MergeExtra {
+                    extra,
+                });
             }
             // Carries response headers such as x-codex-safety-buffering-enabled and
             // x-codex-safety-buffering-faster-model (the internal draft model).
@@ -628,7 +634,9 @@ impl LlmWireAdapter for OpenAiResponsesAdapter {
                         }
                     ]),
                 );
-                deltas.push(LlmStreamDelta::MergeExtra { extra });
+                deltas.push(LlmStreamDelta::MergeExtra {
+                    extra,
+                });
             }
 
             // ── Error events ──
@@ -684,7 +692,9 @@ impl LlmWireAdapter for OpenAiResponsesAdapter {
                             }
                         ]),
                     );
-                    deltas.push(LlmStreamDelta::MergeExtra { extra });
+                    deltas.push(LlmStreamDelta::MergeExtra {
+                        extra,
+                    });
                 } else {
                     tracing::warn!("Unhandled Responses API event: {}", event_type);
                     // Keep an append-only array in extra (don't overwrite prior events).
@@ -700,7 +710,9 @@ impl LlmWireAdapter for OpenAiResponsesAdapter {
                             }
                         ]),
                     );
-                    deltas.push(LlmStreamDelta::MergeExtra { extra });
+                    deltas.push(LlmStreamDelta::MergeExtra {
+                        extra,
+                    });
                     deltas.push(LlmStreamDelta::AddServerContentBlock {
                         block: json!({
                             "type": "unhandled_openai_responses_event",
@@ -716,7 +728,9 @@ impl LlmWireAdapter for OpenAiResponsesAdapter {
         // This handles both top-level and nested "response" wrapper fields
         let extra = extract_extra_fields(&json);
         if !extra.is_empty() {
-            deltas.push(LlmStreamDelta::MergeExtra { extra });
+            deltas.push(LlmStreamDelta::MergeExtra {
+                extra,
+            });
         }
 
         Ok(deltas)
@@ -964,7 +978,9 @@ fn tool_choice_to_responses(choice: &CanonicalToolChoice) -> Value {
         CanonicalToolChoice::Auto => json!("auto"),
         CanonicalToolChoice::None => json!("none"),
         CanonicalToolChoice::Required => json!("required"),
-        CanonicalToolChoice::Function { name } => json!({"type": "function", "name": name}),
+        CanonicalToolChoice::Function {
+            name,
+        } => json!({"type": "function", "name": name}),
     }
 }
 
@@ -1165,7 +1181,9 @@ fn push_response_id(json: &Value, deltas: &mut Vec<LlmStreamDelta>) {
     if let Some(response_id) = response_id {
         let mut extra = serde_json::Map::new();
         extra.insert("openai_response_id".to_string(), json!(response_id));
-        deltas.push(LlmStreamDelta::MergeExtra { extra });
+        deltas.push(LlmStreamDelta::MergeExtra {
+            extra,
+        });
     }
 }
 
@@ -1604,7 +1622,9 @@ mod tests {
 
         assert_eq!(deltas.len(), 1);
         match &deltas[0] {
-            LlmStreamDelta::AppendContent { text, .. } => assert_eq!(text, "Hello"),
+            LlmStreamDelta::AppendContent {
+                text, ..
+            } => assert_eq!(text, "Hello"),
             _ => panic!("expected AppendContent"),
         }
     }
@@ -1750,7 +1770,9 @@ mod tests {
                 .any(|d| matches!(d, LlmStreamDelta::FinalizeToolCalls { .. })),
             "arguments.done should emit FinalizeToolCalls"
         );
-        if let Some(LlmStreamDelta::FinalizeToolCalls { tool_calls }) = deltas
+        if let Some(LlmStreamDelta::FinalizeToolCalls {
+            tool_calls,
+        }) = deltas
             .iter()
             .find(|d| matches!(d, LlmStreamDelta::FinalizeToolCalls { .. }))
         {
@@ -1776,7 +1798,9 @@ mod tests {
                 .any(|d| matches!(d, LlmStreamDelta::FinalizeToolCalls { .. })),
             "output_item.done (function_call) should emit FinalizeToolCalls"
         );
-        if let Some(LlmStreamDelta::FinalizeToolCalls { tool_calls }) = deltas
+        if let Some(LlmStreamDelta::FinalizeToolCalls {
+            tool_calls,
+        }) = deltas
             .iter()
             .find(|d| matches!(d, LlmStreamDelta::FinalizeToolCalls { .. }))
         {
@@ -1802,7 +1826,9 @@ mod tests {
             .find(|d| matches!(d, LlmStreamDelta::SetUsage { .. }));
         assert!(usage_delta.is_some());
         match usage_delta.unwrap() {
-            LlmStreamDelta::SetUsage { usage } => {
+            LlmStreamDelta::SetUsage {
+                usage,
+            } => {
                 assert_eq!(usage.prompt_tokens, 200);
                 assert_eq!(usage.completion_tokens, 100);
                 assert_eq!(usage.total_tokens, 1100);
@@ -1825,7 +1851,9 @@ mod tests {
             .find(|d| matches!(d, LlmStreamDelta::SetUsage { .. }));
         assert!(usage_delta.is_some());
         match usage_delta.unwrap() {
-            LlmStreamDelta::SetUsage { usage } => {
+            LlmStreamDelta::SetUsage {
+                usage,
+            } => {
                 assert_eq!(usage.prompt_tokens, 250);
                 assert_eq!(usage.completion_tokens, 100);
                 assert_eq!(usage.total_tokens, 1100);
@@ -1850,7 +1878,9 @@ mod tests {
             "Should capture reasoning item as SetThinkingBlocks"
         );
 
-        if let Some(LlmStreamDelta::SetThinkingBlocks { blocks }) = deltas
+        if let Some(LlmStreamDelta::SetThinkingBlocks {
+            blocks,
+        }) = deltas
             .iter()
             .find(|d| matches!(d, LlmStreamDelta::SetThinkingBlocks { .. }))
         {

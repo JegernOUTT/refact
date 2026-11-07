@@ -917,7 +917,10 @@ impl Supervisor {
             }
             WorkerState::Stopping => Some(record.info.clone()),
             WorkerState::Crashed => None,
-            WorkerState::Stopped | WorkerState::Failed { .. } => None,
+            WorkerState::Stopped
+            | WorkerState::Failed {
+                ..
+            } => None,
         }
     }
 
@@ -2063,7 +2066,9 @@ async fn shutdown_requested(shutdown_rx: &mut watch::Receiver<Option<String>>) {
 
 fn worker_unavailable_reason(info: &WorkerInfo) -> String {
     match &info.state {
-        WorkerState::Failed { reason } => reason.clone(),
+        WorkerState::Failed {
+            reason,
+        } => reason.clone(),
         WorkerState::Crashed => info
             .last_error
             .clone()
@@ -2244,7 +2249,9 @@ mod tests {
             std::env::set_var("REFACT_DAEMON_SUPERVISOR_BACKOFF_MS", "1");
             std::env::remove_var("FAKE_WORKER_CRASH");
             std::env::remove_var("FAKE_WORKER_DELAY_READY");
-            Some(Self { keys })
+            Some(Self {
+                keys,
+            })
         }
     }
 
@@ -2767,7 +2774,10 @@ mod tests {
             .expect("a foreign holder must be reported promptly, not waited out")
             .unwrap();
 
-        let WorkerState::Failed { ref reason } = info.state else {
+        let WorkerState::Failed {
+            ref reason,
+        } = info.state
+        else {
             panic!("expected a busy failure, got {:?}", info.state);
         };
         assert!(

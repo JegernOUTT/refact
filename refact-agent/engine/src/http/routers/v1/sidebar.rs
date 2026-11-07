@@ -247,19 +247,35 @@ fn section_snapshot_event(
 impl InitialSidebarPart {
     fn section(&self) -> SidebarSection {
         match self {
-            InitialSidebarPart::Workspace { .. } => SidebarSection::Workspace,
-            InitialSidebarPart::Chats { .. } => SidebarSection::Chats,
-            InitialSidebarPart::Tasks { .. } => SidebarSection::Tasks,
-            InitialSidebarPart::Buddy { .. } => SidebarSection::Buddy,
+            InitialSidebarPart::Workspace {
+                ..
+            } => SidebarSection::Workspace,
+            InitialSidebarPart::Chats {
+                ..
+            } => SidebarSection::Chats,
+            InitialSidebarPart::Tasks {
+                ..
+            } => SidebarSection::Tasks,
+            InitialSidebarPart::Buddy {
+                ..
+            } => SidebarSection::Buddy,
         }
     }
 
     fn status(&self) -> SidebarSectionStatus {
         match self {
-            InitialSidebarPart::Workspace { status, .. }
-            | InitialSidebarPart::Chats { status, .. }
-            | InitialSidebarPart::Tasks { status, .. }
-            | InitialSidebarPart::Buddy { status, .. } => *status,
+            InitialSidebarPart::Workspace {
+                status, ..
+            }
+            | InitialSidebarPart::Chats {
+                status, ..
+            }
+            | InitialSidebarPart::Tasks {
+                status, ..
+            }
+            | InitialSidebarPart::Buddy {
+                status, ..
+            } => *status,
         }
     }
 
@@ -302,7 +318,9 @@ impl InitialSidebarPart {
             } => section_snapshot_event(
                 SidebarSection::Tasks,
                 status,
-                SidebarSectionSnapshot::Tasks { tasks },
+                SidebarSectionSnapshot::Tasks {
+                    tasks,
+                },
                 Some(elapsed_ms),
                 error,
             ),
@@ -313,7 +331,9 @@ impl InitialSidebarPart {
             } => section_snapshot_event(
                 SidebarSection::Buddy,
                 status,
-                SidebarSectionSnapshot::Buddy { buddy },
+                SidebarSectionSnapshot::Buddy {
+                    buddy,
+                },
                 Some(elapsed_ms),
                 error,
             ),
@@ -443,7 +463,10 @@ fn spawn_sidebar_section_retry(
     tokio::spawn(async move {
         tokio::time::sleep(SIDEBAR_RETRY_DELAY).await;
         let part = load_section_part(gcx, section).await;
-        let _ = tx.send(InitialSidebarPartMessage { generation, part });
+        let _ = tx.send(InitialSidebarPartMessage {
+            generation,
+            part,
+        });
     });
 }
 
@@ -479,7 +502,10 @@ fn spawn_initial_sidebar_loads(
             match result {
                 Ok(part) => {
                     if tx
-                        .send(InitialSidebarPartMessage { generation, part })
+                        .send(InitialSidebarPartMessage {
+                            generation,
+                            part,
+                        })
                         .is_err()
                     {
                         jobs.abort_all();
@@ -546,15 +572,21 @@ fn buffered_event_ready(
     bootstrap_complete: bool,
 ) -> bool {
     match event {
-        SidebarEvent::SectionSnapshot { section, .. }
-        | SidebarEvent::SectionUpdate { section, .. } => section_settled(
+        SidebarEvent::SectionSnapshot {
+            section, ..
+        }
+        | SidebarEvent::SectionUpdate {
+            section, ..
+        } => section_settled(
             *section,
             workspace_settled,
             chats_settled,
             tasks_settled,
             buddy_settled,
         ),
-        SidebarEvent::Notification { .. } => bootstrap_complete,
+        SidebarEvent::Notification {
+            ..
+        } => bootstrap_complete,
     }
 }
 

@@ -42,7 +42,6 @@ members = [
     "crates/refact-agents-core",
     "crates/refact-work-core",
     "crates/refact-self-update",
-    "crates/refact-tui",
     "crates/refact-privacy",
 ]
 resolver = "2"
@@ -334,7 +333,6 @@ refact-sandbox = { path = "crates/refact-sandbox" }
 refact-agents-core = { path = "crates/refact-agents-core" }
 refact-work-core = { path = "crates/refact-work-core" }
 refact-self-update = { path = "crates/refact-self-update" }
-refact-tui = { path = "crates/refact-tui" }
 
 astral-tokio-tar = "0.5.2"
 axum.workspace = true

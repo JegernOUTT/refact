@@ -253,7 +253,9 @@ fn scan_test_coverage(project_root: &Path) -> CoverageScanResult {
         .filter_map(|rel| missing_test_candidate(project_root, &rel))
         .collect::<Vec<_>>();
     candidates.truncate(MAX_CANDIDATES);
-    CoverageScanResult { candidates }
+    CoverageScanResult {
+        candidates,
+    }
 }
 
 fn render_evidence(scan: &CoverageScanResult) -> String {

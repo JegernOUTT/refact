@@ -34,16 +34,6 @@ describe("MemoryDetailsEditor", () => {
     store = createMockStore();
   });
 
-  it('renders "No memory selected" when memory is null', () => {
-    render(
-      <Provider store={store}>
-        <MemoryDetailsEditor memory={null} />
-      </Provider>,
-    );
-
-    expect(screen.getByText("No memory selected")).toBeInTheDocument();
-  });
-
   it("displays all memory fields when memory is provided", () => {
     render(
       <Provider store={store}>

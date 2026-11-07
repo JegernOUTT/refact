@@ -54,7 +54,10 @@ impl CommandRule {
             },
         };
 
-        Some(CommandRule { kind, matcher })
+        Some(CommandRule {
+            kind,
+            matcher,
+        })
     }
 
     pub fn matches(&self, command: &str, segments: &CommandSegments) -> bool {

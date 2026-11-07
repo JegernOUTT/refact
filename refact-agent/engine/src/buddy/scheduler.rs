@@ -329,11 +329,15 @@ pub struct BuddyScheduler {
 impl BuddyScheduler {
     #[cfg(test)]
     pub(crate) fn with_test_job(job: Box<dyn BuddyJob>) -> Self {
-        Self { jobs: vec![job] }
+        Self {
+            jobs: vec![job],
+        }
     }
 
     pub fn new() -> Self {
-        let mut s = Self { jobs: vec![] };
+        let mut s = Self {
+            jobs: vec![],
+        };
         s.jobs.push(Box::new(super::jobs::greeting::GreetingJob));
         s.jobs.push(Box::new(super::jobs::tour::TourJob));
         s.jobs

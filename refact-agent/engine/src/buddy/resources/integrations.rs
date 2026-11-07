@@ -195,7 +195,10 @@ pub struct McpPreparation {
 pub type IntegrationsAdapter = ManagedResource<McpPreparation>;
 impl McpPreparation {
     pub fn new(project: ProjectIdentity, drafts: Arc<dyn DraftRegistry<McpDraft>>) -> Self {
-        Self { project, drafts }
+        Self {
+            project,
+            drafts,
+        }
     }
 }
 impl ResourcePreparation for McpPreparation {

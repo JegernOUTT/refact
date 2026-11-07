@@ -420,7 +420,10 @@ fn parse_markdown_with_errors(content: &str) -> Result<ParsedMarkdown, String> {
             let body_start = offset + line.len();
             let body = rest.get(body_start..).unwrap_or_default().to_string();
             let frontmatter = parse_frontmatter_mapping(frontmatter_text)?;
-            return Ok(ParsedMarkdown { frontmatter, body });
+            return Ok(ParsedMarkdown {
+                frontmatter,
+                body,
+            });
         }
         offset += line.len();
     }
@@ -666,7 +669,10 @@ mod tests {
             candidate.destination_path,
             PathBuf::from("commands/review-code.md")
         );
-        let ImportArtifact::FileContent { content } = &candidate.artifact else {
+        let ImportArtifact::FileContent {
+            content,
+        } = &candidate.artifact
+        else {
             panic!("expected file content");
         };
         assert!(!content.contains("invokable"));
@@ -709,7 +715,10 @@ mod tests {
             candidate.destination_path,
             PathBuf::from("subagents/security-review.yaml")
         );
-        let ImportArtifact::FileContent { content } = &candidate.artifact else {
+        let ImportArtifact::FileContent {
+            content,
+        } = &candidate.artifact
+        else {
             panic!("expected file content");
         };
         let config: SubagentConfig = serde_yaml::from_str(content).unwrap();

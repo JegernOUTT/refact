@@ -53,7 +53,9 @@ fn completion_event() -> ProcessCompletionEvent {
     ProcessCompletionEvent {
         process_id: ExecProcessId("exec_notification_hook".to_string()),
         chat_id: "notification-hook-chat".to_string(),
-        status: ExecStatus::Exited { exit_code: Some(0) },
+        status: ExecStatus::Exited {
+            exit_code: Some(0),
+        },
         exit_code: Some(0),
         duration_ms: Some(7),
         short_description: "notification hook test".to_string(),

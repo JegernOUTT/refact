@@ -198,10 +198,18 @@ pub(crate) fn workflow_display_title(workflow: &str) -> String {
 pub(crate) fn workflow_result_title(title: &str, terminal: &WorkflowTerminal) -> String {
     match terminal {
         WorkflowTerminal::NoChange => format!("{title} — no change"),
-        WorkflowTerminal::Partial { .. } => format!("{title} is incomplete"),
-        WorkflowTerminal::Blocked { .. } => format!("{title} is blocked"),
-        WorkflowTerminal::Cancelled { .. } => format!("{title} was cancelled"),
-        WorkflowTerminal::Failed { .. } => format!("{title} didn't finish"),
+        WorkflowTerminal::Partial {
+            ..
+        } => format!("{title} is incomplete"),
+        WorkflowTerminal::Blocked {
+            ..
+        } => format!("{title} is blocked"),
+        WorkflowTerminal::Cancelled {
+            ..
+        } => format!("{title} was cancelled"),
+        WorkflowTerminal::Failed {
+            ..
+        } => format!("{title} didn't finish"),
         WorkflowTerminal::Completed => format!("{title} finished"),
         WorkflowTerminal::Inconclusive => format!("{title} assessment"),
     }
@@ -219,7 +227,9 @@ impl WorkflowOutcomeCheckpoint {
         evidence.sort_by(|left, right| left.evidence_id.cmp(&right.evidence_id));
         evidence.dedup_by(|left, right| left.evidence_id == right.evidence_id);
         evidence.truncate(MAX_OUTCOME_EVIDENCE);
-        Self { evidence }
+        Self {
+            evidence,
+        }
     }
 }
 
@@ -261,10 +271,18 @@ pub fn build_workflow_outcome(
 ) -> RunOutcome {
     let (status, failure_class) = match terminal {
         WorkflowTerminal::NoChange => (RunStatus::NoChange, None),
-        WorkflowTerminal::Partial { failure_class } => (RunStatus::Partial, failure_class),
-        WorkflowTerminal::Blocked { failure_class } => (RunStatus::Blocked, failure_class),
-        WorkflowTerminal::Cancelled { failure_class } => (RunStatus::Cancelled, failure_class),
-        WorkflowTerminal::Failed { failure_class } => (RunStatus::Failed, failure_class),
+        WorkflowTerminal::Partial {
+            failure_class,
+        } => (RunStatus::Partial, failure_class),
+        WorkflowTerminal::Blocked {
+            failure_class,
+        } => (RunStatus::Blocked, failure_class),
+        WorkflowTerminal::Cancelled {
+            failure_class,
+        } => (RunStatus::Cancelled, failure_class),
+        WorkflowTerminal::Failed {
+            failure_class,
+        } => (RunStatus::Failed, failure_class),
         WorkflowTerminal::Completed => (RunStatus::Completed, None),
         WorkflowTerminal::Inconclusive => (RunStatus::Inconclusive, None),
     };
@@ -295,9 +313,13 @@ pub fn terminal_from_workflow_result(result: &Result<(), String>) -> WorkflowTer
             let category = refact_buddy_core::workflows::WorkflowFailureCategory::classify(error);
             let failure_class = Some(category.as_str().to_string());
             if category == refact_buddy_core::workflows::WorkflowFailureCategory::Cancelled {
-                WorkflowTerminal::Cancelled { failure_class }
+                WorkflowTerminal::Cancelled {
+                    failure_class,
+                }
             } else {
-                WorkflowTerminal::Failed { failure_class }
+                WorkflowTerminal::Failed {
+                    failure_class,
+                }
             }
         }
     }

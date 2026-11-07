@@ -229,7 +229,10 @@ impl MultimodalElement {
             image_reader_from_b64string(&m_content)
                 .map_err(|e| format!("MultimodalElement::new() failed to parse image: {}", e))?;
         }
-        Ok(MultimodalElement { m_type, m_content })
+        Ok(MultimodalElement {
+            m_type,
+            m_content,
+        })
     }
 
     pub fn is_text(&self) -> bool {

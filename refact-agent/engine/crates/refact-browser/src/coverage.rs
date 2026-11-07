@@ -449,7 +449,10 @@ pub fn merge_ranges(ranges: &[CoverageRange], total: usize) -> Vec<CoverageRange
         .filter_map(|range| {
             let start = range.start.min(total);
             let end = range.end.min(total);
-            (start < end).then_some(CoverageRange { start, end })
+            (start < end).then_some(CoverageRange {
+                start,
+                end,
+            })
         })
         .collect::<Vec<_>>();
     ranges.sort_by_key(|range| (range.start, range.end));

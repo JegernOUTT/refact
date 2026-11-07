@@ -1252,7 +1252,9 @@ impl CoordinationSettings {
         if v.is_empty() {
             Ok(())
         } else {
-            Err(SettingsError { violations: v })
+            Err(SettingsError {
+                violations: v,
+            })
         }
     }
 

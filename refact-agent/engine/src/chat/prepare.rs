@@ -518,9 +518,13 @@ pub async fn prepare_chat_passthrough(
         ToolChoice::Auto => CanonicalToolChoice::Auto,
         ToolChoice::None => CanonicalToolChoice::None,
         ToolChoice::Required => CanonicalToolChoice::Required,
-        ToolChoice::Function { name } => {
+        ToolChoice::Function {
+            name,
+        } => {
             let aliased_name = alias_registry.get_alias(name).unwrap_or(name).to_string();
-            CanonicalToolChoice::Function { name: aliased_name }
+            CanonicalToolChoice::Function {
+                name: aliased_name,
+            }
         }
     });
 

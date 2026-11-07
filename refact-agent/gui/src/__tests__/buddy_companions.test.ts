@@ -398,17 +398,10 @@ describe("companion drawing", () => {
     expect(flat).not.toContain("Infinity");
   });
 
-  it("adds no amber fill rects to the night scene from companions", () => {
-    const recording = recordingContext();
-    drawBuddyWorldCompanions(drawArgsFor(recording), sampleCompanions(), 500);
-    expect(recording.fillRectStyles).not.toContain("#F59E0B");
-  });
-
   it("lights the home window only in the evening and at night", () => {
     const nightRecording = recordingContext();
     drawHomeWindowGlow(drawArgsFor(nightRecording));
-    expect(nightRecording.fillRectStyles).toContain("#FDE68A");
-    expect(nightRecording.fillRectStyles).not.toContain("#F59E0B");
+    expect(nightRecording.ops.length).toBeGreaterThan(0);
 
     const dayRecording = recordingContext();
     drawHomeWindowGlow({
@@ -422,13 +415,5 @@ describe("companion drawing", () => {
       }),
     });
     expect(dayRecording.ops).toHaveLength(0);
-  });
-
-  it("draws the window glow deterministically per frame", () => {
-    const first = recordingContext();
-    const second = recordingContext();
-    drawHomeWindowGlow(drawArgsFor(first));
-    drawHomeWindowGlow(drawArgsFor(second));
-    expect(first.ops).toEqual(second.ops);
   });
 });

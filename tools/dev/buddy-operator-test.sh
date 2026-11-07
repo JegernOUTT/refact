@@ -68,7 +68,8 @@ set -- --unshare-all --die-with-parent --new-session --cap-drop ALL --clearenv \
   --setenv HOME /scratch/home --setenv XDG_CONFIG_HOME /scratch/config \
   --setenv XDG_CACHE_HOME /scratch/cache --setenv PATH /usr/bin:/bin \
   --setenv B02_HOST_NET "$host_net" --setenv B02_MODE controller \
-  --setenv REFACT_DAEMON_NO_UPGRADE 1
+  --setenv REFACT_DAEMON_NO_UPGRADE 1 \
+  --setenv RUST_MIN_STACK 16777216
 for lib in /lib /lib64; do
   if [ -d "$lib" ]; then set -- "$@" --ro-bind "$lib" "$lib"; fi
 done

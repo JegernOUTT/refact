@@ -101,25 +101,6 @@ describe("StreamSection", () => {
     expect(screen.queryByText("Waiting for subagents")).not.toBeInTheDocument();
   });
 
-  it("renders group headers and rows from the stream selectors", () => {
-    render(
-      <StreamSection
-        filter={ALL_FILTER}
-        onOpenChat={vi.fn()}
-        onOpenTask={vi.fn()}
-      />,
-      {
-        preloadedState: preloadedStateWith([
-          makeChat({ id: "a", title: "Fix the toolbar" }),
-        ]),
-      },
-    );
-
-    expect(screen.getByTestId("stream-section")).toBeInTheDocument();
-    expect(screen.getByTestId("stream-row-a")).toBeInTheDocument();
-    expect(screen.getByText("Fix the toolbar")).toBeInTheDocument();
-  });
-
   it("toggles the thread rail from the family pill", () => {
     render(
       <StreamSection

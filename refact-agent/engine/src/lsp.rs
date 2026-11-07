@@ -44,7 +44,9 @@ struct LspTcpClientGuard {
 impl LspTcpClientGuard {
     fn new(gcx: Arc<GlobalContext>) -> Self {
         gcx.lsp_tcp_client_count.fetch_add(1, Ordering::SeqCst);
-        Self { gcx }
+        Self {
+            gcx,
+        }
     }
 }
 
@@ -145,14 +147,18 @@ impl RejectedWorkspaceRoot {
     /// best-effort and legitimately reads as "unknown holder" when the lease file is unreadable.
     pub fn client_message(&self) -> String {
         match &self.reason {
-            WorkspaceRootRejection::Busy { holder } => format!(
+            WorkspaceRootRejection::Busy {
+                holder,
+            } => format!(
                 "Refact: another Refact engine ({holder}) already serves the workspace folder {}. \
                  This window will not index that folder, so completions and chat context for it \
                  stay unavailable. Close the other editor window on this project, or start the \
                  engine with --allow-shared-workspace to serve it anyway.",
                 self.root.display()
             ),
-            WorkspaceRootRejection::LeaseUnavailable { error } => format!(
+            WorkspaceRootRejection::LeaseUnavailable {
+                error,
+            } => format!(
                 "Refact: could not take the workspace lease for the folder {} ({error}). This \
                  window will not index that folder, so completions and chat context for it stay \
                  unavailable.",
@@ -215,11 +221,11 @@ fn acquire_workspace_leases_blocking(
                             holder: conflict.holder_description(),
                         }
                     }
-                    crate::daemon::lock::WorkspaceLeaseError::Io { error, .. } => {
-                        WorkspaceRootRejection::LeaseUnavailable {
-                            error: error.to_string(),
-                        }
-                    }
+                    crate::daemon::lock::WorkspaceLeaseError::Io {
+                        error, ..
+                    } => WorkspaceRootRejection::LeaseUnavailable {
+                        error: error.to_string(),
+                    },
                 };
                 outcome.rejected.push(RejectedWorkspaceRoot {
                     root: root.clone(),
@@ -401,7 +407,9 @@ impl LspBackend {
             crate::nicer_logs::last_n_chars(&path.to_string_lossy().to_string(), 30)
         );
         *self.gcx.documents_state.active_file_path.lock().await = Some(path);
-        Ok(SuccessRes { success: true })
+        Ok(SuccessRes {
+            success: true,
+        })
     }
 
     /// Tells the editor about every workspace folder this engine refused to serve.
@@ -1070,7 +1078,10 @@ mod tests {
         assert_eq!(outcome.rejected.len(), 1, "busy root must be reported");
         let rejection = &outcome.rejected[0];
         assert_eq!(rejection.root, busy_root);
-        let WorkspaceRootRejection::Busy { holder } = &rejection.reason else {
+        let WorkspaceRootRejection::Busy {
+            holder,
+        } = &rejection.reason
+        else {
             panic!("expected a busy rejection, got {:?}", rejection.reason);
         };
         assert!(

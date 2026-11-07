@@ -68,10 +68,18 @@ const MAX_DELTA_TEXT_BYTES: usize = 64 * 1024;
 
 fn delta_ops_contain_visible_content(ops: &[DeltaOp]) -> bool {
     ops.iter().any(|op| match op {
-        DeltaOp::AppendContent { text }
-        | DeltaOp::AppendReasoning { text }
-        | DeltaOp::SetReasoning { text } => !text.is_empty(),
-        DeltaOp::SetThinkingBlocks { blocks } => !blocks.is_empty(),
+        DeltaOp::AppendContent {
+            text,
+        }
+        | DeltaOp::AppendReasoning {
+            text,
+        }
+        | DeltaOp::SetReasoning {
+            text,
+        } => !text.is_empty(),
+        DeltaOp::SetThinkingBlocks {
+            blocks,
+        } => !blocks.is_empty(),
         _ => false,
     })
 }
@@ -90,25 +98,44 @@ fn delta_is_coalescible_text(op: &DeltaOp) -> bool {
 
 fn delta_text_len(op: &DeltaOp) -> usize {
     match op {
-        DeltaOp::AppendContent { text } | DeltaOp::AppendReasoning { text } => text.len(),
+        DeltaOp::AppendContent {
+            text,
+        }
+        | DeltaOp::AppendReasoning {
+            text,
+        } => text.len(),
         _ => 0,
     }
 }
 
 fn append_coalesced_text_op(ops: &mut Vec<DeltaOp>, op: DeltaOp) {
     match op {
-        DeltaOp::AppendContent { text } => {
-            if let Some(DeltaOp::AppendContent { text: previous }) = ops.last_mut() {
+        DeltaOp::AppendContent {
+            text,
+        } => {
+            if let Some(DeltaOp::AppendContent {
+                text: previous,
+            }) = ops.last_mut()
+            {
                 previous.push_str(&text);
             } else {
-                ops.push(DeltaOp::AppendContent { text });
+                ops.push(DeltaOp::AppendContent {
+                    text,
+                });
             }
         }
-        DeltaOp::AppendReasoning { text } => {
-            if let Some(DeltaOp::AppendReasoning { text: previous }) = ops.last_mut() {
+        DeltaOp::AppendReasoning {
+            text,
+        } => {
+            if let Some(DeltaOp::AppendReasoning {
+                text: previous,
+            }) = ops.last_mut()
+            {
                 previous.push_str(&text);
             } else {
-                ops.push(DeltaOp::AppendReasoning { text });
+                ops.push(DeltaOp::AppendReasoning {
+                    text,
+                });
             }
         }
         _ => ops.push(op),
@@ -143,27 +170,31 @@ fn split_large_delta_text_ops(ops: Vec<DeltaOp>) -> Vec<DeltaOp> {
     let mut split = Vec::with_capacity(ops.len());
     for op in ops {
         match op {
-            DeltaOp::AppendContent { text } => split.extend(
-                split_delta_text(&text)
-                    .into_iter()
-                    .map(|text| DeltaOp::AppendContent { text }),
-            ),
-            DeltaOp::AppendReasoning { text } => split.extend(
-                split_delta_text(&text)
-                    .into_iter()
-                    .map(|text| DeltaOp::AppendReasoning { text }),
-            ),
-            DeltaOp::SetReasoning { text } => {
+            DeltaOp::AppendContent {
+                text,
+            } => split.extend(split_delta_text(&text).into_iter().map(|text| {
+                DeltaOp::AppendContent {
+                    text,
+                }
+            })),
+            DeltaOp::AppendReasoning {
+                text,
+            } => split.extend(split_delta_text(&text).into_iter().map(|text| {
+                DeltaOp::AppendReasoning {
+                    text,
+                }
+            })),
+            DeltaOp::SetReasoning {
+                text,
+            } => {
                 let chunks = split_delta_text(&text);
                 if let Some((first, rest)) = chunks.split_first() {
                     split.push(DeltaOp::SetReasoning {
                         text: first.clone(),
                     });
-                    split.extend(
-                        rest.iter()
-                            .cloned()
-                            .map(|text| DeltaOp::AppendReasoning { text }),
-                    );
+                    split.extend(rest.iter().cloned().map(|text| DeltaOp::AppendReasoning {
+                        text,
+                    }));
                 }
             }
             other => split.push(other),
@@ -2298,7 +2329,10 @@ pub fn start_generation(
             let (context, generation_result) = match attempt {
                 GenerationAttemptStart::Continue => continue,
                 GenerationAttemptStart::Stop => break,
-                GenerationAttemptStart::Generated { context, result } => (context, result),
+                GenerationAttemptStart::Generated {
+                    context,
+                    result,
+                } => (context, result),
             };
 
             if let Ok(GenerationResult::PausedForUserDecision) = &generation_result {
@@ -2441,7 +2475,9 @@ async fn resolve_session_compression_cap(
                 "auto_compression_cap": session.thread.auto_compression_cap,
                 "auto_compression_cap_pending": session.thread.auto_compression_cap_pending,
             });
-            session.emit(ChatEvent::ThreadUpdated { params });
+            session.emit(ChatEvent::ThreadUpdated {
+                params,
+            });
             session.increment_version();
             session.touch();
         }
@@ -5089,12 +5125,16 @@ mod tests {
     #[test]
     fn delta_batch_caps_large_utf8_content_without_breaking_text() {
         let text = "😀".repeat((MAX_DELTA_TEXT_BYTES / 4) + 2);
-        let batches = batch_stream_delta_ops(vec![DeltaOp::AppendContent { text: text.clone() }]);
+        let batches = batch_stream_delta_ops(vec![DeltaOp::AppendContent {
+            text: text.clone(),
+        }]);
         let chunks = batches
             .into_iter()
             .flatten()
             .filter_map(|op| match op {
-                DeltaOp::AppendContent { text } => Some(text),
+                DeltaOp::AppendContent {
+                    text,
+                } => Some(text),
                 _ => None,
             })
             .collect::<Vec<_>>();

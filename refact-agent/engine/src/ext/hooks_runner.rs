@@ -174,7 +174,9 @@ impl std::fmt::Display for HookRewriteError {
             HookRewriteError::NotAnObject => {
                 write!(f, "hook rewrite must be a JSON object of tool arguments")
             }
-            HookRewriteError::OutsideAuthority { tool } => write!(
+            HookRewriteError::OutsideAuthority {
+                tool,
+            } => write!(
                 f,
                 "hook rewrite refused: '{tool}' is outside the accepted tool authority"
             ),
@@ -211,7 +213,9 @@ pub struct ObservationHook {
 
 impl ControlHook {
     pub fn new(config: HookConfig) -> Option<Self> {
-        matches!(config.event.kind(), HookKind::Control).then_some(Self { config })
+        matches!(config.event.kind(), HookKind::Control).then_some(Self {
+            config,
+        })
     }
 
     async fn evaluate(
@@ -235,7 +239,9 @@ impl ControlHook {
 
 impl ObservationHook {
     pub fn new(config: HookConfig) -> Option<Self> {
-        matches!(config.event.kind(), HookKind::Observation).then_some(Self { config })
+        matches!(config.event.kind(), HookKind::Observation).then_some(Self {
+            config,
+        })
     }
 
     async fn observe(
@@ -245,7 +251,11 @@ impl ObservationHook {
         shutdown: Option<&Arc<AtomicBool>>,
     ) -> ObservationOutcome {
         match run_single_hook(&self.config, payload, limits, shutdown).await {
-            RawHookOutcome::Completed { code, stderr, .. } => {
+            RawHookOutcome::Completed {
+                code,
+                stderr,
+                ..
+            } => {
                 if code == 0 {
                     ObservationOutcome::Observed
                 } else {
@@ -876,7 +886,9 @@ pub fn revalidate_rewritten_arguments(
     }
     for referenced in referenced_tool_names(rewritten) {
         if !crate::agents::tool_authority::allows_dispatch(authority, &referenced) {
-            return Err(HookRewriteError::OutsideAuthority { tool: referenced });
+            return Err(HookRewriteError::OutsideAuthority {
+                tool: referenced,
+            });
         }
     }
     Ok(object)
@@ -1374,7 +1386,9 @@ async fn run_single_hook(
     };
 
     match terminal {
-        RawHookOutcome::Completed { code, .. } => {
+        RawHookOutcome::Completed {
+            code, ..
+        } => {
             let stdout_bytes = match stdout_task {
                 Some(t) => t.await.unwrap_or_default(),
                 None => Vec::new(),
@@ -2035,7 +2049,9 @@ mod tests {
             max_recursion_depth: 2,
         };
         match run_single_hook(&config, &payload, &limits, None).await {
-            RawHookOutcome::Completed { stdout, .. } => {
+            RawHookOutcome::Completed {
+                stdout, ..
+            } => {
                 assert!(
                     stdout.len() <= 2048,
                     "output should respect the configured cap: {} > 2048",
@@ -2061,7 +2077,9 @@ mod tests {
             max_recursion_depth: 2,
         };
         match run_single_hook(&config, &payload, &limits, None).await {
-            RawHookOutcome::Completed { stderr, .. } => {
+            RawHookOutcome::Completed {
+                stderr, ..
+            } => {
                 assert!(stderr.len() <= 2048, "stderr should respect the cap");
             }
             other => panic!("Expected Completed, got {:?}", other),

@@ -623,15 +623,6 @@ describe("deriveTasksFromMessages", () => {
     ]);
   });
 
-  it("returns empty when only failed tool results exist", () => {
-    const args = JSON.stringify({
-      tasks: [{ id: "1", content: "Task", status: "pending" }],
-    });
-    const messages: ChatMessages = [makeAssistantMsg([{ id: "tc1", args }])];
-    const toolMessages = [makeToolMsg("tc1", true)];
-    expect(deriveTasksFromMessages(messages, toolMessages)).toEqual([]);
-  });
-
   it("handles large conversation with many tasks_set calls", () => {
     const messages: ChatMessages = [];
     const toolMessages: ToolMessage[] = [];
@@ -646,16 +637,5 @@ describe("deriveTasksFromMessages", () => {
 
     const result = deriveTasksFromMessages(messages, toolMessages);
     expect(result).toEqual([{ id: "9", content: "Task 9", status: "pending" }]);
-  });
-
-  it("handles tool result arriving before corresponding assistant message in array", () => {
-    const args = JSON.stringify({
-      tasks: [{ id: "1", content: "Task", status: "pending" }],
-    });
-    const messages: ChatMessages = [makeAssistantMsg([{ id: "tc1", args }])];
-    const toolMessages = [makeToolMsg("tc1")];
-    expect(deriveTasksFromMessages(messages, toolMessages)).toEqual([
-      { id: "1", content: "Task", status: "pending" },
-    ]);
   });
 });

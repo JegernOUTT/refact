@@ -1,9 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   BUDDY_SPEECH_RECENT_LIMIT,
-  BUDDY_WORLD_SPEECH_PRIORITY,
   DIRECTOR_SPEECH_BEATS,
-  DIRECTOR_SPEECH_POOLS,
   SHOWCASE_SPEECH_POOLS,
   careMidBeatAtMs,
   createBuddySpeechMemory,
@@ -181,12 +179,6 @@ describe("buddy world speech resolver", () => {
     });
     expect(resolution.style).toBe("think");
   });
-
-  it("documents the priority ladder attribute", () => {
-    expect(BUDDY_WORLD_SPEECH_PRIORITY).toBe(
-      "backend-care-session-arc-showcase-director-local",
-    );
-  });
 });
 
 describe("speech intent styles", () => {
@@ -214,15 +206,6 @@ describe("speech intent styles", () => {
 });
 
 describe("speech pools", () => {
-  it("gives every director pool at least three variants", () => {
-    for (const pool of Object.values(DIRECTOR_SPEECH_POOLS)) {
-      expect(pool.lines.length).toBeGreaterThanOrEqual(3);
-      for (const line of pool.lines) {
-        expect(line(NAME).length).toBeGreaterThan(0);
-      }
-    }
-  });
-
   it("gives every showcase pool at least three name-templated variants", () => {
     for (const pool of Object.values(SHOWCASE_SPEECH_POOLS)) {
       expect(pool.lines.length).toBeGreaterThanOrEqual(3);

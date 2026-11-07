@@ -1978,7 +1978,10 @@ async fn chrome_command_exec(
     let multimodal_els = vec![];
 
     match action {
-        BrowserAction::OpenTab { tab_id, device } => {
+        BrowserAction::OpenTab {
+            tab_id,
+            device,
+        } => {
             let log = {
                 let mut chrome_session_locked = chrome_session.lock().await;
                 let chrome_session = chrome_session_locked
@@ -1990,7 +1993,11 @@ async fn chrome_command_exec(
             };
             tool_log.push(log);
         }
-        BrowserAction::ClickAtPoint { tab_id, x, y } => {
+        BrowserAction::ClickAtPoint {
+            tab_id,
+            x,
+            y,
+        } => {
             let tab = {
                 let mut chrome_session_locked = chrome_session.lock().await;
                 let chrome_session = chrome_session_locked
@@ -2028,7 +2035,10 @@ async fn chrome_command_exec(
             };
             tool_log.push(log);
         }
-        BrowserAction::TypeText { tab_id, text } => {
+        BrowserAction::TypeText {
+            tab_id,
+            text,
+        } => {
             let tab = {
                 let mut chrome_session_locked = chrome_session.lock().await;
                 let chrome_session = chrome_session_locked
@@ -2126,7 +2136,9 @@ async fn chrome_command_exec(
                 }
             }
         }
-        BrowserAction::CloseTab { tab_id } => {
+        BrowserAction::CloseTab {
+            tab_id,
+        } => {
             let (tab_arc, available, runtime_id) = {
                 let mut chrome_session_locked = chrome_session.lock().await;
                 let cs = chrome_session_locked

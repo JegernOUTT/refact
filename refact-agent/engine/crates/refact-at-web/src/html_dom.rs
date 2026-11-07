@@ -18,14 +18,18 @@ pub fn descendant_nodes(node: &Handle) -> Vec<Handle> {
 
 pub fn element_name(node: &Handle) -> Option<&str> {
     match &node.data {
-        NodeData::Element { name, .. } => Some(name.local.as_ref()),
+        NodeData::Element {
+            name, ..
+        } => Some(name.local.as_ref()),
         _ => None,
     }
 }
 
 pub fn attribute(node: &Handle, attribute_name: &str) -> Option<String> {
     match &node.data {
-        NodeData::Element { attrs, .. } => attrs
+        NodeData::Element {
+            attrs, ..
+        } => attrs
             .borrow()
             .iter()
             .find(|attribute| attribute.name.local.as_ref() == attribute_name)

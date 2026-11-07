@@ -962,7 +962,10 @@ pub async fn resolve_scoped_launch_spec(
             continue;
         }
         let candidate_messages: Result<Vec<ChatMessage>, SkippedContextEntry> = match entry {
-            LaunchContextEntry::RawText { label, text } => {
+            LaunchContextEntry::RawText {
+                label,
+                text,
+            } => {
                 let heading = label
                     .as_deref()
                     .map(|label| format!("# {label}\n\n"))
@@ -986,21 +989,24 @@ pub async fn resolve_scoped_launch_spec(
                 description: describe_entry(entry),
                 reason,
             }),
-            LaunchContextEntry::FileRange { path, line1, line2 } => {
-                resolve_file_range(gcx.clone(), scope, path, *line1, *line2)
-                    .await
-                    .map(|message| vec![message])
-            }
-            LaunchContextEntry::TaskDoc { task_id, slug } => {
-                resolve_task_doc(gcx.clone(), scope, task_id, slug.as_deref())
-                    .await
-                    .map(|message| vec![message])
-            }
-            LaunchContextEntry::MemoryRef { query } => {
-                resolve_memory_ref(gcx.clone(), scope, query)
-                    .await
-                    .map(|message| vec![message])
-            }
+            LaunchContextEntry::FileRange {
+                path,
+                line1,
+                line2,
+            } => resolve_file_range(gcx.clone(), scope, path, *line1, *line2)
+                .await
+                .map(|message| vec![message]),
+            LaunchContextEntry::TaskDoc {
+                task_id,
+                slug,
+            } => resolve_task_doc(gcx.clone(), scope, task_id, slug.as_deref())
+                .await
+                .map(|message| vec![message]),
+            LaunchContextEntry::MemoryRef {
+                query,
+            } => resolve_memory_ref(gcx.clone(), scope, query)
+                .await
+                .map(|message| vec![message]),
         };
         match candidate_messages {
             Ok(messages) => admit_context(
@@ -1143,7 +1149,9 @@ fn admit_context(
 
 fn describe_entry(entry: &LaunchContextEntry) -> String {
     match entry {
-        LaunchContextEntry::RawText { label, .. } => {
+        LaunchContextEntry::RawText {
+            label, ..
+        } => {
             format!(
                 "raw_text{}",
                 label
@@ -1159,15 +1167,23 @@ fn describe_entry(entry: &LaunchContextEntry) -> String {
             "message_range {start_message_id}..{}",
             end_message_id.as_deref().unwrap_or(start_message_id)
         ),
-        LaunchContextEntry::FileRange { path, line1, line2 } => format!(
+        LaunchContextEntry::FileRange {
+            path,
+            line1,
+            line2,
+        } => format!(
             "file_range {path}:{}-{}",
             line1.unwrap_or(1),
             line2
                 .map(|v| v.to_string())
                 .unwrap_or_else(|| "end".to_string())
         ),
-        LaunchContextEntry::TaskDoc { task_id, .. } => format!("task_doc {task_id}"),
-        LaunchContextEntry::MemoryRef { query } => format!("memory_ref {query}"),
+        LaunchContextEntry::TaskDoc {
+            task_id, ..
+        } => format!("task_doc {task_id}"),
+        LaunchContextEntry::MemoryRef {
+            query,
+        } => format!("memory_ref {query}"),
     }
 }
 

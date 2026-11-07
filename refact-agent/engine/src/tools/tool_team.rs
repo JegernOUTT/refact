@@ -403,9 +403,9 @@ impl Tool for ToolTeamRoleGrant {
             now,
         )
         .map_err(|refusal| match refusal {
-            crate::coordination::teams::RoleRefusal::AssignerLacksAuthority { .. } => {
-                "member or recipient is not reachable for this grant".to_string()
-            }
+            crate::coordination::teams::RoleRefusal::AssignerLacksAuthority {
+                ..
+            } => "member or recipient is not reachable for this grant".to_string(),
             _ => refusal.to_string(),
         })?;
         crate::coordination::teams::apply_role_grant(&app.peer_grants, proposal, now)?;

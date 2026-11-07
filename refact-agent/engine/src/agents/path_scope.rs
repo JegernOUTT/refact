@@ -294,7 +294,10 @@ mod tests {
             &limits(),
         )
         .unwrap();
-        let ScopeOutcome::Refused { scope: named, .. } = refused else {
+        let ScopeOutcome::Refused {
+            scope: named, ..
+        } = refused
+        else {
             panic!("expected a refusal: {refused:?}");
         };
         assert_eq!(named, vec!["src/allowed.rs".to_string()]);

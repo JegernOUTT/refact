@@ -101,7 +101,10 @@ fn resolve_task_agent_scope(
         None
     };
 
-    Ok(TaskAgentScope { task_id, card_id })
+    Ok(TaskAgentScope {
+        task_id,
+        card_id,
+    })
 }
 
 async fn resolve_scope_from_context(

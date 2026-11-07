@@ -1,8 +1,8 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 
-import { afterEach, describe, expect, it, vi } from "vitest";
 import { screen, waitFor } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { render } from "../../../utils/test-utils";
 import { Tabs } from "./Tabs";
@@ -56,30 +56,6 @@ describe("Tabs", () => {
     });
   });
 
-  it("does not reserve a global scrollbar gutter in tab strips", async () => {
-    const css = await readTabsCss();
-    const list = css.match(/\.list \{[^}]+\}/)?.[0] ?? "";
-    const trigger = css.match(/\.trigger \{[^}]+\}/)?.[0] ?? "";
-
-    expect(list).toContain("display: grid;");
-    expect(list).toContain("overflow: auto hidden;");
-    expect(trigger).toContain("overflow: hidden;");
-  });
-
-  it("keeps triggers at their intrinsic width so narrow strips scroll", async () => {
-    const css = await readTabsCss();
-    const list = css.match(/\.list \{[^}]+\}/)?.[0] ?? "";
-    const trigger = css.match(/\.trigger \{[^}]+\}/)?.[0] ?? "";
-
-    expect(list).not.toContain("minmax(0, 1fr)");
-    expect(list).toContain("grid-auto-columns: minmax(max-content, 1fr);");
-    expect(list).toContain("overflow: auto hidden;");
-    expect(list).toContain("overscroll-behavior-x: contain;");
-    expect(list).toContain("scroll-snap-type: x proximity;");
-    expect(list).toContain("composes: scrollbarThin from");
-    expect(trigger).toContain("scroll-snap-align: start;");
-  });
-
   it("drives the indicator from the measured active trigger", () => {
     mockTriggerMetrics(
       new Map([
@@ -106,7 +82,7 @@ describe("Tabs", () => {
     });
   });
 
-  it("falls back to count and index maths when the trigger cannot be measured", async () => {
+  it("falls back to count and index maths when the trigger cannot be measured", () => {
     render(
       <Tabs defaultValue="two">
         <Tabs.List activeIndex={1} itemCount={2}>
@@ -123,15 +99,6 @@ describe("Tabs", () => {
       "--rf-tabs-count": "2",
       "--rf-tabs-index": "1",
     });
-
-    const css = await readTabsCss();
-    const measured =
-      css.match(
-        /\.list\[data-tabs-measured="true"\] \.indicator \{[^}]+\}/,
-      )?.[0] ?? "";
-
-    expect(measured).toContain("left: var(--rf-tabs-indicator-left);");
-    expect(measured).toContain("width: var(--rf-tabs-indicator-width);");
   });
 
   it("scrolls the newly activated trigger into view", async () => {

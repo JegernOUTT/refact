@@ -41,7 +41,10 @@ pub fn extract_command_segments(command: &str) -> CommandSegments {
         && !segments
             .iter()
             .any(|segment| executable_basename(segment).is_some_and(is_windows_executable));
-    CommandSegments { segments, parse_ok }
+    CommandSegments {
+        segments,
+        parse_ok,
+    }
 }
 
 pub fn structural_flags(segments: &CommandSegments) -> Vec<&'static str> {

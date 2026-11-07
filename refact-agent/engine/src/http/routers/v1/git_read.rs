@@ -1484,7 +1484,11 @@ where
     })
     .await
     .map_err(|error| internal_error(format!("Git operation task failed: {}", error)))?
-    .map(|roots| Json(RootsResponse { roots }))
+    .map(|roots| {
+        Json(RootsResponse {
+            roots,
+        })
+    })
     .map_err(internal_error)
 }
 
@@ -1531,7 +1535,11 @@ pub async fn handle_v1_git_log(
     })
     .await
     .map_err(|error| internal_error(format!("Git operation task failed: {}", error)))?
-    .map(|roots| Json(RootsResponse { roots }))
+    .map(|roots| {
+        Json(RootsResponse {
+            roots,
+        })
+    })
 }
 
 pub async fn handle_v1_git_commit_details(
@@ -1607,7 +1615,9 @@ pub async fn handle_v1_git_unstage(
     tokio::task::spawn_blocking(move || {
         let repository =
             Repository::open(root).map_err(|error| format!("Failed to open repo: {}", error))?;
-        unstage_changes(&repository, &paths).map(|unstaged| UnstageResponse { unstaged })
+        unstage_changes(&repository, &paths).map(|unstaged| UnstageResponse {
+            unstaged,
+        })
     })
     .await
     .map_err(|error| internal_error(format!("Git operation task failed: {}", error)))?

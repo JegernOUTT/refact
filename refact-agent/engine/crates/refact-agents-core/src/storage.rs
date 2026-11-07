@@ -687,7 +687,9 @@ async fn load_launch_payload(
             return Err("accepted launch changed while reading".into());
         }
     }
-    Ok(AcceptedLaunchPayload { bytes })
+    Ok(AcceptedLaunchPayload {
+        bytes,
+    })
 }
 
 #[cfg(test)]

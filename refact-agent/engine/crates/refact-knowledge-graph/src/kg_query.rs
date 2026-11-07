@@ -70,7 +70,10 @@ impl KnowledgeGraph {
                     .map(|d| d.frontmatter.is_active())
                     .unwrap_or(false)
             })
-            .map(|(id, score)| RelatedDoc { id, score })
+            .map(|(id, score)| RelatedDoc {
+                id,
+                score,
+            })
             .collect();
 
         results.sort_by(|a, b| b.score.total_cmp(&a.score).then_with(|| a.id.cmp(&b.id)));

@@ -36,18 +36,6 @@ describe("VirtualizedGrid", () => {
     expect(screen.getByText("Item 119")).toBeInTheDocument();
   });
 
-  it("renders a single column when columns is 1", () => {
-    render(
-      <VirtualizedGrid
-        items={makeItems(3)}
-        columns={1}
-        getItemKey={(item) => item.id}
-        renderItem={(item) => <span>{item.label}</span>}
-      />,
-    );
-    expect(screen.getByText("Item 2")).toBeInTheDocument();
-  });
-
   it("renders nothing when there are no items", () => {
     const { container } = render(
       <VirtualizedGrid

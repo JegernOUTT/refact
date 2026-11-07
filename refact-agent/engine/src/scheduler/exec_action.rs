@@ -257,11 +257,17 @@ fn collect_foreground_output(
 
 fn exec_exit_code(status: &ExecStatus) -> Option<i32> {
     match status {
-        ExecStatus::Exited { exit_code } => *exit_code,
-        ExecStatus::SandboxLauncherFailed { exit_code } => Some(*exit_code),
+        ExecStatus::Exited {
+            exit_code,
+        } => *exit_code,
+        ExecStatus::SandboxLauncherFailed {
+            exit_code,
+        } => Some(*exit_code),
         ExecStatus::Starting
         | ExecStatus::Running
-        | ExecStatus::Failed { .. }
+        | ExecStatus::Failed {
+            ..
+        }
         | ExecStatus::Killed
         | ExecStatus::TimedOut => None,
     }
@@ -269,10 +275,16 @@ fn exec_exit_code(status: &ExecStatus) -> Option<i32> {
 
 fn command_status_is_success(status: &ExecStatus) -> bool {
     match status {
-        ExecStatus::Exited { exit_code } => exit_code.unwrap_or_default() == 0,
+        ExecStatus::Exited {
+            exit_code,
+        } => exit_code.unwrap_or_default() == 0,
         ExecStatus::Starting | ExecStatus::Running => true,
-        ExecStatus::SandboxLauncherFailed { .. }
-        | ExecStatus::Failed { .. }
+        ExecStatus::SandboxLauncherFailed {
+            ..
+        }
+        | ExecStatus::Failed {
+            ..
+        }
         | ExecStatus::Killed
         | ExecStatus::TimedOut => false,
     }
@@ -280,13 +292,19 @@ fn command_status_is_success(status: &ExecStatus) -> bool {
 
 fn append_status_summary(stderr: &mut String, status: &ExecStatus, timeout_secs: u64) {
     let summary = match status {
-        ExecStatus::Exited { exit_code } => {
+        ExecStatus::Exited {
+            exit_code,
+        } => {
             format!("command exited with code {}", exit_code.unwrap_or_default())
         }
-        ExecStatus::SandboxLauncherFailed { exit_code } => {
+        ExecStatus::SandboxLauncherFailed {
+            exit_code,
+        } => {
             format!("sandbox launcher failed with code {exit_code}")
         }
-        ExecStatus::Failed { message } => format!("command failed: {message}"),
+        ExecStatus::Failed {
+            message,
+        } => format!("command failed: {message}"),
         ExecStatus::Killed => "command was killed".to_string(),
         ExecStatus::TimedOut => format!("command timed out after {timeout_secs} seconds"),
         ExecStatus::Starting | ExecStatus::Running => {
@@ -321,7 +339,9 @@ mod tests {
             durable: false,
             created_at_ms: 1_000,
             recurring: true,
-            trigger: Trigger::Interval { every_ms: 60_000 },
+            trigger: Trigger::Interval {
+                every_ms: 60_000,
+            },
             action: Action::Command {
                 argv: vec!["printf".to_string(), "hello".to_string()],
                 target: AgentTarget::ExistingChat {

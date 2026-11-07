@@ -169,9 +169,12 @@ fn watch_inputs(gui: &Path, inputs: &gui_artifact::Inputs) {
     }
     for entry in &inputs.inventory {
         let path = match entry {
-            gui_artifact::Entry::Directory { path } | gui_artifact::Entry::File { path, .. } => {
-                path
+            gui_artifact::Entry::Directory {
+                path,
             }
+            | gui_artifact::Entry::File {
+                path, ..
+            } => path,
         };
         println!("cargo:rerun-if-changed={}", gui.join(path).display());
     }

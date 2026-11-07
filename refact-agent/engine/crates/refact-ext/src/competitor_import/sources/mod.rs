@@ -174,7 +174,9 @@ pub(super) fn project_scan_root_allowed(
 
 pub(super) fn scan_root_allowed(context: &ConversionContext, path: &Path) -> Result<bool, String> {
     match &context.scope {
-        ImportScope::Project { root } => project_scan_root_allowed(path, root),
+        ImportScope::Project {
+            root,
+        } => project_scan_root_allowed(path, root),
         ImportScope::Global => Ok(regular_dir_exists(path)),
     }
 }

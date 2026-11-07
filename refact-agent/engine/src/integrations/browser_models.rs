@@ -316,7 +316,10 @@ mod tests {
         }))
         .unwrap();
 
-        let BrowserStep::HttpRequest { options } = &request.steps[0] else {
+        let BrowserStep::HttpRequest {
+            options,
+        } = &request.steps[0]
+        else {
             panic!("expected an http_request step");
         };
         assert_eq!(options.url, "https://example.com/api/session");
@@ -344,7 +347,10 @@ mod tests {
             }]
         }))
         .unwrap();
-        let BrowserStep::HttpRequest { options } = &full.steps[0] else {
+        let BrowserStep::HttpRequest {
+            options,
+        } = &full.steps[0]
+        else {
             panic!("expected an http_request step");
         };
         assert_eq!(options.method.as_deref(), Some("post"));

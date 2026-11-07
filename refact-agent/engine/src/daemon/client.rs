@@ -40,10 +40,16 @@ pub enum DaemonInfoReadError {
 impl std::fmt::Display for DaemonInfoReadError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            DaemonInfoReadError::Corrupt { path, message } => {
+            DaemonInfoReadError::Corrupt {
+                path,
+                message,
+            } => {
                 write!(f, "daemon info corrupt at {}: {message}", path.display())
             }
-            DaemonInfoReadError::Io { path, message } => {
+            DaemonInfoReadError::Io {
+                path,
+                message,
+            } => {
                 write!(
                     f,
                     "failed to read daemon info at {}: {message}",
@@ -89,7 +95,10 @@ impl std::fmt::Display for DaemonClientError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             DaemonClientError::Http(message) => write!(f, "{message}"),
-            DaemonClientError::Status { status, body } => {
+            DaemonClientError::Status {
+                status,
+                body,
+            } => {
                 write!(f, "daemon request failed with status {status}: {body}")
             }
             DaemonClientError::Json(message) => write!(f, "{message}"),
@@ -118,7 +127,12 @@ impl DaemonPingStatus {
     pub fn message(&self) -> Option<&str> {
         match self {
             Self::Alive => None,
-            Self::NotRunning { message } | Self::Error { message } => Some(message),
+            Self::NotRunning {
+                message,
+            }
+            | Self::Error {
+                message,
+            } => Some(message),
         }
     }
 }
@@ -201,8 +215,12 @@ pub async fn shutdown_for_upgrade_if_stale(my_version: &str) -> Result<Option<Da
             post_shutdown(&info, "upgrade").await?;
             wait_until_dead(&info, STARTUP_TIMEOUT).await?;
         }
-        DaemonPingStatus::NotRunning { .. } => {}
-        DaemonPingStatus::Error { message } => {
+        DaemonPingStatus::NotRunning {
+            ..
+        } => {}
+        DaemonPingStatus::Error {
+            message,
+        } => {
             return Err(format!("daemon reachable but unhealthy: {message}"));
         }
     }
@@ -493,7 +511,10 @@ async fn response_status_error(response: reqwest::Response) -> DaemonClientError
     } else {
         body
     };
-    DaemonClientError::Status { status, body }
+    DaemonClientError::Status {
+        status,
+        body,
+    }
 }
 
 async fn ensure_daemon_running_with_starter<F>(starter: F) -> Result<DaemonInfo, String>
@@ -505,8 +526,12 @@ where
             DaemonPingStatus::Alive => {
                 return Ok(info);
             }
-            DaemonPingStatus::NotRunning { .. } => {}
-            DaemonPingStatus::Error { message } => {
+            DaemonPingStatus::NotRunning {
+                ..
+            } => {}
+            DaemonPingStatus::Error {
+                message,
+            } => {
                 return Err(format!("daemon reachable but unhealthy: {message}"));
             }
         },
@@ -565,8 +590,12 @@ async fn poll_daemon(timeout: Duration) -> Result<DaemonInfo, String> {
                 DaemonPingStatus::Alive => {
                     return Ok(info);
                 }
-                DaemonPingStatus::NotRunning { .. } => {}
-                DaemonPingStatus::Error { message } => return Err(message),
+                DaemonPingStatus::NotRunning {
+                    ..
+                } => {}
+                DaemonPingStatus::Error {
+                    message,
+                } => return Err(message),
             },
             Ok(None) => {}
             Err(error) => return Err(error.to_string()),
@@ -601,7 +630,10 @@ async fn post_shutdown(info: &DaemonInfo, reason: &str) -> Result<(), String> {
     .map(|_| ())
     .map_err(|error| match error {
         DaemonClientError::Http(message) => format!("failed to request daemon shutdown: {message}"),
-        DaemonClientError::Status { status, body } => {
+        DaemonClientError::Status {
+            status,
+            body,
+        } => {
             format!("daemon shutdown failed with status {status}: {body}")
         }
         DaemonClientError::Json(message) => message,
@@ -967,7 +999,10 @@ mod tests {
 
         assert!(matches!(
             &error,
-            DaemonClientError::Status { status: 401, .. }
+            DaemonClientError::Status {
+                status: 401,
+                ..
+            }
         ));
         assert!(error.to_string().contains("stale, or invalid"));
         assert_eq!(seen.lock().unwrap().len(), 2);
@@ -1015,7 +1050,10 @@ mod tests {
 
         assert!(matches!(
             &error,
-            DaemonClientError::Status { status: 401, .. }
+            DaemonClientError::Status {
+                status: 401,
+                ..
+            }
         ));
         assert_eq!(*seen.lock().unwrap(), 1);
         task.abort();
@@ -1056,7 +1094,10 @@ mod tests {
 
         assert!(matches!(
             &error,
-            DaemonClientError::Status { status: 401, .. }
+            DaemonClientError::Status {
+                status: 401,
+                ..
+            }
         ));
         assert_eq!(*seen.lock().unwrap(), 1);
         task.abort();

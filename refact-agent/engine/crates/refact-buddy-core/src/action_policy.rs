@@ -11,59 +11,119 @@ pub enum ActionExecution {
 
 pub fn action_kind_str(action: &BuddyAction) -> &'static str {
     match action {
-        BuddyAction::OpenPage { .. } => "open_page",
-        BuddyAction::LaunchInvestigationChat { .. } => "launch_investigation_chat",
-        BuddyAction::DraftSkill { .. } => "draft_skill",
-        BuddyAction::DraftCommand { .. } => "draft_command",
-        BuddyAction::DraftDelegate { .. } => "draft_delegate",
-        BuddyAction::DraftMode { .. } => "draft_mode",
-        BuddyAction::DraftAgentsMdPatch { .. } => "draft_agents_md_patch",
-        BuddyAction::DraftDefaultsChange { .. } => "draft_defaults_change",
-        BuddyAction::DraftCustomizationChange { .. } => "draft_customization_change",
-        BuddyAction::OfferMarketplaceInstall { .. } => "offer_marketplace_install",
-        BuddyAction::CreatePulseReport { .. } => "create_pulse_report",
-        BuddyAction::ApplyMemoryBatch { .. } => "apply_memory_batch",
-        BuddyAction::ApplyConfigPatch { .. } => "apply_config_patch",
-        BuddyAction::AcceptQuest { .. } => "accept_quest",
-        BuddyAction::OpenBuddyConversation { .. } => "open_buddy_conversation",
+        BuddyAction::OpenPage {
+            ..
+        } => "open_page",
+        BuddyAction::LaunchInvestigationChat {
+            ..
+        } => "launch_investigation_chat",
+        BuddyAction::DraftSkill {
+            ..
+        } => "draft_skill",
+        BuddyAction::DraftCommand {
+            ..
+        } => "draft_command",
+        BuddyAction::DraftDelegate {
+            ..
+        } => "draft_delegate",
+        BuddyAction::DraftMode {
+            ..
+        } => "draft_mode",
+        BuddyAction::DraftAgentsMdPatch {
+            ..
+        } => "draft_agents_md_patch",
+        BuddyAction::DraftDefaultsChange {
+            ..
+        } => "draft_defaults_change",
+        BuddyAction::DraftCustomizationChange {
+            ..
+        } => "draft_customization_change",
+        BuddyAction::OfferMarketplaceInstall {
+            ..
+        } => "offer_marketplace_install",
+        BuddyAction::CreatePulseReport {
+            ..
+        } => "create_pulse_report",
+        BuddyAction::ApplyMemoryBatch {
+            ..
+        } => "apply_memory_batch",
+        BuddyAction::ApplyConfigPatch {
+            ..
+        } => "apply_config_patch",
+        BuddyAction::AcceptQuest {
+            ..
+        } => "accept_quest",
+        BuddyAction::OpenBuddyConversation {
+            ..
+        } => "open_buddy_conversation",
         BuddyAction::Dismiss => "dismiss",
     }
 }
 
 pub fn action_execution(level: AutonomyLevel, action: &BuddyAction) -> ActionExecution {
     match action {
-        BuddyAction::OpenPage { .. }
-        | BuddyAction::OpenBuddyConversation { .. }
+        BuddyAction::OpenPage {
+            ..
+        }
+        | BuddyAction::OpenBuddyConversation {
+            ..
+        }
         | BuddyAction::Dismiss => ActionExecution::Navigate,
-        BuddyAction::LaunchInvestigationChat { .. } => match level {
+        BuddyAction::LaunchInvestigationChat {
+            ..
+        } => match level {
             AutonomyLevel::ReadOnly => ActionExecution::Deny,
             _ => ActionExecution::Execute,
         },
-        BuddyAction::DraftSkill { .. }
-        | BuddyAction::DraftCommand { .. }
-        | BuddyAction::DraftDelegate { .. }
-        | BuddyAction::DraftMode { .. }
-        | BuddyAction::DraftAgentsMdPatch { .. }
-        | BuddyAction::DraftDefaultsChange { .. }
-        | BuddyAction::DraftCustomizationChange { .. }
-        | BuddyAction::CreatePulseReport { .. } => match level {
+        BuddyAction::DraftSkill {
+            ..
+        }
+        | BuddyAction::DraftCommand {
+            ..
+        }
+        | BuddyAction::DraftDelegate {
+            ..
+        }
+        | BuddyAction::DraftMode {
+            ..
+        }
+        | BuddyAction::DraftAgentsMdPatch {
+            ..
+        }
+        | BuddyAction::DraftDefaultsChange {
+            ..
+        }
+        | BuddyAction::DraftCustomizationChange {
+            ..
+        }
+        | BuddyAction::CreatePulseReport {
+            ..
+        } => match level {
             AutonomyLevel::ReadOnly => ActionExecution::Deny,
             _ => ActionExecution::Prefill,
         },
-        BuddyAction::OfferMarketplaceInstall { .. } => match level {
+        BuddyAction::OfferMarketplaceInstall {
+            ..
+        } => match level {
             AutonomyLevel::ReadOnly => ActionExecution::Deny,
             _ => ActionExecution::Execute,
         },
-        BuddyAction::ApplyMemoryBatch { .. } => match level {
+        BuddyAction::ApplyMemoryBatch {
+            ..
+        } => match level {
             AutonomyLevel::ReadOnly => ActionExecution::Deny,
             _ => ActionExecution::Execute,
         },
-        BuddyAction::ApplyConfigPatch { .. } => match level {
+        BuddyAction::ApplyConfigPatch {
+            ..
+        } => match level {
             AutonomyLevel::ReadOnly => ActionExecution::Deny,
             AutonomyLevel::Suggest => ActionExecution::Prefill,
             AutonomyLevel::Propose | AutonomyLevel::SafeAuto => ActionExecution::Execute,
         },
-        BuddyAction::AcceptQuest { .. } => ActionExecution::Execute,
+        BuddyAction::AcceptQuest {
+            ..
+        } => ActionExecution::Execute,
     }
 }
 

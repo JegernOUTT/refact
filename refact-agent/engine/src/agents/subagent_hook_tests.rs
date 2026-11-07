@@ -58,7 +58,10 @@ async fn fixture(parent_id: &str, hooks_enabled: bool) -> Fixture {
         .write()
         .await
         .insert(parent_id.to_string(), Arc::new(Mutex::new(parent)));
-    Fixture { _temp: temp, app }
+    Fixture {
+        _temp: temp,
+        app,
+    }
 }
 
 fn request(parent_id: &str) -> SpawnRequest {

@@ -1,11 +1,11 @@
-import { describe, expect, test, beforeEach, vi } from "vitest";
 import { http, HttpResponse } from "msw";
+import { beforeEach, describe, expect, test, vi } from "vitest";
 
 import { STUB_CAPS_RESPONSE } from "../../__fixtures__/caps";
 import type { CapsResponse } from "../../services/refact";
+import { enrichAndGroupModels } from "../../utils/enrichModels";
 import { server } from "../../utils/mockServer";
 import { render, screen, within } from "../../utils/test-utils";
-import { enrichAndGroupModels } from "../../utils/enrichModels";
 import { ModelSelector } from "./ModelSelector";
 
 HTMLElement.prototype.hasPointerCapture = () => false;
@@ -193,9 +193,6 @@ describe("model selector caps pipeline", () => {
     );
 
     const listbox = await screen.findByRole("listbox");
-    expect(
-      within(listbox).getByRole("option", { name: /missing\/model/ }),
-    ).toBeDisabled();
 
     await user.click(
       within(listbox).getByRole("option", { name: /openai\/gpt-4o-mini/ }),

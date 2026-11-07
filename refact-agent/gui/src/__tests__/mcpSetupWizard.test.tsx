@@ -246,7 +246,7 @@ describe("MCPSetupWizard", () => {
     await waitFor(
       () => {
         const nameField = screen.getByTestId("mcp-wizard-name");
-        expect((nameField as HTMLInputElement).value).toBeTruthy();
+        expect((nameField as HTMLInputElement).value).toBe("npx_my_server");
       },
       { timeout: 2000 },
     );

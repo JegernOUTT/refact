@@ -43,7 +43,9 @@ impl std::fmt::Display for OperatorStoreError {
             Self::AlreadyOwned(_) => {
                 f.write_str("operator store is already owned by another writer")
             }
-            Self::StaleRevision { current } => {
+            Self::StaleRevision {
+                current,
+            } => {
                 write!(f, "stale revision; current revision is {current}")
             }
         }
@@ -970,7 +972,10 @@ impl OperatorStore {
                     |row| row.get(0),
                 )?)
             };
-            table_row_counts.push(TableRowCount { table, exact_rows });
+            table_row_counts.push(TableRowCount {
+                table,
+                exact_rows,
+            });
         }
         let (min_seq, max_seq): (Option<u64>, Option<u64>) = self.connection.query_row(
             "SELECT (SELECT min(seq) FROM changes), (SELECT max(seq) FROM changes)",
@@ -1281,10 +1286,14 @@ impl OperatorStore {
                 });
             }
             if expected_revision != Some(*revision) {
-                return Err(OperatorStoreError::StaleRevision { current: *revision });
+                return Err(OperatorStoreError::StaleRevision {
+                    current: *revision,
+                });
             }
         } else if expected_revision.is_some() {
-            return Err(OperatorStoreError::StaleRevision { current: 0 });
+            return Err(OperatorStoreError::StaleRevision {
+                current: 0,
+            });
         }
         // A matching CAS retry with no material change allocates neither history nor sequence.
         if let Some((existing, revision, change_seq)) = &current {
@@ -2306,7 +2315,9 @@ impl OperatorStore {
             }
         }
         if current.is_none() && expected_revision.is_some() {
-            return Err(OperatorStoreError::StaleRevision { current: 0 });
+            return Err(OperatorStoreError::StaleRevision {
+                current: 0,
+            });
         }
         let revision = current.unwrap_or(0) + 1;
         let seq = next_seq(&tx)?;
@@ -3184,7 +3195,9 @@ impl OperatorStore {
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()?
-            .ok_or(OperatorStoreError::StaleRevision { current: 0 })?;
+            .ok_or(OperatorStoreError::StaleRevision {
+                current: 0,
+            })?;
         if current as u64 != expected_revision {
             return Err(OperatorStoreError::StaleRevision {
                 current: current as u64,
@@ -3223,9 +3236,13 @@ impl OperatorStore {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?
-            .ok_or(OperatorStoreError::StaleRevision { current: 0 })?;
+            .ok_or(OperatorStoreError::StaleRevision {
+                current: 0,
+            })?;
         if revision != expected_revision {
-            return Err(OperatorStoreError::StaleRevision { current: revision });
+            return Err(OperatorStoreError::StaleRevision {
+                current: revision,
+            });
         }
         let previous: ActionExecution = decode(&previous)?;
         if previous.action_id != execution.action_id
@@ -3964,7 +3981,9 @@ fn upsert_work_item_in_tx(
         }
     }
     if current.is_none() && expected_revision.is_some() {
-        return Err(OperatorStoreError::StaleRevision { current: 0 });
+        return Err(OperatorStoreError::StaleRevision {
+            current: 0,
+        });
     }
     let revision = current
         .unwrap_or(0)
@@ -5214,7 +5233,9 @@ mod tests {
         let (outcome, item, artifact) = linked_records(&project);
         assert!(matches!(
             store.append_outcome_work_item_artifact(&outcome, &item, Some(1), Some(&artifact)),
-            Err(OperatorStoreError::StaleRevision { current: 0 })
+            Err(OperatorStoreError::StaleRevision {
+                current: 0
+            })
         ));
         assert!(store.get_run_outcome(&outcome.run_id).unwrap().is_none());
         assert!(store.get_work_item(&item.id).unwrap().is_none());
@@ -5576,7 +5597,9 @@ mod tests {
         old.status = ActionExecutionState::Completed;
         assert!(matches!(
             store.replace_execution(&old, 1),
-            Err(OperatorStoreError::StaleRevision { current: 2 })
+            Err(OperatorStoreError::StaleRevision {
+                current: 2
+            })
         ));
         store.replace_execution(&old, restored.revision).unwrap();
         assert!(store.is_legacy_resource_execution("legacy").unwrap());
@@ -5619,7 +5642,9 @@ mod tests {
         assert_eq!(updated.value.requester, original.requester);
         assert!(matches!(
             store.update_execution_state(&original.execution_id, 1, ActionExecutionState::Failed),
-            Err(OperatorStoreError::StaleRevision { current: 2 })
+            Err(OperatorStoreError::StaleRevision {
+                current: 2
+            })
         ));
     }
 

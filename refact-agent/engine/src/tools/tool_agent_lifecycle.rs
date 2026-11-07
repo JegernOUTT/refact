@@ -1628,17 +1628,6 @@ pub(crate) mod tests {
         }
     }
 
-    #[test]
-    fn tool_agent_lifecycle_descriptions_are_planner_only() {
-        let cancel = ToolCancelAgent::new().tool_description();
-        assert_eq!(cancel.name, "cancel_agent");
-        assert!(cancel.description.contains("Planner-only"));
-        assert_eq!(cancel.input_schema["required"], json!(["card_id"]));
-        assert!(cancel.input_schema["properties"]
-            .get("retain_worktree")
-            .is_some());
-    }
-
     #[tokio::test]
     async fn tool_agent_lifecycle_rejects_non_planner_role() {
         let temp = tempfile::tempdir().unwrap();

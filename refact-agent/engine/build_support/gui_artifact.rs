@@ -63,7 +63,12 @@ pub enum Entry {
 impl Entry {
     fn path(&self) -> &str {
         match self {
-            Self::Directory { path } | Self::File { path, .. } => path,
+            Self::Directory {
+                path,
+            }
+            | Self::File {
+                path, ..
+            } => path,
         }
     }
 }
@@ -688,7 +693,12 @@ fn complete(entries: &[Entry]) -> Result<()> {
         if !valid_relative(entry.path()) || entry.path().split('/').any(|p| p == OWNER) {
             return refuse("Unsafe/reserved GUI artifact path");
         }
-        if let Entry::File { size, sha256, .. } = entry {
+        if let Entry::File {
+            size,
+            sha256,
+            ..
+        } = entry
+        {
             if *size > MAX_FILE || !is_digest(sha256) {
                 return refuse("Invalid GUI artifact digest/size");
             }
@@ -779,8 +789,14 @@ pub fn publish(
     for entry in &manifest.artifacts {
         let target = stage.join(entry.path());
         match entry {
-            Entry::Directory { .. } => fs::create_dir(&target)?,
-            Entry::File { path, size, sha256 } => {
+            Entry::Directory {
+                ..
+            } => fs::create_dir(&target)?,
+            Entry::File {
+                path,
+                size,
+                sha256,
+            } => {
                 let bytes = read(&gui.join("dist/chat").join(path), MAX_FILE)?;
                 if bytes.len() as u64 != *size || digest(&bytes) != *sha256 {
                     return refuse("GUI artifact changed during staging; prior output retained");

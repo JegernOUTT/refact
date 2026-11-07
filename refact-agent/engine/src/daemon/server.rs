@@ -1499,7 +1499,14 @@ async fn read_log_tail(
     let rotated = !cursor.head.is_empty() && (head != cursor.head || len < cursor.offset);
     let start = if rotated { 0 } else { cursor.offset.min(len) };
     if len <= start {
-        return (String::new(), LogTailCursor { offset: len, head }, None);
+        return (
+            String::new(),
+            LogTailCursor {
+                offset: len,
+                head,
+            },
+            None,
+        );
     }
     let to_read = (len - start).min(LOG_STREAM_READ_CAP);
     if file.seek(std::io::SeekFrom::Start(start)).await.is_err() {
@@ -2732,7 +2739,9 @@ mod tests {
             std::env::remove_var("FAKE_WORKER_DELAY_READY");
             std::env::remove_var("FAKE_WORKER_PORT_BUSY_EXIT");
             std::env::remove_var("FAKE_WORKER_SKIP_LSP");
-            Some(Self { keys })
+            Some(Self {
+                keys,
+            })
         }
     }
 
@@ -2848,7 +2857,9 @@ mod tests {
                 State((state.clone(), 0)),
                 axum::extract::Path(entry.id.clone()),
                 headers.clone(),
-                Json(PrepareInstallationRequest { spec: spec.clone() })
+                Json(PrepareInstallationRequest {
+                    spec: spec.clone()
+                })
             )
             .await
             .status(),
@@ -2882,7 +2893,9 @@ mod tests {
                 State((state.clone(), 0)),
                 axum::extract::Path(entry.id.clone()),
                 headers.clone(),
-                Json(PrepareInstallationRequest { spec }),
+                Json(PrepareInstallationRequest {
+                    spec,
+                }),
             )
             .await,
         )

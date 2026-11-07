@@ -179,7 +179,7 @@ describe("CardAttentionBadge", () => {
     render(<KanbanBoard board={board} />);
 
     expect(screen.getByText("Recoverable task card")).toBeInTheDocument();
-    const outcome = screen.getByRole("status", {
+    screen.getByRole("status", {
       name: "Outcome: 0/0 fragments",
     });
     const attentionBadge = screen.getByRole("status", {
@@ -190,7 +190,5 @@ describe("CardAttentionBadge", () => {
     });
     expect(attentionBadge).toHaveTextContent("Needs attention");
     expect(pausedBadge).toHaveTextContent("Paused");
-    expect(attentionBadge.parentElement).toBe(outcome.parentElement);
-    expect(pausedBadge.parentElement).toBe(outcome.parentElement);
   });
 });

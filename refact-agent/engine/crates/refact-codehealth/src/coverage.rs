@@ -282,7 +282,10 @@ fn tag_sections<'a>(text: &'a str, name: &str) -> Vec<TagSection<'a>> {
         let open_end = start + open_end_rel + 1;
         let open_tag = &text[start..open_end];
         if open_tag.ends_with("/>") {
-            out.push(TagSection { open_tag, body: "" });
+            out.push(TagSection {
+                open_tag,
+                body: "",
+            });
             pos = open_end;
             continue;
         }

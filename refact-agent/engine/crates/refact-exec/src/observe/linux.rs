@@ -263,7 +263,10 @@ fn sorted_access(reads: &HashSet<PathBuf>, writes: &HashSet<PathBuf>) -> Observe
     let mut writes: Vec<_> = writes.iter().cloned().collect();
     reads.sort();
     writes.sort();
-    ObservedAccess { reads, writes }
+    ObservedAccess {
+        reads,
+        writes,
+    }
 }
 
 struct Shared {
@@ -684,7 +687,12 @@ const fn statement(code: u16, k: u32) -> libc::sock_filter {
 }
 
 const fn jump(code: u16, k: u32, jt: u8, jf: u8) -> libc::sock_filter {
-    libc::sock_filter { code, jt, jf, k }
+    libc::sock_filter {
+        code,
+        jt,
+        jf,
+        k,
+    }
 }
 
 fn wait_for_initial_stop(process_id: libc::pid_t) -> Result<(), String> {

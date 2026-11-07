@@ -350,8 +350,13 @@ pub trait ChatSessionFacade: Send + Sync {
         chat_id: &str,
         delivery: PendingDelivery,
     ) -> Result<DeliveryOutcome, String> {
-        self.push_command(chat_id, ChatCommand::DeliverMessages { delivery })
-            .await?;
+        self.push_command(
+            chat_id,
+            ChatCommand::DeliverMessages {
+                delivery,
+            },
+        )
+        .await?;
         Ok(DeliveryOutcome::Queued)
     }
     /// Detailed delivery result. Unsupported runtimes must not fabricate receipts.

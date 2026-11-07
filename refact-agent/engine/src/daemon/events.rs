@@ -112,7 +112,10 @@ impl EventBus {
             .filter(|event| event.seq > after_seq)
             .cloned()
             .collect();
-        EventReplay { events, gap }
+        EventReplay {
+            events,
+            gap,
+        }
     }
 
     pub async fn emit(

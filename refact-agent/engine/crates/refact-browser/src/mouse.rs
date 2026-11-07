@@ -167,7 +167,9 @@ pub struct CdpMouseDispatcher<'a> {
 
 impl<'a> CdpMouseDispatcher<'a> {
     pub fn new(tab: &'a Tab) -> Self {
-        Self { tab }
+        Self {
+            tab,
+        }
     }
 
     pub fn clickable_point(&self, handle: &ElementHandle) -> Result<MainFrameCssPoint, MouseError> {
@@ -376,7 +378,10 @@ impl<'a, D: MouseDispatcher, K: KeyboardDispatcher> Mouse<'a, D, K> {
             return Err(MouseError::InvalidSteps);
         }
         let from = self.state.position;
-        self.state.position = MainFrameCssPoint { x, y };
+        self.state.position = MainFrameCssPoint {
+            x,
+            y,
+        };
         for step in 1..=steps {
             let progress = step as f64 / steps as f64;
             self.dispatch_mouse(MouseEventPayload {
@@ -470,7 +475,10 @@ impl<'a, D: MouseDispatcher, K: KeyboardDispatcher> Mouse<'a, D, K> {
         let modifiers = self.keyboard.modifier_bitmask();
         self.dispatch_touch(TouchEventPayload {
             event_type: TouchEventType::Start,
-            touch_points: vec![MainFrameCssPoint { x, y }],
+            touch_points: vec![MainFrameCssPoint {
+                x,
+                y,
+            }],
             modifiers,
         })?;
         self.dispatch_touch(TouchEventPayload {
@@ -677,7 +685,10 @@ mod tests {
     }
 
     fn quad(points: [(f64, f64); 4]) -> ContentQuad {
-        ContentQuad(points.map(|(x, y)| MainFrameCssPoint { x, y }))
+        ContentQuad(points.map(|(x, y)| MainFrameCssPoint {
+            x,
+            y,
+        }))
     }
 
     fn viewport() -> MainFrameCssViewport {

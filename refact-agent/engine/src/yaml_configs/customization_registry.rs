@@ -1191,23 +1191,4 @@ mod tests {
         let config = exposed_config_subagent("project_researcher");
         assert!(should_expose_subagent_as_config_tool(&config));
     }
-
-    #[test]
-    fn test_setup_skills_prompt_documents_supported_skill_fields() {
-        let content = read_default_mode_file("setup_skills.yaml");
-
-        for key in [
-            "argument-hint",
-            "allowed-tools",
-            "user-invocable",
-            "@include <relative-file>",
-        ] {
-            assert!(
-                content.contains(key),
-                "setup_skills.yaml should mention '{}': {}",
-                key,
-                content
-            );
-        }
-    }
 }

@@ -7,28 +7,35 @@ test.describe("workspace tab drag and drop", () => {
     });
   });
 
-  test("dragging a chat tab onto an unsplit chat creates a two-pane group", async ({
+  test("dragging a chat tab to the pane edge creates a two-pane group", async ({
     page,
   }) => {
     await page.setViewportSize({ width: 1280, height: 900 });
     await page.goto("/tests/e2e/route-showcase.html?route=chat-dnd");
-    await page.locator("[data-workspace-unsplit-drop-target='true']").waitFor();
-
+    const pane = page.locator("[data-workspace-leaf-id='root']");
+    await expect(page.locator("[data-workspace-leaf-id]")).toHaveCount(1);
     const source = page.getByRole("tab", {
       name: /Responsive split pane companion/,
     });
-    const target = page.locator("[data-workspace-unsplit-drop-target='true']");
-    const dataTransfer = await page.evaluateHandle(() => new DataTransfer());
+    const sourceBox = await source.boundingBox();
+    const paneBox = await pane.boundingBox();
+    if (!sourceBox || !paneBox) throw new Error("Missing drag source or pane");
 
-    await source.dispatchEvent("dragstart", { dataTransfer });
-    await target.dispatchEvent("dragenter", { dataTransfer });
-    await target.dispatchEvent("dragover", { dataTransfer });
-    await target.dispatchEvent("drop", { dataTransfer });
-    await source.dispatchEvent("dragend", { dataTransfer });
-
+    await page.mouse.move(
+      sourceBox.x + sourceBox.width / 2,
+      sourceBox.y + sourceBox.height / 2,
+    );
+    await page.mouse.down();
+    await page.mouse.move(
+      paneBox.x + paneBox.width - 20,
+      paneBox.y + paneBox.height / 2,
+      { steps: 12 },
+    );
     await expect(
-      page.locator("[data-workspace-group-tab-id='chat:showcase-chat']"),
-    ).toBeVisible();
+      page.getByTestId("workspace-pane-drop-preview"),
+    ).toHaveAttribute("data-drop-target", "right");
+    await page.mouse.up();
+
     await expect(page.locator("[data-workspace-leaf-id]")).toHaveCount(2);
     await expect(
       page.locator("[data-surface-key='chat:showcase-chat']"),
@@ -36,7 +43,17 @@ test.describe("workspace tab drag and drop", () => {
     await expect(
       page.locator("[data-surface-key='chat:showcase-chat-b']"),
     ).toBeVisible();
-    await expect(page.getByRole("tab")).toHaveCount(1);
-    await expect(page.getByLabel("2 panes")).toBeVisible();
+    await expect(page.getByRole("tab")).toHaveCount(2);
+    // Both surfaces remain owned by distinct panes after the real drop.
+    await expect(
+      page.locator("[data-workspace-leaf-id]").filter({
+        has: page.locator("[data-surface-key='chat:showcase-chat']"),
+      }),
+    ).toHaveCount(1);
+    await expect(
+      page.locator("[data-workspace-leaf-id]").filter({
+        has: page.locator("[data-surface-key='chat:showcase-chat-b']"),
+      }),
+    ).toHaveCount(1);
   });
 });

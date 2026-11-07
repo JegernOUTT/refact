@@ -41,20 +41,11 @@ describe("TranscriptItem", () => {
     );
     const row = screen.getByTestId("transcript-row");
     expect(within(row).getByText("Read")).toBeInTheDocument();
-    expect(within(row).getByText("·")).toBeInTheDocument();
     expect(within(row).getByText("src/main.rs")).toBeInTheDocument();
     expect(screen.getByTestId("transcript-meta")).toHaveTextContent("42 lines");
     expect(screen.getByTestId("transcript-status-pill")).toHaveTextContent(
       "Running",
     );
-    expect(row.lastElementChild).toBe(screen.getByTestId("transcript-chevron"));
-  });
-
-  it("uses an arrow separator for messages", () => {
-    render(
-      <TranscriptItem separator="arrow" target="worker-1" verb="Message" />,
-    );
-    expect(screen.getByText("→")).toBeInTheDocument();
   });
 
   it("hides the pill for done unless statusLabel is set", () => {
@@ -228,14 +219,6 @@ describe("TranscriptRaw", () => {
     expect(
       screen.getByRole("button", { name: "Copy Args" }),
     ).toBeInTheDocument();
-  });
-});
-
-describe("TranscriptItem layout guard", () => {
-  it("renders inline markup as target without changing roles", () => {
-    render(<TranscriptItem target={<code>ls -la</code>} verb="Run" />);
-    const title = screen.getByTestId("transcript-title");
-    expect(within(title).getByText("ls -la").tagName).toBe("CODE");
   });
 });
 

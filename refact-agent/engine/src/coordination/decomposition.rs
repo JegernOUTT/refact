@@ -193,7 +193,9 @@ pub fn aggregate(
 /// Model-facing text. A refusal reads as a refusal, never as a number.
 pub fn render(advice: &Advice) -> String {
     match advice {
-        Advice::Unavailable { reason } => {
+        Advice::Unavailable {
+            reason,
+        } => {
             format!("Decomposition advisor unavailable: {reason}.")
         }
         Advice::InsufficientData {
@@ -244,7 +246,10 @@ pub struct OutcomeLedger {
 impl OutcomeLedger {
     pub fn new(store: Arc<CoordinationStore>, project: ProjectKey) -> Self {
         let access = store.authorize(project);
-        OutcomeLedger { store, access }
+        OutcomeLedger {
+            store,
+            access,
+        }
     }
 
     pub fn store_path(&self) -> &std::path::Path {

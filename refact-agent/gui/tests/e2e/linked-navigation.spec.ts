@@ -260,17 +260,20 @@ test("a hung metadata preflight surfaces a timeout error and the next click stil
   page,
 }) => {
   const mock = await mockEngine(page);
-  await page.clock.install();
   mock.holdMetadata.add(plannerB);
   await page.goto(`/tests/e2e/linked-navigation.html?task=${taskId}`);
   await expect(transcriptOf(page, plannerA)).toBeVisible();
 
+  await page.clock.install();
   await openFromSwitcher(page, `Open chat ${titles[plannerB]}`);
   const pending = page
     .getByRole("status")
-    .filter({ hasText: "Opening linked target..." });
-  await expect(pending).toBeVisible();
+    .filter({ hasText: /Opening linked target(?:…|\.\.\.)/ });
   await expect.poll(() => mock.metadata).toEqual([plannerB]);
+  // The task switcher is a trusted local target: retain the current transcript
+  // without a global loading notice while metadata authorization is pending.
+  await expect(pending).toHaveCount(0);
+  await expect(transcriptOf(page, plannerA)).toBeVisible();
 
   await page.clock.fastForward(15_000);
   await expect(page.getByRole("alert")).toContainText("timed out");

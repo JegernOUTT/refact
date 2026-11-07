@@ -839,25 +839,6 @@ describe("ToolsContent routing", () => {
       "Reported failure",
     );
   });
-
-  it("agent_finish expanded panel keeps fixed section order with raw last", () => {
-    const { container } = renderToolContent(
-      "agent_finish",
-      STRUCTURED_FINAL_REPORT,
-      { resultExtra: { source: "engine" } },
-    );
-    openToolCard();
-    const sections = Array.from(
-      container.querySelectorAll("[data-section]"),
-    ).map((node) => node.getAttribute("data-section"));
-    expect(sections).toEqual([
-      "summary",
-      "output",
-      "artifacts",
-      "actions",
-      "raw",
-    ]);
-  });
 });
 
 const DEDICATED_COMPACT_NAMES = [

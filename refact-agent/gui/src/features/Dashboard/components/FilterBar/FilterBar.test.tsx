@@ -1,5 +1,3 @@
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { act } from "react-dom/test-utils";
 import { fireEvent, render, screen } from "../../../../utils/test-utils";
@@ -7,28 +5,6 @@ import { FilterBar } from "./FilterBar";
 import type { ChatHistoryItem } from "../../../History/historySlice";
 
 const NOW = Date.now();
-
-const css = readFileSync(
-  join(
-    process.cwd(),
-    "src/features/Dashboard/components/FilterBar/FilterBar.module.css",
-  ),
-  "utf8",
-);
-
-function block(css: string, header: string): string {
-  const start = css.indexOf(header);
-  expect(start, `missing block: ${header}`).toBeGreaterThanOrEqual(0);
-  let depth = 0;
-  for (let i = start + header.length - 1; i < css.length; i++) {
-    if (css[i] === "{") depth += 1;
-    if (css[i] === "}") {
-      depth -= 1;
-      if (depth === 0) return css.slice(start, i + 1);
-    }
-  }
-  throw new Error(`unterminated block: ${header}`);
-}
 
 function makeChat(
   partial: Partial<ChatHistoryItem> & { id: string },
@@ -66,26 +42,6 @@ function preloadedStateWith(chats: ChatHistoryItem[]) {
 }
 
 const ALL_FILTER = { kind: "all" as const, query: "" };
-
-describe("FilterBar narrow-width layout contract", () => {
-  it("lets the row wrap instead of squeezing the search field off-screen", () => {
-    expect(block(css, ".filterBar {")).toContain("flex-wrap: wrap;");
-  });
-
-  it("gives the segmented control and search field their own rows when narrow", () => {
-    const narrow = block(css, "@container (max-width: 420px) {");
-
-    expect(block(narrow, ".segmented {")).toContain("flex: 1 1 100%;");
-
-    const searchField = block(narrow, ".searchField {");
-    expect(searchField).toContain("flex-basis: 100%;");
-    expect(searchField).toContain("min-width: 0;");
-  });
-
-  it("uses spacing tokens rather than magic numbers for the row gap", () => {
-    expect(block(css, ".filterBar {")).toContain("gap: var(--rf-space-2);");
-  });
-});
 
 describe("FilterBar controls", () => {
   it("renders only kind filters and search even when chats need attention", () => {

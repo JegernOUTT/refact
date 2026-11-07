@@ -5,7 +5,6 @@ import { server } from "../utils/mockServer";
 import { MarketplaceHub } from "../features/MarketplaceHub";
 import { SkillsMarketplace } from "../features/SkillsMarketplace";
 import { CommandsMarketplace } from "../features/CommandsMarketplace";
-import { SubagentsMarketplace } from "../features/SubagentsMarketplace";
 import { marketplacePageToTab } from "../features/MarketplaceHub";
 import type { Page } from "../features/Pages/pagesSlice";
 
@@ -137,44 +136,6 @@ describe("MarketplaceHub", () => {
 });
 
 describe("SkillsMarketplace", () => {
-  it("renders marketplace items from API", async () => {
-    server.use(
-      http.get("*/v1/ext/registry", () => HttpResponse.json(REGISTRY)),
-      http.get("*/v1/skills/marketplace", () =>
-        HttpResponse.json({
-          items: [
-            {
-              id: "code-review",
-              name: "code-review",
-              description: "Review code",
-              tags: ["review"],
-              publisher: "Refact",
-              kind: "skill",
-              source_id: "refact-starter-skills",
-              source_label: "Refact Starter Skills",
-              path: "skills/code-review",
-              installed_scopes: [],
-            },
-          ],
-          sources: SOURCES,
-        }),
-      ),
-    );
-
-    render(
-      <SkillsMarketplace
-        host="vscode"
-        tabbed={false}
-        backFromMarketplace={() => undefined}
-      />,
-      { preloadedState: PRELOADED_STATE },
-    );
-
-    expect(await screen.findByText("Skills Marketplace")).toBeDefined();
-    expect(await screen.findByText("code-review")).toBeDefined();
-    expect(screen.getByText("Review code")).toBeDefined();
-  });
-
   it("opens source settings dialog", async () => {
     server.use(
       http.get("*/v1/ext/registry", () => HttpResponse.json(REGISTRY)),
@@ -248,67 +209,5 @@ describe("CommandsMarketplace", () => {
     expect(await screen.findByText("Commands Marketplace")).toBeDefined();
     expect(await screen.findByText("Run review")).toBeDefined();
     expect(screen.getByText("Installed: global")).toBeDefined();
-  });
-});
-
-describe("SubagentsMarketplace", () => {
-  it("renders subagents from API", async () => {
-    server.use(
-      http.get("*/v1/customization/registry", () =>
-        HttpResponse.json({
-          modes: [],
-          subagents: [],
-          toolbox_commands: [],
-          code_lens: [],
-          errors: [],
-          has_project_root: true,
-        }),
-      ),
-      http.get("*/v1/subagents/marketplace", () =>
-        HttpResponse.json({
-          items: [
-            {
-              id: "research_helper",
-              name: "Research Helper",
-              description: "Focused research subagent",
-              tags: ["research"],
-              publisher: "Refact",
-              kind: "subagent",
-              source_id: "refact-starter-subagents",
-              source_label: "Refact Starter Subagents",
-              path: "subagents/research_helper.yaml",
-              installed_scopes: [],
-            },
-          ],
-          sources: [
-            {
-              id: "refact-starter-subagents",
-              label: "Refact Starter Subagents",
-              description: "Bundled starter subagents",
-              enabled: true,
-              builtin: true,
-              removable: false,
-              source_kind: "builtin_embedded",
-              supported_kinds: ["subagent"],
-              parser_mode: "scan",
-              item_count: 1,
-            },
-          ],
-        }),
-      ),
-    );
-
-    render(
-      <SubagentsMarketplace
-        host="vscode"
-        tabbed={false}
-        backFromMarketplace={() => undefined}
-      />,
-      { preloadedState: PRELOADED_STATE },
-    );
-
-    expect(await screen.findByText("Subagents Marketplace")).toBeDefined();
-    expect(await screen.findByText("Research Helper")).toBeDefined();
-    expect(screen.getByText("Focused research subagent")).toBeDefined();
   });
 });

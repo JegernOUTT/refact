@@ -1,28 +1,27 @@
+use chrono::Utc;
 use std::collections::{BTreeSet, VecDeque};
 use std::pin::Pin;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use chrono::Utc;
-use tokio::sync::{Mutex as AMutex};
+use std::sync::Arc;
+use tokio::sync::Mutex as AMutex;
 use tracing::warn;
 use uuid::Uuid;
 
 use crate::app_state::AppState;
 use crate::buddy::chat_reactions::{maybe_enqueue_chat_reaction, AcceptedUserMessage};
-use refact_buddy_core::user_action::UserAction;
+use crate::call_validation::{ChatContent, ChatMessage};
+use crate::chat::internal_roles::{self, mode_switch_event_with_diff, EventSubkind};
 use crate::ext::hooks::HookEvent;
-use crate::ext::hooks_runner::{ControlVerdict, HookPayload, get_project_dir_string, run_control_hooks};
+use crate::ext::hooks_runner::{get_project_dir_string, run_control_hooks, ControlVerdict, HookPayload};
 #[cfg(test)]
 use crate::ext::skills_context::SKILLS_CONTEXT_MARKER;
-use crate::call_validation::{ChatContent, ChatMessage};
 use crate::files_correction::get_project_dirs;
-use crate::chat::internal_roles::{self, mode_switch_event_with_diff, EventSubkind};
 use crate::yaml_configs::customization_registry::get_mode_config;
 use crate::yaml_configs::customization_types::ModeConfig;
+use refact_buddy_core::user_action::UserAction;
 
-use super::types::*;
 use super::content::parse_content_with_attachments;
-use super::generation::{start_generation, maybe_save_trajectory_with_intent};
+use super::generation::{maybe_save_trajectory_with_intent, start_generation};
 use super::goal_verifier::{
     should_verify_goal_on_done, verify_goal_before_completion, GoalCompletionGateOutcome,
 };
@@ -30,7 +29,8 @@ use super::tools::{
     acquire_session_turn_tool_pool, execute_tools_with_session,
     resolve_tool_call_aliases_with_catalog,
 };
-use super::trajectories::{maybe_save_trajectory_background_with_intent};
+use super::trajectories::maybe_save_trajectory_background_with_intent;
+use super::types::*;
 use crate::worktrees::service::WorktreeService;
 use crate::worktrees::types::{WorktreeMeta, WorktreeReference};
 

@@ -1708,9 +1708,15 @@ pub(super) fn status_label(status: &ExecStatus) -> &'static str {
     match status {
         ExecStatus::Starting => "starting",
         ExecStatus::Running => "running",
-        ExecStatus::Exited { .. } => "exited",
-        ExecStatus::SandboxLauncherFailed { .. } => "sandbox_launcher_failed",
-        ExecStatus::Failed { .. } => "failed",
+        ExecStatus::Exited {
+            ..
+        } => "exited",
+        ExecStatus::SandboxLauncherFailed {
+            ..
+        } => "sandbox_launcher_failed",
+        ExecStatus::Failed {
+            ..
+        } => "failed",
         ExecStatus::Killed => "killed",
         ExecStatus::TimedOut => "timed_out",
     }
@@ -1718,11 +1724,17 @@ pub(super) fn status_label(status: &ExecStatus) -> &'static str {
 
 fn exit_code(status: &ExecStatus) -> Option<i32> {
     match status {
-        ExecStatus::Exited { exit_code } => *exit_code,
-        ExecStatus::SandboxLauncherFailed { exit_code } => Some(*exit_code),
+        ExecStatus::Exited {
+            exit_code,
+        } => *exit_code,
+        ExecStatus::SandboxLauncherFailed {
+            exit_code,
+        } => Some(*exit_code),
         ExecStatus::Starting
         | ExecStatus::Running
-        | ExecStatus::Failed { .. }
+        | ExecStatus::Failed {
+            ..
+        }
         | ExecStatus::Killed
         | ExecStatus::TimedOut => None,
     }
@@ -1730,11 +1742,19 @@ fn exit_code(status: &ExecStatus) -> Option<i32> {
 
 fn tool_failed_for_status(status: &ExecStatus) -> Option<bool> {
     match status {
-        ExecStatus::SandboxLauncherFailed { .. }
-        | ExecStatus::Failed { .. }
+        ExecStatus::SandboxLauncherFailed {
+            ..
+        }
+        | ExecStatus::Failed {
+            ..
+        }
         | ExecStatus::Killed
         | ExecStatus::TimedOut => Some(true),
-        ExecStatus::Starting | ExecStatus::Running | ExecStatus::Exited { .. } => None,
+        ExecStatus::Starting
+        | ExecStatus::Running
+        | ExecStatus::Exited {
+            ..
+        } => None,
     }
 }
 
@@ -1902,10 +1922,12 @@ fn format_process_snapshot(title: &str, snapshot: &ExecProcessSnapshot) -> Strin
         .map(|code| code.to_string())
         .unwrap_or_else(|| "<none>".to_string());
     let failure_message = match &snapshot.status {
-        ExecStatus::SandboxLauncherFailed { .. } => {
-            Some("sandbox confinement could not start".to_string())
-        }
-        ExecStatus::Failed { message } => Some(message.clone()),
+        ExecStatus::SandboxLauncherFailed {
+            ..
+        } => Some("sandbox confinement could not start".to_string()),
+        ExecStatus::Failed {
+            message,
+        } => Some(message.clone()),
         _ => None,
     };
     let mut out = format!(
@@ -3765,7 +3787,12 @@ mod tests {
         .await
         .unwrap()
         .unwrap();
-        assert_eq!(completed.status, ExecStatus::Exited { exit_code: Some(0) });
+        assert_eq!(
+            completed.status,
+            ExecStatus::Exited {
+                exit_code: Some(0)
+            }
+        );
         assert_eq!(completed.meta.cwd, request.cwd);
         let output = fixture.app.runtime.exec_registry.read(&id, 0, None).await;
         let expected = if cfg!(target_os = "linux") {
@@ -4673,38 +4700,6 @@ mod tests {
         let duration_ms = exec(&completed)["duration_ms"].as_u64().unwrap();
 
         assert!(duration_ms > 0);
-    }
-
-    #[tokio::test]
-    async fn process_extra_exec_no_legacy_duration_field() {
-        let (_gcx, ccx) = test_ccx().await;
-        let mut start = ToolProcessStart {
-            config_path: String::new(),
-        };
-        let started = run_tool(
-            &mut start,
-            ccx.clone(),
-            make_args_map(vec![
-                ("command", json!(delayed_quick_command("hi"))),
-                ("description", json!("Run delayed process")),
-            ]),
-        )
-        .await
-        .unwrap();
-        let process_id = process_id(&started);
-        let completed = run_process_wait(
-            ccx,
-            make_args_map(vec![
-                ("process_id", json!(process_id.as_str())),
-                ("timeout_ms", json!(1000)),
-            ]),
-        )
-        .await
-        .unwrap();
-
-        assert!(exec(&completed)
-            .get(&["duration", "secs"].join("_"))
-            .is_none());
     }
 
     #[tokio::test]

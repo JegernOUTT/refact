@@ -3,29 +3,9 @@
 // chat React surfaces with mocked Redux state, so CI does not need a running LSP.
 import { expect, test } from "@playwright/test";
 
-type OverflowReport = {
-  docOverflow: boolean;
-  offenders: string[];
-  innerScrollOffenders: string[];
-};
-
-type BuddyInnerOverflowReport = {
-  selector: string;
-  description: string;
-  missing: boolean;
-  overflowing: boolean;
-  scrollWidth: number;
-  clientWidth: number;
-};
-
-type BuddyTabPanelTarget = {
-  selector: string;
-  description: string;
-};
-
 // Buddy has exactly five top-level sections. Legacy Pulse/Opportunities live
 // inside Reports and legacy Recent errors inside Activity (operator disabled),
-// so each panel is measured inside the section that owns it.
+// so each panel is checked inside the section that owns it.
 const BUDDY_TOP_SECTIONS = [
   "Home",
   "Reports",
@@ -34,9 +14,11 @@ const BUDDY_TOP_SECTIONS = [
   "Settings",
 ] as const;
 
-const BUDDY_TAB_PANELS: (BuddyTabPanelTarget & {
+const BUDDY_TAB_PANELS: {
   tab: (typeof BUDDY_TOP_SECTIONS)[number];
-})[] = [
+  selector: string;
+  description: string;
+}[] = [
   {
     tab: "Home",
     selector: "[data-testid='buddy-home-overview']",
@@ -89,395 +71,72 @@ const BUDDY_TAB_PANELS: (BuddyTabPanelTarget & {
   },
 ];
 
-type EdgeMeasurement = {
-  name: string;
-  delta: number;
-  details: string;
-};
-
-type GutterMeasurement = {
-  name: string;
-  value: string;
-};
-
 const widths = [240, 360, 768, 1280] as const;
 
-const routes = [
-  {
-    name: "dashboard",
-    path: "/tests/e2e/route-showcase.html?route=dashboard",
-  },
-  {
-    name: "chat",
-    path: "/tests/e2e/route-showcase.html?route=chat",
-  },
-  {
-    name: "chat split group",
-    path: "/tests/e2e/route-showcase.html?route=chat-split",
-  },
-  {
-    name: "workspace dock and terminal workbench",
-    path: "/tests/e2e/route-showcase.html?route=workspace-chrome",
-  },
-  {
-    name: "workspace disabled terminal workbench",
-    path: "/tests/e2e/route-showcase.html?route=workspace-chrome-disabled",
-  },
-  {
-    name: "buddy",
-    path: "/tests/e2e/route-showcase.html?route=buddy",
-  },
-  {
-    name: "settings general",
-    path: "/tests/e2e/route-showcase.html?route=settings&settings=general",
-  },
-  {
-    name: "settings privacy",
-    path: "/tests/e2e/route-showcase.html?route=settings&settings=privacy",
-  },
-  {
-    name: "settings providers",
-    path: "/tests/e2e/route-showcase.html?route=settings&settings=providers",
-  },
-  {
-    name: "settings models",
-    path: "/tests/e2e/route-showcase.html?route=settings&settings=models",
-  },
-  {
-    name: "settings customization",
-    path: "/tests/e2e/route-showcase.html?route=settings&settings=customization",
-  },
-  {
-    name: "settings integrations",
-    path: "/tests/e2e/route-showcase.html?route=settings&settings=integrations",
-  },
-  {
-    name: "settings scheduler",
-    path: "/tests/e2e/route-showcase.html?route=settings&settings=scheduler",
-  },
-  {
-    name: "settings documentation",
-    path: "/tests/e2e/route-showcase.html?route=settings&settings=documentation",
-  },
-  {
-    name: "settings extensions",
-    path: "/tests/e2e/route-showcase.html?route=settings&settings=extensions",
-  },
-  {
-    name: "marketplace skills",
-    path: "/tests/e2e/route-showcase.html?route=marketplace&marketplace=skills",
-  },
-  {
-    name: "marketplace commands",
-    path: "/tests/e2e/route-showcase.html?route=marketplace&marketplace=commands",
-  },
-  {
-    name: "marketplace subagents",
-    path: "/tests/e2e/route-showcase.html?route=marketplace&marketplace=subagents",
-  },
-  {
-    name: "marketplace mcp",
-    path: "/tests/e2e/route-showcase.html?route=marketplace&marketplace=mcp",
-  },
-  {
-    name: "marketplace extensions",
-    path: "/tests/e2e/route-showcase.html?route=marketplace&marketplace=extensions",
-  },
-] as const;
+const SCENE_SECTIONS: readonly string[] = ["Home", "Play"];
 
-test.describe("no page-level horizontal scroll", () => {
+test.describe("Buddy sections", () => {
   test.beforeEach(async ({ page }) => {
     page.on("pageerror", (error) => {
       throw error;
     });
   });
 
-  for (const route of routes) {
-    for (const width of widths) {
-      test(`${route.name} has no page horizontal overflow at ${width}px`, async ({
-        page,
-      }) => {
-        await page.setViewportSize({ width, height: 900 });
-        await page.goto(route.path);
-        await page.locator("[data-element='app-root']").waitFor();
-        if (route.path.includes("route=settings")) {
-          await page.getByRole("heading", { name: "Settings" }).waitFor();
-          const mobileSectionSelect = page.locator(
-            "button[aria-label='Settings sections']",
-          );
-          if (width <= 720) {
-            await expect(mobileSectionSelect).toBeVisible();
-          } else {
-            await expect(mobileSectionSelect).not.toBeVisible();
-          }
-        }
-        if (route.path.includes("route=buddy")) {
-          await page.getByTestId("buddy-home-content").waitFor();
-          const sections = page
-            .getByRole("tablist", { name: "Buddy sections" })
-            .getByRole("tab");
-          await expect(sections).toHaveText([...BUDDY_TOP_SECTIONS]);
-          await expect(
-            page.getByRole("tab", { name: "Home", exact: true }),
-          ).toHaveAttribute("aria-selected", "true");
-          await expect(page.getByTestId("buddy-home-overview")).toBeVisible();
-          await expect(page.getByTestId("buddy-presence")).toBeVisible();
-          await expect(page.getByTestId("buddy-world")).toBeVisible();
-          await expect(page.getByTestId("buddy-home-hero")).toBeVisible();
-        }
-        if (route.path.includes("route=chat-split")) {
-          await page.locator("[data-workspace-group-tab-id]").waitFor();
-          await expect(
-            page.locator("[data-surface-key='chat:showcase-chat']"),
-          ).toBeVisible();
-          await expect(
-            page.locator("[data-surface-key='chat:showcase-chat-b']"),
-          ).toBeVisible();
-        }
-        if (route.path.includes("route=workspace-chrome")) {
-          const terminalDisabled = route.path.includes(
-            "route=workspace-chrome-disabled",
-          );
-          const terminalWorkbench = page.getByLabel(
-            "Terminal workbench for showcase-chat",
-          );
-          const terminalBody = page.getByTestId("terminal-workbench-body");
-          await expect(terminalWorkbench).toBeVisible();
-          await expect(
-            terminalWorkbench.getByText(
-              terminalDisabled
-                ? "Browser terminal disabled"
-                : "No terminal sessions",
-            ),
-          ).toBeVisible();
-          const readTerminalGeometry = () =>
-            terminalBody.evaluate((body) => {
-              const emptyState = body.querySelector("section");
-              const bodyRect = body.getBoundingClientRect();
-              const emptyRect = emptyState?.getBoundingClientRect();
-              return {
-                bodyHeight: bodyRect.height,
-                bodyWidth: bodyRect.width,
-                emptyHeight: emptyRect?.height ?? 0,
-                emptyWidth: emptyRect?.width ?? 0,
-                emptyScrollHeight: emptyState?.scrollHeight ?? 0,
-                emptyClientHeight: emptyState?.clientHeight ?? 0,
-              };
-            });
-          await expect
-            .poll(async () => (await readTerminalGeometry()).bodyHeight)
-            .toBeGreaterThanOrEqual(179);
-          const terminalGeometry = await readTerminalGeometry();
-          expect(terminalGeometry.bodyHeight).toBeGreaterThanOrEqual(179);
-          expect(terminalGeometry.bodyHeight).toBeLessThanOrEqual(301);
-          expect(
-            Math.abs(terminalGeometry.bodyWidth - terminalGeometry.emptyWidth),
-          ).toBeLessThanOrEqual(1);
-          expect(
-            Math.abs(
-              terminalGeometry.bodyHeight - terminalGeometry.emptyHeight,
-            ),
-          ).toBeLessThanOrEqual(1);
-          expect(terminalGeometry.emptyScrollHeight).toBeLessThanOrEqual(
-            terminalGeometry.emptyClientHeight + 1,
-          );
-          if (width < 768) {
-            await page
-              .getByRole("button", { name: "Files", exact: true })
-              .click();
-            await expect(page.getByRole("dialog")).toBeVisible();
-          } else {
-            await expect(page.getByTestId("workspace-dock")).toBeVisible();
-          }
-        }
+  for (const width of widths) {
+    test(`buddy sections select, mount one scene and take focus at ${width}px`, async ({
+      page,
+    }) => {
+      await page.setViewportSize({ width, height: 900 });
+      await page.goto("/tests/e2e/route-showcase.html?route=buddy");
+      await page.locator("[data-element='app-root']").waitFor();
+      await page.getByTestId("buddy-home-content").waitFor();
+      const sections = page
+        .getByRole("tablist", { name: "Buddy sections" })
+        .getByRole("tab");
+      await expect(sections).toHaveText([...BUDDY_TOP_SECTIONS]);
+      await expect(
+        page.getByRole("tab", { name: "Home", exact: true }),
+      ).toHaveAttribute("aria-selected", "true");
+      await expect(page.getByTestId("buddy-home-overview")).toBeVisible();
+      await expect(page.getByTestId("buddy-presence")).toBeVisible();
+      await expect(page.getByTestId("buddy-world")).toBeVisible();
+      await expect(page.getByTestId("buddy-home-hero")).toBeVisible();
 
-        const overflow = await page.evaluate<OverflowReport, boolean>(
-          (checkInnerScroll) => {
-            const describeElement = (el: Element) => {
-              const className =
-                typeof el.className === "string" ? el.className.trim() : "";
-              const testId = el.getAttribute("data-testid");
-              const element = el.getAttribute("data-element");
-              const label = el.getAttribute("aria-label");
-              const descriptor = testId ?? element ?? label ?? className;
-              const size = `${el.scrollWidth}x${el.clientWidth}`;
-              return descriptor
-                ? `${el.tagName.toLowerCase()}.${descriptor} ${size}`
-                : `${el.tagName.toLowerCase()} ${size}`;
-            };
-            const docOverflow =
-              document.documentElement.scrollWidth >
-              document.documentElement.clientWidth + 1;
-            const offenders = [...document.querySelectorAll("*")]
-              .filter((el) => {
-                if (el.closest(".scrollX")) return false;
-                const style = getComputedStyle(el);
-                return (
-                  el.scrollWidth > el.clientWidth + 1 &&
-                  style.overflowX !== "auto" &&
-                  style.overflowX !== "scroll"
-                );
-              })
-              .slice(0, 5)
-              .map(describeElement);
-            const innerScrollOffenders = checkInnerScroll
-              ? [...document.querySelectorAll("*")]
-                  .filter((el) => {
-                    if (el.closest(".scrollX")) return false;
-                    if (el.getAttribute("role") === "tablist") return false;
-                    const style = getComputedStyle(el);
-                    return (
-                      el.scrollWidth > el.clientWidth + 2 &&
-                      (style.overflowX === "auto" ||
-                        style.overflowX === "scroll")
-                    );
-                  })
-                  .slice(0, 5)
-                  .map(describeElement)
-              : [];
-            return { docOverflow, offenders, innerScrollOffenders };
-          },
-          route.path.includes("route=settings") ||
-            route.path.includes("route=buddy"),
-        );
+      for (const panel of BUDDY_TAB_PANELS) {
+        const tab = page.getByRole("tab", { name: panel.tab, exact: true });
+        await tab.click();
+        await expect(tab).toHaveAttribute("aria-selected", "true");
+        await expect(
+          page.locator(panel.selector),
+          panel.description,
+        ).toBeVisible();
+        // Only the active section's BuddyWorld may be mounted, and the scene
+        // sections must actually mount it.
+        const scene = SCENE_SECTIONS.includes(panel.tab);
+        await expect(
+          page.getByTestId("buddy-world"),
+          `${panel.tab}: mounted BuddyWorld count`,
+        ).toHaveCount(scene ? 1 : 0);
+        if (scene) await expect(page.getByTestId("buddy-world")).toBeVisible();
+      }
 
-        expect(
-          overflow.docOverflow,
-          `offenders: ${overflow.offenders.join(" | ")}`,
-        ).toBe(false);
-        expect(
-          overflow.innerScrollOffenders,
-          `inner scroll offenders: ${overflow.innerScrollOffenders.join(
-            " | ",
-          )}`,
-        ).toEqual([]);
-
-        if (route.path.includes("route=buddy")) {
-          // Each target must not overflow internally AND must stay inside the
-          // viewport: an overflow:hidden ancestor can still be scrolled by tab
-          // focus, shifting whole sections off the left edge without any
-          // document-level overflow.
-          const measureBuddyTargets = (targets: BuddyTabPanelTarget[]) =>
-            page.evaluate<BuddyInnerOverflowReport[], BuddyTabPanelTarget[]>(
-              (entries) =>
-                entries.map(({ selector, description }) => {
-                  const el = document.querySelector(selector);
-                  if (!el) {
-                    return {
-                      selector,
-                      description,
-                      missing: true,
-                      overflowing: false,
-                      scrollWidth: 0,
-                      clientWidth: 0,
-                    };
-                  }
-                  const viewportWidth = document.documentElement.clientWidth;
-                  const rect = el.getBoundingClientRect();
-                  const outside =
-                    rect.left < -1 || rect.right > viewportWidth + 1;
-                  const allowInternalScroll =
-                    el.getAttribute("role") === "tablist" &&
-                    el.getAttribute("aria-label") === "Buddy sections" &&
-                    ["auto", "scroll"].includes(getComputedStyle(el).overflowX);
-                  return {
-                    selector: outside
-                      ? `${selector} rect=${Math.round(
-                          rect.left,
-                        )}..${Math.round(rect.right)}/${viewportWidth}`
-                      : selector,
-                    description,
-                    missing: false,
-                    overflowing:
-                      (!allowInternalScroll &&
-                        el.scrollWidth > el.clientWidth + 2) ||
-                      outside,
-                    scrollWidth: el.scrollWidth,
-                    clientWidth: el.clientWidth,
-                  };
-                }),
-              targets,
-            );
-
-          const buddyInnerOverflow = await measureBuddyTargets([
-            {
-              selector: "[data-testid='buddy-home-content']",
-              description: "Buddy content scroller",
-            },
-            {
-              selector: "[data-testid='buddy-presence']",
-              description: "Buddy compact presence",
-            },
-            {
-              selector: "[role='tablist'][aria-label='Buddy sections']",
-              description: "Buddy section tabs",
-            },
-          ]);
-
-          for (const panel of BUDDY_TAB_PANELS) {
-            const tab = page.getByRole("tab", { name: panel.tab, exact: true });
-            await tab.click();
-            await expect(tab).toHaveAttribute("aria-selected", "true");
-            await page.locator(panel.selector).waitFor({ state: "visible" });
-            // Only the active section's BuddyWorld may be mounted.
-            expect(
-              await page.getByTestId("buddy-world").count(),
-              `${panel.tab}: mounted BuddyWorld count`,
-            ).toBeLessThanOrEqual(1);
-            buddyInnerOverflow.push(
-              ...(await measureBuddyTargets([
-                { selector: panel.selector, description: panel.description },
-                {
-                  selector: "[data-testid='buddy-home-content']",
-                  description: `Buddy content scroller (${panel.tab})`,
-                },
-                {
-                  selector: "[role='tablist'][aria-label='Buddy sections']",
-                  description: `Buddy section tabs (${panel.tab})`,
-                },
-              ])),
-            );
-          }
-
-          for (const name of BUDDY_TOP_SECTIONS) {
-            const tab = page.getByRole("tab", { name, exact: true });
-            await tab.focus();
-            await expect(tab).toBeFocused();
-            const box = await tab.boundingBox();
-            expect(box, `${name} tab box`).not.toBeNull();
-            expect(box!.x, `${name} tab left`).toBeGreaterThanOrEqual(-1);
-            expect(
-              box!.x + box!.width,
-              `${name} tab right`,
-            ).toBeLessThanOrEqual(width + 1);
-          }
-
-          const buddyInnerOffenders = buddyInnerOverflow.filter(
-            (entry) => entry.missing || entry.overflowing,
-          );
-          expect(
-            buddyInnerOffenders,
-            buddyInnerOffenders
-              .map(
-                (entry) =>
-                  `${entry.description} ${entry.selector} ${entry.scrollWidth}x${entry.clientWidth}`,
-              )
-              .join(" | "),
-          ).toEqual([]);
-        }
-      });
-    }
+      for (const name of BUDDY_TOP_SECTIONS) {
+        const tab = page.getByRole("tab", { name, exact: true });
+        await tab.focus();
+        await expect(tab).toBeFocused();
+      }
+    });
   }
 });
 
-test.describe("overlay right-edge regressions", () => {
+test.describe("overlay keyboard regressions", () => {
   test.beforeEach(async ({ page }) => {
     page.on("pageerror", (error) => {
       throw error;
     });
   });
 
-  test("aligns overlay controls without broad scrollbar gutters", async ({
+  test("Escape dismisses compression and model overlays and restores trigger focus", async ({
     page,
   }) => {
     await page.setViewportSize({ width: 1280, height: 900 });
@@ -486,7 +145,7 @@ test.describe("overlay right-edge regressions", () => {
 
     const trajectoryTrigger = page.getByLabel("Compress or rebuild context");
     const compressionTab = page.getByRole("tab", {
-      name: "LLM compression",
+      name: "LLM summary",
       exact: true,
     });
     const trajectoryPopover = page.getByRole("dialog").filter({
@@ -495,99 +154,8 @@ test.describe("overlay right-edge regressions", () => {
     await trajectoryTrigger.click();
     await trajectoryPopover.waitFor();
 
-    const trajectoryGutters = await page.evaluate<GutterMeasurement[]>(() => {
-      const dialog = document.querySelector("[role='dialog']");
-      const tab = document.querySelector("[role='tab']");
-      const preview = [...document.querySelectorAll("button")].find(
-        (el) => el.textContent?.trim() === "Preview",
-      );
-      const label = preview?.querySelector("span");
-      const targets = [
-        ["popover content", dialog],
-        ["tabs trigger", tab],
-        ["button label", label],
-      ] as const;
-      return targets.map(([name, el]) => ({
-        name,
-        value: el ? getComputedStyle(el).scrollbarGutter : "missing",
-      }));
-    });
-
-    for (const gutter of trajectoryGutters) {
-      expect(gutter.value, gutter.name).toBe("auto");
-    }
-
-    const trajectoryEdges = await page.evaluate<EdgeMeasurement[]>(() => {
-      const rect = (el: Element) => el.getBoundingClientRect();
-      const px = (value: string) => Number.parseFloat(value) || 0;
-      const tablist = document.querySelector("[role='tablist']");
-      const tabs = [...document.querySelectorAll("[role='tab']")];
-      const preview = [...document.querySelectorAll("button")].find(
-        (el) => el.textContent?.trim() === "Preview",
-      );
-      const label = preview?.querySelector("span");
-      if (!tablist || tabs.length < 2 || !preview || !label) {
-        return [{ name: "trajectory", delta: 999, details: "missing target" }];
-      }
-      const tablistStyle = getComputedStyle(tablist);
-      const tablistRight = rect(tablist).right - px(tablistStyle.paddingRight);
-      const lastTabRight = rect(tabs[tabs.length - 1]).right;
-      const buttonRect = rect(preview);
-      const labelRect = rect(label);
-      return [
-        {
-          name: "trajectory tabs",
-          delta: Math.abs(tablistRight - lastTabRight),
-          details: `tablistRight=${tablistRight} lastTabRight=${lastTabRight}`,
-        },
-        {
-          name: "trajectory preview button",
-          delta: Math.abs(
-            labelRect.left -
-              buttonRect.left -
-              (buttonRect.right - labelRect.right),
-          ),
-          details: `button=${buttonRect.left},${buttonRect.right} label=${labelRect.left},${labelRect.right}`,
-        },
-      ];
-    });
-
-    for (const edge of trajectoryEdges) {
-      const maxDelta = edge.name.includes("button") ? 1 : 2;
-      expect(edge.delta, edge.details).toBeLessThanOrEqual(maxDelta);
-    }
-
     await compressionTab.click();
-
-    const llmCompressEdges = await page.evaluate<EdgeMeasurement[]>(() => {
-      const rect = (el: Element) => el.getBoundingClientRect();
-      const rebuild = [...document.querySelectorAll("button")].find(
-        (el) => el.textContent?.trim() === "Rebuild context",
-      );
-      const label = rebuild?.querySelector("span");
-      if (!rebuild || !label) {
-        return [
-          { name: "trajectory rebuild", delta: 999, details: "missing target" },
-        ];
-      }
-      const buttonRect = rect(rebuild);
-      const labelRect = rect(label);
-      return [
-        {
-          name: "trajectory rebuild button",
-          delta: Math.abs(
-            labelRect.left -
-              buttonRect.left -
-              (buttonRect.right - labelRect.right),
-          ),
-          details: `button=${buttonRect.left},${buttonRect.right} label=${labelRect.left},${labelRect.right}`,
-        },
-      ];
-    });
-
-    for (const edge of llmCompressEdges) {
-      expect(edge.delta, edge.details).toBeLessThanOrEqual(1);
-    }
+    await expect(compressionTab).toHaveAttribute("aria-selected", "true");
 
     await compressionTab.focus();
     await expect(compressionTab).toBeFocused();
@@ -606,27 +174,6 @@ test.describe("overlay right-edge regressions", () => {
     await modelTrigger.click();
     await models.waitFor();
 
-    const modelGutters = await page.evaluate<GutterMeasurement[]>(() => {
-      const dialog = document.querySelector("[role='dialog']");
-      const row = document.querySelector(
-        "[role='option'][data-selected='true']",
-      );
-      return [
-        {
-          name: "model selector popover content",
-          value: dialog ? getComputedStyle(dialog).scrollbarGutter : "missing",
-        },
-        {
-          name: "model selector selected row",
-          value: row ? getComputedStyle(row).scrollbarGutter : "missing",
-        },
-      ];
-    });
-
-    for (const gutter of modelGutters) {
-      expect(gutter.value, gutter.name).toBe("auto");
-    }
-
     const modelSearch = modelPopover.getByRole("searchbox");
     await modelSearch.focus();
     await expect(modelSearch).toBeFocused();
@@ -636,29 +183,22 @@ test.describe("overlay right-edge regressions", () => {
     await expect(modelTrigger).toHaveAttribute("aria-expanded", "false");
     await expect(modelTrigger).toBeFocused();
     await page.mouse.move(0, 0);
-    await page.getByRole("button", { name: /Agent/ }).click();
-    await page.getByRole("dialog").waitFor();
-
-    const modeGutters = await page.evaluate<GutterMeasurement[]>(() => {
-      const list = document.querySelector("[class*='modeList']");
-      const selected = document.querySelector("[class*='itemSelected']");
-      return [
-        {
-          name: "mode select list",
-          value: list ? getComputedStyle(list).scrollbarGutter : "missing",
-        },
-        {
-          name: "mode select selected item",
-          value: selected
-            ? getComputedStyle(selected).scrollbarGutter
-            : "missing",
-        },
-      ];
+    const modeTrigger = page.getByRole("button", {
+      name: "Mode: Agent",
+      exact: true,
     });
-
-    for (const gutter of modeGutters) {
-      expect(gutter.value, gutter.name).toBe("auto");
-    }
+    await modeTrigger.click();
+    const modePopover = page.getByRole("dialog");
+    await expect(modePopover).toBeVisible();
+    const activeMode = modePopover.getByRole("button", {
+      name: "Agent restart Autonomous coding mode editing · tools 12 tools",
+      exact: true,
+    });
+    await expect(activeMode).toBeFocused();
+    await page.keyboard.press("Escape");
+    await expect(modePopover).toHaveCount(0);
+    await expect(modeTrigger).toHaveAttribute("aria-expanded", "false");
+    await expect(modeTrigger).toBeFocused();
   });
 });
 

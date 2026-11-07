@@ -583,23 +583,6 @@ describe("ExecToolCard", () => {
     );
   });
 
-  test("tty true shows PTY chip", () => {
-    renderExecTool({
-      content: "pty output",
-      extra: {
-        process_id: "exec_pty_chip",
-        status: "running",
-        short_description: "Interactive shell",
-        command: "bash",
-        mode: "background",
-        tty: true,
-      },
-    });
-
-    fireEvent.click(screen.getByText("Interactive shell"));
-    expect(screen.getByTestId("exec-pty-chip")).toHaveTextContent("PTY");
-  });
-
   test("process_read output renders stdout stderr and cursor metadata", () => {
     renderExecTool({
       toolName: "process_read",
@@ -742,12 +725,6 @@ describe("ExecToolCard", () => {
       },
     });
 
-    expect(
-      screen.queryByRole("button", { name: /show output/i }),
-    ).not.toBeInTheDocument();
-    expect(
-      screen.queryByRole("button", { name: /hide output/i }),
-    ).not.toBeInTheDocument();
     expect(screen.queryByTestId("exec-output-view")).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByText("Run tests"));

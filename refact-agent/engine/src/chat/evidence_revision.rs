@@ -165,8 +165,16 @@ fn pair_drift(
         }
         let (path, from, to) = (path.clone(), from.to_string(), to.to_string());
         return Some(match input {
-            true => RevisionDrift::Input { path, from, to },
-            false => RevisionDrift::Artifact { path, from, to },
+            true => RevisionDrift::Input {
+                path,
+                from,
+                to,
+            },
+            false => RevisionDrift::Artifact {
+                path,
+                from,
+                to,
+            },
         });
     }
     None
@@ -217,30 +225,52 @@ impl RevisionDrift {
     /// The worktree-relative path that moved, when the drift is about a file.
     pub fn path(&self) -> Option<&str> {
         match self {
-            RevisionDrift::Input { path, .. } | RevisionDrift::Artifact { path, .. } => Some(path),
+            RevisionDrift::Input {
+                path, ..
+            }
+            | RevisionDrift::Artifact {
+                path, ..
+            } => Some(path),
             _ => None,
         }
     }
 
     pub fn describe(&self) -> String {
         match self {
-            RevisionDrift::Worktree { from, to } => format!(
+            RevisionDrift::Worktree {
+                from,
+                to,
+            } => format!(
                 "evidence was produced in worktree '{}', the tree under test is '{}'",
                 from, to
             ),
-            RevisionDrift::SpecRevision { from, to } => format!(
+            RevisionDrift::SpecRevision {
+                from,
+                to,
+            } => format!(
                 "the verification spec moved from revision {} to {}",
                 from, to
             ),
-            RevisionDrift::Commit { from, to } => format!(
+            RevisionDrift::Commit {
+                from,
+                to,
+            } => format!(
                 "the worktree moved from commit {} to {}",
                 from.as_deref().unwrap_or(ABSENT),
                 to.as_deref().unwrap_or(ABSENT)
             ),
-            RevisionDrift::Input { path, from, to } => {
+            RevisionDrift::Input {
+                path,
+                from,
+                to,
+            } => {
                 format!("declared input '{}' changed ({} -> {})", path, from, to)
             }
-            RevisionDrift::Artifact { path, from, to } => {
+            RevisionDrift::Artifact {
+                path,
+                from,
+                to,
+            } => {
                 format!("expected artifact '{}' changed ({} -> {})", path, from, to)
             }
         }

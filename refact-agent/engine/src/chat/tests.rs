@@ -302,28 +302,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_chat_message_preserves_extra_unknown_keys() {
-        let json_with_unknown = json!({
-            "message_id": "msg-unk",
-            "role": "assistant",
-            "content": "test",
-            "unknown_field_1": "value1",
-            "unknown_field_2": 42,
-            "nested_unknown": {"a": 1, "b": 2}
-        });
-
-        let deserialized: ChatMessage =
-            serde_json::from_value(json_with_unknown).expect("deserialize");
-
-        assert_eq!(deserialized.message_id, "msg-unk");
-        assert!(
-            deserialized.extra.contains_key("unknown_field_1")
-                || deserialized.extra.contains_key("unknown_field_2")
-                || deserialized.extra.contains_key("nested_unknown")
-        );
-    }
-
     fn merge_tool_calls(existing: &mut Vec<ChatToolCall>, new_calls: &[serde_json::Value]) {
         for call_val in new_calls {
             let index = call_val

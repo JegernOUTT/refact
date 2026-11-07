@@ -14,7 +14,6 @@ SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$")
 CARGO_LOCK = "refact-agent/engine/Cargo.lock"
 RELEASE_CRATES = (
     ("refact-agent/engine/Cargo.toml", "refact-lsp"),
-    ("refact-agent/engine/crates/refact-tui/Cargo.toml", "refact-tui"),
 )
 INTERNAL_CRATE_VERSION = "0.1.0"
 PACKAGE_RE = re.compile(

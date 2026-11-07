@@ -254,7 +254,10 @@ impl HarRecorder {
             *shared.finished.lock().unwrap() = true;
             shared.changed.notify_all();
         });
-        *worker = Some(BodyWorker { sender, handle });
+        *worker = Some(BodyWorker {
+            sender,
+            handle,
+        });
     }
 
     pub fn is_active(&self) -> bool {
@@ -638,7 +641,10 @@ fn entry_from_monitor(
 fn header_pairs(headers: BTreeMap<String, String>) -> Vec<HarNameValue> {
     headers
         .into_iter()
-        .map(|(name, value)| HarNameValue { name, value })
+        .map(|(name, value)| HarNameValue {
+            name,
+            value,
+        })
         .collect()
 }
 
@@ -683,7 +689,10 @@ fn header_value(headers: &BTreeMap<String, String>, name: &str) -> Option<String
 fn matcher_for_pattern(pattern: &UrlPattern) -> Result<UrlMatcher, String> {
     match pattern {
         UrlPattern::Text(value) => UrlMatcher::text(value),
-        UrlPattern::Regex { source, flags } => UrlMatcher::regex(source, flags),
+        UrlPattern::Regex {
+            source,
+            flags,
+        } => UrlMatcher::regex(source, flags),
     }
 }
 

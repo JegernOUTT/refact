@@ -331,8 +331,12 @@ mod tests {
 
     fn denial(method: &str, params: Option<&Value>, own: Option<&str>) -> String {
         match classify_cdp_command(method, params, own) {
-            CdpGuardrail::Denied { reason } => reason,
-            CdpGuardrail::Allowed { .. } => panic!("expected {method} to be denied"),
+            CdpGuardrail::Denied {
+                reason,
+            } => reason,
+            CdpGuardrail::Allowed {
+                ..
+            } => panic!("expected {method} to be denied"),
         }
     }
 
@@ -362,7 +366,12 @@ mod tests {
             classify_cdp_command("Target.closeTarget", Some(&own), None),
             classify_cdp_command("Target.closeTarget", None, Some("TAB-1")),
         ] {
-            assert_eq!(allowed, CdpGuardrail::Allowed { warnings: vec![] });
+            assert_eq!(
+                allowed,
+                CdpGuardrail::Allowed {
+                    warnings: vec![]
+                }
+            );
         }
     }
 

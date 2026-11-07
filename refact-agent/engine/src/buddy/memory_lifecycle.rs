@@ -2470,7 +2470,10 @@ async fn knowledge_roots(gcx: AppState) -> KnowledgeRoots {
         .map(|dir| dir.join(KNOWLEDGE_FOLDER_NAME))
         .collect();
     let global = get_global_knowledge_dir(gcx.gcx.clone()).await;
-    KnowledgeRoots { local, global }
+    KnowledgeRoots {
+        local,
+        global,
+    }
 }
 
 async fn validate_existing_memory_path(
@@ -3031,8 +3034,12 @@ mod tests {
         let second = explicit_key_test_op("op-2", "semantic-key", MemoryOpStatus::Applied);
 
         let state = MemoryOpsState::from_records(vec![
-            MemoryOpsRecord::Op { op: first },
-            MemoryOpsRecord::Op { op: second.clone() },
+            MemoryOpsRecord::Op {
+                op: first,
+            },
+            MemoryOpsRecord::Op {
+                op: second.clone(),
+            },
         ]);
 
         assert_eq!(state.ops, vec![second.normalized()]);
@@ -3045,8 +3052,12 @@ mod tests {
         let second = explicit_key_test_op("op-collide", "semantic-key-b", MemoryOpStatus::Pending);
 
         let state = MemoryOpsState::from_records(vec![
-            MemoryOpsRecord::Op { op: first.clone() },
-            MemoryOpsRecord::Op { op: second.clone() },
+            MemoryOpsRecord::Op {
+                op: first.clone(),
+            },
+            MemoryOpsRecord::Op {
+                op: second.clone(),
+            },
         ]);
 
         assert_eq!(state.ops, vec![first.normalized(), second.normalized()]);
@@ -3061,8 +3072,12 @@ mod tests {
             let second = explicit_key_test_op("op-collide", "new-key", MemoryOpStatus::Pending);
 
             let state = MemoryOpsState::from_records(vec![
-                MemoryOpsRecord::Op { op: first.clone() },
-                MemoryOpsRecord::Op { op: second.clone() },
+                MemoryOpsRecord::Op {
+                    op: first.clone(),
+                },
+                MemoryOpsRecord::Op {
+                    op: second.clone(),
+                },
             ]);
 
             assert_eq!(state.ops, vec![first.normalized(), second.normalized()]);
@@ -3092,8 +3107,12 @@ mod tests {
             pending.idempotency_key = first.idempotency_key.clone();
 
             let state = MemoryOpsState::from_records(vec![
-                MemoryOpsRecord::Op { op: first.clone() },
-                MemoryOpsRecord::Op { op: pending },
+                MemoryOpsRecord::Op {
+                    op: first.clone(),
+                },
+                MemoryOpsRecord::Op {
+                    op: pending,
+                },
             ]);
             let compacted = MemoryOpsState::from_records(state.canonical_records());
 
@@ -3111,9 +3130,15 @@ mod tests {
         let third = test_op("op-2", "second", MemoryOpStatus::Applied);
 
         let state = MemoryOpsState::from_records(vec![
-            MemoryOpsRecord::Op { op: first },
-            MemoryOpsRecord::Op { op: second.clone() },
-            MemoryOpsRecord::Op { op: third.clone() },
+            MemoryOpsRecord::Op {
+                op: first,
+            },
+            MemoryOpsRecord::Op {
+                op: second.clone(),
+            },
+            MemoryOpsRecord::Op {
+                op: third.clone(),
+            },
         ]);
         let compacted = MemoryOpsState::from_records(state.canonical_records());
 

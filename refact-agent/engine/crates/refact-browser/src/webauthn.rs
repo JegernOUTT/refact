@@ -154,7 +154,9 @@ impl WebAuthnManager {
                 continue;
             };
             for authenticator_id in session.authenticator_ids {
-                let _ = tab.call_method(WebAuthn::RemoveVirtualAuthenticator { authenticator_id });
+                let _ = tab.call_method(WebAuthn::RemoveVirtualAuthenticator {
+                    authenticator_id,
+                });
                 removed += 1;
             }
             if session.enabled {

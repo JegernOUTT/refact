@@ -714,7 +714,10 @@ fn canary_output_passes(output: &CanaryOutput, version: &str) -> bool {
         .filter(|c| c.stream == crate::exec::ExecOutputStream::Stdout)
         .map(|c| c.text.as_str())
         .collect();
-    output.1.status == (crate::exec::ExecStatus::Exited { exit_code: Some(0) })
+    output.1.status
+        == (crate::exec::ExecStatus::Exited {
+            exit_code: Some(0),
+        })
         && output.2.found
         && !output.2.is_truncated
         && text == format!("refact-lsp {version}\n")
@@ -1359,7 +1362,14 @@ pub(crate) mod tests {
             decision: Some(decision),
             worker,
         };
-        (request, native, ResourceCatalogFixture { catalog, grant })
+        (
+            request,
+            native,
+            ResourceCatalogFixture {
+                catalog,
+                grant,
+            },
+        )
     }
     struct ResourceCatalogFixture {
         catalog: crate::buddy::resource_execution::ResourceCatalog,
@@ -1467,6 +1477,12 @@ pub(crate) mod tests {
         );
         assert!(path.is_absolute());
         let bytes = std::fs::read(path).unwrap();
+        assert!(
+            bytes.len() as u64 <= super::super::artifacts::MAX_BYTES,
+            "canary image is {} bytes, above the production staged-artifact cap {}; supply a stripped copy of the actual built refact-lsp",
+            bytes.len(),
+            super::super::artifacts::MAX_BYTES
+        );
         super::super::artifacts::linux_runtime_snapshot(&bytes, std::env::consts::ARCH)
             .expect("actual engine runtime inventory must pass before preparing a canary grant");
         let dir = tempfile::Builder::new()
@@ -1562,7 +1578,9 @@ pub(crate) mod tests {
     #[test]
     fn canary_output_requires_exact_complete_success() {
         use crate::exec::ExecStatus;
-        let success = ExecStatus::Exited { exit_code: Some(0) };
+        let success = ExecStatus::Exited {
+            exit_code: Some(0),
+        };
         assert!(canary_output_passes(
             &fake_canary_output(success.clone(), "refact-lsp 1\n", true, false),
             "1"
@@ -1574,7 +1592,9 @@ pub(crate) mod tests {
             ExecStatus::Failed {
                 message: "spawn".into(),
             },
-            ExecStatus::Exited { exit_code: Some(1) },
+            ExecStatus::Exited {
+                exit_code: Some(1),
+            },
         ] {
             assert!(!canary_output_passes(
                 &fake_canary_output(status, "refact-lsp 1\n", true, false),
@@ -1729,7 +1749,9 @@ pub(crate) mod tests {
             let status = match case {
                 "timeout" => ExecStatus::TimedOut,
                 "killed" => ExecStatus::Killed,
-                _ => ExecStatus::Exited { exit_code: Some(0) },
+                _ => ExecStatus::Exited {
+                    exit_code: Some(0),
+                },
             };
             let text = if case == "wrong-version" {
                 "refact-lsp wrong\n"
@@ -2143,7 +2165,9 @@ pub(crate) mod tests {
         use sha2::{Digest, Sha256};
         for changed in [false, true] {
             let output = fake_canary_output(
-                crate::exec::ExecStatus::Exited { exit_code: Some(0) },
+                crate::exec::ExecStatus::Exited {
+                    exit_code: Some(0),
+                },
                 "refact-lsp 1\n",
                 true,
                 false,
@@ -2599,7 +2623,10 @@ impl InstallationAdapter {
         runtime: crate::buddy::outcome_runtime::OutcomeRuntime,
         drafts: std::sync::Arc<dyn crate::buddy::resources::DraftRegistry<InstallationDraft>>,
     ) -> Self {
-        Self { runtime, drafts }
+        Self {
+            runtime,
+            drafts,
+        }
     }
 }
 #[async_trait::async_trait]

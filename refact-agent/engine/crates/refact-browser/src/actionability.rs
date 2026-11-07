@@ -269,7 +269,9 @@ impl ActionabilityDiagnostic {
     fn log_line(&self) -> String {
         match self {
             Self::NotFound => "locator did not resolve to any element".to_string(),
-            Self::MultipleMatches { count, .. } => {
+            Self::MultipleMatches {
+                count, ..
+            } => {
                 format!("strict mode violation: locator resolved to {count} elements")
             }
             Self::NotVisible => "element is not visible".to_string(),
@@ -278,16 +280,23 @@ impl ActionabilityDiagnostic {
             Self::NotEditable => "element is not editable".to_string(),
             Self::OutsideViewport => "element is outside of the viewport".to_string(),
             Self::Detached => "element was detached from the DOM".to_string(),
-            Self::InterceptsPointerEvents { description } => {
+            Self::InterceptsPointerEvents {
+                description,
+            } => {
                 format!("{description} intercepts pointer events")
             }
-            Self::PrecheckFailed { description } => description.clone(),
+            Self::PrecheckFailed {
+                description,
+            } => description.clone(),
         }
     }
 
     fn display_line(&self) -> String {
         match self {
-            Self::MultipleMatches { count, previews } => {
+            Self::MultipleMatches {
+                count,
+                previews,
+            } => {
                 let previews = previews
                     .iter()
                     .map(|preview| mask_diagnostic_text(preview))
@@ -480,9 +489,9 @@ fn diagnostics_from_parts(
 ) -> ActionabilityDiagnostics {
     let required = required_states(action);
     let intercepting_element = diagnostic.and_then(|diagnostic| match diagnostic {
-        ActionabilityDiagnostic::InterceptsPointerEvents { description } => {
-            Some(mask_diagnostic_text(description))
-        }
+        ActionabilityDiagnostic::InterceptsPointerEvents {
+            description,
+        } => Some(mask_diagnostic_text(description)),
         _ => None,
     });
     ActionabilityDiagnostics {
@@ -527,7 +536,10 @@ pub struct ActionabilityEngine<C> {
 
 impl<C: Clock> ActionabilityEngine<C> {
     pub fn new(clock: C, timeouts: ActionabilityTimeouts) -> Self {
-        Self { clock, timeouts }
+        Self {
+            clock,
+            timeouts,
+        }
     }
 
     pub fn clock(&self) -> &C {
@@ -767,8 +779,12 @@ impl<C: Clock> ActionabilityEngine<C> {
             locator_attempt += 1;
 
             match driver.resolve() {
-                LocatorOutcome::Error { description } => {
-                    let diagnostic = ActionabilityDiagnostic::PrecheckFailed { description };
+                LocatorOutcome::Error {
+                    description,
+                } => {
+                    let diagnostic = ActionabilityDiagnostic::PrecheckFailed {
+                        description,
+                    };
                     call_log.push(diagnostic.log_line());
                     return Err(ActionabilityError::Failed {
                         diagnostic,
@@ -785,9 +801,15 @@ impl<C: Clock> ActionabilityEngine<C> {
                     last_diagnostic = ActionabilityDiagnostic::NotFound;
                     call_log.push(last_diagnostic.log_line());
                 }
-                LocatorOutcome::MultipleMatches { count, previews } => {
+                LocatorOutcome::MultipleMatches {
+                    count,
+                    previews,
+                } => {
                     attached = Some(true);
-                    let diagnostic = ActionabilityDiagnostic::MultipleMatches { count, previews };
+                    let diagnostic = ActionabilityDiagnostic::MultipleMatches {
+                        count,
+                        previews,
+                    };
                     call_log.push(diagnostic.log_line());
                     return Err(ActionabilityError::Failed {
                         diagnostic,
@@ -799,7 +821,9 @@ impl<C: Clock> ActionabilityEngine<C> {
                         receives_events,
                     });
                 }
-                LocatorOutcome::Found { preview } => {
+                LocatorOutcome::Found {
+                    preview,
+                } => {
                     attached = Some(true);
                     call_log.push(format!("locator resolved to {preview}"));
                     match self.run_action(
@@ -1473,7 +1497,10 @@ mod tests {
         assert!(matches!(
             result,
             Err(ActionabilityError::Failed {
-                diagnostic: ActionabilityDiagnostic::MultipleMatches { count: 3, .. },
+                diagnostic: ActionabilityDiagnostic::MultipleMatches {
+                    count: 3,
+                    ..
+                },
                 ..
             })
         ));

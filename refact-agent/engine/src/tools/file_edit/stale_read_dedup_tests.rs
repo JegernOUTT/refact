@@ -243,7 +243,9 @@ async fn partial_dedup_records_range_without_blocking_overwrite() {
     let guard = file_activity::begin_write(
         Some(&fixture.actor),
         &fixture.path,
-        file_activity::WriteIntent::Overwrite { authorized: false },
+        file_activity::WriteIntent::Overwrite {
+            authorized: false,
+        },
         "create_textdoc",
     )
     .await

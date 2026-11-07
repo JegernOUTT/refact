@@ -13,10 +13,6 @@ on:
       - "rust-toolchain.toml"
       - ".github/workflows/agent_engine_build.yml"
   workflow_call:
-#  workflow_run:
-#    workflows: ["Cache cleanup"]
-#    types:
-#      - completed
 
 concurrency:
   group: agent-engine-build-${{ github.run_id }}
@@ -30,7 +26,6 @@ env:
   RUSTUP_TOOLCHAIN: stable
   CARGO_INCREMENTAL: 0
   CARGO_NET_RETRY: 10
-  # RUSTFLAGS: "-D warnings -W unreachable-pub"
   RUSTUP_MAX_RETRIES: 10
   FETCH_DEPTH: 0 # pull in the tags for the version string
   MACOSX_DEPLOYMENT_TARGET: 10.15
@@ -60,15 +55,9 @@ jobs:
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             code-target: linux-arm64
-#          - os: ubuntu-22.04
-#            target: arm-unknown-linux-gnueabihf
-#            code-target: linux-armhf
           # x86_64-apple-darwin (macOS Intel) is disabled — GitHub-hosted macos-15-large runners
           # incur significant costs and Intel Mac support is being phased out. Re-enable only if
           # explicitly needed and billing is confirmed.
-          #- os: macos-15-large
-          #  target: x86_64-apple-darwin
-          #  code-target: darwin-x64
           - os: macos-14
             target: aarch64-apple-darwin
             code-target: darwin-arm64 
@@ -127,10 +116,6 @@ jobs:
           sudo mkswap /swapfile
           sudo swapon /swapfile
           free -h
-
-      - name: Install ARM target toolchain
-        if: matrix.target == 'arm-unknown-linux-gnueabihf'
-        run: sudo apt-get install gcc-arm-linux-gnueabihf
 
       - name: Restore cached cargo
         uses: swatinem/rust-cache@v2

@@ -64,11 +64,15 @@ pub struct ImportPrivacyFilter {
 
 impl ImportPrivacyFilter {
     pub fn allow_all() -> Self {
-        Self { check_fn: None }
+        Self {
+            check_fn: None,
+        }
     }
 
     pub fn with_check(f: Arc<dyn Fn(&Path) -> Result<(), String> + Send + Sync>) -> Self {
-        Self { check_fn: Some(f) }
+        Self {
+            check_fn: Some(f),
+        }
     }
 
     pub fn check_path(&self, path: &Path) -> Result<(), String> {
@@ -329,7 +333,9 @@ impl ImportReportScope {
                 scope_id: None,
                 label: Some("global settings".to_string()),
             },
-            ImportScope::Project { root } => Self {
+            ImportScope::Project {
+                root,
+            } => Self {
                 scope_kind: ImportReportScopeKind::Project,
                 scope_id: Some(report_scope_hash(root)),
                 label: Some("project workspace".to_string()),
@@ -672,7 +678,9 @@ where
 fn sanitize_report_scope(scope: &ImportScope) -> ImportScope {
     match scope {
         ImportScope::Global => ImportScope::Global,
-        ImportScope::Project { .. } => ImportScope::Project {
+        ImportScope::Project {
+            ..
+        } => ImportScope::Project {
             root: PathBuf::from("<redacted>"),
         },
     }
@@ -681,14 +689,18 @@ fn sanitize_report_scope(scope: &ImportScope) -> ImportScope {
 fn report_scope_kind(scope: &ImportScope) -> ImportReportScopeKind {
     match scope {
         ImportScope::Global => ImportReportScopeKind::Global,
-        ImportScope::Project { .. } => ImportReportScopeKind::Project,
+        ImportScope::Project {
+            ..
+        } => ImportReportScopeKind::Project,
     }
 }
 
 fn report_scope_id(scope: &ImportScope) -> Option<String> {
     match scope {
         ImportScope::Global => None,
-        ImportScope::Project { root } => Some(report_scope_hash(root)),
+        ImportScope::Project {
+            root,
+        } => Some(report_scope_hash(root)),
     }
 }
 

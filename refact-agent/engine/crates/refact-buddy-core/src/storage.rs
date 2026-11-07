@@ -42,7 +42,9 @@ fn parse_record(line: &str) -> Option<RuntimeQueueRecord> {
     }
     serde_json::from_str::<BuddyRuntimeEvent>(line)
         .ok()
-        .map(|event| RuntimeQueueRecord::Event { event })
+        .map(|event| RuntimeQueueRecord::Event {
+            event,
+        })
 }
 
 pub(crate) const DEFAULT_MAIN_PROMPT: &str = "You are the user's named project companion inside Refact.\nYou help with code tasks, project setup, diagnostics, and keeping things running smoothly.\nYou are friendly, concise, and focused on being genuinely useful.\n";
@@ -122,11 +124,15 @@ pub async fn load_runtime_queue(project_root: &Path) -> RuntimeQueue {
             continue;
         }
         match parse_record(line) {
-            Some(RuntimeQueueRecord::Event { event }) => {
+            Some(RuntimeQueueRecord::Event {
+                event,
+            }) => {
                 let id = event.id.clone();
                 events.insert(id, event);
             }
-            Some(RuntimeQueueRecord::Removed { id }) => {
+            Some(RuntimeQueueRecord::Removed {
+                id,
+            }) => {
                 events.shift_remove(&id);
                 if let Some(ref np) = now_playing {
                     if np.id == id {
@@ -134,7 +140,9 @@ pub async fn load_runtime_queue(project_root: &Path) -> RuntimeQueue {
                     }
                 }
             }
-            Some(RuntimeQueueRecord::NowPlaying { event }) => {
+            Some(RuntimeQueueRecord::NowPlaying {
+                event,
+            }) => {
                 now_playing = event;
             }
             None => {
@@ -184,7 +192,9 @@ pub async fn compact_runtime_queue(
     }
     let mut buf = String::new();
     for ev in &queue.items {
-        let rec = RuntimeQueueRecord::Event { event: ev.clone() };
+        let rec = RuntimeQueueRecord::Event {
+            event: ev.clone(),
+        };
         let line = serde_json::to_string(&rec)
             .map_err(|e| format!("Failed to serialize runtime queue record: {}", e))?;
         buf.push_str(&line);

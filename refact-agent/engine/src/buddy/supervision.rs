@@ -604,7 +604,9 @@ pub(crate) async fn spawn_worker(
         context_tokens_cap: None,
         goal: Some(spawn_goal),
         plan: None,
-        worktree_mode: SpawnWorktreeMode::Isolated { auto_merge: false },
+        worktree_mode: SpawnWorktreeMode::Isolated {
+            auto_merge: false,
+        },
         parent_subchat_tx: None,
         parent_worktree: snapshot.thread.worktree,
         parent_task_meta: snapshot.thread.task_meta,
@@ -3705,9 +3707,15 @@ mod tests {
         runtime.shutdown().await;
         assert!(proof_owner::get_authorized_proof(&fx.chat_id).is_none());
         assert!(authority::native_edit_scope_for_chat(&fx.chat_id).is_none());
-        let runtime =
-            OutcomeRuntime::open(&fx.source, project, WorkerIdentity { epoch: 2, ..worker })
-                .unwrap();
+        let runtime = OutcomeRuntime::open(
+            &fx.source,
+            project,
+            WorkerIdentity {
+                epoch: 2,
+                ..worker
+            },
+        )
+        .unwrap();
         // The replacement epoch cannot load current authority or edit scope,
         // but reconciliation owns the retained one-way publication.
         assert!(load_link(&runtime, fx.mandate_id.clone()).await.is_err());

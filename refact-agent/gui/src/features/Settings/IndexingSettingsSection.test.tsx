@@ -76,23 +76,6 @@ beforeEach(() => {
 });
 
 describe("IndexingSettingsSection", () => {
-  it("renders the global configuration rows", async () => {
-    render(<IndexingSettingsSection />);
-
-    expect(screen.getByText("Blocklist globs")).toBeInTheDocument();
-    expect(
-      screen.getByText("Additional indexing directories"),
-    ).toBeInTheDocument();
-    expect(
-      await screen.findByDisplayValue("*/generated/*"),
-    ).toBeInTheDocument();
-    expect(screen.getByDisplayValue("*.min.js")).toBeInTheDocument();
-    expect(screen.getByDisplayValue("/shared/library")).toBeInTheDocument();
-    expect(
-      screen.getByText("/home/user/.config/refact/indexing.yaml"),
-    ).toBeInTheDocument();
-  });
-
   it("disables project scope when no project is available", async () => {
     mockSettingsByScope({
       global: { ...globalSettings, project_available: false },

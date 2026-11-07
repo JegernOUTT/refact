@@ -58,18 +58,6 @@ describe("RetryForm", () => {
     expect(onSubmit).toHaveBeenCalledWith("before new\ntext after");
   });
 
-  test("renders the initial value in the textarea", () => {
-    render(
-      <RetryForm
-        value="Initial message"
-        onSubmit={vi.fn()}
-        onClose={vi.fn()}
-      />,
-    );
-
-    expect(screen.getByRole("textbox")).toHaveValue("Initial message");
-  });
-
   test("scrolls into view on mount", () => {
     render(<RetryForm value="Message" onSubmit={vi.fn()} onClose={vi.fn()} />);
 

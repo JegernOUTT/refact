@@ -830,7 +830,10 @@ async fn snapshot(
         patch_digest: digest(&diff).map_err(|e| e.to_string())?,
         source_digest: digest(&files).map_err(|e| e.to_string())?,
     };
-    Ok(Snapshot { identity, files })
+    Ok(Snapshot {
+        identity,
+        files,
+    })
 }
 
 pub async fn inspect_source(
@@ -1130,7 +1133,9 @@ impl Executor for NativeExecutor {
                 ExecStatus::Exited {
                     exit_code: Some(code),
                 } if code == command.expected_exit => CheckResult::Passed,
-                ExecStatus::Exited { .. } => CheckResult::Failed,
+                ExecStatus::Exited {
+                    ..
+                } => CheckResult::Failed,
                 _ => CheckResult::Unavailable,
             }
         };

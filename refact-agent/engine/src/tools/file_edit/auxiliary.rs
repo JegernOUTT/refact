@@ -141,7 +141,9 @@ pub async fn check_scope_guard(
 
     match path_scope::decide(card.scope_guard_mode, &effective, &root, edit_path, &limits)? {
         ScopeOutcome::Allowed => Ok(()),
-        ScopeOutcome::Warned { path, .. } => {
+        ScopeOutcome::Warned {
+            path, ..
+        } => {
             tracing::warn!(
                 "Scope warning: edited {} not in target_files for card {}",
                 path,
@@ -149,9 +151,10 @@ pub async fn check_scope_guard(
             );
             Ok(())
         }
-        ScopeOutcome::Refused { path, scope } => {
-            Err(path_scope::refusal_message(&path, &scope, effective.strict))
-        }
+        ScopeOutcome::Refused {
+            path,
+            scope,
+        } => Err(path_scope::refusal_message(&path, &scope, effective.strict)),
     }
 }
 
@@ -377,7 +380,9 @@ pub async fn write_file(
     let intent = if expected_preimage.is_some() {
         crate::file_activity::WriteIntent::Contextual
     } else {
-        crate::file_activity::WriteIntent::Overwrite { authorized: false }
+        crate::file_activity::WriteIntent::Overwrite {
+            authorized: false,
+        }
     };
     write_file_with_intent(gcx, path, file_text, dry, expected_preimage, intent).await
 }

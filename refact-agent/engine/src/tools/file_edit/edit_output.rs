@@ -80,7 +80,8 @@ pub fn edit_model_content(
         count(before),
         count(after)
     );
-    let deleted = after.is_none() && (action.starts_with("delete") || action.starts_with("moved to "));
+    let deleted =
+        after.is_none() && (action.starts_with("delete") || action.starts_with("moved to "));
     if after.is_none() && !deleted {
         output.push_str("Final text snapshot unavailable; destination exists but may be a directory or binary file.\n");
         return bound_model_content(&output);

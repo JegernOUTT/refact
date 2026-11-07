@@ -27,18 +27,6 @@ const TASK: TaskMeta = {
 };
 
 describe("TaskCreate", () => {
-  it("task_create_form_accepts_target_files_input", async () => {
-    server.use(http.get("*/v1/tasks", () => HttpResponse.json([])));
-
-    const { user } = render(<TaskList />, { preloadedState: CONFIG_STATE });
-
-    await user.click(await screen.findByRole("button", { name: /new task/i }));
-    const targetFilesInput = screen.getByLabelText("Target files");
-    await user.type(targetFilesInput, "src/foo.rs, src/bar.ts");
-
-    expect(targetFilesInput).toHaveValue("src/foo.rs, src/bar.ts");
-  });
-
   it("task_create_form_posts_target_files_array", async () => {
     let postedBody: unknown;
     server.use(

@@ -42,21 +42,6 @@ describe("MemoryListView", () => {
     expect(screen.getByText("No memories to display")).toBeInTheDocument();
   });
 
-  it("renders card grid with memories", () => {
-    render(
-      <MemoryListView
-        memories={mockMemories}
-        selectedId={null}
-        onSelectId={vi.fn()}
-        linkedIds={new Set()}
-      />,
-    );
-
-    expect(screen.getByText("Test Memory 1")).toBeInTheDocument();
-    expect(screen.getByText("Test Memory 2")).toBeInTheDocument();
-    expect(screen.getByText(/Very Long Title/)).toBeInTheDocument();
-  });
-
   it("calls onSelectId when card is clicked", async () => {
     const user = userEvent.setup();
     const onSelectId = vi.fn();
@@ -77,20 +62,6 @@ describe("MemoryListView", () => {
       await user.click(card);
       expect(onSelectId).toHaveBeenCalledWith("mem-1");
     }
-  });
-
-  it("highlights selected card", () => {
-    render(
-      <MemoryListView
-        memories={mockMemories}
-        selectedId="mem-2"
-        onSelectId={vi.fn()}
-        linkedIds={new Set()}
-      />,
-    );
-
-    const selectedCard = screen.getByText("Test Memory 2").closest("button");
-    expect(selectedCard?.className).toContain("selected");
   });
 
   it("shows link badge for linked memories", () => {

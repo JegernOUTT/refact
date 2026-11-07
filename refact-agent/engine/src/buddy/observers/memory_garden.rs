@@ -242,7 +242,10 @@ fn collect_knowledge_candidates_from_dir(
             }
             stats.matching_files_considered += 1;
             let modified_key = metadata.modified().map(system_time_key).unwrap_or_default();
-            all.push(KnowledgeCandidate { modified_key, path });
+            all.push(KnowledgeCandidate {
+                modified_key,
+                path,
+            });
         }
     }
 }

@@ -9,7 +9,6 @@ import { Theme } from "../../src/components/Theme";
 import { AbortControllerProvider } from "../../src/contexts/AbortControllers";
 import { Dashboard } from "../../src/features/Dashboard";
 import { Toolbar } from "../../src/components/Toolbar/Toolbar";
-import { TabBar } from "../../src/features/Workspace/TabBar";
 import { WorkspaceView } from "../../src/features/Workspace/WorkspaceView";
 import { WorkspaceShell } from "../../src/features/Workspace/WorkspaceShell";
 import { WorkPanel } from "../../src/features/Workspace/WorkPanel/WorkPanel";
@@ -2529,11 +2528,30 @@ const preloadedState: Partial<RootState> = {
                 },
               }
             : {
-                tabs: chatDndRoute
-                  ? [chatSurface(chatId), chatSurface(splitChatId)]
-                  : [chatSurface(chatId)],
+                tabs:
+                  chatDndRoute && rebuildRoute
+                    ? [chatSurface(chatId), chatSurface(splitChatId)]
+                    : [chatSurface(chatId)],
                 activeTabId: chatSurface(chatId),
-                groups: {},
+                // Current workspaces consolidate open surfaces into one group.
+                // Seed DnD at that valid single-leaf state, not legacy top tabs.
+                groups:
+                  chatDndRoute && !rebuildRoute
+                    ? {
+                        [chatSurface(chatId)]: {
+                          root: {
+                            kind: "leaf" as const,
+                            id: "root",
+                            tabIds: [
+                              chatSurface(chatId),
+                              chatSurface(splitChatId),
+                            ],
+                            activeTabId: chatSurface(chatId),
+                          },
+                          focusedLeafId: "root",
+                        },
+                      }
+                    : {},
                 ...(queueRoute
                   ? {
                       dock: {
@@ -3420,14 +3438,9 @@ const ShowcaseSurface = () => {
           overflow: "hidden",
         }}
       >
-        {!rebuildRoute && !toolbarAlignmentRoute && <TabBar />}
         <Flex style={{ flex: "1 1 auto", minWidth: 0, minHeight: 0 }}>
           <WorkspaceShell
-            toolbar={
-              (rebuildRoute || toolbarAlignmentRoute) && (
-                <Toolbar activeTab={{ type: "chat", id: chatId }} />
-              )
-            }
+            toolbar={<Toolbar activeTab={{ type: "chat", id: chatId }} />}
           >
             <WorkspaceView />
           </WorkspaceShell>

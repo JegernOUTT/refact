@@ -382,7 +382,9 @@ impl PostMergeCommandRunner for RegressionRunner {
     ) -> PostMergeCommandOutput {
         assert_eq!(root, self.checkout.canonicalize().unwrap());
         let (success, output) = match command {
-            PostMergeCommand::Verify { .. } => {
+            PostMergeCommand::Verify {
+                ..
+            } => {
                 self.verified = true;
                 assert_eq!(
                     std::fs::read_to_string(root.join("file.txt")).unwrap(),

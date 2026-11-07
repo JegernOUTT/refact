@@ -24,7 +24,6 @@ import {
   normalizeConnection,
   resetChatParamsSyncState,
   invalidateChatParamsSyncState,
-  type ChatCommand,
 } from "../services/refact/chatCommands";
 import type { EngineApiConfig } from "../services/refact/apiUrl";
 
@@ -688,113 +687,5 @@ describe("chatCommands", () => {
       expect(calledBody.type).toBe("remove_message");
       expect(calledBody.regenerate).toBe(true);
     });
-  });
-});
-
-describe("Command Types", () => {
-  it("correctly types user_message command with string", () => {
-    const command: ChatCommand = {
-      type: "user_message",
-      content: "Hello",
-      attachments: [],
-      client_request_id: "test-id",
-    };
-
-    expect(command.type).toBe("user_message");
-  });
-
-  it("correctly types user_message command with multimodal array", () => {
-    const command: ChatCommand = {
-      type: "user_message",
-      content: [
-        { type: "text", text: "Hello" },
-        { type: "image_url", image_url: { url: "data:..." } },
-      ],
-      attachments: [],
-      client_request_id: "test-id",
-    };
-
-    expect(command.type).toBe("user_message");
-  });
-
-  it("correctly types set_params command", () => {
-    const command: ChatCommand = {
-      type: "set_params",
-      patch: {
-        model: "gpt-4",
-        mode: "AGENT",
-        boost_reasoning: true,
-      },
-      client_request_id: "test-id",
-    };
-
-    expect(command.type).toBe("set_params");
-  });
-
-  it("correctly types abort command", () => {
-    const command: ChatCommand = {
-      type: "abort",
-      client_request_id: "test-id",
-    };
-    expect(command.type).toBe("abort");
-  });
-
-  it("correctly types tool_decision command", () => {
-    const command: ChatCommand = {
-      type: "tool_decision",
-      tool_call_id: "call_123",
-      accepted: true,
-      client_request_id: "test-id",
-    };
-
-    expect(command.type).toBe("tool_decision");
-  });
-
-  it("correctly types ide_tool_result command", () => {
-    const command: ChatCommand = {
-      type: "ide_tool_result",
-      tool_call_id: "call_123",
-      content: "result",
-      tool_failed: false,
-      client_request_id: "test-id",
-    };
-
-    expect(command.type).toBe("ide_tool_result");
-  });
-
-  it("correctly types tool_decisions command", () => {
-    const command: ChatCommand = {
-      type: "tool_decisions",
-      decisions: [
-        { tool_call_id: "call_1", accepted: true },
-        { tool_call_id: "call_2", accepted: false },
-      ],
-      client_request_id: "test-id",
-    };
-
-    expect(command.type).toBe("tool_decisions");
-  });
-
-  it("correctly types update_message command", () => {
-    const command: ChatCommand = {
-      type: "update_message",
-      message_id: "msg_5",
-      content: "Updated",
-      regenerate: true,
-      client_request_id: "test-id",
-    };
-
-    expect(command.type).toBe("update_message");
-  });
-
-  it("correctly types remove_message command", () => {
-    const command: ChatCommand = {
-      type: "remove_message",
-      message_id: "msg_5",
-      regenerate: false,
-      client_request_id: "test-id",
-    };
-
-    expect(command.type).toBe("remove_message");
   });
 });

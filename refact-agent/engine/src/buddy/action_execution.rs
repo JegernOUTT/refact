@@ -129,7 +129,9 @@ pub struct OperatorStoreRepository<S = OperatorStore> {
 
 impl<S> OperatorStoreRepository<S> {
     pub fn new(store: S) -> Self {
-        Self { store }
+        Self {
+            store,
+        }
     }
 
     pub fn into_store(self) -> S {

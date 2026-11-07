@@ -26,35 +26,72 @@ pub enum ClockOp {
 impl ClockOp {
     pub fn method(&self) -> &'static str {
         match self {
-            ClockOp::Install { .. } => "install",
-            ClockOp::FastForward { .. } => "fastForward",
-            ClockOp::PauseAt { .. } => "pauseAt",
+            ClockOp::Install {
+                ..
+            } => "install",
+            ClockOp::FastForward {
+                ..
+            } => "fastForward",
+            ClockOp::PauseAt {
+                ..
+            } => "pauseAt",
             ClockOp::Resume => "resume",
-            ClockOp::RunFor { .. } => "runFor",
-            ClockOp::SetFixedTime { .. } => "setFixedTime",
-            ClockOp::SetSystemTime { .. } => "setSystemTime",
+            ClockOp::RunFor {
+                ..
+            } => "runFor",
+            ClockOp::SetFixedTime {
+                ..
+            } => "setFixedTime",
+            ClockOp::SetSystemTime {
+                ..
+            } => "setSystemTime",
         }
     }
 
     pub fn action_name(&self) -> &'static str {
         match self {
-            ClockOp::Install { .. } => "clock_install",
-            ClockOp::FastForward { .. } => "clock_fast_forward",
-            ClockOp::PauseAt { .. } => "clock_pause_at",
+            ClockOp::Install {
+                ..
+            } => "clock_install",
+            ClockOp::FastForward {
+                ..
+            } => "clock_fast_forward",
+            ClockOp::PauseAt {
+                ..
+            } => "clock_pause_at",
             ClockOp::Resume => "clock_resume",
-            ClockOp::RunFor { .. } => "clock_run_for",
-            ClockOp::SetFixedTime { .. } => "clock_set_fixed_time",
-            ClockOp::SetSystemTime { .. } => "clock_set_system_time",
+            ClockOp::RunFor {
+                ..
+            } => "clock_run_for",
+            ClockOp::SetFixedTime {
+                ..
+            } => "clock_set_fixed_time",
+            ClockOp::SetSystemTime {
+                ..
+            } => "clock_set_system_time",
         }
     }
 
     pub fn param(&self) -> Option<i64> {
         match self {
-            ClockOp::Install { time_ms }
-            | ClockOp::PauseAt { time_ms }
-            | ClockOp::SetFixedTime { time_ms }
-            | ClockOp::SetSystemTime { time_ms } => Some(*time_ms),
-            ClockOp::FastForward { ticks_ms } | ClockOp::RunFor { ticks_ms } => Some(*ticks_ms),
+            ClockOp::Install {
+                time_ms,
+            }
+            | ClockOp::PauseAt {
+                time_ms,
+            }
+            | ClockOp::SetFixedTime {
+                time_ms,
+            }
+            | ClockOp::SetSystemTime {
+                time_ms,
+            } => Some(*time_ms),
+            ClockOp::FastForward {
+                ticks_ms,
+            }
+            | ClockOp::RunFor {
+                ticks_ms,
+            } => Some(*ticks_ms),
             ClockOp::Resume => None,
         }
     }
@@ -71,17 +108,29 @@ impl ClockOp {
 
     pub fn summary(&self) -> String {
         match self {
-            ClockOp::Install { time_ms } => format!("Installed fake clock at {time_ms}"),
-            ClockOp::FastForward { ticks_ms } => {
+            ClockOp::Install {
+                time_ms,
+            } => format!("Installed fake clock at {time_ms}"),
+            ClockOp::FastForward {
+                ticks_ms,
+            } => {
                 format!("Fast-forwarded clock by {ticks_ms}ms, firing each due timer at most once")
             }
-            ClockOp::PauseAt { time_ms } => format!("Paused clock at {time_ms}"),
+            ClockOp::PauseAt {
+                time_ms,
+            } => format!("Paused clock at {time_ms}"),
             ClockOp::Resume => "Resumed clock".to_string(),
-            ClockOp::RunFor { ticks_ms } => {
+            ClockOp::RunFor {
+                ticks_ms,
+            } => {
                 format!("Ran clock for {ticks_ms}ms, firing all due callbacks")
             }
-            ClockOp::SetFixedTime { time_ms } => format!("Fixed clock time at {time_ms}"),
-            ClockOp::SetSystemTime { time_ms } => format!("Set clock system time to {time_ms}"),
+            ClockOp::SetFixedTime {
+                time_ms,
+            } => format!("Fixed clock time at {time_ms}"),
+            ClockOp::SetSystemTime {
+                time_ms,
+            } => format!("Set clock system time to {time_ms}"),
         }
     }
 }
@@ -111,7 +160,9 @@ impl ClockState {
     pub fn apply(&mut self, op: &ClockOp) {
         self.installed = true;
         match op {
-            ClockOp::PauseAt { .. } => self.paused = true,
+            ClockOp::PauseAt {
+                ..
+            } => self.paused = true,
             ClockOp::Resume => self.paused = false,
             _ => {}
         }
@@ -278,8 +329,13 @@ impl ClockManager {
             }
             None => None,
         };
-        self.tab_scripts
-            .insert(target_id, TabClockScripts { bootstrap, replay });
+        self.tab_scripts.insert(
+            target_id,
+            TabClockScripts {
+                bootstrap,
+                replay,
+            },
+        );
         Ok(())
     }
 
@@ -421,9 +477,15 @@ mod tests {
     fn ordering_guard_requires_install_before_time_travel() {
         let state = ClockState::default();
         for op in [
-            ClockOp::FastForward { ticks_ms: 1000 },
-            ClockOp::RunFor { ticks_ms: 1000 },
-            ClockOp::PauseAt { time_ms: 1000 },
+            ClockOp::FastForward {
+                ticks_ms: 1000,
+            },
+            ClockOp::RunFor {
+                ticks_ms: 1000,
+            },
+            ClockOp::PauseAt {
+                time_ms: 1000,
+            },
             ClockOp::Resume,
         ] {
             let error = state.validate(&op).unwrap_err();
@@ -434,22 +496,34 @@ mod tests {
     #[test]
     fn ordering_guard_allows_standalone_time_setters() {
         let state = ClockState::default();
-        assert!(state.validate(&ClockOp::Install { time_ms: 0 }).is_ok());
         assert!(state
-            .validate(&ClockOp::SetFixedTime { time_ms: 0 })
+            .validate(&ClockOp::Install {
+                time_ms: 0
+            })
             .is_ok());
         assert!(state
-            .validate(&ClockOp::SetSystemTime { time_ms: 0 })
+            .validate(&ClockOp::SetFixedTime {
+                time_ms: 0
+            })
+            .is_ok());
+        assert!(state
+            .validate(&ClockOp::SetSystemTime {
+                time_ms: 0
+            })
             .is_ok());
     }
 
     #[test]
     fn resume_requires_a_preceding_pause() {
         let mut state = ClockState::default();
-        state.apply(&ClockOp::Install { time_ms: 0 });
+        state.apply(&ClockOp::Install {
+            time_ms: 0,
+        });
         let error = state.validate(&ClockOp::Resume).unwrap_err();
         assert!(error.contains("clock_pause_at"), "{error}");
-        state.apply(&ClockOp::PauseAt { time_ms: 1000 });
+        state.apply(&ClockOp::PauseAt {
+            time_ms: 1000,
+        });
         assert!(state.validate(&ClockOp::Resume).is_ok());
         state.apply(&ClockOp::Resume);
         assert!(state.validate(&ClockOp::Resume).is_err());
@@ -458,10 +532,18 @@ mod tests {
     #[test]
     fn fast_forward_and_run_for_keep_the_paused_state() {
         let mut state = ClockState::default();
-        state.apply(&ClockOp::Install { time_ms: 0 });
-        state.apply(&ClockOp::PauseAt { time_ms: 10 });
-        state.apply(&ClockOp::FastForward { ticks_ms: 10 });
-        state.apply(&ClockOp::RunFor { ticks_ms: 10 });
+        state.apply(&ClockOp::Install {
+            time_ms: 0,
+        });
+        state.apply(&ClockOp::PauseAt {
+            time_ms: 10,
+        });
+        state.apply(&ClockOp::FastForward {
+            ticks_ms: 10,
+        });
+        state.apply(&ClockOp::RunFor {
+            ticks_ms: 10,
+        });
         assert!(state.paused);
         assert!(state.installed);
     }
@@ -469,17 +551,26 @@ mod tests {
     #[test]
     fn standalone_time_setters_mark_the_clock_installed() {
         let mut state = ClockState::default();
-        state.apply(&ClockOp::SetFixedTime { time_ms: 5 });
+        state.apply(&ClockOp::SetFixedTime {
+            time_ms: 5,
+        });
         assert!(state.installed);
         assert!(state
-            .validate(&ClockOp::FastForward { ticks_ms: 1 })
+            .validate(&ClockOp::FastForward {
+                ticks_ms: 1
+            })
             .is_ok());
     }
 
     #[test]
     fn log_scripts_carry_the_playwright_method_names_and_wall_time() {
         assert_eq!(
-            clock_log_script(&ClockOp::FastForward { ticks_ms: 1000 }, 42),
+            clock_log_script(
+                &ClockOp::FastForward {
+                    ticks_ms: 1000
+                },
+                42
+            ),
             "globalThis.__refactClock.controller.log('fastForward', 42, 1000)"
         );
         assert_eq!(
@@ -487,7 +578,12 @@ mod tests {
             "globalThis.__refactClock.controller.log('resume', 42)"
         );
         assert_eq!(
-            clock_log_script(&ClockOp::SetFixedTime { time_ms: 7 }, 42),
+            clock_log_script(
+                &ClockOp::SetFixedTime {
+                    time_ms: 7
+                },
+                42
+            ),
             "globalThis.__refactClock.controller.log('setFixedTime', 42, 7)"
         );
     }
@@ -495,7 +591,9 @@ mod tests {
     #[test]
     fn call_scripts_target_the_controller_methods() {
         assert_eq!(
-            clock_call_script(&ClockOp::RunFor { ticks_ms: 250 }),
+            clock_call_script(&ClockOp::RunFor {
+                ticks_ms: 250
+            }),
             "globalThis.__refactClock.controller.runFor(250)"
         );
         assert_eq!(
@@ -503,7 +601,9 @@ mod tests {
             "globalThis.__refactClock.controller.resume()"
         );
         assert_eq!(
-            clock_call_script(&ClockOp::PauseAt { time_ms: -5 }),
+            clock_call_script(&ClockOp::PauseAt {
+                time_ms: -5
+            }),
             "globalThis.__refactClock.controller.pauseAt(-5)"
         );
     }
@@ -532,7 +632,12 @@ mod tests {
 
     #[test]
     fn init_scripts_never_run_immediately_in_the_current_document() {
-        let script = clock_init_script(&clock_log_script(&ClockOp::RunFor { ticks_ms: 1000 }, 0));
+        let script = clock_init_script(&clock_log_script(
+            &ClockOp::RunFor {
+                ticks_ms: 1000,
+            },
+            0,
+        ));
         assert_eq!(script.run_immediately, Some(false));
         assert_eq!(script.world_name, None);
         assert!(script.source.contains("controller.log('runFor'"));
@@ -551,7 +656,13 @@ mod tests {
     fn manager_rejects_out_of_order_steps_before_touching_the_browser() {
         let mut manager = ClockManager::default();
         let error = manager
-            .run(&[], ClockOp::FastForward { ticks_ms: 1000 }, 0)
+            .run(
+                &[],
+                ClockOp::FastForward {
+                    ticks_ms: 1000,
+                },
+                0,
+            )
             .unwrap_err();
         assert!(error.contains("clock_install"), "{error}");
         assert!(!manager.is_installed());
@@ -561,7 +672,13 @@ mod tests {
     fn manager_requires_a_tab_once_the_step_order_is_valid() {
         let mut manager = ClockManager::default();
         let error = manager
-            .run(&[], ClockOp::Install { time_ms: 0 }, 0)
+            .run(
+                &[],
+                ClockOp::Install {
+                    time_ms: 0,
+                },
+                0,
+            )
             .unwrap_err();
         assert!(error.contains("requires an open tab"), "{error}");
     }

@@ -247,7 +247,11 @@ impl Tool for ToolUndoTextDoc {
             });
         let model_content = super::edit_output::edit_model_content(
             path,
-            if summary.contains(", deleted ") { "delete (undo_textdoc)" } else { "undo_textdoc" },
+            if summary.contains(", deleted ") {
+                "delete (undo_textdoc)"
+            } else {
+                "undo_textdoc"
+            },
             Some(&before),
             if summary.contains(", deleted ") {
                 None

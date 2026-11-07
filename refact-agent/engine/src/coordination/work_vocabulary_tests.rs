@@ -9,12 +9,6 @@
 //! generated from `WorkStateTag::ALL`, so it cannot drift; the GUI contract is
 //! a separate language and is pinned by reading the file.
 //!
-//! Surfaces that deliberately carry no work vocabulary, and so are not pinned
-//! here: the TUI renders a single chat session and never lists project work,
-//! so it has no state/freshness/disclosure of its own to keep in step. It
-//! names its own `SessionState`, which the catalog already maps into this
-//! vocabulary, so pinning it would assert a synonym rather than forbid one.
-//!
 //! The six evidence verdicts are pinned here too. They had a GUI surface all
 //! along — the goal receipt card — but it re-derived the verdict by matching
 //! words in the engine's reason string, so rewording a sentence changed what

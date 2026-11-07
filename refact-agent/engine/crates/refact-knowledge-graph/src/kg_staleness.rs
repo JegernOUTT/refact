@@ -63,7 +63,10 @@ impl KnowledgeGraph {
                         .get(*f)
                         .and_then(|idx| self.graph.node_weight(*idx))
                         .map(|node| {
-                            if let super::kg_structs::KgNode::FileRef { exists, .. } = node {
+                            if let super::kg_structs::KgNode::FileRef {
+                                exists, ..
+                            } = node
+                            {
                                 !exists
                             } else {
                                 false

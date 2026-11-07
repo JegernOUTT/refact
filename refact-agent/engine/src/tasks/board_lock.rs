@@ -86,7 +86,10 @@ fn set_board_lock_settings_override(
         .write()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .insert(dir.clone(), settings.sanitized());
-    BoardLockSettingsOverride { dir, previous }
+    BoardLockSettingsOverride {
+        dir,
+        previous,
+    }
 }
 
 #[cfg(test)]

@@ -73,7 +73,10 @@ pub struct RunKey {
 
 impl RunKey {
     pub fn new(work: WorkKey, attempt: u64) -> Self {
-        RunKey { work, attempt }
+        RunKey {
+            work,
+            attempt,
+        }
     }
 
     pub fn runtime(&self) -> RuntimeKind {
@@ -135,7 +138,10 @@ pub struct WorkScope {
 
 impl WorkScope {
     pub fn new(project: ProjectKey, root: CheckoutKey) -> Self {
-        WorkScope { project, root }
+        WorkScope {
+            project,
+            root,
+        }
     }
 
     pub fn single(project: impl Into<String>) -> Self {

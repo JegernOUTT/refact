@@ -37,7 +37,9 @@ pub fn transcribe_pcm(
     pcm: &[f32],
     language: Option<&str>,
 ) -> Result<String, String> {
-    let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+    let mut params = FullParams::new(SamplingStrategy::Greedy {
+        best_of: 1,
+    });
     params.set_print_special(false);
     params.set_print_progress(false);
     params.set_print_realtime(false);

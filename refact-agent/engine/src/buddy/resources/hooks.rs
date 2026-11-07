@@ -22,7 +22,10 @@ pub struct HookPreparation {
 pub type HooksAdapter = ManagedResource<HookPreparation>;
 impl HookPreparation {
     pub fn new(project: ProjectIdentity, drafts: Arc<dyn DraftRegistry<HookDraft>>) -> Self {
-        Self { project, drafts }
+        Self {
+            project,
+            drafts,
+        }
     }
 }
 impl ResourcePreparation for HookPreparation {

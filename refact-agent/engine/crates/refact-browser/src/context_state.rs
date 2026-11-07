@@ -244,8 +244,10 @@ impl ContextState {
             })
             .map_err(|error| format!("Failed to clear touch emulation: {error}"))?;
             apply_media(tab, &self.media)?;
-            tab.call_method(Emulation::SetLocaleOverride { locale: None })
-                .map_err(|error| format!("Failed to clear locale: {error}"))?;
+            tab.call_method(Emulation::SetLocaleOverride {
+                locale: None,
+            })
+            .map_err(|error| format!("Failed to clear locale: {error}"))?;
             tab.call_method(Emulation::SetTimezoneOverride {
                 timezone_id: String::new(),
             })
@@ -383,9 +385,11 @@ pub fn apply_cpu_throttling(tab: &Tab, rate: Option<f64>) -> Result<(), String> 
 }
 
 pub fn apply_block_service_workers(tab: &Tab, block: bool) -> Result<(), String> {
-    tab.call_method(Network::SetBypassServiceWorker { bypass: block })
-        .map(|_| ())
-        .map_err(|error| format!("Failed to set service worker bypass: {error}"))
+    tab.call_method(Network::SetBypassServiceWorker {
+        bypass: block,
+    })
+    .map(|_| ())
+    .map_err(|error| format!("Failed to set service worker bypass: {error}"))
 }
 
 pub fn apply_extra_http_headers(
@@ -403,9 +407,11 @@ pub fn apply_extra_http_headers(
 }
 
 pub fn get_cookies(tab: &Tab, urls: Option<Vec<String>>) -> Result<Vec<BrowserCookie>, String> {
-    tab.call_method(Network::GetCookies { urls })
-        .map_err(|error| format!("Failed to get cookies: {error}"))
-        .map(|response| response.cookies.into_iter().map(cookie_from_cdp).collect())
+    tab.call_method(Network::GetCookies {
+        urls,
+    })
+    .map_err(|error| format!("Failed to get cookies: {error}"))
+    .map(|response| response.cookies.into_iter().map(cookie_from_cdp).collect())
 }
 
 pub fn set_cookies(tab: &Tab, cookies: &[BrowserCookie]) -> Result<(), String> {
@@ -513,7 +519,10 @@ pub fn storage_state(tab: &Tab, indexed_db: bool) -> Result<BrowserStorageState,
             },
         }]
     };
-    Ok(BrowserStorageState { cookies, origins })
+    Ok(BrowserStorageState {
+        cookies,
+        origins,
+    })
 }
 
 pub fn get_indexed_db(tab: &Tab) -> Result<Vec<BrowserIndexedDbDatabase>, String> {

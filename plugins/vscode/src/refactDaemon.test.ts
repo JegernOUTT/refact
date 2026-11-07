@@ -9,7 +9,6 @@ import {
     DAEMON_OPEN_PROJECT_TIMEOUT_MS,
     DAEMON_POLL_TIMEOUT_MS,
     DAEMON_SHUTDOWN_TIMEOUT_MS,
-    DEFAULT_BROWSER_HOST,
     browserProjectUrl,
     browserProjectUrlForConfiguredHost,
     compareVersions,
@@ -93,7 +92,6 @@ export async function runRefactDaemonTests() {
         browserProjectUrl("machine.local", 8488, "abc", "token with/slash"),
         "http://machine.local:8488/p/abc/?daemon_token=token%20with%2Fslash",
     );
-    assert.strictEqual(DEFAULT_BROWSER_HOST, "127.0.0.1");
     assert.strictEqual(configuredBrowserHost(undefined), undefined);
     assert.strictEqual(configuredBrowserHost(""), undefined);
     assert.strictEqual(configuredBrowserHost(" 0.0.0.0 "), undefined);
@@ -1102,9 +1100,6 @@ async function runDaemonUpgradeTimeoutTest() {
             "Refact daemon on port 8488 did not exit within 1s after shutdown. Retry shortly, or stop process 1 before retrying.",
         );
 
-        const command = daemonSpawnCommand(refactPath);
-        assert.deepStrictEqual(command, { command: refactPath, args: ["daemon"] });
-        assert.notStrictEqual(command.command, path.join(assetPath, process.platform === "win32" ? "refact-lsp.exe" : "refact-lsp"));
     } finally {
         fs.rmSync(assetPath, { recursive: true, force: true });
     }

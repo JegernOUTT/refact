@@ -74,15 +74,18 @@ impl KnowledgeGraph {
             // If we already created the node as `exists=false`, and later discover
             // the file exists, upgrade it to keep KG consistent.
             if exists {
-                if let Some(KgNode::FileRef { exists: ref mut ex }) =
-                    self.graph.node_weight_mut(idx)
+                if let Some(KgNode::FileRef {
+                    exists: ref mut ex,
+                }) = self.graph.node_weight_mut(idx)
                 {
                     *ex = true;
                 }
             }
             return idx;
         }
-        let idx = self.graph.add_node(KgNode::FileRef { exists });
+        let idx = self.graph.add_node(KgNode::FileRef {
+            exists,
+        });
         self.file_index.insert(path.to_string(), idx);
         idx
     }
@@ -104,7 +107,9 @@ impl KnowledgeGraph {
             .unwrap_or_else(|| doc.path.to_string_lossy().to_string());
         let path = doc.path.clone();
 
-        let doc_idx = self.graph.add_node(KgNode::Doc { id: id.clone() });
+        let doc_idx = self.graph.add_node(KgNode::Doc {
+            id: id.clone(),
+        });
         self.doc_index.insert(id.clone(), doc_idx);
         self.doc_path_index.insert(path, doc_idx);
 
@@ -175,7 +180,10 @@ impl KnowledgeGraph {
 
     pub fn get_doc_by_path(&self, path: &PathBuf) -> Option<&KnowledgeDoc> {
         self.doc_path_index.get(path).and_then(|idx| {
-            if let Some(KgNode::Doc { id, .. }) = self.graph.node_weight(*idx) {
+            if let Some(KgNode::Doc {
+                id, ..
+            }) = self.graph.node_weight(*idx)
+            {
                 self.docs.get(id)
             } else {
                 None
@@ -196,7 +204,10 @@ impl KnowledgeGraph {
         self.graph
             .neighbors_directed(tag_idx, petgraph::Direction::Incoming)
             .filter_map(|idx| {
-                if let Some(KgNode::Doc { id, .. }) = self.graph.node_weight(idx) {
+                if let Some(KgNode::Doc {
+                    id, ..
+                }) = self.graph.node_weight(idx)
+                {
                     Some(id.clone())
                 } else {
                     None
@@ -213,7 +224,10 @@ impl KnowledgeGraph {
         self.graph
             .neighbors_directed(file_idx, petgraph::Direction::Incoming)
             .filter_map(|idx| {
-                if let Some(KgNode::Doc { id, .. }) = self.graph.node_weight(idx) {
+                if let Some(KgNode::Doc {
+                    id, ..
+                }) = self.graph.node_weight(idx)
+                {
                     Some(id.clone())
                 } else {
                     None
@@ -230,7 +244,10 @@ impl KnowledgeGraph {
         self.graph
             .neighbors_directed(entity_idx, petgraph::Direction::Incoming)
             .filter_map(|idx| {
-                if let Some(KgNode::Doc { id, .. }) = self.graph.node_weight(idx) {
+                if let Some(KgNode::Doc {
+                    id, ..
+                }) = self.graph.node_weight(idx)
+                {
                     Some(id.clone())
                 } else {
                     None

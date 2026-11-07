@@ -255,7 +255,9 @@ pub async fn install_test_voice_service(service: Arc<VoiceService>) -> VoiceServ
         .lock()
         .unwrap()
         .insert(scope, service);
-    VoiceServiceTestGuard { scope }
+    VoiceServiceTestGuard {
+        scope,
+    }
 }
 
 pub async fn voice_service() -> Arc<VoiceService> {

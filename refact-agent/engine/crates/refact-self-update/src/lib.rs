@@ -167,7 +167,9 @@ impl ReqwestReleaseSource {
             .map_err(|error| {
                 SelfUpdateError::runtime(format!("failed to build HTTP client: {error}"))
             })?;
-        Ok(Self { client })
+        Ok(Self {
+            client,
+        })
     }
 
     async fn get_json(&self, url: &str) -> Result<GitHubRelease, SelfUpdateError> {
@@ -378,7 +380,9 @@ async fn run_with_source_for_current_version(
         options.version.as_deref(),
     );
     let target_version = match &decision {
-        UpdateDecision::Update { version, .. } => Some(version.as_str()),
+        UpdateDecision::Update {
+            version, ..
+        } => Some(version.as_str()),
         UpdateDecision::NoUpdate => None,
     };
     let urls = release.asset_urls(target);
@@ -445,7 +449,10 @@ async fn install_update_with_source(
         None => source.latest_release().await?,
     };
     let decision = decide_update(current_version, &release.version, force, version);
-    let UpdateDecision::Update { version, .. } = decision else {
+    let UpdateDecision::Update {
+        version, ..
+    } = decision
+    else {
         return Err(SelfUpdateError::runtime(format!(
             "refact is up to date ({current_version})"
         )));
@@ -711,7 +718,10 @@ fn write_check_output(
     urls: &AssetUrls,
 ) -> Result<(), SelfUpdateError> {
     let (target_version, reason) = match decision {
-        UpdateDecision::Update { version, reason } => (Some(version.as_str()), Some(*reason)),
+        UpdateDecision::Update {
+            version,
+            reason,
+        } => (Some(version.as_str()), Some(*reason)),
         UpdateDecision::NoUpdate => (None, None),
     };
     if options.json {

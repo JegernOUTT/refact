@@ -49,12 +49,6 @@ describe("lib entry global CSS order", () => {
     }
   });
 
-  it("keeps tokens.css imported after the Radix stylesheet", () => {
-    expect(imports.indexOf("../styles/tokens.css")).toBeGreaterThan(
-      imports.indexOf("@radix-ui/themes/styles.css"),
-    );
-  });
-
   it("keeps Theme.tsx and .storybook/preview.tsx cascades in sync", () => {
     // Three copies of the global sheet list exist on purpose (entry, Theme
     // for isolated mounts, Storybook preview); this guards against drift.

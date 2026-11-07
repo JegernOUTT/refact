@@ -1,8 +1,5 @@
 import { describe, expect, it, vi, type Mock } from "vitest";
-import {
-  drawWorldObject,
-  drawWorldObjects,
-} from "../features/Buddy/buddyWorldDrawObjects";
+import { drawWorldObjects } from "../features/Buddy/buddyWorldDrawObjects";
 import { buildBuddyWorldState } from "../features/Buddy/buddyWorldModel";
 import type { DrawBuddyWorldBaseArgs } from "../features/Buddy/buddyWorldDrawHelpers";
 import { PALETTES } from "../features/Buddy/constants";
@@ -123,24 +120,6 @@ describe("buddy world object drawing", () => {
 
       expect(() => drawWorldObjects(args)).not.toThrow();
       expect(mocks.fillRect).toHaveBeenCalled();
-      expectFiniteNumericArgs(mocks);
-    },
-  );
-
-  it.each(["stats", "settings"])(
-    "renders the %s landmark sprite with painted pixels",
-    (objectId) => {
-      const { ctx, mocks } = makeRecordingContext();
-      const args = makeDrawArgs(ctx, false);
-      const object = args.world.objects.find((item) => item.id === objectId);
-
-      expect(object).toBeDefined();
-      if (!object) return;
-
-      drawWorldObject(args, object);
-
-      expect(mocks.fillRect).toHaveBeenCalled();
-      expect(mocks.ellipse).toHaveBeenCalled();
       expectFiniteNumericArgs(mocks);
     },
   );

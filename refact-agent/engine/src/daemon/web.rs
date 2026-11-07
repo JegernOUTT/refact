@@ -318,7 +318,9 @@ fn worker_state_label(worker: Option<&WorkerInfo>) -> String {
         Some(WorkerState::Ready) => "ready".to_string(),
         Some(WorkerState::Stopping) => "stopping".to_string(),
         Some(WorkerState::Crashed) => "crashed".to_string(),
-        Some(WorkerState::Failed { .. }) => "failed".to_string(),
+        Some(WorkerState::Failed {
+            ..
+        }) => "failed".to_string(),
     }
 }
 
@@ -588,7 +590,9 @@ fn daemon_root_origin_candidates(port: u16) -> GuiPublicOriginCandidates {
             origins.push(origin);
         }
     }
-    GuiPublicOriginCandidates { origins }
+    GuiPublicOriginCandidates {
+        origins,
+    }
 }
 
 fn daemon_origin_candidates(port: u16, project_id: &str) -> GuiPublicOriginCandidates {
@@ -601,7 +605,9 @@ fn daemon_origin_candidates(port: u16, project_id: &str) -> GuiPublicOriginCandi
             origins.push(candidate);
         }
     }
-    GuiPublicOriginCandidates { origins }
+    GuiPublicOriginCandidates {
+        origins,
+    }
 }
 
 fn unknown_project_html(project_id: &str) -> String {
@@ -693,7 +699,10 @@ mod tests {
             token.map(str::to_string),
         );
         *state.projects.write().await = ProjectRegistry::empty(dir.path().join("projects.json"));
-        TestState { _dir: dir, state }
+        TestState {
+            _dir: dir,
+            state,
+        }
     }
 
     #[test]

@@ -440,16 +440,26 @@ pub async fn poll_oauth_session(
 
     let mut sessions = PENDING_SESSIONS.lock().await;
     match &outcome {
-        DevicePollOutcome::AuthorizationPending { poll_interval }
-        | DevicePollOutcome::SlowDown { poll_interval } => {
+        DevicePollOutcome::AuthorizationPending {
+            poll_interval,
+        }
+        | DevicePollOutcome::SlowDown {
+            poll_interval,
+        } => {
             if let Some(stored) = sessions.get_mut(session_id) {
                 stored.poll_interval = *poll_interval;
             }
         }
         DevicePollOutcome::Success(_)
-        | DevicePollOutcome::ExpiredToken { .. }
-        | DevicePollOutcome::AccessDenied { .. }
-        | DevicePollOutcome::Error { .. } => {
+        | DevicePollOutcome::ExpiredToken {
+            ..
+        }
+        | DevicePollOutcome::AccessDenied {
+            ..
+        }
+        | DevicePollOutcome::Error {
+            ..
+        } => {
             sessions.remove(session_id);
         }
     }
@@ -568,7 +578,9 @@ mod tests {
         .unwrap();
         assert_eq!(
             pending,
-            DevicePollOutcome::AuthorizationPending { poll_interval: 5 }
+            DevicePollOutcome::AuthorizationPending {
+                poll_interval: 5
+            }
         );
 
         let slow_down = parse_token_poll_response(
@@ -578,7 +590,12 @@ mod tests {
             DEFAULT_COPILOT_API_BASE.to_string(),
         )
         .unwrap();
-        assert_eq!(slow_down, DevicePollOutcome::SlowDown { poll_interval: 10 });
+        assert_eq!(
+            slow_down,
+            DevicePollOutcome::SlowDown {
+                poll_interval: 10
+            }
+        );
 
         let server_slow_down = parse_token_poll_response(
             &json!({"error": "slow_down", "interval": 13}),
@@ -589,7 +606,9 @@ mod tests {
         .unwrap();
         assert_eq!(
             server_slow_down,
-            DevicePollOutcome::SlowDown { poll_interval: 13 }
+            DevicePollOutcome::SlowDown {
+                poll_interval: 13
+            }
         );
 
         let success = parse_token_poll_response(

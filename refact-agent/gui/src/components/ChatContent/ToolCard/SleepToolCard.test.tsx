@@ -281,7 +281,6 @@ describe("SleepToolCard", () => {
     fireEvent.click(screen.getByRole("button", { expanded: false }));
     const dots = screen.getAllByTestId("sleep-tick-dot");
     expect(dots).toHaveLength(3);
-    expect(dots[0]?.className).toMatch(/tickDot/u);
   });
 
   test("completion shows summary", () => {

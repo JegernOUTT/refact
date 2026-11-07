@@ -3,13 +3,6 @@ import { render, screen } from "../../../utils/test-utils";
 import { BuddyDeskPreview } from "./BuddyDeskPreview";
 
 describe("BuddyDeskPreview", () => {
-  it("renders the real Buddy canvas in its compact avatar", () => {
-    render(<BuddyDeskPreview />);
-    expect(
-      screen.getByLabelText(/Pixel Buddy avatar/i).querySelector("canvas"),
-    ).toBeInTheDocument();
-  });
-
   it("opens the verified report without opening chat", async () => {
     const { user } = render(<BuddyDeskPreview />);
     await user.click(

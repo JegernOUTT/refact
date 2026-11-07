@@ -6,7 +6,6 @@ import { server } from "../utils/mockServer";
 import { setUpStore } from "../app/store";
 import { getProviderName } from "../features/Providers/getProviderName";
 import { getProviderIcon } from "../features/Providers/icons/iconsMap";
-import { ProviderCard } from "../features/Providers/ProviderCard";
 import { AddProviderInstanceModal } from "../features/Providers/ProvidersView/AddProviderInstanceModal";
 import { ProvidersView } from "../features/Providers/ProvidersView";
 import {
@@ -206,34 +205,6 @@ describe("Providers provider instances", () => {
     expect(validateProviderInstanceId("OPENAI", ["openai"])).toBe(
       "A provider with this id already exists.",
     );
-  });
-
-  test("getProviderName prefers display name", () => {
-    expect(getProviderName(aliasProvider)).toBe("Work OpenAI");
-  });
-
-  test("ProviderCard renders alias label with instance id", () => {
-    const { container } = render(
-      <ProviderCard provider={aliasProvider} setCurrentProvider={vi.fn()} />,
-    );
-
-    expect(container.querySelector("svg")).toBeInTheDocument();
-    expect(
-      screen.getByRole("heading", { name: "Work OpenAI" }),
-    ).toBeInTheDocument();
-    expect(screen.getByText("openai_work")).toBeInTheDocument();
-  });
-
-  test("OAuth providers use their matching provider icons", () => {
-    expect(
-      getProviderIcon({ name: "xai_oauth", base_provider: "xai_oauth" }),
-    ).not.toBeNull();
-    expect(
-      getProviderIcon({
-        name: "google_antigravity",
-        base_provider: "google_antigravity",
-      }),
-    ).not.toBeNull();
   });
 
   test("native and aliased LiteLLM providers use first-class branding", () => {

@@ -122,7 +122,10 @@ impl SpillWriter {
             .open(&path)
             .await
             .map_err(|error| format!("failed to open exec spill log: {error}"))?;
-        Ok(Self { path, file })
+        Ok(Self {
+            path,
+            file,
+        })
     }
 
     pub async fn write_line(&mut self, line: &str) -> Result<(), String> {

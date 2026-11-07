@@ -377,7 +377,9 @@ impl SubGoalGraph {
         }
 
         if let Some(participants) = first_cycle(&adjacency) {
-            return Err(SubGoalDeclarationError::Cycle { participants });
+            return Err(SubGoalDeclarationError::Cycle {
+                participants,
+            });
         }
 
         for (parent_id, children) in &adjacency {
@@ -713,7 +715,10 @@ mod tests {
     }
 
     fn graph_with(nodes: Vec<SubGoalNode>, edges: Vec<SubGoalEdge>) -> SubGoalGraph {
-        let declaration = SubGoalDeclaration { nodes, edges };
+        let declaration = SubGoalDeclaration {
+            nodes,
+            edges,
+        };
         let mut graph = SubGoalGraph::default();
         graph
             .validate_declaration(&declaration, SubGoalLimits::default())
@@ -934,7 +939,10 @@ mod tests {
             .validate_declaration(&closing, SubGoalLimits::default())
             .expect_err("cycle must be rejected");
 
-        let SubGoalDeclarationError::Cycle { participants } = &error else {
+        let SubGoalDeclarationError::Cycle {
+            participants,
+        } = &error
+        else {
             panic!("expected a cycle error, got {error:?}");
         };
         for expected in ["a", "b", "c"] {

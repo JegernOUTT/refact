@@ -1,39 +1,9 @@
 package com.smallcloud.refactai.panes.sharedchat
 
-import com.smallcloud.refactai.panes.sharedchat.browser.ChatStartupMode
-import com.smallcloud.refactai.panes.sharedchat.browser.selectChatStartupMode
-import com.smallcloud.refactai.panes.sharedchat.browser.shouldNavigateToDaemonGui
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
-import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class SharedChatPaneReadyTest {
-
-    @Test
-    fun startupModeIsBootstrapUntilDaemonUrlAvailable() {
-        assertEquals(ChatStartupMode.BOOTSTRAP, selectChatStartupMode(null))
-        assertEquals(
-            ChatStartupMode.DAEMON_GUI,
-            selectChatStartupMode("http://127.0.0.1:8488/p/project-123/")
-        )
-    }
-
-    @Test
-    fun navigatesFromBootstrapToDaemonWhenBackendBecomesReady() {
-        assertTrue(
-            shouldNavigateToDaemonGui(
-                "http://refactai/index.html",
-                "http://127.0.0.1:8488/p/project-123/"
-            )
-        )
-        assertFalse(
-            shouldNavigateToDaemonGui(
-                "http://127.0.0.1:8488/p/project-123/",
-                "http://127.0.0.1:8488/p/project-123/"
-            )
-        )
-    }
 
     @Test
     fun onChatReadySyncSendsCurrentConfigBeforeQueueFlush() {

@@ -308,7 +308,10 @@ pub struct CausalLedger {
 impl CausalLedger {
     pub fn new(store: Arc<CoordinationStore>, project: ProjectKey) -> Self {
         let access = store.authorize(project);
-        CausalLedger { store, access }
+        CausalLedger {
+            store,
+            access,
+        }
     }
 
     pub fn project(&self) -> &ProjectKey {

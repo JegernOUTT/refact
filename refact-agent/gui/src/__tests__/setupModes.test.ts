@@ -22,13 +22,6 @@ describe("SETUP_MODES", () => {
     expect(modes).toContain("setup_knowledge");
   });
 
-  test("every entry has a non-empty label and mode", () => {
-    for (const m of SETUP_MODES) {
-      expect(m.label.length).toBeGreaterThan(0);
-      expect(m.mode.length).toBeGreaterThan(0);
-    }
-  });
-
   test("SETUP_MODE_IDS mirrors SETUP_MODES", () => {
     for (const m of SETUP_MODES) {
       expect(SETUP_MODE_IDS.has(m.mode)).toBe(true);

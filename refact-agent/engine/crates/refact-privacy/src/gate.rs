@@ -286,7 +286,10 @@ mod tests {
         let mut message = ChatMessage::new("tool".to_string(), "result".to_string());
         message.extra.insert(
             "privacy".to_string(),
-            serde_json::to_value(PrivacyRecord { files }).expect("privacy record should serialize"),
+            serde_json::to_value(PrivacyRecord {
+                files,
+            })
+            .expect("privacy record should serialize"),
         );
         message
     }
@@ -409,7 +412,9 @@ mod tests {
                 record("keys.txt", "secrets"),
             ]),
         ]);
-        let audited = AuditedMessages { messages };
+        let audited = AuditedMessages {
+            messages,
+        };
 
         let policy = compiled(&policy());
         let refusal = match clear(audited, &destination("untrusted"), &policy) {
@@ -477,7 +482,9 @@ mod tests {
             ]),
             message_with_records(vec![record("keys/private.pem", "secrets")]),
         ]);
-        let audited = AuditedMessages { messages };
+        let audited = AuditedMessages {
+            messages,
+        };
         let policy = compiled(&policy());
 
         let refusal = match clear(audited, &destination("untrusted"), &policy) {

@@ -309,7 +309,10 @@ mod tests {
             let envelope = EventEnvelope {
                 chat_id: self.chat_id.clone(),
                 seq: self.event_seq,
-                event: ChatEvent::MessageAdded { message, index },
+                event: ChatEvent::MessageAdded {
+                    message,
+                    index,
+                },
             };
             self.events.push(serde_json::to_string(&envelope).unwrap());
         }

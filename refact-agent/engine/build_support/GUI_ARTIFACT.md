@@ -2,7 +2,7 @@
 
 This is a source-only implementation handoff. Compilation, fixture execution,
 protected-controller positive qualification, critical mutant/restored-pass witnesses,
-independent semantic review and admission are **NOT_RUN**. No cache performance,
+and independent semantic review are **NOT_RUN**. No cache performance,
 artifact verification PASS, browser-loaded identity or security qualification is
 claimed by this document or by static formatting.
 
@@ -224,7 +224,7 @@ not the build-script artifact consumer, so they cannot detect a return of blind
 dist copying, prebuilt pin bypass, destructive asset publication or NODE_OPTIONS
 replacement. The separate GUI target is the cheapest current Cargo layer that
 imports shipping build-support code without running a GUI compiler or linking a
-live engine harness. Independent review must validate scenario admission rather
+live engine harness. Independent review must validate failure detection rather
 than infer it from test names or counts. Suggested central semantic mutants:
 bypass manifest pin; omit current source/lock equality; skip artifact hash/type
 checks; move destructive destination replacement before validation; replace rather
@@ -260,7 +260,5 @@ The appropriate contained runner and independently pinned producer import are
 central prerequisites, not provided/executed here. Local-producer offline build
 qualification must retain required NODE_OPTIONS transport guards and prove no
 implicit installer/download; a skip-only check cannot substitute. Execute critical
-mutant/before-fix failure and restored-pass witnesses, obtain independent semantic
-review, record fingerprint-bound test/support admissions centrally, and run the
-project test budget checker/self-tests against the trusted base before claiming
-qualification. No shared ledger was edited by this source lane.
+mutant/before-fix failure and restored-pass witnesses and obtain independent semantic
+review before claiming qualification.

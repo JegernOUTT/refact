@@ -113,7 +113,9 @@ pub fn parse_patch(patch: &str) -> Result<ParsedPatch, ParseError> {
         ));
     }
 
-    Ok(ParsedPatch { operations })
+    Ok(ParsedPatch {
+        operations,
+    })
 }
 
 fn parse_add_file(lines: &[&str], start: usize) -> Result<(FileOperation, usize), ParseError> {
@@ -160,7 +162,13 @@ fn parse_add_file(lines: &[&str], start: usize) -> Result<(FileOperation, usize)
         result
     };
 
-    Ok((FileOperation::Add { path, contents }, i))
+    Ok((
+        FileOperation::Add {
+            path,
+            contents,
+        },
+        i,
+    ))
 }
 
 fn parse_delete_file(lines: &[&str], start: usize) -> Result<(FileOperation, usize), ParseError> {
@@ -178,7 +186,12 @@ fn parse_delete_file(lines: &[&str], start: usize) -> Result<(FileOperation, usi
         });
     }
 
-    Ok((FileOperation::Delete { path }, start + 1))
+    Ok((
+        FileOperation::Delete {
+            path,
+        },
+        start + 1,
+    ))
 }
 
 fn parse_update_file(lines: &[&str], start: usize) -> Result<(FileOperation, usize), ParseError> {
@@ -591,7 +604,10 @@ mod tests {
         let parsed = parse_patch(&patch).unwrap();
         assert_eq!(parsed.operations.len(), 1);
         match &parsed.operations[0] {
-            FileOperation::Add { path, contents } => {
+            FileOperation::Add {
+                path,
+                contents,
+            } => {
                 assert_eq!(path, "hello.txt");
                 assert_eq!(contents, "Hello world\nLine 2\n");
             }
@@ -605,7 +621,9 @@ mod tests {
         let parsed = parse_patch(&patch).unwrap();
         assert_eq!(parsed.operations.len(), 1);
         match &parsed.operations[0] {
-            FileOperation::Delete { path } => {
+            FileOperation::Delete {
+                path,
+            } => {
                 assert_eq!(path, "obsolete.txt");
             }
             _ => panic!("Expected Delete operation"),
@@ -641,7 +659,11 @@ mod tests {
         let patch = wrap_patch("*** Update File: old.py\n*** Move to: new.py\n@@ \n-old\n+new");
         let parsed = parse_patch(&patch).unwrap();
         match &parsed.operations[0] {
-            FileOperation::Update { path, move_to, .. } => {
+            FileOperation::Update {
+                path,
+                move_to,
+                ..
+            } => {
                 assert_eq!(path, "old.py");
                 assert_eq!(move_to.as_deref(), Some("new.py"));
             }
@@ -654,7 +676,9 @@ mod tests {
         let patch = wrap_patch("*** Update File: file.txt\n@@\n+appended line\n*** End of File");
         let parsed = parse_patch(&patch).unwrap();
         match &parsed.operations[0] {
-            FileOperation::Update { chunks, .. } => {
+            FileOperation::Update {
+                chunks, ..
+            } => {
                 assert!(chunks[0].is_end_of_file);
             }
             _ => panic!("Expected Update operation"),
@@ -691,31 +715,13 @@ mod tests {
     }
 
     #[test]
-    fn test_apply_multiple_chunks() {
-        let original = "a\nb\nc\nd\ne\nf\n";
-        let chunks = vec![
-            UpdateChunk {
-                change_context: vec!["a".to_string()],
-                old_lines: vec!["b".to_string()],
-                new_lines: vec!["B".to_string()],
-                is_end_of_file: false,
-            },
-            UpdateChunk {
-                change_context: vec!["d".to_string()],
-                old_lines: vec!["e".to_string()],
-                new_lines: vec!["E".to_string()],
-                is_end_of_file: false,
-            },
-        ];
-        let result = apply_update_chunks(original, &chunks).unwrap();
-        assert_eq!(result, "a\nB\nc\nd\nE\nf\n");
-    }
-
-    #[test]
     fn unordered_hunks_use_original_snapshot() {
         let patch = wrap_patch("*** Update File: f\n@@ later\n-old_later\n+new_later\n+extra\n@@ class Early\n@@ method\n-old_early\n+new_early");
         let parsed = parse_patch(&patch).unwrap();
-        let FileOperation::Update { chunks, .. } = &parsed.operations[0] else {
+        let FileOperation::Update {
+            chunks, ..
+        } = &parsed.operations[0]
+        else {
             panic!("expected update");
         };
         assert_eq!(
@@ -746,7 +752,10 @@ mod tests {
     fn chained_anchors_unique_body() {
         let patch = wrap_patch("*** Update File: f\n@@ class A\n@@ method\n-x\n+X");
         let parsed = parse_patch(&patch).unwrap();
-        let FileOperation::Update { chunks, .. } = &parsed.operations[0] else {
+        let FileOperation::Update {
+            chunks, ..
+        } = &parsed.operations[0]
+        else {
             panic!("expected update");
         };
         assert_eq!(

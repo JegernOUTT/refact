@@ -183,7 +183,9 @@ async fn message_to_completed_child_is_saved_and_delivered_on_continue() {
         }));
         let mut request = spawn_request(PARENT, BgAgentKind::Subagent);
         if isolated {
-            request.worktree_mode = SpawnWorktreeMode::Isolated { auto_merge: true };
+            request.worktree_mode = SpawnWorktreeMode::Isolated {
+                auto_merge: true,
+            };
         }
         let first = await_completion(
             spawn_background_agent(fixture.app.clone(), request)

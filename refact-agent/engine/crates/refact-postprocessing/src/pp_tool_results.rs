@@ -1384,7 +1384,9 @@ mod tests {
         file.file_content = format_lines_with_numbers(&text.lines().collect::<Vec<_>>(), 0, 100);
         let history = vec![make_context_file_message(vec![file])];
         let (result, notes) = deduplicate_and_merge_context_files(
-            Arc::new(StaticPPContext { content: text }),
+            Arc::new(StaticPPContext {
+                content: text,
+            }),
             files,
             &history,
         )

@@ -368,7 +368,9 @@ impl Tool for ToolSubagent {
             crate::subchat::ToolsPolicy::Only(names) => names,
             // A supervised ceiling is already a concrete, bounded set; the
             // exact names it carries are the only ones this child may get.
-            crate::subchat::ToolsPolicy::Supervised { tools, .. } => tools,
+            crate::subchat::ToolsPolicy::Supervised {
+                tools, ..
+            } => tools,
             crate::subchat::ToolsPolicy::None => Vec::new(),
             crate::subchat::ToolsPolicy::All => {
                 return Err("concrete child authority unavailable".into())
@@ -504,9 +506,9 @@ impl Tool for ToolSubagent {
                     Ok(effective) => {
                         let tools = match &effective.tools {
                             crate::subchat::ToolsPolicy::Only(tools)
-                            | crate::subchat::ToolsPolicy::Supervised { tools, .. } => {
-                                tools.clone()
-                            }
+                            | crate::subchat::ToolsPolicy::Supervised {
+                                tools, ..
+                            } => tools.clone(),
                             crate::subchat::ToolsPolicy::None => Vec::new(),
                             crate::subchat::ToolsPolicy::All => {
                                 return Err("concrete child authority unavailable".into())
@@ -809,7 +811,10 @@ fn parse_profile_reference(
                     ))
                 }
             };
-            Ok(Some(ProfileReference { name, revision }))
+            Ok(Some(ProfileReference {
+                name,
+                revision,
+            }))
         }
         other => Err(format!(
             "argument `profile` must be a string or object: {other:?}"
@@ -1223,8 +1228,9 @@ fn build_launch_preview_tool_result(
             "- worktree_mode: {}",
             match &args.worktree_mode {
                 SpawnWorktreeMode::Inherit => "inherit".to_string(),
-                SpawnWorktreeMode::Isolated { auto_merge } =>
-                    format!("isolated (auto_merge={auto_merge})"),
+                SpawnWorktreeMode::Isolated {
+                    auto_merge,
+                } => format!("isolated (auto_merge={auto_merge})"),
             }
         ),
         format!(
@@ -1249,7 +1255,9 @@ fn build_launch_preview_tool_result(
             let tools = match &effective.tools {
                 crate::subchat::ToolsPolicy::None => "none (0)".to_string(),
                 crate::subchat::ToolsPolicy::Only(tools)
-                | crate::subchat::ToolsPolicy::Supervised { tools, .. } => preview_names(tools),
+                | crate::subchat::ToolsPolicy::Supervised {
+                    tools, ..
+                } => preview_names(tools),
                 crate::subchat::ToolsPolicy::All => "unresolved authority".to_string(),
             };
             lines.extend([
@@ -2679,7 +2687,9 @@ mod tests {
         isolated.insert("worktree".to_string(), json!("isolated"));
         assert!(matches!(
             parse_subagent_args(&isolated).unwrap().worktree_mode,
-            SpawnWorktreeMode::Isolated { auto_merge: true }
+            SpawnWorktreeMode::Isolated {
+                auto_merge: true
+            }
         ));
         let mut inherited = args();
         inherited.insert("auto_merge".to_string(), json!(true));

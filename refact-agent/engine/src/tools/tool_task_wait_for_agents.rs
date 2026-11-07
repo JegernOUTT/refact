@@ -253,7 +253,9 @@ mod tests {
                     supervision_guard: None,
                     client_request_id: "queued".into(),
                     priority: false,
-                    command: ChatCommand::SetParams { patch: json!({}) },
+                    command: ChatCommand::SetParams {
+                        patch: json!({})
+                    },
                 }),
                 EnqueueCommandOutcome::Accepted
             );

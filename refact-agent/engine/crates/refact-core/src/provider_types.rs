@@ -74,7 +74,9 @@ impl CredentialSpec {
 
     pub fn timeout_ms(&self) -> u64 {
         match self {
-            Self::Command { timeout_ms, .. } => *timeout_ms,
+            Self::Command {
+                timeout_ms, ..
+            } => *timeout_ms,
         }
     }
 

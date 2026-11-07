@@ -1064,13 +1064,19 @@ pub fn aggregate_summary(
 
     let mut by_finish_reason: Vec<StatsCountItem> = finish_reason_map
         .into_iter()
-        .map(|(key, count)| StatsCountItem { key, count })
+        .map(|(key, count)| StatsCountItem {
+            key,
+            count,
+        })
         .collect();
     by_finish_reason.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.key.cmp(&b.key)));
 
     let mut by_category: Vec<StatsCountItem> = error_category_map
         .into_iter()
-        .map(|(key, count)| StatsCountItem { key, count })
+        .map(|(key, count)| StatsCountItem {
+            key,
+            count,
+        })
         .collect();
     by_category.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.key.cmp(&b.key)));
 

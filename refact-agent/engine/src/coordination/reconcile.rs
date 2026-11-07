@@ -200,7 +200,10 @@ pub enum ProtocolError {
 impl std::fmt::Display for ProtocolError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ProtocolError::OutOfOrder { from, to } => write!(
+            ProtocolError::OutOfOrder {
+                from,
+                to,
+            } => write!(
                 f,
                 "launch boundary `{}` cannot move to `{}`; boundaries only move forward",
                 from.as_str(),
@@ -235,7 +238,10 @@ pub struct LaunchProtocol {
 impl LaunchProtocol {
     pub fn new(store: Arc<CoordinationStore>, project: ProjectKey) -> LaunchProtocol {
         let access = store.authorize(project);
-        LaunchProtocol { store, access }
+        LaunchProtocol {
+            store,
+            access,
+        }
     }
 
     /// Boundary 1. Idempotent by construction: an intent that already exists is
@@ -412,13 +418,17 @@ impl ReconciliationOutcome {
     pub fn report(&self) -> Option<&ReconciliationReport> {
         match self {
             ReconciliationOutcome::Ran(report) => Some(report),
-            ReconciliationOutcome::Skipped { .. } => None,
+            ReconciliationOutcome::Skipped {
+                ..
+            } => None,
         }
     }
 
     pub fn skip_reason(&self) -> Option<&str> {
         match self {
-            ReconciliationOutcome::Skipped { reason } => Some(reason),
+            ReconciliationOutcome::Skipped {
+                reason,
+            } => Some(reason),
             ReconciliationOutcome::Ran(_) => None,
         }
     }
@@ -629,13 +639,14 @@ impl Reconciler {
                     .await
                 {
                     Ok(taken) => Ownership::Held(Box::new(taken.lease)),
-                    Err(LeaseError::TakeoverRefused { refusal, holder }) => {
-                        Ownership::Foreign(Box::new(ForeignRecord {
-                            run: run.clone(),
-                            holder_instance: holder.holder_instance.clone(),
-                            refusal,
-                        }))
-                    }
+                    Err(LeaseError::TakeoverRefused {
+                        refusal,
+                        holder,
+                    }) => Ownership::Foreign(Box::new(ForeignRecord {
+                        run: run.clone(),
+                        holder_instance: holder.holder_instance.clone(),
+                        refusal,
+                    })),
                     Err(error) => Ownership::Unavailable(error.to_string()),
                 }
             }
@@ -660,7 +671,9 @@ pub async fn reconcile_at_path(
         Err(error) => {
             let reason = error.to_string();
             super::outbox::note_durability_unavailable(path, reason.clone());
-            return ReconciliationOutcome::Skipped { reason };
+            return ReconciliationOutcome::Skipped {
+                reason,
+            };
         }
     };
     match Reconciler::new(store, setup) {
@@ -672,7 +685,9 @@ pub async fn reconcile_at_path(
         Err(error) => {
             let reason = error.to_string();
             super::outbox::note_durability_unavailable(path, reason.clone());
-            ReconciliationOutcome::Skipped { reason }
+            ReconciliationOutcome::Skipped {
+                reason,
+            }
         }
     }
 }

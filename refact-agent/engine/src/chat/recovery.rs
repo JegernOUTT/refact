@@ -28,7 +28,9 @@ pub fn apply_model_patch(session: &mut ChatSession, model: &str) -> bool {
     if session.thread.model != old {
         super::trajectory_ops::sanitize_messages_for_model_switch(&mut session.messages);
         session.release_turn_only_state();
-        session.emit(super::types::ChatEvent::ThreadUpdated { params: patch });
+        session.emit(super::types::ChatEvent::ThreadUpdated {
+            params: patch,
+        });
         session.mark_persisted_runtime_changed();
     }
     changed

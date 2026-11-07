@@ -820,6 +820,7 @@ test("inline wide glyphs do not soft wrap and near-edge text remains scrollable"
   await input.dispatchEvent("compositionend");
   await page.keyboard.press("Control+Enter");
   await expect(canvas).toBeFocused();
+  await expect.poll(() => redPixels(page)).toBeGreaterThan(100);
   const pixels = await redPixels(page);
   expect(pixels).toBeGreaterThan(100);
   expect((await result(page)).redPixels).toBe(pixels);

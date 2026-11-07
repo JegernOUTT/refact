@@ -642,7 +642,10 @@ fn decoded_len(data: &str) -> usize {
 fn matcher_for_pattern(pattern: &UrlPattern) -> Result<UrlMatcher, String> {
     match pattern {
         UrlPattern::Text(value) => UrlMatcher::text(value),
-        UrlPattern::Regex { source, flags } => UrlMatcher::regex(source, flags),
+        UrlPattern::Regex {
+            source,
+            flags,
+        } => UrlMatcher::regex(source, flags),
     }
 }
 
@@ -706,7 +709,9 @@ fn spawn_command_flusher(tab: &std::sync::Arc<Tab>, registry: std::sync::Arc<Web
                     );
                     return;
                 }
-                FlushDecision::Retry { report } => {
+                FlushDecision::Retry {
+                    report,
+                } => {
                     if report {
                         tracing::warn!(
                             "WebSocket command dispatch failed: {}",
@@ -1072,11 +1077,15 @@ mod tests {
         );
         assert_eq!(
             classify_flush_result(&Err("socket route is not installed".into()), false),
-            FlushDecision::Retry { report: true }
+            FlushDecision::Retry {
+                report: true
+            }
         );
         assert_eq!(
             classify_flush_result(&Err("socket route is not installed".into()), true),
-            FlushDecision::Retry { report: false },
+            FlushDecision::Retry {
+                report: false
+            },
             "repeated identical dispatch failures must not be logged every iteration"
         );
     }

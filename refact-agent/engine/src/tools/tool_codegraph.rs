@@ -824,7 +824,10 @@ pub(crate) fn pr_blast_suggested_reviewers(
 
     let mut reviewers: Vec<SuggestedReviewer> = scores
         .into_iter()
-        .map(|(author, score)| SuggestedReviewer { author, score })
+        .map(|(author, score)| SuggestedReviewer {
+            author,
+            score,
+        })
         .collect();
     reviewers.sort_by(|a, b| {
         b.score
@@ -2466,7 +2469,10 @@ pub(crate) fn git_risk_response(
         .collect();
     let reviewers = refact_git_intel::coupling::reviewer_suggestions(intel, &hotspot_paths, 5)
         .into_iter()
-        .map(|(author, score)| GitReviewerResponse { author, score })
+        .map(|(author, score)| GitReviewerResponse {
+            author,
+            score,
+        })
         .collect();
     let findings = assembly
         .files
@@ -2690,12 +2696,18 @@ impl Tool for ToolCodegraphOverview {
                     top_pagerank: centrality
                         .top_pagerank
                         .into_iter()
-                        .map(|(path, score)| FileScoreEntry { path, score })
+                        .map(|(path, score)| FileScoreEntry {
+                            path,
+                            score,
+                        })
                         .collect(),
                     top_betweenness: centrality
                         .top_betweenness
                         .into_iter()
-                        .map(|(path, score)| FileScoreEntry { path, score })
+                        .map(|(path, score)| FileScoreEntry {
+                            path,
+                            score,
+                        })
                         .collect(),
                 },
                 community_count,
@@ -2990,7 +3002,10 @@ fn enrich_health_finding(
             hot_path = context.hot_path.contains(&key);
         }
     }
-    HealthFinding { finding, hot_path }
+    HealthFinding {
+        finding,
+        hot_path,
+    }
 }
 
 fn health_graph_context(
@@ -3024,7 +3039,10 @@ fn health_graph_context(
         }
     }
 
-    HealthGraphContext { fan_in, hot_path }
+    HealthGraphContext {
+        fan_in,
+        hot_path,
+    }
 }
 
 fn hot_path_node_ids(
@@ -5491,7 +5509,10 @@ fn assemble_code_map_response(
         .into_iter()
         .map(|page| {
             let content = render_code_map_page_markdown(&page, &input, &nodes, &edges);
-            CodeMapRenderedPage { page, content }
+            CodeMapRenderedPage {
+                page,
+                content,
+            }
         })
         .collect::<Vec<_>>();
     let link_count = rendered_pages
@@ -5517,7 +5538,10 @@ fn assemble_code_map_response(
         .into_iter()
         .filter(|(_, count)| *count > 0)
         .take(12)
-        .map(|(path, count)| CodeMapBacklinkHub { path, count })
+        .map(|(path, count)| CodeMapBacklinkHub {
+            path,
+            count,
+        })
         .collect();
     let pages = rendered_pages
         .iter()

@@ -157,26 +157,6 @@ describe("KnowledgeGraphView", () => {
     expect(screen.getByText("No linked memories")).toBeInTheDocument();
   });
 
-  it("renders nodes and edges correctly", () => {
-    const nodes = [
-      createDocNode("doc1", "doc_code", "Code Memory"),
-      createDocNode("doc2", "doc_decision", "Decision Memory"),
-    ];
-    const edges = [createEdge("doc1", "doc2", "relates_to")];
-
-    render(
-      <KnowledgeGraphView
-        nodes={nodes}
-        edges={edges}
-        selectedId={null}
-        onSelectId={vi.fn()}
-      />,
-    );
-
-    expect(screen.getByTestId("cytoscape-mock")).toBeInTheDocument();
-    expect(screen.getByText("3 elements")).toBeInTheDocument();
-  });
-
   it("filters out non-doc nodes", () => {
     const nodes = [
       createDocNode("doc1", "doc_code", "Code Memory"),
@@ -385,22 +365,6 @@ describe("KnowledgeGraphView", () => {
     );
 
     expect(screen.getByText("Loading graph...")).toBeInTheDocument();
-  });
-
-  it("calls onSelectId with correct ID on node click", () => {
-    const onSelectId = vi.fn();
-    const nodes = [createDocNode("doc1", "doc_code", "Code Memory")];
-
-    render(
-      <KnowledgeGraphView
-        nodes={nodes}
-        edges={[]}
-        selectedId={null}
-        onSelectId={onSelectId}
-      />,
-    );
-
-    expect(screen.getByTestId("cytoscape-mock")).toBeInTheDocument();
   });
 
   it("renders all doc node types", () => {

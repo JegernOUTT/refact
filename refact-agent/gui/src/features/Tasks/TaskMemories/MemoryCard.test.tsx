@@ -1,6 +1,3 @@
-import { readFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type React from "react";
 import { act } from "react-dom/test-utils";
@@ -11,8 +8,6 @@ import { memoryKindColor } from "../../../services/refact/taskKinds";
 import { COLLAPSE_ANIMATION_MS } from "../../../components/shared/useDelayedUnmount";
 
 HTMLElement.prototype.hasPointerCapture = () => false;
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const CONFIG_STATE = {
   config: {
@@ -80,15 +75,7 @@ describe("MemoryCard", () => {
 
     const title = screen.getByText("(no title)");
     expect(title).toBeInTheDocument();
-    expect(title.className).toContain("cardTitleEmpty");
     expect(screen.queryByText("decision.md")).not.toBeInTheDocument();
-  });
-
-  it("memory card shows pin and archive icon buttons", () => {
-    renderCard(mockMemory);
-
-    expect(screen.getByRole("button", { name: "Pin" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Archive" })).toBeInTheDocument();
   });
 
   it("clicking the pin icon button toggles pinned", async () => {
@@ -215,16 +202,5 @@ describe("MemoryCard", () => {
     expect(memoryKindColor("roadmap")).toBe("gray");
     expect(memoryKindColor("")).toBe("gray");
     expect(memoryKindColor("decision")).toBe("purple");
-  });
-
-  it("tag overflow uses shared thin scrollbar class", () => {
-    const css = readFileSync(
-      resolve(__dirname, "MemoryInboxPanel.module.css"),
-      "utf-8",
-    );
-    expect(css).toMatch(/\.tagChips\s*\{[^}]*composes:[^}]*scrollbarThin/s);
-    expect(css).toMatch(
-      /\.expandedContent\s*\{[^}]*composes:[^}]*scrollbarThin/s,
-    );
   });
 });

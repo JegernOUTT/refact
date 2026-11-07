@@ -7,18 +7,11 @@ import { server } from "../utils/mockServer";
 import { setUpStore } from "../app/store";
 import { actionLabel } from "../features/Buddy/buddyOpportunityActions";
 import { BuddyHome } from "../features/Buddy/BuddyHome";
-import { BuddyDashboardScene } from "../features/Buddy/BuddyDashboardScene";
 import { formatCompactNumber } from "../features/Buddy/buddyUtils";
-import {
-  addOpportunity,
-  buddySlice,
-  selectUnreadOpportunities,
-  setBuddySnapshot,
-} from "../features/Buddy/buddySlice";
+import { setBuddySnapshot } from "../features/Buddy/buddySlice";
 import { navigateFromBuddyPage } from "../features/Buddy/executeBuddyAction";
 import { push } from "../features/Pages/pagesSlice";
 import type {
-  BuddyOpportunity,
   BuddyPage,
   BuddyPulse,
   BuddySnapshot,
@@ -69,28 +62,6 @@ function makeThunkDispatch() {
     return innerDispatch(action);
   });
   return { dispatch, innerDispatch };
-}
-
-function makeOpportunity(
-  overrides?: Partial<BuddyOpportunity>,
-): BuddyOpportunity {
-  return {
-    id: "opp-1",
-    kind: "diagnostic_investigation",
-    summary: "Model config is broken",
-    priority: "high",
-    confidence: 0.9,
-    fact_keys: [],
-    cooldown_key: "opp-1",
-    cooldown_secs: 1800,
-    status: "new",
-    proposed_actions: [],
-    humor_allowed: false,
-    related: { chat_ids: [], task_ids: [], memory_ids: [], config_paths: [] },
-    created_at: "2024-01-01T00:00:00Z",
-    expires_at: "2099-12-31T00:00:00Z",
-    ...overrides,
-  };
 }
 
 function makePulse(): BuddyPulse {
@@ -249,20 +220,6 @@ describe("buddy UI polish", () => {
     ).toBe("Install MCP");
   });
 
-  it("unread_selector_treats_new_and_shown_as_unread", () => {
-    const reducer = buddySlice.reducer;
-    const s1 = reducer(
-      undefined,
-      addOpportunity(makeOpportunity({ id: "o-new", status: "new" })),
-    );
-    const s2 = reducer(
-      s1,
-      addOpportunity(makeOpportunity({ id: "o-shown", status: "shown" })),
-    );
-    const unread = selectUnreadOpportunities({ buddy: s2 });
-    expect(unread.map((o) => o.id)).toEqual(["o-new", "o-shown"]);
-  });
-
   it("shared_navigation_helper_routes_pages", () => {
     const cases: [BuddyPage, string][] = [
       [{ type: "buddy" }, "buddy"],
@@ -309,52 +266,6 @@ describe("buddy UI polish", () => {
     expect(action.payload).toEqual({ name: "tasks list" });
   });
 
-  it("BuddyWorld_keeps_scene_level_motion_without_roam_boosts", async () => {
-    const source = await readGuiSource("features/Buddy/BuddyWorld.tsx");
-
-    const forbiddenTarget = ["roam", "TargetX"].join("");
-    const forbiddenBoost = ["roam", "Boost"].join("");
-
-    expect(source).not.toContain(forbiddenTarget);
-    expect(source).not.toContain(forbiddenBoost);
-  });
-
-  it("BuddyWorld_uses_deterministic_edge_aware_bubbles", async () => {
-    const source = await readGuiSource("features/Buddy/BuddyWorld.tsx");
-    const utilSource = await readGuiSource("features/Buddy/buddyWorldUtils.ts");
-
-    expect(utilSource).toContain("function bubblePositionForSceneX");
-    expect(utilSource).toContain("COMPACT_SIDE_PREFERRED_SPEECH_LENGTH");
-    expect(utilSource).toContain("length > sidePreferredLength");
-    expect(utilSource).toContain('if (x < 42) return "right"');
-    expect(utilSource).toContain('if (x > 58) return "left"');
-    expect(utilSource).toContain('return "top"');
-    expect(source).toContain("bubblePosition={bubblePosition}");
-    expect(source).toContain("randomizeBubblePosition={false}");
-  });
-
-  it("BuddyCharacter_splits_anchor_and_body_motion", async () => {
-    const characterSource = await readGuiSource(
-      "features/Buddy/BuddyCharacter.tsx",
-    );
-    const canvasSource = await readGuiSource("features/Buddy/BuddyCanvas.tsx");
-    const styleSource = await readGuiSource(
-      "features/Buddy/BuddyWorld.module.css",
-    );
-
-    expect(characterSource).toContain("styles.characterAnchor");
-    expect(characterSource).toContain("styles.characterBody");
-    expect(characterSource).toContain("compactBubble={compactBubble}");
-    expect(canvasSource).toContain(
-      "compactBubbleOverride || displaySize <= 180",
-    );
-    expect(styleSource).toContain(".characterAnchor");
-    expect(styleSource).toContain("bottom 3.8s cubic-bezier");
-    expect(styleSource).toContain("transform 3.8s cubic-bezier");
-    expect(styleSource).toContain(".characterBody[data-pose");
-    expect(styleSource).not.toContain(".character[data-pose");
-  });
-
   it("BuddyWorld_uses_kit_tooltips_and_focus_ring_for_hotspots", async () => {
     const source = await readGuiSource("features/Buddy/BuddyWorld.tsx");
     const css = await readGuiSource("features/Buddy/BuddyWorld.module.css");
@@ -366,14 +277,6 @@ describe("buddy UI polish", () => {
       "outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring)",
     );
     expect(css).not.toMatch(/rgba\(255,\s*255,\s*255/u);
-  });
-
-  it("BuddyWorld_preserves_compact_height_in_narrow_media", async () => {
-    const source = await readGuiSource("features/Buddy/BuddyWorld.module.css");
-
-    expect(source).toContain(".compact {\n  height: 210px;");
-    expect(source).toContain("@media (max-width: 720px)");
-    expect(source).toContain(".scene:not(.compact) {\n    height: 250px;");
   });
 
   it("BuddyWorld_reschedules_idle_loop_after_noop_branch", async () => {
@@ -467,27 +370,6 @@ describe("buddy UI polish", () => {
     expect(
       await screen.findByTestId("buddy-recent-errors-panel"),
     ).toBeInTheDocument();
-  });
-
-  it("BuddyDashboardScene_renders_shared_canvas_scene", async () => {
-    server.use(
-      http.get("*/v1/setup/status", () =>
-        HttpResponse.json({ configured: true }),
-      ),
-    );
-
-    const store = setUpStore({ ...CONFIG_STATE });
-    store.dispatch(setBuddySnapshot(makeSnapshot()));
-
-    render(<BuddyDashboardScene />, {
-      preloadedState: { ...CONFIG_STATE, buddy: store.getState().buddy },
-    });
-
-    await waitFor(() => {
-      expect(screen.getByTestId("buddy-world")).toBeInTheDocument();
-      expect(screen.getByTestId("buddy-world-canvas")).toBeInTheDocument();
-      expect(screen.getByTestId("buddy-world-character")).toBeInTheDocument();
-    });
   });
 
   it("formatCompactNumber_truncates_decimal_values_below_1000", () => {

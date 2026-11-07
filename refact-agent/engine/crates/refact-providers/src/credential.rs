@@ -304,7 +304,9 @@ mod tests {
     #[tokio::test]
     async fn reports_timeout_nonzero_empty_and_oversized_without_output() {
         let mut timeout = shell_spec("sleep 1; echo secret");
-        let CredentialSpec::Command { timeout_ms, .. } = &mut timeout;
+        let CredentialSpec::Command {
+            timeout_ms, ..
+        } = &mut timeout;
         *timeout_ms = 100;
         assert!(resolve("timeout", &timeout, false)
             .await

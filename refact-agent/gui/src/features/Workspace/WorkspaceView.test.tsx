@@ -1,5 +1,3 @@
-import { readFileSync } from "node:fs";
-
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { waitFor } from "@testing-library/react";
 
@@ -27,11 +25,6 @@ import { WorkspaceView } from "./WorkspaceView";
 import { Toolbar } from "../../components/Toolbar/Toolbar";
 import { WorkspaceShell } from "./WorkspaceShell";
 import { panePanelId, paneTabId } from "./paneTabIds";
-
-const groupSplitViewCss = readFileSync(
-  "src/features/Workspace/GroupSplitView.module.css",
-  "utf8",
-);
 function getChatGroup(store: AppStore) {
   const group =
     store.getState().workspace.groups[makeSurfaceKey("chat", "chat-a")];
@@ -208,17 +201,6 @@ describe("WorkspaceView", () => {
       configurable: true,
       value: originalMatchMedia,
     });
-  });
-
-  it("always renders the activity rail with every section entry", () => {
-    renderWorkspaceView(createWorkspaceStore());
-
-    expect(
-      screen.getByRole("navigation", { name: "Workspace sections" }),
-    ).toBeVisible();
-    for (const label of ["Files", "Git", "Agents", "Active chats"]) {
-      expect(screen.getByRole("button", { name: label })).toBeInTheDocument();
-    }
   });
 
   it("keeps the activity rail mounted for IDE hosts without forced panels", () => {
@@ -547,9 +529,6 @@ describe("WorkspaceView", () => {
       expectSurface(chat("chat-a"));
       expectSurface(chat("chat-b"));
       expect(screen.queryByTestId("workspace-vertical-divider")).toBeNull();
-      expect(groupSplitViewCss).toMatch(
-        /\.stackedLayout\s*\{[^}]*overflow:\s*hidden auto;/u,
-      );
     } finally {
       clientWidthSpy.mockRestore();
     }

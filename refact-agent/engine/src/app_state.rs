@@ -124,7 +124,9 @@ pub struct EngineChatSessionFacade {
 
 impl EngineChatSessionFacade {
     pub fn new(gcx: SharedGlobalContext) -> Self {
-        Self { gcx }
+        Self {
+            gcx,
+        }
     }
 
     async fn enqueue_command(
@@ -157,7 +159,9 @@ impl EngineChatSessionFacade {
     ) -> Result<(), String> {
         let app = AppState::from_gcx(self.gcx.clone()).await;
         match command {
-            refact_chat_api::ChatCommand::DeliverMessages { delivery } => {
+            refact_chat_api::ChatCommand::DeliverMessages {
+                delivery,
+            } => {
                 return chat::deliver_to_chat(app, chat_id, delivery)
                     .await
                     .map(|_| ());
@@ -526,7 +530,9 @@ pub struct AppActivitySink {
 
 impl AppActivitySink {
     pub fn new(user_activity: Arc<AMutex<UserActivityRing>>) -> Self {
-        Self { user_activity }
+        Self {
+            user_activity,
+        }
     }
 }
 
@@ -916,7 +922,9 @@ impl AppToolRegistry {
                 .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok()
             {
-                let expansion_guard = ToolPoolExpansionGuard { pool: pool_impl };
+                let expansion_guard = ToolPoolExpansionGuard {
+                    pool: pool_impl,
+                };
                 let result = self
                     .take_or_expand_turn_tool_pool(
                         pool,
@@ -1586,7 +1594,9 @@ impl BuddyEventSink for AppBuddyEventSink {
             return Err("buddy service is unavailable for operator signal correlation".to_string());
         };
         svc.enqueue_runtime_event(signal.runtime_event.clone());
-        let _ = svc.events_tx.send(BuddyEvent::OperatorSignal { signal });
+        let _ = svc.events_tx.send(BuddyEvent::OperatorSignal {
+            signal,
+        });
         Ok(())
     }
 
@@ -2137,7 +2147,9 @@ mod tests {
             .expansion_in_progress
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire,)
             .is_ok());
-        let guard = ToolPoolExpansionGuard { pool: pool_impl };
+        let guard = ToolPoolExpansionGuard {
+            pool: pool_impl,
+        };
         let before = builds.load(Ordering::SeqCst);
         let leased = registry
             .take_or_expand_turn_tool_pool(

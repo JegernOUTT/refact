@@ -317,7 +317,9 @@ pub fn make_reconstruction_report(
     let report = ReconstructionReport {
         kind: RECONSTRUCTED_HISTORY_KIND.into(),
         schema_version: RECONSTRUCTION_SCHEMA_VERSION,
-        payload: ReconstructionPayload { messages },
+        payload: ReconstructionPayload {
+            messages,
+        },
         metadata,
     };
     let value = serde_json::to_value(report)
@@ -370,7 +372,9 @@ pub fn active_context(stored: &[ChatMessage]) -> Result<ActiveContext, ActiveCon
             return Err(ActiveContextError::NeedsExplicitRebuild);
         }
         messages.push(message.clone());
-        origins.push(MessageOrigin::Stored { message_index });
+        origins.push(MessageOrigin::Stored {
+            message_index,
+        });
     }
     validate_ids(&messages, false)?;
     Ok(ActiveContext {
@@ -509,12 +513,16 @@ pub fn writeback_active_context(
                 })
         });
         match origin {
-            Some(MessageOrigin::ReportPayload { .. }) if in_suffix => {
+            Some(MessageOrigin::ReportPayload {
+                ..
+            }) if in_suffix => {
                 return Err(ActiveContextError::InvalidWriteback(
                     "payload moved after raw suffix".into(),
                 ));
             }
-            Some(MessageOrigin::Stored { .. }) => in_suffix = true,
+            Some(MessageOrigin::Stored {
+                ..
+            }) => in_suffix = true,
             None if !is_static_compression_report(message) => {
                 return Err(ActiveContextError::InvalidWriteback(
                     "new or re-identified non-diagnostic message".into(),
@@ -592,7 +600,9 @@ pub fn insert_active_message(
         Some(report_index) => {
             let message_index = report_index + 1 + (index - payload_len);
             result.insert(message_index, message.clone());
-            MessageOrigin::Stored { message_index }
+            MessageOrigin::Stored {
+                message_index,
+            }
         }
         None => {
             result.insert(index, message.clone());

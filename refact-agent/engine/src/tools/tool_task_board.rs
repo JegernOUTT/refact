@@ -713,7 +713,11 @@ impl Tool for ToolTaskBoardGet {
         tool_call_id: &String,
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
-        let PlannerBoardContext { gcx, task_id, .. } = planner_context(&ccx, args).await?;
+        let PlannerBoardContext {
+            gcx,
+            task_id,
+            ..
+        } = planner_context(&ccx, args).await?;
         let board = storage::load_board(gcx, &task_id).await?;
         let card_id = args
             .get("card_id")
@@ -1198,7 +1202,11 @@ impl Tool for ToolTaskReadyCards {
         tool_call_id: &String,
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
-        let PlannerBoardContext { gcx, task_id, .. } = planner_context(&ccx, args).await?;
+        let PlannerBoardContext {
+            gcx,
+            task_id,
+            ..
+        } = planner_context(&ccx, args).await?;
         let board = storage::load_board(gcx, &task_id).await?;
         let result = render_ready_cards(&board);
 

@@ -84,7 +84,12 @@ impl ProjectRegistry {
     pub async fn load(path: PathBuf) -> Self {
         match tokio::fs::read_to_string(&path).await {
             Ok(content) => match serde_json::from_str::<HashMap<String, ProjectEntry>>(&content) {
-                Ok(entries) => return Self { entries, path },
+                Ok(entries) => {
+                    return Self {
+                        entries,
+                        path,
+                    }
+                }
                 Err(error) => {
                     tracing::error!("failed to parse {}: {error}", path.display());
                     let bad = path.with_extension("json.bad");
@@ -545,7 +550,9 @@ mod tests {
             );
             std::env::set_var("REFACT_DAEMON_SUPERVISOR_BACKOFF_MS", "1");
             std::env::remove_var("FAKE_WORKER_CRASH");
-            Some(Self { keys })
+            Some(Self {
+                keys,
+            })
         }
     }
 

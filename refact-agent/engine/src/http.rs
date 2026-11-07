@@ -112,7 +112,9 @@ pub(crate) fn gui_public_origin_candidates(port: u16) -> GuiPublicOriginCandidat
     if !origins.contains(&mdns_origin) {
         origins.push(mdns_origin);
     }
-    GuiPublicOriginCandidates { origins }
+    GuiPublicOriginCandidates {
+        origins,
+    }
 }
 
 pub(crate) fn local_mdns_host_name() -> String {
@@ -216,7 +218,10 @@ fn start_mdns_advertisement(port: u16, app_searchable_id: String) -> Option<Mdns
         port,
         fullname
     );
-    Some(MdnsRegistration { daemon, fullname })
+    Some(MdnsRegistration {
+        daemon,
+        fullname,
+    })
 }
 
 pub async fn start_server(

@@ -339,7 +339,10 @@ mod tests {
 
 impl MarkdownPreparation {
     pub fn new(project: ProjectIdentity, drafts: Arc<dyn DraftRegistry<MarkdownDraft>>) -> Self {
-        Self { project, drafts }
+        Self {
+            project,
+            drafts,
+        }
     }
 }
 impl ResourcePreparation for MarkdownPreparation {

@@ -118,14 +118,18 @@ impl Job {
 
     pub fn cron_expr(&self) -> Option<&str> {
         match &self.trigger {
-            Trigger::Cron { expr, .. } => Some(expr),
+            Trigger::Cron {
+                expr, ..
+            } => Some(expr),
             _ => None,
         }
     }
 
     pub fn prompt(&self) -> Option<&str> {
         match &self.action {
-            Action::AgentTurn { prompt, .. } => Some(prompt),
+            Action::AgentTurn {
+                prompt, ..
+            } => Some(prompt),
             _ => None,
         }
     }
@@ -151,19 +155,27 @@ impl Job {
 
     pub fn action_kind(&self) -> &'static str {
         match &self.action {
-            Action::AgentTurn { .. } => "agent_turn",
-            Action::Command { .. } => "command",
+            Action::AgentTurn {
+                ..
+            } => "agent_turn",
+            Action::Command {
+                ..
+            } => "command",
         }
     }
 
     pub fn chat_id(&self) -> Option<&str> {
         match &self.action {
             Action::AgentTurn {
-                target: AgentTarget::ExistingChat { chat_id },
+                target: AgentTarget::ExistingChat {
+                    chat_id,
+                },
                 ..
             } if !chat_id.is_empty() => Some(chat_id),
             Action::Command {
-                target: AgentTarget::ExistingChat { chat_id },
+                target: AgentTarget::ExistingChat {
+                    chat_id,
+                },
                 ..
             } if !chat_id.is_empty() => Some(chat_id),
             _ => None,
@@ -172,7 +184,9 @@ impl Job {
 
     pub fn mode(&self) -> Option<&str> {
         match &self.action {
-            Action::AgentTurn { mode, .. } => mode.as_deref().filter(|mode| !mode.is_empty()),
+            Action::AgentTurn {
+                mode, ..
+            } => mode.as_deref().filter(|mode| !mode.is_empty()),
             _ => None,
         }
     }
@@ -202,7 +216,12 @@ impl Job {
 
     pub fn set_existing_chat(&mut self, chat_id: Option<String>) {
         match &mut self.action {
-            Action::AgentTurn { target, .. } | Action::Command { target, .. } => {
+            Action::AgentTurn {
+                target, ..
+            }
+            | Action::Command {
+                target, ..
+            } => {
                 *target = AgentTarget::ExistingChat {
                     chat_id: chat_id.unwrap_or_default(),
                 };
@@ -212,14 +231,22 @@ impl Job {
 
     pub fn set_isolated(&mut self) {
         match &mut self.action {
-            Action::AgentTurn { target, .. } | Action::Command { target, .. } => {
+            Action::AgentTurn {
+                target, ..
+            }
+            | Action::Command {
+                target, ..
+            } => {
                 *target = AgentTarget::Isolated;
             }
         }
     }
 
     pub fn set_mode(&mut self, mode: Option<String>) {
-        if let Action::AgentTurn { mode: target, .. } = &mut self.action {
+        if let Action::AgentTurn {
+            mode: target, ..
+        } = &mut self.action
+        {
             *target = mode;
         }
     }
@@ -339,7 +366,10 @@ impl DeliveryResponse {
     pub fn from_delivery(delivery: &Delivery) -> Self {
         match delivery {
             Delivery::Chat => DeliveryResponse::Chat,
-            Delivery::Webhook { url, token } => DeliveryResponse::Webhook {
+            Delivery::Webhook {
+                url,
+                token,
+            } => DeliveryResponse::Webhook {
                 url: url.clone(),
                 has_token: token.as_ref().is_some_and(|token| !token.trim().is_empty()),
             },
@@ -397,20 +427,34 @@ pub fn cron_task_response(task: &Job, next_fire_at_ms: u64) -> CronTaskResponse 
 
 pub fn human_schedule_for_trigger(trigger: &Trigger) -> String {
     match trigger {
-        Trigger::Cron { expr, .. } => super::cron_expr::human_schedule(expr),
-        Trigger::Interval { every_ms } => format!("every {}", duration_label(*every_ms)),
-        Trigger::Once { at_ms } => format!("at {at_ms}"),
+        Trigger::Cron {
+            expr, ..
+        } => super::cron_expr::human_schedule(expr),
+        Trigger::Interval {
+            every_ms,
+        } => format!("every {}", duration_label(*every_ms)),
+        Trigger::Once {
+            at_ms,
+        } => format!("at {at_ms}"),
         Trigger::Manual => "manual".to_string(),
-        Trigger::Webhook { .. } => "webhook".to_string(),
-        Trigger::OnProcessExit { .. } => "process exit".to_string(),
+        Trigger::Webhook {
+            ..
+        } => "webhook".to_string(),
+        Trigger::OnProcessExit {
+            ..
+        } => "process exit".to_string(),
     }
 }
 
 pub fn delivery_kind(delivery: &Delivery) -> &'static str {
     match delivery {
         Delivery::Chat => "chat",
-        Delivery::Webhook { .. } => "webhook",
-        Delivery::Notifier { .. } => "notifier",
+        Delivery::Webhook {
+            ..
+        } => "webhook",
+        Delivery::Notifier {
+            ..
+        } => "notifier",
         Delivery::None => "none",
     }
 }
@@ -425,20 +469,28 @@ fn trigger_response_fields(
     Option<String>,
 ) {
     match trigger {
-        Trigger::Cron { tz, .. } => ("cron".to_string(), None, None, None, tz.clone()),
-        Trigger::Interval { every_ms } => {
-            ("interval".to_string(), None, Some(*every_ms), None, None)
-        }
-        Trigger::Once { at_ms } => ("once".to_string(), None, None, Some(*at_ms), None),
+        Trigger::Cron {
+            tz, ..
+        } => ("cron".to_string(), None, None, None, tz.clone()),
+        Trigger::Interval {
+            every_ms,
+        } => ("interval".to_string(), None, Some(*every_ms), None, None),
+        Trigger::Once {
+            at_ms,
+        } => ("once".to_string(), None, None, Some(*at_ms), None),
         Trigger::Manual => ("manual".to_string(), None, None, None, None),
-        Trigger::Webhook { hook_id } => (
+        Trigger::Webhook {
+            hook_id,
+        } => (
             "webhook".to_string(),
             Some(hook_id.clone()),
             None,
             None,
             None,
         ),
-        Trigger::OnProcessExit { .. } => ("manual".to_string(), None, None, None, None),
+        Trigger::OnProcessExit {
+            ..
+        } => ("manual".to_string(), None, None, None, None),
     }
 }
 
@@ -612,8 +664,11 @@ impl From<RawJob> for Job {
 }
 
 fn legacy_trigger(cron: Option<String>) -> Trigger {
-    cron.map(|expr| Trigger::Cron { expr, tz: None })
-        .unwrap_or(Trigger::Manual)
+    cron.map(|expr| Trigger::Cron {
+        expr,
+        tz: None,
+    })
+    .unwrap_or(Trigger::Manual)
 }
 
 fn legacy_action(prompt: Option<String>, chat_id: Option<String>, mode: Option<String>) -> Action {

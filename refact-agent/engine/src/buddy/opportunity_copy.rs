@@ -15,10 +15,14 @@ pub(super) fn page_action(page: &BuddyPage) -> Option<&'static str> {
         BuddyPage::CommandsMarketplace => Some("Open Commands Marketplace"),
         BuddyPage::DelegatesMarketplace => Some("Open Subagents Marketplace"),
         BuddyPage::TasksList => Some("Open Tasks"),
-        BuddyPage::TaskWorkspace { .. } => Some("Open the task's workspace"),
+        BuddyPage::TaskWorkspace {
+            ..
+        } => Some("Open the task's workspace"),
         BuddyPage::KnowledgeGraph => Some("Open Knowledge Graph"),
         BuddyPage::Worktrees => Some("Open Worktrees"),
-        BuddyPage::SetupMode { .. } => Some("Start the guided setup"),
+        BuddyPage::SetupMode {
+            ..
+        } => Some("Start the guided setup"),
     }
 }
 

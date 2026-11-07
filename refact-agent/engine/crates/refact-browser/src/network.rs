@@ -701,7 +701,9 @@ impl UrlMatcher {
             .dot_matches_new_line(flags.contains('s'))
             .unicode(true)
             .build()
-            .map(|regex| Self { regex })
+            .map(|regex| Self {
+                regex,
+            })
             .map_err(|error| format!("Invalid URL regex: {error}"))
     }
 

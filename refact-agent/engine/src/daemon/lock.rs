@@ -231,7 +231,10 @@ impl std::fmt::Display for WorkspaceLeaseError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Busy(conflict) => write!(f, "{conflict}"),
-            Self::Io { path, error } => {
+            Self::Io {
+                path,
+                error,
+            } => {
                 write!(
                     f,
                     "failed to take workspace lease {}: {error}",

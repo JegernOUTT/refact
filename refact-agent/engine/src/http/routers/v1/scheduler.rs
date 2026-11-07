@@ -218,7 +218,9 @@ pub async fn handle_v1_scheduler_cron_delete(
         crate::tools::tool_cron_delete::delete_schedule(&id, session_cron_store(), durable)
             .await
             .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    Ok(Json(CronDeleteResponse { removed }))
+    Ok(Json(CronDeleteResponse {
+        removed,
+    }))
 }
 
 fn task_response(task: Job, now_ms: u64, tz: chrono_tz::Tz) -> CronTaskResponse {
@@ -440,7 +442,9 @@ fn validate_next_fire(task: &Job, now_ms: u64) -> Result<(), String> {
 
 fn trigger_cron_expr(trigger: &Trigger) -> Option<&str> {
     match trigger {
-        Trigger::Cron { expr, .. } => Some(expr.as_str()),
+        Trigger::Cron {
+            expr, ..
+        } => Some(expr.as_str()),
         _ => None,
     }
 }
@@ -475,7 +479,9 @@ fn request_webhook_trigger(request: &CronCreateRequest) -> Result<Option<Trigger
         .filter(|hook_id| !hook_id.is_empty())
         .map(str::to_string);
     let Some(trigger) = request.trigger.as_ref() else {
-        return Ok(hook_id.map(|hook_id| Trigger::Webhook { hook_id }));
+        return Ok(hook_id.map(|hook_id| Trigger::Webhook {
+            hook_id,
+        }));
     };
     match trigger {
         serde_json::Value::Object(map) => {
@@ -494,14 +500,20 @@ fn request_webhook_trigger(request: &CronCreateRequest) -> Result<Option<Trigger
                 .map(str::to_string)
                 .or(hook_id)
                 .ok_or_else(|| "trigger webhook requires `hook_id`".to_string())?;
-            Ok(Some(Trigger::Webhook { hook_id }))
+            Ok(Some(Trigger::Webhook {
+                hook_id,
+            }))
         }
         serde_json::Value::String(kind) if kind == "webhook" => {
             let hook_id =
                 hook_id.ok_or_else(|| "trigger webhook requires `hook_id`".to_string())?;
-            Ok(Some(Trigger::Webhook { hook_id }))
+            Ok(Some(Trigger::Webhook {
+                hook_id,
+            }))
         }
-        serde_json::Value::Null => Ok(hook_id.map(|hook_id| Trigger::Webhook { hook_id })),
+        serde_json::Value::Null => Ok(hook_id.map(|hook_id| Trigger::Webhook {
+            hook_id,
+        })),
         other => Err(format!("argument `trigger` is invalid: {other:?}")),
     }
 }

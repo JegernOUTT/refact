@@ -265,7 +265,9 @@ async fn ready_worker_with_timeout(
 
 fn proxy_worker_timeout_reason(info: &WorkerInfo) -> String {
     match &info.state {
-        WorkerState::Failed { reason } => reason.clone(),
+        WorkerState::Failed {
+            reason,
+        } => reason.clone(),
         WorkerState::Crashed => info
             .last_error
             .clone()
@@ -552,7 +554,10 @@ struct ProxyStreamGuard {
 
 impl ProxyStreamGuard {
     fn new(state: Arc<DaemonState>, project_id: String) -> Self {
-        Self { state, project_id }
+        Self {
+            state,
+            project_id,
+        }
     }
 }
 
@@ -627,7 +632,9 @@ mod tests {
             std::env::remove_var("FAKE_WORKER_DELAY_READY");
             std::env::remove_var("FAKE_WORKER_PORT_BUSY_EXIT");
             std::env::remove_var("FAKE_WORKER_SKIP_LSP");
-            Some(Self { keys })
+            Some(Self {
+                keys,
+            })
         }
     }
 

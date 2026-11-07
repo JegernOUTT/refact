@@ -101,12 +101,10 @@ Avoid nested locks, avoid RwLock unless you know what you are doing.
 
 #### Testing
 
-All Rust test changes must satisfy the [test admission and suite-budget policy](../../docs/rust-test-policy.md).
-Keep only distinct important failure detection at the cheapest sufficient layer. Use real shipping
-logic, a discriminating oracle and non-vacuous fixtures; critical contracts require an executed
-before-fix or mutant failure followed by a restored passing run. Obtain independent semantic review
-and record fingerprint-bound admissions and test-support impacts. Do not meet the 6,400-case ceiling
-by ignoring, disconnecting, generating or packing the same scenarios into fewer functions.
+Follow the [Rust testing guidance](../../docs/rust-test-policy.md): exercise shipping
+behavior with discriminating assertions and deterministic, non-vacuous fixtures. Obtain
+independent code review, especially for security, persistence and lifecycle contracts,
+and run the affected tests as well as the build and formatting checks.
 
 It's a good idea to have tests in source files, and run them using `cargo test`, and we
 have CI in place to run it automatically.

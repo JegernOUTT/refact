@@ -189,7 +189,9 @@ pub(crate) fn convert_command_markdown_with_source_hash(
         destination_path: PathBuf::from("commands").join(format!("{name}.md")),
         source_hash,
         artifact_hash: hash_string(&rendered),
-        artifact: ImportArtifact::FileContent { content: rendered },
+        artifact: ImportArtifact::FileContent {
+            content: rendered,
+        },
         metadata: JsonValue::Object(metadata),
     })
 }
@@ -290,7 +292,9 @@ pub fn convert_skill_package(
         source_path: skill_dir.to_path_buf(),
         dest_name: skill_id.clone(),
         destination_path: PathBuf::from("skills").join(&skill_id),
-        artifact: ImportArtifact::DirectoryCopy { source_dir },
+        artifact: ImportArtifact::DirectoryCopy {
+            source_dir,
+        },
         source_hash: directory_hash.clone(),
         artifact_hash: directory_hash,
         metadata: JsonValue::Object(metadata),
@@ -380,7 +384,9 @@ pub(crate) fn convert_subagent_with_source_hash(
         destination_path: PathBuf::from("subagents").join(format!("{id}.yaml")),
         source_hash,
         artifact_hash: hash_string(&yaml),
-        artifact: ImportArtifact::FileContent { content: yaml },
+        artifact: ImportArtifact::FileContent {
+            content: yaml,
+        },
         metadata: JsonValue::Object(metadata),
     })
 }
@@ -978,7 +984,10 @@ mod tests {
             fs::read_to_string(skill_dir.join("SKILL.md")).unwrap(),
             original
         );
-        let ImportArtifact::DirectoryCopy { source_dir } = candidate.artifact else {
+        let ImportArtifact::DirectoryCopy {
+            source_dir,
+        } = candidate.artifact
+        else {
             panic!("expected directory copy");
         };
         assert_ne!(source_dir, skill_dir);
@@ -1010,7 +1019,10 @@ mod tests {
         let staging = temp.path().join("staging");
 
         let first = convert_skill_package(&context(temp.path()), &skill_dir, &staging).unwrap();
-        let ImportArtifact::DirectoryCopy { source_dir } = first.artifact else {
+        let ImportArtifact::DirectoryCopy {
+            source_dir,
+        } = first.artifact
+        else {
             panic!("expected directory copy");
         };
         fs::write(source_dir.join("stale.txt"), "stale").unwrap();
@@ -1064,7 +1076,10 @@ mod tests {
         .unwrap();
         let staging = temp.path().join("staging");
         let first = convert_skill_package(&context(temp.path()), &skill_dir, &staging).unwrap();
-        let ImportArtifact::DirectoryCopy { source_dir } = first.artifact else {
+        let ImportArtifact::DirectoryCopy {
+            source_dir,
+        } = first.artifact
+        else {
             panic!("expected directory copy");
         };
         fs::remove_dir_all(&source_dir).unwrap();
@@ -1150,7 +1165,10 @@ mod tests {
             candidate.destination_path,
             PathBuf::from("subagents/code-reviewer.yaml")
         );
-        let ImportArtifact::FileContent { content } = candidate.artifact else {
+        let ImportArtifact::FileContent {
+            content,
+        } = candidate.artifact
+        else {
             panic!("expected file content");
         };
         let config: SubagentConfig = serde_yaml::from_str(&content).unwrap();
@@ -1186,7 +1204,10 @@ mod tests {
         };
 
         let candidate = convert_subagent(&context(temp.path()), &source_path, &input).unwrap();
-        let ImportArtifact::FileContent { content } = candidate.artifact else {
+        let ImportArtifact::FileContent {
+            content,
+        } = candidate.artifact
+        else {
             panic!("expected file content");
         };
         let config: SubagentConfig = serde_yaml::from_str(&content).unwrap();

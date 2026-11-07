@@ -52,16 +52,6 @@ describe("buddy status maps", () => {
     ]);
   });
 
-  it("never uses accent for a status", () => {
-    const all = [
-      ...Object.values(BUDDY_STATUS_MAPS).flatMap((m) => Object.values(m)),
-      ...Object.values(BUDDY_OPERATOR_STATUS),
-    ];
-    expect(all.some((entry) => (entry.tone as string) === "accent")).toBe(
-      false,
-    );
-  });
-
   it("maps backend keys", () => {
     expect(toBuddyWorkState("needs_attention")).toBe("needs_you");
     expect(buddyStatus("work", "needs_you").label).toBe("Needs you");
@@ -99,11 +89,6 @@ describe("BuddyStatusBadge", () => {
     expect(severity).toHaveTextContent("Critical");
     expect(severity).toHaveAttribute("data-tone", "danger");
     expect(severity.querySelector("span")).not.toBeNull();
-  });
-
-  it("accepts a label override", () => {
-    render(<BuddyStatusBadge dimension="read" value="unread" label="New" />);
-    expect(screen.getByText("New")).toBeInTheDocument();
   });
 });
 

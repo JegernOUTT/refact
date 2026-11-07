@@ -1756,6 +1756,36 @@ mod router_tests {
     #[tokio::test]
     async fn v1_router_routes_each_domain_and_keeps_shared_layers() {
         let app = AppState::from_gcx(crate::global_context::tests::make_test_gcx().await).await;
+        let mut sources =
+            crate::ext::extensions_marketplace::load_all_sources(&app.paths.config_dir)
+                .await
+                .unwrap();
+        for source in &mut sources {
+            source.enabled = matches!(
+                source.source_kind,
+                crate::ext::extensions_marketplace::MarketplaceSourceKind::BuiltinEmbedded
+            );
+        }
+        crate::ext::extensions_marketplace::save_sources_db(
+            &app.paths.config_dir,
+            &crate::ext::extensions_marketplace::ExtensionsMarketplaceSourcesDb {
+                sources,
+            },
+        )
+        .await
+        .unwrap();
+        for source in super::mcp_marketplace_sources::load_sources(&app.paths.config_dir)
+            .await
+            .sources
+        {
+            super::mcp_marketplace_sources::handle_v1_mcp_marketplace_sources_configure(
+                axum::extract::State(app.clone()),
+                axum::extract::Path(source.id),
+                hyper::body::Bytes::from_static(br#"{"enabled":false}"#),
+            )
+            .await
+            .unwrap();
+        }
         let router = make_v1_router(app.clone()).with_state(app);
         let routes = [
             ("GET", "/ping"),

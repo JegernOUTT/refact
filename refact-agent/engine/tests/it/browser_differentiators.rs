@@ -293,7 +293,9 @@ async fn differentiator_03_dismiss_overlays_explicit_and_default_handler_paths()
     let explicit = execute_steps_with_runtime(
         &mut case.runtime,
         &[
-            BrowserStep::DismissOverlays { aggressive: false },
+            BrowserStep::DismissOverlays {
+                aggressive: false,
+            },
             BrowserStep::Click {
                 timeout_ms: None,
                 locator: BrowserLocator::css("#target"),

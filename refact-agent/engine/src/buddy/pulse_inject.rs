@@ -456,17 +456,23 @@ fn group_activity(actions: &[UserAction]) -> Vec<PulseActivityGroup> {
 
 fn action_summary(action: &UserAction) -> (String, Option<String>) {
     match action {
-        UserAction::FileOpened { path, .. } => ("file_opened".to_string(), Some(redact(path))),
-        UserAction::SnippetSelected { path, lines, .. } => (
+        UserAction::FileOpened {
+            path, ..
+        } => ("file_opened".to_string(), Some(redact(path))),
+        UserAction::SnippetSelected {
+            path,
+            lines,
+            ..
+        } => (
             "snippet_selected".to_string(),
             Some(redact(format!("{}:{}-{}", path, lines.0, lines.1))),
         ),
-        UserAction::ToolApproved { tool_name, .. } => {
-            ("tool_approved".to_string(), Some(redact(tool_name)))
-        }
-        UserAction::ToolRejected { tool_name, .. } => {
-            ("tool_rejected".to_string(), Some(redact(tool_name)))
-        }
+        UserAction::ToolApproved {
+            tool_name, ..
+        } => ("tool_approved".to_string(), Some(redact(tool_name))),
+        UserAction::ToolRejected {
+            tool_name, ..
+        } => ("tool_rejected".to_string(), Some(redact(tool_name))),
         UserAction::CommandRun {
             command_preview, ..
         } => ("command_run".to_string(), Some(redact(command_preview))),

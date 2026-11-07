@@ -1,6 +1,6 @@
 # Refact without an IDE
 
-Refact runs everywhere the terminal does — no editor, no plugin, no graphical desktop required. A single `refact` binary gives you the resident daemon, a browser dashboard, a full-screen TUI, workspace panels, and a headless agent CLI. This guide covers the full IDE-free journey from first install to scheduled autonomous runs and remote access.
+Refact runs everywhere the terminal does — no editor, no plugin, no graphical desktop required. A single `refact` binary gives you the resident daemon, a browser dashboard, workspace panels, and a headless agent CLI. This guide covers the full IDE-free journey from first install to scheduled autonomous runs and remote access.
 
 ## Install
 
@@ -104,7 +104,7 @@ Once a project is open in the dashboard, three workspace panels provide IDE-grad
 
 These panels are backed by the same engine capabilities that power the agent's file, shell, and git tools. They are thin browser surfaces over the local daemon — no file leaves your machine.
 
-> **Capability note:** Workspace panels are available in the dashboard. The TUI (`refact` / `refact tui`) provides a keyboard-first alternative with the same session, tools, and project state.
+> **Capability note:** Workspace panels are available in the dashboard. Bare `refact` opens the same dashboard as `refact ui`.
 
 ## Access from other devices
 
@@ -136,7 +136,7 @@ The daemon port (shown in `refact status` output) must be reachable on your LAN.
 
 ## Headless CLI
 
-When you don't want a browser or TUI at all, Refact works entirely from the terminal.
+When you don't want a browser at all, Refact works entirely from the terminal.
 
 ### `refact run` — one-shot agent turns
 
@@ -164,15 +164,6 @@ Key options:
 | `--json` | Emit final JSON instead of streaming text |
 
 With `--approve deny`, the agent plans and explains but never touches files — safe for exploration. With `--approve auto`, it runs tools autonomously — great for known-safe batch work.
-
-### TUI: `refact` / `refact tui`
-
-```sh
-refact
-refact tui --project .
-```
-
-The full-screen terminal UI mirrors the browser dashboard. It runs the same sessions, tools, and agent modes as the GUI, but in a keyboard-driven terminal interface. Ideal for SSH sessions, tmux workflows, and minimal environments.
 
 ### Scheduled autonomous runs: `refact cron`
 
@@ -219,7 +210,7 @@ Refact runs local-first. Here is what that means for the headless and browser-ac
 
 ### Terminal gating
 
-By default, agent-initiated shell commands require user approval. The confirmation popup appears in the dashboard, TUI, or headless `--approve` policy. You control the trust boundary:
+By default, agent-initiated shell commands require user approval. The confirmation popup appears in the dashboard or headless `--approve` policy. You control the trust boundary:
 
 - `--approve deny` — the agent can plan and read but never executes. Safest for unattended exploration.
 - `--approve ask` — the agent pauses and asks before every tool call. The default for interactive use.

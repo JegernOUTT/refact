@@ -84,13 +84,19 @@ mod tests {
         fn set(key: &'static str, value: &std::path::Path) -> Self {
             let previous = std::env::var_os(key);
             std::env::set_var(key, value);
-            Self { key, previous }
+            Self {
+                key,
+                previous,
+            }
         }
 
         fn clear(key: &'static str) -> Self {
             let previous = std::env::var_os(key);
             std::env::remove_var(key);
-            Self { key, previous }
+            Self {
+                key,
+                previous,
+            }
         }
     }
 

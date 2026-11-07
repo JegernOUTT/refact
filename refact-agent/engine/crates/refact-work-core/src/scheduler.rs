@@ -76,7 +76,9 @@ impl fmt::Display for AdmissionError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             AdmissionError::Disabled => write!(f, "coordination scheduler is disabled"),
-            AdmissionError::Duplicate { run } => write!(f, "run {run} is already admitted"),
+            AdmissionError::Duplicate {
+                run,
+            } => write!(f, "run {run} is already admitted"),
             AdmissionError::QueueFull {
                 pending,
                 max_pending,
@@ -575,7 +577,9 @@ impl AdmissionScheduler {
             });
         }
         if state.by_run.contains_key(&request.run) {
-            return Err(AdmissionError::Duplicate { run: request.run });
+            return Err(AdmissionError::Duplicate {
+                run: request.run,
+            });
         }
         let outstanding = state.entries.len();
         if outstanding >= state.settings.max_outstanding {

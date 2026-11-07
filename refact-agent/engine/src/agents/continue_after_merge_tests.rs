@@ -201,7 +201,9 @@ async fn continue_after_merge_runs_in_a_fresh_worktree() {
         let expected_head = Arc::new(Mutex::new(None));
         let _runner = runner(seen.clone(), expected_head.clone(), false);
         let mut request = spawn_request(PARENT, BgAgentKind::Subagent);
-        request.worktree_mode = SpawnWorktreeMode::Isolated { auto_merge: true };
+        request.worktree_mode = SpawnWorktreeMode::Isolated {
+            auto_merge: true,
+        };
         request.notify_parent = NotifyParent::Auto;
         if nested {
             request.parent_worktree = Some(fixture.parent_worktree.clone());
@@ -364,7 +366,9 @@ async fn continue_after_merge_refuses_when_target_is_gone() {
     let seen = Arc::new(Mutex::new(Vec::new()));
     let _runner = runner(seen.clone(), Arc::new(Mutex::new(None)), false);
     let mut request = spawn_request(PARENT, BgAgentKind::Subagent);
-    request.worktree_mode = SpawnWorktreeMode::Isolated { auto_merge: true };
+    request.worktree_mode = SpawnWorktreeMode::Isolated {
+        auto_merge: true,
+    };
     let first = await_completion(
         spawn_background_agent(fixture.app.clone(), request)
             .await
@@ -536,7 +540,9 @@ async fn resumed_generation_with_existing_worktree_is_merged() {
     let _runner = runner(seen.clone(), Arc::new(Mutex::new(None)), true);
     let mut request = spawn_request(PARENT, BgAgentKind::Subagent);
     request.parent_worktree = Some(fixture.parent_worktree.clone());
-    request.worktree_mode = SpawnWorktreeMode::Isolated { auto_merge: true };
+    request.worktree_mode = SpawnWorktreeMode::Isolated {
+        auto_merge: true,
+    };
     let first = await_completion(
         spawn_background_agent(fixture.app.clone(), request)
             .await

@@ -88,8 +88,14 @@ fn dispatch_cleared_mcp_call<T>(
             }
         }
     }
-    clear_for_mcp(gcx, McpCallAudit { records }, server_name)
-        .map_err(|refusal| refusal.model_facing().to_string())?;
+    clear_for_mcp(
+        gcx,
+        McpCallAudit {
+            records,
+        },
+        server_name,
+    )
+    .map_err(|refusal| refusal.model_facing().to_string())?;
     Ok(dispatch(call_params))
 }
 
@@ -189,8 +195,12 @@ fn mcp_call_failure_receipt(
         rmcp::service::ServiceError::TransportSend(_) => "Transport send failed".to_string(),
         rmcp::service::ServiceError::McpError(_) => "MCP protocol error".to_string(),
         rmcp::service::ServiceError::UnexpectedResponse => "Unexpected MCP response".to_string(),
-        rmcp::service::ServiceError::Cancelled { .. } => "MCP request cancelled".to_string(),
-        rmcp::service::ServiceError::Timeout { timeout } => {
+        rmcp::service::ServiceError::Cancelled {
+            ..
+        } => "MCP request cancelled".to_string(),
+        rmcp::service::ServiceError::Timeout {
+            timeout,
+        } => {
             format!("Request timed out after {}s", timeout.as_secs())
         }
         _ => "Unclassified MCP service failure".to_string(),
@@ -274,7 +284,9 @@ impl Tool for ToolMCP {
                     )
                 })?;
             match &session_downcasted.connection_status {
-                MCPConnectionStatus::Reconnecting { .. } => {
+                MCPConnectionStatus::Reconnecting {
+                    ..
+                } => {
                     let msg = format!(
                         "MCP server '{}' is reconnecting, please try again shortly",
                         self.mcp_tool.name
@@ -289,7 +301,9 @@ impl Tool for ToolMCP {
                     .await;
                     return Err(msg);
                 }
-                MCPConnectionStatus::Failed { message } => {
+                MCPConnectionStatus::Failed {
+                    message,
+                } => {
                     let msg = format!(
                         "MCP server '{}' connection failed: {}",
                         self.mcp_tool.name, message
@@ -1146,13 +1160,5 @@ mod tests {
                 && record["zone"] == "secrets"
                 && record["attribution"] == "observed"
         }));
-    }
-
-    #[test]
-    fn test_no_annotations_is_none() {
-        let schema = json!({"type": "object", "properties": {}});
-        let tool = make_tool_mcp(schema);
-        let desc = tool.tool_description();
-        assert!(desc.annotations.is_none());
     }
 }

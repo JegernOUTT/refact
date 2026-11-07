@@ -1,8 +1,8 @@
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64};
+use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
-use tokio::sync::{broadcast, Notify, Mutex as AMutex};
+use tokio::sync::{broadcast, Mutex as AMutex, Notify};
 
 use crate::call_validation::{ChatMessage, ChatUsage};
 use refact_runtime_api::{ToolCatalogSnapshot, TurnToolPool};
@@ -13,14 +13,14 @@ pub use refact_chat_api::chat_local_types::{
     TrajectorySourceIdentity,
 };
 pub use refact_chat_api::{
-    delivery_id_of_message, ActiveCommandContext, BackgroundAgentSummary, BrowserMeta, CausalStamp,
-    BrowserSnapshot, BrowserTabInfo, BuddyThreadMeta, ChatCommand, ChatEvent, CommandRequest,
-    CompressionPhase, CompressionReason, CriterionEvidence, CriterionVerdict, DeliveryOutcome,
-    DeliveryStatus, DeliveryStatusRecord, DeltaOp, DiffBox, EventEnvelope, GoalAttempt, GoalBudget,
-    GoalCriterion, GoalEvent, GoalLedgerEntry, GoalLedgerOp, GoalProgress, GoalSnapshot,
-    GoalStatus, GoalWait, GoalWaitResume, GoalWaitSubject, PauseReason, PendingDelivery,
-    PendingQuestion, PendingQuestionSet, PendingQuestionStatus, PushMode, QuestionAnswer,
-    QueuedItem, RuntimeState, SessionState, TaskMeta, ThreadParams, TimelineEntry,
+    delivery_id_of_message, ActiveCommandContext, BackgroundAgentSummary, BrowserMeta,
+    BrowserSnapshot, BrowserTabInfo, BuddyThreadMeta, CausalStamp, ChatCommand, ChatEvent,
+    CommandRequest, CompressionPhase, CompressionReason, CriterionEvidence, CriterionVerdict,
+    DeliveryOutcome, DeliveryStatus, DeliveryStatusRecord, DeltaOp, DiffBox, EventEnvelope,
+    GoalAttempt, GoalBudget, GoalCriterion, GoalEvent, GoalLedgerEntry, GoalLedgerOp, GoalProgress,
+    GoalSnapshot, GoalStatus, GoalWait, GoalWaitResume, GoalWaitSubject, PauseReason,
+    PendingDelivery, PendingQuestion, PendingQuestionSet, PendingQuestionStatus, PushMode,
+    QuestionAnswer, QueuedItem, RuntimeState, SessionState, TaskMeta, ThreadParams, TimelineEntry,
     ToolDecisionItem, VerdictSource, WindowBounds, WorktreeMeta, CLIENT_MESSAGE_ID_EXTRA_KEY,
     DELIVERY_COMMAND_TYPE, DELIVERY_EXTRA_KEY,
 };

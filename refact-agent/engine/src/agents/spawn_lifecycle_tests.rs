@@ -483,7 +483,9 @@ async fn isolated_auto_merge_merges_changes_and_cleans_worktree() {
     let fixture = repo_fixture().await;
     let mut request = spawn_request("parent-auto-merge", BgAgentKind::Subagent);
     request.parent_worktree = Some(fixture.parent_worktree.clone());
-    request.worktree_mode = SpawnWorktreeMode::Isolated { auto_merge: true };
+    request.worktree_mode = SpawnWorktreeMode::Isolated {
+        auto_merge: true,
+    };
     fixture.install_parent(&request).await;
 
     let completed = await_completion(
@@ -532,7 +534,9 @@ async fn nested_isolated_auto_merge_runs_inside_parent_worktree() {
         }));
     let mut request = spawn_request("parent-nested-auto-merge", BgAgentKind::Subagent);
     request.parent_worktree = Some(parent_worktree.clone());
-    request.worktree_mode = SpawnWorktreeMode::Isolated { auto_merge: true };
+    request.worktree_mode = SpawnWorktreeMode::Isolated {
+        auto_merge: true,
+    };
     fixture.install_parent(&request).await;
 
     std::fs::write(parent_worktree.root.join("base.txt"), "staged parent\n").unwrap();
@@ -636,7 +640,9 @@ async fn nested_isolated_auto_merge_refuses_changed_parent_checkout() {
         }));
     let mut request = spawn_request("parent-checkout-changed", BgAgentKind::Subagent);
     request.parent_worktree = Some(fixture.parent_worktree.clone());
-    request.worktree_mode = SpawnWorktreeMode::Isolated { auto_merge: true };
+    request.worktree_mode = SpawnWorktreeMode::Isolated {
+        auto_merge: true,
+    };
     fixture.install_parent(&request).await;
     let head = run_git(&parent_root, &["rev-parse", "HEAD"]);
 
@@ -815,7 +821,9 @@ async fn nested_isolated_auto_merge_child_commit_failure_preserves_parent_edits(
         }));
     let mut request = spawn_request("parent-child-commit-failure", BgAgentKind::Subagent);
     request.parent_worktree = Some(fixture.parent_worktree.clone());
-    request.worktree_mode = SpawnWorktreeMode::Isolated { auto_merge: true };
+    request.worktree_mode = SpawnWorktreeMode::Isolated {
+        auto_merge: true,
+    };
     fixture.install_parent(&request).await;
     let head = run_git(&parent_root, &["rev-parse", "HEAD"]);
 
@@ -879,7 +887,9 @@ async fn isolated_auto_merge_conflict_preserves_worktree_and_summary() {
         }));
     let mut request = spawn_request("parent-auto-conflict", BgAgentKind::Subagent);
     request.parent_worktree = Some(fixture.parent_worktree.clone());
-    request.worktree_mode = SpawnWorktreeMode::Isolated { auto_merge: true };
+    request.worktree_mode = SpawnWorktreeMode::Isolated {
+        auto_merge: true,
+    };
     fixture.install_parent(&request).await;
 
     let completed = await_completion(
@@ -1087,7 +1097,9 @@ async fn capped_child_resumes_once_with_full_history_and_remaining_lifetime_budg
         budget: None,
     });
     request.target_files = vec!["before-cap.txt".into(), "after-cap.txt".into()];
-    request.worktree_mode = SpawnWorktreeMode::Isolated { auto_merge: false };
+    request.worktree_mode = SpawnWorktreeMode::Isolated {
+        auto_merge: false,
+    };
     request.notify_parent = NotifyParent::Auto;
     let stopped = await_completion(
         crate::agents::spawn::spawn_background_agent(fixture.app.clone(), request)

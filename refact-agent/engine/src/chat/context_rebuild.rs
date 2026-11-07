@@ -255,13 +255,15 @@ pub(crate) fn place_report_before_live_suffix(
         .zip(&active.origins[start..])
     {
         match origin {
-            refact_core::active_context::MessageOrigin::Stored { message_index } => {
+            refact_core::active_context::MessageOrigin::Stored {
+                message_index,
+            } => {
                 at = *message_index;
                 break;
             }
-            refact_core::active_context::MessageOrigin::ReportPayload { .. } => {
-                embedded.push(message.clone())
-            }
+            refact_core::active_context::MessageOrigin::ReportPayload {
+                ..
+            } => embedded.push(message.clone()),
         }
     }
     if !embedded.is_empty() {

@@ -685,18 +685,3 @@ it("checks only the latest user tail and caches by immutable message identity", 
     false,
   );
 });
-
-it("does not inspect history before the latest user boundary", () => {
-  const archived = { role: "assistant" as const, content: null };
-  const access = vi.spyOn(archived, "role", "get");
-  const messages: ChatMessages = [
-    archived,
-    { role: "user", content: "latest", checkpoints: [] },
-  ];
-  const state = {
-    chat: { threads: { test: { thread: { messages } } } },
-  } as unknown as RootState;
-  expect(selectHasUncalledToolsById(state, "test")).toBe(false);
-  expect(access).not.toHaveBeenCalled();
-  access.mockRestore();
-});

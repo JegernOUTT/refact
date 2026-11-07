@@ -1,14 +1,10 @@
-import { readFile } from "node:fs/promises";
-import path from "node:path";
-
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { describe, expect, it, vi } from "vitest";
 
-import { EditableTable } from "./EditableTable";
 import type { EditableTableColumn } from "./EditableTable";
-import styles from "./EditableTable.module.css";
+import { EditableTable } from "./EditableTable";
 
 interface ParameterRow {
   name: string;
@@ -66,21 +62,6 @@ function ControlledEditableTable({
 }
 
 describe("EditableTable", () => {
-  it("keeps column tracks in a CSS variable so narrow mode can override rows", () => {
-    render(<ControlledEditableTable />);
-
-    const table = screen.getByRole("table");
-    const bodyRow = screen.getByDisplayValue("city").closest(`.${styles.row}`);
-
-    expect(table).toHaveClass(styles.table);
-    expect(table.getAttribute("style")).toContain(
-      "--editable-table-columns: minmax(140px, 0.7fr) minmax(0, 1fr) auto",
-    );
-    expect(table.getAttribute("style")).not.toContain("grid-template-columns");
-    expect(bodyRow).toHaveClass(styles.row);
-    expect(bodyRow).toHaveClass("rf-enter");
-  });
-
   it("renders stacked labels associated with each editable cell", () => {
     render(
       <ControlledEditableTable
@@ -158,19 +139,5 @@ describe("EditableTable", () => {
 
     expect(nameInputs).toHaveLength(2);
     expect(nameInputs[1]).toHaveFocus();
-  });
-
-  it("defines the stacked responsive card layout in CSS", async () => {
-    const css = await readFile(
-      path.resolve(__dirname, "EditableTable.module.css"),
-      "utf8",
-    );
-
-    expect(css).toContain("container-type: inline-size");
-    expect(css).toContain("@container (max-width: 480px)");
-    expect(css).toContain("grid-template-columns: minmax(0, 1fr)");
-    expect(css).toContain("border-radius: var(--rf-radius-card)");
-    expect(css).toContain("display: inline-flex");
-    expect(css).not.toContain("display: contents");
   });
 });

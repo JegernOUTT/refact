@@ -112,7 +112,9 @@ impl std::fmt::Display for OperatorOpenFailureReason {
             Self::AlreadyOwned(None) => {
                 f.write_str("operator store is already owned by another writer")
             }
-            Self::Other { detail, .. } => f.write_str(detail),
+            Self::Other {
+                detail, ..
+            } => f.write_str(detail),
         }
     }
 }
@@ -121,7 +123,9 @@ impl OperatorOpenFailureReason {
     fn kind(&self) -> OperatorOpenFailureKind {
         match self {
             Self::AlreadyOwned(_) => OperatorOpenFailureKind::AlreadyOwned,
-            Self::Other { kind, .. } => *kind,
+            Self::Other {
+                kind, ..
+            } => *kind,
         }
     }
 }
@@ -202,7 +206,10 @@ pub(crate) async fn observe_buddy_facts_parallel(
         let gcx = gcx.clone();
         let project_root = project_root.clone();
         pending.push(async move {
-            let ctx = ObserverContext { project_root, now };
+            let ctx = ObserverContext {
+                project_root,
+                now,
+            };
             let refresh_ttl = obs.emission_refresh_ttl_seconds();
             let facts =
                 tokio::time::timeout(tokio::time::Duration::from_secs(5), obs.observe(gcx, &ctx))
@@ -287,12 +294,17 @@ async fn poll_commit_activity_once(gcx: AppState, project_root: PathBuf) {
             .snapshot()
             .iter()
             .filter_map(|action| match action {
-                UserAction::CommitMade { sha, .. } => Some(sha.clone()),
+                UserAction::CommitMade {
+                    sha, ..
+                } => Some(sha.clone()),
                 _ => None,
             })
             .collect::<HashSet<_>>();
         for action in actions {
-            if let UserAction::CommitMade { sha, .. } = &action {
+            if let UserAction::CommitMade {
+                sha, ..
+            } = &action
+            {
                 if existing.contains(sha) {
                     continue;
                 }
@@ -494,7 +506,9 @@ impl<T> BuddyAdmission<T> {
         for draft in pending.drafts {
             svc.persisted_operator_drafts.insert(draft.id.clone());
             svc.draft_store.restore(vec![draft.clone()]);
-            let _ = svc.events_tx.send(BuddyEvent::DraftCreated { draft });
+            let _ = svc.events_tx.send(BuddyEvent::DraftCreated {
+                draft,
+            });
         }
         Ok(self.value)
     }
@@ -915,15 +929,21 @@ impl BuddyService {
     }
 
     fn persist_event(&self, event: BuddyRuntimeEvent) {
-        self.persist_record(RuntimeQueueRecord::Event { event });
+        self.persist_record(RuntimeQueueRecord::Event {
+            event,
+        });
     }
 
     fn persist_removal(&self, id: String) {
-        self.persist_record(RuntimeQueueRecord::Removed { id });
+        self.persist_record(RuntimeQueueRecord::Removed {
+            id,
+        });
     }
 
     fn persist_now_playing(&self, slot: Option<BuddyRuntimeEvent>) {
-        self.persist_record(RuntimeQueueRecord::NowPlaying { event: slot });
+        self.persist_record(RuntimeQueueRecord::NowPlaying {
+            event: slot,
+        });
     }
 
     pub fn track_background_task(&mut self, handle: JoinHandle<()>) {
@@ -1044,9 +1064,9 @@ impl BuddyService {
             if let Some(opportunity) = refreshed {
                 self.state.opportunities = self.opportunity_queue.snapshot();
                 self.dirty = true;
-                let _ = self
-                    .events_tx
-                    .send(BuddyEvent::OpportunityProduced { opportunity });
+                let _ = self.events_tx.send(BuddyEvent::OpportunityProduced {
+                    opportunity,
+                });
                 return true;
             }
         }
@@ -1055,9 +1075,9 @@ impl BuddyService {
         self.state.opportunities = self.opportunity_queue.snapshot();
         self.state.dismissed_history = self.opportunity_queue.dismissed_history_snapshot();
         self.dirty = true;
-        let _ = self
-            .events_tx
-            .send(BuddyEvent::OpportunityProduced { opportunity: opp });
+        let _ = self.events_tx.send(BuddyEvent::OpportunityProduced {
+            opportunity: opp,
+        });
         true
     }
 
@@ -1080,11 +1100,15 @@ impl BuddyService {
             &self.opportunity_queue,
             &self.state.muted_rules,
         ) {
-            PolicyDecision::Drop { reason } => {
+            PolicyDecision::Drop {
+                reason,
+            } => {
                 tracing::debug!("buddy: opportunity dropped by policy: {}", reason);
                 false
             }
-            PolicyDecision::Surface { humor_allowed } => {
+            PolicyDecision::Surface {
+                humor_allowed,
+            } => {
                 opp.humor_allowed = humor_allowed && !self.operator_features.editorial;
                 let rule_key = refact_buddy_core::verdicts::rule_key_of(&opp.cooldown_key);
                 let multiplier = refact_buddy_core::verdicts::cooldown_multiplier_for_rule(
@@ -1444,7 +1468,9 @@ impl BuddyService {
         let mut pulse = pulse;
         self.apply_memory_ops_to_pulse(&mut pulse);
         self.pulse = pulse.clone();
-        let _ = self.events_tx.send(BuddyEvent::PulseUpdated { pulse });
+        let _ = self.events_tx.send(BuddyEvent::PulseUpdated {
+            pulse,
+        });
     }
 
     fn apply_memory_ops_to_pulse(&self, pulse: &mut BuddyPulse) {
@@ -1623,13 +1649,17 @@ impl BuddyService {
             if let Some(existing) = &self.active_speech {
                 if existing.dedupe_key.as_deref() == Some(key.as_str()) {
                     self.active_speech = Some(speech.clone());
-                    let _ = self.events_tx.send(BuddyEvent::SpeechUpdated { speech });
+                    let _ = self.events_tx.send(BuddyEvent::SpeechUpdated {
+                        speech,
+                    });
                     return true;
                 }
             }
         }
         self.active_speech = Some(speech.clone());
-        let _ = self.events_tx.send(BuddyEvent::SpeechUpdated { speech });
+        let _ = self.events_tx.send(BuddyEvent::SpeechUpdated {
+            speech,
+        });
         true
     }
 
@@ -1659,7 +1689,9 @@ impl BuddyService {
     }
 
     pub fn send_navigation(&self, page: super::types::BuddyPage) {
-        let _ = self.events_tx.send(BuddyEvent::NavigationRequest { page });
+        let _ = self.events_tx.send(BuddyEvent::NavigationRequest {
+            page,
+        });
     }
 
     pub fn enqueue_runtime_event(&mut self, event: BuddyRuntimeEvent) {
@@ -1799,9 +1831,9 @@ impl BuddyService {
                 .cloned()
         };
         if let Some(ev) = to_persist.as_ref() {
-            let _ = self
-                .events_tx
-                .send(BuddyEvent::RuntimeEvent { event: ev.clone() });
+            let _ = self.events_tx.send(BuddyEvent::RuntimeEvent {
+                event: ev.clone(),
+            });
             self.persist_event(ev.clone());
         }
         if dedupe_key.is_some()
@@ -1859,9 +1891,9 @@ impl BuddyService {
             .find(|e| e.dedupe_key.as_deref() == Some(dedupe_key))
             .cloned()
         {
-            let _ = self
-                .events_tx
-                .send(BuddyEvent::RuntimeEvent { event: e.clone() });
+            let _ = self.events_tx.send(BuddyEvent::RuntimeEvent {
+                event: e.clone(),
+            });
             self.persist_event(e);
         }
         if self
@@ -1922,7 +1954,9 @@ impl BuddyService {
     pub fn add_activity(&mut self, activity: BuddyActivity) {
         super::state::add_activity(&mut self.state, activity.clone());
         self.dirty = true;
-        let _ = self.events_tx.send(BuddyEvent::ActivityAdded { activity });
+        let _ = self.events_tx.send(BuddyEvent::ActivityAdded {
+            activity,
+        });
     }
 
     pub fn refresh_active_quest(&mut self) {
@@ -2069,9 +2103,9 @@ impl BuddyService {
         }
         self.last_suggestion_at = Some(Instant::now());
         self.dirty = true;
-        let _ = self
-            .events_tx
-            .send(BuddyEvent::SuggestionAdded { suggestion });
+        let _ = self.events_tx.send(BuddyEvent::SuggestionAdded {
+            suggestion,
+        });
     }
 
     pub fn maybe_add_suggestion(&mut self, suggestion: BuddySuggestion) -> bool {
@@ -2731,7 +2765,9 @@ pub(crate) async fn publish_operator_inputs(
         .saturating_add(consumed_opportunities);
     for draft in committed_drafts {
         if svc.persisted_operator_drafts.insert(draft.id.clone()) {
-            let _ = svc.events_tx.send(BuddyEvent::DraftCreated { draft });
+            let _ = svc.events_tx.send(BuddyEvent::DraftCreated {
+                draft,
+            });
         }
     }
     if let Some(error) = migration_error {
@@ -3709,10 +3745,14 @@ async fn handle_run_observers(gcx: AppState, context: &BuddyBackgroundContext) {
                             &svc.opportunity_queue,
                             &svc.state.muted_rules,
                         ) {
-                            PolicyDecision::Drop { reason } => {
+                            PolicyDecision::Drop {
+                                reason,
+                            } => {
                                 tracing::debug!("buddy: opp dropped by policy: {}", reason);
                             }
-                            PolicyDecision::Surface { humor_allowed } => {
+                            PolicyDecision::Surface {
+                                humor_allowed,
+                            } => {
                                 if humor_allowed && !svc.operator_features.editorial {
                                     let kind =
                                         primary_fact_kind_for_opportunity(&opp, &svc.fact_store);

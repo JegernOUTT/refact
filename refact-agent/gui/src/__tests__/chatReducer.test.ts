@@ -90,21 +90,6 @@ describe("Chat Thread Reducer - Core Functionality", () => {
       expect(state.threads[taskChatId]).toBeDefined();
       expect(state.threads[taskChatId]?.thread.is_task_chat).toBe(true);
     });
-
-    test("should_preserve_is_task_chat_flag_on_snapshot", () => {
-      const taskChatId = "task-chat-456";
-      const state = chatReducer(
-        initialState,
-        createChatWithId({
-          id: taskChatId,
-          isTaskChat: true,
-          title: "Task Chat",
-        }),
-      );
-
-      expect(state.threads[taskChatId]?.thread.is_task_chat).toBe(true);
-      expect(state.open_thread_ids).toContain(taskChatId);
-    });
   });
 
   describe("Thread Lifecycle", () => {

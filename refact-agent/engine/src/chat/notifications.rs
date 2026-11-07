@@ -136,9 +136,10 @@ pub(crate) async fn prepare_sealed_chat_process_cleanup(
         .capture_chat_cleanup_targets(chat_id)
         .await;
     let reason = match &owner {
-        ProcessCleanupOwner::TaskCard { task_id, card_id } => {
-            crate::agents::seal::task_card_seal_reason(app, chat_id, task_id, card_id).await?
-        }
+        ProcessCleanupOwner::TaskCard {
+            task_id,
+            card_id,
+        } => crate::agents::seal::task_card_seal_reason(app, chat_id, task_id, card_id).await?,
         _ => crate::agents::seal::seal_reason(app, chat_id).await?,
     };
     let matches = match (&owner, &reason) {
@@ -155,7 +156,10 @@ pub(crate) async fn prepare_sealed_chat_process_cleanup(
             },
         ) => *agent_id == current_agent && run_generation == current_generation,
         (
-            ProcessCleanupOwner::TaskCard { task_id, card_id },
+            ProcessCleanupOwner::TaskCard {
+                task_id,
+                card_id,
+            },
             crate::agents::seal::SealReason::TaskCardLeftDoing {
                 task_id: current_task,
                 card_id: current_card,
@@ -189,7 +193,10 @@ pub(crate) async fn stop_task_chat_processes(
     if let Some(cleanup) = prepare_sealed_chat_process_cleanup(
         &app,
         chat_id,
-        ProcessCleanupOwner::TaskCard { task_id, card_id },
+        ProcessCleanupOwner::TaskCard {
+            task_id,
+            card_id,
+        },
     )
     .await
     {
@@ -396,9 +403,15 @@ fn status_label(status: &ExecStatus) -> &'static str {
     match status {
         ExecStatus::Starting => "starting",
         ExecStatus::Running => "running",
-        ExecStatus::Exited { .. } => "exited",
-        ExecStatus::SandboxLauncherFailed { .. } => "sandbox_launcher_failed",
-        ExecStatus::Failed { .. } => "failed",
+        ExecStatus::Exited {
+            ..
+        } => "exited",
+        ExecStatus::SandboxLauncherFailed {
+            ..
+        } => "sandbox_launcher_failed",
+        ExecStatus::Failed {
+            ..
+        } => "failed",
         ExecStatus::Killed => "killed",
         ExecStatus::TimedOut => "timed_out",
     }
@@ -462,7 +475,9 @@ mod tests {
         ProcessCompletionEvent {
             process_id: ExecProcessId(process_id.to_string()),
             chat_id: chat_id.to_string(),
-            status: ExecStatus::Exited { exit_code: Some(0) },
+            status: ExecStatus::Exited {
+                exit_code: Some(0),
+            },
             exit_code: Some(0),
             duration_ms: Some(5),
             short_description: "test process".to_string(),

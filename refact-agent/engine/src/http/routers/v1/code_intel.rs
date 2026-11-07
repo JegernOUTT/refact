@@ -81,7 +81,9 @@ fn json_response<T: Serialize>(value: &T) -> Result<Response<Body>, ScratchError
 }
 
 fn detail_response(detail: &str) -> Result<Response<Body>, ScratchError> {
-    json_response(&DetailResponse { detail })
+    json_response(&DetailResponse {
+        detail,
+    })
 }
 
 fn codegraph_off_response() -> Result<Response<Body>, ScratchError> {
@@ -123,7 +125,10 @@ async fn codegraph_index_state(
 fn file_score_entries(entries: Vec<(String, f64)>) -> Vec<FileScoreEntry> {
     entries
         .into_iter()
-        .map(|(path, score)| FileScoreEntry { path, score })
+        .map(|(path, score)| FileScoreEntry {
+            path,
+            score,
+        })
         .collect()
 }
 
@@ -747,7 +752,10 @@ pub async fn handle_v1_code_intel_git_risk(
     let reviewers =
         refact_git_intel::coupling::reviewer_suggestions(&intel, &ownership_paths, limit.min(10))
             .into_iter()
-            .map(|(author, score)| GitReviewerResponse { author, score })
+            .map(|(author, score)| GitReviewerResponse {
+                author,
+                score,
+            })
             .collect();
     let findings = assembly
         .files

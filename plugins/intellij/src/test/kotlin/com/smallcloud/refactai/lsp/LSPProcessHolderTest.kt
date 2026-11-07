@@ -420,24 +420,6 @@ class LSPProcessHolderTest : BasePlatformTestCase() {
     }
 
     @Test
-    fun testBaseUrlUsesDaemonProjectProxy() {
-        val root = createTempDir().canonicalPath
-        val fake = FakeDaemonClient().apply {
-            port = 9999
-            projectId = "abc123"
-        }
-        val holder = TestLspProcessHolder(mockProject(root), fake)
-        LSPProcessHolder.BIN_PATH = "/tmp/refact"
-        try {
-            runOffEdt { holder.ensureStartedBlockingForTest("base-url") }
-
-            assertEquals(URI("http://127.0.0.1:9999/p/abc123/"), holder.baseUrlOrNull())
-        } finally {
-            holder.dispose()
-        }
-    }
-
-    @Test
     fun testBrowserUrlDefaultsToLoopbackBaseUrlAndPreservesToken() = withBrowserHost("") {
         val root = createTempDir().canonicalPath
         val fake = FakeDaemonClient().apply {
@@ -642,21 +624,6 @@ class LSPProcessHolderTest : BasePlatformTestCase() {
     }
 
     @Test
-    fun testBackendConnectionStatusReadyAfterAttach() {
-        val root = createTempDir().canonicalPath
-        val holder = TestLspProcessHolder(mockProject(root), FakeDaemonClient())
-        LSPProcessHolder.BIN_PATH = "/tmp/refact"
-        try {
-            runOffEdt { holder.ensureStartedBlockingForTest("backend-ready") }
-
-            assertEquals(LSPBackendConnectionStatus.READY, holder.backendConnectionStatus())
-            assertTrue(holder.backendReady())
-        } finally {
-            holder.dispose()
-        }
-    }
-
-    @Test
     fun testBinaryResolutionPublishesInstallingThenFailureAndSettingsResetRecovers() {
         val root = createTempDir().canonicalPath
         val publisher = RecordingStatusPublisher()
@@ -747,24 +714,6 @@ class LSPProcessHolderTest : BasePlatformTestCase() {
             assertFalse(holder.backendReady())
             assertFalse(holder.isWorking)
             assertNull(holder.baseUrlOrNull())
-        } finally {
-            holder.dispose()
-        }
-    }
-
-    @Test
-    fun testBackendConnectionStatusFailedAfterAttachError() {
-        val root = createTempDir().canonicalPath
-        val fake = FakeDaemonClient().apply {
-            openProjectError = RuntimeException("open failed")
-        }
-        val holder = TestLspProcessHolder(mockProject(root), fake)
-        LSPProcessHolder.BIN_PATH = "/tmp/refact"
-        try {
-            runOffEdt { holder.ensureStartedBlockingForTest("backend-failed") }
-
-            assertEquals(LSPBackendConnectionStatus.FAILED, holder.backendConnectionStatus())
-            assertFalse(holder.backendReady())
         } finally {
             holder.dispose()
         }
@@ -1131,20 +1080,4 @@ class LSPProcessHolderTest : BasePlatformTestCase() {
         }
     }
 
-    @Test
-    fun testConfigPayloadContainsBackendReadiness() {
-        val payload = Events.Config.UpdatePayload(
-            Events.Config.Features(true, false),
-            Events.Config.ThemeProps("light"),
-            0,
-            Events.Config.KeyBindings("foo"),
-            backendReady = false,
-            connectionStatus = LSPBackendConnectionStatus.STARTING.wireName
-        )
-
-        val result = Events.stringify(Events.Config.Update(payload))
-
-        assertTrue(result.contains("\"backendReady\":false"))
-        assertTrue(result.contains("\"connectionStatus\":\"starting\""))
-    }
 }

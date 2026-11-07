@@ -101,7 +101,9 @@ pub fn resolve_tab(runtime: &BrowserRuntime, target: &TabTarget) -> Result<Arc<T
         TabTarget::Active => runtime
             .get_active_tab()
             .ok_or_else(|| "No active tab in browser runtime".to_string()),
-        TabTarget::Id { id } => {
+        TabTarget::Id {
+            id,
+        } => {
             let tabs = runtime
                 .browser
                 .get_tabs()
@@ -187,7 +189,10 @@ enum ResolveElementError {
 impl ResolveElementError {
     fn into_message(self, locator: &BrowserLocator) -> String {
         match self {
-            Self::MultipleMatches { count, previews } => {
+            Self::MultipleMatches {
+                count,
+                previews,
+            } => {
                 refact_browser::strict_mode_violation(&describe_locator(locator), count, &previews)
             }
             Self::Other(message) => message,
@@ -199,7 +204,9 @@ fn locator_outcome_for_resolve_error(strategy: &LocatorStrategy, error: String) 
     if matches!(strategy, LocatorStrategy::Ref { .. })
         || refact_browser::is_transport_dead_error(&error)
     {
-        LocatorOutcome::Error { description: error }
+        LocatorOutcome::Error {
+            description: error,
+        }
     } else {
         LocatorOutcome::NotFound
     }
@@ -283,11 +290,17 @@ impl ActionabilityDriver for DragActionabilityDriver<'_> {
             Ok(resolved) => {
                 let preview = element_preview(self.tab, self.world, &resolved.handle);
                 self.resolved = Some(resolved);
-                LocatorOutcome::Found { preview }
+                LocatorOutcome::Found {
+                    preview,
+                }
             }
-            Err(ResolveElementError::MultipleMatches { count, previews }) => {
-                LocatorOutcome::MultipleMatches { count, previews }
-            }
+            Err(ResolveElementError::MultipleMatches {
+                count,
+                previews,
+            }) => LocatorOutcome::MultipleMatches {
+                count,
+                previews,
+            },
             Err(ResolveElementError::Other(error)) => {
                 locator_outcome_for_resolve_error(&self.locator.strategy, error)
             }
@@ -330,9 +343,9 @@ impl ActionabilityDriver for DragActionabilityDriver<'_> {
                 let resolved = self.resolved.take().unwrap();
                 Ok((resolved.info.tag, resolved.handle, point))
             }
-            Ok(HitTargetResult::Intercepted { description }) => {
-                Err(intercepts_pointer_events(description))
-            }
+            Ok(HitTargetResult::Intercepted {
+                description,
+            }) => Err(intercepts_pointer_events(description)),
             Ok(HitTargetResult::NotConnected) => Err(ActionabilityDiagnostic::Detached),
             Ok(HitTargetResult::Skipped) => Err(ActionabilityDiagnostic::PrecheckFailed {
                 description: "Browser drag hit-target check was skipped".to_string(),
@@ -344,8 +357,11 @@ impl ActionabilityDriver for DragActionabilityDriver<'_> {
     }
 
     fn wait_for_navigation(&mut self) -> Result<(), ActionabilityDiagnostic> {
-        wait_for_pending_navigation(self.tab, self.precheck_deadline)
-            .map_err(|description| ActionabilityDiagnostic::PrecheckFailed { description })
+        wait_for_pending_navigation(self.tab, self.precheck_deadline).map_err(|description| {
+            ActionabilityDiagnostic::PrecheckFailed {
+                description,
+            }
+        })
     }
 
     fn locator_handlers_checkpoint(&mut self) -> Result<(), ActionabilityDiagnostic> {
@@ -360,7 +376,9 @@ impl ActionabilityDriver for DragActionabilityDriver<'_> {
             self.image_policy,
             self.precheck_deadline,
         )
-        .map_err(|description| ActionabilityDiagnostic::PrecheckFailed { description })
+        .map_err(|description| ActionabilityDiagnostic::PrecheckFailed {
+            description,
+        })
     }
 }
 
@@ -422,11 +440,17 @@ impl ActionabilityDriver for BrowserActionDriver<'_> {
             Ok(resolved) => {
                 let preview = element_preview(self.tab, self.world, &resolved.handle);
                 self.resolved = Some(resolved);
-                LocatorOutcome::Found { preview }
+                LocatorOutcome::Found {
+                    preview,
+                }
             }
-            Err(ResolveElementError::MultipleMatches { count, previews }) => {
-                LocatorOutcome::MultipleMatches { count, previews }
-            }
+            Err(ResolveElementError::MultipleMatches {
+                count,
+                previews,
+            }) => LocatorOutcome::MultipleMatches {
+                count,
+                previews,
+            },
             Err(ResolveElementError::Other(error)) => {
                 locator_outcome_for_resolve_error(&self.locator.strategy, error)
             }
@@ -438,9 +462,9 @@ impl ActionabilityDriver for BrowserActionDriver<'_> {
         self.world
             .element_states(self.tab, &resolved.handle)
             .map_err(|error| match error {
-                refact_browser::HandleError::Invalidated { .. } => {
-                    ActionabilityDiagnostic::Detached
-                }
+                refact_browser::HandleError::Invalidated {
+                    ..
+                } => ActionabilityDiagnostic::Detached,
                 _ => ActionabilityDiagnostic::PrecheckFailed {
                     description: error.to_string(),
                 },
@@ -464,7 +488,9 @@ impl ActionabilityDriver for BrowserActionDriver<'_> {
                 &browser_locators::js_focus_element(),
             )
             .map(|_| resolved.info.tag.clone())
-            .map_err(|description| ActionabilityDiagnostic::PrecheckFailed { description });
+            .map_err(|description| ActionabilityDiagnostic::PrecheckFailed {
+                description,
+            });
         }
         if self.action == ActionKind::ScrollIntoViewIfNeeded {
             return dispatcher
@@ -499,7 +525,9 @@ impl ActionabilityDriver for BrowserActionDriver<'_> {
         match hit_target.expect_hit_target(self.tab, self.world, &resolved.handle, hit_target_point)
         {
             Ok(HitTargetResult::Done) => {}
-            Ok(HitTargetResult::Intercepted { description }) => {
+            Ok(HitTargetResult::Intercepted {
+                description,
+            }) => {
                 return Err(intercepts_pointer_events(description));
             }
             Ok(HitTargetResult::NotConnected) => {
@@ -537,9 +565,9 @@ impl ActionabilityDriver for BrowserActionDriver<'_> {
         })?;
         match hit_result {
             Ok(HitTargetResult::Done | HitTargetResult::Skipped) => Ok(resolved.info.tag.clone()),
-            Ok(HitTargetResult::Intercepted { description }) => {
-                Err(intercepts_pointer_events(description))
-            }
+            Ok(HitTargetResult::Intercepted {
+                description,
+            }) => Err(intercepts_pointer_events(description)),
             Ok(HitTargetResult::NotConnected) => Ok(resolved.info.tag.clone()),
             Err(error) if action_outcome_is_lost_to_navigation(&error.to_string()) => {
                 Ok(resolved.info.tag.clone())
@@ -551,8 +579,11 @@ impl ActionabilityDriver for BrowserActionDriver<'_> {
     }
 
     fn wait_for_navigation(&mut self) -> Result<(), ActionabilityDiagnostic> {
-        wait_for_pending_navigation(self.tab, self.precheck_deadline)
-            .map_err(|description| ActionabilityDiagnostic::PrecheckFailed { description })
+        wait_for_pending_navigation(self.tab, self.precheck_deadline).map_err(|description| {
+            ActionabilityDiagnostic::PrecheckFailed {
+                description,
+            }
+        })
     }
 
     fn locator_handlers_checkpoint(&mut self) -> Result<(), ActionabilityDiagnostic> {
@@ -567,7 +598,9 @@ impl ActionabilityDriver for BrowserActionDriver<'_> {
             self.image_policy,
             self.precheck_deadline,
         )
-        .map_err(|description| ActionabilityDiagnostic::PrecheckFailed { description })
+        .map_err(|description| ActionabilityDiagnostic::PrecheckFailed {
+            description,
+        })
     }
 }
 
@@ -641,7 +674,10 @@ fn resolve_element_typed(
                 return Err(ResolveElementError::Other("Element not found".to_string()));
             }
             Ok((count, previews)) if count > 1 => {
-                return Err(ResolveElementError::MultipleMatches { count, previews });
+                return Err(ResolveElementError::MultipleMatches {
+                    count,
+                    previews,
+                });
             }
             Ok(_) | Err(_) => {}
         }
@@ -653,8 +689,14 @@ fn resolve_element_typed(
             return Err(ResolveElementError::Other("Element not found".to_string()));
         }
         StrictLocatorHandle::One(handle) => handle,
-        StrictLocatorHandle::Multiple { count, previews } => {
-            return Err(ResolveElementError::MultipleMatches { count, previews });
+        StrictLocatorHandle::Multiple {
+            count,
+            previews,
+        } => {
+            return Err(ResolveElementError::MultipleMatches {
+                count,
+                previews,
+            });
         }
     };
     inspect_resolved_element(tab, world, handle).map_err(ResolveElementError::Other)
@@ -683,7 +725,9 @@ fn resolve_locator_handles(
     locator: &BrowserLocator,
 ) -> Result<Vec<ElementHandle>, String> {
     match &locator.strategy {
-        LocatorStrategy::Ref { value } => {
+        LocatorStrategy::Ref {
+            value,
+        } => {
             if !locator.frames.is_empty()
                 || locator.nth.is_some()
                 || locator.within.is_some()
@@ -731,11 +775,16 @@ fn frame_locator_error_message(
     error: refact_browser::FrameLocatorError,
 ) -> String {
     match error {
-        refact_browser::FrameLocatorError::FrameDetached { index, source } => {
+        refact_browser::FrameLocatorError::FrameDetached {
+            index,
+            source,
+        } => {
             let summary = locator.frames.get(index).map(describe_locator);
             refact_browser::frame_detached_message(index, summary.as_deref(), source.as_deref())
         }
-        refact_browser::FrameLocatorError::FrameOwnerMissing { index } => {
+        refact_browser::FrameLocatorError::FrameOwnerMissing {
+            index,
+        } => {
             let summary = locator.frames.get(index).map(describe_locator);
             refact_browser::frame_owner_missing_message(index, summary.as_deref())
         }
@@ -762,9 +811,14 @@ fn strict_locator_handle(
     match strict_locator_handle_result(tab, world, handles) {
         StrictLocatorHandle::None => Ok(None),
         StrictLocatorHandle::One(handle) => Ok(Some(handle)),
-        StrictLocatorHandle::Multiple { count, previews } => Err(
-            refact_browser::strict_mode_violation(&describe_locator(locator), count, &previews),
-        ),
+        StrictLocatorHandle::Multiple {
+            count,
+            previews,
+        } => Err(refact_browser::strict_mode_violation(
+            &describe_locator(locator),
+            count,
+            &previews,
+        )),
     }
 }
 
@@ -783,7 +837,10 @@ fn strict_locator_handle_result(
         let count = handles.len();
         let previews = strict_locator_previews(tab, world, &handles);
         release_locator_handles(tab, world, &handles);
-        return StrictLocatorHandle::Multiple { count, previews };
+        return StrictLocatorHandle::Multiple {
+            count,
+            previews,
+        };
     }
     handles
         .pop()
@@ -851,7 +908,10 @@ fn inspect_resolved_element(
             return Err(error);
         }
     };
-    Ok(ResolvedElement { handle, info })
+    Ok(ResolvedElement {
+        handle,
+        info,
+    })
 }
 
 fn resolve_interactable(
@@ -1161,12 +1221,16 @@ fn execute_context_management_step(
             apply_context_to_tabs(runtime)?;
             Ok(StepResult::success(idx, "Applied media emulation"))
         }
-        BrowserStep::SetLocale { locale } => {
+        BrowserStep::SetLocale {
+            locale,
+        } => {
             runtime.context_state.locale = Some(locale.clone());
             apply_context_to_tabs(runtime)?;
             Ok(StepResult::success(idx, format!("Set locale to {locale}")))
         }
-        BrowserStep::SetTimezone { timezone } => {
+        BrowserStep::SetTimezone {
+            timezone,
+        } => {
             runtime.context_state.timezone = Some(timezone.clone());
             apply_context_to_tabs(runtime)?;
             Ok(StepResult::success(
@@ -1192,7 +1256,9 @@ fn execute_context_management_step(
             apply_context_to_tabs(runtime)?;
             Ok(StepResult::success(idx, "Set geolocation"))
         }
-        BrowserStep::SetOffline { offline } => {
+        BrowserStep::SetOffline {
+            offline,
+        } => {
             runtime.context_state.offline = *offline;
             apply_context_to_tabs(runtime)?;
             Ok(StepResult::success(
@@ -1235,7 +1301,9 @@ fn execute_context_management_step(
                 "offline": runtime.context_state.offline,
             })))
         }
-        BrowserStep::SetCpuThrottling { rate } => {
+        BrowserStep::SetCpuThrottling {
+            rate,
+        } => {
             if *rate < 1.0 {
                 return Err(format!(
                     "rate must be at least 1 (1 disables CPU throttling), got {rate}"
@@ -1253,7 +1321,9 @@ fn execute_context_management_step(
             )
             .with_data(serde_json::json!({"cpu_throttling_rate": rate})))
         }
-        BrowserStep::EmulateDevice { name } => {
+        BrowserStep::EmulateDevice {
+            name,
+        } => {
             let device = refact_browser::devices::lookup(name)?;
             runtime.context_state.viewport = Some(device.viewport.clone());
             runtime.context_state.user_agent = Some((device.user_agent.clone(), None));
@@ -1272,7 +1342,9 @@ fn execute_context_management_step(
                 ),
             )
         }
-        BrowserStep::ListDevices { filter } => {
+        BrowserStep::ListDevices {
+            filter,
+        } => {
             let names = refact_browser::devices::list(filter.as_deref());
             Ok(
                 StepResult::success(idx, format!("{} matching device(s)", names.len())).with_data(
@@ -1280,7 +1352,9 @@ fn execute_context_management_step(
                 ),
             )
         }
-        BrowserStep::SetExtraHttpHeaders { headers } => {
+        BrowserStep::SetExtraHttpHeaders {
+            headers,
+        } => {
             runtime.context_state.extra_http_headers = headers.clone();
             apply_context_to_tabs(runtime)?;
             Ok(StepResult::success(
@@ -1288,7 +1362,9 @@ fn execute_context_management_step(
                 format!("Set {} extra HTTP header(s)", headers.len()),
             ))
         }
-        BrowserStep::GetCookies { urls } => {
+        BrowserStep::GetCookies {
+            urls,
+        } => {
             let cookies = refact_browser::context_state::get_cookies(
                 runtime
                     .get_active_tab()
@@ -1304,7 +1380,9 @@ fn execute_context_management_step(
                 ),
             )
         }
-        BrowserStep::SetCookies { cookies } => {
+        BrowserStep::SetCookies {
+            cookies,
+        } => {
             refact_browser::context_state::set_cookies(
                 runtime
                     .get_active_tab()
@@ -1317,7 +1395,11 @@ fn execute_context_management_step(
                 format!("Set {} cookie(s)", cookies.len()),
             ))
         }
-        BrowserStep::ClearCookies { name, domain, path } => {
+        BrowserStep::ClearCookies {
+            name,
+            domain,
+            path,
+        } => {
             let cleared = refact_browser::context_state::clear_cookies(
                 runtime
                     .get_active_tab()
@@ -1332,7 +1414,10 @@ fn execute_context_management_step(
                 format!("Cleared {cleared} cookie(s)"),
             ))
         }
-        BrowserStep::GetStorage { kind, origin } => {
+        BrowserStep::GetStorage {
+            kind,
+            origin,
+        } => {
             let items = refact_browser::context_state::get_storage(
                 runtime
                     .get_active_tab()
@@ -1353,7 +1438,10 @@ fn execute_context_management_step(
                     .with_data(serde_json::json!({"items": masked})),
             )
         }
-        BrowserStep::SetStorage { kind, items } => {
+        BrowserStep::SetStorage {
+            kind,
+            items,
+        } => {
             refact_browser::context_state::set_storage(
                 runtime
                     .get_active_tab()
@@ -1367,7 +1455,9 @@ fn execute_context_management_step(
                 format!("Set {} storage item(s)", items.len()),
             ))
         }
-        BrowserStep::ClearStorage { kind } => {
+        BrowserStep::ClearStorage {
+            kind,
+        } => {
             refact_browser::context_state::clear_storage(
                 runtime
                     .get_active_tab()
@@ -1421,7 +1511,10 @@ fn execute_context_management_step(
                     .with_data(serde_json::json!({"state": masked}))),
             }
         }
-        BrowserStep::SetStorageState { state, indexed_db } => {
+        BrowserStep::SetStorageState {
+            state,
+            indexed_db,
+        } => {
             refact_browser::context_state::set_storage_state(
                 runtime
                     .get_active_tab()
@@ -1467,7 +1560,10 @@ fn execute_context_management_step(
             runtime.context_state.permissions.clear();
             Ok(StepResult::success(idx, "Cleared permissions"))
         }
-        BrowserStep::SetHttpCredentials { username, password } => {
+        BrowserStep::SetHttpCredentials {
+            username,
+            password,
+        } => {
             runtime.set_http_credentials(username.clone(), password.clone())?;
             Ok(StepResult::success(idx, "Set HTTP credentials"))
         }
@@ -1493,7 +1589,9 @@ fn execute_route_management_step(
                 Err(error) => StepResult::failure(idx, "Add network route", error),
             },
         ),
-        BrowserStep::Unroute { pattern } => Some(match runtime.remove_routes(pattern.as_ref()) {
+        BrowserStep::Unroute {
+            pattern,
+        } => Some(match runtime.remove_routes(pattern.as_ref()) {
             Ok(removed) => StepResult::success(
                 idx,
                 if pattern.is_some() {
@@ -1530,7 +1628,9 @@ fn execute_route_management_step(
                 Err(error) => StepResult::failure(idx, "Add WebSocket route", error),
             },
         ),
-        BrowserStep::UnrouteWebSocket { pattern } => {
+        BrowserStep::UnrouteWebSocket {
+            pattern,
+        } => {
             let removed = runtime.websocket_registry.remove_routes(pattern.as_ref());
             Some(StepResult::success(
                 idx,
@@ -1541,7 +1641,10 @@ fn execute_route_management_step(
                 },
             ))
         }
-        BrowserStep::SendWebSocketMessage { pattern, text } => {
+        BrowserStep::SendWebSocketMessage {
+            pattern,
+            text,
+        } => {
             let result = runtime.websocket_registry.send_to_page(pattern, text);
             Some(match flush_websocket_commands(runtime, result) {
                 Ok(sent) => {
@@ -1652,7 +1755,9 @@ fn execute_init_script_step(
         .map(|tabs| tabs.iter().cloned().collect::<Vec<_>>())
         .unwrap_or_default();
     match step {
-        BrowserStep::AddInitScript { content } => {
+        BrowserStep::AddInitScript {
+            content,
+        } => {
             for tab in &tabs {
                 if let Err(error) = runtime.world_manager.ensure_utility_world(tab) {
                     return StepResult::failure(idx, "Add init script", error);
@@ -1664,7 +1769,9 @@ fn execute_init_script_step(
                 Err(error) => StepResult::failure(idx, "Add init script", error),
             }
         }
-        BrowserStep::RemoveInitScript { id } => match runtime.init_scripts.remove(&tabs, id) {
+        BrowserStep::RemoveInitScript {
+            id,
+        } => match runtime.init_scripts.remove(&tabs, id) {
             Ok(()) => StepResult::success(idx, format!("Removed init script {id}"))
                 .with_data(serde_json::json!({"id": id})),
             Err(error) => StepResult::failure(idx, "Remove init script", error),
@@ -1893,10 +2000,14 @@ fn execute_cdp_send_step(
         .get_active_tab()
         .map(|tab| tab.get_target_id().to_string());
     let warnings = match classify_cdp_command(method, params, own_target_id.as_deref()) {
-        CdpGuardrail::Denied { reason } => {
+        CdpGuardrail::Denied {
+            reason,
+        } => {
             return StepResult::failure(idx, format!("cdp_send {method} blocked"), reason);
         }
-        CdpGuardrail::Allowed { warnings } => warnings,
+        CdpGuardrail::Allowed {
+            warnings,
+        } => warnings,
     };
     let target_id = match target {
         CdpTarget::Page => match own_target_id {
@@ -2109,7 +2220,9 @@ fn execute_screencast_step(
                     ),
                 ))
             }
-            BrowserStep::ScreencastStop { compose } => {
+            BrowserStep::ScreencastStop {
+                compose,
+            } => {
                 let stopped = runtime.screencast_manager.stop(&tab)?;
                 let mut warnings = Vec::new();
                 if stopped.auto_stopped {
@@ -2268,26 +2381,38 @@ fn is_clock_step(step: &BrowserStep) -> bool {
 
 fn clock_op_from_step(step: &BrowserStep) -> Result<ClockOp, String> {
     match step {
-        BrowserStep::ClockInstall { time } => Ok(ClockOp::Install {
+        BrowserStep::ClockInstall {
+            time,
+        } => Ok(ClockOp::Install {
             time_ms: match time {
                 Some(time) => parse_clock_time(time)?,
                 None => current_wall_ms(),
             },
         }),
-        BrowserStep::ClockFastForward { ticks } => Ok(ClockOp::FastForward {
+        BrowserStep::ClockFastForward {
+            ticks,
+        } => Ok(ClockOp::FastForward {
             ticks_ms: parse_clock_ticks(ticks)?,
         }),
-        BrowserStep::ClockPauseAt { time } => Ok(ClockOp::PauseAt {
+        BrowserStep::ClockPauseAt {
+            time,
+        } => Ok(ClockOp::PauseAt {
             time_ms: parse_clock_time(time)?,
         }),
         BrowserStep::ClockResume => Ok(ClockOp::Resume),
-        BrowserStep::ClockRunFor { ticks } => Ok(ClockOp::RunFor {
+        BrowserStep::ClockRunFor {
+            ticks,
+        } => Ok(ClockOp::RunFor {
             ticks_ms: parse_clock_ticks(ticks)?,
         }),
-        BrowserStep::ClockSetFixedTime { time } => Ok(ClockOp::SetFixedTime {
+        BrowserStep::ClockSetFixedTime {
+            time,
+        } => Ok(ClockOp::SetFixedTime {
             time_ms: parse_clock_time(time)?,
         }),
-        BrowserStep::ClockSetSystemTime { time } => Ok(ClockOp::SetSystemTime {
+        BrowserStep::ClockSetSystemTime {
+            time,
+        } => Ok(ClockOp::SetSystemTime {
             time_ms: parse_clock_time(time)?,
         }),
         _ => unreachable!(),
@@ -2558,20 +2683,27 @@ fn execute_instrumentation_step(
                 )?;
                 Ok(virtual_authenticator_added(idx, id))
             }
-            BrowserStep::RemoveVirtualAuthenticator { id } => {
+            BrowserStep::RemoveVirtualAuthenticator {
+                id,
+            } => {
                 runtime
                     .webauthn_manager
                     .remove_virtual_authenticator(&tab, id)?;
                 Ok(StepResult::success(idx, "Removed virtual authenticator"))
             }
-            BrowserStep::ListCredentials { id } => {
+            BrowserStep::ListCredentials {
+                id,
+            } => {
                 let credentials = runtime.webauthn_manager.list_credentials(&tab, id)?;
                 Ok(
                     StepResult::success(idx, format!("Listed {} credential(s)", credentials.len()))
                         .with_data(serde_json::json!({"credentials": credentials})),
                 )
             }
-            BrowserStep::AddCredential { id, credential } => {
+            BrowserStep::AddCredential {
+                id,
+                credential,
+            } => {
                 runtime
                     .webauthn_manager
                     .add_credential(&tab, id, credential)?;
@@ -2580,14 +2712,19 @@ fn execute_instrumentation_step(
                     "Added virtual authenticator credential",
                 ))
             }
-            BrowserStep::ClearCredentials { id } => {
+            BrowserStep::ClearCredentials {
+                id,
+            } => {
                 runtime.webauthn_manager.clear_credentials(&tab, id)?;
                 Ok(StepResult::success(
                     idx,
                     "Cleared virtual authenticator credentials",
                 ))
             }
-            BrowserStep::SetUserVerified { id, verified } => {
+            BrowserStep::SetUserVerified {
+                id,
+                verified,
+            } => {
                 runtime
                     .webauthn_manager
                     .set_user_verified(&tab, id, *verified)?;
@@ -2743,7 +2880,10 @@ async fn resume_after_relaunch(
         }
         let mut report =
             execute_request_with_runtime(runtime_arc, retry_request, image_policy).await?;
-        if let Some(BrowserStep::Navigate { url, .. }) = restore {
+        if let Some(BrowserStep::Navigate {
+            url, ..
+        }) = restore
+        {
             let restored = (!report.steps.is_empty()).then(|| report.steps.remove(0));
             match restored {
                 Some(result) if result.ok => {
@@ -2815,7 +2955,15 @@ impl ResumePlan {
             .map(|(idx, step)| (idx, step.clone()));
         let restorable_url = last_known_url.filter(|url| url_is_restorable(url));
         self.replay = match (replayable, restorable_url) {
-            (Some((idx, step @ BrowserStep::SetContent { .. })), _) => Some((idx, step)),
+            (
+                Some((
+                    idx,
+                    step @ BrowserStep::SetContent {
+                        ..
+                    },
+                )),
+                _,
+            ) => Some((idx, step)),
             (Some((idx, step)), Some(url)) => {
                 if step_targets_url(&step, url) {
                     Some((idx, step))
@@ -2844,7 +2992,9 @@ fn url_is_restorable(url: &str) -> bool {
 
 fn step_targets_url(step: &BrowserStep, url: &str) -> bool {
     match step {
-        BrowserStep::Navigate { url: target, .. } => target == url,
+        BrowserStep::Navigate {
+            url: target, ..
+        } => target == url,
         BrowserStep::OpenTab {
             url: Some(target), ..
         } => target == url,
@@ -3103,7 +3253,10 @@ pub async fn execute_request_with_runtime(
     {
         let mut rt = runtime_arc.lock().await;
         rt.touch();
-        if let TabTarget::Id { id } = &request.target {
+        if let TabTarget::Id {
+            id,
+        } = &request.target
+        {
             let tabs = rt
                 .browser
                 .get_tabs()
@@ -3158,10 +3311,18 @@ pub async fn execute_request_with_runtime(
         .iter()
         .enumerate()
         .filter_map(|(index, step)| match step {
-            BrowserStep::WaitForRequest { .. } => Some((index, network_monitor.request_cursor())),
-            BrowserStep::WaitForResponse { .. } => Some((index, network_monitor.response_cursor())),
-            BrowserStep::WaitForDownload { .. } => Some((index, download_monitor.cursor())),
-            BrowserStep::WaitForWebSocketFrame { .. } => Some((index, websocket_registry.cursor())),
+            BrowserStep::WaitForRequest {
+                ..
+            } => Some((index, network_monitor.request_cursor())),
+            BrowserStep::WaitForResponse {
+                ..
+            } => Some((index, network_monitor.response_cursor())),
+            BrowserStep::WaitForDownload {
+                ..
+            } => Some((index, download_monitor.cursor())),
+            BrowserStep::WaitForWebSocketFrame {
+                ..
+            } => Some((index, websocket_registry.cursor())),
             _ => None,
         })
         .collect::<std::collections::HashMap<_, _>>();
@@ -3191,7 +3352,10 @@ pub async fn execute_request_with_runtime(
             .map(crate::integrations::browser_runtime::recovery_fence_error);
         let mut result = if let Some(error) = fenced {
             StepResult::failure(idx, "Browser page was lost", error)
-        } else if let BrowserStep::WaitForPopup { timeout_ms } = step {
+        } else if let BrowserStep::WaitForPopup {
+            timeout_ms,
+        } = step
+        {
             match popup_wait_conflict(pending_popup_wait.as_ref().map(|wait| wait.step_index)) {
                 Some(error) => StepResult::failure(idx, "Wait for popup", error),
                 None => {
@@ -3239,7 +3403,10 @@ pub async fn execute_request_with_runtime(
                 clamp_timeout_ms(*timeout_ms),
             )
             .await
-        } else if let BrowserStep::CancelDownload { id } = step {
+        } else if let BrowserStep::CancelDownload {
+            id,
+        } = step
+        {
             cancel_download_step_result(
                 idx,
                 tokio::task::block_in_place(|| download_monitor.cancel_download(id.as_deref())),
@@ -3248,7 +3415,10 @@ pub async fn execute_request_with_runtime(
             let mut rt = runtime_arc.lock().await;
             rt.drain_raw_events();
             tab_log_from_buffer(idx, &rt.console_buffer)
-        } else if let BrowserStep::Pdf { options } = step {
+        } else if let BrowserStep::Pdf {
+            options,
+        } = step
+        {
             let mut rt = runtime_arc.lock().await;
             let result = match rt.get_active_tab() {
                 Some(tab) => {
@@ -3302,7 +3472,10 @@ pub async fn execute_request_with_runtime(
                 .as_ref()
                 .map(|pattern| match pattern {
                     UrlPattern::Text(value) => UrlMatcher::text(value),
-                    UrlPattern::Regex { source, flags } => UrlMatcher::regex(source, flags),
+                    UrlPattern::Regex {
+                        source,
+                        flags,
+                    } => UrlMatcher::regex(source, flags),
                 })
                 .transpose();
             let cursor = armed_network_waits.get(&idx).copied().unwrap_or_default();
@@ -3351,7 +3524,10 @@ pub async fn execute_request_with_runtime(
         } else if is_clock_step(step) {
             let mut rt = runtime_arc.lock().await;
             tokio::task::block_in_place(|| execute_clock_step(&mut rt, step, idx))
-        } else if let BrowserStep::HttpRequest { options } = step {
+        } else if let BrowserStep::HttpRequest {
+            options,
+        } = step
+        {
             let prepared = {
                 let mut rt = runtime_arc.lock().await;
                 tokio::task::block_in_place(|| prepare_http_request(&mut rt, options))
@@ -3761,9 +3937,15 @@ async fn validate_upload_paths(
 ) -> Result<(), String> {
     for (idx, step) in request.steps.iter().enumerate() {
         let (action, paths) = match step {
-            BrowserStep::SetInputFiles { paths, .. } => ("set_input_files", paths.as_slice()),
-            BrowserStep::ExpectFileChooser { paths } => ("expect_file_chooser", paths.as_slice()),
-            BrowserStep::DropFiles { paths, .. } => ("drop_files", paths.as_slice()),
+            BrowserStep::SetInputFiles {
+                paths, ..
+            } => ("set_input_files", paths.as_slice()),
+            BrowserStep::ExpectFileChooser {
+                paths,
+            } => ("expect_file_chooser", paths.as_slice()),
+            BrowserStep::DropFiles {
+                paths, ..
+            } => ("drop_files", paths.as_slice()),
             _ => continue,
         };
         for path in paths {
@@ -3873,7 +4055,9 @@ pub fn execute_steps_with_runtime(
         .iter()
         .enumerate()
         .filter_map(|(index, step)| match step {
-            BrowserStep::WaitForDownload { .. } => Some((index, runtime.download_monitor.cursor())),
+            BrowserStep::WaitForDownload {
+                ..
+            } => Some((index, runtime.download_monitor.cursor())),
             _ => None,
         })
         .collect::<std::collections::HashMap<_, _>>();
@@ -3881,7 +4065,10 @@ pub fn execute_steps_with_runtime(
     for (idx, step) in steps.iter().enumerate() {
         let step_tab_ids = runtime.known_tab_ids();
         let result = match step {
-            BrowserStep::OpenTab { device, url } => match open_tab_for_device(runtime, device) {
+            BrowserStep::OpenTab {
+                device,
+                url,
+            } => match open_tab_for_device(runtime, device) {
                 Ok((descriptor, new_tab)) => {
                     let device_label = descriptor.name.clone();
                     let target_id = new_tab.get_target_id().to_string();
@@ -3926,7 +4113,9 @@ pub fn execute_steps_with_runtime(
                 }
                 Err(error) => StepResult::failure(idx, "OpenTab", error),
             },
-            BrowserStep::CloseTab { tab: target } => {
+            BrowserStep::CloseTab {
+                tab: target,
+            } => {
                 let tab = match target {
                     Some(target) => match resolve_tab(runtime, target) {
                         Ok(tab) => tab,
@@ -3960,7 +4149,9 @@ pub fn execute_steps_with_runtime(
                     Err(e) => StepResult::failure(idx, "CloseTab", &format!("Failed: {}", e)),
                 }
             }
-            BrowserStep::SwitchTab { tab: tab_target } => {
+            BrowserStep::SwitchTab {
+                tab: tab_target,
+            } => {
                 let tabs = runtime
                     .browser
                     .get_tabs()
@@ -3969,11 +4160,15 @@ pub fn execute_steps_with_runtime(
                     .unwrap_or_default();
                 let target_str = match tab_target {
                     TabTarget::Active => String::from("active"),
-                    TabTarget::Id { id } => id.clone(),
+                    TabTarget::Id {
+                        id,
+                    } => id.clone(),
                 };
                 let found = match tab_target {
                     TabTarget::Active => runtime.get_active_tab().or_else(|| tabs.first().cloned()),
-                    TabTarget::Id { id } => tabs
+                    TabTarget::Id {
+                        id,
+                    } => tabs
                         .iter()
                         .find(|t| t.get_target_id() == id.as_str())
                         .cloned(),
@@ -4004,18 +4199,32 @@ pub fn execute_steps_with_runtime(
                 StepResult::success(idx, format!("Listed {} tabs", tab_list.len()))
                     .with_data(serde_json::json!({"tabs": tab_list}))
             }
-            step @ (BrowserStep::Route { .. }
-            | BrowserStep::Unroute { .. }
-            | BrowserStep::ListRoutes
-            | BrowserStep::RouteWebSocket { .. }
-            | BrowserStep::UnrouteWebSocket { .. }
-            | BrowserStep::SendWebSocketMessage { .. }
-            | BrowserStep::CloseWebSocket { .. }
-            | BrowserStep::StartHarRecording { .. }
-            | BrowserStep::StopHarRecording
-            | BrowserStep::RouteFromHar { .. }) => {
-                execute_route_management_step(runtime, step, idx).unwrap()
+            step @ (BrowserStep::Route {
+                ..
             }
+            | BrowserStep::Unroute {
+                ..
+            }
+            | BrowserStep::ListRoutes
+            | BrowserStep::RouteWebSocket {
+                ..
+            }
+            | BrowserStep::UnrouteWebSocket {
+                ..
+            }
+            | BrowserStep::SendWebSocketMessage {
+                ..
+            }
+            | BrowserStep::CloseWebSocket {
+                ..
+            }
+            | BrowserStep::StartHarRecording {
+                ..
+            }
+            | BrowserStep::StopHarRecording
+            | BrowserStep::RouteFromHar {
+                ..
+            }) => execute_route_management_step(runtime, step, idx).unwrap(),
             BrowserStep::Reset => execute_reset_step(runtime, idx),
             BrowserStep::CdpSend {
                 method,
@@ -4031,7 +4240,9 @@ pub fn execute_steps_with_runtime(
                 width,
                 height,
             } => execute_set_window_bounds_step(runtime, *x, *y, *width, *height, idx),
-            BrowserStep::HttpRequest { options } => tokio::task::block_in_place(|| {
+            BrowserStep::HttpRequest {
+                options,
+            } => tokio::task::block_in_place(|| {
                 tokio::runtime::Handle::current()
                     .block_on(execute_http_request_step(runtime, options, idx))
             }),
@@ -4041,7 +4252,9 @@ pub fn execute_steps_with_runtime(
             step if is_context_management_step(step) => {
                 execute_context_management_step(runtime, step, idx)
             }
-            BrowserStep::WaitForPopup { timeout_ms } => {
+            BrowserStep::WaitForPopup {
+                timeout_ms,
+            } => {
                 match popup_wait_conflict(pending_popup_wait.as_ref().map(|wait| wait.step_index)) {
                     Some(error) => StepResult::failure(idx, "Wait for popup", error),
                     None => {
@@ -4055,7 +4268,9 @@ pub fn execute_steps_with_runtime(
                     }
                 }
             }
-            BrowserStep::WaitForNetworkIdle { timeout_ms } => wait_for_network_idle_step(
+            BrowserStep::WaitForNetworkIdle {
+                timeout_ms,
+            } => wait_for_network_idle_step(
                 &runtime.network_monitor,
                 idx,
                 clamp_timeout_ms(*timeout_ms),
@@ -4074,7 +4289,9 @@ pub fn execute_steps_with_runtime(
                 ),
                 Err(error) => StepResult::failure(idx, "HandleDialog", error),
             },
-            BrowserStep::ExpectFileChooser { paths } => {
+            BrowserStep::ExpectFileChooser {
+                paths,
+            } => {
                 let Some(tab) = &current_tab else {
                     all_ok = false;
                     results.push(StepResult::failure(
@@ -4109,11 +4326,15 @@ pub fn execute_steps_with_runtime(
                     save_as.as_deref(),
                 ),
             ),
-            BrowserStep::CancelDownload { id } => cancel_download_step_result(
+            BrowserStep::CancelDownload {
+                id,
+            } => cancel_download_step_result(
                 idx,
                 runtime.download_monitor.cancel_download(id.as_deref()),
             ),
-            BrowserStep::Pdf { options } => match &current_tab {
+            BrowserStep::Pdf {
+                options,
+            } => match &current_tab {
                 Some(tab) => step_pdf(tab, idx, options, &runtime.artifacts_dir),
                 None => StepResult::failure(idx, "PDF", "No active tab"),
             },
@@ -4125,14 +4346,17 @@ pub fn execute_steps_with_runtime(
                 runtime.drain_raw_events();
                 tab_log_from_buffer(idx, &runtime.console_buffer)
             }
-            BrowserStep::AddInitScript { .. } | BrowserStep::RemoveInitScript { .. } => {
-                execute_init_script_step(runtime, step, idx)
+            BrowserStep::AddInitScript {
+                ..
             }
-            BrowserStep::Help { topic } => {
-                StepResult::success(idx, "chrome help").with_data(serde_json::json!({
-                    "text": crate::tools::tool_chrome::chrome_help_text(topic.as_deref()),
-                }))
-            }
+            | BrowserStep::RemoveInitScript {
+                ..
+            } => execute_init_script_step(runtime, step, idx),
+            BrowserStep::Help {
+                topic,
+            } => StepResult::success(idx, "chrome help").with_data(serde_json::json!({
+                "text": crate::tools::tool_chrome::chrome_help_text(topic.as_deref()),
+            })),
             other => match &current_tab {
                 Some(tab) => {
                     let chooser_was_armed = runtime.file_chooser_manager.is_armed();
@@ -4313,7 +4537,10 @@ fn is_non_fatal_step(step: &BrowserStep) -> bool {
     matches!(
         step,
         BrowserStep::ClickIfExists { .. }
-            | BrowserStep::Expect { soft: true, .. }
+            | BrowserStep::Expect {
+                soft: true,
+                ..
+            }
             | BrowserStep::ExpectPoll {
                 soft: Some(true),
                 ..
@@ -4399,15 +4626,17 @@ fn execute_runtime_network_step(
     mouse_state: &mut MouseState,
 ) -> StepResult {
     match step {
-        BrowserStep::SetContent { html, wait_until } => {
-            step_set_content(tab, world, network_monitor, idx, html, *wait_until)
-        }
-        BrowserStep::WaitForNetworkIdle { timeout_ms } => {
-            wait_for_network_idle_step(network_monitor, idx, clamp_timeout_ms(*timeout_ms))
-        }
-        BrowserStep::WaitForLoadState { state, timeout_ms } => {
-            wait_for_load_state(network_monitor, idx, *state, clamp_timeout_ms(*timeout_ms))
-        }
+        BrowserStep::SetContent {
+            html,
+            wait_until,
+        } => step_set_content(tab, world, network_monitor, idx, html, *wait_until),
+        BrowserStep::WaitForNetworkIdle {
+            timeout_ms,
+        } => wait_for_network_idle_step(network_monitor, idx, clamp_timeout_ms(*timeout_ms)),
+        BrowserStep::WaitForLoadState {
+            state,
+            timeout_ms,
+        } => wait_for_load_state(network_monitor, idx, *state, clamp_timeout_ms(*timeout_ms)),
         BrowserStep::WaitForRequest {
             pattern,
             method,
@@ -4523,7 +4752,10 @@ fn wait_for_network_entry(
 ) -> StepResult {
     let matcher = match pattern {
         UrlPattern::Text(value) => UrlMatcher::text(value),
-        UrlPattern::Regex { source, flags } => UrlMatcher::regex(source, flags),
+        UrlPattern::Regex {
+            source,
+            flags,
+        } => UrlMatcher::regex(source, flags),
     };
     let matcher = match matcher {
         Ok(matcher) => matcher,
@@ -4677,7 +4909,10 @@ fn perform_locator_handlers_checkpoint(
             continue;
         };
         match probe_locator_handler(tab, world, &handler)? {
-            LocatorHandlerProbe::Hidden | LocatorHandlerProbe::MultipleMatches { .. } => continue,
+            LocatorHandlerProbe::Hidden
+            | LocatorHandlerProbe::MultipleMatches {
+                ..
+            } => continue,
             LocatorHandlerProbe::Visible => {}
         }
         let lease = {
@@ -4750,7 +4985,9 @@ fn probe_locator_handler(
         for handle in &handles {
             let _ = world.release_handle(tab, handle);
         }
-        return Ok(LocatorHandlerProbe::MultipleMatches { count });
+        return Ok(LocatorHandlerProbe::MultipleMatches {
+            count,
+        });
     }
     let handle = &handles[0];
     let inspect = format!(
@@ -4809,7 +5046,9 @@ fn execute_locator_handler(
                 Err(result.error.unwrap_or(result.summary))
             }
         }
-        LocatorHandlerOperation::Action(LocatorHandlerAction::Steps { steps }) => {
+        LocatorHandlerOperation::Action(LocatorHandlerAction::Steps {
+            steps,
+        }) => {
             let mut summaries = Vec::new();
             for step in steps {
                 if Instant::now() >= deadline {
@@ -4848,19 +5087,29 @@ fn bound_handler_step(step: &BrowserStep, deadline: Instant) -> BrowserStep {
         .as_millis()
         .min(u64::MAX as u128) as u64;
     match step {
-        BrowserStep::WaitForSelector { locator, state, .. } => BrowserStep::WaitForSelector {
+        BrowserStep::WaitForSelector {
+            locator,
+            state,
+            ..
+        } => BrowserStep::WaitForSelector {
             locator: locator.clone(),
             state: *state,
             timeout_ms: Some(remaining_ms),
         },
-        BrowserStep::WaitForNavigation { .. } => BrowserStep::WaitForNavigation {
+        BrowserStep::WaitForNavigation {
+            ..
+        } => BrowserStep::WaitForNavigation {
             timeout_ms: Some(remaining_ms),
         },
-        BrowserStep::WaitForUrl { pattern, .. } => BrowserStep::WaitForUrl {
+        BrowserStep::WaitForUrl {
+            pattern, ..
+        } => BrowserStep::WaitForUrl {
             pattern: pattern.clone(),
             timeout_ms: Some(remaining_ms),
         },
-        BrowserStep::WaitForText { text, .. } => BrowserStep::WaitForText {
+        BrowserStep::WaitForText {
+            text, ..
+        } => BrowserStep::WaitForText {
             text: text.clone(),
             timeout_ms: Some(remaining_ms),
         },
@@ -4877,18 +5126,26 @@ fn bound_handler_step(step: &BrowserStep, deadline: Instant) -> BrowserStep {
             soft: *soft,
             not: *not,
         },
-        BrowserStep::WaitForNetworkIdle { .. } => BrowserStep::WaitForNetworkIdle {
+        BrowserStep::WaitForNetworkIdle {
+            ..
+        } => BrowserStep::WaitForNetworkIdle {
             timeout_ms: Some(remaining_ms),
         },
-        BrowserStep::WaitForElementHidden { locator, .. } => BrowserStep::WaitForElementHidden {
+        BrowserStep::WaitForElementHidden {
+            locator, ..
+        } => BrowserStep::WaitForElementHidden {
             locator: locator.clone(),
             timeout_ms: Some(remaining_ms),
         },
-        BrowserStep::WaitForElementStable { locator, .. } => BrowserStep::WaitForElementStable {
+        BrowserStep::WaitForElementStable {
+            locator, ..
+        } => BrowserStep::WaitForElementStable {
             locator: locator.clone(),
             timeout_ms: Some(remaining_ms),
         },
-        BrowserStep::WaitSeconds { seconds } => BrowserStep::WaitSeconds {
+        BrowserStep::WaitSeconds {
+            seconds,
+        } => BrowserStep::WaitSeconds {
             seconds: seconds.min(remaining_ms as f64 / 1_000.0),
         },
         _ => step.clone(),
@@ -4949,68 +5206,167 @@ fn execute_single_step(
         }
     }
     match step {
-        BrowserStep::Navigate { url, timeout_ms } => {
-            step_navigate(tab, idx, url, clamp_timeout_ms(*timeout_ms))
-        }
+        BrowserStep::Navigate {
+            url,
+            timeout_ms,
+        } => step_navigate(tab, idx, url, clamp_timeout_ms(*timeout_ms)),
         BrowserStep::Reload => step_nav_js(tab, idx, "location.reload()", "Reloaded page"),
         BrowserStep::GoBack => step_nav_js(tab, idx, "history.back()", "Navigated back"),
         BrowserStep::GoForward => step_nav_js(tab, idx, "history.forward()", "Navigated forward"),
 
-        BrowserStep::OpenTab { .. }
-        | BrowserStep::CloseTab { .. }
-        | BrowserStep::SwitchTab { .. }
+        BrowserStep::OpenTab {
+            ..
+        }
+        | BrowserStep::CloseTab {
+            ..
+        }
+        | BrowserStep::SwitchTab {
+            ..
+        }
         | BrowserStep::ListTabs
-        | BrowserStep::WaitForPopup { .. }
-        | BrowserStep::Route { .. }
-        | BrowserStep::Unroute { .. }
+        | BrowserStep::WaitForPopup {
+            ..
+        }
+        | BrowserStep::Route {
+            ..
+        }
+        | BrowserStep::Unroute {
+            ..
+        }
         | BrowserStep::ListRoutes
-        | BrowserStep::RouteWebSocket { .. }
-        | BrowserStep::UnrouteWebSocket { .. }
-        | BrowserStep::SendWebSocketMessage { .. }
-        | BrowserStep::CloseWebSocket { .. }
-        | BrowserStep::WaitForWebSocketFrame { .. }
-        | BrowserStep::StartHarRecording { .. }
+        | BrowserStep::RouteWebSocket {
+            ..
+        }
+        | BrowserStep::UnrouteWebSocket {
+            ..
+        }
+        | BrowserStep::SendWebSocketMessage {
+            ..
+        }
+        | BrowserStep::CloseWebSocket {
+            ..
+        }
+        | BrowserStep::WaitForWebSocketFrame {
+            ..
+        }
+        | BrowserStep::StartHarRecording {
+            ..
+        }
         | BrowserStep::StopHarRecording
-        | BrowserStep::RouteFromHar { .. }
+        | BrowserStep::RouteFromHar {
+            ..
+        }
         | BrowserStep::Reset
-        | BrowserStep::CdpSend { .. }
-        | BrowserStep::CaptureFrames { .. }
-        | BrowserStep::ScreencastStart { .. }
-        | BrowserStep::ScreencastStop { .. }
-        | BrowserStep::HttpRequest { .. }
-        | BrowserStep::StartCoverage { .. }
+        | BrowserStep::CdpSend {
+            ..
+        }
+        | BrowserStep::CaptureFrames {
+            ..
+        }
+        | BrowserStep::ScreencastStart {
+            ..
+        }
+        | BrowserStep::ScreencastStop {
+            ..
+        }
+        | BrowserStep::HttpRequest {
+            ..
+        }
+        | BrowserStep::StartCoverage {
+            ..
+        }
         | BrowserStep::StopCoverage
-        | BrowserStep::AddVirtualAuthenticator { .. }
-        | BrowserStep::RemoveVirtualAuthenticator { .. }
-        | BrowserStep::ListCredentials { .. }
-        | BrowserStep::AddCredential { .. }
-        | BrowserStep::ClearCredentials { .. }
-        | BrowserStep::SetUserVerified { .. }
-        | BrowserStep::SetViewport { .. }
-        | BrowserStep::SetWindowBounds { .. }
-        | BrowserStep::EmulateMedia { .. }
-        | BrowserStep::SetLocale { .. }
-        | BrowserStep::SetTimezone { .. }
-        | BrowserStep::SetUserAgent { .. }
-        | BrowserStep::SetGeolocation { .. }
-        | BrowserStep::SetOffline { .. }
-        | BrowserStep::SetNetworkConditions { .. }
-        | BrowserStep::SetCpuThrottling { .. }
-        | BrowserStep::EmulateDevice { .. }
-        | BrowserStep::ListDevices { .. }
-        | BrowserStep::SetExtraHttpHeaders { .. }
-        | BrowserStep::GetCookies { .. }
-        | BrowserStep::SetCookies { .. }
-        | BrowserStep::ClearCookies { .. }
-        | BrowserStep::GetStorage { .. }
-        | BrowserStep::SetStorage { .. }
-        | BrowserStep::ClearStorage { .. }
-        | BrowserStep::StorageState { .. }
-        | BrowserStep::SetStorageState { .. }
-        | BrowserStep::GrantPermissions { .. }
+        | BrowserStep::AddVirtualAuthenticator {
+            ..
+        }
+        | BrowserStep::RemoveVirtualAuthenticator {
+            ..
+        }
+        | BrowserStep::ListCredentials {
+            ..
+        }
+        | BrowserStep::AddCredential {
+            ..
+        }
+        | BrowserStep::ClearCredentials {
+            ..
+        }
+        | BrowserStep::SetUserVerified {
+            ..
+        }
+        | BrowserStep::SetViewport {
+            ..
+        }
+        | BrowserStep::SetWindowBounds {
+            ..
+        }
+        | BrowserStep::EmulateMedia {
+            ..
+        }
+        | BrowserStep::SetLocale {
+            ..
+        }
+        | BrowserStep::SetTimezone {
+            ..
+        }
+        | BrowserStep::SetUserAgent {
+            ..
+        }
+        | BrowserStep::SetGeolocation {
+            ..
+        }
+        | BrowserStep::SetOffline {
+            ..
+        }
+        | BrowserStep::SetNetworkConditions {
+            ..
+        }
+        | BrowserStep::SetCpuThrottling {
+            ..
+        }
+        | BrowserStep::EmulateDevice {
+            ..
+        }
+        | BrowserStep::ListDevices {
+            ..
+        }
+        | BrowserStep::SetExtraHttpHeaders {
+            ..
+        }
+        | BrowserStep::GetCookies {
+            ..
+        }
+        | BrowserStep::SetCookies {
+            ..
+        }
+        | BrowserStep::ClearCookies {
+            ..
+        }
+        | BrowserStep::GetStorage {
+            ..
+        }
+        | BrowserStep::SetStorage {
+            ..
+        }
+        | BrowserStep::ClearStorage {
+            ..
+        }
+        | BrowserStep::StorageState {
+            ..
+        }
+        | BrowserStep::SetStorageState {
+            ..
+        }
+        | BrowserStep::GrantPermissions {
+            ..
+        }
         | BrowserStep::ClearPermissions
-        | BrowserStep::SetHttpCredentials { .. }
-        | BrowserStep::HandleDialog { .. } => StepResult::failure(
+        | BrowserStep::SetHttpCredentials {
+            ..
+        }
+        | BrowserStep::HandleDialog {
+            ..
+        } => StepResult::failure(
             idx,
             "Runtime management step",
             "Use execute_steps_with_runtime() for runtime management",
@@ -5063,7 +5419,9 @@ fn execute_single_step(
             image_policy,
             *timeout_ms,
         ),
-        BrowserStep::ClickIfExists { locator } => step_click_if_exists(
+        BrowserStep::ClickIfExists {
+            locator,
+        } => step_click_if_exists(
             tab,
             world,
             idx,
@@ -5072,7 +5430,11 @@ fn execute_single_step(
             locator_handler_firings,
             image_policy,
         ),
-        BrowserStep::Tap { locator, x, y } => step_tap(
+        BrowserStep::Tap {
+            locator,
+            x,
+            y,
+        } => step_tap(
             tab,
             world,
             idx,
@@ -5098,7 +5460,9 @@ fn execute_single_step(
             image_policy,
             *timeout_ms,
         ),
-        BrowserStep::Focus { locator } => step_locator_action(
+        BrowserStep::Focus {
+            locator,
+        } => step_locator_action(
             tab,
             world,
             idx,
@@ -5108,7 +5472,9 @@ fn execute_single_step(
             locator_handler_firings,
             image_policy,
         ),
-        BrowserStep::Blur { locator } => step_locator_action(
+        BrowserStep::Blur {
+            locator,
+        } => step_locator_action(
             tab,
             world,
             idx,
@@ -5118,7 +5484,9 @@ fn execute_single_step(
             locator_handler_firings,
             image_policy,
         ),
-        BrowserStep::ScrollTo { locator } => step_locator_action(
+        BrowserStep::ScrollTo {
+            locator,
+        } => step_locator_action(
             tab,
             world,
             idx,
@@ -5128,8 +5496,14 @@ fn execute_single_step(
             locator_handler_firings,
             image_policy,
         ),
-        BrowserStep::PressKey { key, modifiers } => step_press_key(tab, idx, key, modifiers),
-        BrowserStep::InsertText { locator, text } => step_insert_text(
+        BrowserStep::PressKey {
+            key,
+            modifiers,
+        } => step_press_key(tab, idx, key, modifiers),
+        BrowserStep::InsertText {
+            locator,
+            text,
+        } => step_insert_text(
             tab,
             world,
             idx,
@@ -5172,7 +5546,10 @@ fn execute_single_step(
             image_policy,
             mouse_state,
         ),
-        BrowserStep::DropFiles { target, paths } => step_drop_files(
+        BrowserStep::DropFiles {
+            target,
+            paths,
+        } => step_drop_files(
             tab,
             world,
             idx,
@@ -5182,21 +5559,29 @@ fn execute_single_step(
             locator_handler_firings,
             image_policy,
         ),
-        BrowserStep::MouseMove { x, y, steps } => step_mouse(
+        BrowserStep::MouseMove {
+            x,
+            y,
+            steps,
+        } => step_mouse(
             tab,
             idx,
             mouse_state,
             |mouse| mouse.move_to(*x, *y, steps.unwrap_or(1)),
             format!("Moved mouse to ({x}, {y})"),
         ),
-        BrowserStep::MouseDown { button } => step_mouse(
+        BrowserStep::MouseDown {
+            button,
+        } => step_mouse(
             tab,
             idx,
             mouse_state,
             |mouse| mouse.down(browser_mouse_button(*button), 1),
             format!("Pressed {button:?} mouse button"),
         ),
-        BrowserStep::MouseUp { button } => step_mouse(
+        BrowserStep::MouseUp {
+            button,
+        } => step_mouse(
             tab,
             idx,
             mouse_state,
@@ -5243,7 +5628,10 @@ fn execute_single_step(
             },
             format!("Dragged mouse from ({start_x}, {start_y}) to ({end_x}, {end_y})"),
         ),
-        BrowserStep::MouseWheel { delta_x, delta_y } => step_mouse(
+        BrowserStep::MouseWheel {
+            delta_x,
+            delta_y,
+        } => step_mouse(
             tab,
             idx,
             mouse_state,
@@ -5257,16 +5645,27 @@ fn execute_single_step(
             clear_first,
             verify,
         } => step_fill(tab, world, idx, locator, text, *clear_first, *verify),
-        BrowserStep::Clear { locator, verify } => step_clear(tab, world, idx, locator, *verify),
-        BrowserStep::SelectOption { locator, value } => {
-            step_select_option(tab, world, idx, locator, value)
-        }
-        BrowserStep::Check { locator } => step_check_uncheck(tab, world, idx, locator, true),
-        BrowserStep::Uncheck { locator } => step_check_uncheck(tab, world, idx, locator, false),
-        BrowserStep::SetInputFiles { locator, paths } => {
-            step_set_input_files(tab, world, idx, locator, paths)
-        }
-        BrowserStep::ExpectFileChooser { .. } => StepResult::failure(
+        BrowserStep::Clear {
+            locator,
+            verify,
+        } => step_clear(tab, world, idx, locator, *verify),
+        BrowserStep::SelectOption {
+            locator,
+            value,
+        } => step_select_option(tab, world, idx, locator, value),
+        BrowserStep::Check {
+            locator,
+        } => step_check_uncheck(tab, world, idx, locator, true),
+        BrowserStep::Uncheck {
+            locator,
+        } => step_check_uncheck(tab, world, idx, locator, false),
+        BrowserStep::SetInputFiles {
+            locator,
+            paths,
+        } => step_set_input_files(tab, world, idx, locator, paths),
+        BrowserStep::ExpectFileChooser {
+            ..
+        } => StepResult::failure(
             idx,
             "Expect file chooser",
             "File chooser flow requires a browser runtime",
@@ -5298,29 +5697,42 @@ fn execute_single_step(
             *state,
             clamp_timeout_ms(*timeout_ms),
         ),
-        BrowserStep::WaitForNavigation { timeout_ms } => {
-            step_wait_for_navigation(tab, idx, clamp_timeout_ms(*timeout_ms), pre_step_url)
-        }
+        BrowserStep::WaitForNavigation {
+            timeout_ms,
+        } => step_wait_for_navigation(tab, idx, clamp_timeout_ms(*timeout_ms), pre_step_url),
         BrowserStep::WaitForUrl {
             pattern,
             timeout_ms,
         } => step_wait_for_url(tab, idx, pattern, clamp_timeout_ms(*timeout_ms)),
-        BrowserStep::WaitForText { text, timeout_ms } => {
-            step_wait_for_text(tab, idx, text, clamp_timeout_ms(*timeout_ms))
+        BrowserStep::WaitForText {
+            text,
+            timeout_ms,
+        } => step_wait_for_text(tab, idx, text, clamp_timeout_ms(*timeout_ms)),
+        BrowserStep::WaitForNetworkIdle {
+            timeout_ms,
+        } => step_wait_for_network_idle(tab, idx, clamp_timeout_ms(*timeout_ms)),
+        BrowserStep::WaitForLoadState {
+            ..
         }
-        BrowserStep::WaitForNetworkIdle { timeout_ms } => {
-            step_wait_for_network_idle(tab, idx, clamp_timeout_ms(*timeout_ms))
+        | BrowserStep::WaitForRequest {
+            ..
         }
-        BrowserStep::WaitForLoadState { .. }
-        | BrowserStep::WaitForRequest { .. }
-        | BrowserStep::WaitForResponse { .. }
-        | BrowserStep::WaitForDownload { .. }
-        | BrowserStep::CancelDownload { .. } => StepResult::failure(
+        | BrowserStep::WaitForResponse {
+            ..
+        }
+        | BrowserStep::WaitForDownload {
+            ..
+        }
+        | BrowserStep::CancelDownload {
+            ..
+        } => StepResult::failure(
             idx,
             "Network wait",
             "Network waits require a browser runtime",
         ),
-        BrowserStep::WaitForConsoleMessage { .. } => StepResult::failure(
+        BrowserStep::WaitForConsoleMessage {
+            ..
+        } => StepResult::failure(
             idx,
             "Wait for console message",
             "Console waits require a browser runtime",
@@ -5333,43 +5745,59 @@ fn execute_single_step(
             locator,
             timeout_ms,
         } => step_wait_for_element_stable(tab, world, idx, locator, clamp_timeout_ms(*timeout_ms)),
-        BrowserStep::WaitSeconds { seconds } => {
-            step_wait_seconds(idx, clamp_wait_seconds(*seconds))
-        }
+        BrowserStep::WaitSeconds {
+            seconds,
+        } => step_wait_seconds(idx, clamp_wait_seconds(*seconds)),
 
-        BrowserStep::GetText { locator } => step_get_text(tab, world, idx, locator),
-        BrowserStep::GetHtml { locator } => step_get_html(tab, world, idx, locator),
-        BrowserStep::GetAttribute { locator, attribute } => {
-            step_get_attribute(tab, world, idx, locator, attribute)
-        }
-        BrowserStep::BoundingBox { locator } => step_bounding_box(tab, world, idx, locator),
-        BrowserStep::Count { locator } => step_count(tab, world, idx, locator),
-        BrowserStep::InputValue { locator } => step_input_value(tab, world, idx, locator),
+        BrowserStep::GetText {
+            locator,
+        } => step_get_text(tab, world, idx, locator),
+        BrowserStep::GetHtml {
+            locator,
+        } => step_get_html(tab, world, idx, locator),
+        BrowserStep::GetAttribute {
+            locator,
+            attribute,
+        } => step_get_attribute(tab, world, idx, locator, attribute),
+        BrowserStep::BoundingBox {
+            locator,
+        } => step_bounding_box(tab, world, idx, locator),
+        BrowserStep::Count {
+            locator,
+        } => step_count(tab, world, idx, locator),
+        BrowserStep::InputValue {
+            locator,
+        } => step_input_value(tab, world, idx, locator),
         BrowserStep::AllTexts {
             locator,
             mode,
             limit,
         } => step_all_texts(tab, world, idx, locator, *mode, *limit),
-        BrowserStep::ElementState { locator } => step_element_state(tab, world, idx, locator),
-        BrowserStep::ExtractLinks { locator, limit } => {
-            step_extract_links(tab, world, idx, locator.as_ref(), *limit)
-        }
-        BrowserStep::ExtractTable { locator, limit } => {
-            step_extract_table(tab, world, idx, locator, *limit)
-        }
+        BrowserStep::ElementState {
+            locator,
+        } => step_element_state(tab, world, idx, locator),
+        BrowserStep::ExtractLinks {
+            locator,
+            limit,
+        } => step_extract_links(tab, world, idx, locator.as_ref(), *limit),
+        BrowserStep::ExtractTable {
+            locator,
+            limit,
+        } => step_extract_table(tab, world, idx, locator, *limit),
         BrowserStep::DomSnapshot {
             selector,
             max_chars,
         } => step_dom_snapshot(tab, idx, selector, *max_chars),
-        BrowserStep::AccessibilitySnapshot { options } => {
-            step_accessibility_snapshot(tab, world, idx, options)
-        }
-        BrowserStep::Screenshot { options } => {
-            step_screenshot(tab, world, idx, options, image_policy)
-        }
-        BrowserStep::ScreenshotElement { locator, options } => {
-            step_screenshot_element(tab, world, idx, locator, options, image_policy)
-        }
+        BrowserStep::AccessibilitySnapshot {
+            options,
+        } => step_accessibility_snapshot(tab, world, idx, options),
+        BrowserStep::Screenshot {
+            options,
+        } => step_screenshot(tab, world, idx, options, image_policy),
+        BrowserStep::ScreenshotElement {
+            locator,
+            options,
+        } => step_screenshot_element(tab, world, idx, locator, options, image_policy),
         BrowserStep::ScreenshotElements {
             locators,
             compose,
@@ -5400,9 +5828,9 @@ fn execute_single_step(
             options,
             image_policy,
         ),
-        BrowserStep::Pdf { .. } => {
-            StepResult::failure(idx, "PDF", "PDF generation requires a browser runtime")
-        }
+        BrowserStep::Pdf {
+            ..
+        } => StepResult::failure(idx, "PDF", "PDF generation requires a browser runtime"),
 
         BrowserStep::Eval {
             expression,
@@ -5413,7 +5841,9 @@ fn execute_single_step(
             property_filter,
         } => step_styles(tab, world, idx, locator, property_filter.as_deref()),
 
-        BrowserStep::SetContent { .. } => StepResult::failure(
+        BrowserStep::SetContent {
+            ..
+        } => StepResult::failure(
             idx,
             "Set content",
             "Setting page content requires a browser runtime",
@@ -5434,12 +5864,16 @@ fn execute_single_step(
             content.as_deref(),
             script_type.as_deref(),
         ),
-        BrowserStep::AddStyleTag { url, content } => {
-            step_add_style_tag(tab, idx, url.as_deref(), content.as_deref())
+        BrowserStep::AddStyleTag {
+            url,
+            content,
+        } => step_add_style_tag(tab, idx, url.as_deref(), content.as_deref()),
+        BrowserStep::AddInitScript {
+            ..
         }
-        BrowserStep::AddInitScript { .. } | BrowserStep::RemoveInitScript { .. } => {
-            StepResult::failure(idx, "Init script", "Init scripts require a browser runtime")
-        }
+        | BrowserStep::RemoveInitScript {
+            ..
+        } => StepResult::failure(idx, "Init script", "Init scripts require a browser runtime"),
         BrowserStep::DispatchEvent {
             locator,
             event_type,
@@ -5463,11 +5897,13 @@ fn execute_single_step(
             *times,
             *no_wait_after,
         ),
-        BrowserStep::RemoveLocatorHandler { name } => {
-            step_remove_locator_handler(idx, handlers, name)
-        }
+        BrowserStep::RemoveLocatorHandler {
+            name,
+        } => step_remove_locator_handler(idx, handlers, name),
 
-        BrowserStep::DismissOverlays { aggressive } => step_dismiss_overlays(
+        BrowserStep::DismissOverlays {
+            aggressive,
+        } => step_dismiss_overlays(
             tab,
             world,
             idx,
@@ -5476,9 +5912,9 @@ fn execute_single_step(
             image_policy,
             *aggressive,
         ),
-        BrowserStep::HighlightElement { locator } => {
-            step_highlight(tab, world, idx, locator, None, None, true)
-        }
+        BrowserStep::HighlightElement {
+            locator,
+        } => step_highlight(tab, world, idx, locator, None, None, true),
         BrowserStep::Highlight {
             locator,
             style,
@@ -5493,21 +5929,34 @@ fn execute_single_step(
             false,
         ),
         BrowserStep::HideHighlight => step_hide_highlight(tab, world, idx),
-        BrowserStep::Annotate { locator, text } => {
-            step_highlight(tab, world, idx, locator, None, Some(text), false)
+        BrowserStep::Annotate {
+            locator,
+            text,
+        } => step_highlight(tab, world, idx, locator, None, Some(text), false),
+        BrowserStep::Help {
+            topic,
+        } => StepResult::success(idx, "chrome help").with_data(serde_json::json!({
+            "text": crate::tools::tool_chrome::chrome_help_text(topic.as_deref()),
+        })),
+        BrowserStep::ClockInstall {
+            ..
         }
-        BrowserStep::Help { topic } => {
-            StepResult::success(idx, "chrome help").with_data(serde_json::json!({
-                "text": crate::tools::tool_chrome::chrome_help_text(topic.as_deref()),
-            }))
+        | BrowserStep::ClockFastForward {
+            ..
         }
-        BrowserStep::ClockInstall { .. }
-        | BrowserStep::ClockFastForward { .. }
-        | BrowserStep::ClockPauseAt { .. }
+        | BrowserStep::ClockPauseAt {
+            ..
+        }
         | BrowserStep::ClockResume
-        | BrowserStep::ClockRunFor { .. }
-        | BrowserStep::ClockSetFixedTime { .. }
-        | BrowserStep::ClockSetSystemTime { .. } => StepResult::failure(
+        | BrowserStep::ClockRunFor {
+            ..
+        }
+        | BrowserStep::ClockSetFixedTime {
+            ..
+        }
+        | BrowserStep::ClockSetSystemTime {
+            ..
+        } => StepResult::failure(
             idx,
             "Browser clock",
             "Clock steps are session-scoped and run only from a browser request batch",
@@ -5606,7 +6055,9 @@ fn evaluate_expectation(
         ),
     };
     let diff = match matcher {
-        BrowserExpectation::ToMatchAriaSnapshot { expected } if !passed && !negate => received
+        BrowserExpectation::ToMatchAriaSnapshot {
+            expected,
+        } if !passed && !negate => received
             .as_str()
             .map(|actual| refact_browser::assertions::aria_snapshot_diff(expected, actual)),
         _ => None,
@@ -5725,7 +6176,9 @@ fn sample_poll_expression(
     let value = world.call_function_on(tab, &handle, &element_poll_js(expression), Vec::new());
     match value {
         Ok(value) => Ok(value),
-        Err(refact_browser::HandleError::Invalidated { .. }) => Ok(Value::Null),
+        Err(refact_browser::HandleError::Invalidated {
+            ..
+        }) => Ok(Value::Null),
         Err(error) => Err(error.to_string()),
     }
 }
@@ -5987,40 +6440,70 @@ fn expectation_expected_value(matcher: &BrowserExpectation) -> Value {
             indeterminate: Some(true),
             ..
         } => Value::String("indeterminate".to_string()),
-        BrowserExpectation::ToBeChecked { checked, .. } => Value::Bool(checked.unwrap_or(true)),
-        BrowserExpectation::ToBeInViewport { ratio } => ratio
+        BrowserExpectation::ToBeChecked {
+            checked, ..
+        } => Value::Bool(checked.unwrap_or(true)),
+        BrowserExpectation::ToBeInViewport {
+            ratio,
+        } => ratio
             .and_then(serde_json::Number::from_f64)
             .map(Value::Number)
             .unwrap_or(Value::Bool(true)),
-        BrowserExpectation::ToHaveAttribute { expected: None, .. } => {
-            Value::String("<present>".to_string())
+        BrowserExpectation::ToHaveAttribute {
+            expected: None, ..
+        } => Value::String("<present>".to_string()),
+        BrowserExpectation::ToHaveText {
+            expected, ..
         }
-        BrowserExpectation::ToHaveText { expected, .. }
-        | BrowserExpectation::ToContainText { expected, .. } => {
-            serde_json::to_value(expected).unwrap_or(Value::Null)
+        | BrowserExpectation::ToContainText {
+            expected, ..
+        } => serde_json::to_value(expected).unwrap_or(Value::Null),
+        BrowserExpectation::ToHaveValue {
+            expected, ..
         }
-        BrowserExpectation::ToHaveValue { expected, .. }
-        | BrowserExpectation::ToHaveClass { expected, .. }
-        | BrowserExpectation::ToHaveId { expected, .. }
-        | BrowserExpectation::ToHaveAccessibleName { expected, .. }
-        | BrowserExpectation::ToHaveAccessibleDescription { expected, .. }
-        | BrowserExpectation::ToHaveUrl { expected, .. }
-        | BrowserExpectation::ToHaveTitle { expected, .. }
+        | BrowserExpectation::ToHaveClass {
+            expected, ..
+        }
+        | BrowserExpectation::ToHaveId {
+            expected, ..
+        }
+        | BrowserExpectation::ToHaveAccessibleName {
+            expected, ..
+        }
+        | BrowserExpectation::ToHaveAccessibleDescription {
+            expected, ..
+        }
+        | BrowserExpectation::ToHaveUrl {
+            expected, ..
+        }
+        | BrowserExpectation::ToHaveTitle {
+            expected, ..
+        }
         | BrowserExpectation::ToHaveAttribute {
             expected: Some(expected),
             ..
         }
-        | BrowserExpectation::ToHaveCss { expected, .. } => {
-            serde_json::to_value(expected).unwrap_or(Value::Null)
+        | BrowserExpectation::ToHaveCss {
+            expected, ..
+        } => serde_json::to_value(expected).unwrap_or(Value::Null),
+        BrowserExpectation::ToHaveValues {
+            expected, ..
+        } => serde_json::to_value(expected).unwrap_or(Value::Null),
+        BrowserExpectation::ToContainClass {
+            expected, ..
         }
-        BrowserExpectation::ToHaveValues { expected, .. } => {
-            serde_json::to_value(expected).unwrap_or(Value::Null)
-        }
-        BrowserExpectation::ToContainClass { expected, .. }
-        | BrowserExpectation::ToHaveRole { expected } => Value::String(expected.clone()),
-        BrowserExpectation::ToHaveCount { expected } => Value::from(*expected),
-        BrowserExpectation::ToHaveJsProperty { expected, .. } => expected.clone(),
-        BrowserExpectation::ToMatchAriaSnapshot { expected } => Value::String(expected.clone()),
+        | BrowserExpectation::ToHaveRole {
+            expected,
+        } => Value::String(expected.clone()),
+        BrowserExpectation::ToHaveCount {
+            expected,
+        } => Value::from(*expected),
+        BrowserExpectation::ToHaveJsProperty {
+            expected, ..
+        } => expected.clone(),
+        BrowserExpectation::ToMatchAriaSnapshot {
+            expected,
+        } => Value::String(expected.clone()),
     }
 }
 
@@ -6072,7 +6555,10 @@ fn sample_expectation(
         Err(_) => Vec::new(),
     };
     let handles = world.wrap_scoped_all(tab, handles);
-    if let BrowserExpectation::ToHaveCount { expected } = matcher {
+    if let BrowserExpectation::ToHaveCount {
+        expected,
+    } = matcher
+    {
         let count = handles.len();
         return Ok((count == *expected, Value::from(count)));
     }
@@ -6182,16 +6668,25 @@ fn sample_single_element(
     handle: &ElementHandle,
     matcher: &BrowserExpectation,
 ) -> Result<(bool, Value), String> {
-    if let BrowserExpectation::ToMatchAriaSnapshot { expected } = matcher {
+    if let BrowserExpectation::ToMatchAriaSnapshot {
+        expected,
+    } = matcher
+    {
         let snapshot = world
             .aria_snapshot(tab, Some(handle.clone()), SnapshotOptions::default())
             .map_err(|error| error.to_string())?;
         let matches = refact_browser::assertions::match_aria_snapshot(expected, &snapshot.yaml)?;
         return Ok((matches, Value::String(snapshot.yaml)));
     }
-    if let BrowserExpectation::ToHaveAttribute { name, .. }
-    | BrowserExpectation::ToHaveCss { name, .. }
-    | BrowserExpectation::ToHaveJsProperty { name, .. } = matcher
+    if let BrowserExpectation::ToHaveAttribute {
+        name, ..
+    }
+    | BrowserExpectation::ToHaveCss {
+        name, ..
+    }
+    | BrowserExpectation::ToHaveJsProperty {
+        name, ..
+    } = matcher
     {
         let (function, arguments) = match matcher {
             BrowserExpectation::ToHaveAttribute { .. } => (
@@ -6217,7 +6712,9 @@ fn sample_single_element(
             .call_function_on(tab, handle, function, arguments)
             .map_err(|error| error.to_string())?;
         let matches = match matcher {
-            BrowserExpectation::ToHaveAttribute { expected: None, .. } => !received.is_null(),
+            BrowserExpectation::ToHaveAttribute {
+                expected: None, ..
+            } => !received.is_null(),
             BrowserExpectation::ToHaveAttribute {
                 expected: Some(expected),
                 ignore_case,
@@ -6236,9 +6733,9 @@ fn sample_single_element(
                 )
                 .unwrap_or(false)
             }),
-            BrowserExpectation::ToHaveJsProperty { expected, .. } => {
-                refact_browser::assertions::matches_json_property(&received, expected)
-            }
+            BrowserExpectation::ToHaveJsProperty {
+                expected, ..
+            } => refact_browser::assertions::matches_json_property(&received, expected),
             _ => false,
         };
         return Ok((matches, received));
@@ -6274,13 +6771,17 @@ fn sample_single_element(
             indeterminate: Some(true),
             ..
         } => Ok(boolean("indeterminate", true)),
-        BrowserExpectation::ToBeChecked { checked, .. } => {
-            Ok(boolean("checked", checked.unwrap_or(true)))
-        }
+        BrowserExpectation::ToBeChecked {
+            checked, ..
+        } => Ok(boolean("checked", checked.unwrap_or(true))),
         BrowserExpectation::ToBeFocused => Ok(boolean("focused", true)),
         BrowserExpectation::ToBeEmpty => Ok(boolean("empty", true)),
-        BrowserExpectation::ToBeInViewport { ratio: None } => Ok(boolean("inViewport", true)),
-        BrowserExpectation::ToBeInViewport { ratio: Some(ratio) } => {
+        BrowserExpectation::ToBeInViewport {
+            ratio: None,
+        } => Ok(boolean("inViewport", true)),
+        BrowserExpectation::ToBeInViewport {
+            ratio: Some(ratio),
+        } => {
             let received = field("viewportRatio");
             Ok((
                 viewport_ratio_matches(received.as_f64().unwrap_or_default(), *ratio),
@@ -6344,7 +6845,9 @@ fn sample_single_element(
             refact_browser::assertions::TextMatchKind::Exact,
             *ignore_case,
         ),
-        BrowserExpectation::ToHaveRole { expected } => Ok((
+        BrowserExpectation::ToHaveRole {
+            expected,
+        } => Ok((
             field("role").as_str() == Some(expected.as_str()),
             field("role"),
         )),
@@ -7219,7 +7722,9 @@ fn probe_click_if_exists(
 ) -> Result<(), String> {
     let resolved = match resolve_element_typed(tab, world, locator) {
         Ok(resolved) => resolved,
-        Err(ResolveElementError::MultipleMatches { count, .. }) => {
+        Err(ResolveElementError::MultipleMatches {
+            count, ..
+        }) => {
             return Err(format!("locator resolved to {count} elements"));
         }
         Err(ResolveElementError::Other(message)) => return Err(message),
@@ -7974,14 +8479,20 @@ fn step_wait_for_navigation(
 fn wait_for_url_matcher(pattern: &UrlPattern) -> Result<UrlMatcher, String> {
     match pattern {
         UrlPattern::Text(value) => UrlMatcher::substring(value),
-        UrlPattern::Regex { source, flags } => UrlMatcher::regex(source, flags),
+        UrlPattern::Regex {
+            source,
+            flags,
+        } => UrlMatcher::regex(source, flags),
     }
 }
 
 fn describe_url_pattern(pattern: &UrlPattern) -> String {
     match pattern {
         UrlPattern::Text(value) => format!("'{value}'"),
-        UrlPattern::Regex { source, flags } => format!("/{source}/{flags}"),
+        UrlPattern::Regex {
+            source,
+            flags,
+        } => format!("/{source}/{flags}"),
     }
 }
 
@@ -8942,9 +9453,11 @@ fn capture_screenshot(
         .map_err(|error| format!("Screenshot capture failed: {error}"))
     });
     let background_cleanup = if transparent {
-        tab.call_method(Emulation::SetDefaultBackgroundColorOverride { color: None })
-            .map(|_| ())
-            .map_err(|error| format!("Failed to restore screenshot background: {error}"))
+        tab.call_method(Emulation::SetDefaultBackgroundColorOverride {
+            color: None,
+        })
+        .map(|_| ())
+        .map_err(|error| format!("Failed to restore screenshot background: {error}"))
     } else {
         Ok(())
     };
@@ -9599,8 +10112,10 @@ fn read_cdp_stream(tab: &Tab, stream: IO::StreamHandle) -> Result<Vec<u8>, Strin
             break;
         }
     }
-    tab.call_method(IO::Close { handle: stream })
-        .map_err(|error| format!("PDF stream close failed: {error}"))?;
+    tab.call_method(IO::Close {
+        handle: stream,
+    })
+    .map_err(|error| format!("PDF stream close failed: {error}"))?;
     Ok(bytes)
 }
 
@@ -9718,7 +10233,12 @@ fn bound_eval_value(value: Value, limit: usize) -> (Value, Option<EvalTruncation
                 return (Value::String(text), None);
             }
             let head = text.chars().take(limit).collect::<String>();
-            (Value::String(head), Some(EvalTruncation { total_chars }))
+            (
+                Value::String(head),
+                Some(EvalTruncation {
+                    total_chars,
+                }),
+            )
         }
         other => {
             let serialized = other.to_string();
@@ -9727,7 +10247,12 @@ fn bound_eval_value(value: Value, limit: usize) -> (Value, Option<EvalTruncation
                 return (other, None);
             }
             let head = serialized.chars().take(limit).collect::<String>();
-            (Value::String(head), Some(EvalTruncation { total_chars }))
+            (
+                Value::String(head),
+                Some(EvalTruncation {
+                    total_chars,
+                }),
+            )
         }
     }
 }
@@ -10405,28 +10930,58 @@ fn step_hide_highlight(tab: &Tab, world: &WorldManager, idx: usize) -> StepResul
 
 pub fn describe_locator(locator: &BrowserLocator) -> String {
     let mut description = match &locator.strategy {
-        LocatorStrategy::Ref { value } => format!("ref={}", value),
-        LocatorStrategy::Css { value } => format!("css={}", value),
-        LocatorStrategy::Id { value } => format!("id={}", value),
-        LocatorStrategy::Name { value } => format!("name={}", value),
-        LocatorStrategy::TestId { value, .. } => format!("testid={}", value),
-        LocatorStrategy::Placeholder { value, .. } => format!("placeholder={}", value),
-        LocatorStrategy::AltText { value, .. } => format!("alt_text={}", value),
-        LocatorStrategy::Title { value, .. } => format!("title={}", value),
-        LocatorStrategy::Autocomplete { value } => format!("autocomplete={}", value),
-        LocatorStrategy::Text { value, exact, .. } => {
+        LocatorStrategy::Ref {
+            value,
+        } => format!("ref={}", value),
+        LocatorStrategy::Css {
+            value,
+        } => format!("css={}", value),
+        LocatorStrategy::Id {
+            value,
+        } => format!("id={}", value),
+        LocatorStrategy::Name {
+            value,
+        } => format!("name={}", value),
+        LocatorStrategy::TestId {
+            value, ..
+        } => format!("testid={}", value),
+        LocatorStrategy::Placeholder {
+            value, ..
+        } => format!("placeholder={}", value),
+        LocatorStrategy::AltText {
+            value, ..
+        } => format!("alt_text={}", value),
+        LocatorStrategy::Title {
+            value, ..
+        } => format!("title={}", value),
+        LocatorStrategy::Autocomplete {
+            value,
+        } => format!("autocomplete={}", value),
+        LocatorStrategy::Text {
+            value,
+            exact,
+            ..
+        } => {
             if *exact {
                 format!("text=\"{}\"", value)
             } else {
                 format!("text~\"{}\"", value)
             }
         }
-        LocatorStrategy::Label { value, .. } => format!("label={}", value),
-        LocatorStrategy::Role { role, name, .. } => match name {
+        LocatorStrategy::Label {
+            value, ..
+        } => format!("label={}", value),
+        LocatorStrategy::Role {
+            role,
+            name,
+            ..
+        } => match name {
             Some(n) => format!("role={}[{}]", role, n),
             None => format!("role={}", role),
         },
-        LocatorStrategy::Xpath { value } => format!("xpath={}", value),
+        LocatorStrategy::Xpath {
+            value,
+        } => format!("xpath={}", value),
     };
     if let Some(inner) = &locator.locator {
         description = format!("{description}.locator({})", describe_locator(inner));
@@ -10518,7 +11073,12 @@ mod tests {
         drive_element_state_actions(
             &mut mouse,
             element_state_sequence(states),
-            || Ok(MainFrameCssPoint { x: 5.0, y: 5.0 }),
+            || {
+                Ok(MainFrameCssPoint {
+                    x: 5.0,
+                    y: 5.0,
+                })
+            },
             |_| Ok(()),
             observe,
         )
@@ -11057,7 +11617,9 @@ mod tests {
         .unwrap();
 
         let NavigationWaitOutcome::TimedOut {
-            committed, message, ..
+            committed,
+            message,
+            ..
         } = outcome
         else {
             panic!("expected a navigation timeout outcome");
@@ -11403,7 +11965,9 @@ mod tests {
                 max_width: None,
                 max_height: None,
             },
-            BrowserStep::ScreencastStop { compose: None },
+            BrowserStep::ScreencastStop {
+                compose: None,
+            },
         ] {
             assert!(is_screencast_step(&step));
             assert!(!is_instrumentation_step(&step));
@@ -11469,7 +12033,9 @@ mod tests {
         );
         let missing = frame_locator_error_message(
             &BrowserLocator::css(".inner").in_frames(vec![BrowserLocator::css("iframe")]),
-            refact_browser::FrameLocatorError::FrameOwnerMissing { index: 0 },
+            refact_browser::FrameLocatorError::FrameOwnerMissing {
+                index: 0,
+            },
         );
 
         assert!(is_transient_page_error(&detached));

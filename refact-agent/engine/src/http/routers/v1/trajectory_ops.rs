@@ -608,7 +608,9 @@ pub async fn handle_transform_apply(
     )
     .await;
 
-    let response = TransformApplyResponse { stats };
+    let response = TransformApplyResponse {
+        stats,
+    };
 
     let body = serde_json::to_vec(&response)
         .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;

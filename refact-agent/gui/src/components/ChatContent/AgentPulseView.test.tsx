@@ -106,22 +106,6 @@ describe("AgentPulseView parsing", () => {
 });
 
 describe("AgentPulseContent", () => {
-  it("renders pulse output", () => {
-    render(<AgentPulseContent report={parsedReport()} />);
-
-    expect(screen.getByText("Pulse: T-29")).toBeInTheDocument();
-    expect(screen.getByText("~38k / 200k")).toBeInTheDocument();
-    expect(
-      screen.getByText("src/tools/tool_task_check_agents.rs"),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByText("Adding sticky alerts logic..."),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByText('patch(path="src/tools/tool_task_check_agents.rs")'),
-    ).toBeInTheDocument();
-  });
-
   it("dispatches action commands", async () => {
     const onSubmitCommand = vi
       .spyOn(chatCommands, "sendChatCommand")

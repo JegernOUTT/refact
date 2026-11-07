@@ -1356,7 +1356,10 @@ fn collect_behavior_trajectory_candidates_from_dir(
             let modified_key = metadata.modified().map(system_time_key).unwrap_or_default();
             push_behavior_trajectory_candidate(
                 heap,
-                BehaviorTrajectoryCandidate { modified_key, path },
+                BehaviorTrajectoryCandidate {
+                    modified_key,
+                    path,
+                },
                 max_files,
             );
         }
@@ -3204,13 +3207,17 @@ fn git_source_check(
     use crate::buddy::workflow_deliverables::{SourceCheck, SourceCompletion};
     let observed_at = Utc::now().to_rfc3339();
     let (fingerprint, completion) = match git {
-        LocalGitObservation::NotRepository { reason } => (
+        LocalGitObservation::NotRepository {
+            reason,
+        } => (
             signal_hash([workflow_id, "no-repository"]),
             SourceCompletion::NotApplicable {
                 reason: reason.clone(),
             },
         ),
-        LocalGitObservation::Failed { error } => (
+        LocalGitObservation::Failed {
+            error,
+        } => (
             signal_hash([workflow_id, "read-failed", error.as_str()]),
             SourceCompletion::Failed {
                 error: error.clone(),
@@ -3244,15 +3251,15 @@ fn git_source_check(
             };
             match &completion {
                 SourceCompletion::Complete => parts.push("completion:complete".to_string()),
-                SourceCompletion::Partial { uncovered } => {
-                    parts.push(format!("completion:partial:{uncovered}"))
-                }
-                SourceCompletion::Failed { error } => {
-                    parts.push(format!("completion:failed:{error}"))
-                }
-                SourceCompletion::NotApplicable { reason } => {
-                    parts.push(format!("completion:not-applicable:{reason}"))
-                }
+                SourceCompletion::Partial {
+                    uncovered,
+                } => parts.push(format!("completion:partial:{uncovered}")),
+                SourceCompletion::Failed {
+                    error,
+                } => parts.push(format!("completion:failed:{error}")),
+                SourceCompletion::NotApplicable {
+                    reason,
+                } => parts.push(format!("completion:not-applicable:{reason}")),
             }
             (signal_hash(parts), completion)
         }
@@ -3325,9 +3332,15 @@ async fn publish_source_check_outcome(
     }
     let status = match terminal {
         crate::buddy::outcome_runtime::WorkflowTerminal::NoChange => "no_change",
-        crate::buddy::outcome_runtime::WorkflowTerminal::Partial { .. } => "partial",
-        crate::buddy::outcome_runtime::WorkflowTerminal::Blocked { .. } => "blocked",
-        crate::buddy::outcome_runtime::WorkflowTerminal::Failed { .. } => "source_failed",
+        crate::buddy::outcome_runtime::WorkflowTerminal::Partial {
+            ..
+        } => "partial",
+        crate::buddy::outcome_runtime::WorkflowTerminal::Blocked {
+            ..
+        } => "blocked",
+        crate::buddy::outcome_runtime::WorkflowTerminal::Failed {
+            ..
+        } => "source_failed",
         _ => "inconclusive",
     };
     let last = AutonomousLastResult {
@@ -4749,7 +4762,10 @@ fn architecture_groups(paths: &[PathStatus]) -> Vec<PathGroup> {
     }
     let mut groups: Vec<PathGroup> = counts
         .into_iter()
-        .map(|(group, count)| PathGroup { group, count })
+        .map(|(group, count)| PathGroup {
+            group,
+            count,
+        })
         .collect();
     groups.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.group.cmp(&b.group)));
     groups.truncate(10);

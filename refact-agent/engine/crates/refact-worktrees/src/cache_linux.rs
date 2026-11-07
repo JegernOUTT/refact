@@ -590,7 +590,15 @@ enum Entry {
 impl Entry {
     fn path(&self) -> &str {
         match self {
-            Self::Directory { path } | Self::File { path, .. } | Self::Symlink { path, .. } => path,
+            Self::Directory {
+                path,
+            }
+            | Self::File {
+                path, ..
+            }
+            | Self::Symlink {
+                path, ..
+            } => path,
         }
     }
 }
@@ -815,7 +823,9 @@ fn inventory(directory: &Directory, budget: &mut Budget) -> Result<Vec<Entry>, C
             relative_parts(&path)?;
             let entry = match directory.kind(&name)? {
                 libc::S_IFDIR => {
-                    entries.push(Entry::Directory { path: path.clone() });
+                    entries.push(Entry::Directory {
+                        path: path.clone(),
+                    });
                     walk(&directory.child(&name)?, &path, entries, budget)?;
                     continue;
                 }
@@ -1273,7 +1283,9 @@ fn materialize(
         budget.check()?;
         let (parent, name) = temporary.parent(entry.path())?;
         match entry {
-            Entry::Directory { .. } => {
+            Entry::Directory {
+                ..
+            } => {
                 parent.mkdir(&name)?;
             }
             Entry::File {
@@ -1293,12 +1305,19 @@ fn materialize(
                 }
                 target.sync_all().map_err(|_| CacheReason::IoFailure)?;
             }
-            Entry::Symlink { .. } => {}
+            Entry::Symlink {
+                ..
+            } => {}
         }
     }
     for entry in &entries {
         budget.check()?;
-        if let Entry::Symlink { path, target, .. } = entry {
+        if let Entry::Symlink {
+            path,
+            target,
+            ..
+        } = entry
+        {
             let (parent, name) = temporary.parent(path)?;
             parent.symlink(&name, target)?;
         }

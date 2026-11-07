@@ -915,7 +915,10 @@ impl CodeGraphService {
             .into_iter()
             .filter(|(src, dst, _)| ids.contains(src) && ids.contains(dst))
             .collect();
-        Ok(analytics::GraphData { nodes, edges })
+        Ok(analytics::GraphData {
+            nodes,
+            edges,
+        })
     }
 
     pub async fn graph_nodes(&self) -> Result<Vec<analytics::GraphNode>, String> {
@@ -1245,7 +1248,6 @@ mod tests {
         ),
         ("../gui/src/features/Chat/Thread/selectors.ts", "typescript"),
         ("src/chat/trajectories.rs", "rust"),
-        ("crates/refact-tui/src/app.rs", "rust"),
         ("src/buddy/tests.rs", "rust"),
         ("src/chat/summarization.rs", "rust"),
         ("src/chat/session.rs", "rust"),
