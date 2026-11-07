@@ -144,6 +144,7 @@ async fn aborted_before_start_generation(
     if !session.user_interrupt_flag.load(Ordering::SeqCst) {
         return false;
     }
+    session.live_diagnostics.clear_accepted();
     session.abort_flag.store(false, Ordering::SeqCst);
     session.user_interrupt_flag.store(false, Ordering::SeqCst);
     if session.runtime.state == SessionState::Generating {
@@ -514,6 +515,7 @@ pub async fn inject_priority_messages_if_any(
                     client_message_id,
                 );
                 session.add_message(user_message);
+                session.live_diagnostics.accept(std::time::Instant::now());
                 note_user_turn_resets_goal_pursuit(&mut session);
                 accepted
             };
@@ -3889,6 +3891,7 @@ mod tests {
             locked.end_interruptible_wait();
             locked.drain_pending_deliveries();
             locked.delivery_wake_sources.insert("delivery".into());
+            locked.live_diagnostics.accept(std::time::Instant::now());
         }
         assert!(aborted_before_start_generation(&session).await);
         let selected = select_next_command(&session)
@@ -3900,6 +3903,29 @@ mod tests {
         let locked = session.lock().await;
         assert!(locked.delivery_wake_sources.contains("delivery"));
         assert!(!locked.abort_flag.load(Ordering::SeqCst));
+        assert_eq!(locked.live_diagnostics.accepted_count, 1);
+    }
+
+    #[tokio::test]
+    async fn live_diagnostics_clear_reaccepted_answer_at_pre_generation_user_interrupt() {
+        let session = Arc::new(AMutex::new(ChatSession::new(
+            "answer-abort-boundary".into(),
+        )));
+        {
+            let mut locked = session.lock().await;
+            locked.set_runtime_state(SessionState::Generating, None);
+            locked.abort_stream();
+            locked.user_interrupt_flag.store(true, Ordering::SeqCst);
+            locked.live_diagnostics.accept(std::time::Instant::now());
+            assert_eq!(locked.live_diagnostics.accepted_count, 1);
+        }
+        assert!(aborted_before_start_generation(&session).await);
+        let locked = session.lock().await;
+        assert_eq!(locked.runtime.state, SessionState::Idle);
+        assert!(!locked.user_interrupt_flag.load(Ordering::SeqCst));
+        assert_eq!(locked.live_diagnostics.accepted_count, 0);
+        assert!(locked.live_diagnostics.accepted_at.is_none());
+        assert!(locked.live_diagnostics.phase.is_none());
     }
 
     fn make_request(cmd: ChatCommand) -> CommandRequest {

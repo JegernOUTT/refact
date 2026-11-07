@@ -892,6 +892,7 @@ impl ChatSession {
             work_provenance: Default::default(),
             work_capsule_state: Default::default(),
             last_stream_delta_at: None,
+            live_diagnostics: Default::default(),
             command_enqueued_at: HashMap::new(),
             stream_started_at: None,
             confirmation_paused_at: None,
@@ -1046,6 +1047,7 @@ impl ChatSession {
             work_provenance,
             work_capsule_state: Default::default(),
             last_stream_delta_at: None,
+            live_diagnostics: Default::default(),
             command_enqueued_at: HashMap::new(),
             stream_started_at: None,
             confirmation_paused_at: None,
@@ -1877,6 +1879,7 @@ impl ChatSession {
 
     pub fn mark_tool_started(&mut self) {
         let now = Instant::now();
+        self.live_diagnostics.chat_progress = Some(now);
         self.last_tool_started_at = Some(now);
         self.last_tool_progress_at = None;
         self.last_activity = now;
@@ -1928,6 +1931,7 @@ impl ChatSession {
 
     pub fn mark_tool_progress(&mut self) {
         let now = Instant::now();
+        self.live_diagnostics.chat_progress = Some(now);
         self.last_tool_progress_at = Some(now);
         self.last_activity = now;
     }
@@ -2107,6 +2111,7 @@ impl ChatSession {
     }
 
     pub fn close_event_channel(&mut self) {
+        self.live_diagnostics.clear_accepted();
         self.pending_context_rebuild = None;
         self.pending_mode_handoff = None;
         if let Some(flag) = &self.compression_abort_flag {
@@ -2580,13 +2585,22 @@ impl ChatSession {
                     self.delivery_wake_sources.insert("queue-boundary".into());
                     self.queued_user_merge_targets
                         .insert(request.client_request_id.clone(), message_id);
+                    let accepted = (
+                        self.live_diagnostics.accepted_at,
+                        self.live_diagnostics.accepted_count,
+                        self.live_diagnostics.phase,
+                    );
                     self.abort_stream();
+                    (
+                        self.live_diagnostics.accepted_at,
+                        self.live_diagnostics.accepted_count,
+                        self.live_diagnostics.phase,
+                    ) = accepted;
                 }
             }
-            if perf_diagnostics::is_enabled() {
-                self.command_enqueued_at
-                    .insert(request.client_request_id.clone(), Instant::now());
-            }
+            self.begin_queue_diagnostics_episode();
+            self.command_enqueued_at
+                .insert(request.client_request_id.clone(), Instant::now());
             self.command_queue.push_back(request);
             self.interrupt_wait_for_delivery();
             self.touch();
@@ -2611,6 +2625,7 @@ impl ChatSession {
     }
 
     pub(crate) fn record_command_queue_wait_at(&mut self, client_request_id: &str, now: Instant) {
+        self.live_diagnostics.queue_progress = Some(now);
         let Some(enqueued_at) = self.command_enqueued_at.remove(client_request_id) else {
             return;
         };
@@ -2647,6 +2662,15 @@ impl ChatSession {
         self.queued_user_merge_targets.remove(client_request_id);
     }
 
+    fn begin_queue_diagnostics_episode(&mut self) {
+        if self.command_queue.is_empty()
+            && self.pending_deliveries.is_empty()
+            && self.runner_pending_deliveries.is_empty()
+        {
+            self.live_diagnostics.queue_progress = Some(Instant::now());
+        }
+    }
+
     pub fn add_message(&mut self, message: ChatMessage) {
         // Legacy event producers must not insert ahead of an uncommitted draft
         // or between an assistant tool call and its results.
@@ -2655,6 +2679,7 @@ impl ChatSession {
                 || self.has_pending_tool_result_window()
                 || crate::chat::context_rebuild::compression_attempt_active(self))
         {
+            self.begin_queue_diagnostics_episode();
             self.pending_deliveries.push_back(PendingDelivery::new(
                 vec![message],
                 PushMode::Append,
@@ -2991,6 +3016,7 @@ impl ChatSession {
     /// Append one delivery's messages, stamping delivery provenance so dedupe
     /// and the UI survive a restart without the pending queue.
     fn append_delivery(&mut self, delivery: &PendingDelivery) {
+        self.live_diagnostics.queue_progress = Some(Instant::now());
         if let Some(patch) = &delivery.thread_patch {
             let old_mode = self.thread.mode.clone();
             let (changed, sanitized) = super::queue::apply_setparams_patch(&mut self.thread, patch);
@@ -3139,6 +3165,7 @@ impl ChatSession {
             return Ok(DeliveryOutcome::Delivered);
         }
 
+        self.begin_queue_diagnostics_episode();
         self.pending_deliveries.push_back(delivery);
         self.interrupt_wait_for_delivery();
         self.emit_queue_update();
@@ -3180,6 +3207,7 @@ impl ChatSession {
             wake |= delivery.wake;
         }
         if !delivered_ids.is_empty() || expired {
+            self.live_diagnostics.queue_progress = Some(Instant::now());
             self.emit_queue_update();
             self.mark_persisted_runtime_changed();
         }
@@ -3347,6 +3375,9 @@ impl ChatSession {
         if self.runner_pending_deliveries == deliveries {
             return;
         }
+        if !deliveries.is_empty() {
+            self.begin_queue_diagnostics_episode();
+        }
         self.runner_pending_deliveries = deliveries;
         self.interrupt_wait_for_delivery();
         self.emit_queue_update();
@@ -3394,6 +3425,12 @@ impl ChatSession {
                 continue;
             }
             self.supersede_pending(&delivery);
+            if self.command_queue.is_empty()
+                && self.pending_deliveries.is_empty()
+                && self.runner_pending_deliveries.is_empty()
+            {
+                self.live_diagnostics.queue_progress = None;
+            }
             self.pending_deliveries.push_back(delivery);
         }
     }
@@ -3820,6 +3857,15 @@ impl ChatSession {
     }
 
     pub fn set_runtime_state(&mut self, state: SessionState, error: Option<String>) {
+        if matches!(
+            state,
+            SessionState::Completed
+                | SessionState::Interrupted
+                | SessionState::Error
+                | SessionState::WaitingUserInput
+        ) {
+            self.live_diagnostics.clear_accepted();
+        }
         let old_state = self.runtime.state;
         let old_error = self.runtime.error.clone();
         let should_clear_terminal_stream =
@@ -4116,10 +4162,9 @@ impl ChatSession {
             .iter()
             .position(|r| !r.priority)
             .unwrap_or(self.command_queue.len());
-        if perf_diagnostics::is_enabled() {
-            self.command_enqueued_at
-                .insert(request.client_request_id.clone(), Instant::now());
-        }
+        self.begin_queue_diagnostics_episode();
+        self.command_enqueued_at
+            .insert(request.client_request_id.clone(), Instant::now());
         self.command_queue.insert(insert_pos, request);
         self.interrupt_wait_for_delivery();
         self.touch();
@@ -4340,6 +4385,26 @@ impl ChatSession {
             }
             None => return,
         };
+        let meaningful = applied
+            && ops.iter().any(|op| match op {
+                DeltaOp::AppendContent {
+                    text,
+                }
+                | DeltaOp::AppendReasoning {
+                    text,
+                }
+                | DeltaOp::SetReasoning {
+                    text,
+                } => !text.is_empty(),
+                DeltaOp::SetToolCalls {
+                    tool_calls,
+                } => !tool_calls.is_empty(),
+                _ => false,
+            });
+        if meaningful {
+            self.live_diagnostics
+                .first_output(now.unwrap_or_else(Instant::now));
+        }
         self.emit(ChatEvent::StreamDelta {
             message_id,
             ops,
@@ -4619,6 +4684,7 @@ impl ChatSession {
     }
 
     pub fn abort_stream(&mut self) {
+        self.live_diagnostics.clear_accepted();
         self.pending_context_rebuild = None;
         self.pending_mode_handoff = None;
         if let Some(flag) = &self.compression_abort_flag {

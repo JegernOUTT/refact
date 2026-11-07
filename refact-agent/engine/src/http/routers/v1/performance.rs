@@ -30,6 +30,7 @@ pub struct PerformanceTelemetryResponse {
     #[serde(flatten)]
     telemetry: PerformanceTelemetrySnapshot,
     rollout_switches: RolloutSwitches,
+    queue_diagnostics: crate::chat::live_diagnostics::QueueDiagnostics,
 }
 
 #[derive(Debug, Serialize)]
@@ -60,6 +61,7 @@ pub async fn handle_v1_performance_telemetry_get(
     Json(PerformanceTelemetryResponse {
         telemetry: app.gcx.performance_telemetry.snapshot(),
         rollout_switches: rollout_switches(),
+        queue_diagnostics: crate::chat::live_diagnostics::sample(&app),
     })
 }
 
@@ -87,7 +89,12 @@ pub async fn handle_v1_performance_telemetry_reset(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use axum::routing::get;
     use hyper::{Body, Request, StatusCode};
+    use tokio::sync::Mutex;
     use tower::ServiceExt;
 
     use super::*;
@@ -96,5 +103,79 @@ mod tests {
         let response = router.oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         serde_json::from_slice(&hyper::body::to_bytes(response.into_body()).await.unwrap()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn live_queue_http_reports_partial_coverage_without_waiting_for_held_locks() {
+        let app = AppState::from_gcx(crate::global_context::tests::make_test_gcx().await).await;
+        app.gcx.performance_telemetry.set_enabled(false);
+        let session = Arc::new(Mutex::new(crate::chat::types::ChatSession::new(
+            "private-diagnostic-chat".into(),
+        )));
+        let command = serde_json::from_value(serde_json::json!({
+            "client_request_id": "private-diagnostic-request",
+            "priority": true,
+            "type": "answer_questions",
+            "tool_call_id": "private-diagnostic-question",
+            "answers": []
+        }))
+        .unwrap();
+        session.lock().await.command_queue.push_back(command);
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert("private-diagnostic-chat".into(), session.clone());
+        let router = axum::Router::new()
+            .route(
+                "/v1/performance/telemetry",
+                get(handle_v1_performance_telemetry_get),
+            )
+            .with_state(app.clone());
+        let get = || {
+            Request::get("/v1/performance/telemetry")
+                .body(Body::empty())
+                .unwrap()
+        };
+
+        let initial = request(router.clone(), get()).await;
+        assert_eq!(initial["enabled"], false);
+        assert_eq!(initial["queue_diagnostics"]["commands"]["pending_count"], 1);
+        assert_eq!(
+            initial["queue_diagnostics"]["question_answers"]["pending_count"],
+            1
+        );
+        assert_eq!(
+            initial["queue_diagnostics"]["commands"]["unknown_age_count"],
+            1
+        );
+        assert!(!initial.to_string().contains("private-diagnostic"));
+
+        let held_session = session.lock().await;
+        let partial = tokio::time::timeout(Duration::from_secs(1), request(router.clone(), get()))
+            .await
+            .expect("performance GET must not wait for a held chat lock");
+        assert_eq!(partial["queue_diagnostics"]["coverage"]["skipped_busy"], 1);
+        assert_eq!(partial["queue_diagnostics"]["coverage"]["partial"], true);
+        drop(held_session);
+
+        let held_registry = app.chat.sessions.write().await;
+        let partial = tokio::time::timeout(Duration::from_secs(1), request(router.clone(), get()))
+            .await
+            .expect("performance GET must not wait for a held registry lock");
+        assert_eq!(
+            partial["queue_diagnostics"]["coverage"]["sessions_total"],
+            serde_json::Value::Null
+        );
+        assert_eq!(partial["queue_diagnostics"]["coverage"]["partial"], true);
+        drop(held_registry);
+
+        let restored = request(router, get()).await;
+        assert_eq!(
+            restored["queue_diagnostics"]["commands"]["pending_count"],
+            1
+        );
+        assert_eq!(restored["queue_diagnostics"]["coverage"]["partial"], false);
+        assert_eq!(session.lock().await.command_queue.len(), 1);
     }
 }

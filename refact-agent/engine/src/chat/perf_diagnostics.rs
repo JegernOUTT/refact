@@ -104,10 +104,13 @@ pub enum PerfComponent {
     ShellPostprocess,
     ExecPathQueueWait,
     ExecPathCollect,
+    MessageAcceptedToFirstDelta,
+    StreamPreamblePrepare,
+    StreamProviderAdmission,
 }
 
 impl PerfComponent {
-    pub const ALL: [Self; 89] = [
+    pub const ALL: [Self; 92] = [
         Self::TrajectorySnapshot,
         Self::TrajectorySerialize,
         Self::TrajectoryAtomicWrite,
@@ -197,6 +200,9 @@ impl PerfComponent {
         Self::ShellPostprocess,
         Self::ExecPathQueueWait,
         Self::ExecPathCollect,
+        Self::MessageAcceptedToFirstDelta,
+        Self::StreamPreamblePrepare,
+        Self::StreamProviderAdmission,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -290,6 +296,9 @@ impl PerfComponent {
             Self::ShellPostprocess => "shell.postprocess",
             Self::ExecPathQueueWait => "exec.path_queue_wait",
             Self::ExecPathCollect => "exec.path_collect",
+            Self::MessageAcceptedToFirstDelta => "message.accepted_to_first_delta",
+            Self::StreamPreamblePrepare => "stream.preamble_prepare",
+            Self::StreamProviderAdmission => "stream.provider_admission",
         }
     }
 

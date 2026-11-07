@@ -27,6 +27,35 @@ export type PerformanceIndexWatcherVecdbRollup = {
   aggregate?: PerformanceAggregate;
 };
 
+export type PendingAggregate = {
+  pending_count: number;
+  oldest_pending_age_ms: number | null;
+  unknown_age_count: number;
+};
+
+export type LiveQueueDiagnostics = {
+  sampled_at_ms: number;
+  coverage: {
+    sessions_total: number | null;
+    inspected: number;
+    skipped_busy: number;
+    skipped_budget: number;
+    partial: boolean;
+  };
+  commands: PendingAggregate;
+  deliveries: PendingAggregate;
+  question_answers: PendingAggregate;
+  blockers: (PendingAggregate & { reason: string })[];
+  progress: {
+    oldest_queue_progress_age_ms: number | null;
+    oldest_chat_progress_age_ms: number | null;
+    unknown_queue_progress_sessions: number;
+    unknown_chat_progress_sessions: number;
+  };
+  accepted_waiting_first_output: PendingAggregate;
+  phases: (PendingAggregate & { phase: string })[];
+};
+
 export type PerformanceTelemetryResponse = {
   schema_version?: number;
   enabled?: boolean;
@@ -40,6 +69,7 @@ export type PerformanceTelemetryResponse = {
     enrichment_stages?: PerformanceAggregate;
   };
   rollout_switches?: Record<string, boolean>;
+  queue_diagnostics?: LiveQueueDiagnostics | null;
 };
 
 export type PerformanceTelemetrySettingsResponse = {

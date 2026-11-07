@@ -21,6 +21,7 @@ import {
   formatUptime,
 } from "./performanceFormatters";
 import { TelemetryPanel } from "./TelemetryPanel";
+import { LiveQueueDiagnostics } from "./LiveQueueDiagnostics";
 import { TrajectorySettingsPanel } from "./TrajectorySettingsPanel";
 import styles from "./PerformancePage.module.css";
 
@@ -229,6 +230,8 @@ export function PerformancePage({ onBack }: PerformancePageProps) {
               title="Telemetry action failed"
             />
           ) : null}
+
+          <LiveQueueDiagnostics diagnostics={telemetry.queue_diagnostics} />
 
           <TrajectorySettingsPanel />
 

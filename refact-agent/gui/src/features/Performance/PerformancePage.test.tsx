@@ -117,6 +117,53 @@ afterEach(() => {
 });
 
 describe("PerformancePage", () => {
+  it("shows live diagnostics while historical collection is disabled", async () => {
+    const pending = {
+      pending_count: 1,
+      oldest_pending_age_ms: 20_000,
+      unknown_age_count: 0,
+    };
+    server.use(
+      http.get("*/v1/performance/telemetry", () =>
+        HttpResponse.json({
+          ...telemetry(false, []),
+          queue_diagnostics: {
+            sampled_at_ms: 1_700_000_000_000,
+            coverage: {
+              sessions_total: 1,
+              inspected: 1,
+              skipped_busy: 0,
+              skipped_budget: 0,
+              partial: false,
+            },
+            commands: pending,
+            deliveries: pending,
+            question_answers: pending,
+            blockers: [],
+            progress: {
+              oldest_queue_progress_age_ms: 1000,
+              oldest_chat_progress_age_ms: 2000,
+              unknown_queue_progress_sessions: 0,
+              unknown_chat_progress_sessions: 0,
+            },
+            accepted_waiting_first_output: pending,
+            phases: [{ phase: "request_preparing", ...pending }],
+          },
+        }),
+      ),
+      trajectorySettingsHandler(),
+    );
+    renderPage();
+    expect(
+      await screen.findByText("Telemetry collection is disabled"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("Accepted messages awaiting first output"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Request preparation")).toBeInTheDocument();
+    expect(screen.getAllByText("Oldest age: 20 s").length).toBeGreaterThan(0);
+  });
+
   it("renders aggregate groups and readable percentile and unit values", async () => {
     server.use(
       http.get("*/v1/performance/telemetry", () =>

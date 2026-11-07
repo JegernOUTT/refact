@@ -994,6 +994,7 @@ async fn handle_answer_questions(
         .and_then(|question_id| app.questions().get(question_id))
         .and_then(|question| question.default_answer);
     let mut staged_message_id: Option<String> = None;
+    let mut staged_at = None;
     let mut attention_questions = Vec::new();
     let resolved = {
         let mut session = session_arc.lock().await;
@@ -1040,6 +1041,7 @@ async fn handle_answer_questions(
                         Some(request_id.clone()),
                     );
                     staged_message_id = Some(message.message_id.clone());
+                    staged_at = Some(std::time::Instant::now());
                     session.add_message(message);
                     crate::buddy::decision_receipts::transition(
                         &mut session,
@@ -1132,6 +1134,9 @@ async fn handle_answer_questions(
                 &chat_id,
                 || {
                     note_user_turn_resets_goal_pursuit(&mut session);
+                    if let Some(staged_at) = staged_at {
+                        session.live_diagnostics.accept(staged_at);
+                    }
                     session.set_runtime_state(SessionState::Generating, None);
                     Ok(())
                 },
@@ -1790,6 +1795,7 @@ async fn handle_browser_context_decision(
             pending.client_message_id,
         );
         session.add_or_merge_queued_user_message(request_id, user_message);
+        session.live_diagnostics.accept(std::time::Instant::now());
         note_user_turn_resets_goal_pursuit(&mut session);
 
         if let Some(ref skill_name) = pending.skill_activation_name {
@@ -2005,6 +2011,12 @@ async fn handle_user_message(
             );
             return QueueCommandOutcome::Continue;
         }
+        context
+            .session_arc
+            .lock()
+            .await
+            .live_diagnostics
+            .accept(std::time::Instant::now());
         context.release_board_operation().await;
         start_generation(context.app.clone(), context.session_arc.clone()).await;
         return QueueCommandOutcome::Finished;
@@ -2430,6 +2442,7 @@ async fn add_user_messages(context: &QueueCommandContext, prepared: PreparedUser
             client_message_id,
         );
         session.add_or_merge_queued_user_message(request_id, user_message);
+        session.live_diagnostics.accept(std::time::Instant::now());
         note_user_turn_resets_goal_pursuit(&mut session);
         if session.messages.iter().filter(|m| m.role == "user").count() == 1 {
             let chat_id = session.chat_id.clone();
@@ -2491,6 +2504,7 @@ async fn add_user_messages(context: &QueueCommandContext, prepared: PreparedUser
                 );
                 session
                     .add_or_merge_queued_user_message(&additional.client_request_id, add_message);
+                session.live_diagnostics.accept(std::time::Instant::now());
                 note_user_turn_resets_goal_pursuit(&mut session);
             }
         }
@@ -2528,6 +2542,115 @@ async fn add_user_messages(context: &QueueCommandContext, prepared: PreparedUser
         );
     }
     true
+}
+
+#[cfg(test)]
+mod answer_replay_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn replayed_answer_preserves_original_accepted_diagnostics_without_new_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
+            dir.path().join("cache"),
+            dir.path().join("config"),
+        )
+        .await;
+        gcx.documents_state
+            .workspace_folders
+            .lock()
+            .unwrap()
+            .push(dir.path().to_path_buf());
+        let app = AppState::from_gcx(gcx).await;
+        let mut session = ChatSession::new("answer-replay-diagnostics".into());
+        session.thread.mode = "chat".into();
+        session.thread.checkpoints_enabled = false;
+        session.thread.include_project_info = false;
+        session.thread.auto_enrichment_enabled = Some(false);
+        session.add_message(ChatMessage {
+            message_id: "system".into(),
+            role: "system".into(),
+            content: ChatContent::SimpleText("Test system prompt".into()),
+            ..Default::default()
+        });
+        let answers = vec![QuestionAnswer {
+            id: "question".into(),
+            answer: serde_json::json!("original answer"),
+        }];
+        let answer_content = answer_questions_content("ask-replay", &answers);
+        session.add_message(user_message_with_client_message_id(
+            ChatContent::SimpleText(answer_content.clone()),
+            Vec::new(),
+            Some("answer-request".into()),
+        ));
+        session
+            .pending_questions
+            .push(refact_chat_api::PendingQuestionSet {
+                tool_call_id: "ask-replay".into(),
+                questions: vec![refact_chat_api::PendingQuestion {
+                    id: "question".into(),
+                    question_type: "text".into(),
+                    text: "What should be used?".into(),
+                    options: None,
+                }],
+                asked_at_ms: 123,
+                status: PendingQuestionStatus::Answered,
+                answers: answers.clone(),
+                resolution_id: Some("answer-request".into()),
+                response_protocol_version: 1,
+                response: None,
+            });
+        let original_accepted_at = std::time::Instant::now() - std::time::Duration::from_secs(30);
+        session.live_diagnostics.accept(original_accepted_at);
+        let queued: CommandRequest = serde_json::from_value(serde_json::json!({
+            "client_request_id": "next-user", "type": "user_message",
+            "content": "next turn", "priority": false
+        }))
+        .unwrap();
+        session.command_queue.push_back(queued);
+        let session_arc = Arc::new(AMutex::new(session));
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert("answer-replay-diagnostics".into(), session_arc.clone());
+        let context = QueueCommandContext {
+            app,
+            session_arc: session_arc.clone(),
+            request_id: "answer-request".into(),
+            priority: true,
+            native_guard: None,
+            supervision_guard: None,
+            board_operation: AMutex::new(None),
+        };
+
+        let outcome =
+            handle_answer_questions(&context, "ask-replay".into(), answers, Some(123), None).await;
+
+        assert!(matches!(outcome, QueueCommandOutcome::Continue));
+        let session = session_arc.lock().await;
+        assert_eq!(session.runtime.state, SessionState::Idle);
+        assert!(session.delivery_wake_sources.contains("queue-boundary"));
+        assert!(session.draft_message.is_none());
+        assert_eq!(session.command_queue.len(), 1);
+        let users: Vec<_> = session
+            .messages
+            .iter()
+            .filter(|m| m.role == "user")
+            .collect();
+        assert_eq!(users.len(), 1, "replay added another answer message");
+        assert_eq!(users[0].content.content_text_only(), answer_content);
+        assert_eq!(session.live_diagnostics.accepted_count, 1);
+        assert_eq!(
+            session.live_diagnostics.accepted_at,
+            Some(original_accepted_at)
+        );
+        assert_eq!(
+            session.live_diagnostics.phase.map(|(phase, _)| phase),
+            Some("request_preparing"),
+            "replay did not reach the continuation after persistence"
+        );
+    }
 }
 
 #[cfg(test)]

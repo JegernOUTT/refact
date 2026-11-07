@@ -357,6 +357,7 @@ pub struct ChatSession {
     pub work_capsule_state: crate::coordination::capsule::CapsuleState,
     pub last_stream_delta_at: Option<Instant>,
     pub command_enqueued_at: HashMap<String, Instant>,
+    pub(crate) live_diagnostics: super::live_diagnostics::RuntimeDiagnostics,
     pub stream_started_at: Option<Instant>,
     pub confirmation_paused_at: Option<(Instant, HashSet<String>)>,
     pub(crate) approval_wrapper_calls: HashMap<String, crate::call_validation::ChatToolCall>,

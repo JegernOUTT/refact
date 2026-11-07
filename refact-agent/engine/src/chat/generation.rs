@@ -576,9 +576,22 @@ pub fn prepare_session_preamble_and_knowledge(
         else {
             return;
         };
+        session_arc
+            .lock()
+            .await
+            .live_diagnostics
+            .phase("preamble", Instant::now());
+        let preamble_span =
+            perf_diagnostics::span(PerfComponent::StreamPreamblePrepare, None, None);
         ensure_session_preamble_inner(app.clone(), session_arc.clone()).await;
         prepare_session_knowledge_inner(app.clone(), session_arc.clone()).await;
         prepare_project_work_context(&app, &session_arc).await;
+        preamble_span.finish(PerfOutcome::Success, None, None, None, None);
+        session_arc
+            .lock()
+            .await
+            .live_diagnostics
+            .phase("request_preparing", Instant::now());
     })
 }
 
@@ -2421,6 +2434,9 @@ impl TurnDepthGuard {
         }
         let mut session = self.session_arc.lock().await;
         session.turn_depth = session.turn_depth.saturating_sub(1);
+        if session.turn_depth == 0 && session.queued_user_restart_target.is_none() {
+            session.live_diagnostics.clear_accepted();
+        }
         session.queue_notify.notify_one();
         self.released = true;
         let chat_id = session.chat_id.clone();
@@ -2440,6 +2456,9 @@ impl Drop for TurnDepthGuard {
         tokio::spawn(async move {
             let mut session = session_arc.lock().await;
             session.turn_depth = session.turn_depth.saturating_sub(1);
+            if session.turn_depth == 0 && session.queued_user_restart_target.is_none() {
+                session.live_diagnostics.clear_accepted();
+            }
             if matches!(
                 session.runtime.state,
                 SessionState::Generating | SessionState::ExecutingTools
@@ -3207,6 +3226,11 @@ async fn run_stream_attempt(
     let call_ts_start = chrono::Utc::now().to_rfc3339();
     let call_start = std::time::Instant::now();
 
+    session_arc
+        .lock()
+        .await
+        .live_diagnostics
+        .phase("stream_invocation", Instant::now());
     let stream_outcome = super::stream_core::run_llm_stream_with_prepare_started(
         app.clone(),
         params,

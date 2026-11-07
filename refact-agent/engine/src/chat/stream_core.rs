@@ -2747,6 +2747,7 @@ async fn prepare_llm_stream_request(
             .check()
             .map_err(|error| LlmStreamError::new(error, partial_output_emitted))?;
     }
+    let admission_span = perf_diagnostics::span(PerfComponent::StreamProviderAdmission, None, None);
     if let Some(budget) = &params.recovery_budget {
         *pressure_permit = crate::llm::pressure::acquire_for_recovery(
             provider_bucket,
@@ -2778,6 +2779,7 @@ async fn prepare_llm_stream_request(
         .map_err(|error| LlmStreamError::new(error, false))?;
     }
 
+    admission_span.finish(PerfOutcome::Success, None, None, None, None);
     tracing::debug!(
         url = %http_parts.url,
         model = %params.llm_request.model_id,
