@@ -456,7 +456,7 @@ pub(crate) async fn create_cron_job(
     };
 
     let durable_count = match &runtime.durable_store {
-        Some(store) => store.list().await.len(),
+        Some(store) => store.try_list().await?.len(),
         None => 0,
     };
     let total_tasks = runtime.session_store.list().await.len() + durable_count;

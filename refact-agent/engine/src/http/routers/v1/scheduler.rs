@@ -112,8 +112,9 @@ pub async fn handle_v1_scheduler_cron_get(
     if let Some(store) = durable {
         tasks.extend(
             store
-                .list()
+                .try_list()
                 .await
+                .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?
                 .into_iter()
                 .map(|task| task_response(task, now_ms, tz)),
         );
@@ -161,19 +162,35 @@ pub async fn handle_v1_scheduler_cron_patch(
     Json(request): Json<CronUpdateRequest>,
 ) -> Result<Json<CronUpdateResponse>, ScratchError> {
     let now_ms = unix_now_ms();
-    let (store, mut task) = find_task_store(&app, &id).await?;
-    apply_update(&mut task, request, now_ms)
-        .map_err(|error| ScratchError::new(StatusCode::BAD_REQUEST, error))?;
-    if !store
-        .replace(task.clone())
-        .await
-        .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?
-    {
-        return Err(ScratchError::new(
-            StatusCode::BAD_REQUEST,
-            format!("Scheduled task `{id}` not found"),
-        ));
-    }
+    let (store, _) = find_task_store(&app, &id).await?;
+    let (validation_tx, mut validation_rx) = tokio::sync::oneshot::channel();
+    let result = store
+        .mutate(
+            &id,
+            Box::new(move |task| match apply_update(task, request, now_ms) {
+                Ok(()) => Ok(()),
+                Err(error) => {
+                    let _ = validation_tx.send(error.clone());
+                    Err(error)
+                }
+            }),
+        )
+        .await;
+    let task = result
+        .map_err(|error| {
+            let status = if validation_rx.try_recv().is_ok() {
+                StatusCode::BAD_REQUEST
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            };
+            ScratchError::new(status, error)
+        })?
+        .ok_or_else(|| {
+            ScratchError::new(
+                StatusCode::BAD_REQUEST,
+                format!("Scheduled task `{id}` not found"),
+            )
+        })?;
     crate::scheduler::runner_change_notify().notify_waiters();
     let human_schedule = human_schedule_for_trigger(&task.trigger);
     Ok(Json(CronUpdateResponse {
@@ -188,18 +205,24 @@ pub async fn handle_v1_scheduler_cron_run(
     State(app): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<CronRunResponse>, ScratchError> {
-    let (store, mut task) = find_task_store(&app, &id).await?;
-    task.trigger_at_ms = Some(unix_now_ms());
-    if !store
-        .replace(task.clone())
+    let (store, _) = find_task_store(&app, &id).await?;
+    let now_ms = unix_now_ms();
+    let task = store
+        .mutate(
+            &id,
+            Box::new(move |task| {
+                task.trigger_at_ms = Some(now_ms);
+                Ok(())
+            }),
+        )
         .await
         .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?
-    {
-        return Err(ScratchError::new(
-            StatusCode::BAD_REQUEST,
-            format!("Scheduled task `{id}` not found"),
-        ));
-    }
+        .ok_or_else(|| {
+            ScratchError::new(
+                StatusCode::BAD_REQUEST,
+                format!("Scheduled task `{id}` not found"),
+            )
+        })?;
     crate::scheduler::runner_change_notify().notify_waiters();
     Ok(Json(CronRunResponse {
         id: task.id,
@@ -259,7 +282,7 @@ async fn create_http_cron_job(
 
     let session_store = session_cron_store();
     let durable_count = match &durable_store {
-        Some(store) => store.list().await.len(),
+        Some(store) => store.try_list().await?.len(),
         None => 0,
     };
     let total_tasks = session_store.list().await.len() + durable_count;
@@ -393,7 +416,11 @@ async fn find_task_store(
         .await
         .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     if let Some(store) = durable {
-        if let Some(task) = store.get(id).await {
+        if let Some(task) = store
+            .try_get(id)
+            .await
+            .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?
+        {
             return Ok((store, task));
         }
     }

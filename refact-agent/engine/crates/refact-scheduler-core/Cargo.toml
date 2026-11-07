@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+fs2 = "0.4.3"
 refact-core = { path = "../refact-core" }
 async-trait.workspace = true
 chrono.workspace = true
@@ -13,6 +14,7 @@ regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
+tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]

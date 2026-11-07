@@ -88,14 +88,17 @@ impl CronUpdateRuntime {
         let input = CronUpdateInput::from_args(args)?;
         let session_store = self.session_store();
         let durable_store = self.durable_store(ccx).await?;
-        let (mut job, store) = load_job_store(&input.id, session_store, durable_store).await?;
+        let (job, store) = load_job_store(&input.id, session_store, durable_store).await?;
         let now_ms = self.now_ms();
 
-        apply_update(&mut job, input, now_ms)?;
+        let job = store
+            .mutate(
+                &job.id,
+                Box::new(move |job| apply_update(job, input, now_ms)),
+            )
+            .await?
+            .ok_or_else(|| format!("Scheduled task `{}` not found", job.id))?;
         let human_schedule = human_schedule_for_trigger(&job.trigger);
-        if !store.replace(job.clone()).await? {
-            return Err(format!("Scheduled task `{}` not found", job.id));
-        }
         crate::scheduler::runner_change_notify().notify_waiters();
 
         Ok((
@@ -169,11 +172,11 @@ async fn load_job_store(
     session_store: Arc<dyn CronStore>,
     durable_store: Option<Arc<dyn CronStore>>,
 ) -> Result<(Job, Arc<dyn CronStore>), String> {
-    if let Some(job) = session_store.get(id).await {
+    if let Some(job) = session_store.try_get(id).await? {
         return Ok((job, session_store));
     }
     if let Some(store) = durable_store {
-        if let Some(job) = store.get(id).await {
+        if let Some(job) = store.try_get(id).await? {
             return Ok((job, store));
         }
     }
@@ -284,16 +287,23 @@ pub(crate) async fn set_schedule_enabled(
     enabled: bool,
 ) -> Result<Value, String> {
     let runtime = CronUpdateRuntime::new(String::new());
-    let (mut job, store) = load_job_store(
+    let (job, store) = load_job_store(
         id,
         runtime.session_store(),
         runtime.durable_store(ccx).await?,
     )
     .await?;
-    set_job_enabled(&mut job, enabled, unix_now_ms());
-    if !store.replace(job.clone()).await? {
-        return Err(format!("Scheduled task `{id}` not found"));
-    }
+    let now_ms = unix_now_ms();
+    let job = store
+        .mutate(
+            &job.id,
+            Box::new(move |job| {
+                set_job_enabled(job, enabled, now_ms);
+                Ok(())
+            }),
+        )
+        .await?
+        .ok_or_else(|| format!("Scheduled task `{id}` not found"))?;
     crate::scheduler::runner_change_notify().notify_waiters();
     Ok(json!({"id": job.id, "enabled": job.enabled, "paused": !job.enabled, "updated": true}))
 }

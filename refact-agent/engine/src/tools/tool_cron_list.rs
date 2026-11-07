@@ -94,7 +94,7 @@ impl CronListRuntime {
 
         if scope == CronListScope::Durable || scope == CronListScope::All {
             if let Some(store) = self.durable_store(ccx).await? {
-                let durable_tasks = store.list().await;
+                let durable_tasks = store.try_list().await?;
                 tasks.extend(
                     durable_tasks
                         .iter()

@@ -42,7 +42,9 @@ pub async fn active_durable_cron_store(
 ) -> Result<Option<std::sync::Arc<dyn CronStore>>, String> {
     match crate::files_correction::get_active_project_path(gcx).await {
         None => Ok(None),
-        Some(path) => JsonFileCronStore::new(path)
+        Some(path) => tokio::task::spawn_blocking(move || JsonFileCronStore::new(path))
+            .await
+            .map_err(|error| format!("Scheduler storage task failed: {error}"))?
             .map(|store| Some(std::sync::Arc::new(store) as std::sync::Arc<dyn CronStore>)),
     }
 }

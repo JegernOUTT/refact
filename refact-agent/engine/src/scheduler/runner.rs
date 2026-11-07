@@ -32,7 +32,7 @@ use super::types::{
     Action, AgentTarget, CommandSpec, CronRunRecord, Delivery, Job, SchedulerConfig, Trigger,
 };
 
-const DEFAULT_SLEEP_MS: u64 = 60_000;
+const DEFAULT_SLEEP_MS: u64 = 1_000;
 const IDLE_DEFER_MS: u64 = 30_000;
 const INVALID_TARGET_DEFER_MS: u64 = 60_000;
 const DAY_MS: u64 = 24 * 60 * 60 * 1000;
@@ -103,23 +103,18 @@ impl CronRunner {
         if !runner_enabled(&gcx.scheduler_config) {
             return Ok(false);
         }
-        let mut task = store
-            .get(job_id)
-            .await
+        let task = store
+            .mutate(
+                job_id,
+                Box::new(move |task| {
+                    task.trigger_at_ms = Some(now);
+                    Ok(())
+                }),
+            )
+            .await?
             .ok_or_else(|| format!("Scheduled task {job_id} not found"))?;
-        task.trigger_at_ms = Some(now);
         let mut runner = Self::new(store.clone(), gcx);
         let fired = runner.handle_due_task(task, now).await;
-        if !fired {
-            if let Some(mut stored) = store
-                .get(job_id)
-                .await
-                .filter(|task| task.last_status.as_deref() == Some("deferred"))
-            {
-                stored.trigger_at_ms = Some(now);
-                let _ = store.replace(stored).await?;
-            }
-        }
         Ok(fired)
     }
 
@@ -140,10 +135,13 @@ impl CronRunner {
                 .iter()
                 .filter_map(|task| self.scheduled_fire_at_ms(task, now))
                 .min()
-                .unwrap_or(now + DEFAULT_SLEEP_MS);
+                .unwrap_or(now + DEFAULT_SLEEP_MS)
+                .min(now + DEFAULT_SLEEP_MS);
             let sleep_until = TokioInstant::now() + Duration::from_millis(next.saturating_sub(now));
 
+            let global_change = runner_change_notify();
             tokio::select! {
+                _ = global_change.notified() => continue,
                 _ = tokio::time::sleep_until(sleep_until) => {}
                 _ = self.change_notify.notified() => continue,
                 _ = wait_for_shutdown(self.shutdown_flag.clone()) => break,
@@ -157,7 +155,13 @@ impl CronRunner {
         let now = now_ms();
         let mut missed_counts = HashMap::<String, u64>::new();
 
-        for task in self.store.list().await {
+        for selected in self.store.list().await {
+            let Some(task) = self.store.get(&selected.id).await else {
+                continue;
+            };
+            if task.is_paused() && task.trigger_at_ms.is_none() {
+                continue;
+            }
             if self.shutdown_flag.load(Ordering::Relaxed) {
                 break;
             }
@@ -184,12 +188,7 @@ impl CronRunner {
                         chat_id
                     );
                     let _ = self
-                        .record_run(
-                            &task.id,
-                            "deferred",
-                            Some("no trajectory found".into()),
-                            now,
-                        )
+                        .record_run(&task, "deferred", Some("no trajectory found".into()), now)
                         .await;
                     self.defer_invalid_target_task(&task, now);
                     continue;
@@ -202,7 +201,7 @@ impl CronRunner {
                     if let Some(chat_id) = chat_id {
                         *missed_counts.entry(chat_id).or_default() += 1;
                     }
-                    if let Err(error) = self.store.remove(&task.id).await {
+                    if let Err(error) = self.remove_completed_task(&task).await {
                         tracing::warn!(
                             "failed to remove caught-up scheduled task {}: {}",
                             task.id,
@@ -212,20 +211,13 @@ impl CronRunner {
                 }
                 Ok(false) => {
                     let _ = self
-                        .record_run(
-                            &task.id,
-                            "deferred",
-                            Some("delivery not accepted".into()),
-                            now,
-                        )
+                        .record_run(&task, "deferred", Some("delivery not accepted".into()), now)
                         .await;
                     self.defer_task(&task, now);
                 }
                 Err(error) => {
                     tracing::warn!("failed to catch up scheduled task {}: {}", task.id, error);
-                    let _ = self
-                        .record_run(&task.id, "deferred", Some(error), now)
-                        .await;
+                    let _ = self.record_run(&task, "deferred", Some(error), now).await;
                     self.defer_task(&task, now);
                 }
             }
@@ -237,39 +229,8 @@ impl CronRunner {
     }
 
     async fn resume_recurring_task(&self, task: &Job, now: u64) {
-        if !matches!(
-            task.trigger,
-            Trigger::Cron { .. } | Trigger::Interval { .. }
-        ) {
-            return;
-        }
-        if task
-            .trigger_at_ms
-            .is_some_and(|trigger_at_ms| trigger_at_ms <= now)
-        {
-            return;
-        }
-        let from_ms = task.last_fired_at_ms.unwrap_or(task.created_at_ms);
-        let Some(state) = recurring_missed_grace_state(
-            task,
-            from_ms,
-            now,
-            scheduler_timezone(),
-            self.missed_grace_config(),
-        ) else {
-            return;
-        };
-        if state.due_ms.is_some() && !state.should_fire {
-            let Some(advance_to_ms) = state.advance_last_fired_at_ms else {
-                return;
-            };
-            if let Err(error) = self
-                .store
-                .update_fired(&task.id, advance_to_ms, task.fire_count)
-                .await
-            {
-                tracing::warn!("failed to resume scheduled task {}: {}", task.id, error);
-            }
+        if let Err(error) = self.fast_forward_recurring_if_missed(task, now).await {
+            tracing::warn!("failed to resume scheduled task {}: {}", task.id, error);
         }
     }
 
@@ -305,7 +266,13 @@ impl CronRunner {
 
         let mut handles = Vec::new();
         let max_concurrent_runs = self.gcx.scheduler_config.max_concurrent_runs.max(1);
-        for task in due_tasks {
+        for selected in due_tasks {
+            let Some(task) = self.store.get(&selected.id).await else {
+                continue;
+            };
+            if !self.task_is_due(&task, now) && !self.task_needs_missed_fast_forward(&task, now) {
+                continue;
+            }
             if self.shutdown_flag.load(Ordering::Relaxed) {
                 break;
             }
@@ -370,6 +337,12 @@ impl CronRunner {
     }
 
     async fn handle_due_task(&mut self, task: Job, now: u64) -> bool {
+        let Some(task) = self.store.get(&task.id).await else {
+            return false;
+        };
+        if !self.task_is_due(&task, now) {
+            return false;
+        }
         if matches!(&task.action, Action::Command { .. }) {
             return self.handle_due_command_task(task, now).await;
         }
@@ -410,7 +383,7 @@ impl CronRunner {
                     );
                     if let Err(error) = self
                         .record_run(
-                            &task.id,
+                            &task,
                             "deferred",
                             Some("no trajectory found".to_string()),
                             now,
@@ -436,7 +409,7 @@ impl CronRunner {
                         );
                         if let Err(error) = self
                             .record_run(
-                                &task.id,
+                                &task,
                                 "deferred",
                                 Some(format!("session restore status: {status:?}")),
                                 now,
@@ -528,7 +501,7 @@ impl CronRunner {
                 } else {
                     if let Err(error) = self
                         .record_run(
-                            &task.id,
+                            &task,
                             "deferred",
                             Some("no trajectory found".to_string()),
                             now,
@@ -591,7 +564,7 @@ impl CronRunner {
         now: u64,
     ) -> DueFireOutcome {
         let error = (result.status == "error").then(|| command_record_error(&result));
-        if let Err(store_error) = self.record_run(&task.id, &result.status, error, now).await {
+        if let Err(store_error) = self.record_run(&task, &result.status, error, now).await {
             tracing::warn!(
                 "failed to record scheduled task {} status {}: {}",
                 task.id,
@@ -637,7 +610,7 @@ impl CronRunner {
     async fn fire_agent_task(&mut self, task: &Job, final_fire: bool, now: u64) -> DueFireOutcome {
         match self.fire(task, final_fire, now).await {
             Ok(true) => {
-                if let Err(error) = self.record_run(&task.id, "fired", None, now).await {
+                if let Err(error) = self.record_run(&task, "fired", None, now).await {
                     tracing::warn!(
                         "failed to record fired scheduled task {}: {}",
                         task.id,
@@ -651,7 +624,7 @@ impl CronRunner {
                 if self.record_skipped_after_advance(task, now).await {
                     return DueFireOutcome::Deferred;
                 }
-                if let Err(error) = self.record_run(&task.id, "deferred", None, now).await {
+                if let Err(error) = self.record_run(&task, "deferred", None, now).await {
                     tracing::warn!(
                         "failed to record deferred scheduled task {}: {}",
                         task.id,
@@ -663,9 +636,7 @@ impl CronRunner {
             }
             Err(error) => {
                 tracing::warn!("failed to fire scheduled task {}: {}", task.id, error);
-                if let Err(store_error) = self
-                    .record_run(&task.id, "deferred", Some(error), now)
-                    .await
+                if let Err(store_error) = self.record_run(&task, "deferred", Some(error), now).await
                 {
                     tracing::warn!(
                         "failed to record deferred task {}: {}",
@@ -681,7 +652,7 @@ impl CronRunner {
 
     async fn finish_task_after_fire(&mut self, task: &Job, final_fire: bool) {
         if final_fire {
-            match self.store.remove(&task.id).await {
+            match self.remove_completed_task(task).await {
                 Ok(true) => self.emit_auto_expired_notice(task).await,
                 Ok(false) => {
                     tracing::warn!("expired scheduled task {} was already removed", task.id);
@@ -714,7 +685,7 @@ impl CronRunner {
                 reason
             );
             if let Err(error) = self
-                .record_run(&task.id, "deferred", Some(reason.to_string()), now)
+                .record_run(&task, "deferred", Some(reason.to_string()), now)
                 .await
             {
                 tracing::warn!(
@@ -733,7 +704,7 @@ impl CronRunner {
             reason
         );
         if let Err(error) = self
-            .record_run(&task.id, "skipped", Some(reason.to_string()), now)
+            .record_run(&task, "skipped", Some(reason.to_string()), now)
             .await
         {
             tracing::warn!(
@@ -762,7 +733,7 @@ impl CronRunner {
             return false;
         }
         if let Err(store_error) = self
-            .record_run(&task.id, "error", Some(error.to_string()), now)
+            .record_run(&task, "error", Some(error.to_string()), now)
             .await
         {
             tracing::warn!(
@@ -786,7 +757,7 @@ impl CronRunner {
             }
         }
         if final_fire {
-            match self.store.remove(&task.id).await {
+            match self.remove_completed_task(task).await {
                 Ok(true) => self.emit_auto_expired_notice(task).await,
                 Ok(false) => {
                     tracing::warn!("expired scheduled task {} was already removed", task.id)
@@ -817,7 +788,7 @@ impl CronRunner {
         }
         if let Err(error) = self
             .record_run(
-                &task.id,
+                &task,
                 "skipped",
                 Some("slot advanced before enqueue".to_string()),
                 now,
@@ -841,21 +812,36 @@ impl CronRunner {
         if self.shutdown_flag.load(Ordering::Relaxed) {
             return Ok(false);
         }
-        let mut stored = match self.store.get(&task.id).await {
-            Some(stored) => stored,
-            None => return Ok(false),
-        };
         let retry_cfg = self.gcx.scheduler_config.retry.clone();
-        let Some(delay_ms) = retry_delay_ms(&retry_cfg, stored.retry_attempts) else {
+        let (scheduled_tx, scheduled_rx) = tokio::sync::oneshot::channel();
+        let stored = self
+            .store
+            .mutate(
+                &task.id,
+                Box::new(move |stored| {
+                    if stored.is_paused() {
+                        let _ = scheduled_tx.send(false);
+                        return Ok(());
+                    }
+                    if let Some(delay_ms) = retry_delay_ms(&retry_cfg, stored.retry_attempts) {
+                        stored.retry_attempts = stored.retry_attempts.saturating_add(1);
+                        stored.trigger_at_ms = Some(now.saturating_add(delay_ms));
+                        let _ = scheduled_tx.send(true);
+                    } else {
+                        let _ = scheduled_tx.send(false);
+                    }
+                    Ok(())
+                }),
+            )
+            .await?;
+        let Some(stored) = stored else {
             return Ok(false);
         };
-        stored.retry_attempts = stored.retry_attempts.saturating_add(1);
-        stored.trigger_at_ms = Some(now.saturating_add(delay_ms));
-        let next_retry_at_ms = stored.trigger_at_ms;
-        let retry_attempts = stored.retry_attempts;
-        if !self.store.replace(stored).await? {
+        if !scheduled_rx.await.unwrap_or(false) {
             return Ok(false);
         }
+        let next_retry_at_ms = stored.trigger_at_ms;
+        let retry_attempts = stored.retry_attempts;
         tracing::info!(
             task_id = %task.id,
             ?category,
@@ -867,51 +853,73 @@ impl CronRunner {
     }
 
     async fn fast_forward_recurring_if_missed(&self, task: &Job, now: u64) -> Result<bool, String> {
-        if !task.recurring || task.trigger_at_ms.is_some() || task.retry_attempts > 0 {
-            return Ok(false);
-        }
-        let from_ms = task.last_fired_at_ms.unwrap_or(task.created_at_ms);
-        let Some(state) = recurring_missed_grace_state(
-            task,
-            from_ms,
-            now,
-            scheduler_timezone(),
-            self.missed_grace_config(),
-        ) else {
-            return Ok(false);
-        };
-        if state.due_ms.is_some() && !state.should_fire {
-            let Some(advance_to_ms) = state.advance_last_fired_at_ms else {
-                return Ok(false);
-            };
-            self.store
-                .update_fired(&task.id, advance_to_ms, task.fire_count)
-                .await?;
-            return Ok(true);
-        }
-        Ok(false)
+        let grace = self.missed_grace_config();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.store
+            .mutate(
+                &task.id,
+                Box::new(move |current| {
+                    let mut advanced = false;
+                    if !current.is_paused()
+                        && current.recurring
+                        && current.trigger_at_ms.is_none()
+                        && current.retry_attempts == 0
+                    {
+                        if let Some(state) = recurring_missed_grace_state(
+                            current,
+                            current.last_fired_at_ms.unwrap_or(current.created_at_ms),
+                            now,
+                            scheduler_timezone(),
+                            grace,
+                        ) {
+                            if state.due_ms.is_some() && !state.should_fire {
+                                if let Some(at) = state.advance_last_fired_at_ms {
+                                    current.last_fired_at_ms =
+                                        Some(current.last_fired_at_ms.unwrap_or(0).max(at));
+                                    advanced = true;
+                                }
+                            }
+                        }
+                    }
+                    let _ = tx.send(advanced);
+                    Ok(())
+                }),
+            )
+            .await?;
+        Ok(rx.await.unwrap_or(false))
     }
 
     async fn record_run(
         &self,
-        job_id: &str,
+        selected: &Job,
         status: &str,
         error: Option<String>,
         now_ms: u64,
     ) -> Result<(), String> {
         record_run(
             &self.store,
-            job_id,
+            &selected.id,
             status,
             error,
             now_ms,
             self.recent_runs_cap(),
+            Some(selected.clone()),
         )
         .await
     }
 
+    async fn remove_completed_task(&self, task: &Job) -> Result<bool, String> {
+        let selected = task.clone();
+        self.store
+            .remove_if(
+                &task.id,
+                Box::new(move |current| completion_controls_match(&selected, current)),
+            )
+            .await
+    }
+
     async fn remove_task(&mut self, task: &Job) -> Result<(), String> {
-        let _ = self.store.remove(&task.id).await?;
+        let _ = self.remove_completed_task(task).await?;
         self.deferred_until_ms.remove(&task.id);
         Ok(())
     }
@@ -927,7 +935,7 @@ impl CronRunner {
     async fn defer_for_backpressure(&mut self, task: &Job, now: u64) {
         if let Err(error) = self
             .record_run(
-                &task.id,
+                &task,
                 "deferred",
                 Some("scheduler at capacity".to_string()),
                 now,
@@ -966,7 +974,12 @@ impl CronRunner {
             }
         }
         if let Some(deferred_at) = self.deferred_until_ms.get(&task.id).copied() {
-            return Some(deferred_at);
+            return Some(
+                deferred_at.max(
+                    scheduled_fire_at_ms(task, now, &self.jitter_cfg, self.missed_grace_config())
+                        .unwrap_or(deferred_at),
+                ),
+            );
         }
         if task.retry_attempts > 0 && task.trigger_at_ms.is_some() {
             return task.trigger_at_ms;
@@ -983,7 +996,11 @@ impl CronRunner {
     }
 
     fn task_needs_missed_fast_forward(&self, task: &Job, now: u64) -> bool {
-        if !task.recurring || task.trigger_at_ms.is_some() || task.retry_attempts > 0 {
+        if task.is_paused()
+            || !task.recurring
+            || task.trigger_at_ms.is_some()
+            || task.retry_attempts > 0
+        {
             return false;
         }
         recurring_missed_grace_state(
@@ -1090,29 +1107,29 @@ impl CronRunner {
     }
 
     async fn clear_delivery_error(&self, job_id: &str) -> Result<(), String> {
-        let Some(mut task) = self.store.get(job_id).await else {
-            return Ok(());
-        };
-        task.last_delivery_error = None;
-        if self.store.replace(task).await? {
-            Ok(())
-        } else {
-            Ok(())
-        }
+        self.store
+            .mutate(
+                job_id,
+                Box::new(|task| {
+                    task.last_delivery_error = None;
+                    Ok(())
+                }),
+            )
+            .await?;
+        Ok(())
     }
 
     async fn record_delivery_error(&self, job_id: &str, error: String) -> Result<(), String> {
-        let mut task = self
-            .store
-            .get(job_id)
-            .await
-            .ok_or_else(|| format!("Scheduled task {job_id} not found"))?;
-        task.last_delivery_error = Some(error);
-        if self.store.replace(task).await? {
-            Ok(())
-        } else {
-            Err(format!("Scheduled task {job_id} not found"))
-        }
+        self.store
+            .mutate(
+                job_id,
+                Box::new(move |task| {
+                    task.last_delivery_error = Some(error);
+                    Ok(())
+                }),
+            )
+            .await?;
+        Ok(())
     }
 
     async fn deliver_command_result(
@@ -1233,9 +1250,10 @@ pub async fn spawn_from_active_project(gcx: SharedGlobalContext) -> Vec<JoinHand
 
     let mut handles = vec![spawn(session_cron_store(), gcx.clone())];
     if let Some(project_root) = get_active_project_path(gcx.clone()).await {
-        match JsonFileCronStore::new(project_root) {
-            Ok(store) => handles.push(spawn(Arc::new(store), gcx)),
-            Err(error) => tracing::warn!("durable scheduler runner disabled: {error}"),
+        match tokio::task::spawn_blocking(move || JsonFileCronStore::new(project_root)).await {
+            Ok(Ok(store)) => handles.push(spawn(Arc::new(store), gcx)),
+            Ok(Err(error)) => tracing::warn!("durable scheduler runner disabled: {error}"),
+            Err(error) => tracing::warn!("durable scheduler storage task failed: {error}"),
         }
     }
     handles
@@ -1625,9 +1643,10 @@ pub(crate) fn scheduled_fire_at_ms(
     } else {
         None
     };
-    if recurring_state
-        .as_ref()
-        .is_some_and(|state| state.due_ms.is_some() && !state.should_fire)
+    if task.trigger_at_ms.is_none()
+        && recurring_state
+            .as_ref()
+            .is_some_and(|state| state.due_ms.is_some() && !state.should_fire)
     {
         return recurring_state.map(|state| state.next_future_ms);
     }
@@ -1665,6 +1684,21 @@ pub(crate) fn scheduled_fire_at_ms(
     }
 }
 
+fn completion_controls_match(selected: &Job, current: &Job) -> bool {
+    selected.id == current.id
+        && selected.description == current.description
+        && selected.enabled == current.enabled
+        && selected.paused_at_ms == current.paused_at_ms
+        && selected.created_at_ms == current.created_at_ms
+        && selected.recurring == current.recurring
+        && selected.trigger == current.trigger
+        && selected.action == current.action
+        && selected.delivery == current.delivery
+        && selected.push == current.push
+        && selected.auto_expire_after_ms == current.auto_expire_after_ms
+        && (current.trigger_at_ms.is_none() || current.trigger_at_ms == selected.trigger_at_ms)
+}
+
 async fn record_run(
     store: &Arc<dyn CronStore>,
     job_id: &str,
@@ -1672,63 +1706,79 @@ async fn record_run(
     error: Option<String>,
     now_ms: u64,
     recent_runs_cap: usize,
+    selected: Option<Job>,
 ) -> Result<(), String> {
-    let mut task = store
-        .get(job_id)
-        .await
-        .ok_or_else(|| format!("Scheduled task {job_id} not found"))?;
-    let already_advanced = job_was_advanced_before_fire(&task, now_ms);
-    if already_advanced {
-        if let Some(run) = task
-            .recent_runs
-            .last_mut()
-            .filter(|run| run.at_ms == now_ms)
-        {
-            run.status = status.to_string();
-            run.error = error.clone();
-        } else {
-            task.recent_runs.push(CronRunRecord {
-                at_ms: now_ms,
-                status: status.to_string(),
-                error: error.clone(),
-            });
-            cap_recent_runs(&mut task, recent_runs_cap);
-        }
-    } else {
-        task.recent_runs.push(CronRunRecord {
-            at_ms: now_ms,
-            status: status.to_string(),
-            error: error.clone(),
-        });
-        cap_recent_runs(&mut task, recent_runs_cap);
-    }
-    task.last_status = Some(status.to_string());
-    task.last_error = error;
-    // A rejected agent prompt remains the same outstanding fire even after a
-    // restart or a long backoff. Do not let missed-run grace fast-forward it.
-    if status == "deferred" && matches!(task.action, Action::AgentTurn { .. }) {
-        task.trigger_at_ms.get_or_insert(now_ms);
-    }
-    if status == "fired" || status == "error" {
-        if !already_advanced {
-            task.last_fired_at_ms = Some(now_ms);
-            task.fire_count = task.fire_count.saturating_add(1);
-        }
-        if status == "fired" {
-            task.retry_attempts = 0;
-        }
-        if task
-            .trigger_at_ms
-            .is_some_and(|trigger_at_ms| trigger_at_ms <= now_ms)
-        {
-            task.trigger_at_ms = None;
-        }
-    }
-    if store.replace(task).await? {
-        Ok(())
-    } else {
-        Err(format!("Scheduled task {job_id} not found"))
-    }
+    let status = status.to_string();
+    store
+        .mutate(
+            job_id,
+            Box::new(move |task| {
+                let same_occurrence = selected.as_ref().is_none_or(|selected| {
+                    selected.id == task.id
+                        && selected.created_at_ms == task.created_at_ms
+                        && selected.recurring == task.recurring
+                        && selected.trigger == task.trigger
+                        && (task.trigger_at_ms.is_none()
+                            || selected.trigger_at_ms == task.trigger_at_ms)
+                });
+                let already_advanced =
+                    same_occurrence && job_was_advanced_before_fire(task, now_ms);
+                if already_advanced {
+                    if let Some(run) = task
+                        .recent_runs
+                        .last_mut()
+                        .filter(|run| run.at_ms == now_ms)
+                    {
+                        run.status = status.to_string();
+                        run.error = error.clone();
+                    } else {
+                        task.recent_runs.push(CronRunRecord {
+                            at_ms: now_ms,
+                            status: status.to_string(),
+                            error: error.clone(),
+                        });
+                        cap_recent_runs(task, recent_runs_cap);
+                    }
+                } else {
+                    task.recent_runs.push(CronRunRecord {
+                        at_ms: now_ms,
+                        status: status.to_string(),
+                        error: error.clone(),
+                    });
+                    cap_recent_runs(task, recent_runs_cap);
+                }
+                task.last_status = Some(status.to_string());
+                task.last_error = error;
+                // A rejected agent prompt remains the same outstanding fire even after a
+                // restart or a long backoff. Do not let missed-run grace fast-forward it.
+                if status == "deferred"
+                    && same_occurrence
+                    && !task.is_paused()
+                    && matches!(task.action, Action::AgentTurn { .. })
+                {
+                    task.trigger_at_ms.get_or_insert(now_ms);
+                }
+                if status == "fired" || status == "error" {
+                    if same_occurrence && !already_advanced {
+                        task.last_fired_at_ms = Some(now_ms);
+                        task.fire_count = task.fire_count.saturating_add(1);
+                    }
+                    if same_occurrence && status == "fired" {
+                        task.retry_attempts = 0;
+                    }
+                    if same_occurrence
+                        && task
+                            .trigger_at_ms
+                            .is_some_and(|trigger_at_ms| trigger_at_ms <= now_ms)
+                    {
+                        task.trigger_at_ms = None;
+                    }
+                }
+                Ok(())
+            }),
+        )
+        .await?;
+    Ok(())
 }
 
 fn cap_recent_runs(task: &mut Job, cap: usize) {
@@ -2968,6 +3018,225 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn durable_runner_refreshes_selected_controls_and_discovers_new_jobs() {
+        let now = now_ms();
+        let temp = tempfile::tempdir().unwrap();
+        let store: Arc<dyn CronStore> = Arc::new(JsonFileCronStore::new(temp.path()).unwrap());
+        let controls = JsonFileCronStore::new(temp.path()).unwrap();
+        let (_workspace, gcx) = gcx_with_session(SessionState::Idle).await;
+        let mut runner = CronRunner::new(store.clone(), gcx.clone());
+        for id in ["deleted", "paused", "rescheduled"] {
+            let selected = due_task(id, now);
+            controls.add(selected.clone()).await.unwrap();
+            if id == "deleted" {
+                controls.remove(id).await.unwrap();
+            } else {
+                controls
+                    .mutate(
+                        id,
+                        Box::new(move |job| {
+                            if id == "paused" {
+                                job.enabled = false;
+                                job.paused_at_ms = Some(now);
+                            } else {
+                                job.set_trigger(Trigger::Once {
+                                    at_ms: now + 60_000,
+                                });
+                            }
+                            Ok(())
+                        }),
+                    )
+                    .await
+                    .unwrap();
+            }
+            assert!(
+                !runner.handle_due_task(selected, now).await,
+                "stale selection {id} fired"
+            );
+        }
+        {
+            let session = session(&gcx).await;
+            let session = session.lock().await;
+            assert!(session.messages.is_empty());
+            assert!(session.pending_deliveries.is_empty());
+        }
+        controls.add(due_task("new_job", now)).await.unwrap();
+        runner.fire_due_tasks(now).await;
+        assert_eq!(controls.get("new_job").await.unwrap().fire_count, 1);
+        assert_eq!(controls.get("paused").await.unwrap().fire_count, 0);
+        assert_eq!(controls.get("rescheduled").await.unwrap().fire_count, 0);
+        assert!(controls.get("deleted").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn old_completion_does_not_delete_rescheduled_one_shot() {
+        let now = now_ms();
+        let store: Arc<dyn CronStore> = Arc::new(InMemoryCronStore::new());
+        let selected = one_shot_task("rescheduled_completion", now);
+        store.add(selected.clone()).await.unwrap();
+        let (_workspace, gcx) = gcx_with_session(SessionState::Idle).await;
+        let mut runner = CronRunner::new(store.clone(), gcx);
+        store
+            .mutate(
+                &selected.id,
+                Box::new(move |job| {
+                    job.set_trigger(Trigger::Once {
+                        at_ms: now + 60_000,
+                    });
+                    Ok(())
+                }),
+            )
+            .await
+            .unwrap();
+        runner
+            .record_run(&selected, "fired", None, now)
+            .await
+            .unwrap();
+        runner.finish_task_after_fire(&selected, false).await;
+        let current = store.get(&selected.id).await.unwrap();
+        assert_eq!(
+            current.trigger,
+            Trigger::Once {
+                at_ms: now + 60_000
+            }
+        );
+        assert_eq!(current.last_fired_at_ms, None);
+        assert_eq!(current.fire_count, 0);
+        assert_eq!(current.recent_runs.last().unwrap().status, "fired");
+        assert_eq!(
+            runner.scheduled_fire_at_ms(&current, now),
+            Some(now + 60_000)
+        );
+        runner.fire_due_tasks(now + 59_999).await;
+        assert_no_fire(&runner.gcx).await;
+        runner.fire_due_tasks(now + 60_000).await;
+        assert!(store.get(&selected.id).await.is_none());
+        runner.fire_due_tasks(now + 120_000).await;
+        let session = session(&runner.gcx).await;
+        let session = session.lock().await;
+        assert_eq!(
+            session.messages.iter().filter(|m| m.role == "user").count(),
+            1
+        );
+        let fire = event_message(&session, "cron_fire", &selected.id);
+        assert_eq!(fire.extra["event"]["payload"]["fire_count"], json!(1));
+    }
+
+    #[tokio::test]
+    async fn old_completion_preserves_new_run_now_marker() {
+        let now = now_ms();
+        let store: Arc<dyn CronStore> = Arc::new(InMemoryCronStore::new());
+        let selected = due_task("new_run_now_completion", now);
+        store.add(selected.clone()).await.unwrap();
+        let (_workspace, gcx) = gcx_with_session(SessionState::Idle).await;
+        let runner = CronRunner::new(store.clone(), gcx);
+        store
+            .mutate(
+                &selected.id,
+                Box::new(move |job| {
+                    job.trigger_at_ms = Some(now);
+                    Ok(())
+                }),
+            )
+            .await
+            .unwrap();
+        runner
+            .record_run(&selected, "fired", None, now)
+            .await
+            .unwrap();
+        let current = store.get(&selected.id).await.unwrap();
+        assert_eq!(current.trigger_at_ms, Some(now));
+        assert_eq!(current.last_fired_at_ms, selected.last_fired_at_ms);
+        assert_eq!(current.fire_count, 0);
+        assert!(runner.task_is_due(&current, now));
+    }
+
+    #[tokio::test]
+    async fn missed_advance_uses_current_controls_and_preserves_newer_count() {
+        let now = now_ms();
+        let store: Arc<dyn CronStore> = Arc::new(InMemoryCronStore::new());
+        let mut selected = interval_task("stale_advance", now, 60_000);
+        selected.last_fired_at_ms = Some(now - 600_000);
+        store.add(selected.clone()).await.unwrap();
+        let (_workspace, gcx) = gcx_with_session(SessionState::Idle).await;
+        let runner = CronRunner::new(store.clone(), gcx);
+        store
+            .mutate(
+                &selected.id,
+                Box::new(move |job| {
+                    job.enabled = false;
+                    job.fire_count = 9;
+                    job.last_fired_at_ms = Some(now);
+                    Ok(())
+                }),
+            )
+            .await
+            .unwrap();
+        assert!(!runner
+            .fast_forward_recurring_if_missed(&selected, now)
+            .await
+            .unwrap());
+        let current = store.get(&selected.id).await.unwrap();
+        assert_eq!(current.last_fired_at_ms, Some(now));
+        assert_eq!(current.fire_count, 9);
+        store
+            .mutate(
+                &selected.id,
+                Box::new(move |job| {
+                    job.enabled = true;
+                    job.last_fired_at_ms = Some(now - 600_000);
+                    Ok(())
+                }),
+            )
+            .await
+            .unwrap();
+        assert!(runner
+            .fast_forward_recurring_if_missed(&selected, now)
+            .await
+            .unwrap());
+        assert_eq!(store.get(&selected.id).await.unwrap().fire_count, 9);
+    }
+
+    #[tokio::test]
+    async fn durable_completion_preserves_edits_and_deleted_jobs() {
+        let now = now_ms();
+        let temp = tempfile::tempdir().unwrap();
+        let store: Arc<dyn CronStore> = Arc::new(JsonFileCronStore::new(temp.path()).unwrap());
+        let controls = JsonFileCronStore::new(temp.path()).unwrap();
+        controls.add(due_task("completion", now)).await.unwrap();
+        let selected = controls.get("completion").await.unwrap();
+        controls
+            .mutate(
+                "completion",
+                Box::new(move |job| {
+                    job.enabled = false;
+                    job.paused_at_ms = Some(now);
+                    if let Action::AgentTurn {
+                        prompt, ..
+                    } = &mut job.action
+                    {
+                        *prompt = "edited prompt".into();
+                    }
+                    Ok(())
+                }),
+            )
+            .await
+            .unwrap();
+        record_run(&store, "completion", "fired", None, now, 20, Some(selected))
+            .await
+            .unwrap();
+        let job = controls.get("completion").await.unwrap();
+        assert!(!job.enabled);
+        assert_eq!(job.prompt(), Some("edited prompt"));
+        assert_eq!(job.fire_count, 1);
+        controls.remove("completion").await.unwrap();
+        record_run(&store, "completion", "fired", None, now, 20, None)
+            .await
+            .unwrap();
+        assert!(controls.list().await.is_empty());
+    }
+
+    #[tokio::test]
     async fn record_run_caps_history_and_updates_status() {
         let now = now_ms();
         let store: Arc<dyn CronStore> = Arc::new(InMemoryCronStore::new());
@@ -2982,9 +3251,17 @@ mod tests {
             .collect();
         store.add(task).await.unwrap();
 
-        record_run(&store, "history_cap", "fired", None, now, RECENT_RUNS_CAP)
-            .await
-            .unwrap();
+        record_run(
+            &store,
+            "history_cap",
+            "fired",
+            None,
+            now,
+            RECENT_RUNS_CAP,
+            None,
+        )
+        .await
+        .unwrap();
         record_run(
             &store,
             "history_cap",
@@ -2992,6 +3269,7 @@ mod tests {
             Some("busy".to_string()),
             now + 1,
             RECENT_RUNS_CAP,
+            None,
         )
         .await
         .unwrap();
