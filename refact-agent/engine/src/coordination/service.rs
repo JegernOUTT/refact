@@ -191,6 +191,8 @@ pub async fn visible_projection(
     app: &AppState,
     caller: &WorkCaller,
 ) -> Result<(WorkCatalog, String), WorkError> {
+    #[cfg(test)]
+    let _ = PROJECTION_BUILDS.try_with(|count| count.set(count.get() + 1));
     let before = match &caller.model {
         Some(model) => privacy_guard::policy_key(&app.gcx, model)?,
         None => "operator".into(),
@@ -231,6 +233,11 @@ pub async fn visible_projection(
         }
     }
     Ok((catalog, before))
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    pub(super) static PROJECTION_BUILDS: std::cell::Cell<usize>;
 }
 
 fn row_path(row: &WorkRow, raw: &str) -> Option<PathBuf> {
@@ -658,6 +665,15 @@ pub async fn overview(
     caller: &WorkCaller,
     mut request: WorkOverviewRequest,
 ) -> Result<WorkOverview, WorkError> {
+    let selected = overview_selection(caller, &mut request)?;
+    let (catalog, disclosure) = visible_projection(app, caller).await?;
+    overview_selected(app, caller, request, selected, &catalog, &disclosure)
+}
+
+fn overview_selection(
+    caller: &WorkCaller,
+    request: &mut WorkOverviewRequest,
+) -> Result<Option<PathBuf>, WorkError> {
     if request.scope == OverviewScope::Root {
         request.root =
             Some(caller.root_chat_id.clone().ok_or_else(|| {
@@ -666,12 +682,32 @@ pub async fn overview(
     } else if request.root.is_some() {
         return Err(WorkError::invalid("root is not a project-scope filter"));
     }
-    let selected = request
+    request
         .path
         .as_ref()
         .map(|path| resolve_path(path, caller))
-        .transpose()?;
-    let (catalog, disclosure) = visible_projection(app, caller).await?;
+        .transpose()
+}
+
+pub(super) fn overview_from_projection(
+    app: &AppState,
+    caller: &WorkCaller,
+    mut request: WorkOverviewRequest,
+    catalog: &WorkCatalog,
+    disclosure: &str,
+) -> Result<WorkOverview, WorkError> {
+    let selected = overview_selection(caller, &mut request)?;
+    overview_selected(app, caller, request, selected, catalog, disclosure)
+}
+
+fn overview_selected(
+    app: &AppState,
+    caller: &WorkCaller,
+    request: WorkOverviewRequest,
+    selected: Option<PathBuf>,
+    catalog: &WorkCatalog,
+    disclosure: &str,
+) -> Result<WorkOverview, WorkError> {
     let settings = crate::file_activity::settings();
     let recent = now_ms().saturating_sub(settings.recent_window_secs.saturating_mul(1000));
     let rows: Vec<_> = catalog
@@ -705,7 +741,7 @@ pub async fn overview(
     page(
         app,
         caller,
-        disclosure,
+        disclosure.to_owned(),
         &request,
         WorkSnapshot {
             rows,
@@ -715,7 +751,7 @@ pub async fn overview(
             ..Default::default()
         },
         digest(&(&filter, &request.root, &caller.checkout_root))?,
-        &catalog,
+        catalog,
     )
     .map(|(page, _)| page)
 }

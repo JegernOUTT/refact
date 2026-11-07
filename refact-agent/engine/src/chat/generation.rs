@@ -584,8 +584,12 @@ pub fn prepare_session_preamble_and_knowledge(
         let preamble_span =
             perf_diagnostics::span(PerfComponent::StreamPreamblePrepare, None, None);
         ensure_session_preamble_inner(app.clone(), session_arc.clone()).await;
+        let knowledge_span = perf_diagnostics::span(PerfComponent::PreambleKnowledge, None, None);
         prepare_session_knowledge_inner(app.clone(), session_arc.clone()).await;
+        knowledge_span.finish(PerfOutcome::Success, None, None, None, None);
+        let work_span = perf_diagnostics::span(PerfComponent::PreambleWorkContext, None, None);
         prepare_project_work_context(&app, &session_arc).await;
+        work_span.finish(PerfOutcome::Success, None, None, None, None);
         preamble_span.finish(PerfOutcome::Success, None, None, None, None);
         session_arc
             .lock()
@@ -644,11 +648,13 @@ async fn ensure_session_preamble_inner(app: AppState, session_arc: Arc<AMutex<Ch
     let mut mcp_lazy_total: Option<usize> = None;
 
     if needs_preamble {
+        let caps_span = perf_diagnostics::span(PerfComponent::PreambleCaps, None, None);
         let caps = match crate::global_context::try_load_caps_quickly_if_not_present(gcx.clone(), 0)
             .await
         {
             Ok(caps) => caps,
             Err(e) => {
+                caps_span.finish(PerfOutcome::Failure, None, None, None, None);
                 warn!("Failed to load caps for preamble: {}", e.message);
                 return;
             }
@@ -656,15 +662,18 @@ async fn ensure_session_preamble_inner(app: AppState, session_arc: Arc<AMutex<Ch
         let model_rec = match crate::caps::resolve_chat_model(caps.clone(), &thread.model) {
             Ok(rec) => rec,
             Err(e) => {
+                caps_span.finish(PerfOutcome::Failure, None, None, None, None);
                 warn!("Failed to resolve model for preamble: {}", e);
                 return;
             }
         };
+        caps_span.finish(PerfOutcome::Success, None, None, None, None);
 
         let execution_scope = thread
             .worktree
             .as_ref()
             .map(|worktree| worktree.root.to_string_lossy().into_owned());
+        let catalog_span = perf_diagnostics::span(PerfComponent::PreambleCatalog, None, None);
         let tools_for_mode = app
             .tool_registry
             .acquire_tool_catalog(
@@ -676,6 +685,7 @@ async fn ensure_session_preamble_inner(app: AppState, session_arc: Arc<AMutex<Ch
         let tools_for_mode =
             crate::tools::tools_list::filter_tool_catalog_for_chat(&app, &chat_id, tools_for_mode)
                 .await;
+        catalog_span.finish(PerfOutcome::Success, None, None, None, None);
         let tools_for_mode = &tools_for_mode.index;
         if tools_for_mode.mcp_lazy_mode {
             mcp_lazy_total = Some(tools_for_mode.mcp_total_count);
@@ -697,6 +707,7 @@ async fn ensure_session_preamble_inner(app: AppState, session_arc: Arc<AMutex<Ch
             worktree: thread.worktree.clone(),
         };
 
+        let prompt_span = perf_diagnostics::span(PerfComponent::PreamblePrompt, None, None);
         let messages = {
             let session = session_arc.lock().await;
             match refact_core::active_context::active_context(&session.messages) {
@@ -720,6 +731,7 @@ async fn ensure_session_preamble_inner(app: AppState, session_arc: Arc<AMutex<Ch
                 &thread.model,
             )
             .await;
+        prompt_span.finish(PerfOutcome::Success, None, None, None, None);
 
         let mut session = session_arc.lock().await;
         session.skills_available_count = skills_info.available_count;

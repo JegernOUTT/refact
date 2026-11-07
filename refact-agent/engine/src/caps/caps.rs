@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures::{stream, StreamExt};
 use indexmap::IndexMap;
 use tracing::{info, warn};
 
@@ -18,6 +19,7 @@ use crate::caps::model_caps::{get_model_caps, resolve_model_caps, ModelCapabilit
 use refact_core::provider_types::AvailableModel;
 
 const PROVIDER_MODEL_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(20);
+const PROVIDER_MODEL_DISCOVERY_CONCURRENCY: usize = 4;
 pub(crate) const MODEL_BASE_PROVIDER_HEADER: &str = "x-refact-internal-base-provider";
 
 fn resolve_image_token_mode(configured: ImageTokenMode, wire_format: WireFormat) -> ImageTokenMode {
@@ -421,46 +423,26 @@ fn build_chat_model_record(
     }
 }
 
-pub async fn populate_chat_models_from_providers(
-    caps: &mut CodeAssistantCaps,
-    gcx: Arc<GlobalContext>,
-) {
-    let model_caps = &*caps.model_caps;
+struct DiscoveredProvider {
+    index: usize,
+    provider: Box<dyn crate::providers::traits::ProviderTrait>,
+    runtime: crate::providers::traits::ProviderRuntime,
+    base_provider_names: Vec<String>,
+    models: Vec<AvailableModel>,
+}
 
-    let (http_client, providers_snapshot) = {
-        let registry = gcx.providers.read().await;
-        let snapshot: Vec<Box<dyn crate::providers::traits::ProviderTrait>> =
-            registry.iter().map(|(_, p)| p.clone_box()).collect();
-        (gcx.http_client.clone(), snapshot)
-    };
-
-    for provider in &providers_snapshot {
-        let runtime = match provider.build_runtime() {
-            Ok(r) => r,
-            Err(e) => {
-                warn!(
-                    "Failed to build runtime for provider '{}': {}",
-                    provider.name(),
-                    e
-                );
-                continue;
-            }
-        };
-
-        if !runtime.enabled {
-            continue;
-        }
-
-        let mut base_provider_names = vec![provider.base_provider_name().to_string()];
-        if runtime.name != provider.name() {
-            base_provider_names.push(provider.name().to_string());
-        }
-        base_provider_names.sort();
-        base_provider_names.dedup();
-
-        let available_models = match tokio::time::timeout(
+fn discover_provider(
+    index: usize,
+    provider: Box<dyn crate::providers::traits::ProviderTrait>,
+    runtime: crate::providers::traits::ProviderRuntime,
+    base_provider_names: Vec<String>,
+    http_client: reqwest::Client,
+    model_caps: Arc<HashMap<String, ModelCapabilities>>,
+) -> futures::future::BoxFuture<'static, DiscoveredProvider> {
+    Box::pin(async move {
+        let models = match tokio::time::timeout(
             PROVIDER_MODEL_DISCOVERY_TIMEOUT,
-            provider.fetch_available_models(&http_client, model_caps),
+            provider.fetch_available_models(&http_client, &model_caps),
         )
         .await
         {
@@ -470,10 +452,97 @@ pub async fn populate_chat_models_from_providers(
                     "Timed out fetching available models for provider '{}'; using model_caps fallback",
                     provider.name()
                 );
-                provider.get_available_models_from_caps(model_caps)
+                provider.get_available_models_from_caps(&model_caps)
             }
         };
+        DiscoveredProvider {
+            index,
+            provider,
+            runtime,
+            base_provider_names,
+            models,
+        }
+    })
+}
 
+fn discover_provider_models(
+    providers: Vec<Box<dyn crate::providers::traits::ProviderTrait>>,
+    http_client: reqwest::Client,
+    model_caps: Arc<HashMap<String, ModelCapabilities>>,
+) -> futures::future::BoxFuture<'static, Vec<DiscoveredProvider>> {
+    Box::pin(async move {
+        let mut enabled_providers = Vec::new();
+        for provider in providers {
+            let runtime = match provider.build_runtime() {
+                Ok(r) => r,
+                Err(e) => {
+                    warn!(
+                        "Failed to build runtime for provider '{}': {}",
+                        provider.name(),
+                        e
+                    );
+                    continue;
+                }
+            };
+
+            if !runtime.enabled {
+                continue;
+            }
+
+            let mut base_provider_names = vec![provider.base_provider_name().to_string()];
+            if runtime.name != provider.name() {
+                base_provider_names.push(provider.name().to_string());
+            }
+            base_provider_names.sort();
+            base_provider_names.dedup();
+
+            enabled_providers.push((provider, runtime, base_provider_names));
+        }
+
+        let mut discoveries = Vec::with_capacity(enabled_providers.len());
+        for (index, (provider, runtime, base_provider_names)) in
+            enabled_providers.into_iter().enumerate()
+        {
+            discoveries.push(discover_provider(
+                index,
+                provider,
+                runtime,
+                base_provider_names,
+                http_client.clone(),
+                model_caps.clone(),
+            ));
+        }
+        let mut discovered = stream::iter(discoveries)
+            .buffer_unordered(PROVIDER_MODEL_DISCOVERY_CONCURRENCY)
+            .collect::<Vec<_>>()
+            .await;
+        discovered.sort_by_key(|provider| provider.index);
+        discovered
+    })
+}
+
+pub async fn populate_chat_models_from_providers(
+    caps: &mut CodeAssistantCaps,
+    gcx: Arc<GlobalContext>,
+) {
+    let (http_client, providers_snapshot) = {
+        let registry = gcx.providers.read().await;
+        let snapshot: Vec<Box<dyn crate::providers::traits::ProviderTrait>> =
+            registry.iter().map(|(_, p)| p.clone_box()).collect();
+        (gcx.http_client.clone(), snapshot)
+    };
+    let discovered =
+        discover_provider_models(providers_snapshot, http_client, caps.model_caps.clone()).await;
+    let model_caps = &*caps.model_caps;
+
+    for DiscoveredProvider {
+        provider,
+        runtime,
+        base_provider_names,
+        models: available_models,
+        ..
+    } in discovered
+    {
         let runtime_credential = provider.credential();
 
         for model in available_models {
@@ -1245,6 +1314,274 @@ pub fn resolve_completion_model<'a>(
 mod tests {
     use super::*;
     use indexmap::IndexMap;
+    use crate::providers::custom::CustomProvider;
+    use crate::providers::traits::{ProviderRuntime, ProviderTrait};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::sync::{mpsc, Notify};
+
+    #[derive(Clone)]
+    struct DiscoveryProvider {
+        name: String,
+        inner: CustomProvider,
+        release: Arc<Notify>,
+        started: mpsc::UnboundedSender<String>,
+        active: Arc<AtomicUsize>,
+        peak: Arc<AtomicUsize>,
+        invalid_runtime: bool,
+    }
+
+    struct ActiveDiscovery(Arc<AtomicUsize>);
+
+    impl Drop for ActiveDiscovery {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ProviderTrait for DiscoveryProvider {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        fn display_name(&self) -> &str {
+            &self.name
+        }
+        fn base_provider_name(&self) -> &str {
+            "custom"
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+        fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+            self
+        }
+        fn clone_box(&self) -> Box<dyn ProviderTrait> {
+            Box::new(self.clone())
+        }
+        fn default_wire_format(&self) -> WireFormat {
+            self.inner.default_wire_format()
+        }
+        fn model_filter_regex(&self) -> Option<&'static str> {
+            None
+        }
+        fn provider_schema(&self) -> &'static str {
+            self.inner.provider_schema()
+        }
+        fn provider_settings_apply(&mut self, yaml: serde_yaml::Value) -> Result<(), String> {
+            self.inner.provider_settings_apply(yaml)
+        }
+        fn provider_settings_as_json(&self) -> serde_json::Value {
+            self.inner.provider_settings_as_json()
+        }
+        fn build_runtime(&self) -> Result<ProviderRuntime, String> {
+            if self.invalid_runtime {
+                return Err("invalid fixture runtime".to_string());
+            }
+            let mut runtime = self.inner.build_runtime()?;
+            runtime.name = self.name.clone();
+            Ok(runtime)
+        }
+        fn credential(&self) -> Option<&CredentialSpec> {
+            self.inner.credential()
+        }
+        fn get_available_models_from_caps(
+            &self,
+            model_caps: &HashMap<String, ModelCapabilities>,
+        ) -> Vec<AvailableModel> {
+            self.inner.get_available_models_from_caps(model_caps)
+        }
+        async fn fetch_available_models(
+            &self,
+            _client: &reqwest::Client,
+            model_caps: &HashMap<String, ModelCapabilities>,
+        ) -> Vec<AvailableModel> {
+            let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+            self.peak.fetch_max(active, Ordering::SeqCst);
+            let _active = ActiveDiscovery(self.active.clone());
+            self.started.send(self.name.clone()).unwrap();
+            self.release.notified().await;
+            self.get_available_models_from_caps(model_caps)
+        }
+    }
+
+    fn discovery_provider(
+        name: &str,
+        started: &mpsc::UnboundedSender<String>,
+        active: &Arc<AtomicUsize>,
+        peak: &Arc<AtomicUsize>,
+    ) -> DiscoveryProvider {
+        DiscoveryProvider {
+            name: name.to_string(),
+            inner: CustomProvider {
+                enabled: true,
+                chat_endpoint: "https://unused.invalid/chat".to_string(),
+                enabled_models: vec!["first".to_string(), "second".to_string()],
+                credential: Some(
+                    serde_yaml::from_str(
+                        "type: command\ncommand: must-not-execute-during-discovery\n",
+                    )
+                    .unwrap(),
+                ),
+                ..Default::default()
+            },
+            release: Arc::new(Notify::new()),
+            started: started.clone(),
+            active: active.clone(),
+            peak: peak.clone(),
+            invalid_runtime: false,
+        }
+    }
+
+    fn discovery_caps() -> CodeAssistantCaps {
+        let mut caps = CodeAssistantCaps::default();
+        caps.model_caps = Arc::new(
+            ["first", "second", "disabled-model"]
+                .into_iter()
+                .map(|id| {
+                    (
+                        id.to_string(),
+                        ModelCapabilities {
+                            n_ctx: 8192,
+                            tokenizer: "fake".to_string(),
+                            ..Default::default()
+                        },
+                    )
+                })
+                .collect(),
+        );
+        caps
+    }
+
+    #[tokio::test]
+    async fn provider_discovery_overlaps_with_bound_and_merges_in_snapshot_order() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let (started, mut starts) = mpsc::unbounded_channel();
+        let active = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let providers: Vec<_> = (0..6)
+            .map(|i| {
+                let mut provider =
+                    discovery_provider(&format!("provider_{i}"), &started, &active, &peak);
+                if i % 2 == 0 {
+                    provider.inner.credential = None;
+                    provider.inner.api_key = format!("fixture-key-{i}");
+                }
+                provider
+            })
+            .collect();
+        {
+            let mut registry = gcx.providers.write().await;
+            *registry = crate::providers::ProviderRegistry::new();
+            for provider in &providers {
+                registry.add(Box::new(provider.clone()));
+            }
+            let mut disabled = discovery_provider("disabled", &started, &active, &peak);
+            disabled.inner.enabled = false;
+            registry.add(Box::new(disabled));
+            let mut invalid = discovery_provider("invalid", &started, &active, &peak);
+            invalid.invalid_runtime = true;
+            registry.add(Box::new(invalid));
+        }
+        let mut caps = discovery_caps();
+        let defaults_before = serde_json::to_value(&caps.defaults).unwrap();
+        {
+            let discovery = populate_chat_models_from_providers(&mut caps, gcx);
+            tokio::pin!(discovery);
+            // Explicitly poll to pending: all four slots must be waiting on Notify, not a clock.
+            assert!(futures::poll!(&mut discovery).is_pending());
+            assert_eq!(active.load(Ordering::SeqCst), 4);
+            for i in 0..4 {
+                assert_eq!(starts.try_recv().unwrap(), format!("provider_{i}"));
+            }
+            assert!(starts.try_recv().is_err());
+            // Complete later providers first and prove a newly free slot is used even while
+            // the first provider remains blocked (no ordered-buffer head-of-line stall).
+            providers[3].release.notify_one();
+            assert!(futures::poll!(&mut discovery).is_pending());
+            assert_eq!(starts.try_recv().unwrap(), "provider_4");
+            providers[4].release.notify_one();
+            assert!(futures::poll!(&mut discovery).is_pending());
+            assert_eq!(starts.try_recv().unwrap(), "provider_5");
+            for i in [5, 2, 1, 0] {
+                providers[i].release.notify_one();
+            }
+            tokio::time::timeout(Duration::from_secs(5), &mut discovery)
+                .await
+                .unwrap();
+        }
+        assert_eq!(active.load(Ordering::SeqCst), 0);
+        assert_eq!(peak.load(Ordering::SeqCst), 4);
+        assert!(
+            starts.try_recv().is_err(),
+            "disabled/invalid providers must not fetch"
+        );
+        let expected: Vec<_> = (0..6)
+            .flat_map(|i| {
+                [
+                    format!("provider_{i}/first"),
+                    format!("provider_{i}/second"),
+                ]
+            })
+            .collect();
+        assert_eq!(
+            caps.chat_models.keys().cloned().collect::<Vec<_>>(),
+            expected
+        );
+        for provider in &providers {
+            assert_eq!(caps.provider_base_names[&provider.name], vec!["custom"]);
+            let record = &caps.chat_models[&format!("{}/first", provider.name)];
+            assert_eq!(record.base.api_key, provider.inner.api_key);
+            assert_eq!(record.base.credential, provider.inner.credential);
+            assert_eq!(
+                record.base.extra_headers[MODEL_BASE_PROVIDER_HEADER],
+                "custom"
+            );
+        }
+        assert_eq!(
+            serde_json::to_value(&caps.defaults).unwrap(),
+            defaults_before
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn provider_discovery_timeout_cancels_fetch_and_uses_caps_fallback() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let (started, mut starts) = mpsc::unbounded_channel();
+        let active = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let provider = discovery_provider("timed_out", &started, &active, &peak);
+        {
+            let mut registry = gcx.providers.write().await;
+            *registry = crate::providers::ProviderRegistry::new();
+            registry.add(Box::new(provider));
+        }
+        let mut caps = discovery_caps();
+        {
+            let discovery = populate_chat_models_from_providers(&mut caps, gcx);
+            tokio::pin!(discovery);
+            assert!(futures::poll!(&mut discovery).is_pending());
+            assert_eq!(starts.try_recv().unwrap(), "timed_out");
+            assert_eq!(active.load(Ordering::SeqCst), 1);
+            tokio::time::advance(PROVIDER_MODEL_DISCOVERY_TIMEOUT).await;
+            tokio::time::timeout(Duration::from_secs(1), discovery)
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            active.load(Ordering::SeqCst),
+            0,
+            "timed out IO must be dropped"
+        );
+        assert_eq!(
+            caps.chat_models
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["timed_out/first", "timed_out/second"]
+        );
+        assert_eq!(caps.chat_models["timed_out/first"].base.n_ctx, 8192);
+        assert!(!caps.chat_models.contains_key("timed_out/disabled-model"));
+    }
 
     fn create_test_caps() -> CodeAssistantCaps {
         let mut caps = CodeAssistantCaps::default();

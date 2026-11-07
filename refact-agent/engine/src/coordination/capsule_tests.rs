@@ -140,9 +140,19 @@ async fn many_rows_shrink_to_total_message_budget_and_supply_a_recoverable_inven
             .insert(id, Arc::new(Mutex::new(peer)));
     }
     let mut state = CapsuleState::default();
-    let message = prepare_work_context(&app, &mut state, "capsule-caller", "trusted/model")
-        .await
-        .unwrap();
+    let message = super::service::PROJECTION_BUILDS
+        .scope(std::cell::Cell::new(0), async {
+            let message = prepare_work_context(&app, &mut state, "capsule-caller", "trusted/model")
+                .await
+                .unwrap();
+            assert_eq!(
+                super::service::PROJECTION_BUILDS.with(|count| count.get()),
+                1,
+                "omitted-row inventory must reuse the capsule's cleared projection"
+            );
+            message
+        })
+        .await;
     let wire = refact_llm::adapters::render_extra::render_event_message(&message);
     assert!(
         crate::tokens::count_text_tokens(None, &wire).unwrap()
@@ -156,7 +166,7 @@ async fn many_rows_shrink_to_total_message_budget_and_supply_a_recoverable_inven
         .split('"')
         .next()
         .unwrap();
-    let caller = super::scope::model_caller(&app, "capsule-caller", "trusted/model")
+    let mut caller = super::scope::model_caller(&app, "capsule-caller", "trusted/model")
         .await
         .unwrap();
     let page = super::service::overview(
@@ -171,7 +181,49 @@ async fn many_rows_shrink_to_total_message_budget_and_supply_a_recoverable_inven
     .unwrap();
     assert_eq!(page.total, 42);
     assert_eq!(page.rows.len(), 42);
+    let ids: std::collections::HashSet<_> = page
+        .rows
+        .iter()
+        .filter_map(|row| row.chat_id.as_deref())
+        .collect();
+    assert!(ids.contains("capsule-caller"));
+    assert!(ids.contains("capsule-peer"));
+    for number in 0..40 {
+        assert!(ids.contains(format!("peer-{number}").as_str()));
+    }
+    let request = super::types::WorkOverviewRequest {
+        cursor: Some(token.into()),
+        ..Default::default()
+    };
     assert!(super::capsule::still_cleared(&app, &message));
+    let original_checkout = caller.checkout_root.clone();
+    caller.checkout_root = dir.path().join("other-checkout");
+    std::fs::create_dir(&caller.checkout_root).unwrap();
+    assert_eq!(
+        super::service::overview(&app, &caller, request.clone())
+            .await
+            .unwrap_err()
+            .code,
+        "invalid_cursor"
+    );
+    caller.checkout_root = original_checkout;
+    app.gcx.privacy_policy_load.write().unwrap().policy = Arc::new(refact_privacy::PrivacyPolicy {
+        zones: vec![refact_privacy::Zone {
+            name: "guarded".into(),
+            patterns: vec![dir.path().join("guarded.rs").to_string_lossy().into()],
+            send_to: vec!["other".into()],
+            on_shell_read: refact_privacy::ShellBehavior::Withhold,
+        }],
+        ..Default::default()
+    });
+    assert_eq!(
+        super::service::overview(&app, &caller, request)
+            .await
+            .unwrap_err()
+            .code,
+        "invalid_cursor"
+    );
+    assert!(!super::capsule::still_cleared(&app, &message));
     app.gcx.privacy_policy_load.write().unwrap().error = Some("unavailable".into());
     assert!(!super::capsule::still_cleared(&app, &message));
 }

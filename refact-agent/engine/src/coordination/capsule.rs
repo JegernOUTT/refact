@@ -263,12 +263,13 @@ pub async fn prepare_work_context(
         )?;
         if rendered.omitted > 0 {
             if inventory_cursor.is_none() {
-                let page = super::service::overview(
+                let page = super::service::overview_from_projection(
                     app,
                     &caller,
                     super::types::WorkOverviewRequest::default(),
+                    &catalog,
+                    &disclosure,
                 )
-                .await
                 .ok()?;
                 inventory_cursor = Some(
                     app.work_views

@@ -107,10 +107,15 @@ pub enum PerfComponent {
     MessageAcceptedToFirstDelta,
     StreamPreamblePrepare,
     StreamProviderAdmission,
+    PreambleCaps,
+    PreambleCatalog,
+    PreamblePrompt,
+    PreambleKnowledge,
+    PreambleWorkContext,
 }
 
 impl PerfComponent {
-    pub const ALL: [Self; 92] = [
+    pub const ALL: [Self; 97] = [
         Self::TrajectorySnapshot,
         Self::TrajectorySerialize,
         Self::TrajectoryAtomicWrite,
@@ -203,6 +208,11 @@ impl PerfComponent {
         Self::MessageAcceptedToFirstDelta,
         Self::StreamPreamblePrepare,
         Self::StreamProviderAdmission,
+        Self::PreambleCaps,
+        Self::PreambleCatalog,
+        Self::PreamblePrompt,
+        Self::PreambleKnowledge,
+        Self::PreambleWorkContext,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -299,6 +309,11 @@ impl PerfComponent {
             Self::MessageAcceptedToFirstDelta => "message.accepted_to_first_delta",
             Self::StreamPreamblePrepare => "stream.preamble_prepare",
             Self::StreamProviderAdmission => "stream.provider_admission",
+            Self::PreambleCaps => "preamble.caps",
+            Self::PreambleCatalog => "preamble.catalog",
+            Self::PreamblePrompt => "preamble.prompt",
+            Self::PreambleKnowledge => "preamble.knowledge",
+            Self::PreambleWorkContext => "preamble.work_context",
         }
     }
 

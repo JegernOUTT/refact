@@ -1,5 +1,7 @@
 use std::path::Path;
 
+use futures::future::BoxFuture;
+use futures::{stream, StreamExt};
 use crate::app_state::AppState;
 use crate::chat::trajectory_index::{TrajectoryIndexEntry, TrajectoryIndexSource, WorkReferenceState};
 use refact_work_core::WorkKey;
@@ -209,17 +211,45 @@ pub(super) async fn indexed_rows(
         })
         .collect();
     entries.sort_by_key(|entry| std::cmp::Reverse(timestamp(&entry.updated_at)));
+    rows_from_entries(&directory, entries, roots, resolve).await
+}
+
+fn resolve_entry_or_fallback<'a>(
+    directory: &'a Path,
+    entry: &'a TrajectoryIndexEntry,
+    roots: &'a ProjectRoots,
+) -> BoxFuture<'a, WorkRow> {
+    Box::pin(async move {
+        resolve_entry(directory, entry, roots)
+            .await
+            .unwrap_or_else(|| row_from_entry(entry, roots))
+    })
+}
+
+async fn rows_from_entries(
+    directory: &Path,
+    entries: Vec<&TrajectoryIndexEntry>,
+    roots: &ProjectRoots,
+    resolve: bool,
+) -> Vec<WorkRow> {
     let mut rows = Vec::with_capacity(entries.len());
+    let resolved_count = if resolve {
+        entries.len().min(MAX_RESOLVED_ROWS)
+    } else {
+        0
+    };
+    let mut jobs: Vec<BoxFuture<'_, WorkRow>> = Vec::with_capacity(resolved_count);
+    for entry in &entries[..resolved_count] {
+        jobs.push(resolve_entry_or_fallback(directory, entry, roots));
+    }
+    let resolved = stream::iter(jobs).buffered(4);
+    let mut suffix = Vec::with_capacity(entries.len() - resolved_count);
+    for entry in &entries[resolved_count..] {
+        suffix.push(row_from_entry(entry, roots));
+    }
+    let mut ordered = resolved.chain(stream::iter(suffix));
     let mut evidence_bytes = 0usize;
-    for (position, entry) in entries.into_iter().enumerate() {
-        let row = if resolve && position < MAX_RESOLVED_ROWS {
-            resolve_entry(&directory, entry, roots)
-                .await
-                .unwrap_or_else(|| row_from_entry(entry, roots))
-        } else {
-            row_from_entry(entry, roots)
-        };
-        let mut row = row;
+    while let Some(mut row) = ordered.next().await {
         evidence_bytes = evidence_bytes.saturating_add(row.source_records.iter().fold(
             0usize,
             |bytes, record| {
@@ -655,6 +685,112 @@ mod tests {
         assert!(row.source_records.is_empty());
         std::fs::remove_file(dir.path().join("lazy.json")).unwrap();
         assert!(resolve_entry(dir.path(), &entry, &roots).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn ordered_resolution_matches_sequential_fallback_limit_and_clearance() {
+        let record = json!({"path":"/guarded/file", "zone":"guarded", "attribution":"observed"});
+        let (dir, gcx, roots, _) = fixture(vec![
+            json!({"role":"tool", "content":"private", "privacy":{"files":[record]}}),
+        ])
+        .await;
+        let original: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.path().join("lazy.json")).unwrap()).unwrap();
+        let mut entries = Vec::new();
+        for position in 0..=MAX_RESOLVED_ROWS {
+            let mut value = original.clone();
+            let id = format!("ordered-{position:02}");
+            value["id"] = json!(id);
+            value["title"] = json!(format!("Verified {position}"));
+            let path = dir.path().join(format!("{id}.json"));
+            let bytes = serde_json::to_vec(&value).unwrap();
+            std::fs::write(&path, &bytes).unwrap();
+            let mut entry = crate::chat::trajectory_index::entry_from_trajectory_value(
+                dir.path(),
+                &path,
+                &value,
+                None,
+                Some(crate::chat::trajectory_index::source_sha256(&bytes)),
+            )
+            .unwrap();
+            entry.title = format!("Index fallback {position}");
+            entries.push(entry);
+        }
+        std::fs::remove_file(dir.path().join("ordered-05.json")).unwrap();
+        let mut expected = Vec::new();
+        for (position, entry) in entries.iter().enumerate() {
+            expected.push(if position < MAX_RESOLVED_ROWS {
+                resolve_entry(dir.path(), entry, &roots)
+                    .await
+                    .unwrap_or_else(|| row_from_entry(entry, &roots))
+            } else {
+                row_from_entry(entry, &roots)
+            });
+        }
+        let rows = rows_from_entries(dir.path(), entries.iter().collect(), &roots, true).await;
+        assert_eq!(
+            serde_json::to_value(&rows).unwrap(),
+            serde_json::to_value(&expected).unwrap()
+        );
+        assert_eq!(rows.len(), MAX_RESOLVED_ROWS + 1);
+        for (position, row) in rows.iter().enumerate() {
+            assert_eq!(row.chat_id.as_deref(), Some(entries[position].id.as_str()));
+            assert_eq!(row.source_records, expected[position].source_records);
+            assert_eq!(
+                row.provenance_complete,
+                expected[position].provenance_complete
+            );
+            assert_eq!(
+                row.provenance_complete,
+                position != 5 && position < MAX_RESOLVED_ROWS
+            );
+        }
+        assert_eq!(rows[5].title.as_deref(), Some("Index fallback 5"));
+        assert_eq!(
+            rows[MAX_RESOLVED_ROWS].title.as_deref(),
+            Some("Index fallback 32")
+        );
+        let suffix = std::fs::canonicalize(dir.path().join("ordered-32.json")).unwrap();
+        assert!(!SOURCE_READS.lock().unwrap().contains_key(&suffix));
+        gcx.privacy_policy_load.write().unwrap().policy = Arc::new(refact_privacy::PrivacyPolicy {
+            zones: vec![refact_privacy::Zone {
+                name: "guarded".into(),
+                patterns: vec!["/guarded/**".into()],
+                send_to: vec!["trusted".into()],
+                on_shell_read: refact_privacy::ShellBehavior::Withhold,
+            }],
+            ..Default::default()
+        });
+        let trusted = crate::caps::BaseModelRecord {
+            id: "trusted/model".into(),
+            ..Default::default()
+        };
+        let other = crate::caps::BaseModelRecord {
+            id: "other/model".into(),
+            ..Default::default()
+        };
+        let cleared = privacy_guard::clear_rows(&gcx, rows.clone(), &trusted).unwrap();
+        let expected_ids: Vec<_> = entries[..MAX_RESOLVED_ROWS]
+            .iter()
+            .enumerate()
+            .filter(|(position, _)| *position != 5)
+            .map(|(_, entry)| Some(entry.id.clone()))
+            .collect();
+        assert_eq!(
+            cleared
+                .iter()
+                .map(|row| row.chat_id.clone())
+                .collect::<Vec<_>>(),
+            expected_ids
+        );
+        assert!(privacy_guard::clear_rows(&gcx, rows, &other)
+            .unwrap()
+            .is_empty());
+        let unresolved =
+            rows_from_entries(dir.path(), entries.iter().collect(), &roots, false).await;
+        assert!(privacy_guard::clear_rows(&gcx, unresolved, &trusted)
+            .unwrap()
+            .is_empty());
     }
 
     #[tokio::test]
