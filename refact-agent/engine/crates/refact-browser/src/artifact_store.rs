@@ -1038,8 +1038,6 @@ mod windows_platform {
                     .is_err()
             );
             let artifact = store.write(b"public", "text/plain").unwrap();
-            assert!(std::fs::remove_file(&artifact.path).is_err());
-            assert!(OpenOptions::new().write(true).open(&artifact.path).is_err());
             let mut reader = OpenOptions::new()
                 .access_mode(GENERIC_READ)
                 .share_mode(FILE_SHARE_READ)
@@ -1048,6 +1046,14 @@ mod windows_platform {
             let mut content = String::new();
             reader.read_to_string(&mut content).unwrap();
             assert_eq!(content, "public");
+            drop(reader);
+            assert!(std::fs::remove_file(&artifact.path).is_err());
+            assert!(OpenOptions::new().write(true).open(&artifact.path).is_err());
+            let reader = OpenOptions::new()
+                .access_mode(GENERIC_READ)
+                .share_mode(FILE_SHARE_READ)
+                .open(&artifact.path)
+                .unwrap();
             assert!(store
                 .evict(&mut store.state.lock().unwrap(), &artifact.id)
                 .is_err());
