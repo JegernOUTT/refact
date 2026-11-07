@@ -1,21 +1,20 @@
 use std::collections::HashMap;
-use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::sync::mpsc::{Receiver, RecvTimeoutError};
+use headless_chrome::browser::transport::Transport;
+use headless_chrome::protocol::cdp::types::Event;
 use std::time::{Duration, Instant};
 
 use headless_chrome::Tab;
 use headless_chrome::protocol::cdp::DOM;
 use refact_integrations::browser_models::{DownloadInfo, DownloadState, UploadInfo};
 use serde_json::{Value, json};
-use tungstenite::stream::MaybeTlsStream;
-use tungstenite::{Message, WebSocket};
 
 use crate::{ElementHandle, WorldManager};
 
 const CANCELED_REASON: &str = "canceled";
-const COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
-const DOWNLOAD_POLL_INTERVAL: Duration = Duration::from_millis(250);
+const DOWNLOAD_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct InputMetadata {
@@ -394,28 +393,27 @@ impl DownloadTracker {
     }
 }
 
-type BrowserSocket = WebSocket<MaybeTlsStream<TcpStream>>;
-
 pub struct DownloadMonitor {
-    socket: Mutex<BrowserSocket>,
+    transport: Transport,
+    events: Mutex<Receiver<Event>>,
     tracker: DownloadTracker,
     directory: PathBuf,
-    next_command_id: Mutex<u64>,
-    command_timeout: Duration,
 }
 
 impl DownloadMonitor {
     pub fn connect(ws_url: &str, directory: PathBuf) -> Result<Self, String> {
         std::fs::create_dir_all(&directory)
             .map_err(|error| format!("Failed to create downloads directory: {error}"))?;
-        let socket = crate::cdp::connect_raw_cdp(ws_url)
+        let url = url::Url::parse(ws_url)
+            .map_err(|error| format!("Invalid download CDP URL: {error}"))?;
+        let transport = Transport::new(url, None, Duration::from_secs(86_400), None)
             .map_err(|error| format!("Failed to connect download CDP session: {error}"))?;
+        let events = Mutex::new(transport.listen_to_browser_events());
         Ok(Self {
-            socket: Mutex::new(socket),
+            transport,
+            events,
             tracker: DownloadTracker::default(),
             directory,
-            next_command_id: Mutex::new(1),
-            command_timeout: COMMAND_TIMEOUT,
         })
     }
 
@@ -443,66 +441,49 @@ impl DownloadMonitor {
     }
 
     fn send_command(&self, method: &str, params: Value) -> Result<(), String> {
-        let id = {
-            let mut next = self.next_command_id.lock().unwrap();
-            let id = *next;
-            *next += 1;
-            id
-        };
-        let mut socket = self.socket.lock().unwrap();
-        restoring_read_timeout(&mut socket, |socket| {
-            self.exchange(socket, id, method, params)
-        })
+        self.transport
+            .call_method_json(method, params, None)
+            .map(|_| ())
+            .map_err(|error| format!("Download CDP command failed: {error}"))
     }
 
-    fn exchange(
-        &self,
-        socket: &mut BrowserSocket,
-        id: u64,
-        method: &str,
-        params: Value,
-    ) -> Result<(), String> {
-        let deadline = Instant::now() + self.command_timeout;
-        set_read_timeout(socket, Some(self.command_timeout))?;
-        socket
-            .send(Message::Text(
-                json!({"id": id, "method": method, "params": params})
-                    .to_string()
-                    .into(),
-            ))
-            .map_err(|error| format!("Failed to send download CDP command: {error}"))?;
-        loop {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                return Err(format!(
-                    "Timed out after {}ms waiting for download CDP response to {method}",
-                    self.command_timeout.as_millis()
-                ));
-            }
-            set_read_timeout(socket, Some(remaining))?;
-            let message = match socket.read() {
-                Ok(message) => message,
-                Err(error) if is_read_timeout(&error) => continue,
-                Err(error) => return Err(format!("Failed to read download CDP response: {error}")),
-            };
-            let Some(value) = message_json(message)? else {
-                continue;
-            };
-            if value.get("id").and_then(Value::as_u64) == Some(id) {
-                if let Some(error) = value.get("error") {
-                    return Err(format!("Download CDP command failed: {error}"));
+    // A command never borrows this receiver or its lock. Only event consumers
+    // serialize, and draining is capped so an event flood cannot starve callers.
+    fn drain_events(&self) {
+        if let Ok(events) = self.events.try_lock() {
+            for _ in 0..256 {
+                match events.try_recv() {
+                    Ok(event) => self.handle_typed_event(event),
+                    Err(_) => break,
                 }
-                return Ok(());
             }
-            self.handle_event(&value);
+        }
+    }
+
+    fn handle_typed_event(&self, event: Event) {
+        let (method, params) = match event {
+            Event::BrowserDownloadWillBegin(event) => (
+                "Browser.downloadWillBegin",
+                serde_json::to_value(event.params),
+            ),
+            Event::BrowserDownloadProgress(event) => (
+                "Browser.downloadProgress",
+                serde_json::to_value(event.params),
+            ),
+            _ => return,
+        };
+        if let Ok(params) = params {
+            self.handle_event(&json!({"method": method, "params": params}));
         }
     }
 
     pub fn cursor(&self) -> u64 {
+        self.drain_events();
         self.tracker.cursor()
     }
 
     pub fn cancel_download(&self, id: Option<&str>) -> Result<DownloadInfo, String> {
+        self.drain_events();
         let guid = match id {
             Some(id) => id.to_string(),
             None => self
@@ -537,20 +518,19 @@ impl DownloadMonitor {
                     timeout.as_millis()
                 ));
             }
-            let mut socket = self.socket.lock().unwrap();
-            restoring_read_timeout(&mut socket, |socket| {
-                set_read_timeout(socket, Some(remaining.min(DOWNLOAD_POLL_INTERVAL)))?;
-                match socket.read() {
-                    Ok(message) => {
-                        if let Some(value) = message_json(message)? {
-                            self.handle_event(&value);
-                        }
-                        Ok(())
+            match self.events.try_lock() {
+                Ok(events) => match events.recv_timeout(remaining.min(DOWNLOAD_POLL_INTERVAL)) {
+                    Ok(event) => self.handle_typed_event(event),
+                    Err(RecvTimeoutError::Timeout) => {}
+                    Err(RecvTimeoutError::Disconnected) => {
+                        return Err("Download CDP session closed".into());
                     }
-                    Err(error) if is_read_timeout(&error) => Ok(()),
-                    Err(error) => Err(format!("Failed while waiting for download: {error}")),
+                },
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    std::thread::sleep(remaining.min(Duration::from_millis(5)))
                 }
-            })?;
+                Err(_) => return Err("Download event receiver poisoned".into()),
+            }
         }
     }
 
@@ -615,57 +595,9 @@ impl DownloadMonitor {
     }
 
     pub fn take_report(&self) -> Vec<DownloadInfo> {
+        self.drain_events();
         self.tracker.take_report()
     }
-}
-
-fn message_json(message: Message) -> Result<Option<Value>, String> {
-    match message {
-        Message::Text(text) => serde_json::from_str(&text)
-            .map(Some)
-            .map_err(|error| format!("Invalid download CDP message: {error}")),
-        Message::Close(_) => Err("Download CDP session closed".to_string()),
-        _ => Ok(None),
-    }
-}
-
-fn set_read_timeout(socket: &mut BrowserSocket, timeout: Option<Duration>) -> Result<(), String> {
-    match socket.get_mut() {
-        MaybeTlsStream::Plain(stream) => stream.set_read_timeout(timeout),
-        MaybeTlsStream::Rustls(stream) => stream.sock.set_read_timeout(timeout),
-        _ => return Err("Unsupported download CDP transport".to_string()),
-    }
-    .map_err(|error| format!("Failed to configure download wait timeout: {error}"))
-}
-
-fn read_timeout(socket: &mut BrowserSocket) -> Result<Option<Duration>, String> {
-    match socket.get_mut() {
-        MaybeTlsStream::Plain(stream) => stream.read_timeout(),
-        MaybeTlsStream::Rustls(stream) => stream.sock.read_timeout(),
-        _ => return Err("Unsupported download CDP transport".to_string()),
-    }
-    .map_err(|error| format!("Failed to read download wait timeout: {error}"))
-}
-
-fn restoring_read_timeout<T>(
-    socket: &mut BrowserSocket,
-    body: impl FnOnce(&mut BrowserSocket) -> Result<T, String>,
-) -> Result<T, String> {
-    let previous = read_timeout(socket)?;
-    let result = body(socket);
-    let restored = set_read_timeout(socket, previous);
-    result.and_then(|value| restored.map(|()| value))
-}
-
-fn is_read_timeout(error: &tungstenite::Error) -> bool {
-    matches!(
-        error,
-        tungstenite::Error::Io(error)
-            if matches!(
-                error.kind(),
-                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-            )
-    )
 }
 
 fn string_field(value: &Value, name: &str) -> String {
@@ -694,94 +626,122 @@ mod tests {
     use std::net::TcpListener;
     use tempfile::tempdir;
 
-    struct SilentServer {
-        url: String,
-        _handle: std::thread::JoinHandle<()>,
-    }
-
-    fn silent_cdp_server() -> SilentServer {
+    fn mock_monitor(
+        script: impl FnOnce(tungstenite::WebSocket<std::net::TcpStream>) + Send + 'static,
+    ) -> (
+        DownloadMonitor,
+        tempfile::TempDir,
+        std::thread::JoinHandle<()>,
+    ) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let url = format!("ws://{}/devtools", listener.local_addr().unwrap());
-        let handle = std::thread::spawn(move || {
-            if let Ok((stream, _)) = listener.accept() {
-                let Ok(socket) = tungstenite::accept(stream) else {
-                    return;
-                };
-                std::thread::sleep(Duration::from_secs(30));
-                drop(socket);
-            }
+        let url = format!(
+            "ws://{}/devtools/browser/test",
+            listener.local_addr().unwrap()
+        );
+        let peer = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            stream
+                .set_write_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            script(tungstenite::accept(stream).unwrap());
         });
-        SilentServer {
-            url,
-            _handle: handle,
-        }
-    }
-
-    fn silent_monitor(
-        server: &SilentServer,
-        command_timeout: Duration,
-    ) -> (DownloadMonitor, tempfile::TempDir) {
         let dir = tempdir().unwrap();
-        let mut monitor =
-            DownloadMonitor::connect(&server.url, dir.path().join("downloads")).unwrap();
-        monitor.command_timeout = command_timeout;
-        (monitor, dir)
+        (
+            DownloadMonitor::connect(&url, dir.path().join("downloads")).unwrap(),
+            dir,
+            peer,
+        )
+    }
+
+    fn read_call(ws: &mut tungstenite::WebSocket<std::net::TcpStream>) -> Value {
+        serde_json::from_str(ws.read().unwrap().to_text().unwrap()).unwrap()
+    }
+    fn send(ws: &mut tungstenite::WebSocket<std::net::TcpStream>, value: Value) {
+        ws.send(tungstenite::Message::text(value.to_string()))
+            .unwrap();
     }
 
     #[test]
-    fn send_command_times_out_on_an_unresponsive_socket() {
-        let server = silent_cdp_server();
-        let (monitor, _dir) = silent_monitor(&server, Duration::from_millis(200));
+    fn download_monitor_configures_events_and_cancels_during_wait_without_stealing_reply() {
+        let (monitor, _dir, peer) = mock_monitor(|mut ws| {
+            let configure = read_call(&mut ws);
+            assert_eq!(configure["method"], "Browser.setDownloadBehavior");
+            assert_eq!(configure["params"]["browserContextId"], "context");
+            send(
+                &mut ws,
+                json!({"method":"Browser.downloadWillBegin", "params":{
+                "guid":"download", "url":"https://example.test/file", "frameId":"frame", "suggestedFilename":"file.bin"}}),
+            );
+            send(&mut ws, json!({"id":configure["id"], "result":{}}));
+            let cancel = read_call(&mut ws);
+            assert_eq!(cancel["method"], "Browser.cancelDownload");
+            assert_eq!(cancel["params"]["guid"], "download");
+            send(
+                &mut ws,
+                json!({"method":"Browser.downloadProgress", "params":{
+                "guid":"download", "receivedBytes":3, "totalBytes":9, "state":"canceled"}}),
+            );
+            send(&mut ws, json!({"id":cancel["id"], "result":{}}));
+            let _ = ws.read();
+        });
+        monitor.configure_context(Some("context")).unwrap();
+        std::thread::scope(|scope| {
+            let waiting =
+                scope.spawn(|| monitor.wait_for_download(0, Duration::from_secs(2), None));
+            assert_eq!(
+                monitor.cancel_download(Some("download")).unwrap().state,
+                DownloadState::Canceled
+            );
+            assert_eq!(
+                waiting.join().unwrap().unwrap().state,
+                DownloadState::Canceled
+            );
+        });
+        drop(monitor);
+        peer.join().unwrap();
+    }
+
+    #[test]
+    fn download_monitor_deadline_is_bounded_and_uncertain_cancel_is_not_replayed() {
+        use headless_chrome::browser::transport::CommandDeadlineGuard;
+        let (release, released) = std::sync::mpsc::channel();
+        let (monitor, _dir, peer) = mock_monitor(move |mut ws| {
+            let call = read_call(&mut ws);
+            assert_eq!(call["method"], "Browser.cancelDownload");
+            released.recv_timeout(Duration::from_secs(3)).unwrap();
+            send(&mut ws, json!({"id":call["id"], "result":{}}));
+            let next = read_call(&mut ws);
+            assert_eq!(
+                next["method"], "Browser.setDownloadBehavior",
+                "uncertain cancel replayed"
+            );
+            send(&mut ws, json!({"id":next["id"], "result":{}}));
+            let _ = ws.read();
+        });
         let started = Instant::now();
-        let error = monitor
-            .send_command("Browser.setDownloadBehavior", json!({}))
-            .unwrap_err();
+        let guard = CommandDeadlineGuard::new(started + Duration::from_millis(100));
+        let error = monitor.cancel_download(Some("download")).unwrap_err();
+        drop(guard);
         assert!(
-            error.contains("Timed out after 200ms waiting for download CDP response"),
-            "unexpected error: {error}"
+            error.contains("deadline exceeded") && error.contains("effect_unknown=true"),
+            "{error}"
         );
+        assert!(started.elapsed() < Duration::from_secs(1));
+        release.send(()).unwrap();
+        monitor.configure_context(None).unwrap();
+        let started = Instant::now();
         assert!(
-            started.elapsed() < Duration::from_secs(5),
-            "the command exchange must be bounded, took {:?}",
-            started.elapsed()
+            monitor
+                .wait_for_download(0, Duration::from_millis(100), None)
+                .unwrap_err()
+                .contains("Timed out waiting")
         );
-    }
-
-    #[test]
-    fn send_command_restores_the_previous_read_timeout() {
-        let server = silent_cdp_server();
-        let (monitor, _dir) = silent_monitor(&server, Duration::from_millis(200));
-        {
-            let mut socket = monitor.socket.lock().unwrap();
-            set_read_timeout(&mut socket, Some(Duration::from_secs(7))).unwrap();
-        }
-        assert!(monitor
-            .send_command("Browser.setDownloadBehavior", json!({}))
-            .is_err());
-        let mut socket = monitor.socket.lock().unwrap();
-        assert_eq!(
-            read_timeout(&mut socket).unwrap(),
-            Some(Duration::from_secs(7))
-        );
-    }
-
-    #[test]
-    fn wait_for_download_restores_the_read_timeout_it_borrowed() {
-        let server = silent_cdp_server();
-        let (monitor, _dir) = silent_monitor(&server, COMMAND_TIMEOUT);
-        {
-            let mut socket = monitor.socket.lock().unwrap();
-            assert_eq!(read_timeout(&mut socket).unwrap(), None);
-        }
-        assert!(monitor
-            .wait_for_download(0, Duration::from_millis(300), None)
-            .is_err());
-        let mut socket = monitor.socket.lock().unwrap();
-        assert_eq!(
-            read_timeout(&mut socket).unwrap(),
-            None,
-            "a stale poll timeout must not leak into later commands"
-        );
+        assert!(started.elapsed() < Duration::from_secs(1));
+        drop(monitor);
+        peer.join().unwrap();
     }
 
     fn metadata(multiple: bool) -> InputMetadata {
@@ -848,9 +808,11 @@ mod tests {
     fn rejects_non_file_input() {
         let mut value = metadata(false);
         value.input_type = "text".to_string();
-        assert!(validate_input_paths(&value, &[])
-            .unwrap_err()
-            .contains("requires <input type=\"file\">"));
+        assert!(
+            validate_input_paths(&value, &[])
+                .unwrap_err()
+                .contains("requires <input type=\"file\">")
+        );
     }
 
     #[test]

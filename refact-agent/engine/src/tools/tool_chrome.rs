@@ -168,7 +168,10 @@ const CHROME_DESCRIPTION: &str = concat!(
     "Locators are ref-first with a fallback vocabulary (role, test_id, text, label, placeholder, alt_text, title, css, xpath, id, name, autocomplete) composable with nth/first/last, filter, and/or, and an outermost-first `frames` chain. Non-selecting actions are strict: ambiguous locators fail loudly with the match count.\n",
     "Page report: a page-changing batch returns `page` with the final URL and title, `page.status` for a non-2xx main document, `page.console` error/warning COUNTS (full text stays in `console` and `tab_log`), and `page.snapshot`, inlined when small and otherwise a `text/yaml` artifact plus the head, `lines`, `bytes`, and `truncated:true`. Locator-driven actions report `locator_echo`, a canonical locator generated for the element actually acted on.\n",
     "`page_context` picks the page-changed context: `snapshot` (the default) attaches the ref-annotated ARIA snapshot and NO image, `screenshot` attaches a policy-sized image instead, `both` attaches each, `none` attaches only the page header. `attach_screenshot` is the tri-state override and wins over `page_context`: true = always attach, false = never attach, omitted = follow `page_context`. `network` controls per-request report volume: `summary` (the default) emits one `method url status bytes ms` line per request, `full` keeps headers, `none` drops per-request entries.\n",
-    "Click, hover, fill, clear, check, and uncheck auto-wait for actionability. Never use `wait_seconds` for readiness; use `wait_for_response`, `wait_for_load_state`, `wait_for_selector`, or `wait_for_function`."
+    "Click, hover, fill, clear, check, and uncheck auto-wait for actionability. Never use `wait_seconds` for readiness; use `wait_for_response`, `wait_for_load_state`, `wait_for_selector`, or `wait_for_function`.\n",
+    "Result: one JSON object with `tool`, `summary`, `completion` (steps_requested/reported, failed, unknown, skipped, incomplete) plus `ok`, `steps`, `page`. Under a tight budget it is reduced as JSON: failed and effect-unknown steps are prioritized, with explicit aggregate verdicts and omission counts when step details cannot fit. If even the minimum verdict cannot fit, delivery fails explicitly rather than reporting success. At most 64 steps per call; invalid requests are rejected before the browser starts.\n",
+    "Recovery: if `recovery.state_lost` is true, nothing interrupted was retried; resend with `acknowledge_session_generation` set to the report's `session_generation`, then navigate again (old refs and tab ids are invalid).\n",
+    "Large redacted reports may include `full_report.id`. Read it with `read_artifact` using that opaque id and byte `offset`/`limit` (default 8192, maximum 32768). The result's `content_base64` encodes the exact UTF-8 bytes; decode and concatenate chunks using `next_offset`. Retrieval is scoped to the current runtime, does not create another report artifact, and expired or evicted ids fail explicitly. Managed artifacts are bounded to 64 files, 32 MiB total, 8 MiB per file, with one-hour idle TTL. Secure managed storage is currently Unix-only."
 );
 
 pub fn chrome_help_text(topic: Option<&str>) -> String {
@@ -350,7 +353,51 @@ fn browser_step_schema_with_actions(
     properties.get_mut("frame_count").unwrap()["maximum"] = Value::from(MAX_FRAME_COUNT);
     let contract_fields = browser_contract_field_names();
     properties.retain(|name, _| name == "action" || contract_fields.contains(name.as_str()));
+    for (action, required, optional, _) in
+        crate::integrations::browser_models::BrowserStep::ACTION_FIELDS.iter()
+    {
+        if !actions.contains(action) {
+            continue;
+        }
+        for field in required.iter().chain(optional.iter()) {
+            properties.entry((*field).to_string()).or_insert_with(
+                || serde_json::json!({"description": format!("{action} field; see help")}),
+            );
+        }
+    }
+    if let Some(offset) = properties.get_mut("offset") {
+        *offset = serde_json::json!({"type": "integer", "minimum": 0, "description": "read_artifact byte offset"});
+    }
+    schema["anyOf"] = Value::Array(browser_action_variants(actions));
     schema
+}
+
+/// Nested per-action discriminated variants derived from [`BrowserStep::ACTION_FIELDS`].
+/// Field types stay in the flat sibling `properties`; each variant only pins which keys the
+/// strict parser accepts for its action. Providers that flatten unions (Google CloudCode
+/// `sanitize_schema`) keep the flat properties, so the flat bag is the conservative fallback.
+/// Actions with serde aliases only require `action`: the table does not map alias to field.
+fn browser_action_variants(actions: &[&str]) -> Vec<Value> {
+    crate::integrations::browser_models::BrowserStep::ACTION_FIELDS
+        .iter()
+        .filter(|(action, ..)| actions.contains(action))
+        .map(|(action, required, optional, aliases)| {
+            let mut properties = serde_json::Map::new();
+            properties.insert("action".to_string(), serde_json::json!({"enum": [action]}));
+            for field in required.iter().chain(optional.iter()).chain(aliases.iter()) {
+                properties.insert((*field).to_string(), serde_json::json!({}));
+            }
+            let mut required_fields = vec![Value::String("action".to_string())];
+            if aliases.is_empty() {
+                required_fields.extend(required.iter().map(|f| Value::String((*f).to_string())));
+            }
+            serde_json::json!({
+                "properties": properties,
+                "required": required_fields,
+                "additionalProperties": false
+            })
+        })
+        .collect()
 }
 
 fn route_handler_schema() -> serde_json::Value {
@@ -370,6 +417,7 @@ fn browser_request_schema() -> serde_json::Value {
         "required": ["steps"],
         "properties": {
             "session": {"type": "string", "enum": ["shared_default"]},
+            "acknowledge_session_generation": {"type": "string", "description": "Recovery handshake: after a report says browser state was lost, resend with the `session_generation` value it returned. Then navigate again; old refs/tab ids are invalid and interrupted actions were NOT retried"},
             "page_context": {"type": "string", "enum": ["snapshot", "screenshot", "both", "none"], "description": "snapshot (default) attaches the aria snapshot and no image; screenshot attaches a PNG; both; none = page header only"},
             "attach_screenshot": {"type": "boolean", "description": "Screenshot override: true = always, false = never, omitted = follow page_context"},
             "network": {"type": "string", "enum": ["none", "summary", "full"], "description": "summary (default) = one `method url status bytes ms` line per request, full keeps headers, none drops entries"},
@@ -378,6 +426,7 @@ fn browser_request_schema() -> serde_json::Value {
             "target": tab_target_schema(),
             "steps": {
                 "type": "array",
+                "maxItems": MAX_CHROME_BATCH_STEPS,
                 "items": browser_step_schema_with_actions(
                     crate::integrations::browser_models::BrowserStep::ACTION_NAMES,
                     true,
@@ -488,6 +537,13 @@ impl Tool for ToolChrome {
             }
         }
 
+        // Validate the typed request before any browser setup so an invalid or oversized
+        // batch never launches Chrome or touches a session.
+        let preflight_request = match args.get("request") {
+            Some(request_value) => Some(preflight_browser_request(request_value)?),
+            None => None,
+        };
+
         let (gcx, chat_id, current_model) = {
             let ccx_lock = ccx.lock().await;
             (
@@ -546,9 +602,14 @@ impl Tool for ToolChrome {
         let mut browser_extra = None;
         let mut tool_failed = false;
 
-        if let Some(request_value) = args.get("request") {
-            let request = parse_browser_action_request(request_value.clone())
-                .map_err(|e| format!("argument `request` is invalid: {}", e))?;
+        if let Some(request) = preflight_request {
+            let steps_requested = request.steps.len();
+            let retrieval_only = request.steps.iter().all(|step| {
+                matches!(
+                    step,
+                    crate::integrations::browser_models::BrowserStep::ReadArtifact { .. }
+                )
+            });
 
             let runtime_id = {
                 let mut session_locked = command_session.lock().await;
@@ -571,7 +632,7 @@ impl Tool for ToolChrome {
             };
 
             match browser_controller::execute_request_with_runtime_validated(
-                runtime_arc,
+                runtime_arc.clone(),
                 request,
                 &image_policy,
                 gcx.clone(),
@@ -580,7 +641,48 @@ impl Tool for ToolChrome {
             {
                 Ok(report) => {
                     tool_failed = !report.ok;
-                    typed_content = Some(execution_report_to_multimodal(&report, &image_policy)?);
+                    let mut content = execution_report_to_multimodal_with_request(
+                        &report,
+                        &image_policy,
+                        Some(steps_requested),
+                    )?;
+                    if let Some(text) = content.iter_mut().find(|element| element.is_text()) {
+                        if !retrieval_only && text.m_content.len() > 16 * 1024 {
+                            let store = runtime_arc.lock().await.get_store();
+                            match store.and_then(|store| {
+                                store.write(text.m_content.as_bytes(), "application/json")
+                            }) {
+                                Ok(artifact) => {
+                                    let mut value: Value = serde_json::from_str(&text.m_content)
+                                        .map_err(|error| {
+                                            format!("Invalid browser report: {error}")
+                                        })?;
+                                    value["full_report"] = serde_json::json!({
+                                        "id": artifact.id,
+                                        "mime": artifact.mime,
+                                        "bytes": artifact.bytes,
+                                        "retrieval": "read_artifact",
+                                    });
+                                    text.m_content =
+                                        serde_json::to_string(&value).map_err(|error| {
+                                            format!("Invalid browser report: {error}")
+                                        })?;
+                                }
+                                Err(error) => {
+                                    let mut value: Value = serde_json::from_str(&text.m_content)
+                                        .map_err(|error| {
+                                            format!("Invalid browser report: {error}")
+                                        })?;
+                                    value["artifact_error"] = Value::String(error);
+                                    text.m_content =
+                                        serde_json::to_string(&value).map_err(|error| {
+                                            format!("Invalid browser report: {error}")
+                                        })?;
+                                }
+                            }
+                        }
+                    }
+                    typed_content = Some(content);
                     let (execute_log, command_multimodal_els) =
                         format_controller_report(&report, "", &image_policy);
                     tool_log.extend(execute_log);
@@ -709,6 +811,203 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::*;
+    use serde_json::json;
+
+    fn step_variant_admits(variants: &[Value], step: &Value) -> bool {
+        let object = step.as_object().unwrap();
+        variants.iter().any(|variant| {
+            let properties = variant["properties"].as_object().unwrap();
+            let action_ok = properties["action"]["enum"]
+                .as_array()
+                .unwrap()
+                .contains(&object["action"]);
+            let required_ok = variant["required"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|field| object.contains_key(field.as_str().unwrap()));
+            let keys_ok = object.keys().all(|key| properties.contains_key(key));
+            action_ok && required_ok && keys_ok
+        })
+    }
+
+    #[test]
+    fn action_variants_agree_with_the_strict_runtime_parser() {
+        let schema = browser_request_schema();
+        let step_schema = &schema["properties"]["steps"];
+        assert_eq!(step_schema["maxItems"], MAX_CHROME_BATCH_STEPS);
+        let variants = step_schema["items"]["anyOf"].as_array().unwrap();
+        let fields = crate::integrations::browser_models::BrowserStep::ACTION_FIELDS;
+        assert_eq!(variants.len(), fields.len());
+        let flat = step_schema["items"]["properties"].as_object().unwrap();
+        for (_, required, optional, _) in fields {
+            for key in required.iter().chain(optional.iter()) {
+                assert!(
+                    flat.contains_key(*key),
+                    "variant field {key} missing in flat bag"
+                );
+            }
+        }
+        let cases = [
+            (
+                json!({"action": "navigate", "url": "https://example.com"}),
+                true,
+            ),
+            (
+                json!({"action": "navigate", "url": "https://example.com", "timeout_ms": 10}),
+                true,
+            ),
+            (json!({"action": "navigate"}), false),
+            (
+                json!({"action": "navigate", "url": "https://example.com", "text": "x"}),
+                false,
+            ),
+            (
+                json!({"action": "get_text", "locator": {"by": "ref", "value": "e1"}}),
+                true,
+            ),
+            (json!({"action": "get_text"}), false),
+            (
+                json!({"action": "get_text", "locator": {"by": "ref", "value": "e1"}, "url": "u"}),
+                false,
+            ),
+            (json!({"action": "tab_log"}), true),
+            (json!({"action": "tab_log", "url": "u"}), false),
+            (json!({"action": "help", "topic": "routes"}), true),
+            (
+                json!({"action": "help", "locator": {"by": "ref", "value": "e1"}}),
+                false,
+            ),
+            (json!({"action": "wait_for_url", "contains": "x"}), true),
+            (json!({"action": "wait_for_url", "pattern": "x"}), true),
+            (
+                json!({"action": "send_web_socket_message", "url_pattern": "x", "data": "y"}),
+                true,
+            ),
+            (
+                json!({"action": "accessibility_snapshot", "root": {"by": "ref", "value": "e1"}}),
+                true,
+            ),
+            (json!({"action": "no_such_action"}), false),
+        ];
+        for (step, expected) in cases {
+            let runtime = crate::integrations::browser_models::parse_browser_action_request(
+                json!({"steps": [step.clone()]}),
+            );
+            assert_eq!(runtime.is_ok(), expected, "runtime {step}: {runtime:?}");
+            assert_eq!(
+                step_variant_admits(variants, &step),
+                expected,
+                "schema {step}"
+            );
+        }
+        let read_artifact = crate::integrations::browser_models::BrowserStep::ACTION_FIELDS
+            .iter()
+            .any(|(name, ..)| *name == "read_artifact");
+        if read_artifact {
+            assert_eq!(
+                step_schema["items"]["properties"]["offset"]["type"],
+                "integer"
+            );
+            for (step, expected) in [
+                (
+                    json!({"action": "read_artifact", "id": "a1", "offset": 0, "limit": 10}),
+                    true,
+                ),
+                (json!({"action": "read_artifact"}), false),
+                (
+                    json!({"action": "read_artifact", "id": "a1", "url": "u"}),
+                    false,
+                ),
+            ] {
+                let runtime = crate::integrations::browser_models::parse_browser_action_request(
+                    json!({"steps": [step.clone()]}),
+                );
+                assert_eq!(runtime.is_ok(), expected, "runtime {step}: {runtime:?}");
+                assert_eq!(
+                    step_variant_admits(variants, &step),
+                    expected,
+                    "schema {step}"
+                );
+            }
+        }
+        let ack = json!({"acknowledge_session_generation": "g1", "steps": [{"action": "tab_log"}]});
+        assert!(crate::integrations::browser_models::parse_browser_action_request(ack).is_ok());
+        assert!(schema["properties"]
+            .as_object()
+            .unwrap()
+            .contains_key("acknowledge_session_generation"));
+    }
+
+    #[test]
+    fn provider_adapters_keep_a_usable_browser_schema() {
+        use refact_llm::adapter::AdapterSettings;
+        let tool = json!({"type": "function", "function": {
+            "name": "chrome", "description": "browser", "parameters": chrome_input_schema()}});
+        assert!(chrome_input_schema().get("anyOf").is_none());
+        assert!(chrome_input_schema().get("oneOf").is_none());
+        let settings = |format_header: bool| {
+            let mut extra_headers = HashMap::new();
+            if format_header {
+                extra_headers.insert(
+                    "x-refact-internal-cloudcode-project".to_string(),
+                    "project".to_string(),
+                );
+            }
+            AdapterSettings {
+                api_key: "test".to_string(),
+                auth_token: "test".to_string(),
+                endpoint: "https://example.invalid".to_string(),
+                extra_headers,
+                model_name: "model".to_string(),
+                supports_tools: true,
+                supports_reasoning: false,
+                reasoning_type: None,
+                supports_temperature: false,
+                supports_max_completion_tokens: false,
+                eof_is_done: false,
+                supports_web_search: false,
+                supports_cache_control: false,
+            }
+        };
+        let body = |format: refact_llm::WireFormat| {
+            let request = refact_llm::LlmRequest::new(
+                "model".to_string(),
+                vec![ChatMessage::new("user".to_string(), "hi".to_string())],
+            )
+            .with_tools(vec![tool.clone()], None);
+            refact_llm::get_adapter(format)
+                .build_http(
+                    &refact_privacy::testing::cleared(request),
+                    &settings(format == refact_llm::WireFormat::GoogleCloudCode),
+                )
+                .unwrap()
+                .body
+        };
+        let anthropic = body(refact_llm::WireFormat::AnthropicMessages);
+        let input_schema = &anthropic["tools"][0]["input_schema"];
+        assert!(input_schema.get("anyOf").is_none());
+        let items = &input_schema["properties"]["request"]["properties"]["steps"]["items"];
+        assert!(items["anyOf"].as_array().is_some_and(|v| !v.is_empty()));
+
+        let google = body(refact_llm::WireFormat::GoogleCloudCode);
+        let parameters = &google["request"]["tools"][0]["functionDeclarations"][0]["parameters"];
+        let text = parameters.to_string();
+        for forbidden in ["\"anyOf\"", "\"oneOf\"", "additionalProperties"] {
+            assert!(
+                !text.contains(forbidden),
+                "{forbidden} survived google sanitize"
+            );
+        }
+        let items = &parameters["properties"]["request"]["properties"]["steps"]["items"];
+        assert_eq!(items["required"], json!(["action"]));
+        for field in ["url", "locator", "topic", "pattern", "contains"] {
+            assert!(
+                items["properties"].get(field).is_some(),
+                "{field} lost in fallback"
+            );
+        }
+    }
 
     #[test]
     fn a_help_only_request_is_answered_without_a_browser_session() {
@@ -1502,19 +1801,143 @@ fn format_controller_report(
     (log, multimodal)
 }
 
+/// Fixed upper bound on typed steps per call, checked before any browser setup. It bounds report
+/// size but does not guarantee the report fits a given budget; the postprocessor reduces it.
+const MAX_CHROME_BATCH_STEPS: usize = 64;
+
+fn preflight_browser_request(
+    request_value: &Value,
+) -> Result<crate::integrations::browser_models::BrowserActionRequest, String> {
+    if let Some(count) = request_value
+        .get("steps")
+        .and_then(Value::as_array)
+        .map(Vec::len)
+    {
+        if count > MAX_CHROME_BATCH_STEPS {
+            return Err(format!(
+                "argument `request` is invalid: {count} steps exceed the limit of {MAX_CHROME_BATCH_STEPS} per call; split the batch. No browser action was run."
+            ));
+        }
+    }
+    parse_browser_action_request(request_value.clone()).map_err(|e| {
+        format!("argument `request` is invalid: {e}. No browser action was run; see {{\"steps\":[{{\"action\":\"help\"}}]}} for per-action fields.")
+    })
+}
+
+/// Completion accounting for the compact report envelope. `unknown` counts steps whose
+/// effect could not be established; they are never folded into success or failure.
+fn browser_completion(report: &ExecutionReport, steps_requested: Option<usize>) -> Value {
+    let outcome_is = |step: &crate::integrations::browser_models::StepResult, name: &str| {
+        step.outcome.as_deref() == Some(name)
+    };
+    let unknown = report
+        .steps
+        .iter()
+        .filter(|step| outcome_is(step, "effect_unknown"))
+        .count();
+    let skipped = report
+        .steps
+        .iter()
+        .filter(|step| step.skipped || outcome_is(step, "skipped"))
+        .count();
+    let failed = report
+        .steps
+        .iter()
+        .filter(|step| {
+            !step.ok
+                && !step.skipped
+                && !outcome_is(step, "effect_unknown")
+                && !outcome_is(step, "skipped")
+        })
+        .count();
+    let reported = report.steps.len();
+    let incomplete = report.recovery.as_ref().is_some_and(|r| r.incomplete)
+        || steps_requested.is_some_and(|requested| requested > reported)
+        || unknown > 0;
+    serde_json::json!({
+        "steps_requested": steps_requested,
+        "steps_reported": reported,
+        "failed": failed,
+        "unknown": unknown,
+        "skipped": skipped,
+        "incomplete": incomplete,
+        "context_warnings": report.warnings.len(),
+    })
+}
+
+fn browser_report_summary(report: &ExecutionReport, completion: &Value) -> String {
+    let count = |key: &str| completion[key].as_u64().unwrap_or(0);
+    let mut summary = format!(
+        "{}: {} of {} steps reported, {} failed, {} effect unknown, {} skipped",
+        browser_outcome(report),
+        count("steps_reported"),
+        completion["steps_requested"]
+            .as_u64()
+            .unwrap_or(count("steps_reported")),
+        count("failed"),
+        count("unknown"),
+        count("skipped"),
+    );
+    if completion["incomplete"] == true {
+        summary.push_str("; INCOMPLETE");
+    }
+    if let Some(recovery) = &report.recovery {
+        if recovery.state_lost {
+            summary.push_str("; browser state lost: resend with acknowledge_session_generation");
+        }
+        if !recovery.retry_safe {
+            summary.push_str("; not retry-safe");
+        }
+    }
+    summary
+}
+
+/// Text half of the typed browser result: the redacted, binary-free report wrapped in an
+/// envelope that names the producing tool and carries `summary` and `completion`. The
+/// envelope keeps the report's own top-level fields (`ok`, `steps`, `page`, ...) and is the
+/// shape the shared postprocessor reduces as JSON instead of cutting lines.
+fn browser_report_text(
+    report: &ExecutionReport,
+    steps_requested: Option<usize>,
+) -> Result<String, String> {
+    let mut text_report = serde_json::to_value(report)
+        .map_err(|e| format!("Failed to serialize browser report: {}", e))?;
+    redact_browser_execution_report(&mut text_report, report);
+    strip_binary_data_for_text(&mut text_report);
+    let completion = browser_completion(report, steps_requested);
+    let mut envelope = serde_json::Map::new();
+    envelope.insert("tool".to_string(), Value::String("chrome".to_string()));
+    envelope.insert(
+        "summary".to_string(),
+        Value::String(browser_report_summary(report, &completion)),
+    );
+    envelope.insert("completion".to_string(), completion);
+    if let Value::Object(fields) = text_report {
+        for (key, value) in fields {
+            envelope.entry(key).or_insert(value);
+        }
+    }
+    serde_json::to_string(&Value::Object(envelope))
+        .map_err(|e| format!("Failed to encode browser report: {}", e))
+}
+
 fn execution_report_to_multimodal(
     report: &ExecutionReport,
     image_policy: &ImagePolicy,
 ) -> Result<Vec<MultimodalElement>, String> {
-    let mut content = Vec::new();
+    execution_report_to_multimodal_with_request(report, image_policy, None)
+}
 
-    let mut text_report = serde_json::to_value(report)
-        .map_err(|e| format!("Failed to serialize browser report: {}", e))?;
-    redact_browser_report(&mut text_report);
-    strip_binary_data_for_text(&mut text_report);
-    let text_pretty = serde_json::to_string_pretty(&text_report)
-        .map_err(|e| format!("Failed to pretty-print browser report: {}", e))?;
-    content.push(MultimodalElement::new("text".to_string(), text_pretty)?);
+fn execution_report_to_multimodal_with_request(
+    report: &ExecutionReport,
+    image_policy: &ImagePolicy,
+    steps_requested: Option<usize>,
+) -> Result<Vec<MultimodalElement>, String> {
+    let mut content = Vec::new();
+    content.push(MultimodalElement::new(
+        "text".to_string(),
+        browser_report_text(report, steps_requested)?,
+    )?);
 
     for result in &report.steps {
         if let Some(ref data) = result.data {
@@ -1556,12 +1979,26 @@ fn redact_browser_credential_fields(value: &mut serde_json::Value) {
                 "large_blob",
                 "user_name",
                 "user_display_name",
+                "password",
+                "passwd",
+                "pwd",
+                "token",
+                "access_token",
+                "refresh_token",
+                "api_key",
+                "apikey",
+                "authorization",
+                "cookie",
+                "set-cookie",
+                "client_secret",
             ] {
-                if map.contains_key(key) {
-                    map.insert(
-                        key.to_string(),
-                        serde_json::Value::String("[REDACTED]".to_string()),
-                    );
+                let matching = map
+                    .keys()
+                    .filter(|name| name.eq_ignore_ascii_case(key))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                for name in matching {
+                    map.insert(name, serde_json::Value::String("[REDACTED]".to_string()));
                 }
             }
             for child in map.values_mut() {
@@ -1713,9 +2150,98 @@ fn redact_browser_report(value: &mut serde_json::Value) {
     redact_browser_payload_strings(value, false);
 }
 
+fn redact_browser_execution_report(value: &mut Value, report: &ExecutionReport) {
+    let chunks = report
+        .steps
+        .iter()
+        .enumerate()
+        .filter_map(|(index, step)| {
+            if step.ok && step.outcome.as_deref() == Some("artifact_read") {
+                step.data
+                    .as_ref()?
+                    .get("content_base64")?
+                    .as_str()
+                    .map(|text| (index, text))
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    redact_browser_report(value);
+    for (index, encoded) in chunks {
+        if let Some(content) = value
+            .get_mut("steps")
+            .and_then(Value::as_array_mut)
+            .and_then(|steps| steps.get_mut(index))
+            .and_then(|step| step.get_mut("data"))
+            .and_then(|data| data.get_mut("content_base64"))
+        {
+            *content = Value::String(encoded.to_string());
+        }
+    }
+}
+
 #[cfg(test)]
 mod browser_credential_redaction_tests {
-    use super::{redact_browser_credential_fields, redact_browser_report, redact_browser_secret_tokens};
+    use super::{
+        browser_report_text, redact_browser_credential_fields, redact_browser_report,
+        redact_browser_secret_tokens, ExecutionReport,
+    };
+
+    #[test]
+    fn persisted_report_masks_key_context_and_retrieval_keeps_redacted_bytes() {
+        let mut value = serde_json::json!({
+            "data": {"value": {"password": "hunter22", "TOKEN": "bearer-value"}},
+            "page": {"url": "https://example.com?x=1"},
+        });
+        redact_browser_report(&mut value);
+        let body = serde_json::to_vec(&value).unwrap();
+        assert!(!String::from_utf8_lossy(&body).contains("hunter22"));
+        assert!(!String::from_utf8_lossy(&body).contains("bearer-value"));
+        let root = tempfile::tempdir().unwrap();
+        let store = crate::refact_browser::artifact_store::ArtifactStore::new(root.path()).unwrap();
+        let artifact = store.write(&body, "application/json").unwrap();
+        let chunk = store.read_report(&artifact.id, 0, 32768).unwrap();
+        let encoded = base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            chunk.content.as_bytes(),
+        );
+        let mut response = serde_json::json!({"data": {"content_base64": encoded}});
+        redact_browser_report(&mut response);
+        let restored = base64::Engine::decode(
+            &base64::engine::general_purpose::STANDARD,
+            response["data"]["content_base64"].as_str().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(restored, body);
+        let bytes = b"\x01\x22\x00BBBBBBBBBBBB";
+        let artifact = store.write(bytes, "text/plain").unwrap();
+        let chunk = store.read_report(&artifact.id, 0, 32768).unwrap();
+        let encoded = base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            chunk.content.as_bytes(),
+        );
+        assert_eq!(encoded, "ASIAQkJCQkJCQkJCQkJC");
+        let mut step =
+            crate::integrations::browser_models::StepResult::success(0, "Read browser artifact");
+        step.outcome = Some("artifact_read".to_string());
+        step.data = Some(serde_json::json!({"content_base64": encoded}));
+        let report = ExecutionReport {
+            ok: true,
+            steps: vec![step],
+            ..Default::default()
+        };
+        let text = browser_report_text(&report, Some(1)).unwrap();
+        let envelope: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let restored = base64::Engine::decode(
+            &base64::engine::general_purpose::STANDARD,
+            envelope["steps"][0]["data"]["content_base64"]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(restored, bytes);
+    }
 
     #[test]
     fn browser_credential_request_fields_are_redacted_recursively() {
@@ -1837,21 +2363,20 @@ fn strip_binary_data_for_text(value: &mut serde_json::Value) {
                 .map(|mime| mime.starts_with("image/") || mime == "application/pdf")
                 .unwrap_or(false);
             if is_binary {
-                let b64_len = map
-                    .get("data")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.len())
-                    .unwrap_or(0);
-                if b64_len > 0 {
-                    let bytes = b64_len * 3 / 4;
+                let encoded = map.get("data").and_then(|v| v.as_str()).unwrap_or_default();
+                if !encoded.is_empty() && encoded != "<omitted>" {
+                    let padding = encoded
+                        .bytes()
+                        .rev()
+                        .take_while(|byte| *byte == b'=')
+                        .count();
+                    let bytes = (encoded.len() * 3 / 4).saturating_sub(padding);
                     map.insert(
                         "data".to_string(),
                         serde_json::Value::String("<omitted>".to_string()),
                     );
-                    map.insert(
-                        "bytes".to_string(),
-                        serde_json::Value::Number(serde_json::Number::from(bytes)),
-                    );
+                    map.entry("bytes".to_string())
+                        .or_insert_with(|| serde_json::json!(bytes));
                 }
             }
             for v in map.values_mut() {
@@ -1978,7 +2503,10 @@ async fn chrome_command_exec(
     let multimodal_els = vec![];
 
     match action {
-        BrowserAction::OpenTab { tab_id, device } => {
+        BrowserAction::OpenTab {
+            tab_id,
+            device,
+        } => {
             let log = {
                 let mut chrome_session_locked = chrome_session.lock().await;
                 let chrome_session = chrome_session_locked
@@ -1990,7 +2518,11 @@ async fn chrome_command_exec(
             };
             tool_log.push(log);
         }
-        BrowserAction::ClickAtPoint { tab_id, x, y } => {
+        BrowserAction::ClickAtPoint {
+            tab_id,
+            x,
+            y,
+        } => {
             let tab = {
                 let mut chrome_session_locked = chrome_session.lock().await;
                 let chrome_session = chrome_session_locked
@@ -2028,7 +2560,10 @@ async fn chrome_command_exec(
             };
             tool_log.push(log);
         }
-        BrowserAction::TypeText { tab_id, text } => {
+        BrowserAction::TypeText {
+            tab_id,
+            text,
+        } => {
             let tab = {
                 let mut chrome_session_locked = chrome_session.lock().await;
                 let chrome_session = chrome_session_locked
@@ -2126,7 +2661,9 @@ async fn chrome_command_exec(
                 }
             }
         }
-        BrowserAction::CloseTab { tab_id } => {
+        BrowserAction::CloseTab {
+            tab_id,
+        } => {
             let (tab_arc, available, runtime_id) = {
                 let mut chrome_session_locked = chrome_session.lock().await;
                 let cs = chrome_session_locked

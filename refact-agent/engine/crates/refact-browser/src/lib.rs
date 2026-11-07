@@ -1,4 +1,5 @@
 mod actionability;
+pub mod artifact_store;
 pub mod artifacts;
 pub mod assertions;
 pub mod cdp;
@@ -360,7 +361,9 @@ impl BrowserBuffers {
                             &mut self.last_send_mutation_cursor,
                         );
                     }
-                    RecorderEvent::ToolbarAction { action, .. } => {
+                    RecorderEvent::ToolbarAction {
+                        action, ..
+                    } => {
                         if self.toolbar_action_queue.len() < 50 {
                             self.toolbar_action_queue.push(action.clone());
                         }
@@ -496,7 +499,10 @@ pub struct BrowserRuntime {
     pub runtime_id: String,
     pub ownership: Arc<RuntimeOwnership>,
     pub recovery_fence: Option<String>,
+    pub session_acknowledged: bool,
+    pub context_state_dirty: bool,
     pub browser: Browser,
+    document_checkpoint: Option<DocumentIdentity>,
     pub world_manager: WorldManager,
     pub dialog_manager: DialogManager,
     pub file_chooser_manager: Arc<FileChooserManager>,
@@ -510,6 +516,7 @@ pub struct BrowserRuntime {
     pub profile_dir: PathBuf,
     pub downloads_dir: PathBuf,
     pub artifacts_dir: PathBuf,
+    artifact_store: Arc<std::sync::OnceLock<Result<Arc<artifact_store::ArtifactStore>, String>>>,
     pub allowed_roots: Vec<PathBuf>,
     pub launch_options: BrowserLaunchOptions,
     pub buffers: BrowserBuffers,
@@ -538,10 +545,14 @@ pub struct BrowserRuntime {
 pub struct RuntimeOwnership {
     runtime_id: String,
     browser: Browser,
+    connection: Mutex<Browser>,
+    endpoint: String,
+    connection_epoch: std::sync::atomic::AtomicU64,
     profile_dir: PathBuf,
     launch_options: BrowserLaunchOptions,
     state: Mutex<RuntimeOwnershipState>,
     probe_in_flight: std::sync::atomic::AtomicBool,
+    invalidated: std::sync::atomic::AtomicBool,
 }
 
 impl std::fmt::Debug for RuntimeOwnership {
@@ -569,6 +580,9 @@ impl RuntimeOwnership {
     ) -> Arc<Self> {
         Arc::new(Self {
             runtime_id: runtime_id.to_string(),
+            endpoint: browser.get_ws_url(),
+            connection: Mutex::new(browser.clone()),
+            connection_epoch: std::sync::atomic::AtomicU64::new(0),
             browser,
             profile_dir,
             launch_options,
@@ -578,7 +592,17 @@ impl RuntimeOwnership {
                 unresponsive_probes: 0,
             }),
             probe_in_flight: std::sync::atomic::AtomicBool::new(false),
+            invalidated: std::sync::atomic::AtomicBool::new(false),
         })
+    }
+
+    pub fn invalidate(&self) {
+        self.invalidated
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    pub fn is_current_generation(&self) -> bool {
+        !self.invalidated.load(std::sync::atomic::Ordering::Acquire)
     }
 
     pub fn runtime_id(&self) -> &str {
@@ -655,9 +679,21 @@ impl RuntimeOwnership {
         {
             return None;
         }
-        let connected = self.browser.get_version().is_ok();
+        let epoch = self.connection_epoch();
+        let browser = self
+            .connection
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let _deadline = headless_chrome::browser::transport::CommandDeadlineGuard::new(
+            Instant::now() + Duration::from_secs(5),
+        );
+        let connected = browser.get_version().is_ok();
         self.probe_in_flight
             .store(false, std::sync::atomic::Ordering::SeqCst);
+        if self.connection_epoch() != epoch {
+            return None;
+        }
         self.set_connected(connected);
         Some(connected)
     }
@@ -674,8 +710,352 @@ impl RuntimeOwnership {
         state.unresponsive_probes
     }
 
+    pub fn connection_epoch(&self) -> u64 {
+        self.connection_epoch
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    pub fn is_connection_epoch(&self, epoch: u64) -> bool {
+        self.is_current_generation() && self.connection_epoch() == epoch
+    }
+
     pub fn process_id(&self) -> Option<u32> {
         self.browser.get_process_id()
+    }
+}
+
+/// A connection epoch is not a new public session when the original document is verified.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReconnectOutcome {
+    pub runtime_id: String,
+    pub connection_epoch: u64,
+    pub same_state_verified: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DocumentIdentity {
+    target_id: String,
+    frames: BTreeMap<String, String>,
+}
+
+fn reconnect_context_is_default(state: &ContextState) -> bool {
+    state.viewport.is_none()
+        && state.media.color_scheme.is_none()
+        && state.media.reduced_motion.is_none()
+        && state.media.forced_colors.is_none()
+        && state.media.contrast.is_none()
+        && state.media.media.is_none()
+        && state.locale.is_none()
+        && state.timezone.is_none()
+        && state.user_agent.is_none()
+        && state.geolocation.is_none()
+        && !state.offline
+        && state.network_conditions.is_none()
+        && state.cpu_throttling_rate.is_none()
+        && state.extra_http_headers.is_empty()
+        && state.permissions.is_empty()
+        && state.http_credentials.is_none()
+        && !state.block_service_workers
+}
+
+/// Discovery is asynchronous: connecting the browser socket does not register its tabs.
+fn reconnect_targets_ready(required: &BTreeSet<String>, present: &BTreeSet<String>) -> bool {
+    required.is_subset(present)
+}
+
+fn reconnect_target_requirements(
+    adopted: &BTreeSet<String>,
+    active: Option<&str>,
+    inventory: &BTreeSet<String>,
+) -> (BTreeSet<String>, BTreeSet<String>) {
+    let missing = adopted.difference(inventory).cloned().collect();
+    let mut required: BTreeSet<_> = adopted.intersection(inventory).cloned().collect();
+    if let Some(active) = active {
+        required.insert(active.to_string());
+    }
+    (required, missing)
+}
+
+fn same_document(
+    before: Option<&DocumentIdentity>,
+    after: Option<&DocumentIdentity>,
+    active_target: Option<&str>,
+) -> bool {
+    matches!((before, after), (Some(before), Some(after)) if active_target == Some(before.target_id.as_str()) && before == after && !before.frames.is_empty())
+}
+
+fn reconnect_same_state_verified(
+    missing: &BTreeSet<String>,
+    before: Option<&DocumentIdentity>,
+    after: Option<&DocumentIdentity>,
+    active_target: Option<&str>,
+) -> bool {
+    missing.is_empty() && same_document(before, after, active_target)
+}
+
+fn document_identity(tab: &headless_chrome::Tab) -> Result<DocumentIdentity, String> {
+    fn collect(
+        tree: &Page::FrameTree,
+        frames: &mut BTreeMap<String, String>,
+    ) -> Result<(), String> {
+        if tree.frame.loader_id.is_empty() {
+            return Err("Document has no verifiable loader identity".into());
+        }
+        frames.insert(tree.frame.id.clone(), tree.frame.loader_id.clone());
+        if let Some(children) = &tree.child_frames {
+            for child in children {
+                collect(child, frames)?;
+            }
+        }
+        Ok(())
+    }
+    let tree = tab
+        .call_method(Page::GetFrameTree(None))
+        .map_err(|e| format!("Document verification: {e}"))?
+        .frame_tree;
+    let mut frames = BTreeMap::new();
+    collect(&tree, &mut frames)?;
+    Ok(DocumentIdentity {
+        target_id: tab.get_target_id().to_string(),
+        frames,
+    })
+}
+
+impl BrowserRuntime {
+    /// Call after successful work and before dispatch. A failed read clears the old baseline.
+    pub fn checkpoint_document_identity(&mut self) -> Result<(), String> {
+        self.document_checkpoint = None;
+        let _deadline = headless_chrome::browser::transport::CommandDeadlineGuard::new(
+            Instant::now() + Duration::from_secs(5),
+        );
+        let tab = self
+            .get_active_tab()
+            .ok_or("No active document to checkpoint")?;
+        self.document_checkpoint = Some(document_identity(&tab)?);
+        Ok(())
+    }
+
+    /// Reconnect only the pinned original browser. Never navigate, restore a URL or replay work.
+    /// The caller must first verify the original process is alive and serialize by chat.
+    pub fn reconnect_same_process(&mut self) -> Result<ReconnectOutcome, String> {
+        if !self.ownership.is_current_generation() || !self.owns_browser_process() {
+            return Err("Reconnect refused: no current owned browser process".into());
+        }
+        if self.context_state_dirty || self.clock.is_installed() || !self.init_scripts.is_empty() {
+            return Err("Reconnect refused: dirty context or session-bound clock/init scripts cannot be verified without replay".into());
+        }
+        if !reconnect_context_is_default(&self.context_state)
+            || self.route_interception_enabled
+            || !self.route_registry.is_empty()
+            || self.coverage_manager.has_active_session()
+            || self.screencast_manager.has_active_session()
+            || self.webauthn_manager.has_active_session()
+        {
+            return Err("Reconnect refused: nondefault context, routes, coverage, screencast or WebAuthn are not qualified for session reattachment; live process retained".into());
+        }
+        let baseline = self.document_checkpoint.clone();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let _deadline = headless_chrome::browser::transport::CommandDeadlineGuard::new(deadline);
+        let connection = Browser::connect_with_timeout(
+            self.ownership.endpoint.clone(),
+            self.launch_options.transport_read_timeout(),
+        )
+        .map_err(|e| format!("Reconnect failed (owned process retained): {e}"))?;
+        connection
+            .set_default_command_timeout(Duration::from_secs(30))
+            .map_err(|e| e.to_string())?;
+        let inventory_session = cdp::CdpSession::connect(&self.ownership.endpoint)?;
+        let adopted: BTreeSet<String> = self.adopted_tab_target_ids.iter().cloned().collect();
+        let (reconnect_tabs, missing) = loop {
+            if !self.ownership.is_current_generation() || Instant::now() >= deadline {
+                connection.disconnect_transport();
+                return Err("Reconnect refused: target registration timed out or runtime retired; owned process retained".into());
+            }
+            let response = inventory_session
+                .send("Target.getTargets", None, None)
+                .map_err(|e| format!("Reconnect target inventory failed: {e}"))?;
+            let infos = response
+                .get("targetInfos")
+                .and_then(|v| v.as_array())
+                .ok_or("Reconnect target inventory malformed")?;
+            let mut inventory = BTreeSet::new();
+            for target in infos {
+                let kind = target
+                    .get("type")
+                    .and_then(|v| v.as_str())
+                    .ok_or("Reconnect target type missing")?;
+                if kind == "page" {
+                    inventory.insert(
+                        target
+                            .get("targetId")
+                            .and_then(|v| v.as_str())
+                            .ok_or("Reconnect target ID missing")?
+                            .to_string(),
+                    );
+                }
+            }
+            let (required, missing) = reconnect_target_requirements(
+                &adopted,
+                self.active_tab_target_id.as_deref(),
+                &inventory,
+            );
+            let tabs = connection
+                .get_tabs()
+                .lock()
+                .map_err(|e| e.to_string())?
+                .clone();
+            let present = tabs
+                .iter()
+                .map(|tab| tab.get_target_id().to_string())
+                .collect();
+            if self
+                .active_tab_target_id
+                .as_ref()
+                .is_some_and(|id| inventory.contains(id))
+                && reconnect_targets_ready(&required, &present)
+            {
+                break (
+                    tabs.into_iter()
+                        .filter(|tab| required.contains(tab.get_target_id()))
+                        .collect::<Vec<_>>(),
+                    missing,
+                );
+            }
+            // The browser's event thread registers Tab objects asynchronously. Bound every
+            // readiness wait by the same reconnect deadline, rechecking retirement each time.
+            std::thread::park_timeout(
+                Duration::from_millis(10).min(deadline.saturating_duration_since(Instant::now())),
+            );
+        };
+        let tab = reconnect_tabs
+            .iter()
+            .find(|tab| Some(tab.get_target_id().as_str()) == self.active_tab_target_id.as_deref())
+            .cloned();
+        let after = tab.as_ref().and_then(|tab| document_identity(tab).ok());
+        let verified = reconnect_same_state_verified(
+            &missing,
+            baseline.as_ref(),
+            after.as_ref(),
+            self.active_tab_target_id.as_deref(),
+        );
+        if !self.ownership.is_current_generation() || Instant::now() >= deadline {
+            connection.disconnect_transport();
+            return Err(
+                "Reconnect refused: runtime retired or deadline elapsed before publication".into(),
+            );
+        }
+        // Original owning Browser stays in RuntimeOwnership until actual runtime shutdown.
+        // Retire the old transport before publishing a new connection or its callbacks.
+        self.browser.disconnect_transport();
+        self.ownership
+            .connection_epoch
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        self.browser = connection;
+        *self
+            .ownership
+            .connection
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = self.browser.clone();
+        let refs = self.world_manager.refs.clone();
+        for target in &self.adopted_tab_target_ids {
+            refs.top_level_navigation(target);
+        }
+        for target in &missing {
+            self.remove_tab_metadata(target);
+            self.mouse_states.remove(target);
+            if self.recording_tab_target_id.as_ref() == Some(target) {
+                self.recording_tab_target_id = None;
+            }
+        }
+        self.world_manager = WorldManager::default();
+        self.world_manager.refs = refs;
+        self.cdp_session = None;
+        // Old queued callbacks can only write into retired queues, never the new generation.
+        self.buffers.drain_raw_events();
+        self.buffers.raw_recorder_events = Arc::new(Mutex::new(Vec::new()));
+        self.buffers.raw_console_entries = Arc::new(Mutex::new(Vec::new()));
+        self.buffers.raw_network_entries = Arc::new(Mutex::new(Vec::new()));
+        self.network_monitor = Arc::new(NetworkMonitorHandle::default());
+        self.dialog_manager.prepare_reconnect();
+        self.file_chooser_manager = Arc::new(FileChooserManager::default());
+        self.is_connected = false;
+        self.ownership.set_connected(false);
+        let restored = (|| {
+            for tab in reconnect_tabs {
+                // Session listeners only: no startup cleanup, user-script execution or navigation.
+                self.world_manager.ensure_utility_world(&tab)?;
+                self.dialog_manager.install(&tab)?;
+                setup_file_chooser_capture(&tab, self.file_chooser_manager.clone())?;
+                let buffer = self.buffers.raw_recorder_events.clone();
+                tab.expose_function(
+                    "__refact_event",
+                    Arc::new(move |payload| {
+                        if let Some(event) = extract_refact_event_json(&payload) {
+                            if !event.is_empty() && event.len() <= MAX_RAW_EVENT_BYTES {
+                                if let Ok(mut queue) = buffer.lock() {
+                                    if queue.len() < MAX_RAW_EVENT_QUEUE {
+                                        queue.push(event);
+                                    }
+                                }
+                            }
+                        }
+                    }),
+                )
+                .map_err(|e| e.to_string())?;
+                register_recorder_init_scripts(&tab, self.buffers.mask_passwords)?;
+                setup_console_capture(&tab, self.buffers.raw_console_entries.clone())?;
+                setup_network_capture(
+                    tab.clone(),
+                    self.network_monitor.clone(),
+                    self.buffers.raw_network_entries.clone(),
+                    self.websocket_registry.clone(),
+                    self.har_recorder.clone(),
+                )?;
+                install_websocket_router(&tab, self.websocket_registry.clone())?;
+                if self.route_interception_enabled {
+                    self.route_registry
+                        .enable_for_tab(&tab, self.context_state.http_credentials.is_some())?;
+                }
+            }
+            if verified
+                && !matches!((&baseline, &tab), (Some(before), Some(tab)) if document_identity(tab).is_ok_and(|after| after == *before))
+            {
+                return Err("Document changed during reconnect bootstrap".to_string());
+            }
+            Ok::<(), String>(())
+        })();
+        if let Err(error) = restored {
+            self.browser.disconnect_transport();
+            self.document_checkpoint = None;
+            self.context_state_dirty = true;
+            self.fence_after_relaunch(
+                "Reconnect bootstrap failed; live process retained, state unverified",
+            );
+            return Err(error);
+        }
+        if !verified {
+            self.document_checkpoint = None;
+            self.fence_after_relaunch("Same-process reconnect could not verify the original target/document; process retained, no actions replayed");
+        }
+        if !self.ownership.is_current_generation() || Instant::now() >= deadline {
+            self.browser.disconnect_transport();
+            self.document_checkpoint = None;
+            self.context_state_dirty = true;
+            self.fence_after_relaunch(
+                "Reconnect expired during bootstrap; live process retained, state unverified",
+            );
+            return Err(
+                "Reconnect refused: runtime retired or deadline elapsed during listener bootstrap"
+                    .into(),
+            );
+        }
+        self.is_connected = true;
+        self.ownership.set_connected(true);
+        Ok(ReconnectOutcome {
+            runtime_id: self.runtime_id.clone(),
+            connection_epoch: self.ownership.connection_epoch(),
+            same_state_verified: verified,
+        })
     }
 }
 
@@ -718,6 +1098,20 @@ pub fn chrome_launch_options<'a>(
 }
 
 impl BrowserRuntime {
+    pub fn maintain_artifacts(&self) -> Result<(), String> {
+        match self.artifact_store.get() {
+            Some(Ok(store)) => store.maintenance(),
+            Some(Err(error)) => Err(error.clone()),
+            None => Ok(()),
+        }
+    }
+
+    pub fn get_store(&self) -> Result<Arc<artifact_store::ArtifactStore>, String> {
+        self.artifact_store
+            .get_or_init(|| artifact_store::ArtifactStore::new(&self.artifacts_dir).map(Arc::new))
+            .clone()
+    }
+
     pub fn launch(profile_dir: PathBuf, options: BrowserLaunchOptions) -> Result<Self, String> {
         std::fs::create_dir_all(&profile_dir)
             .map_err(|e| format!("Failed to create profile dir {:?}: {}", profile_dir, e))?;
@@ -760,6 +1154,9 @@ impl BrowserRuntime {
             runtime_id,
             ownership,
             recovery_fence: None,
+            session_acknowledged: true,
+            context_state_dirty: false,
+            document_checkpoint: None,
             browser,
             world_manager: WorldManager::default(),
             dialog_manager: DialogManager::default(),
@@ -774,6 +1171,7 @@ impl BrowserRuntime {
             profile_dir,
             downloads_dir,
             artifacts_dir,
+            artifact_store: Arc::new(std::sync::OnceLock::new()),
             allowed_roots: Vec::new(),
             launch_options: options,
             buffers: BrowserBuffers::new(mask_passwords),
@@ -829,6 +1227,9 @@ impl BrowserRuntime {
             runtime_id,
             ownership,
             recovery_fence: None,
+            session_acknowledged: true,
+            context_state_dirty: false,
+            document_checkpoint: None,
             browser,
             world_manager: WorldManager::default(),
             dialog_manager: DialogManager::default(),
@@ -843,6 +1244,7 @@ impl BrowserRuntime {
             profile_dir: PathBuf::new(),
             downloads_dir,
             artifacts_dir,
+            artifact_store: Arc::new(std::sync::OnceLock::new()),
             allowed_roots: Vec::new(),
             launch_options: options,
             buffers: BrowserBuffers::new(mask_passwords),
@@ -1002,16 +1404,19 @@ impl BrowserRuntime {
     }
 
     pub fn set_block_service_workers(&mut self, block: bool) -> Result<(), String> {
-        self.context_state.block_service_workers = block;
-        for tab in self
+        let tabs = self
             .browser
             .get_tabs()
             .lock()
-            .map(|tabs| tabs.iter().cloned().collect::<Vec<_>>())
-            .unwrap_or_default()
-        {
-            context_state::apply_block_service_workers(&tab, block)?;
+            .map_err(|error| format!("Failed to list tabs: {error}"))?
+            .clone();
+        for tab in tabs {
+            if let Err(error) = context_state::apply_block_service_workers(&tab, block) {
+                self.context_state_dirty = true;
+                return Err(error);
+            }
         }
+        self.context_state.block_service_workers = block;
         Ok(())
     }
 
@@ -1020,12 +1425,28 @@ impl BrowserRuntime {
         username: String,
         password: String,
     ) -> Result<(), String> {
-        self.context_state.http_credentials = Some((username, password));
-        for tab in self.tabs_snapshot() {
-            self.context_state.apply_to_tab(&tab)?;
-            self.route_registry.enable_for_tab(&tab, true)?;
+        let mut candidate = self.context_state.clone();
+        candidate.http_credentials = Some((username, password));
+        let tabs = self
+            .browser
+            .get_tabs()
+            .lock()
+            .map_err(|error| format!("Failed to list tabs: {error}"))?
+            .clone();
+        for tab in tabs {
+            if let Err(error) = candidate.apply_to_tab(&tab) {
+                self.context_state_dirty = true;
+                return Err(error);
+            }
         }
-        self.route_interception_enabled = true;
+        // Interception needs the prospective credentials. Failure retains known-good config,
+        // but cannot undo live authentication already applied to earlier tabs.
+        let previous = std::mem::replace(&mut self.context_state, candidate);
+        if let Err(error) = self.reconcile_route_interception() {
+            self.context_state = previous;
+            self.context_state_dirty = true;
+            return Err(error);
+        }
         Ok(())
     }
 
@@ -1054,6 +1475,9 @@ impl BrowserRuntime {
     }
 
     pub fn check_connection(&mut self) -> bool {
+        let _deadline = headless_chrome::browser::transport::CommandDeadlineGuard::new(
+            Instant::now() + Duration::from_secs(5),
+        );
         let connected = match self.browser.get_version() {
             Ok(_) => true,
             Err(error) => {
@@ -1075,6 +1499,18 @@ impl BrowserRuntime {
     /// are refused until a navigate/open_tab/set_content step succeeds.
     pub fn fence_after_relaunch(&mut self, reason: impl Into<String>) {
         self.recovery_fence = Some(reason.into());
+        self.session_acknowledged = false;
+    }
+
+    pub fn acknowledge_session_generation(&mut self, generation: &str) -> Result<(), String> {
+        if generation != self.runtime_id {
+            return Err(format!(
+                "Stale browser acknowledgement; current session_generation is {}. Submit a new request acknowledging this exact generation. Old tabs and refs are lost.",
+                self.runtime_id
+            ));
+        }
+        self.session_acknowledged = true;
+        Ok(())
     }
 
     pub fn lift_recovery_fence(&mut self) {
@@ -1203,11 +1639,12 @@ impl BrowserRuntime {
     }
 }
 
-pub const TRANSPORT_DEAD_MARKERS: [&str; 4] = [
+pub const TRANSPORT_DEAD_MARKERS: [&str; 5] = [
     "underlying connection is closed",
     "connectionclosed",
     "connection closed",
     "cdp session closed",
+    "cdp command deadline exceeded",
 ];
 
 pub fn is_transport_dead_error(error: &str) -> bool {
@@ -1217,6 +1654,10 @@ pub fn is_transport_dead_error(error: &str) -> bool {
 /// Which dead-transport marker an error carries, so a relaunch can name the failure variant.
 pub fn transport_dead_marker(error: &str) -> Option<&'static str> {
     let error = error.to_ascii_lowercase();
+    // Outbound HTTP failures describe the remote peer, not the browser CDP transport.
+    if error.starts_with("http request failed:") || error.starts_with("request failed:") {
+        return None;
+    }
     TRANSPORT_DEAD_MARKERS
         .iter()
         .copied()
@@ -1283,7 +1724,10 @@ fn tab_opener(
     opener_id: Option<String>,
     frame_id: Option<String>,
 ) -> Option<refact_integrations::browser_models::TabOpener> {
-    opener_id.map(|tab_id| refact_integrations::browser_models::TabOpener { tab_id, frame_id })
+    opener_id.map(|tab_id| refact_integrations::browser_models::TabOpener {
+        tab_id,
+        frame_id,
+    })
 }
 
 impl Drop for BrowserRuntime {
@@ -1320,6 +1764,28 @@ pub fn compute_frame_hash(data: &[u8]) -> u64 {
 
 pub fn hash_distance(a: u64, b: u64) -> u64 {
     (a ^ b).count_ones() as u64
+}
+
+fn register_recorder_init_scripts(
+    tab: &headless_chrome::Tab,
+    mask_passwords: bool,
+) -> Result<(), String> {
+    tab.call_method(stealth_init_script())
+        .map_err(|e| e.to_string())?;
+    for source in [
+        build_recorder_script(mask_passwords),
+        OVERLAYS_SCRIPT.to_string(),
+        TOOLBAR_SCRIPT.to_string(),
+    ] {
+        tab.call_method(Page::AddScriptToEvaluateOnNewDocument {
+            source,
+            world_name: None,
+            include_command_line_api: None,
+            run_immediately: None,
+        })
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 pub fn inject_recorder_into_tab(
@@ -1750,7 +2216,9 @@ pub fn setup_network_capture(
                         &entry,
                         Box::new(move || {
                             body_tab
-                                .call_method(Network::GetResponseBody { request_id })
+                                .call_method(Network::GetResponseBody {
+                                    request_id,
+                                })
                                 .ok()
                                 .map(|response| {
                                     har::normalize_response_body(
@@ -2089,6 +2557,116 @@ mod tests {
     use super::*;
 
     #[test]
+    fn reconnect_waits_for_every_adopted_target_before_listener_bootstrap() {
+        let required = BTreeSet::from(["active".to_string(), "background".to_string()]);
+        assert!(!reconnect_targets_ready(&required, &BTreeSet::new()));
+        assert!(!reconnect_targets_ready(
+            &required,
+            &BTreeSet::from(["active".to_string()])
+        ));
+        assert!(reconnect_targets_ready(&required, &required));
+        let mut extra = required.clone();
+        extra.insert("unadopted".into());
+        assert!(reconnect_targets_ready(&required, &extra));
+    }
+
+    #[test]
+    fn reconnect_inventory_excludes_absent_background_but_records_loss() {
+        let adopted = BTreeSet::from(["active".to_string(), "background".to_string()]);
+        let inventory = BTreeSet::from(["active".to_string()]);
+        let (required, missing) =
+            reconnect_target_requirements(&adopted, Some("active"), &inventory);
+        assert_eq!(required, inventory);
+        assert_eq!(missing, BTreeSet::from(["background".to_string()]));
+        assert!(reconnect_targets_ready(&required, &inventory));
+        let document = DocumentIdentity {
+            target_id: "active".into(),
+            frames: BTreeMap::from([("main".into(), "loader".into())]),
+        };
+        assert!(!reconnect_same_state_verified(
+            &missing,
+            Some(&document),
+            Some(&document),
+            Some("active")
+        ));
+        let (_, missing_all) = reconnect_target_requirements(&adopted, Some("active"), &adopted);
+        assert!(missing_all.is_empty());
+        assert!(reconnect_same_state_verified(
+            &missing_all,
+            Some(&document),
+            Some(&document),
+            Some("active")
+        ));
+        let (required, _) =
+            reconnect_target_requirements(&adopted, Some("active"), &BTreeSet::new());
+        assert!(required.contains("active"));
+        assert!(!reconnect_targets_ready(&required, &BTreeSet::new()));
+    }
+
+    #[test]
+    fn reconnect_context_policy_rejects_nondefault_configuration() {
+        assert!(reconnect_context_is_default(&ContextState::default()));
+        let mut state = ContextState::default();
+        state.viewport = Some(ViewportState::default());
+        assert!(!reconnect_context_is_default(&state));
+        state = ContextState::default();
+        state.offline = true;
+        assert!(!reconnect_context_is_default(&state));
+        state = ContextState::default();
+        state.media.color_scheme = Some("dark".into());
+        assert!(!reconnect_context_is_default(&state));
+        state = ContextState::default();
+        state.http_credentials = Some(("a".into(), "b".into()));
+        assert!(!reconnect_context_is_default(&state));
+    }
+
+    #[test]
+    fn reconnect_identity_requires_target_and_every_frame_loader_not_url() {
+        let original = DocumentIdentity {
+            target_id: "target".into(),
+            frames: BTreeMap::from([
+                ("main".into(), "loader-a".into()),
+                ("child".into(), "loader-b".into()),
+            ]),
+        };
+        assert!(same_document(
+            Some(&original),
+            Some(&original),
+            Some("target")
+        ));
+        assert!(!same_document(None, Some(&original), Some("target")));
+        assert!(!same_document(Some(&original), None, Some("target")));
+        assert!(!same_document(
+            Some(&original),
+            Some(&original),
+            Some("other")
+        ));
+        let mut changed = original.clone();
+        changed
+            .frames
+            .insert("main".into(), "new-loader-at-same-url".into());
+        assert!(!same_document(
+            Some(&original),
+            Some(&changed),
+            Some("target")
+        ));
+        changed = original.clone();
+        changed.frames.remove("child");
+        assert!(!same_document(
+            Some(&original),
+            Some(&changed),
+            Some("target")
+        ));
+        changed = original.clone();
+        changed.target_id = "new-target".into();
+        assert!(!same_document(
+            Some(&original),
+            Some(&changed),
+            Some("target")
+        ));
+    }
+
+    #[test]
     fn huge_console_text_is_capped_on_a_char_boundary() {
         let short = "x".repeat(MAX_CONSOLE_TEXT_BYTES);
         assert_eq!(cap_console_text(short.clone()), short);
@@ -2320,7 +2898,9 @@ mod tests {
         let values = masked
             .iter()
             .map(|event| match event {
-                RecorderEvent::Input { value, .. } => value.clone(),
+                RecorderEvent::Input {
+                    value, ..
+                } => value.clone(),
                 _ => panic!("expected input"),
             })
             .collect::<Vec<_>>();

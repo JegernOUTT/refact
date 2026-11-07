@@ -275,10 +275,81 @@ class RepoTests(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn('bad.rs', out['error'])
 
+    def test_external_readme_snapshot_counts_each_usage_and_tracks_change(self):
+        path = 'vendor/pkg/src/lib.rs'
+        readme = 'vendor/pkg/README.md'
+        self.write(path, '#![doc=include_str!("../README.md")]\n'
+                         '#[cfg_attr(any(), cfg_attr(any(), doc=include_str!(r"../README.md",)))] pub struct A;')
+        self.write(readme, '```rust\nassert_eq!(1, 1);\n```\n'
+                           '```\nassert!(true);\n```\n```javascript\nnotRust();\n```')
+        files = gate.snapshot(self.root)
+        self.assertIn(readme, files)
+        inv = gate.inventory(files, EMPTY)
+        rows = [t for t in inv['tests'] if t['path'] == path]
+        self.assertEqual(len(rows), 4)
+        self.assertEqual(len({t['fingerprint'] for t in rows}), 2)
+        self.assertTrue(all(t['doc_source'] == readme for t in rows))
+        self.assertEqual(inv['leads'], [])
+        self.assertEqual(sum(t['kind'] == 'doc_source' for t in gate.scan(path, files[path])[1]), 2)
+        self.git('add', '.')
+        self.git('commit', '-qm', 'external doc fixture')
+        self.base = self.git('rev-parse', 'HEAD').strip()
+        self.assertEqual(gate.inventory(gate.snapshot(self.root, self.base), EMPTY)['tests'], inv['tests'])
+        self.write(readme, '```rust\nassert_eq!(2, 2);\n```')
+        code, out = self.run_gate()
+        self.assertEqual(code, 1)
+        self.assertTrue(any('admission:' in x for x in out['violations']))
+        self.assertTrue(any('support impact: ' + readme in x for x in out['violations']))
+        self.write(readme, '    ordinary indented prose\n')
+        lead = next(item for item in gate.inventory(gate.snapshot(self.root), EMPTY)['leads']
+                    if item['kind'] == 'indented_doc')
+        certificate = dict(lead, conclusion='non_test', rationale='Reviewed original prose',
+                           author='A', reviewer='B', review_evidence='review/external-doc')
+        ledger = dict(EMPTY, classifications=[certificate])
+        self.write(readme, '    assert_eq!(1, 2);\n')
+        leads = [item for item in gate.inventory(gate.snapshot(self.root), ledger)['leads']
+                 if item['kind'] == 'indented_doc']
+        self.assertEqual(len(leads), 2)
+        self.assertTrue(all(not item['resolved'] for item in leads))
+        self.assertTrue(all(readme in item['reason'] for item in leads))
+
+    def test_external_docs_missing_outside_and_symlink_fail_closed(self):
+        for target in ('missing.md', '../outside.md', '/outside.md', 'concat!("a", ".md")'):
+            expression = target if target.startswith('concat!') else json.dumps(target)
+            self.write('a.rs', '#[doc=include_str!(%s)] pub struct A;' % expression)
+            code, out = self.run_gate(base=False)
+            self.assertEqual(code, 1, out)
+            self.assertTrue(any(x['kind'] == 'doc_source' and not x['classifiable'] for x in out['leads']))
+        self.write('a.rs', '#[doc=include_str!("linked.md")] pub struct A;')
+        (self.root / 'linked.md').symlink_to(self.root / 'a.rs')
+        code, out = self.run_gate(base=False)
+        self.assertEqual(code, 2)
+        self.assertIn('symlink path forbidden', out['error'])
+
+    def test_external_docs_binary_and_size_limit_fail_closed(self):
+        self.write('a.rs', '#[doc=include_str!("external.md")] pub struct A;')
+        (self.root / 'external.md').write_bytes(b'\xff')
+        code, out = self.run_gate(base=False)
+        self.assertEqual(code, 1)
+        self.assertTrue(any('invalid UTF-8 external documentation' in x['reason'] for x in out['leads']))
+        self.write('external.md', 'x' * gate.DOC_SOURCE_LIMIT)
+        self.assertEqual(self.run_gate(base=False)[0], 0)
+        self.write('external.md', 'x' * (gate.DOC_SOURCE_LIMIT + 1))
+        code, out = self.run_gate(base=False)
+        self.assertEqual(code, 2)
+        self.assertIn('exceeds 1 MiB', out['error'])
+        self.git('add', '.')
+        self.git('commit', '-qm', 'oversize external doc fixture')
+        self.base = self.git('rev-parse', 'HEAD').strip()
+        self.write('external.md', '')
+        code, out = self.run_gate()
+        self.assertEqual(code, 2)
+        self.assertIn('exceeds 1 MiB', out['error'])
+
     def test_7000_external_include_and_doc_tests_reject_fake_certificates(self):
         for source, payload, kind in (
                 ('include!("hidden.txt");', '\n'.join('#[test] fn hidden_%d() {}' % i for i in range(7000)), 'external_include'),
-                ('#[doc=include_str!("hidden.txt")] pub struct Documented;', '```rust\nassert!(true);\n```\n' * 7000, 'doc_source')):
+                ('#[doc=include_str!(concat!("hidden", ".txt"))] pub struct Documented;', '```rust\nassert!(true);\n```\n' * 7000, 'doc_source')):
             with self.subTest(kind=kind):
                 self.write('a.rs', source)
                 self.write('hidden.txt', payload)

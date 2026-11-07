@@ -48,6 +48,7 @@ import subprocess
 import sys
 
 LIMIT = 8000
+DOC_SOURCE_LIMIT = 1024 * 1024
 ADMISSIONS = 'tools/dev/test_admissions.json'
 ATTRIBUTE_GENERATORS = {'rstest', 'test_case', 'test_matrix', 'quickcheck', 'proptest', 'parameterized', 'wasm_bindgen_test'}
 MACRO_GENERATORS = {'proptest', 'quickcheck', 'test_case', 'test_cases', 'parameterized', 'test_suite'}
@@ -103,30 +104,64 @@ def support_path(path):
 
 
 def snapshot(root, base=None):
+    def external_docs(result, registry, read):
+        for path, data in list(result.items()):
+            if not path.endswith('.rs'):
+                continue
+            try:
+                ts, _, _ = lex(data.decode('utf-8'))
+            except UnicodeError as exc:
+                raise ValueError('invalid UTF-8 source: ' + path) from exc
+            pairs, _ = paired(ts)
+            for i, (token, _, _) in enumerate(ts):
+                op = i + 2 if i + 1 < len(ts) and ts[i + 1][0] == '!' else i + 1
+                if token != '#' or op not in pairs or ts[op][0] != '[':
+                    continue
+                for item in meta_items([t[0] for t in ts[op + 1:pairs[op]]]):
+                    target = doc_source_path(path, item)
+                    if target is not None and target in registry and target not in result:
+                        result[target] = read(target, True)
+        return result
+
     if base is not None:
         # Resolve before listing: an invalid explicitly requested base never falls back.
         ref = git(root, 'rev-parse', '--verify', base + '^{commit}').decode().strip()
         entries = git(root, 'ls-tree', '-r', '-z', ref).decode().split('\0')
-        result = {}
+        result, registry = {}, {}
         for entry in filter(None, entries):
             meta, path = entry.split('\t', 1)
             mode, kind, oid = meta.split()
-            if not support_path(path):
-                continue
+            registry[path] = (mode, kind, oid)
+
+        def read(path, bounded=False):
+            mode, kind, oid = registry[path]
             if kind != 'blob' or mode not in ('100644', '100755'):
                 raise ValueError('nonregular base object forbidden: ' + path)
-            result[path] = git(root, 'cat-file', 'blob', oid)
-        return result
+            if bounded and int(git(root, 'cat-file', '-s', oid)) > DOC_SOURCE_LIMIT:
+                raise ValueError('external documentation exceeds 1 MiB: ' + path)
+            return git(root, 'cat-file', 'blob', oid)
+
+        for path in registry:
+            if support_path(path):
+                result[path] = read(path)
+        return external_docs(result, registry, read)
     paths = git(root, 'ls-files', '-z', '--cached', '--others', '--exclude-standard').decode().split('\0')
     result = {}
+
+    def read(path, bounded=False):
+        file = root / path
+        safe_file(root, file)
+        if bounded and file.stat().st_size > DOC_SOURCE_LIMIT:
+            raise ValueError('external documentation exceeds 1 MiB: ' + path)
+        return file.read_bytes()
+
     for p in sorted(set(paths) - {''}):
         if not support_path(p):
             continue
         file = root / p
         if file.exists() or file.is_symlink():
-            safe_file(root, file)
-            result[p] = file.read_bytes()
-    return result
+            result[p] = read(p)
+    return external_docs(result, set(paths), read)
 
 
 def lex(src):
@@ -290,6 +325,37 @@ def included_source(path, values, files):
     return resolved
 
 
+def doc_source_path(path, item):
+    """Only literal include_str documentation, relative to the referring source.
+
+    Leading parent components are allowed within the repository; internal parent
+    components are rejected rather than normalizing away a possible symlink hop.
+    The snapshot registry, never the live filesystem/environment, supplies bytes.
+    """
+    if len(item) not in (7, 8) or item[:5] != ['doc', '=', 'include_str', '!', '(']:
+        return None
+    # A single literal, optionally followed by the macro's trailing comma.
+    if item[-1] != ')':
+        return None
+    values = item[5:-1]
+    if len(values) == 2 and values[-1] == ',':
+        values = values[:-1]
+    target = source_literal(values[0]) if len(values) == 1 else None
+    if not target or Path(target).is_absolute() or '\\' in target or '\0' in target:
+        return None
+    parts = list(Path(path).parent.parts)
+    descending = False
+    for part in target.split('/'):
+        if part == '..':
+            if descending or not parts:
+                return None
+            parts.pop()
+        elif part not in ('', '.'):
+            descending = True
+            parts.append(part)
+    return '/'.join(parts) or None
+
+
 def scan(path, data, files=None):
     try:
         src = data.decode('utf-8')
@@ -395,7 +461,28 @@ def scan(path, data, files=None):
                     continue
                 except (ValueError, TypeError):
                     pass
-            lead('doc_source', a, b, 'unsupported doc expression/external documentation cannot be certified', False)
+            target = doc_source_path(path, item)
+            if target is not None and target in (files or {}):
+                payload = files[target]
+                if len(payload) > DOC_SOURCE_LIMIT:
+                    lead('doc_source', a, b, 'external documentation exceeds 1 MiB: ' + target, False)
+                    continue
+                try:
+                    content = payload.decode('utf-8')
+                except UnicodeError:
+                    lead('doc_source', a, b, 'invalid UTF-8 external documentation: ' + target, False)
+                    continue
+                # Each inclusion is a distinct rustdoc usage; retain identical
+                # body fingerprints and multiplicity, attributed to the .rs file.
+                def external_test(kind, start, end, name, body=None):
+                    test(kind, start, end, name, body)
+                    tests[-1]['doc_source'] = target
+                    tests[-1]['context_sha256'] = sha(json.dumps([tests[-1]['context_sha256'], target]))
+                def external_lead(kind, start, end, reason, resolvable=True):
+                    lead(kind, start, end, reason + ' (in ' + target + ')', False)
+                doc_tests(content, a, b, external_test, external_lead)
+                continue
+            lead('doc_source', a, b, 'unsupported, missing, or outside-repository external documentation: ' + (target or ''.join(item[2:])), False)
 
     groups = []
     for a, b in docs:
@@ -492,7 +579,7 @@ def inventory(files, ledger):
             leads.extend(pending)
             errors.extend(errs)
             residues[path] = residue
-        elif path != ADMISSIONS and support_path(path):
+        elif path != ADMISSIONS:
             residues[path] = sha(data)
     for lead in leads:
         lead['resolved'] = False

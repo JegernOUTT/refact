@@ -327,16 +327,24 @@ impl Serialize for LocatorStrategy {
         S: Serializer,
     {
         let wire = match self {
-            Self::Ref { value } => LocatorWire::Ref {
+            Self::Ref {
+                value,
+            } => LocatorWire::Ref {
                 value: value.clone(),
             },
-            Self::Css { value } => LocatorWire::Css {
+            Self::Css {
+                value,
+            } => LocatorWire::Css {
                 value: value.clone(),
             },
-            Self::Id { value } => LocatorWire::Id {
+            Self::Id {
+                value,
+            } => LocatorWire::Id {
                 value: value.clone(),
             },
-            Self::Name { value } => LocatorWire::Name {
+            Self::Name {
+                value,
+            } => LocatorWire::Name {
                 value: value.clone(),
             },
             Self::TestId {
@@ -377,7 +385,9 @@ impl Serialize for LocatorStrategy {
                 exact: *exact,
                 regex: regex.clone(),
             },
-            Self::Autocomplete { value } => LocatorWire::Autocomplete {
+            Self::Autocomplete {
+                value,
+            } => LocatorWire::Autocomplete {
                 value: value.clone(),
             },
             Self::Text {
@@ -427,7 +437,9 @@ impl Serialize for LocatorStrategy {
                 level: *level,
                 include_hidden: *include_hidden,
             },
-            Self::Xpath { value } => LocatorWire::Xpath {
+            Self::Xpath {
+                value,
+            } => LocatorWire::Xpath {
                 value: value.clone(),
             },
         };
@@ -442,10 +454,26 @@ impl<'de> Deserialize<'de> for LocatorStrategy {
     {
         let wire = LocatorWire::deserialize(deserializer)?;
         Ok(match wire {
-            LocatorWire::Ref { value } => Self::Ref { value },
-            LocatorWire::Css { value } => Self::Css { value },
-            LocatorWire::Id { value } => Self::Id { value },
-            LocatorWire::Name { value } => Self::Name { value },
+            LocatorWire::Ref {
+                value,
+            } => Self::Ref {
+                value,
+            },
+            LocatorWire::Css {
+                value,
+            } => Self::Css {
+                value,
+            },
+            LocatorWire::Id {
+                value,
+            } => Self::Id {
+                value,
+            },
+            LocatorWire::Name {
+                value,
+            } => Self::Name {
+                value,
+            },
             LocatorWire::TestId {
                 value,
                 exact,
@@ -484,7 +512,11 @@ impl<'de> Deserialize<'de> for LocatorStrategy {
                 exact,
                 regex,
             },
-            LocatorWire::Autocomplete { value } => Self::Autocomplete { value },
+            LocatorWire::Autocomplete {
+                value,
+            } => Self::Autocomplete {
+                value,
+            },
             LocatorWire::Text {
                 value,
                 exact,
@@ -532,7 +564,11 @@ impl<'de> Deserialize<'de> for LocatorStrategy {
                 level,
                 include_hidden,
             },
-            LocatorWire::Xpath { value } => Self::Xpath { value },
+            LocatorWire::Xpath {
+                value,
+            } => Self::Xpath {
+                value,
+            },
         })
     }
 }
@@ -954,27 +990,65 @@ impl BrowserExpectation {
             Self::ToBeEnabled => "to_be_enabled",
             Self::ToBeDisabled => "to_be_disabled",
             Self::ToBeEditable => "to_be_editable",
-            Self::ToBeChecked { .. } => "to_be_checked",
+            Self::ToBeChecked {
+                ..
+            } => "to_be_checked",
             Self::ToBeFocused => "to_be_focused",
             Self::ToBeEmpty => "to_be_empty",
-            Self::ToBeInViewport { .. } => "to_be_in_viewport",
-            Self::ToHaveText { .. } => "to_have_text",
-            Self::ToContainText { .. } => "to_contain_text",
-            Self::ToHaveValue { .. } => "to_have_value",
-            Self::ToHaveValues { .. } => "to_have_values",
-            Self::ToHaveAttribute { .. } => "to_have_attribute",
-            Self::ToHaveClass { .. } => "to_have_class",
-            Self::ToContainClass { .. } => "to_contain_class",
-            Self::ToHaveCount { .. } => "to_have_count",
-            Self::ToHaveCss { .. } => "to_have_css",
-            Self::ToHaveId { .. } => "to_have_id",
-            Self::ToHaveJsProperty { .. } => "to_have_js_property",
-            Self::ToHaveRole { .. } => "to_have_role",
-            Self::ToHaveAccessibleName { .. } => "to_have_accessible_name",
-            Self::ToHaveAccessibleDescription { .. } => "to_have_accessible_description",
-            Self::ToHaveUrl { .. } => "to_have_url",
-            Self::ToHaveTitle { .. } => "to_have_title",
-            Self::ToMatchAriaSnapshot { .. } => "to_match_aria_snapshot",
+            Self::ToBeInViewport {
+                ..
+            } => "to_be_in_viewport",
+            Self::ToHaveText {
+                ..
+            } => "to_have_text",
+            Self::ToContainText {
+                ..
+            } => "to_contain_text",
+            Self::ToHaveValue {
+                ..
+            } => "to_have_value",
+            Self::ToHaveValues {
+                ..
+            } => "to_have_values",
+            Self::ToHaveAttribute {
+                ..
+            } => "to_have_attribute",
+            Self::ToHaveClass {
+                ..
+            } => "to_have_class",
+            Self::ToContainClass {
+                ..
+            } => "to_contain_class",
+            Self::ToHaveCount {
+                ..
+            } => "to_have_count",
+            Self::ToHaveCss {
+                ..
+            } => "to_have_css",
+            Self::ToHaveId {
+                ..
+            } => "to_have_id",
+            Self::ToHaveJsProperty {
+                ..
+            } => "to_have_js_property",
+            Self::ToHaveRole {
+                ..
+            } => "to_have_role",
+            Self::ToHaveAccessibleName {
+                ..
+            } => "to_have_accessible_name",
+            Self::ToHaveAccessibleDescription {
+                ..
+            } => "to_have_accessible_description",
+            Self::ToHaveUrl {
+                ..
+            } => "to_have_url",
+            Self::ToHaveTitle {
+                ..
+            } => "to_have_title",
+            Self::ToMatchAriaSnapshot {
+                ..
+            } => "to_match_aria_snapshot",
         }
     }
 
@@ -984,8 +1058,18 @@ impl BrowserExpectation {
 
     pub fn is_multi_element(&self) -> bool {
         match self {
-            Self::ToHaveCount { .. } | Self::ToHaveValues { .. } => true,
-            Self::ToHaveText { expected, .. } | Self::ToContainText { expected, .. } => {
+            Self::ToHaveCount {
+                ..
+            }
+            | Self::ToHaveValues {
+                ..
+            } => true,
+            Self::ToHaveText {
+                expected, ..
+            }
+            | Self::ToContainText {
+                expected, ..
+            } => {
                 matches!(expected, BrowserExpectedTextOrList::Many(_))
             }
             _ => false,
@@ -1001,9 +1085,11 @@ impl BrowserExpectation {
                 "to_be_checked cannot combine indeterminate: true with a checked expectation"
                     .to_string(),
             ),
-            Self::ToBeInViewport { ratio: Some(ratio) } if !(0.0..=1.0).contains(ratio) => Err(
-                format!("to_be_in_viewport ratio must be between 0 and 1, got {ratio}"),
-            ),
+            Self::ToBeInViewport {
+                ratio: Some(ratio),
+            } if !(0.0..=1.0).contains(ratio) => Err(format!(
+                "to_be_in_viewport ratio must be between 0 and 1, got {ratio}"
+            )),
             _ => Ok(()),
         }
     }
@@ -1878,6 +1964,13 @@ pub enum BrowserStep {
     },
 
     TabLog,
+    ReadArtifact {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        offset: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<u64>,
+    },
 
     AddLocatorHandler {
         name: String,
@@ -2243,6 +2336,7 @@ impl BrowserStep {
         "remove_init_script",
         "dispatch_event",
         "tab_log",
+        "read_artifact",
         "add_locator_handler",
         "remove_locator_handler",
         "handle_dialog",
@@ -2695,6 +2789,7 @@ impl BrowserStep {
             &[],
         ),
         ("tab_log", &[], &[], &[]),
+        ("read_artifact", &["id"], &["offset", "limit"], &[]),
         (
             "add_locator_handler",
             &["handler", "locator", "name"],
@@ -2757,6 +2852,9 @@ impl PageContextMode {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BrowserActionRequest {
+    /// Compare-and-set acknowledgement of a replacement runtime, never replay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acknowledge_session_generation: Option<String>,
     #[serde(default)]
     pub session: SessionPolicy,
     #[serde(default)]
@@ -2851,6 +2949,8 @@ pub struct BrowserAssertionResult {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StepResult {
     pub step_index: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<String>,
     pub ok: bool,
     pub summary: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2879,6 +2979,7 @@ impl StepResult {
     pub fn success(step_index: usize, summary: impl Into<String>) -> Self {
         Self {
             step_index,
+            outcome: None,
             ok: true,
             summary: summary.into(),
             error: None,
@@ -2901,6 +3002,7 @@ impl StepResult {
     ) -> Self {
         Self {
             step_index,
+            outcome: None,
             ok: false,
             summary: summary.into(),
             error: Some(error.into()),
@@ -2923,6 +3025,7 @@ impl StepResult {
         );
         result.ok = false;
         result.skipped = true;
+        result.outcome = Some("skipped".to_string());
         result
     }
 
@@ -2998,7 +3101,19 @@ pub struct BrowserPageContext {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BrowserRecovery {
+    pub incomplete: bool,
+    pub state_lost: bool,
+    pub effect_unknown: bool,
+    pub retry_safe: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ExecutionReport {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_generation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery: Option<BrowserRecovery>,
     pub ok: bool,
     pub steps: Vec<StepResult>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -3387,7 +3502,9 @@ mod tests {
                 device: Some("desktop".to_string()),
                 url: Some("https://example.com/new".to_string()),
             },
-            BrowserStep::CloseTab { tab: None },
+            BrowserStep::CloseTab {
+                tab: None,
+            },
             BrowserStep::SwitchTab {
                 tab: TabTarget::Active,
             },
@@ -3402,7 +3519,9 @@ mod tests {
                 },
                 times: Some(2),
             },
-            BrowserStep::Unroute { pattern: None },
+            BrowserStep::Unroute {
+                pattern: None,
+            },
             BrowserStep::ListRoutes,
             BrowserStep::RouteWebSocket {
                 pattern: UrlPattern::Text("wss://example.com/**".to_string()),
@@ -3410,7 +3529,9 @@ mod tests {
                 on_page_message: WebSocketMessageAction::Forward,
                 on_server_message: WebSocketMessageAction::Forward,
             },
-            BrowserStep::UnrouteWebSocket { pattern: None },
+            BrowserStep::UnrouteWebSocket {
+                pattern: None,
+            },
             BrowserStep::CloseWebSocket {
                 pattern: UrlPattern::Text("wss://example.com/**".to_string()),
                 code: Some(1001),
@@ -3561,7 +3682,9 @@ mod tests {
                 longitude: 2.0,
                 accuracy: None,
             },
-            BrowserStep::SetOffline { offline: false },
+            BrowserStep::SetOffline {
+                offline: false,
+            },
             BrowserStep::SetNetworkConditions {
                 offline: Some(false),
                 latency_ms: Some(150.0),
@@ -3569,7 +3692,9 @@ mod tests {
                 upload_kbps: Some(750.0),
                 preset: Some("slow-3g".to_string()),
             },
-            BrowserStep::SetCpuThrottling { rate: 4.0 },
+            BrowserStep::SetCpuThrottling {
+                rate: 4.0,
+            },
             BrowserStep::EmulateDevice {
                 name: "iPhone 13".to_string(),
             },
@@ -3579,7 +3704,9 @@ mod tests {
             BrowserStep::SetExtraHttpHeaders {
                 headers: BTreeMap::new(),
             },
-            BrowserStep::GetCookies { urls: None },
+            BrowserStep::GetCookies {
+                urls: None,
+            },
             BrowserStep::SetCookies {
                 cookies: Vec::new(),
             },
@@ -3635,7 +3762,9 @@ mod tests {
                 locator: locator(),
                 timeout_ms: None,
             },
-            BrowserStep::ClickIfExists { locator: locator() },
+            BrowserStep::ClickIfExists {
+                locator: locator(),
+            },
             BrowserStep::Tap {
                 locator: Some(locator()),
                 x: None,
@@ -3645,9 +3774,15 @@ mod tests {
                 locator: locator(),
                 timeout_ms: None,
             },
-            BrowserStep::Focus { locator: locator() },
-            BrowserStep::Blur { locator: locator() },
-            BrowserStep::ScrollTo { locator: locator() },
+            BrowserStep::Focus {
+                locator: locator(),
+            },
+            BrowserStep::Blur {
+                locator: locator(),
+            },
+            BrowserStep::ScrollTo {
+                locator: locator(),
+            },
             BrowserStep::PressKey {
                 key: "Enter".to_string(),
                 modifiers: vec!["Ctrl".to_string()],
@@ -3664,8 +3799,14 @@ mod tests {
             BrowserStep::DragAndDrop {
                 source: locator(),
                 target: locator(),
-                source_position: Some(BrowserPosition { x: 1.0, y: 2.0 }),
-                target_position: Some(BrowserPosition { x: 3.0, y: 4.0 }),
+                source_position: Some(BrowserPosition {
+                    x: 1.0,
+                    y: 2.0,
+                }),
+                target_position: Some(BrowserPosition {
+                    x: 3.0,
+                    y: 4.0,
+                }),
             },
             BrowserStep::DropFiles {
                 target: locator(),
@@ -3713,8 +3854,12 @@ mod tests {
                 locator: locator(),
                 value: "one".to_string(),
             },
-            BrowserStep::Check { locator: locator() },
-            BrowserStep::Uncheck { locator: locator() },
+            BrowserStep::Check {
+                locator: locator(),
+            },
+            BrowserStep::Uncheck {
+                locator: locator(),
+            },
             BrowserStep::SetInputFiles {
                 locator: locator(),
                 paths: vec!["/tmp/file".to_string()],
@@ -3774,7 +3919,9 @@ mod tests {
                 timeout_ms: Some(1_000),
                 save_as: Some("file.txt".to_string()),
             },
-            BrowserStep::CancelDownload { id: None },
+            BrowserStep::CancelDownload {
+                id: None,
+            },
             BrowserStep::WaitForElementHidden {
                 locator: locator(),
                 timeout_ms: Some(1_000),
@@ -3783,22 +3930,36 @@ mod tests {
                 locator: locator(),
                 timeout_ms: Some(1_000),
             },
-            BrowserStep::WaitSeconds { seconds: 0.1 },
-            BrowserStep::GetText { locator: locator() },
-            BrowserStep::GetHtml { locator: locator() },
+            BrowserStep::WaitSeconds {
+                seconds: 0.1,
+            },
+            BrowserStep::GetText {
+                locator: locator(),
+            },
+            BrowserStep::GetHtml {
+                locator: locator(),
+            },
             BrowserStep::GetAttribute {
                 locator: locator(),
                 attribute: "href".to_string(),
             },
-            BrowserStep::BoundingBox { locator: locator() },
-            BrowserStep::Count { locator: locator() },
-            BrowserStep::InputValue { locator: locator() },
+            BrowserStep::BoundingBox {
+                locator: locator(),
+            },
+            BrowserStep::Count {
+                locator: locator(),
+            },
+            BrowserStep::InputValue {
+                locator: locator(),
+            },
             BrowserStep::AllTexts {
                 locator: locator(),
                 mode: BrowserTextMode::TextContent,
                 limit: Some(10),
             },
-            BrowserStep::ElementState { locator: locator() },
+            BrowserStep::ElementState {
+                locator: locator(),
+            },
             BrowserStep::ExtractLinks {
                 locator: Some(locator()),
                 limit: Some(10),
@@ -3870,6 +4031,11 @@ mod tests {
                 event_init: Some(serde_json::json!({"detail": 2})),
             },
             BrowserStep::TabLog,
+            BrowserStep::ReadArtifact {
+                id: "session-owned-report".to_string(),
+                offset: Some(0),
+                limit: Some(8192),
+            },
             BrowserStep::AddLocatorHandler {
                 name: "overlay".to_string(),
                 locator: locator(),
@@ -3884,8 +4050,12 @@ mod tests {
                 accept: true,
                 prompt_text: Some("answer".to_string()),
             },
-            BrowserStep::DismissOverlays { aggressive: true },
-            BrowserStep::HighlightElement { locator: locator() },
+            BrowserStep::DismissOverlays {
+                aggressive: true,
+            },
+            BrowserStep::HighlightElement {
+                locator: locator(),
+            },
             BrowserStep::Highlight {
                 locator: locator(),
                 style: Some("outline: 2px solid red".to_string()),
@@ -4054,7 +4224,10 @@ mod tests {
             serde_json::json!({"action": "clock_fast_forward", "ticks": "01:00"}),
         )
         .unwrap();
-        let BrowserStep::ClockFastForward { ticks } = &human else {
+        let BrowserStep::ClockFastForward {
+            ticks,
+        } = &human
+        else {
             panic!("expected clock_fast_forward, got {human:?}");
         };
         assert_eq!(*ticks, ClockTicks::Human("01:00".to_string()));
@@ -4070,7 +4243,10 @@ mod tests {
             serde_json::json!({"action": "clock_pause_at", "time": 1_580_601_600_000i64}),
         )
         .unwrap();
-        let BrowserStep::ClockPauseAt { time } = &numeric else {
+        let BrowserStep::ClockPauseAt {
+            time,
+        } = &numeric
+        else {
             panic!("expected clock_pause_at, got {numeric:?}");
         };
         assert_eq!(*time, ClockTime::UnixMillis(1_580_601_600_000));
@@ -4078,7 +4254,10 @@ mod tests {
             serde_json::json!({"action": "clock_set_fixed_time", "time": "2020-02-02"}),
         )
         .unwrap();
-        let BrowserStep::ClockSetFixedTime { time } = &iso else {
+        let BrowserStep::ClockSetFixedTime {
+            time,
+        } = &iso
+        else {
             panic!("expected clock_set_fixed_time, got {iso:?}");
         };
         assert_eq!(*time, ClockTime::Text("2020-02-02".to_string()));
@@ -4088,7 +4267,12 @@ mod tests {
     fn clock_install_time_is_optional_and_resume_takes_no_parameters() {
         let install: BrowserStep =
             serde_json::from_value(serde_json::json!({"action": "clock_install"})).unwrap();
-        assert!(matches!(install, BrowserStep::ClockInstall { time: None }));
+        assert!(matches!(
+            install,
+            BrowserStep::ClockInstall {
+                time: None
+            }
+        ));
         assert_eq!(
             serde_json::to_value(&install).unwrap(),
             serde_json::json!({"action": "clock_install"})
@@ -4260,7 +4444,9 @@ mod tests {
                 assert!(clear_first);
                 assert!(verify);
                 match &locator.strategy {
-                    LocatorStrategy::Name { value } => assert_eq!(value, "q"),
+                    LocatorStrategy::Name {
+                        value,
+                    } => assert_eq!(value, "q"),
                     _ => panic!("Expected Name locator"),
                 }
             }
@@ -4552,7 +4738,12 @@ mod tests {
             }))
             .unwrap();
 
-            let BrowserStep::ExpectPoll { matcher, soft, .. } = step else {
+            let BrowserStep::ExpectPoll {
+                matcher,
+                soft,
+                ..
+            } = step
+            else {
                 panic!("expected ExpectPoll");
             };
             assert_eq!(matcher, expected);
@@ -4585,7 +4776,9 @@ mod tests {
         let step: BrowserStep =
             serde_json::from_str(r#"{"action":"accessibility_snapshot"}"#).unwrap();
         match step {
-            BrowserStep::AccessibilitySnapshot { options } => {
+            BrowserStep::AccessibilitySnapshot {
+                options,
+            } => {
                 assert_eq!(options.mode, AccessibilitySnapshotMode::Ai);
                 assert!(options.refs_enabled());
                 assert!(!options.boxes);
@@ -4613,7 +4806,10 @@ mod tests {
     fn accessibility_snapshot_omitting_scoping_options_stays_byte_stable() {
         let options = AccessibilitySnapshotOptions::default();
         assert_eq!(
-            serde_json::to_string(&BrowserStep::AccessibilitySnapshot { options }).unwrap(),
+            serde_json::to_string(&BrowserStep::AccessibilitySnapshot {
+                options
+            })
+            .unwrap(),
             r#"{"action":"accessibility_snapshot","mode":"ai","boxes":false}"#
         );
     }
@@ -4624,14 +4820,18 @@ mod tests {
         let step: BrowserStep = serde_json::from_str(json_str).unwrap();
         assert!(matches!(
             step,
-            BrowserStep::DismissOverlays { aggressive: false }
+            BrowserStep::DismissOverlays {
+                aggressive: false
+            }
         ));
 
         let opt_in: BrowserStep =
             serde_json::from_str(r#"{"action": "dismiss_overlays", "aggressive": true}"#).unwrap();
         assert!(matches!(
             opt_in,
-            BrowserStep::DismissOverlays { aggressive: true }
+            BrowserStep::DismissOverlays {
+                aggressive: true
+            }
         ));
     }
 
@@ -4822,6 +5022,8 @@ mod tests {
     #[test]
     fn test_execution_report_serde() {
         let report = ExecutionReport {
+            session_generation: None,
+            recovery: None,
             ok: true,
             warnings: vec!["browser session was dead; relaunched and retried".to_string()],
             steps: vec![

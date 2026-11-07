@@ -157,6 +157,26 @@ pub struct ContextState {
 }
 
 impl ContextState {
+    /// Commit only after every intended live target accepted the candidate. A failed
+    /// apply cannot be rolled back honestly: retain known-good state and mark dirty.
+    pub fn apply_candidate(
+        &mut self,
+        candidate: Self,
+        dirty: &mut bool,
+        apply: impl FnOnce(&Self) -> Result<(), String>,
+    ) -> Result<(), String> {
+        match apply(&candidate) {
+            Ok(()) => {
+                *self = candidate;
+                Ok(())
+            }
+            Err(error) => {
+                *dirty = true;
+                Err(error)
+            }
+        }
+    }
+
     pub fn apply_to_tab(&self, tab: &Tab) -> Result<(), String> {
         if let Some(viewport) = &self.viewport {
             apply_viewport(tab, viewport)?;
@@ -224,17 +244,18 @@ impl ContextState {
     }
 
     pub fn clear_overrides(&mut self, tabs: &[std::sync::Arc<Tab>]) -> Result<(), String> {
-        self.viewport = None;
-        self.media = MediaState::default();
-        self.locale = None;
-        self.timezone = None;
-        self.user_agent = None;
-        self.geolocation = None;
-        self.offline = false;
-        self.network_conditions = None;
-        self.cpu_throttling_rate = None;
-        self.permissions.clear();
-        self.block_service_workers = false;
+        let mut candidate = self.clone();
+        candidate.viewport = None;
+        candidate.media = MediaState::default();
+        candidate.locale = None;
+        candidate.timezone = None;
+        candidate.user_agent = None;
+        candidate.geolocation = None;
+        candidate.offline = false;
+        candidate.network_conditions = None;
+        candidate.cpu_throttling_rate = None;
+        candidate.permissions.clear();
+        candidate.block_service_workers = false;
         for tab in tabs {
             tab.call_method(Emulation::ClearDeviceMetricsOverride(None))
                 .map_err(|error| format!("Failed to clear viewport: {error}"))?;
@@ -243,9 +264,11 @@ impl ContextState {
                 max_touch_points: None,
             })
             .map_err(|error| format!("Failed to clear touch emulation: {error}"))?;
-            apply_media(tab, &self.media)?;
-            tab.call_method(Emulation::SetLocaleOverride { locale: None })
-                .map_err(|error| format!("Failed to clear locale: {error}"))?;
+            apply_media(tab, &candidate.media)?;
+            tab.call_method(Emulation::SetLocaleOverride {
+                locale: None,
+            })
+            .map_err(|error| format!("Failed to clear locale: {error}"))?;
             tab.call_method(Emulation::SetTimezoneOverride {
                 timezone_id: String::new(),
             })
@@ -259,11 +282,16 @@ impl ContextState {
             .map_err(|error| format!("Failed to clear user agent: {error}"))?;
             tab.call_method(Emulation::ClearGeolocationOverride(None))
                 .map_err(|error| format!("Failed to clear geolocation: {error}"))?;
-            apply_block_service_workers(tab, self.block_service_workers)?;
-            apply_network_conditions(tab, self.offline, self.network_conditions.as_ref())?;
-            apply_cpu_throttling(tab, self.cpu_throttling_rate)?;
+            apply_block_service_workers(tab, candidate.block_service_workers)?;
+            apply_network_conditions(
+                tab,
+                candidate.offline,
+                candidate.network_conditions.as_ref(),
+            )?;
+            apply_cpu_throttling(tab, candidate.cpu_throttling_rate)?;
             clear_permissions(tab)?;
         }
+        *self = candidate;
         Ok(())
     }
 
@@ -383,9 +411,11 @@ pub fn apply_cpu_throttling(tab: &Tab, rate: Option<f64>) -> Result<(), String> 
 }
 
 pub fn apply_block_service_workers(tab: &Tab, block: bool) -> Result<(), String> {
-    tab.call_method(Network::SetBypassServiceWorker { bypass: block })
-        .map(|_| ())
-        .map_err(|error| format!("Failed to set service worker bypass: {error}"))
+    tab.call_method(Network::SetBypassServiceWorker {
+        bypass: block,
+    })
+    .map(|_| ())
+    .map_err(|error| format!("Failed to set service worker bypass: {error}"))
 }
 
 pub fn apply_extra_http_headers(
@@ -403,9 +433,11 @@ pub fn apply_extra_http_headers(
 }
 
 pub fn get_cookies(tab: &Tab, urls: Option<Vec<String>>) -> Result<Vec<BrowserCookie>, String> {
-    tab.call_method(Network::GetCookies { urls })
-        .map_err(|error| format!("Failed to get cookies: {error}"))
-        .map(|response| response.cookies.into_iter().map(cookie_from_cdp).collect())
+    tab.call_method(Network::GetCookies {
+        urls,
+    })
+    .map_err(|error| format!("Failed to get cookies: {error}"))
+    .map(|response| response.cookies.into_iter().map(cookie_from_cdp).collect())
 }
 
 pub fn set_cookies(tab: &Tab, cookies: &[BrowserCookie]) -> Result<(), String> {
@@ -513,7 +545,10 @@ pub fn storage_state(tab: &Tab, indexed_db: bool) -> Result<BrowserStorageState,
             },
         }]
     };
-    Ok(BrowserStorageState { cookies, origins })
+    Ok(BrowserStorageState {
+        cookies,
+        origins,
+    })
 }
 
 pub fn get_indexed_db(tab: &Tab) -> Result<Vec<BrowserIndexedDbDatabase>, String> {
@@ -907,6 +942,40 @@ mod tests {
             }],
         }];
         state
+    }
+
+    #[test]
+    fn managed_candidate_commits_only_after_complete_live_apply() {
+        let mut state = ContextState::default();
+        state.locale = Some("en-US".to_string());
+        let mut candidate = state.clone();
+        candidate.locale = Some("fr-FR".to_string());
+        let mut dirty = false;
+        let applied_targets = std::cell::Cell::new(0);
+        let result = state.apply_candidate(candidate.clone(), &mut dirty, |_| {
+            applied_targets.set(applied_targets.get() + 1);
+            Err("second intended tab disconnected after first tab changed".to_string())
+        });
+        assert!(result.is_err());
+        assert_eq!(applied_targets.get(), 1);
+        assert_eq!(state.locale.as_deref(), Some("en-US"));
+        assert!(
+            dirty,
+            "partial live apply must not claim rollback/equivalence"
+        );
+        state
+            .apply_candidate(candidate, &mut dirty, |candidate| {
+                assert_eq!(candidate.locale.as_deref(), Some("fr-FR"));
+                applied_targets.set(applied_targets.get() + 1);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(applied_targets.get(), 2);
+        assert_eq!(state.locale.as_deref(), Some("fr-FR"));
+        assert!(
+            dirty,
+            "a later managed setter cannot prove other dirty state restored"
+        );
     }
 
     #[test]

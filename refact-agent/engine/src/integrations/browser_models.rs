@@ -11,6 +11,8 @@ const MIN_ACTION_SUGGESTION_SCORE: usize = 3;
 #[serde(deny_unknown_fields)]
 struct BrowserActionRequestEnvelope {
     #[serde(default)]
+    acknowledge_session_generation: Option<String>,
+    #[serde(default)]
     session: SessionPolicy,
     #[serde(default)]
     target: TabTarget,
@@ -35,6 +37,7 @@ pub fn parse_browser_action_request(value: Value) -> Result<BrowserActionRequest
         steps.push(parse_browser_step(index, raw_step)?);
     }
     Ok(BrowserActionRequest {
+        acknowledge_session_generation: envelope.acknowledge_session_generation,
         session: envelope.session,
         target: envelope.target,
         attach_screenshot: envelope.attach_screenshot,
@@ -316,7 +319,10 @@ mod tests {
         }))
         .unwrap();
 
-        let BrowserStep::HttpRequest { options } = &request.steps[0] else {
+        let BrowserStep::HttpRequest {
+            options,
+        } = &request.steps[0]
+        else {
             panic!("expected an http_request step");
         };
         assert_eq!(options.url, "https://example.com/api/session");
@@ -344,7 +350,10 @@ mod tests {
             }]
         }))
         .unwrap();
-        let BrowserStep::HttpRequest { options } = &full.steps[0] else {
+        let BrowserStep::HttpRequest {
+            options,
+        } = &full.steps[0]
+        else {
             panic!("expected an http_request step");
         };
         assert_eq!(options.method.as_deref(), Some("post"));

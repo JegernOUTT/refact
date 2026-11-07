@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashMap};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+use crate::artifact_store::ArtifactStore;
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use headless_chrome::Tab;
 use headless_chrome::protocol::cdp::types::Event;
@@ -105,6 +105,13 @@ pub struct CoverageManager {
 }
 
 impl CoverageManager {
+    pub fn has_active_session(&self) -> bool {
+        self.sessions
+            .lock()
+            .map(|sessions| sessions.values().any(|session| session.options.is_some()))
+            .unwrap_or(true)
+    }
+
     pub fn start(&self, tab: &Tab, options: CoverageOptions) -> Result<(), String> {
         if !options.js && !options.css {
             return Err("Coverage requires js, css, or both".to_string());
@@ -202,7 +209,7 @@ impl CoverageManager {
         Ok(())
     }
 
-    pub fn stop(&self, tab: &Tab, artifacts_dir: &Path) -> Result<CoverageStopResult, String> {
+    pub fn stop(&self, tab: &Tab, store: &ArtifactStore) -> Result<CoverageStopResult, String> {
         let target_id = tab.get_target_id().to_string();
         let (options, scripts, style_sheets) = {
             let sessions = self.sessions.lock().map_err(|error| error.to_string())?;
@@ -324,28 +331,13 @@ impl CoverageManager {
             .iter()
             .filter(|resource| resource.unmeasured)
             .count();
-        std::fs::create_dir_all(artifacts_dir).map_err(|error| {
-            format!(
-                "Failed to create browser artifacts directory {}: {error}",
-                artifacts_dir.display()
-            )
-        })?;
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis();
-        let path = artifacts_dir.join(format!("coverage-{nonce}.json"));
         let body = serde_json::to_vec_pretty(&serde_json::json!({
             "summaries": summaries,
             "resources": resources,
         }))
         .map_err(|error| format!("Failed to serialize coverage artifact: {error}"))?;
-        std::fs::write(&path, &body).map_err(|error| {
-            format!(
-                "Failed to save coverage artifact {}: {error}",
-                path.display()
-            )
-        })?;
+        let stored = store.write(&body, "application/json")?;
+        let path = stored.path;
         Ok(CoverageStopResult {
             summaries,
             artifact: CoverageArtifact {
@@ -449,7 +441,10 @@ pub fn merge_ranges(ranges: &[CoverageRange], total: usize) -> Vec<CoverageRange
         .filter_map(|range| {
             let start = range.start.min(total);
             let end = range.end.min(total);
-            (start < end).then_some(CoverageRange { start, end })
+            (start < end).then_some(CoverageRange {
+                start,
+                end,
+            })
         })
         .collect::<Vec<_>>();
     ranges.sort_by_key(|range| (range.start, range.end));

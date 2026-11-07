@@ -1,12 +1,13 @@
 use std::collections::HashMap;
 use std::net::TcpStream;
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde_json::{Value, json};
 use tungstenite::stream::MaybeTlsStream;
 use tungstenite::protocol::WebSocketConfig;
-use tungstenite::{Message, WebSocket};
+use tungstenite::WebSocket;
+use headless_chrome::browser::transport::Transport;
 
 pub const CDP_INLINE_RESULT_LIMIT_BYTES: usize = 8 * 1024;
 pub const CDP_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
@@ -172,22 +173,22 @@ pub fn connect_raw_cdp(ws_url: &str) -> Result<CdpSocket, tungstenite::Error> {
 }
 
 pub struct CdpSession {
-    socket: Mutex<CdpSocket>,
-    next_command_id: Mutex<u64>,
+    transport: Transport,
     attached_sessions: Mutex<HashMap<String, String>>,
 }
 
 impl CdpSession {
     pub fn connect(ws_url: &str) -> Result<Self, String> {
-        let socket = connect_raw_cdp(ws_url).map_err(|error| {
-            format!(
-                "Failed to open raw CDP session: {}",
-                bounded_cdp_text(&error.to_string())
-            )
-        })?;
+        let url = url::Url::parse(ws_url).map_err(|error| format!("Invalid CDP URL: {error}"))?;
+        let transport =
+            Transport::new(url, None, Duration::from_secs(86_400), None).map_err(|error| {
+                format!(
+                    "Failed to open raw CDP session: {}",
+                    bounded_cdp_text(&error.to_string())
+                )
+            })?;
         Ok(Self {
-            socket: Mutex::new(socket),
-            next_command_id: Mutex::new(1),
+            transport,
             attached_sessions: Mutex::new(HashMap::new()),
         })
     }
@@ -237,102 +238,155 @@ impl CdpSession {
         params: Option<&Value>,
         session_id: Option<&str>,
     ) -> Result<Value, String> {
-        let id = {
-            let mut next = self
-                .next_command_id
-                .lock()
-                .map_err(|error| format!("Failed to lock CDP command counter: {error}"))?;
-            let id = *next;
-            *next += 1;
-            id
-        };
-        let mut frame = json!({"id": id, "method": method});
-        if let Some(params) = params.filter(|params| !params.is_null()) {
-            frame["params"] = params.clone();
-        }
-        if let Some(session_id) = session_id {
-            frame["sessionId"] = Value::String(session_id.to_string());
-        }
-        let mut socket = self
-            .socket
-            .lock()
-            .map_err(|error| format!("Failed to lock CDP socket: {error}"))?;
-        socket
-            .send(Message::Text(frame.to_string().into()))
-            .map_err(|error| {
-                format!(
-                    "Failed to send {method}: {}",
-                    bounded_cdp_text(&error.to_string())
-                )
-            })?;
-        let deadline = Instant::now() + CDP_COMMAND_TIMEOUT;
-        loop {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                return Err(format!(
-                    "{method} timed out after {}ms",
-                    CDP_COMMAND_TIMEOUT.as_millis()
-                ));
-            }
-            set_read_timeout(&mut socket, Some(remaining))?;
-            let message = match socket.read() {
-                Ok(message) => message,
-                Err(tungstenite::Error::Io(error))
-                    if matches!(
-                        error.kind(),
-                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                    ) =>
-                {
-                    continue;
-                }
-                Err(error) => {
-                    return Err(format!(
-                        "Failed to read the {method} response: {}",
-                        bounded_cdp_text(&error.to_string())
-                    ));
-                }
-            };
-            let Some(value) = message_json(message)? else {
-                continue;
-            };
-            if value.get("id").and_then(Value::as_u64) != Some(id) {
-                continue;
-            }
-            if let Some(error) = value.get("error") {
-                return Err(bounded_cdp_text(&error.to_string()));
-            }
-            return Ok(value.get("result").cloned().unwrap_or(Value::Null));
-        }
+        self.transport
+            .call_method_json(method, params.cloned().unwrap_or(Value::Null), session_id)
+            .map_err(|error| bounded_cdp_text(&error.to_string()))
     }
-}
-
-fn message_json(message: Message) -> Result<Option<Value>, String> {
-    match message {
-        Message::Text(text) => serde_json::from_str(&text)
-            .map(Some)
-            .map_err(|error| format!("Invalid CDP message: {error}")),
-        Message::Close(_) => Err("The raw CDP session closed".to_string()),
-        _ => Ok(None),
-    }
-}
-
-fn set_read_timeout(socket: &mut CdpSocket, timeout: Option<Duration>) -> Result<(), String> {
-    match socket.get_mut() {
-        MaybeTlsStream::Plain(stream) => stream.set_read_timeout(timeout),
-        MaybeTlsStream::Rustls(stream) => stream.sock.set_read_timeout(timeout),
-        _ => return Err("Unsupported raw CDP transport".to_string()),
-    }
-    .map_err(|error| format!("Failed to configure the CDP read timeout: {error}"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn mock_session(
+        script: impl FnOnce(WebSocket<TcpStream>) + Send + 'static,
+    ) -> (CdpSession, std::thread::JoinHandle<()>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!(
+            "ws://{}/devtools/browser/test",
+            listener.local_addr().unwrap()
+        );
+        let peer = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            stream
+                .set_write_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            script(tungstenite::accept(stream).unwrap());
+        });
+        (CdpSession::connect(&url).unwrap(), peer)
+    }
+
+    fn read_frame(ws: &mut WebSocket<TcpStream>) -> Value {
+        serde_json::from_str(ws.read().unwrap().to_text().unwrap()).unwrap()
+    }
+
+    #[test]
+    fn dynamic_session_sends_flattened_unknown_method_and_maps_remote_error() {
+        let (session, peer) = mock_session(|mut ws| {
+            let attach = read_frame(&mut ws);
+            assert_eq!(attach["method"], "Target.attachToTarget");
+            assert_eq!(attach["params"], json!({"targetId":"tab", "flatten":true}));
+            assert!(attach.get("sessionId").is_none());
+            ws.send(tungstenite::Message::text(
+                json!({"id":attach["id"],
+                "result":{"sessionId":"flat-session"}})
+                .to_string(),
+            ))
+            .unwrap();
+            let raw = read_frame(&mut ws);
+            assert_eq!(raw["method"], "FutureDomain.notInGeneratedProtocol");
+            assert_eq!(raw["params"], json!({"nested":{"numbers":[3,5]}}));
+            assert_eq!(raw["sessionId"], "flat-session");
+            assert!(raw["id"] != attach["id"]);
+            ws.send(tungstenite::Message::text(
+                json!({"id":raw["id"], "sessionId":"flat-session",
+                "result":{"nested":[false,{"value":17}]}})
+                .to_string(),
+            ))
+            .unwrap();
+            let failed = read_frame(&mut ws);
+            // A second targeted command must reuse the attachment, not issue attach again.
+            assert_eq!(failed["method"], "FutureDomain.fail");
+            assert_eq!(failed["sessionId"], "flat-session");
+            ws.send(tungstenite::Message::text(
+                json!({"id":failed["id"],
+                "error":{"code":-32000,"message":"mock refusal"}})
+                .to_string(),
+            ))
+            .unwrap();
+            let _ = ws.read();
+        });
+        assert_eq!(
+            session
+                .send(
+                    "FutureDomain.notInGeneratedProtocol",
+                    Some(&json!({"nested":{"numbers":[3,5]}})),
+                    Some("tab")
+                )
+                .unwrap(),
+            json!({"nested":[false,{"value":17}]})
+        );
+        assert_eq!(
+            session
+                .send("FutureDomain.fail", None, Some("tab"))
+                .unwrap_err(),
+            "Method call error -32000: mock refusal"
+        );
+        drop(session);
+        peer.join().unwrap();
+    }
+
+    #[test]
+    fn dynamic_session_deadline_is_not_replayed_and_late_reply_is_discarded() {
+        use headless_chrome::browser::transport::CommandDeadlineGuard;
+        use std::sync::mpsc;
+        use std::time::Instant;
+        let (release, wait) = mpsc::channel();
+        let (seen, received) = mpsc::channel();
+        let (session, peer) = mock_session(move |mut ws| {
+            let first = read_frame(&mut ws);
+            assert_eq!(first["method"], "FutureDomain.pending");
+            seen.send(()).unwrap();
+            wait.recv_timeout(Duration::from_secs(3)).unwrap();
+            ws.send(tungstenite::Message::text(
+                json!({"id":first["id"],
+                "result":{"late":true}})
+                .to_string(),
+            ))
+            .unwrap();
+            let next = read_frame(&mut ws);
+            assert_eq!(
+                next["method"], "FutureDomain.next",
+                "uncertain command was replayed"
+            );
+            assert_ne!(next["id"], first["id"]);
+            // Missing result is a valid null result, never a panic.
+            ws.send(tungstenite::Message::text(
+                json!({"id":next["id"]}).to_string(),
+            ))
+            .unwrap();
+            let _ = ws.read();
+        });
+        let guard = CommandDeadlineGuard::new(Instant::now() + Duration::from_millis(100));
+        let error = session
+            .send("FutureDomain.pending", None, None)
+            .unwrap_err();
+        drop(guard);
+        received.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(
+            error,
+            "CDP command deadline exceeded: raw CDP (effect_unknown=true)"
+        );
+        release.send(()).unwrap();
+        assert_eq!(
+            session.send("FutureDomain.next", None, None).unwrap(),
+            Value::Null
+        );
+        drop(session);
+        peer.join().unwrap();
+    }
+
     fn denial(method: &str, params: Option<&Value>, own: Option<&str>) -> String {
         match classify_cdp_command(method, params, own) {
-            CdpGuardrail::Denied { reason } => reason,
-            CdpGuardrail::Allowed { .. } => panic!("expected {method} to be denied"),
+            CdpGuardrail::Denied {
+                reason,
+            } => reason,
+            CdpGuardrail::Allowed {
+                ..
+            } => panic!("expected {method} to be denied"),
         }
     }
 
@@ -362,7 +416,12 @@ mod tests {
             classify_cdp_command("Target.closeTarget", Some(&own), None),
             classify_cdp_command("Target.closeTarget", None, Some("TAB-1")),
         ] {
-            assert_eq!(allowed, CdpGuardrail::Allowed { warnings: vec![] });
+            assert_eq!(
+                allowed,
+                CdpGuardrail::Allowed {
+                    warnings: vec![]
+                }
+            );
         }
     }
 

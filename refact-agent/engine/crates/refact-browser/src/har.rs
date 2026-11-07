@@ -11,6 +11,7 @@ use refact_integrations::browser_models::{
 };
 use refact_integrations::browser_types::NetworkEntry;
 
+use crate::artifact_store::ArtifactStore;
 use crate::network::{UrlMatcher, mask_headers, mask_text};
 
 const HAR_BODY_QUEUE_CAP: usize = 64;
@@ -124,6 +125,7 @@ pub struct HarTimings {
 
 #[derive(Clone, Debug)]
 struct HarRecording {
+    managed: bool,
     path: PathBuf,
     mode: HarMode,
     content: HarContentPolicy,
@@ -212,6 +214,7 @@ impl HarRecorder {
                 Ok::<_, String>((path, file.log.entries))
             })
             .transpose()?;
+        let managed = path.is_none() && base.is_none();
         let path = match (path, &base) {
             (Some(path), _) => artifact_har_path(artifacts_dir, path)?,
             (None, Some((base_path, _))) => base_path.clone(),
@@ -225,6 +228,7 @@ impl HarRecorder {
             return Err("HAR recording is already active".to_string());
         }
         state.recording = Some(HarRecording {
+            managed,
             path: path.clone(),
             mode,
             content,
@@ -254,7 +258,10 @@ impl HarRecorder {
             *shared.finished.lock().unwrap() = true;
             shared.changed.notify_all();
         });
-        *worker = Some(BodyWorker { sender, handle });
+        *worker = Some(BodyWorker {
+            sender,
+            handle,
+        });
     }
 
     pub fn is_active(&self) -> bool {
@@ -320,20 +327,31 @@ impl HarRecorder {
         let _ = worker.handle.join();
     }
 
+    /// Explicit named exports are durable; automatic captures require the runtime store.
     pub fn stop(&self) -> Result<HarRecordingSummary, String> {
+        self.stop_inner(None)
+    }
+
+    pub fn stop_with_store(&self, store: &ArtifactStore) -> Result<HarRecordingSummary, String> {
+        self.stop_inner(Some(store))
+    }
+
+    fn stop_inner(&self, store: Option<&ArtifactStore>) -> Result<HarRecordingSummary, String> {
         self.join_worker(HAR_BODY_JOIN_TIMEOUT);
         let mut state = self.shared.state.lock().unwrap();
         let recording = state
             .recording
             .take()
             .ok_or_else(|| "HAR recording is not active".to_string())?;
-        if let Some(parent) = recording.path.parent() {
-            std::fs::create_dir_all(parent).map_err(|error| {
-                format!(
-                    "Failed to create HAR directory {}: {error}",
-                    parent.display()
-                )
-            })?;
+        if !recording.managed {
+            if let Some(parent) = recording.path.parent() {
+                std::fs::create_dir_all(parent).map_err(|error| {
+                    format!(
+                        "Failed to create HAR directory {}: {error}",
+                        parent.display()
+                    )
+                })?;
+            }
         }
         let (updated_from, base_entries) = match recording.base {
             Some((path, entries)) => (Some(path.to_string_lossy().into_owned()), Some(entries)),
@@ -352,11 +370,19 @@ impl HarRecorder {
         };
         let bytes = serde_json::to_vec_pretty(&file)
             .map_err(|error| format!("Failed to serialize HAR: {error}"))?;
-        std::fs::write(&recording.path, &bytes).map_err(|error| {
-            format!("Failed to write HAR {}: {error}", recording.path.display())
-        })?;
+        let path = if recording.managed {
+            store
+                .ok_or("automatic HAR capture requires the runtime artifact store")?
+                .write(&bytes, "application/json")?
+                .path
+        } else {
+            std::fs::write(&recording.path, &bytes).map_err(|error| {
+                format!("Failed to write HAR {}: {error}", recording.path.display())
+            })?;
+            recording.path
+        };
         Ok(HarRecordingSummary {
-            path: recording.path.to_string_lossy().into_owned(),
+            path: path.to_string_lossy().into_owned(),
             entry_count: file.log.entries.len(),
             bytes: bytes.len() as u64,
             updated_from,
@@ -638,7 +664,10 @@ fn entry_from_monitor(
 fn header_pairs(headers: BTreeMap<String, String>) -> Vec<HarNameValue> {
     headers
         .into_iter()
-        .map(|(name, value)| HarNameValue { name, value })
+        .map(|(name, value)| HarNameValue {
+            name,
+            value,
+        })
         .collect()
 }
 
@@ -683,7 +712,10 @@ fn header_value(headers: &BTreeMap<String, String>, name: &str) -> Option<String
 fn matcher_for_pattern(pattern: &UrlPattern) -> Result<UrlMatcher, String> {
     match pattern {
         UrlPattern::Text(value) => UrlMatcher::text(value),
-        UrlPattern::Regex { source, flags } => UrlMatcher::regex(source, flags),
+        UrlPattern::Regex {
+            source,
+            flags,
+        } => UrlMatcher::regex(source, flags),
     }
 }
 
@@ -760,6 +792,49 @@ mod tests {
             )
             .unwrap();
         recorder
+    }
+
+    #[test]
+    fn automatic_har_requires_shared_store_and_obeys_retention() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ArtifactStore::new(dir.path()).unwrap();
+        let recorder = HarRecorder::default();
+        recorder
+            .start(
+                dir.path(),
+                None,
+                HarMode::Full,
+                HarContentPolicy::Omit,
+                None,
+                None,
+            )
+            .unwrap();
+        recorder.record(&network_entry(), None);
+        let summary = recorder.stop_with_store(&store).unwrap();
+        let path = PathBuf::from(&summary.path);
+        assert_eq!(summary.entry_count, 1);
+        let file: HarFile = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(file.log.entries.len(), 1);
+        for _ in 0..64 {
+            store.write(b"other", "text/plain").unwrap();
+        }
+        assert!(!path.exists(), "automatic HAR bypassed quota");
+        recorder
+            .start(
+                dir.path(),
+                None,
+                HarMode::Full,
+                HarContentPolicy::Omit,
+                None,
+                None,
+            )
+            .unwrap();
+        assert!(
+            recorder
+                .stop()
+                .unwrap_err()
+                .contains("requires the runtime artifact store")
+        );
     }
 
     #[test]
@@ -913,12 +988,16 @@ mod tests {
                 "{body} should replay {status}"
             );
         }
-        assert!(replay
-            .match_request("POST", "https://x.test/rpc", Some(r#"{"op":"three"}"#))
-            .is_none());
-        assert!(replay
-            .match_request("POST", "https://x.test/rpc", None)
-            .is_none());
+        assert!(
+            replay
+                .match_request("POST", "https://x.test/rpc", Some(r#"{"op":"three"}"#))
+                .is_none()
+        );
+        assert!(
+            replay
+                .match_request("POST", "https://x.test/rpc", None)
+                .is_none()
+        );
     }
 
     #[test]
@@ -1078,8 +1157,10 @@ mod tests {
             not_found: HarNotFound::Fallback,
             ..replay
         };
-        assert!(fallback
-            .match_request("GET", "https://example.test/missing", None)
-            .is_none());
+        assert!(
+            fallback
+                .match_request("GET", "https://example.test/missing", None)
+                .is_none()
+        );
     }
 }

@@ -254,22 +254,35 @@ fn mask_diagnostic_text(message: &str) -> String {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ActionabilityDiagnostic {
     NotFound,
-    MultipleMatches { count: usize, previews: Vec<String> },
+    MultipleMatches {
+        count: usize,
+        previews: Vec<String>,
+    },
     NotVisible,
     NotStable,
     NotEnabled,
     NotEditable,
     OutsideViewport,
     Detached,
-    InterceptsPointerEvents { description: String },
-    PrecheckFailed { description: String },
+    InterceptsPointerEvents {
+        description: String,
+    },
+    PrecheckFailed {
+        description: String,
+    },
+    /// Dispatch may already have happened: never retry this action.
+    EffectUnknown {
+        description: String,
+    },
 }
 
 impl ActionabilityDiagnostic {
     fn log_line(&self) -> String {
         match self {
             Self::NotFound => "locator did not resolve to any element".to_string(),
-            Self::MultipleMatches { count, .. } => {
+            Self::MultipleMatches {
+                count, ..
+            } => {
                 format!("strict mode violation: locator resolved to {count} elements")
             }
             Self::NotVisible => "element is not visible".to_string(),
@@ -278,16 +291,26 @@ impl ActionabilityDiagnostic {
             Self::NotEditable => "element is not editable".to_string(),
             Self::OutsideViewport => "element is outside of the viewport".to_string(),
             Self::Detached => "element was detached from the DOM".to_string(),
-            Self::InterceptsPointerEvents { description } => {
+            Self::InterceptsPointerEvents {
+                description,
+            } => {
                 format!("{description} intercepts pointer events")
             }
-            Self::PrecheckFailed { description } => description.clone(),
+            Self::PrecheckFailed {
+                description,
+            }
+            | Self::EffectUnknown {
+                description,
+            } => description.clone(),
         }
     }
 
     fn display_line(&self) -> String {
         match self {
-            Self::MultipleMatches { count, previews } => {
+            Self::MultipleMatches {
+                count,
+                previews,
+            } => {
                 let previews = previews
                     .iter()
                     .map(|preview| mask_diagnostic_text(preview))
@@ -480,9 +503,9 @@ fn diagnostics_from_parts(
 ) -> ActionabilityDiagnostics {
     let required = required_states(action);
     let intercepting_element = diagnostic.and_then(|diagnostic| match diagnostic {
-        ActionabilityDiagnostic::InterceptsPointerEvents { description } => {
-            Some(mask_diagnostic_text(description))
-        }
+        ActionabilityDiagnostic::InterceptsPointerEvents {
+            description,
+        } => Some(mask_diagnostic_text(description)),
         _ => None,
     });
     ActionabilityDiagnostics {
@@ -527,7 +550,10 @@ pub struct ActionabilityEngine<C> {
 
 impl<C: Clock> ActionabilityEngine<C> {
     pub fn new(clock: C, timeouts: ActionabilityTimeouts) -> Self {
-        Self { clock, timeouts }
+        Self {
+            clock,
+            timeouts,
+        }
     }
 
     pub fn clock(&self) -> &C {
@@ -767,8 +793,12 @@ impl<C: Clock> ActionabilityEngine<C> {
             locator_attempt += 1;
 
             match driver.resolve() {
-                LocatorOutcome::Error { description } => {
-                    let diagnostic = ActionabilityDiagnostic::PrecheckFailed { description };
+                LocatorOutcome::Error {
+                    description,
+                } => {
+                    let diagnostic = ActionabilityDiagnostic::PrecheckFailed {
+                        description,
+                    };
                     call_log.push(diagnostic.log_line());
                     return Err(ActionabilityError::Failed {
                         diagnostic,
@@ -785,9 +815,15 @@ impl<C: Clock> ActionabilityEngine<C> {
                     last_diagnostic = ActionabilityDiagnostic::NotFound;
                     call_log.push(last_diagnostic.log_line());
                 }
-                LocatorOutcome::MultipleMatches { count, previews } => {
+                LocatorOutcome::MultipleMatches {
+                    count,
+                    previews,
+                } => {
                     attached = Some(true);
-                    let diagnostic = ActionabilityDiagnostic::MultipleMatches { count, previews };
+                    let diagnostic = ActionabilityDiagnostic::MultipleMatches {
+                        count,
+                        previews,
+                    };
                     call_log.push(diagnostic.log_line());
                     return Err(ActionabilityError::Failed {
                         diagnostic,
@@ -799,7 +835,9 @@ impl<C: Clock> ActionabilityEngine<C> {
                         receives_events,
                     });
                 }
-                LocatorOutcome::Found { preview } => {
+                LocatorOutcome::Found {
+                    preview,
+                } => {
                     attached = Some(true);
                     call_log.push(format!("locator resolved to {preview}"));
                     match self.run_action(
@@ -816,6 +854,17 @@ impl<C: Clock> ActionabilityEngine<C> {
                         ActionLoopResult::Done(output) => {
                             return Ok(ActionabilitySuccess {
                                 output,
+                                call_log,
+                                elapsed: self.clock.now().saturating_sub(started_at),
+                                attempts,
+                                attached,
+                                state: last_state,
+                                receives_events,
+                            });
+                        }
+                        ActionLoopResult::Fatal(diagnostic) => {
+                            return Err(ActionabilityError::Failed {
+                                diagnostic,
                                 call_log,
                                 elapsed: self.clock.now().saturating_sub(started_at),
                                 attempts,
@@ -983,6 +1032,9 @@ impl<C: Clock> ActionabilityEngine<C> {
                     Err(diagnostic) => {
                         call_log.push(diagnostic.log_line());
                         *last_diagnostic = diagnostic.clone();
+                        if terminal_action_diagnostic(&diagnostic) {
+                            return ActionLoopResult::Fatal(diagnostic);
+                        }
                         if diagnostic == ActionabilityDiagnostic::Detached {
                             return ActionLoopResult::RetryLocator;
                         }
@@ -1010,6 +1062,9 @@ impl<C: Clock> ActionabilityEngine<C> {
                     }
                     call_log.push(diagnostic.log_line());
                     *last_diagnostic = diagnostic.clone();
+                    if terminal_action_diagnostic(&diagnostic) {
+                        return ActionLoopResult::Fatal(diagnostic);
+                    }
                     if diagnostic == ActionabilityDiagnostic::Detached {
                         return ActionLoopResult::RetryLocator;
                     }
@@ -1033,10 +1088,17 @@ impl<C: Clock> ActionabilityEngine<C> {
     }
 }
 
+fn terminal_action_diagnostic(diagnostic: &ActionabilityDiagnostic) -> bool {
+    matches!(diagnostic, ActionabilityDiagnostic::EffectUnknown { .. })
+        || matches!(diagnostic, ActionabilityDiagnostic::PrecheckFailed { description }
+            if crate::is_transport_dead_error(description))
+}
+
 enum ActionLoopResult<T> {
     Done(T),
     RetryLocator,
     TimedOut,
+    Fatal(ActionabilityDiagnostic),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1473,7 +1535,10 @@ mod tests {
         assert!(matches!(
             result,
             Err(ActionabilityError::Failed {
-                diagnostic: ActionabilityDiagnostic::MultipleMatches { count: 3, .. },
+                diagnostic: ActionabilityDiagnostic::MultipleMatches {
+                    count: 3,
+                    ..
+                },
                 ..
             })
         ));
@@ -1499,6 +1564,34 @@ mod tests {
             }) if description.contains("ref e5 is stale")
         ));
         assert_eq!(driver.resolve_calls, 1);
+        assert!(clock.sleeps.borrow().is_empty());
+    }
+
+    #[test]
+    fn uncertain_dispatch_is_never_repeated() {
+        let clock = MockClock::default();
+        let engine = ActionabilityEngine::new(clock.clone(), ActionabilityTimeouts::default());
+        let mut driver = MockDriver::new();
+        driver.actions = VecDeque::from([
+            Err(ActionabilityDiagnostic::EffectUnknown {
+                description: "target closed after dispatch".to_string(),
+            }),
+            Ok("duplicate side effect"),
+        ]);
+        let result = engine.execute("button", ActionKind::Click, &mut driver);
+        assert!(
+            result.is_err(),
+            "uncertain dispatch must not become success through retry"
+        );
+        assert_eq!(
+            driver.action_calls, 1,
+            "a committed side effect must not be dispatched twice"
+        );
+        assert_eq!(
+            driver.actions.len(),
+            1,
+            "the second dispatch sentinel must remain unconsumed"
+        );
         assert!(clock.sleeps.borrow().is_empty());
     }
 

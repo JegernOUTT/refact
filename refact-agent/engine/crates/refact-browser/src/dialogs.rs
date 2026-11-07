@@ -32,6 +32,10 @@ pub struct DialogManager {
 }
 
 impl DialogManager {
+    pub fn prepare_reconnect(&self) {
+        self.state.lock().unwrap().installed_tabs.clear();
+    }
+
     pub fn arm(&self, accept: bool, prompt_text: Option<String>) -> Result<(), String> {
         let mut state = self.state.lock().unwrap();
         if state.dialog_open {
