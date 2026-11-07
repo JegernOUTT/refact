@@ -226,7 +226,12 @@ export const ChatForm: React.FC<ChatFormProps> = ({
     selectManualPreviewItemsById(state, chatId),
   );
   const { activeSkill } = useSkillsStatus(chatId);
-  const autoFocus = useAutoFocusOnce();
+  const autoFocusOnce = useAutoFocusOnce();
+  const autoFocus =
+    autoFocusOnce &&
+    !document.activeElement?.matches(
+      '[aria-label="Workspace toolbar"] :is([role="tab"], [data-pane-tab-overflow])',
+    );
   const { abort, regenerate } = useChatActions(chatId);
   useFirstSendAutoFlip();
 

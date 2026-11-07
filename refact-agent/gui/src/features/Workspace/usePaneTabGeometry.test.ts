@@ -188,6 +188,45 @@ describe("usePaneTabGeometry lifecycle", () => {
     expect(frames.size).toBe(0);
   });
 
+  it("reprojects after pane animations settle without a resize and removes listeners", () => {
+    const { root, panes } = mountGroup();
+    const moving = bounds(panes[1], 632, 932, 42);
+    const view = render(createElement(Harness));
+    bounds(latest.slotRef.current, slot.left, slot.right, 0);
+    flushFrame();
+    expect(latest.sections).toBeNull();
+    expect(frames.size).toBe(0);
+
+    moving.mockReturnValue(new DOMRect(632, 36, 300, 764));
+    const content = document.createElement("div");
+    panes[1].append(content);
+    act(() => {
+      content.dispatchEvent(new Event("animationend", { bubbles: true }));
+      root.dispatchEvent(new Event("animationend", { bubbles: true }));
+    });
+    expect(frames.size).toBe(0);
+    act(() => {
+      panes[1].dispatchEvent(new Event("animationend", { bubbles: true }));
+    });
+    expect(frames.size).toBe(1);
+    flushFrame();
+    expect(latest.sections).toEqual([
+      { id: "a", left: 296, width: 300 },
+      { id: "b", left: 596, width: 300 },
+    ]);
+    act(() => {
+      panes[1].dispatchEvent(new Event("animationcancel", { bubbles: true }));
+    });
+    expect(frames.size).toBe(1);
+    view.unmount();
+    expect(frames.size).toBe(0);
+    act(() => {
+      panes[1].dispatchEvent(new Event("animationend", { bubbles: true }));
+      panes[1].dispatchEvent(new Event("animationcancel", { bubbles: true }));
+    });
+    expect(frames.size).toBe(0);
+  });
+
   it("rebinds a replaced root with unchanged leaf IDs and cancels queued measurements", () => {
     const original = mountGroup();
     const view = render(createElement(Harness));

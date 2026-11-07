@@ -44,6 +44,7 @@ import {
 } from "./workspaceSlice";
 import { PaneHeaderActions } from "./PaneHeaderContext";
 import { panePanelId, paneTabId } from "./paneTabIds";
+import { fitPaneTabs, type PaneTabFitChange } from "./paneTabFit";
 import styles from "./PaneTabStrip.module.css";
 
 type LocalTab = {
@@ -143,6 +144,7 @@ function LocalTabButton({
   focusable,
   headerLeafId = leaf.id,
   hasOwner = true,
+  minimumWidth,
 }: {
   tab: RenderTab;
   leaf: LeafPane;
@@ -154,6 +156,7 @@ function LocalTabButton({
   focusable: boolean;
   headerLeafId?: string;
   hasOwner?: boolean;
+  minimumWidth?: number;
 }) {
   const dispatch = useAppDispatch();
   const pointerEnabled = usePointerDragHost();
@@ -212,6 +215,7 @@ function LocalTabButton({
         pointerDrop.isOver && styles.dropTarget,
       )}
       role="presentation"
+      style={{ minWidth: minimumWidth }}
       data-pane-tab-key={tab.key}
       onDragOver={(event) => {
         if (!canDrop) return;
@@ -324,6 +328,7 @@ export function PaneTabStrip({
   navigationEntries = [],
   selectedNavigationKey,
   onActivateLeaf,
+  onFitChange,
   hidePaneActions = false,
   ownerBySurface,
   tablistLabel = "Pane tabs",
@@ -336,6 +341,7 @@ export function PaneTabStrip({
   hidePaneActions?: boolean;
   ownerBySurface?: Record<SurfaceKey, PaneTabOwner>;
   tablistLabel?: string;
+  onFitChange?: PaneTabFitChange;
 }) {
   const dispatch = useAppDispatch();
   const resolveDisplay = useTabDisplay();
@@ -344,9 +350,10 @@ export function PaneTabStrip({
   const actions = useRef<HTMLDivElement>(null);
   const preview = useRef<HTMLDivElement>(null);
   const overflowMeasure = useRef<HTMLButtonElement>(null);
-  const overflowTimer = useRef<number>();
-  useEffect(() => () => window.clearTimeout(overflowTimer.current), []);
+  const overflowTrigger = useRef<HTMLButtonElement>(null);
+  const overflowSelection = useRef<SurfaceKey | null>(null);
   const [visibleKeys, setVisibleKeys] = useState(leaf.tabIds);
+  const [minimums, setMinimums] = useState<Record<string, number>>({});
   const [focusKey, setFocusKey] = useState<SurfaceKey | null>(null);
   const activeKey =
     selectedNavigationKey === undefined
@@ -393,41 +400,69 @@ export function PaneTabStrip({
     const measure = () => {
       if (!header.current || !measures.current) return;
       const width = header.current.clientWidth;
+      const nodes = Array.from(measures.current.children);
+      const widths = nodes.map((node) => node.getBoundingClientRect().width);
+      onFitChange?.(
+        header.current,
+        widths.reduce((sum, value) => sum + value, 0),
+      );
       if (!width) {
         setVisibleKeys(keys);
         return;
       }
-      const widths = Array.from(
-        measures.current.children,
-        (node) => node.getBoundingClientRect().width,
-      );
-      let remaining =
+      const floors = nodes.map((node, index) => {
+        const title = node.querySelector<HTMLElement>(`.${styles.title}`);
+        return title
+          ? widths[index] -
+              title.getBoundingClientRect().width +
+              Math.min(
+                title.getBoundingClientRect().width,
+                parseFloat(getComputedStyle(title).minWidth) || 0,
+              )
+          : widths[index];
+      });
+      const remaining =
         width -
         (actions.current?.getBoundingClientRect().width ?? 0) -
         (preview.current?.getBoundingClientRect().width ?? 0);
-      const total = widths.reduce((sum, value) => sum + value, 0);
-      if (total <= remaining) {
-        setVisibleKeys(keys);
-        return;
-      }
-      remaining -= overflowMeasure.current?.getBoundingClientRect().width ?? 0;
-      const activeIndex = Math.max(0, keys.indexOf(activeKey ?? ""));
-      const selected = new Set([activeIndex]);
-      remaining -= widths[activeIndex];
-      for (let i = 0; i < widths.length; i++) {
-        if (i !== activeIndex && widths[i] <= remaining) {
-          selected.add(i);
-          remaining -= widths[i];
-        }
-      }
-      setVisibleKeys(keys.filter((_, index) => selected.has(index)));
+      const selected = fitPaneTabs(
+        floors,
+        remaining,
+        overflowMeasure.current?.getBoundingClientRect().width ?? 0,
+        keys.indexOf(activeKey ?? ""),
+      );
+      const tabSpace = Math.max(
+        0,
+        remaining -
+          (selected.length < keys.length
+            ? overflowMeasure.current?.getBoundingClientRect().width ?? 0
+            : 0),
+      );
+      const nextMinimums = Object.fromEntries(
+        keys.map((key, index) => [
+          key,
+          selected.length === 1 && selected[0] === index
+            ? Math.min(floors[index], tabSpace)
+            : floors[index],
+        ]),
+      );
+      setMinimums((previous) =>
+        JSON.stringify(previous) === JSON.stringify(nextMinimums)
+          ? previous
+          : nextMinimums,
+      );
+      setVisibleKeys(keys.filter((_, index) => selected.includes(index)));
     };
     measure();
     const observer = new ResizeObserver(measure);
     if (header.current) observer.observe(header.current);
     if (preview.current) observer.observe(preview.current);
-    return () => observer.disconnect();
-  }, [activeKey, labels, hidePaneActions, keys]);
+    const element = header.current;
+    return () => {
+      observer.disconnect();
+      if (element) onFitChange?.(element, null);
+    };
+  }, [activeKey, labels, hidePaneActions, keys, onFitChange]);
   useLayoutEffect(() => {
     if (!focusKey) return;
     document.getElementById(paneTabId(leaf.id, focusKey))?.focus();
@@ -503,6 +538,7 @@ export function PaneTabStrip({
         {renderedTabs.map((tab) => (
           <LocalTabButton
             key={tab.key}
+            minimumWidth={minimums[tab.key]}
             tab={tab}
             leaf={ownerBySurface?.[tab.key]?.leaf ?? leaf}
             tabId={ownerBySurface?.[tab.key]?.tabId ?? tabId}
@@ -550,23 +586,32 @@ export function PaneTabStrip({
           <Menu.Trigger asChild>
             <button
               type="button"
+              ref={overflowTrigger}
+              data-pane-tab-overflow="true"
               className={styles.overflow}
               aria-label={`${hidden.length} more pane tabs`}
             >
               +{hidden.length}
             </button>
           </Menu.Trigger>
-          <Menu.Content>
+          <Menu.Content
+            onCloseAutoFocus={(event) => {
+              const selected = overflowSelection.current;
+              overflowSelection.current = null;
+              if (!selected) return;
+              // Selection hands focus to the newly visible tab, not the trigger.
+              event.preventDefault();
+              overflowTrigger.current?.focus();
+              activate(selected, true);
+            }}
+          >
             {hidden.map((tab) => (
               <Menu.Item
                 title={tab.display.tooltip ?? tab.title}
                 key={tab.key}
-                onSelect={() =>
-                  (overflowTimer.current = window.setTimeout(
-                    () => activate(tab.key, true),
-                    0,
-                  ))
-                }
+                onSelect={() => {
+                  overflowSelection.current = tab.key;
+                }}
               >
                 <TabDisplayContent
                   display={tab.display}

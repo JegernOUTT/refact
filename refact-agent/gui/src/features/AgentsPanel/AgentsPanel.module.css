@@ -12,8 +12,8 @@
   display: flex;
   flex: 0 0 auto;
   flex-direction: column;
-  gap: var(--rf-space-2);
-  padding: var(--rf-space-3);
+  gap: var(--rf-space-1);
+  padding: var(--rf-space-1) var(--rf-space-2);
   border-bottom: var(--rf-hairline) solid var(--rf-border);
 }
 
@@ -29,12 +29,16 @@
 
 .titleRow {
   justify-content: space-between;
+  min-width: 0;
+  gap: var(--rf-space-2);
+  min-height: var(--rf-control-h-icon-sm);
 }
 
 .panelTitle {
   min-width: 0;
-  gap: var(--rf-space-2);
-  font: var(--rf-weight-semibold) var(--rf-text-3) / var(--rf-line)
+  flex: 0 0 auto;
+  gap: var(--rf-space-1);
+  font: var(--rf-weight-semibold) var(--rf-text-2) / var(--rf-line-2)
     var(--rf-font-ui);
 }
 
@@ -47,8 +51,12 @@
   white-space: nowrap;
 }
 
-.tabs {
-  width: 100%;
+.tabs.tabs {
+  align-self: flex-start;
+  grid-auto-columns: minmax(0, 1fr);
+  min-width: 0;
+  width: auto;
+  max-width: 100%;
 }
 
 .panelBody {

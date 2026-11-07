@@ -595,6 +595,30 @@ describe("Work panel", () => {
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
+  it("selects overflow views by keyboard and retains the current view label", async () => {
+    const { user } = render(<AgentWorkSection chatId={null} />);
+    const nav = screen.getByRole("group", { name: "Agent work scope" });
+    const more = within(nav).getByRole("button", { name: "More views" });
+    more.focus();
+    await user.keyboard("{Enter}");
+    const causality = await screen.findByRole("menuitemradio", {
+      name: "Causality",
+    });
+    expect(screen.getAllByRole("menuitemradio")).toHaveLength(4);
+    await waitFor(() => expect(causality).toHaveFocus());
+    await user.keyboard("{Enter}");
+    expect(await screen.findByText("No event selected")).toBeInTheDocument();
+    expect(within(nav).getByText("Causality")).toBeInTheDocument();
+    expect(more).toHaveAttribute("data-selected", "true");
+    await waitFor(() => expect(more).toHaveFocus());
+    await user.keyboard("{Enter}");
+    expect(
+      await screen.findByRole("menuitemradio", { name: "Causality" }),
+    ).toHaveAttribute("aria-checked", "true");
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(more).toHaveFocus());
+  });
+
   it("keeps every exact dock label keyboard reachable and mounts only the selected view", async () => {
     const requests: string[] = [];
     server.use(
@@ -637,7 +661,8 @@ describe("Work panel", () => {
     expect(
       within(nav)
         .getAllByRole("button")
-        .map((button) => button.textContent),
+        .map((button) => button.getAttribute("aria-label"))
+        .filter((label) => label !== "More views"),
     ).toEqual(labels);
     expect(requests).toEqual([]);
     within(nav).getByRole("button", { name: "This chat" }).focus();

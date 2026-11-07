@@ -282,6 +282,9 @@ test.describe("no page-level horizontal scroll", () => {
             terminalGeometry.emptyClientHeight + 1,
           );
           if (width < 768) {
+            await page
+              .getByRole("button", { name: "Files", exact: true })
+              .click();
             await expect(page.getByRole("dialog")).toBeVisible();
           } else {
             await expect(page.getByTestId("workspace-dock")).toBeVisible();

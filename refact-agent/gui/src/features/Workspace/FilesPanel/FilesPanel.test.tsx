@@ -350,7 +350,10 @@ describe("FilesPanel", () => {
     ).toBeVisible();
     expect(screen.queryByRole("treeitem", { name: /debug\.log/i })).toBeNull();
 
-    await user.click(screen.getByRole("switch", { name: "Show ignored" }));
+    await user.click(screen.getByRole("button", { name: "More options" }));
+    await user.click(
+      screen.getByRole("menuitemcheckbox", { name: "Show ignored" }),
+    );
 
     expect(
       await screen.findByRole("treeitem", { name: /debug\.log/i }),
@@ -361,27 +364,38 @@ describe("FilesPanel", () => {
     server.use(rootHandler());
     setProjectStorageNamespace("project-a");
     const first = render(<FilesPanel />);
-    const firstToggle = screen.getByRole("switch", { name: "Show ignored" });
-    await first.user.click(firstToggle);
-    expect(firstToggle).toBeChecked();
+    await first.user.click(
+      screen.getByRole("button", { name: "More options" }),
+    );
+    await first.user.click(
+      screen.getByRole("menuitemcheckbox", { name: "Show ignored" }),
+    );
+    await first.user.click(
+      screen.getByRole("button", { name: "More options" }),
+    );
+    expect(
+      screen.getByRole("menuitemcheckbox", { name: "Show ignored" }),
+    ).toBeChecked();
     first.unmount();
 
     setProjectStorageNamespace("project-b");
     const second = render(<FilesPanel />);
-    await waitFor(() =>
-      expect(
-        screen.getByRole("switch", { name: "Show ignored" }),
-      ).not.toBeChecked(),
+    await second.user.click(
+      screen.getByRole("button", { name: "More options" }),
     );
+    expect(
+      screen.getByRole("menuitemcheckbox", { name: "Show ignored" }),
+    ).not.toBeChecked();
     second.unmount();
 
     setProjectStorageNamespace("project-a");
-    render(<FilesPanel />);
-    await waitFor(() =>
-      expect(
-        screen.getByRole("switch", { name: "Show ignored" }),
-      ).toBeChecked(),
+    const third = render(<FilesPanel />);
+    await third.user.click(
+      screen.getByRole("button", { name: "More options" }),
     );
+    expect(
+      screen.getByRole("menuitemcheckbox", { name: "Show ignored" }),
+    ).toBeChecked();
   });
 
   it("toggles live edits for the focused chat from the explorer header", async () => {
@@ -391,7 +405,8 @@ describe("FilesPanel", () => {
     view.store.dispatch(openTab("chat:chat-a"));
     view.store.dispatch(setActiveTab("chat:chat-a"));
 
-    const liveEdits = await screen.findByRole("switch", {
+    await view.user.click(screen.getByRole("button", { name: "More options" }));
+    const liveEdits = await screen.findByRole("menuitemcheckbox", {
       name: "Live edits",
     });
     await waitFor(() => expect(liveEdits).toBeEnabled());
@@ -404,16 +419,28 @@ describe("FilesPanel", () => {
         true,
       ),
     );
-    expect(liveEdits).toBeChecked();
+    await view.user.click(screen.getByRole("button", { name: "More options" }));
+    expect(
+      screen.getByRole("menuitemcheckbox", { name: "Live edits" }),
+    ).toBeChecked();
   });
 
-  it("disables the live edits switch without a focused chat", async () => {
+  it("disables live edits without a focused chat and explains why", async () => {
     server.use(rootHandler());
-    render(<FilesPanel />);
-
-    expect(
-      await screen.findByRole("switch", { name: "Live edits" }),
-    ).toBeDisabled();
+    const { user, store } = render(<FilesPanel />);
+    const more = screen.getByRole("button", { name: "More options" });
+    more.focus();
+    await user.keyboard("{Enter}");
+    const liveEdits = await screen.findByRole("menuitemcheckbox", {
+      name: "Live edits",
+    });
+    expect(liveEdits).toHaveAttribute("aria-disabled", "true");
+    expect(liveEdits).not.toBeChecked();
+    expect(liveEdits).toHaveAccessibleDescription("Open a chat to enable");
+    await user.click(liveEdits);
+    expect(store.getState().workspace.liveEditsByChat).toBeUndefined();
+    await user.keyboard("{Escape}");
+    expect(more).toHaveFocus();
   });
 
   it("replaces refetched children while keeping the directory expanded", async () => {
@@ -1424,16 +1451,15 @@ describe("FilesPanel", () => {
     ).toBeVisible();
   });
 
-  it("wraps the explorer header toggles instead of overflowing the dock sheet", () => {
+  it("keeps compact Explorer actions alongside the shrinkable path input", () => {
     const css = readFileSync(
       "src/features/Workspace/FilesPanel/FilesPanel.module.css",
       "utf8",
     );
-    const headerToggles = /\.headerToggles\s*\{[^}]*\}/u.exec(css)?.[0] ?? "";
-
-    expect(headerToggles).toContain("flex-wrap: wrap");
-    expect(headerToggles).toContain("min-width: 0");
-    expect(headerToggles).toContain("flex: 0 1 auto");
+    const pathInput = /\.openPathInput\s*\{[^}]*\}/u.exec(css)?.[0] ?? "";
+    expect(pathInput).toContain("min-width: 0");
+    expect(pathInput).toContain("min-height: var(--rf-control-h-sm)");
+    expect(css).not.toContain(".headerToggles");
   });
 
   it("keeps the reduced-motion rule for live change highlights", () => {

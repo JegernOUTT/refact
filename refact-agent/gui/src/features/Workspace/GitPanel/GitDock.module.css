@@ -222,6 +222,10 @@
   justify-content: center;
 }
 
+.checkSlot input {
+  margin: 0;
+}
+
 .chevronButton {
   display: inline-flex;
   padding: 0;

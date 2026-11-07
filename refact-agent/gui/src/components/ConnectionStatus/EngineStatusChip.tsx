@@ -107,7 +107,9 @@ export const EngineStatusChip: React.FC<{ compact?: boolean }> = ({
             >
               <StatusDot status={connectionStatus} size="small" />
               <StatusDot status={indexStatus} size="small" />
-              <span className={styles.chipLabel}>{engineHost}</span>
+              <span data-engine-label className={styles.chipLabel}>
+                {engineHost}
+              </span>
             </button>
           </Popover.Trigger>
         </Tooltip.Trigger>

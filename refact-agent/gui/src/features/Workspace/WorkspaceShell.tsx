@@ -1,6 +1,7 @@
 import { addListener, isAnyOf } from "@reduxjs/toolkit";
-import { type ReactNode, useEffect } from "react";
+import { type ReactNode, useEffect, useRef } from "react";
 
+import { useMediaQuery } from "../../components/ui";
 import { useAppDispatch, useAppSelector } from "../../hooks";
 import { selectCapabilities, selectHost } from "../Config/configSlice";
 import { push, selectCurrentPage } from "../Pages/pagesSlice";
@@ -10,6 +11,7 @@ import { selectEditPlayer } from "./FilesPanel/filesPanelSlice";
 import { isFileSurface, isGitDiffSurface, isGitSurface } from "./surfaceKey";
 import { useAgentsSidebarAutoOpen } from "./useAgentsSidebarAutoOpen";
 import { useWorkspaceShortcuts } from "./useWorkspaceShortcuts";
+import { WORKSPACE_NARROW_QUERY } from "./workspaceBreakpoints";
 import {
   isDockSectionAvailable,
   resolveWorkspaceDockAvailability,
@@ -21,6 +23,7 @@ import {
   selectFocusedWorkspaceSurfaceKey,
   selectPanelsForced,
   selectWorkspaceDock,
+  setDockOpen,
 } from "./workspaceSlice";
 import styles from "./WorkspaceShell.module.css";
 
@@ -66,14 +69,28 @@ function useWorkspaceSurfaceNavigation() {
   );
 }
 
-export function WorkspaceShell({ children }: { children: ReactNode }) {
+export function WorkspaceShell({
+  children,
+  toolbar,
+}: {
+  children: ReactNode;
+  toolbar?: ReactNode;
+}) {
   useWorkspaceShortcuts();
   useAgentsSidebarAutoOpen();
   useWorkspaceSurfaceNavigation();
+  const dispatch = useAppDispatch();
   const host = useAppSelector(selectHost);
   const capabilities = useAppSelector(selectCapabilities);
   const panelsForced = useAppSelector(selectPanelsForced);
   const dock = useAppSelector(selectWorkspaceDock);
+  const isNarrow = useMediaQuery(WORKSPACE_NARROW_QUERY);
+  const wasNarrow = useRef(false);
+  const enteringNarrow = isNarrow && !wasNarrow.current;
+  useEffect(() => {
+    if (isNarrow && !wasNarrow.current) dispatch(setDockOpen(false));
+    wasNarrow.current = isNarrow;
+  }, [dispatch, isNarrow]);
   const dockMounted = isDockSectionAvailable(
     dock.section,
     resolveWorkspaceDockAvailability(host, capabilities, panelsForced),
@@ -82,8 +99,11 @@ export function WorkspaceShell({ children }: { children: ReactNode }) {
   return (
     <div className={styles.shell} data-testid="workspace-shell">
       <ActivityRail />
-      {dockMounted ? <Dock /> : null}
-      <div className={styles.content}>{children}</div>
+      {dockMounted ? <Dock enteringNarrow={enteringNarrow} /> : null}
+      <div className={styles.content}>
+        {toolbar}
+        {children}
+      </div>
     </div>
   );
 }

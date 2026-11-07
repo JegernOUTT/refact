@@ -199,6 +199,35 @@ describe("AgentsSection", () => {
     expect(screen.queryByLabelText("Cancel Worker")).not.toBeInTheDocument();
   });
 
+  test("keeps compact filter counts and keyboard selection wired to Redux", async () => {
+    expect(agentsPanelCss).toMatch(
+      /\.tabs\s*\{[^}]*grid-auto-columns: minmax\(0, 1fr\)[^}]*min-width: 0[^}]*max-width: 100%/u,
+    );
+    const { user, store } = render(<AgentsSection chatId={chatId} />, {
+      preloadedState: panelState([
+        agent("active", chatId, null),
+        agent("finished", chatId, null, { status: "completed" }),
+      ]),
+    });
+    const active = await screen.findByRole("radio", { name: "Active (1)" });
+    const all = screen.getByRole("radio", { name: "All (2)" });
+    expect(
+      screen.getByRole("radiogroup", { name: "Agents filter" }),
+    ).toHaveAttribute("data-layout", "content");
+    expect(screen.getByLabelText("1 running agents")).toBeInTheDocument();
+    expect(active).toBeChecked();
+    active.focus();
+    await user.keyboard("{ArrowRight}");
+    expect(all).toHaveFocus();
+    expect(all).toBeChecked();
+    expect(store.getState().agentsPanel.tab).toBe("all");
+    expect(screen.getByText("finished")).toBeInTheDocument();
+    await user.keyboard("{ArrowLeft}");
+    expect(active).toBeChecked();
+    expect(store.getState().agentsPanel.tab).toBe("active");
+    expect(screen.queryByText("finished")).not.toBeInTheDocument();
+  });
+
   test("does not carry REST rows or expanded details into another chat or revive stale cached records on return", async () => {
     const worker = agent("worker", chatId, null, {
       progress: "Old chat progress",

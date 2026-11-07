@@ -8,6 +8,7 @@ import {
   EmptyState,
   ErrorState,
   LoadingState,
+  Icon,
   SegmentedControl,
 } from "../../components/ui";
 import { useAppDispatch, useAppSelector } from "../../hooks";
@@ -129,21 +130,30 @@ function AgentsSectionContents({
       <header className={styles.panelHeader}>
         <div className={styles.titleRow}>
           <div className={styles.panelTitle}>
-            <Bot aria-hidden="true" size={17} />
+            <Icon icon={Bot} size="sm" />
             <span>Agents</span>
-            <Badge tone="accent">{aggregate.runningCount}</Badge>
+            <Badge
+              tone="accent"
+              aria-label={`${aggregate.runningCount} running agents`}
+            >
+              {aggregate.runningCount}
+            </Badge>
           </div>
-        </div>
-        <div
-          className={styles.aggregateUsage}
-          data-testid="agents-aggregate-usage"
-        >
-          {formatTokens(aggregate.tokensTotal)}
-          {cost ? ` · ${cost}` : ""}
+          <div
+            className={styles.aggregateUsage}
+            data-testid="agents-aggregate-usage"
+            title={`${formatTokens(aggregate.tokensTotal)}${
+              cost ? ` · ${cost}` : ""
+            }`}
+          >
+            {formatTokens(aggregate.tokensTotal)}
+            {cost ? ` · ${cost}` : ""}
+          </div>
         </div>
         <SegmentedControl
           aria-label="Agents filter"
           className={styles.tabs}
+          layout="content"
           name={`agents-tab-${chatId}`}
           options={[
             { value: "active", label: `Active (${activeAgents.length})` },

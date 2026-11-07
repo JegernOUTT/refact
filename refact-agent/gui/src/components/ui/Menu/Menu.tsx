@@ -15,7 +15,8 @@ export interface MenuProps extends OverlayRootProps {
   modal?: boolean;
 }
 export type MenuTriggerProps = DropdownMenuPrimitive.DropdownMenuTriggerProps;
-export type MenuContentProps = AnchoredOverlayContentProps;
+export type MenuContentProps = AnchoredOverlayContentProps &
+  Pick<DropdownMenuPrimitive.DropdownMenuContentProps, "onCloseAutoFocus">;
 export type MenuItemProps = DropdownMenuPrimitive.DropdownMenuItemProps;
 export type MenuLabelProps = DropdownMenuPrimitive.DropdownMenuLabelProps;
 export type MenuSeparatorProps =
@@ -37,6 +38,7 @@ const MenuContent = React.forwardRef<HTMLDivElement, MenuContentProps>(
       align = "start",
       sideOffset = 8,
       collisionPadding = 12,
+      onCloseAutoFocus,
       children,
     },
     ref,
@@ -52,6 +54,7 @@ const MenuContent = React.forwardRef<HTMLDivElement, MenuContentProps>(
             align={align}
             sideOffset={sideOffset}
             collisionPadding={collisionPadding}
+            onCloseAutoFocus={onCloseAutoFocus}
             className={classNames(
               styles.content,
               isInsideModalOverlay && styles.contentInModal,

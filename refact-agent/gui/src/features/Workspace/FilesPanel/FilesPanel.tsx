@@ -1,7 +1,20 @@
-import { FolderOpen } from "lucide-react";
+import {
+  ArrowUp,
+  Check,
+  FileInput,
+  FolderOpen,
+  MoreHorizontal,
+  Undo2,
+} from "lucide-react";
 import { type FormEvent, useCallback, useEffect, useId, useState } from "react";
 
-import { Button, FieldText, Switch, Tooltip } from "../../../components/ui";
+import {
+  FieldText,
+  Icon,
+  IconButton,
+  Menu,
+  Tooltip,
+} from "../../../components/ui";
 import { useAppDispatch, useAppSelector } from "../../../hooks";
 import { filesApi } from "../../../services/refact/files";
 import {
@@ -90,32 +103,49 @@ export function FilesPanel() {
       <aside className={styles.explorer} aria-label="File explorer">
         <div className={styles.explorerHeader}>
           <span>Explorer</span>
-          <div className={styles.headerToggles}>
-            <Tooltip>
-              <Tooltip.Trigger asChild>
-                <Switch
-                  checked={liveEdits}
-                  className={styles.liveEditsToggle}
-                  disabled={focusedChatId === null}
-                  label="Live edits"
-                  onCheckedChange={onLiveEditsChange}
+          <Menu modal={false}>
+            <Tooltip content="More options">
+              <Menu.Trigger asChild>
+                <IconButton
+                  aria-label="More options"
+                  icon={MoreHorizontal}
+                  size="sm"
+                  variant="ghost"
                 />
-              </Tooltip.Trigger>
-              <Tooltip.Content side="bottom">
-                {focusedChatId === null
-                  ? "Open a chat to enable"
-                  : "Stream agent edits into the viewer"}
-              </Tooltip.Content>
+              </Menu.Trigger>
             </Tooltip>
-            <Switch
-              checked={showIgnored}
-              className={styles.showIgnoredToggle}
-              label="Show ignored"
-              onCheckedChange={(checked) =>
-                dispatch(updateShowIgnored(checked))
-              }
-            />
-          </div>
+            <Menu.Content align="end">
+              <Menu.Item
+                role="menuitemcheckbox"
+                aria-checked={liveEdits}
+                aria-describedby={
+                  focusedChatId === null ? `${inputId}-live-edits` : undefined
+                }
+                disabled={focusedChatId === null}
+                onSelect={() => onLiveEditsChange(!liveEdits)}
+              >
+                <span className={styles.menuCheck}>
+                  {liveEdits ? <Icon icon={Check} size="sm" /> : null}
+                </span>
+                Live edits
+              </Menu.Item>
+              {focusedChatId === null ? (
+                <Menu.Label id={`${inputId}-live-edits`}>
+                  Open a chat to enable
+                </Menu.Label>
+              ) : null}
+              <Menu.Item
+                role="menuitemcheckbox"
+                aria-checked={showIgnored}
+                onSelect={() => dispatch(updateShowIgnored(!showIgnored))}
+              >
+                <span className={styles.menuCheck}>
+                  {showIgnored ? <Icon icon={Check} size="sm" /> : null}
+                </span>
+                Show ignored
+              </Menu.Item>
+            </Menu.Content>
+          </Menu>
         </div>
         <form
           aria-label="Open file by absolute path"
@@ -141,13 +171,26 @@ export function FilesPanel() {
               spellCheck={false}
               value={manualPath}
             />
-            <Button leftIcon={FolderOpen} size="sm" type="submit">
-              Open
-            </Button>
+            <Tooltip content="Open file">
+              <IconButton
+                aria-label="Open"
+                icon={FileInput}
+                size="sm"
+                variant="ghost"
+                type="submit"
+              />
+            </Tooltip>
+            <Tooltip content="Browse folder">
+              <IconButton
+                aria-label="Browse folder"
+                icon={FolderOpen}
+                size="sm"
+                variant="ghost"
+                type="button"
+                onClick={onBrowsePath}
+              />
+            </Tooltip>
           </div>
-          <Button size="sm" type="button" onClick={onBrowsePath}>
-            Browse folder
-          </Button>
           {manualPathError ? (
             <p className={styles.openPathError} id={errorId} role="alert">
               {manualPathError}
@@ -158,21 +201,32 @@ export function FilesPanel() {
           <div className={styles.openPathForm}>
             <span className="rf-wrap-anywhere">{browsePath}</span>
             <div className={styles.openPathRow}>
-              <Button
-                size="sm"
-                disabled={!browseParent || browseParent === browsePath}
-                onClick={() =>
-                  setBrowse({
-                    contextRoot,
-                    path: browseParent ?? browsePath,
-                  })
-                }
-              >
-                Parent folder
-              </Button>
-              <Button size="sm" onClick={() => setBrowse(null)}>
-                Current worktree
-              </Button>
+              <Tooltip content="Parent folder">
+                <span className={styles.actionHost}>
+                  <IconButton
+                    aria-label="Parent folder"
+                    icon={ArrowUp}
+                    size="sm"
+                    variant="ghost"
+                    disabled={!browseParent || browseParent === browsePath}
+                    onClick={() =>
+                      setBrowse({
+                        contextRoot,
+                        path: browseParent ?? browsePath,
+                      })
+                    }
+                  />
+                </span>
+              </Tooltip>
+              <Tooltip content="Current worktree">
+                <IconButton
+                  aria-label="Current worktree"
+                  icon={Undo2}
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => setBrowse(null)}
+                />
+              </Tooltip>
             </div>
           </div>
         ) : null}

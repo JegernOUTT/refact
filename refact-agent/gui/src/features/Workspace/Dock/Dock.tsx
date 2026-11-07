@@ -39,7 +39,7 @@ type DockStyle = CSSProperties & {
   "--workspace-dock-w": string;
 };
 
-export function Dock() {
+export function Dock({ enteringNarrow = false }: { enteringNarrow?: boolean }) {
   const dispatch = useAppDispatch();
   const capabilities = useAppSelector(selectCapabilities);
   const panelsForced = useAppSelector(selectPanelsForced);
@@ -47,6 +47,10 @@ export function Dock() {
   const focusedChatId = useAppSelector(selectFocusedWorkspaceChatId);
   const navigation = useInternalNavigation({ scope: focusedChatId ?? "" });
   const isNarrow = useMediaQuery(WORKSPACE_NARROW_QUERY);
+  const { shouldRender: shouldRenderNarrow } = useDelayedUnmount(
+    isNarrow && !enteringNarrow && dock.open,
+    COLLAPSE_ANIMATION_MS,
+  );
   const dockRef = useRef<HTMLElement>(null);
   const liveWidthRef = useRef(dock.width);
   const dragCleanupRef = useRef<(() => void) | null>(null);
@@ -189,12 +193,14 @@ export function Dock() {
     return (
       <Sheet
         modal={false}
-        open={dock.open}
+        open={(dock.open || shouldRenderNarrow) && !enteringNarrow}
         onOpenChange={(open) => dispatch(setDockOpen(open))}
       >
         <Sheet.Content
-          className={classNames(styles.sheet, "rf-grow-in")}
-          maxWidth="400px"
+          className={classNames(
+            styles.sheet,
+            !dock.open && styles.sheetClosing,
+          )}
           scrollable={false}
           side="left"
         >

@@ -51,7 +51,16 @@ export function usePaneTabGeometry(
     let root: HTMLElement | undefined;
     let panes: HTMLElement[] = [];
     const ids = JSON.parse(leafSignature) as string[];
+    const onPaneAnimationComplete = (event: AnimationEvent) => {
+      if (event.target instanceof HTMLElement && panes.includes(event.target))
+        schedule();
+    };
+    const unbindAnimations = () => {
+      root?.removeEventListener("animationend", onPaneAnimationComplete);
+      root?.removeEventListener("animationcancel", onPaneAnimationComplete);
+    };
     const bind = () => {
+      unbindAnimations();
       root = Array.from(
         document.querySelectorAll<HTMLElement>("[data-workspace-group-tab-id]"),
       ).find((element) => element.dataset.workspaceGroupTabId === groupId);
@@ -64,6 +73,8 @@ export function usePaneTabGeometry(
       if (slotRef.current) observer?.observe(slotRef.current);
       if (root) observer?.observe(root);
       panes.forEach((pane) => observer?.observe(pane));
+      root?.addEventListener("animationend", onPaneAnimationComplete);
+      root?.addEventListener("animationcancel", onPaneAnimationComplete);
     };
     const measure = () => {
       frame = 0;
@@ -121,6 +132,7 @@ export function usePaneTabGeometry(
       cancelAnimationFrame(frame);
       if (retry !== undefined) clearTimeout(retry);
       observer?.disconnect();
+      unbindAnimations();
       window.removeEventListener("resize", schedule);
     };
   }, [groupId, leafSignature, source]);

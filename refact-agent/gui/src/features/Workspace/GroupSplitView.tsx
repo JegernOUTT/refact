@@ -32,7 +32,11 @@ import {
   splitPaneWithSurface,
   splitTab,
 } from "./workspaceSlice";
-import { isSplittableSurface, type SurfaceKey } from "./surfaceKey";
+import {
+  isChatSurface,
+  isSplittableSurface,
+  type SurfaceKey,
+} from "./surfaceKey";
 import {
   hasSplittableTabDrag,
   readTabDragSurfaceKey,
@@ -393,7 +397,7 @@ function LeafView({
         ref={setPaneRef}
         className={classNames(
           styles.pane,
-          focused && styles.focused,
+          surfaceKey && isChatSurface(surfaceKey) && styles.chatPane,
           entering && styles.paneEntering,
         )}
         aria-label={`Workspace pane ${leaf.id}`}

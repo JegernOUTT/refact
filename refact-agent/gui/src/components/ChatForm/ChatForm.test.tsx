@@ -266,6 +266,38 @@ describe("ChatForm", () => {
     server.use(...handlers);
   });
 
+  test.each(["tab", "overflow", "outside-overflow", "new-chat"])(
+    "mount autofocus respects workspace navigation ownership: %s",
+    async (source) => {
+      const workspaceFocused = source === "tab" || source === "overflow";
+      const toolbar = document.createElement("div");
+      if (source !== "outside-overflow")
+        toolbar.setAttribute("aria-label", "Workspace toolbar");
+      const tab = document.createElement("button");
+      if (source === "tab") tab.setAttribute("role", "tab");
+      else tab.setAttribute("data-pane-tab-overflow", "true");
+      toolbar.append(tab);
+      document.body.append(toolbar);
+      if (source !== "new-chat") tab.focus();
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      try {
+        const app = render(<App />, { preloadedState: engineConfigState });
+        const textarea = screen.getByTestId("chat-form-textarea");
+        const initialComposerFocus = focus.mock.contexts.some(
+          (element) => element === textarea,
+        );
+        expect(initialComposerFocus).toBe(!workspaceFocused);
+        if (workspaceFocused) expect(tab).toHaveFocus();
+        await app.user.click(textarea);
+        expect(textarea).toHaveFocus();
+        app.unmount();
+      } finally {
+        focus.mockRestore();
+        toolbar.remove();
+      }
+    },
+  );
+
   test("companion composers reject the voice shortcut while regular composers retain it", async () => {
     const toggleRecording = vi
       .fn<() => Promise<string | null>>()

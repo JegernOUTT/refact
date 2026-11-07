@@ -1,5 +1,12 @@
 import classNames from "classnames";
-import { Activity, Bot, Files, GitBranch, type LucideIcon } from "lucide-react";
+import {
+  Activity,
+  Bot,
+  Files,
+  GitBranch,
+  Home,
+  type LucideIcon,
+} from "lucide-react";
 import { skipToken } from "@reduxjs/toolkit/query";
 import { useCallback, useId } from "react";
 
@@ -11,7 +18,15 @@ import {
   agentsSectionUserClosed,
   agentsSectionUserOpened,
 } from "../../AgentsPanel/agentsPanelSlice";
-import { selectActiveBackgroundAgents } from "../../Chat/Thread";
+import {
+  closeThread,
+  selectActiveBackgroundAgents,
+  selectAllThreads,
+  selectChatId,
+} from "../../Chat/Thread";
+import { popBackTo, selectCurrentPage } from "../../Pages/pagesSlice";
+import { collectTabIds } from "../../ChatPanes/panesTree";
+import { isFileSurface } from "../surfaceKey";
 import { selectCapabilities, selectHost } from "../../Config/configSlice";
 import { changedFileCount } from "../GitPanel";
 import { activeChatsNeedAttention } from "../Dock/activeChatsModel";
@@ -20,6 +35,9 @@ import {
   selectFocusedChatWorkspaceRoots,
   selectFocusedWorkspaceChatId,
   selectPanelsForced,
+  selectTabs,
+  selectWorkspaceGroups,
+  selectWorkspaceFocusedChatId,
   selectWorkspaceDock,
   setDockOpen,
   setDockSection,
@@ -73,11 +91,22 @@ const countDescriptionFor = (
 export function ActivityRail() {
   const railId = useId();
   const dispatch = useAppDispatch();
+  const page = useAppSelector(selectCurrentPage);
+  const allThreads = useAppSelector(selectAllThreads);
+  const currentChatId = useAppSelector(selectChatId);
+  const workspaceTabs = useAppSelector(selectTabs);
+  const workspaceGroups = useAppSelector(selectWorkspaceGroups);
+  const hasOpenFiles =
+    workspaceTabs.some(isFileSurface) ||
+    Object.values(workspaceGroups).some((group) =>
+      group ? collectTabIds(group.root).some(isFileSurface) : false,
+    );
   const host = useAppSelector(selectHost);
   const capabilities = useAppSelector(selectCapabilities);
   const panelsForced = useAppSelector(selectPanelsForced);
   const dock = useAppSelector(selectWorkspaceDock);
   const focusedChatId = useAppSelector(selectFocusedWorkspaceChatId);
+  const homeChatId = useAppSelector(selectWorkspaceFocusedChatId);
   const contextRoots = useAppSelector(selectFocusedChatWorkspaceRoots);
   const availability = resolveWorkspaceDockAvailability(
     host,
@@ -103,6 +132,21 @@ export function ActivityRail() {
     dock.open &&
     dock.section === section &&
     isDockSectionAvailable(section, availability);
+
+  const goHome = useCallback(() => {
+    if (page?.name === "chat") {
+      const chatId = homeChatId ?? currentChatId;
+      const currentThread = allThreads[chatId];
+      if (
+        currentThread &&
+        currentThread.thread.messages.length === 0 &&
+        !hasOpenFiles
+      ) {
+        dispatch(closeThread({ id: chatId }));
+      }
+    }
+    dispatch(popBackTo({ name: "history" }));
+  }, [page, homeChatId, currentChatId, allThreads, hasOpenFiles, dispatch]);
 
   const handleSelect = useCallback(
     (section: WorkspaceDockSection) => {
@@ -131,6 +175,19 @@ export function ActivityRail() {
 
   return (
     <nav aria-label="Workspace sections" className={styles.rail}>
+      <div className={styles.slot}>
+        <Tooltip content="Home">
+          <IconButton
+            aria-label="Home"
+            aria-pressed={page?.name === "history"}
+            className={styles.button}
+            icon={Home}
+            onClick={goHome}
+            size="sm"
+            variant="ghost"
+          />
+        </Tooltip>
+      </div>
       {RAIL_ITEMS.map((item) => {
         const badgeCount =
           item.id === "agents"

@@ -80,6 +80,40 @@ function goTo(store: AppStore, page: Parameters<typeof push>[0]) {
 }
 
 describe("WorkspaceShell", () => {
+  it("closes initial narrow state even when the stored section is unavailable, then permits first manual open", async () => {
+    const original = window.matchMedia;
+    window.matchMedia = ((query: string) => ({
+      matches: query === "(max-width: 767px)",
+      media: query,
+      onchange: null,
+      addListener: () => undefined,
+      removeListener: () => undefined,
+      dispatchEvent: () => true,
+      addEventListener: () => undefined,
+      removeEventListener: () => undefined,
+    })) as typeof window.matchMedia;
+    try {
+      const store = createStore();
+      store.dispatch(
+        updateConfig({
+          host: "web",
+          capabilities: { filesPanel: false, gitPanel: false },
+        }),
+      );
+      const width = store.getState().workspace.dock?.width;
+      const view = renderShell(store);
+      expect(store.getState().workspace.dock?.open).toBe(false);
+      expect(store.getState().workspace.dock?.section).toBe("files");
+      expect(screen.queryByRole("dialog")).toBeNull();
+      await view.user.click(screen.getByRole("button", { name: /^Agents$/ }));
+      expect(await screen.findByRole("dialog")).toBeVisible();
+      expect(store.getState().workspace.dock?.open).toBe(true);
+      expect(store.getState().workspace.dock?.width).toBe(width);
+    } finally {
+      window.matchMedia = original;
+    }
+  });
+
   it.each([
     { name: "history" },
     { name: "chat" },

@@ -21,6 +21,10 @@ vi.mock("./components/HeroBlock/HeroBlock", () => ({
   HeroBlock: () => <div>Removed hero</div>,
 }));
 
+vi.mock("../Buddy/BuddyDashboardScene", () => ({
+  BuddyDashboardScene: () => <section aria-label="Home Buddy" />,
+}));
+
 vi.mock("./components/ContinueSection/ContinueSection", () => ({
   ContinueSection: () => <div>Removed continue cards</div>,
 }));
@@ -34,7 +38,7 @@ describe("Dashboard composition", () => {
     server.use(http.get("*/v1/tasks", () => HttpResponse.json([])));
   });
 
-  it("keeps filters and the main stream without the removed home sections", async () => {
+  it("keeps Buddy, filters and the main stream without the removed home sections", async () => {
     const { store, user, container } = render(<Dashboard />);
     act(() => {
       store.dispatch(setBackendStatus({ status: "online" }));
@@ -49,8 +53,14 @@ describe("Dashboard composition", () => {
 
     expect(screen.getByTestId("main-stream")).toHaveTextContent("all:");
     expect(screen.getByRole("searchbox")).toBeInTheDocument();
+    expect(
+      screen.getByRole("region", { name: "Home Buddy" }),
+    ).toBeInTheDocument();
     expect(screen.queryByText(/Removed/)).not.toBeInTheDocument();
-    expect(container.querySelectorAll(".rf-stagger > *")).toHaveLength(2);
+    expect(container.querySelector(".rf-stagger > :first-child")).toBe(
+      screen.getByRole("region", { name: "Home Buddy" }),
+    );
+    expect(container.querySelectorAll(".rf-stagger > *")).toHaveLength(3);
     await user.click(screen.getByRole("radio", { name: /^Tasks/ }));
     expect(screen.getByTestId("main-stream")).toHaveTextContent("task:");
   });
@@ -59,6 +69,9 @@ describe("Dashboard composition", () => {
     const { store } = render(<Dashboard />);
     expect(screen.getByText("Connecting to Refact…")).toBeInTheDocument();
     expect(screen.queryByRole("searchbox")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("region", { name: "Home Buddy" }),
+    ).not.toBeInTheDocument();
     act(() => {
       store.dispatch(setBackendStatus({ status: "offline" }));
     });
@@ -67,6 +80,9 @@ describe("Dashboard composition", () => {
       store.dispatch(setBackendStatus({ status: "online" }));
     });
     expect(screen.getByRole("searchbox")).toBeInTheDocument();
+    expect(
+      screen.getByRole("region", { name: "Home Buddy" }),
+    ).toBeInTheDocument();
     expect(screen.getByText("Loading")).toBeInTheDocument();
     expect(screen.queryByTestId("main-stream")).not.toBeInTheDocument();
     act(() => {

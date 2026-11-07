@@ -249,16 +249,18 @@ describe("WorkspacePaneTabs", () => {
       .mockReturnValue(240);
     const rect = vi
       .spyOn(HTMLElement.prototype, "getBoundingClientRect")
-      .mockReturnValue({
-        width: 100,
-        height: 30,
-        left: 0,
-        right: 100,
-        top: 0,
-        bottom: 30,
-        x: 0,
-        y: 0,
-        toJSON: () => ({}),
+      .mockImplementation(function (this: HTMLElement) {
+        return {
+          width: this.className.includes("title") ? 0 : 100,
+          height: 30,
+          left: 0,
+          right: 100,
+          top: 0,
+          bottom: 30,
+          x: 0,
+          y: 0,
+          toJSON: () => ({}),
+        };
       });
     try {
       const view = render(

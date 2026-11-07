@@ -7,6 +7,7 @@ import React, {
 } from "react";
 import { FilterBar } from "./components/FilterBar/FilterBar";
 import { StreamSection } from "./components/Stream";
+import { BuddyDashboardScene } from "../Buddy/BuddyDashboardScene";
 import styles from "./Dashboard.module.css";
 import { ErrorState, LoadingState } from "../../components/ui";
 import { useAppDispatch, useAppSelector } from "../../hooks";
@@ -105,6 +106,7 @@ export const Dashboard: React.FC = () => {
         <OfflineState />
       ) : (
         <div className={`${styles.page} rf-stagger`}>
+          <BuddyDashboardScene />
           <FilterBar filter={filter} onFilterChange={setFilter} />
 
           {loadError ? (

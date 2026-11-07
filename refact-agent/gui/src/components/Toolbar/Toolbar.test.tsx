@@ -213,11 +213,13 @@ describe("Toolbar pane-only workspace navigation", () => {
     expect(screen.queryByRole("button", { name: /agents/i })).toBeNull();
   });
 
-  it("keeps the toolbar left section down to Home only", () => {
+  it("leaves Home navigation exclusively to the activity rail", () => {
     useToolbarHandlers();
     renderToolbar({ type: "chat", id: "chat-1" });
 
-    expect(screen.getByRole("button", { name: "Home" })).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Home" }),
+    ).not.toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: "Workspace panels" }),
     ).not.toBeInTheDocument();
@@ -364,7 +366,9 @@ describe("Toolbar pane-only workspace navigation", () => {
     expect(screen.getByRole("tab", { name: /Chat Alpha/ })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: /Task Alpha/ })).toBeInTheDocument();
     await view.user.keyboard("{Escape}");
-    expect(screen.getByRole("button", { name: "Home" })).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Home" }),
+    ).not.toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "New Chat" }),
     ).toBeInTheDocument();
@@ -434,13 +438,15 @@ describe("Toolbar pane-only workspace navigation", () => {
     ).toBeInTheDocument();
   });
 
-  it("keeps Home, New Chat, New Task, theme, and menu actions functional", async () => {
+  it("keeps New Chat, New Task, theme, and menu actions functional", async () => {
     useToolbarHandlers();
     const activeTab = { type: "chat" as const, id: "chat-a" };
     const view = renderToolbar(activeTab);
     const initialThreadId = view.store.getState().chat.current_thread_id;
 
-    expect(screen.getByRole("button", { name: "Home" })).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Home" }),
+    ).not.toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "New Chat" }),
     ).toBeInTheDocument();
@@ -451,9 +457,6 @@ describe("Toolbar pane-only workspace navigation", () => {
     expect(
       screen.queryByRole("button", { name: "Toggle Dark Mode" }),
     ).not.toBeInTheDocument();
-
-    await view.user.click(screen.getByRole("button", { name: "Home" }));
-    expect(view.store.getState().pages.at(-1)?.name).toBe("history");
 
     await view.user.click(screen.getByRole("button", { name: "New Chat" }));
     expect(view.store.getState().chat.current_thread_id).not.toBe(

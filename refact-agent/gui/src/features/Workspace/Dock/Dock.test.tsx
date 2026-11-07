@@ -24,24 +24,9 @@ const dockCss = readFileSync(
   "src/features/Workspace/Dock/Dock.module.css",
   "utf8",
 );
-const toolbarCss = readFileSync(
-  "src/components/Toolbar/Toolbar.module.css",
-  "utf8",
-);
-const sheetCss = readFileSync(
-  "src/components/ui/Sheet/Sheet.module.css",
-  "utf8",
-);
-const tokensCss = readFileSync("src/styles/tokens.css", "utf8");
-
 function cssBlock(css: string, selector: string): string {
   const escapedSelector = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   return new RegExp(`${escapedSelector} \\{[^}]*\\}`).exec(css)?.[0] ?? "";
-}
-
-function tokenPixels(name: string): number {
-  const value = new RegExp(`${name}:\\s*(\\d+)px`).exec(tokensCss)?.[1];
-  return Number(value);
 }
 
 function mockNarrow(narrow: boolean) {
@@ -386,22 +371,21 @@ describe("Dock", () => {
     });
   });
 
-  it("uses a Sheet on narrow viewports and follows open state", async () => {
+  it("uses a Sheet on narrow viewports and follows explicit open state", async () => {
     mockNarrow(true);
     stubFileTree();
     const view = render(<Dock />);
-
-    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    expect(await screen.findByRole("dialog")).toBeInTheDocument();
     view.store.dispatch(setDockOpen(false));
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   });
 
-  it("offers a visible close control inside the narrow Sheet (audit L-01)", async () => {
+  it("offers a visible close control inside the narrow Sheet", async () => {
     mockNarrow(true);
     stubFileTree();
     const view = render(<Dock />);
-
-    const close = screen.getByRole("button", {
+    view.store.dispatch(setDockOpen(true));
+    const close = await screen.findByRole("button", {
       name: "Close workspace panel",
     });
     fireEvent.click(close);
@@ -409,32 +393,16 @@ describe("Dock", () => {
     expect(view.store.getState().workspace.dock?.open).toBe(false);
   });
 
-  it("keeps the narrow Sheet below the fixed toolbar without blocking toolbar input", () => {
-    const sheetBlock = cssBlock(dockCss, ".sheet");
-    const toolbarBlock = cssBlock(toolbarCss, ".toolbar");
-    const toolbarHeight = tokenPixels("--rf-control-h-lg");
-    const viewportInset = tokenPixels("--rf-space-3");
-
-    expect(toolbarBlock).toContain("height: var(--rf-control-h-lg)");
-    expect(sheetBlock).toContain(
-      "top: calc(var(--rf-control-h-lg) + var(--rf-space-3))",
-    );
-    expect(sheetBlock).toContain(
-      "100dvh - var(--rf-control-h-lg) - var(--rf-space-5)",
-    );
-    expect(sheetCss).toMatch(
-      /\.left,\s*\.right\s*\{[\s\S]*?width:\s*min\([\s\S]*?calc\(100vw - 2 \* var\(--rf-space-3\)\)/,
-    );
-    for (const viewportWidth of [360, 480, 640]) {
-      expect(toolbarHeight + viewportInset).toBeGreaterThan(toolbarHeight);
-      expect(viewportWidth - 2 * viewportInset).toBeLessThan(viewportWidth);
-    }
-
+  it("uses the full narrow viewport without changing shared Sheet defaults", async () => {
+    expect(cssBlock(dockCss, ".sheet.sheet")).toContain("inset: 0");
+    expect(cssBlock(dockCss, ".sheet.sheet")).toContain("width: 100%");
+    expect(cssBlock(dockCss, ".sheet.sheet")).toContain("max-height: 100dvh");
+    expect(cssBlock(dockCss, ".sheet .panelInner")).toContain("width: 100%");
     mockNarrow(true);
     stubFileTree();
-    render(<Dock />);
-
-    expect(screen.getByRole("dialog")).toHaveClass(dockStyles.sheet);
+    const view = render(<Dock />);
+    view.store.dispatch(setDockOpen(true));
+    expect(await screen.findByRole("dialog")).toHaveClass(dockStyles.sheet);
     expect(document.querySelector(`.${sheetStyles.overlay}`)).toBeNull();
     expect(document.body.style.pointerEvents).not.toBe("none");
   });

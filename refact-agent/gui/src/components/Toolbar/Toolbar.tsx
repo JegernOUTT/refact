@@ -1,7 +1,6 @@
 import { Dropdown, DropdownNavigationOptions } from "./Dropdown";
-import { Home } from "lucide-react";
 import classNames from "classnames";
-import { ComponentProps, useCallback } from "react";
+import { useCallback, useLayoutEffect, useRef, useState } from "react";
 
 import { newChatAction } from "../../events";
 import {
@@ -19,19 +18,19 @@ import {
   selectWorkspaceGroups,
   selectWorkspaceFocusedChatId,
 } from "../../features/Workspace/workspaceSlice";
-import {
-  collectLeafIds,
-  collectTabIds,
-} from "../../features/ChatPanes/panesTree";
+import { collectTabIds } from "../../features/ChatPanes/panesTree";
 import { isFileSurface } from "../../features/Workspace/surfaceKey";
 import { useAppDispatch } from "../../hooks/useAppDispatch";
 import { useAppSelector } from "../../hooks/useAppSelector";
 import { useEventsBusForIDE } from "../../hooks/useEventBusForIDE";
 import { useCreateTaskMutation } from "../../services/refact/tasks";
-import { IconButton, Tooltip } from "../ui";
 import { EngineStatusChip } from "../ConnectionStatus";
 import { NewSplitButton } from "./NewSplitButton";
 import { WorkspaceToolbarTabs } from "../../features/Workspace/WorkspacePaneTabs";
+import {
+  needsCompactEngine,
+  type PaneTabFitChange,
+} from "../../features/Workspace/paneTabFit";
 import styles from "./Toolbar.module.css";
 
 export type DashboardTab = {
@@ -59,44 +58,68 @@ export type ToolbarProps = {
   activeTab: Tab;
 };
 
-type ToolbarIconButtonProps = {
-  label: string;
-  onClick: () => void;
-  icon: ComponentProps<typeof IconButton>["icon"];
-  className?: string;
-};
-
-const ToolbarIconButton = ({
-  label,
-  onClick,
-  icon,
-  className,
-}: ToolbarIconButtonProps) => (
-  <Tooltip>
-    <Tooltip.Trigger asChild>
-      <IconButton
-        aria-label={label}
-        className={classNames(styles.iconButton, "rf-pressable", className)}
-        icon={icon}
-        onClick={onClick}
-        size="sm"
-        variant="plain"
-      />
-    </Tooltip.Trigger>
-    <Tooltip.Content side="bottom">{label}</Tooltip.Content>
-  </Tooltip>
-);
-
 export const Toolbar = ({ activeTab }: ToolbarProps) => {
+  const toolbarRef = useRef<HTMLDivElement>(null);
+  const tabsRef = useRef<HTMLDivElement>(null);
+  const stripWidths = useRef(new Map<HTMLElement, number>());
+  const scheduleFit = useRef<() => void>();
+  const [compactEngine, setCompactEngine] = useState(false);
+  const compactRef = useRef(compactEngine);
+  compactRef.current = compactEngine;
+  const onFitChange = useCallback<PaneTabFitChange>((element, width) => {
+    if (width === null) stripWidths.current.delete(element);
+    else stripWidths.current.set(element, width);
+    scheduleFit.current?.();
+  }, []);
+  useLayoutEffect(() => {
+    let frame = 0;
+    const measure = () => {
+      frame = 0;
+      const slot = tabsRef.current;
+      const label = toolbarRef.current?.querySelector<HTMLElement>(
+        "[data-engine-label]",
+      );
+      if (!slot || !label) return;
+      const chip = label.parentElement;
+      const savings =
+        label.getBoundingClientRect().width +
+        (chip ? parseFloat(getComputedStyle(chip).columnGap) || 0 : 0);
+      const expandedRight =
+        slot.getBoundingClientRect().right - (compactRef.current ? savings : 0);
+      const strips = Array.from(
+        stripWidths.current,
+        ([element, naturalWidth]) => ({
+          left: element.getBoundingClientRect().left,
+          right: element.getBoundingClientRect().right,
+          naturalWidth,
+        }),
+      );
+      setCompactEngine(needsCompactEngine(strips, expandedRight));
+    };
+    const schedule = () => {
+      if (!frame) frame = requestAnimationFrame(measure);
+    };
+    scheduleFit.current = schedule;
+    const observer = new ResizeObserver(schedule);
+    if (toolbarRef.current) observer.observe(toolbarRef.current);
+    if (tabsRef.current) observer.observe(tabsRef.current);
+    const label = toolbarRef.current?.querySelector<HTMLElement>(
+      "[data-engine-label]",
+    );
+    if (label) observer.observe(label);
+    schedule();
+    return () => {
+      scheduleFit.current = undefined;
+      observer.disconnect();
+      cancelAnimationFrame(frame);
+    };
+  }, []);
   const dispatch = useAppDispatch();
   const allThreads = useAppSelector(selectAllThreads);
   const currentChatId = useAppSelector(selectChatId);
   const focusedWorkspaceChatId = useAppSelector(selectWorkspaceFocusedChatId);
   const workspaceTabs = useAppSelector(selectTabs);
   const workspaceGroups = useAppSelector(selectWorkspaceGroups);
-  const hasSplitPanes = Object.values(workspaceGroups).some((group) =>
-    group ? collectLeafIds(group.root).length > 1 : false,
-  );
   const hasOpenFiles =
     workspaceTabs.some(isFileSurface) ||
     Object.values(workspaceGroups).some((group) =>
@@ -110,21 +133,6 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
   const shouldCleanToolbarChat =
     activeTab.type === "chat" || focusedWorkspaceChatId !== null;
   const [createTask] = useCreateTaskMutation();
-
-  const goHome = useCallback(() => {
-    if (activeTab.type === "chat") {
-      const currentThread = allThreads[activeTab.id];
-      if (
-        currentThread &&
-        currentThread.thread.messages.length === 0 &&
-        !hasOpenFiles
-      ) {
-        dispatch(closeThread({ id: activeTab.id }));
-      }
-    }
-
-    dispatch(popBackTo({ name: "history" }));
-  }, [activeTab, allThreads, dispatch, hasOpenFiles]);
 
   const handleNavigation = useCallback(
     (to: DropdownNavigationOptions | "chat") => {
@@ -204,21 +212,13 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
 
   return (
     <div
+      ref={toolbarRef}
       className={styles.toolbar}
       role="toolbar"
       aria-label="Workspace toolbar"
     >
-      <div className={styles.toolbarSection}>
-        <ToolbarIconButton
-          label="Home"
-          className={styles.homeButton}
-          icon={Home}
-          onClick={goHome}
-        />
-      </div>
-
-      <div className={styles.toolbarTabs}>
-        <WorkspaceToolbarTabs />
+      <div ref={tabsRef} className={styles.toolbarTabs}>
+        <WorkspaceToolbarTabs onFitChange={onFitChange} />
       </div>
 
       <div
@@ -228,7 +228,7 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
       <div
         className={classNames(styles.toolbarSection, styles.connectionSection)}
       >
-        <EngineStatusChip compact={hasSplitPanes} />
+        <EngineStatusChip compact={compactEngine} />
       </div>
 
       <div className={styles.toolbarDivider} />

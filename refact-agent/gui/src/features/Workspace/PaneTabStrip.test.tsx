@@ -129,6 +129,50 @@ describe("compact pane tabs", () => {
     expect(group && findLeaf(group.root, "root")?.tabIds).toEqual([b, a]);
   });
 
+  it("shrinks titles before overflow and removes fit contributions on unmount", () => {
+    const onFitChange = vi.fn();
+    const width = vi
+      .spyOn(HTMLElement.prototype, "clientWidth", "get")
+      .mockReturnValue(170);
+    const rect = vi
+      .spyOn(HTMLElement.prototype, "getBoundingClientRect")
+      .mockImplementation(function (this: HTMLElement) {
+        return {
+          width: this.className.includes("title") ? 100 : 180,
+          height: 30,
+          left: 0,
+          right: 180,
+          top: 0,
+          bottom: 30,
+          x: 0,
+          y: 0,
+          toJSON: () => ({}),
+        };
+      });
+    try {
+      const { unmount } = render(
+        <PaneTabStrip
+          leaf={{ kind: "leaf", id: "root", tabIds: [a, b], activeTabId: b }}
+          tabId={a}
+          hidePaneActions
+          onFitChange={onFitChange}
+        />,
+      );
+      expect(screen.getByRole("tab", { name: "alpha.ts" })).toBeInTheDocument();
+      expect(screen.getByRole("tab", { name: "beta.ts" })).toBeInTheDocument();
+      expect(
+        screen.queryByRole("button", { name: /more pane tabs/ }),
+      ).toBeNull();
+      const element = onFitChange.mock.calls[0][0] as HTMLElement;
+      expect(onFitChange).toHaveBeenCalledWith(element, 360);
+      unmount();
+      expect(onFitChange).toHaveBeenLastCalledWith(element, null);
+    } finally {
+      width.mockRestore();
+      rect.mockRestore();
+    }
+  });
+
   it("measures overflow and retains the active tab with keyboard access to hidden tabs", () => {
     const store = setup();
     const width = vi
@@ -136,16 +180,18 @@ describe("compact pane tabs", () => {
       .mockReturnValue(150);
     const rect = vi
       .spyOn(HTMLElement.prototype, "getBoundingClientRect")
-      .mockReturnValue({
-        width: 100,
-        height: 30,
-        left: 0,
-        right: 100,
-        top: 0,
-        bottom: 30,
-        x: 0,
-        y: 0,
-        toJSON: () => ({}),
+      .mockImplementation(function (this: HTMLElement) {
+        return {
+          width: this.className.includes("title") ? 0 : 100,
+          height: 30,
+          left: 0,
+          right: 100,
+          top: 0,
+          bottom: 30,
+          x: 0,
+          y: 0,
+          toJSON: () => ({}),
+        };
       });
     try {
       render(
@@ -159,6 +205,11 @@ describe("compact pane tabs", () => {
         screen.getByRole("button", { name: "1 more pane tabs" }),
       ).toBeInTheDocument();
       expect(screen.queryByRole("tab", { name: "alpha.ts" })).toBeNull();
+      expect(
+        screen
+          .getByRole("tab", { name: "beta.ts" })
+          .closest("[data-pane-tab-key]"),
+      ).toHaveStyle({ minWidth: "50px" });
       fireEvent.keyDown(screen.getByRole("tab", { name: "beta.ts" }), {
         key: "Home",
       });

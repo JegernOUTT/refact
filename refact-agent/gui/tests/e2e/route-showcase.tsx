@@ -2587,7 +2587,88 @@ const preloadedState: Partial<RootState> = {
   pages: [{ name: "history" }],
 };
 
+const toolbarAlignmentRoute = new URLSearchParams(window.location.search).has(
+  "toolbar_alignment",
+);
+if (toolbarAlignmentRoute) {
+  const leftTabs = [chatId, "alignment-middle", "alignment-last"];
+  const activeIndex = Number(
+    new URLSearchParams(window.location.search).get("active") ?? "2",
+  );
+  const activeSurface = chatSurface(leftTabs[activeIndex] ?? chatId);
+  preloadedState.pages = [{ name: "chat" }];
+  preloadedState.chat = {
+    ...preloadedState.chat!,
+    current_thread_id: leftTabs[activeIndex] ?? chatId,
+    open_thread_ids: [...leftTabs, splitChatId],
+    threads: Object.fromEntries(
+      [...leftTabs, splitChatId].map((id, index) => [
+        id,
+        {
+          ...chatRuntime,
+          thread: {
+            ...chatRuntime.thread,
+            id,
+            title: ["First chat", "Middle chat", "Last chat", "Companion"][
+              index
+            ],
+            messages: [],
+          },
+        },
+      ]),
+    ),
+  };
+  preloadedState.workspace = {
+    tabs: [chatSurface(chatId)],
+    activeTabId: chatSurface(chatId),
+    dock: { open: false, width: 280, section: "files" },
+    drawer: { open: false, height: 280 },
+    groups: {
+      [chatSurface(chatId)]: {
+        root: {
+          kind: "split",
+          id: "alignment-split",
+          dir: "row",
+          sizes: [0.6, 0.4],
+          children: [
+            {
+              kind: "leaf",
+              id: "alignment-left",
+              tabIds: leftTabs.map(chatSurface),
+              activeTabId: activeSurface,
+            },
+            {
+              kind: "leaf",
+              id: "alignment-right",
+              tabIds: [chatSurface(splitChatId)],
+              activeTabId: chatSurface(splitChatId),
+            },
+          ],
+        },
+        focusedLeafId: "alignment-left",
+      },
+    },
+  };
+}
+
+if (
+  toolbarAlignmentRoute &&
+  new URLSearchParams(window.location.search).has("unsplit")
+) {
+  preloadedState.workspace!.groups = {};
+  preloadedState.workspace!.tabs = [
+    chatSurface(chatId),
+    chatSurface("alignment-middle"),
+    chatSurface("alignment-last"),
+    chatSurface(splitChatId),
+  ];
+}
 const store = setUpStore(preloadedState);
+if (toolbarAlignmentRoute) {
+  Object.defineProperty(window, "__toolbarAlignmentStore", {
+    get: () => store,
+  });
+}
 if (workspaceGitActionsRoute) {
   const selector = workspaceGitPushRoute
     ? 'button[aria-label="Push…"]:not([disabled])'
@@ -3339,13 +3420,15 @@ const ShowcaseSurface = () => {
           overflow: "hidden",
         }}
       >
-        {rebuildRoute ? (
-          <Toolbar activeTab={{ type: "chat", id: chatId }} />
-        ) : (
-          <TabBar />
-        )}
+        {!rebuildRoute && !toolbarAlignmentRoute && <TabBar />}
         <Flex style={{ flex: "1 1 auto", minWidth: 0, minHeight: 0 }}>
-          <WorkspaceShell>
+          <WorkspaceShell
+            toolbar={
+              (rebuildRoute || toolbarAlignmentRoute) && (
+                <Toolbar activeTab={{ type: "chat", id: chatId }} />
+              )
+            }
+          >
             <WorkspaceView />
           </WorkspaceShell>
         </Flex>

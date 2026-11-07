@@ -12,7 +12,10 @@ import {
 } from "../../../utils/test-utils";
 import { updateConfig } from "../../Config/configSlice";
 import { setBrowserOnline } from "../../Connection/connectionSlice";
-import { createChatWithId } from "../../Chat/Thread";
+import { push } from "../../Pages/pagesSlice";
+import { collectTabIds } from "../../ChatPanes/panesTree";
+import { Toolbar } from "../../../components/Toolbar/Toolbar";
+import { createChatWithId, switchToThread } from "../../Chat/Thread";
 import {
   openTab,
   setActiveTab,
@@ -88,6 +91,83 @@ describe("ActivityRail", () => {
       http.get("*/v1/git/status", () => HttpResponse.json({ roots: [] })),
     );
   });
+
+  it("renders exactly one Home at the rail top alongside the toolbar", () => {
+    const store = createRailStore();
+    store.dispatch(push({ name: "history" }));
+    render(
+      <>
+        <Toolbar activeTab={{ type: "dashboard" }} />
+        <ActivityRail />
+      </>,
+      { store },
+    );
+
+    const home = screen.getByRole("button", { name: "Home" });
+    const rail = screen.getByRole("navigation", { name: "Workspace sections" });
+    expect(rail.querySelector("button")).toBe(home);
+    expect(home).toHaveAttribute("aria-pressed", "true");
+    expect(home).toHaveClass(styles.button);
+  });
+
+  it("returns to existing history, cleans only the focused empty chat, and leaves dock closed", async () => {
+    const store = createRailStore();
+    store.dispatch(
+      createChatWithId({ id: "hidden", title: "Hidden", openTab: false }),
+    );
+    store.dispatch(switchToThread({ id: "hidden", openTab: false }));
+    store.dispatch(push({ name: "history" }));
+    store.dispatch(push({ name: "chat" }));
+    store.dispatch(setDockOpen(false));
+    const view = renderRail(store);
+    const home = screen.getByRole("button", { name: "Home" });
+    expect(home).toHaveAttribute("aria-pressed", "false");
+
+    await view.user.click(home);
+
+    expect(store.getState().pages).toEqual([
+      { name: "login page" },
+      { name: "history" },
+    ]);
+    expect(store.getState().chat.threads[chatId]).toBeUndefined();
+    expect(store.getState().chat.threads.hidden).toBeDefined();
+    expect(store.getState().workspace.dock?.open).toBe(false);
+    expect(home).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("preserves empty chats with open local files on Home", async () => {
+    const store = createRailStore();
+    store.dispatch(openTab(makeSurfaceKey("file", "/repo/local.ts")));
+    store.dispatch(setActiveTab(makeSurfaceKey("chat", chatId)));
+    store.dispatch(push({ name: "chat" }));
+    const view = renderRail(store);
+
+    await view.user.click(screen.getByRole("button", { name: "Home" }));
+
+    expect(store.getState().chat.threads[chatId]).toBeDefined();
+    expect(
+      Object.values(store.getState().workspace.groups).flatMap((group) =>
+        group ? collectTabIds(group.root) : [],
+      ),
+    ).toContain(makeSurfaceKey("file", "/repo/local.ts"));
+    expect(store.getState().pages.at(-1)?.name).toBe("history");
+  });
+
+  it.each(["buddy", "task workspace", "history"] as const)(
+    "does not clean the focused chat when Home is clicked from %s",
+    async (name) => {
+      const store = createRailStore();
+      store.dispatch(
+        push(name === "task workspace" ? { name, taskId: "task-a" } : { name }),
+      );
+      const view = renderRail(store);
+
+      await view.user.click(screen.getByRole("button", { name: "Home" }));
+
+      expect(store.getState().chat.threads[chatId]).toBeDefined();
+      expect(store.getState().pages.at(-1)?.name).toBe("history");
+    },
+  );
 
   it("renders one rail button per workspace section", () => {
     renderRail(createRailStore());

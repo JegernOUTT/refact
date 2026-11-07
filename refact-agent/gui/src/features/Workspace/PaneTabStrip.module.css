@@ -28,10 +28,13 @@
     color var(--rf-dur-fast) var(--rf-ease-standard),
     box-shadow var(--rf-dur-fast) var(--rf-ease-standard);
   padding: 0;
+  border: 0;
   display: flex;
   align-items: center;
-  flex: 0 1 auto;
+  flex: 1 1 0;
   min-width: 0;
+  background: var(--rf-surface-2);
+  color: var(--rf-color-muted);
   max-width: calc(var(--rf-space-6) * 8);
 }
 
@@ -55,12 +58,28 @@
   white-space: nowrap;
 }
 
+.tab.active,
+.tab.active:hover {
+  background: transparent;
+  border-color: transparent;
+  color: var(--rf-color-fg);
+}
+
+.tab:not(.active):hover {
+  background: var(--rf-surface-2);
+  color: var(--rf-color-muted);
+}
+
 .active {
   composes: active from "../../components/ui/Tabs/TabAppearance.module.css";
 }
 
 .tab .tabButton:hover:not(:disabled) {
   background: transparent;
+}
+
+.tabButton > :not(.title) {
+  flex-shrink: 0;
 }
 
 .tabButton[aria-selected="true"] {
@@ -107,6 +126,10 @@
   display: flex;
   width: max-content;
   inset: 0 auto auto 0;
+}
+
+.measure .title {
+  min-width: 3ch;
 }
 
 .measure .tab {

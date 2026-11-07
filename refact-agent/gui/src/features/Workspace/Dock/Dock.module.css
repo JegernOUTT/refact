@@ -106,10 +106,16 @@
   background: var(--rf-border-strong);
 }
 
-.sheet {
-  top: calc(var(--rf-control-h-lg) + var(--rf-space-3));
-  max-height: calc(100dvh - var(--rf-control-h-lg) - var(--rf-space-5));
+.sheet.sheet {
+  inset: 0;
+  width: 100%;
+  max-height: 100dvh;
   gap: 0;
+  border-radius: 0;
+}
+
+.sheet .panelInner {
+  width: 100%;
 }
 
 .sheet > div {
@@ -130,6 +136,14 @@
 }
 
 @media (prefers-reduced-motion: no-preference) {
+  .sheet[data-state="open"] {
+    animation: dock-sheet-in var(--rf-dur-med) var(--rf-ease-entrance) both;
+  }
+
+  .sheet.sheetClosing {
+    animation: dock-sheet-out var(--rf-dur-med) var(--rf-ease-exit) both;
+  }
+
   .dock {
     transition:
       flex-basis var(--rf-dur-med) var(--rf-ease-entrance),
@@ -157,6 +171,30 @@
   .dock[data-state="closed"] {
     transform: none;
   }
+}
+
+@keyframes dock-sheet-in {
+  from {
+    transform: translateX(-100%);
+  }
+
+  to {
+    transform: translateX(0);
+  }
+}
+
+@keyframes dock-sheet-out {
+  from {
+    transform: translateX(0);
+  }
+
+  to {
+    transform: translateX(-100%);
+  }
+}
+
+html[data-reduced-motion="on"] .sheet[data-state] {
+  animation: none;
 }
 
 html[data-reduced-motion="on"] .dock,

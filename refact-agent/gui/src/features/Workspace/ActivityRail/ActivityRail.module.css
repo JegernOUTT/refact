@@ -48,10 +48,11 @@
   background: var(--rf-color-accent-soft);
 }
 
-.badge {
+.rail .badge {
   position: absolute;
   top: 0;
   right: 0;
+  background: var(--rf-bg);
   pointer-events: none;
   padding-inline: var(--rf-space-2xs);
   white-space: nowrap;

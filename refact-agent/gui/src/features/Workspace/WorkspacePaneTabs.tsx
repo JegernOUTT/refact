@@ -17,9 +17,14 @@ import {
   setActiveTab,
 } from "./workspaceSlice";
 import { usePaneTabGeometry } from "./usePaneTabGeometry";
+import type { PaneTabFitChange } from "./paneTabFit";
 import styles from "./WorkspacePaneTabs.module.css";
 
-export function WorkspaceToolbarTabs() {
+export function WorkspaceToolbarTabs({
+  onFitChange,
+}: {
+  onFitChange?: PaneTabFitChange;
+}) {
   const dispatch = useAppDispatch();
   const tabs = useAppSelector(selectTabs);
   const groups = useAppSelector(selectWorkspaceGroups);
@@ -77,6 +82,7 @@ export function WorkspaceToolbarTabs() {
   const selected = page && page.name !== "chat" ? null : undefined;
   const strip = (
     <PaneTabStrip
+      onFitChange={onFitChange}
       leaf={leaf}
       tabId={activeTabId ?? "workspace-navigation"}
       navigationEntries={entries}
@@ -132,6 +138,7 @@ export function WorkspaceToolbarTabs() {
               }
             >
               <PaneTabStrip
+                onFitChange={onFitChange}
                 leaf={{ ...pane, id: "toolbar" }}
                 tabId={activeTabId ?? "workspace-navigation"}
                 navigationEntries={

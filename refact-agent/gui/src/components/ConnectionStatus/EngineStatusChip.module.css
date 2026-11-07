@@ -38,7 +38,10 @@
 }
 
 .compact .chipLabel {
-  display: none;
+  position: absolute;
+  width: max-content;
+  visibility: hidden;
+  pointer-events: none;
 }
 
 .panel {
@@ -82,10 +85,4 @@
 .engineUrl:focus-visible {
   outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
   outline-offset: var(--rf-hairline);
-}
-
-@container toolbar (max-width: 760px) {
-  .chipLabel {
-    display: none;
-  }
 }

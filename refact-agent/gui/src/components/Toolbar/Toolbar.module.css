@@ -54,10 +54,6 @@
   background: var(--rf-surface-1);
 }
 
-.homeButton {
-  color: var(--rf-color-accent);
-}
-
 .toolbarDivider {
   width: var(--rf-hairline);
   height: 16px;
@@ -84,8 +80,7 @@
 
 @container toolbar (max-width: 320px) {
   .toolbarDivider,
-  .connectionDivider,
-  .connectionSection {
+  .connectionDivider {
     display: none;
   }
 }

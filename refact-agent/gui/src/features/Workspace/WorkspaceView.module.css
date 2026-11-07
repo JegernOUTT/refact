@@ -36,7 +36,7 @@
   --rf-chat-gutter-x: 0px;
   --rf-chat-gutter-y: 0px;
 
-  padding: var(--rf-space-2);
+  padding: 0 var(--rf-space-2) var(--rf-space-2);
 }
 
 .unsplitSurfaceWrap {

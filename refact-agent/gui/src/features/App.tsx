@@ -102,9 +102,17 @@ export interface AppProps {
 
 const MaybeWorkspaceShell: React.FC<{
   enabled: boolean;
+  toolbar?: React.ReactNode;
   children: React.ReactNode;
-}> = ({ enabled, children }) =>
-  enabled ? <WorkspaceShell>{children}</WorkspaceShell> : <>{children}</>;
+}> = ({ enabled, toolbar, children }) =>
+  enabled ? (
+    <WorkspaceShell toolbar={toolbar}>{children}</WorkspaceShell>
+  ) : (
+    <>
+      {toolbar}
+      {children}
+    </>
+  );
 
 const WorkspaceApp: React.FC<AppProps> = ({ style }: AppProps) => {
   const dispatch = useAppDispatch();
@@ -575,8 +583,13 @@ const WorkspaceApp: React.FC<AppProps> = ({ style }: AppProps) => {
         <SplashScreen message={startupSplashMessage} />
       ) : (
         <>
-          {activeTab && <Toolbar activeTab={activeTab} />}
-          <MaybeWorkspaceShell enabled={showWorkspaceShell}>
+          <MaybeWorkspaceShell
+            enabled={showWorkspaceShell}
+            toolbar={
+              showWorkspaceShell &&
+              activeTab && <Toolbar activeTab={activeTab} />
+            }
+          >
             <PageWrapper
               host={config.host}
               style={pageWrapperStyle}
