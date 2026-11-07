@@ -77,7 +77,10 @@ export function SurfacePane({
 
     if (parsed.kind === "task" || parsed.kind === "buddy") {
       return (
-        <div className={styles.surfacePane} data-surface-key={surfaceKey}>
+        <div
+          className={classNames(styles.surfacePane, styles.workspaceSurface)}
+          data-surface-key={surfaceKey}
+        >
           <Suspense fallback={<Spinner label="Loading workspace" />}>
             {parsed.kind === "task" ? (
               <TaskWorkspace

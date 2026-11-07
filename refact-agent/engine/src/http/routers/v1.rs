@@ -181,6 +181,7 @@ pub mod ext_management;
 mod ext_marketplace_sources;
 mod file_edit_tools;
 mod files;
+mod files_search;
 mod git;
 mod git_branches;
 mod git_read;
@@ -605,6 +606,7 @@ fn files_routes() -> Router<AppState> {
             "/file_edit_tool_dry_run",
             post(handle_v1_file_edit_tool_dry_run),
         )
+        .route("/files/search", get(files_search::handle_v1_files_search))
         .route("/files/tree", get(handle_v1_files_tree))
         .route("/files/read", get(handle_v1_files_read))
         .route("/files/open", post(handle_v1_files_open))

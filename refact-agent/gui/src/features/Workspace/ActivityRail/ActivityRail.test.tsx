@@ -108,6 +108,27 @@ describe("ActivityRail", () => {
     expect(rail.querySelector("button")).toBe(home);
     expect(home).toHaveAttribute("aria-pressed", "true");
     expect(home).toHaveClass(styles.button);
+    const logo = home.querySelector("svg");
+    expect(logo).toHaveAttribute("viewBox", "200 180 400 480");
+    expect(logo).toHaveAttribute("aria-hidden", "true");
+    expect(logo).toHaveAttribute("focusable", "false");
+    expect(logo).toHaveClass(styles.homeLogo, "rf-status-pulse");
+  });
+
+  it("keeps the Home tooltip and keyboard navigation with the brand glyph", async () => {
+    const store = createRailStore();
+    store.dispatch(push({ name: "chat" }));
+    const view = renderRail(store);
+    const home = screen.getByRole("button", { name: "Home" });
+
+    await view.user.hover(home);
+    expect(await screen.findByRole("tooltip")).toHaveTextContent("Home");
+    home.focus();
+    await view.user.keyboard("{Enter}");
+
+    expect(store.getState().pages.at(-1)?.name).toBe("history");
+    expect(store.getState().chat.threads[chatId]).toBeUndefined();
+    expect(home).toHaveFocus();
   });
 
   it("returns to existing history, cleans only the focused empty chat, and leaves dock closed", async () => {
@@ -500,7 +521,7 @@ describe("ActivityRail", () => {
             {
               id: "a",
               title: "Alpha",
-              updated_at_ms: 2,
+              updated_at_ms: Date.now(),
               session_state: "generating",
               recovery_state: null,
               schedule_count: 0,
@@ -509,7 +530,7 @@ describe("ActivityRail", () => {
             {
               id: "b",
               title: "Beta",
-              updated_at_ms: 1,
+              updated_at_ms: Date.now(),
               session_state: null,
               recovery_state: "needs_action",
               schedule_count: 1,
@@ -550,7 +571,7 @@ describe("ActivityRail", () => {
             {
               id: "a",
               title: "Alpha",
-              updated_at_ms: 2,
+              updated_at_ms: Date.now(),
               session_state: "generating",
               recovery_state: null,
               schedule_count: 0,

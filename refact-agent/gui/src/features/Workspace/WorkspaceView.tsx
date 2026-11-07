@@ -1,8 +1,6 @@
 import classNames from "classnames";
-import { Columns3 } from "lucide-react";
 import { type DragEvent, useCallback, useEffect, useState } from "react";
 
-import { IconButton, Tooltip, useMediaQuery } from "../../components/ui";
 import { useAppDispatch, useAppSelector } from "../../hooks";
 import {
   selectCurrentThreadId,
@@ -32,7 +30,6 @@ import {
   selectWorkspaceGroups,
   splitTab,
 } from "./workspaceSlice";
-import { WORKSPACE_NARROW_QUERY } from "./workspaceBreakpoints";
 import styles from "./WorkspaceView.module.css";
 
 export function WorkspaceView() {
@@ -65,8 +62,6 @@ export function WorkspaceView() {
   const activeTabCanSplit = activeTabId
     ? isSplittableSurface(activeTabId)
     : false;
-  const isNarrow = useMediaQuery(WORKSPACE_NARROW_QUERY);
-  const splitAffordanceVisible = activeTabCanSplit && !isNarrow;
 
   useEffect(() => {
     const workspaceTabs = tabs.filter(isSplittableSurface);
@@ -99,11 +94,6 @@ export function WorkspaceView() {
     if (currentThreadId === focusedChatId) return;
     dispatch(switchToThread({ id: focusedChatId, openTab: false }));
   }, [focusedChatId, focusedChatIsOpen, currentThreadId, dispatch]);
-
-  const handleSplitActiveSurface = useCallback(() => {
-    if (!activeTabCanSplit || !activeTabId) return;
-    dispatch(splitTab({ tabId: activeTabId, dir: "row" }));
-  }, [activeTabCanSplit, activeTabId, dispatch]);
 
   const handleUnsplitDragEnter = useCallback(
     (event: DragEvent) => {
@@ -240,20 +230,6 @@ export function WorkspaceView() {
                   aria-hidden="true"
                 >
                   <div className={styles.unsplitDropHint}>Drop to split</div>
-                </div>
-              ) : null}
-              {splitAffordanceVisible ? (
-                <div className={styles.unsplitSplitAffordance}>
-                  <Tooltip content="Split this tab">
-                    <IconButton
-                      aria-label="Split active tab"
-                      className={styles.unsplitSplitButton}
-                      icon={Columns3}
-                      onClick={handleSplitActiveSurface}
-                      size="sm"
-                      variant="plain"
-                    />
-                  </Tooltip>
                 </div>
               ) : null}
             </div>

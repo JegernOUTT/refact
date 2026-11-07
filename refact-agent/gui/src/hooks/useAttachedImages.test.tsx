@@ -1,4 +1,5 @@
 import React from "react";
+import { act } from "react-dom/test-utils";
 import { renderHook, waitFor } from "@testing-library/react";
 import { Provider } from "react-redux";
 import { http, HttpResponse } from "msw";
@@ -7,6 +8,7 @@ import { describe, expect, it, vi } from "vitest";
 import { STUB_CAPS_RESPONSE } from "../__fixtures__/caps";
 import { setUpStore } from "../app/store";
 import { ChatThreadProvider } from "../features/Chat/Thread";
+import { updateConfig } from "../features/Config/configSlice";
 import { setBackendStatus } from "../features/Connection";
 import { useAttachedImages } from "./useAttachedImages";
 import { createDefaultChatState } from "../utils/test-utils";
@@ -48,7 +50,7 @@ describe("useAttachedImages", () => {
     );
     const { result } = renderHook(() => useAttachedImages(), { wrapper });
 
-    result.current.processAndInsertImages([
+    result.current.processEditedImages([
       new File(["native-png-bytes"], "4000x2251.png", {
         type: "image/png",
       }),
@@ -65,6 +67,46 @@ describe("useAttachedImages", () => {
     });
     expect(readAsDataURL).toHaveBeenCalledOnce();
     expect(canvasSpy).not.toHaveBeenCalledWith("canvas");
+  });
+
+  it("ignores a late edited file read after endpoint changes away and back", async () => {
+    const chat = createDefaultChatState();
+    const chatId = chat.current_thread_id;
+    const store = setUpStore({
+      chat,
+      config: { host: "web", themeProps: {}, lspPort: 8001 },
+    });
+    const wrapper = ({ children }: React.PropsWithChildren) => (
+      <Provider store={store}>
+        <ChatThreadProvider chatId={chatId}>{children}</ChatThreadProvider>
+      </Provider>
+    );
+    const readers: FileReader[] = [];
+    vi.spyOn(FileReader.prototype, "readAsDataURL").mockImplementation(
+      function (this: FileReader) {
+        readers.push(this);
+      },
+    );
+    const { result } = renderHook(() => useAttachedImages(), { wrapper });
+    act(() =>
+      result.current.processEditedImages([
+        new File(["raw"], "late.png", { type: "image/png" }),
+      ]),
+    );
+    act(() => {
+      store.dispatch(updateConfig({ lspPort: 8002 }));
+    });
+    act(() => {
+      store.dispatch(updateConfig({ lspPort: 8001 }));
+    });
+    Object.defineProperty(readers[0], "result", {
+      value: "data:image/png;base64,bGF0ZQ==",
+    });
+    act(() => {
+      readers[0].dispatchEvent(new ProgressEvent("load"));
+    });
+    await Promise.resolve();
+    expect(store.getState().chat.threads[chatId]?.attached_images).toEqual([]);
   });
 
   const ATTACHED = [

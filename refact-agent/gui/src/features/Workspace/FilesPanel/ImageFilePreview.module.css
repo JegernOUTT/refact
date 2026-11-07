@@ -67,6 +67,7 @@
   min-width: 0;
   max-width: 100%;
   overflow: auto;
+  overflow-anchor: none;
   background: var(--rf-surface-2);
   outline: none;
 }

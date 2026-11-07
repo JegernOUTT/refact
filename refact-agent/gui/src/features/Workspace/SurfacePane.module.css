@@ -13,6 +13,11 @@
   justify-content: stretch;
 }
 
+.workspaceSurface > * {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
 .fileSurface {
   align-items: stretch;
   justify-content: stretch;

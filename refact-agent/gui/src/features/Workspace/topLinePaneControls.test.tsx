@@ -83,9 +83,14 @@ describe("top-line-only pane controls", () => {
     expect(controls).toContainElement(
       screen.getByText("File controls file:/a.html"),
     );
-    expect(controls).toContainElement(
-      within(pane).getByRole("button", { name: "Pane actions" }),
-    );
+    expect(
+      within(pane).queryByRole("button", {
+        name: /Pane actions|Split right|Split down/,
+      }),
+    ).not.toBeInTheDocument();
+    expect(within(pane).getAllByRole("button")).toEqual([
+      screen.getByText("File controls file:/a.html"),
+    ]);
   });
 
   it("portals only active controls while retaining visited panel drafts", () => {

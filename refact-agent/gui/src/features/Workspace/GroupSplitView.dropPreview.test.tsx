@@ -274,8 +274,9 @@ describe("single native pane preview", () => {
     }
   });
 
-  it("uses protected global source identity and excludes only floating controls", () => {
+  it("uses protected global source identity and excludes file header actions", () => {
     const { pane } = setup();
+    expect(screen.queryByRole("button", { name: "Pane actions" })).toBeNull();
     fireEvent.dragStart(screen.getByText("Drag B"), {
       dataTransfer: transfer(),
     });

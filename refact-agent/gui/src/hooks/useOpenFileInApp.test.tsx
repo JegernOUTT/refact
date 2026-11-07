@@ -7,6 +7,9 @@ import { server } from "../utils/mockServer";
 import { useOpenFileInApp, type OpenFileInAppTarget } from "./useOpenFileInApp";
 import { useGoToLink } from "./useGoToLink";
 import type { Config } from "../features/Config/configSlice";
+import { createDefaultChatState } from "../utils/test-utils";
+import { setUpStore } from "../app/store";
+import { ChatThreadProvider } from "../features/Chat/Thread/ChatThreadContext";
 
 const filePath = "/workspace/src/main.ts";
 
@@ -53,6 +56,83 @@ afterEach(() => {
 });
 
 describe("useOpenFileInApp", () => {
+  it("resolves against the source chat, not the currently focused chat", async () => {
+    const chat = createDefaultChatState();
+    const source = createDefaultChatState();
+    const sourceId = source.current_thread_id;
+    source.threads[sourceId].thread.worktree = {
+      id: "source-worktree",
+      kind: "chat",
+      root: "/source-worktree",
+      source_workspace_root: "/project",
+      repo_root: "/project",
+      enforce: true,
+    };
+    chat.threads = { ...chat.threads, ...source.threads };
+    const store = setUpStore({ chat, config: makeConfig("web") });
+    const { user } = render(
+      <ChatThreadProvider chatId={sourceId}>
+        <OpenFileHarness
+          target={{ path: "refact-agent/engine/src/caps/caps.rs", line: 42 }}
+        />
+      </ChatThreadProvider>,
+      { store },
+    );
+    await user.click(screen.getByRole("button", { name: "open" }));
+    const absolute = "/source-worktree/refact-agent/engine/src/caps/caps.rs";
+    expect(store.getState().filesPanel.viewerTarget).toEqual({
+      path: absolute,
+      line: 42,
+    });
+    expect(store.getState().workspace.tabs).toContain(`file:${absolute}`);
+    expect(store.getState().workspace.tabs).not.toContain(
+      "file:refact-agent/engine/src/caps/caps.rs",
+    );
+  });
+
+  it("resolves a sole project root before dispatch", async () => {
+    const initial = setUpStore().getState();
+    const { user, store } = render(
+      <OpenFileHarness target={{ path: "src/main.ts", line: 8 }} />,
+      {
+        preloadedState: {
+          config: makeConfig("web"),
+          current_project: {
+            ...initial.current_project,
+            workspaceRoots: ["/workspace"],
+          },
+        },
+      },
+    );
+    await user.click(screen.getByRole("button", { name: "open" }));
+    expect(store.getState().filesPanel.viewerTarget).toEqual({
+      path: filePath,
+      line: 8,
+    });
+  });
+
+  it.each(["src/main.ts", "../secret", "%2e%2e/secret"])(
+    "rejects ambiguous or unsafe %s without creating a surface",
+    async (path) => {
+      const initial = setUpStore().getState();
+      const { user, store } = render(
+        <OpenFileHarness target={{ path, resolved: true }} />,
+        {
+          preloadedState: {
+            config: makeConfig("web"),
+            current_project: {
+              ...initial.current_project,
+              workspaceRoots: ["/one", "/two"],
+            },
+          },
+        },
+      );
+      await user.click(screen.getByRole("button", { name: "open" }));
+      expect(store.getState().filesPanel.viewerTarget).toBeNull();
+      expect(store.getState().error.message).toMatch(/Cannot open/);
+    },
+  );
+
   it("opens a file viewer tab on the web host", async () => {
     const { user, store } = render(
       <OpenFileHarness target={{ path: filePath, line: 7 }} />,

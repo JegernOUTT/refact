@@ -306,15 +306,19 @@ describe("App buddy chat page rendering", () => {
       "task-a",
     );
     expect(
-      screen.getByRole("button", { name: "Pane actions" }),
-    ).toBeInTheDocument();
+      screen.queryByRole("button", {
+        name: /Pane actions|Split right|Split down/,
+      }),
+    ).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("tab", { name: /Buddy/ }));
 
     expect(store.getState().pages.at(-1)).toEqual({ name: "chat" });
     expect(await screen.findByTestId("buddy-home")).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "Pane actions" }),
-    ).toBeInTheDocument();
+      screen.queryByRole("button", {
+        name: /Pane actions|Split right|Split down/,
+      }),
+    ).not.toBeInTheDocument();
   });
 });

@@ -63,7 +63,7 @@ pub struct FileIndexStatus {
 }
 
 pub struct FileIndex {
-    entries: StdRwLock<HashMap<PathBuf, FileFacts>>,
+    entries: StdRwLock<HashMap<PathBuf, Option<FileFacts>>>,
     identities: StdRwLock<HashMap<(u64, u64), Vec<PathBuf>>>,
     bytes: AtomicU64,
     cap_bytes: AtomicU64,
@@ -73,6 +73,11 @@ pub struct FileIndex {
     started_at_ms: AtomicU64,
     finished_at_ms: AtomicU64,
     build_running: AtomicBool,
+    build_requests: std::sync::Mutex<Option<Vec<PathBuf>>>,
+    generation: AtomicU64,
+    built_roots: StdRwLock<Vec<PathBuf>>,
+    pending_watcher_drops: AtomicU64,
+    processed_watcher_drops: AtomicU64,
 }
 
 impl Default for FileIndex {
@@ -94,6 +99,11 @@ impl FileIndex {
             started_at_ms: AtomicU64::new(0),
             finished_at_ms: AtomicU64::new(0),
             build_running: AtomicBool::new(false),
+            build_requests: std::sync::Mutex::new(None),
+            generation: AtomicU64::new(0),
+            built_roots: StdRwLock::new(Vec::new()),
+            pending_watcher_drops: AtomicU64::new(0),
+            processed_watcher_drops: AtomicU64::new(0),
         }
     }
 
@@ -111,6 +121,7 @@ impl FileIndex {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .get(path)
             .copied()
+            .flatten()
     }
 
     pub fn lookup_or_stat(&self, path: &Path) -> Option<FileFacts> {
@@ -123,6 +134,8 @@ impl FileIndex {
     }
 
     pub fn aliases_of(&self, facts: &FileFacts, exclude: &Path) -> Vec<PathBuf> {
+        // Synchronize identity reads with atomic generation publication.
+        let _entries = self.entries.read().unwrap_or_else(|p| p.into_inner());
         if facts.nlink <= 1 {
             return Vec::new();
         }
@@ -141,65 +154,114 @@ impl FileIndex {
     }
 
     pub fn upsert(&self, path: &Path, facts: FileFacts) -> bool {
+        self.upsert_entry(path, Some(facts))
+    }
+
+    fn upsert_entry(&self, path: &Path, facts: Option<FileFacts>) -> bool {
         let cost = entry_cost(path);
-        let outcome = {
-            let mut guard = self
-                .entries
-                .write()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if let Some(slot) = guard.get_mut(path) {
-                let previous = *slot;
-                *slot = facts;
-                Some(Some(previous))
-            } else if self.bytes.load(Ordering::Relaxed) + cost
-                > self.cap_bytes.load(Ordering::Relaxed)
-            {
-                None
-            } else {
-                guard.insert(path.to_path_buf(), facts);
-                self.bytes.fetch_add(cost, Ordering::Relaxed);
-                Some(None)
-            }
-        };
-        match outcome {
-            None => {
-                self.skipped_over_cap.fetch_add(1, Ordering::Relaxed);
-                self.set_state(FileIndexState::Degraded);
-                false
-            }
-            Some(previous) => {
-                if let Some(previous) = previous {
-                    if previous.dev != facts.dev || previous.ino != facts.ino {
-                        self.identity_forget(path, &previous);
-                    }
-                }
-                self.identity_record(path, &facts);
-                true
-            }
+        let mut guard = self.entries.write().unwrap_or_else(|p| p.into_inner());
+        if guard.get(path) == Some(&facts) {
+            return true;
         }
+        self.generation.fetch_add(1, Ordering::SeqCst);
+        let previous = if let Some(slot) = guard.get_mut(path) {
+            Some(std::mem::replace(slot, facts))
+        } else if self.bytes.load(Ordering::Relaxed) + cost > self.cap_bytes.load(Ordering::Relaxed)
+        {
+            self.skipped_over_cap.fetch_add(1, Ordering::Relaxed);
+            self.set_state(FileIndexState::Degraded);
+            return false;
+        } else {
+            guard.insert(path.to_path_buf(), facts);
+            self.bytes.fetch_add(cost, Ordering::Relaxed);
+            None
+        };
+        if let Some(Some(previous)) = previous {
+            self.identity_forget(path, &previous);
+        }
+        if let Some(facts) = facts {
+            self.identity_record(path, &facts);
+        }
+        true
     }
 
     pub fn remove(&self, path: &Path) {
-        let removed = {
-            let mut guard = self
-                .entries
-                .write()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            guard.remove(path)
-        };
-        if let Some(facts) = removed {
+        let mut guard = self.entries.write().unwrap_or_else(|p| p.into_inner());
+        self.generation.fetch_add(1, Ordering::SeqCst);
+        if let Some(facts) = guard.remove(path) {
             let cost = entry_cost(path).min(self.bytes.load(Ordering::Relaxed));
             self.bytes.fetch_sub(cost, Ordering::Relaxed);
-            self.identity_forget(path, &facts);
+            if let Some(facts) = facts {
+                self.identity_forget(path, &facts);
+            }
         }
     }
 
-    pub fn refresh(&self, path: &Path) {
-        match facts_for(path) {
-            Some(facts) => {
-                self.upsert(path, facts);
+    /// Metadata inventory only: None denotes a real directory, never a symlink.
+    pub fn snapshot(&self) -> Vec<(PathBuf, Option<FileFacts>)> {
+        self.entries
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .iter()
+            .map(|(path, facts)| (path.clone(), *facts))
+            .collect()
+    }
+
+    pub fn remove_subtree(&self, path: &Path) {
+        for (known, _) in self.snapshot() {
+            if known.starts_with(path) {
+                self.remove(&known);
             }
-            None => self.remove(path),
+        }
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::SeqCst)
+    }
+
+    pub fn covers_roots(&self, roots: &[PathBuf]) -> bool {
+        let built = self.built_roots.read().unwrap_or_else(|p| p.into_inner());
+        roots.iter().all(|root| built.contains(root))
+    }
+
+    pub fn mark_degraded(&self) {
+        let _entries = self.entries.write().unwrap_or_else(|p| p.into_inner());
+        self.generation.fetch_add(1, Ordering::SeqCst);
+        self.set_state(FileIndexState::Degraded);
+    }
+
+    pub fn observe_watcher_drops(&self, dropped: u64) -> bool {
+        let _entries = self.entries.write().unwrap_or_else(|p| p.into_inner());
+        if dropped <= self.pending_watcher_drops.load(Ordering::Relaxed) {
+            return false;
+        }
+        self.pending_watcher_drops.store(dropped, Ordering::Relaxed);
+        self.generation.fetch_add(1, Ordering::SeqCst);
+        self.set_state(FileIndexState::Degraded);
+        true
+    }
+
+    pub fn refresh(&self, path: &Path) {
+        match std::fs::symlink_metadata(path) {
+            Ok(metadata) if metadata.is_file() => {
+                self.upsert(path, facts_from_metadata(&metadata));
+            }
+            Ok(metadata) if metadata.is_dir() => {
+                self.upsert_entry(path, None);
+            }
+            _ => {
+                let directory = self
+                    .entries
+                    .read()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .get(path)
+                    .is_some_and(|facts| facts.is_none());
+                if directory {
+                    self.remove_subtree(path);
+                } else {
+                    self.remove(path);
+                }
+            }
         }
     }
 
@@ -241,7 +303,9 @@ impl FileIndex {
         self.entries
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .len()
+            .values()
+            .filter(|facts| facts.is_some())
+            .count()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -249,7 +313,10 @@ impl FileIndex {
     }
 
     pub fn begin_build(&self) {
+        let _entries = self.entries.write().unwrap_or_else(|p| p.into_inner());
+        self.generation.fetch_add(1, Ordering::SeqCst);
         self.set_state(FileIndexState::Building);
+        self.skipped_over_cap.store(0, Ordering::Relaxed);
         self.scanned.store(0, Ordering::Relaxed);
         self.started_at_ms.store(now_ms(), Ordering::Relaxed);
         self.finished_at_ms.store(0, Ordering::Relaxed);
@@ -335,43 +402,201 @@ fn facts_from_metadata(metadata: &std::fs::Metadata) -> FileFacts {
 }
 
 pub fn build_blocking(index: &FileIndex, roots: &[PathBuf], shutdown: &AtomicBool) {
+    build_with_observer(index, roots, shutdown, || {});
+}
+
+fn build_with_observer(
+    index: &FileIndex,
+    roots: &[PathBuf],
+    shutdown: &AtomicBool,
+    started: impl FnOnce(),
+) {
+    build_observed(index, roots, shutdown, started, || {});
+}
+
+fn build_observed(
+    index: &FileIndex,
+    roots: &[PathBuf],
+    shutdown: &AtomicBool,
+    started: impl FnOnce(),
+    before_publish: impl FnOnce(),
+) {
+    let mut started = Some(started);
+    let mut before_publish = Some(before_publish);
+    build_retrying(
+        || build_attempt(index, roots, shutdown, &mut started, &mut before_publish),
+        shutdown,
+    );
+}
+
+fn build_retrying(mut attempt: impl FnMut() -> bool, shutdown: &AtomicBool) {
+    for _ in 0..3 {
+        if !attempt() || shutdown.load(Ordering::Relaxed) {
+            return;
+        }
+        for _ in 0..5 {
+            if shutdown.load(Ordering::Relaxed) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+}
+
+fn build_attempt(
+    index: &FileIndex,
+    roots: &[PathBuf],
+    shutdown: &AtomicBool,
+    started: &mut Option<impl FnOnce()>,
+    before_publish: &mut Option<impl FnOnce()>,
+) -> bool {
     use rayon::prelude::*;
 
     fn flush(index: &FileIndex, pending: &mut Vec<PathBuf>) {
         if pending.is_empty() {
             return;
         }
+        let expected = pending.len();
         let batch: Vec<(PathBuf, FileFacts)> = std::mem::take(pending)
             .into_par_iter()
             .filter_map(|path| facts_for(&path).map(|facts| (path, facts)))
             .collect();
+        if batch.len() != expected {
+            index.mark_degraded();
+        }
         index.scanned.fetch_add(batch.len(), Ordering::Relaxed);
         index.merge_batch(batch);
     }
 
     index.begin_build();
-    let mut pending: Vec<PathBuf> = Vec::with_capacity(MERGE_BATCH);
-    for root in roots {
-        for entry in walkdir::WalkDir::new(root)
-            .follow_links(false)
-            .into_iter()
-            .filter_map(Result::ok)
+    let generation = index.generation();
+    let watcher_drops = index.pending_watcher_drops.load(Ordering::Relaxed);
+    // Never clear the live privacy/hardlink inventory while rebuilding. Scan into a
+    // private bounded generation and publish only after a stable complete traversal.
+    if let Some(started) = started.take() {
+        started();
+    }
+    let staged = FileIndex::new(index.cap_bytes.load(Ordering::Relaxed));
+    let canonical_roots: Vec<_> = roots
+        .iter()
+        .filter_map(|root| {
+            std::fs::canonicalize(root)
+                .ok()
+                .map(|root| dunce::simplified(&root).to_path_buf())
+        })
+        .collect();
+    let previous_roots = index
+        .built_roots
+        .read()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone();
+    for (path, facts) in index.snapshot() {
+        if !previous_roots.iter().any(|root| path.starts_with(root))
+            && !canonical_roots.iter().any(|root| path.starts_with(root))
         {
+            staged.upsert_entry(&path, facts);
+        }
+    }
+    let mut uncertain = canonical_roots.len() != roots.len();
+    let mut pending: Vec<PathBuf> = Vec::with_capacity(MERGE_BATCH);
+    for root in &canonical_roots {
+        for entry in walkdir::WalkDir::new(root).follow_links(false).into_iter() {
             if shutdown.load(Ordering::Relaxed) {
-                index.finish_build();
-                return;
+                index.mark_degraded();
+                return false;
+            }
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(_) => {
+                    uncertain = true;
+                    continue;
+                }
+            };
+            if entry.file_type().is_dir() {
+                // Only Explorer-visible directories need inventory slots; regular
+                // files remain unfiltered for privacy hardlink identity discovery.
+                if entry.path().strip_prefix(root).is_ok_and(|relative| {
+                    relative.components().all(|component| {
+                        let name = component.as_os_str().to_string_lossy();
+                        !name.starts_with('.')
+                            && !matches!(name.as_ref(), "target" | "node_modules")
+                    })
+                }) {
+                    staged.upsert_entry(entry.path(), None);
+                }
             }
             if !entry.file_type().is_file() {
                 continue;
             }
             pending.push(entry.into_path());
             if pending.len() >= MERGE_BATCH {
-                flush(index, &mut pending);
+                flush(&staged, &mut pending);
             }
         }
     }
-    flush(index, &mut pending);
+    flush(&staged, &mut pending);
+    if let Some(before_publish) = before_publish.take() {
+        before_publish();
+    }
+    uncertain |= staged.state() == FileIndexState::Degraded;
+    if uncertain {
+        let mut entries = index.entries.write().unwrap_or_else(|p| p.into_inner());
+        if generation != index.generation() {
+            index.set_state(FileIndexState::Degraded);
+            return !shutdown.load(Ordering::Relaxed);
+        }
+        for (path, facts) in staged.snapshot() {
+            if entries.contains_key(&path) {
+                continue;
+            }
+            let cost = entry_cost(&path);
+            if index.bytes.load(Ordering::Relaxed) + cost > index.cap_bytes.load(Ordering::Relaxed)
+            {
+                index.skipped_over_cap.fetch_add(1, Ordering::Relaxed);
+                continue;
+            }
+            entries.insert(path.clone(), facts);
+            index.bytes.fetch_add(cost, Ordering::Relaxed);
+            if let Some(facts) = facts {
+                index.identity_record(&path, &facts);
+            }
+        }
+        index.generation.fetch_add(1, Ordering::SeqCst);
+        index.set_state(FileIndexState::Degraded);
+        return false;
+    }
+    if generation != index.generation() {
+        // Keeping the previous identities is conservative for privacy and avoids
+        // replacing them with an incomplete map after errors or concurrent changes.
+        index.mark_degraded();
+        return !shutdown.load(Ordering::Relaxed);
+    }
+    let mut entries = index.entries.write().unwrap_or_else(|p| p.into_inner());
+    let mut identities = index.identities.write().unwrap_or_else(|p| p.into_inner());
+    if generation != index.generation() {
+        index.set_state(FileIndexState::Degraded);
+        return !shutdown.load(Ordering::Relaxed);
+    }
+    *entries = staged
+        .entries
+        .into_inner()
+        .unwrap_or_else(|p| p.into_inner());
+    *identities = staged
+        .identities
+        .into_inner()
+        .unwrap_or_else(|p| p.into_inner());
+    index
+        .bytes
+        .store(staged.bytes.load(Ordering::Relaxed), Ordering::Relaxed);
+    index
+        .scanned
+        .store(staged.scanned.load(Ordering::Relaxed), Ordering::Relaxed);
+    *index.built_roots.write().unwrap_or_else(|p| p.into_inner()) = canonical_roots;
+    index
+        .processed_watcher_drops
+        .store(watcher_drops, Ordering::Relaxed);
     index.finish_build();
+    false
 }
 
 pub fn spawn_build(
@@ -379,12 +604,33 @@ pub fn spawn_build(
     roots: Vec<PathBuf>,
     shutdown: Arc<AtomicBool>,
 ) -> Option<tokio::task::JoinHandle<()>> {
-    if roots.is_empty() || index.build_running.swap(true, Ordering::SeqCst) {
+    if roots.is_empty() {
         return None;
     }
-    Some(tokio::task::spawn_blocking(move || {
+    let mut requests = index
+        .build_requests
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    *requests = Some(roots);
+    if index.build_running.swap(true, Ordering::SeqCst) {
+        return None;
+    }
+    drop(requests);
+    Some(tokio::task::spawn_blocking(move || loop {
+        let roots = {
+            let mut requests = index
+                .build_requests
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            match requests.take() {
+                Some(roots) if !shutdown.load(Ordering::Relaxed) => roots,
+                _ => {
+                    index.build_running.store(false, Ordering::SeqCst);
+                    return;
+                }
+            }
+        };
         build_blocking(&index, &roots, &shutdown);
-        index.build_running.store(false, Ordering::SeqCst);
     }))
 }
 
@@ -434,6 +680,216 @@ mod tests {
         std::fs::remove_file(&secret).unwrap();
         index.refresh(&secret);
         assert!(index.aliases_of(&alias_facts, &alias).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rebuild_keeps_live_hardlink_aliases_until_atomic_publication() {
+        let temp = tempfile::tempdir().unwrap();
+        let external = tempfile::tempdir().unwrap();
+        let secret = external.path().join(".env");
+        let alias = temp.path().join("plain.txt");
+        std::fs::write(&secret, "private").unwrap();
+        std::fs::hard_link(&secret, &alias).unwrap();
+        let index = FileIndex::default();
+        index.refresh(&secret);
+        index.refresh(&alias);
+        let facts = index.get(&alias).unwrap();
+        assert_eq!(index.aliases_of(&facts, &alias), vec![secret.clone()]);
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            let index_ref = &index;
+            scope.spawn(move || {
+                build_with_observer(
+                    index_ref,
+                    &[temp.path().into()],
+                    &AtomicBool::new(false),
+                    || {
+                        started_tx.send(()).unwrap();
+                        release_rx
+                            .recv_timeout(std::time::Duration::from_secs(10))
+                            .unwrap();
+                    },
+                )
+            });
+            started_rx
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .unwrap();
+            let during = index.aliases_of(&facts, &alias);
+            release_tx.send(()).unwrap();
+            assert_eq!(during, vec![secret.clone()]);
+        });
+        assert_eq!(index.aliases_of(&facts, &alias), vec![secret]);
+        assert!(index.status().complete);
+    }
+
+    #[test]
+    fn directory_inventory_rebuild_prunes_deleted_subtrees_and_keeps_empty_folders() {
+        let temp = tempfile::tempdir().unwrap();
+        let old = temp.path().join("old");
+        std::fs::create_dir(&old).unwrap();
+        std::fs::write(old.join("no_extension"), "x").unwrap();
+        let index = FileIndex::default();
+        let shutdown = AtomicBool::new(false);
+        build_blocking(&index, &[temp.path().into()], &shutdown);
+        assert!(index
+            .snapshot()
+            .iter()
+            .any(|(path, facts)| path == &old && facts.is_none()));
+        std::fs::rename(&old, temp.path().join("new")).unwrap();
+        index.refresh(&old);
+        assert!(!index
+            .snapshot()
+            .iter()
+            .any(|(path, _)| path.starts_with(&old)));
+        std::fs::create_dir(temp.path().join("empty")).unwrap();
+        build_blocking(&index, &[temp.path().into()], &shutdown);
+        let snapshot = index.snapshot();
+        assert!(snapshot
+            .iter()
+            .any(|(path, facts)| path == &temp.path().join("empty") && facts.is_none()));
+        assert!(index.get(&temp.path().join("new/no_extension")).is_some());
+        assert!(index.status().complete);
+    }
+
+    #[test]
+    fn cold_build_recovers_from_modify_during_staging() {
+        let temp = tempfile::tempdir().unwrap();
+        let changed = temp.path().join("changed.txt");
+        let untouched = temp.path().join("untouched.txt");
+        std::fs::write(&changed, "old").unwrap();
+        std::fs::write(&untouched, "retained").unwrap();
+        let index = FileIndex::default();
+        build_with_observer(
+            &index,
+            &[temp.path().into()],
+            &AtomicBool::new(false),
+            || {
+                std::fs::write(&changed, "changed bytes").unwrap();
+                index.refresh(&changed);
+            },
+        );
+        assert!(
+            index.status().complete,
+            "ordinary Modify must not strand a cold inventory"
+        );
+        assert_eq!(index.get(&untouched).unwrap().size, 8);
+        assert_eq!(index.get(&changed).unwrap().size, 13);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn racing_external_lookup_alias_survives_staged_publication() {
+        let temp = tempfile::tempdir().unwrap();
+        let external = tempfile::tempdir().unwrap();
+        let alias = temp.path().join("plain.txt");
+        let secret = external.path().join(".env");
+        std::fs::write(&secret, "private").unwrap();
+        std::fs::hard_link(&secret, &alias).unwrap();
+        let index = FileIndex::default();
+        build_observed(
+            &index,
+            &[temp.path().into()],
+            &AtomicBool::new(false),
+            || {},
+            || {
+                assert!(index.lookup_or_stat(&secret).is_some());
+            },
+        );
+        let facts = index.get(&alias).unwrap();
+        assert_eq!(index.aliases_of(&facts, &alias), vec![secret]);
+        assert!(index.status().complete);
+    }
+
+    #[test]
+    fn racing_remove_cannot_be_resurrected_by_staged_publication() {
+        let temp = tempfile::tempdir().unwrap();
+        let removed = temp.path().join("removed.txt");
+        std::fs::write(&removed, "exists").unwrap();
+        let index = FileIndex::default();
+        build_observed(
+            &index,
+            &[temp.path().into()],
+            &AtomicBool::new(false),
+            || {},
+            || {
+                std::fs::remove_file(&removed).unwrap();
+                index.remove(&removed);
+            },
+        );
+        assert!(
+            index.get(&removed).is_none(),
+            "staging must not resurrect a concurrent removal"
+        );
+        assert!(index.status().complete);
+    }
+
+    #[test]
+    fn watcher_drop_watermark_coalesces_and_only_success_acknowledges() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("present.txt"), "present").unwrap();
+        let index = FileIndex::default();
+        assert!(index.observe_watcher_drops(1));
+        let generation = index.generation();
+        assert!(!index.observe_watcher_drops(1));
+        assert_eq!(index.generation(), generation);
+        build_blocking(
+            &index,
+            &[temp.path().join("missing")],
+            &AtomicBool::new(false),
+        );
+        assert!(!index.status().complete);
+        assert_eq!(index.processed_watcher_drops.load(Ordering::Relaxed), 0);
+        build_observed(
+            &index,
+            &[temp.path().into()],
+            &AtomicBool::new(false),
+            || {},
+            || {
+                assert!(!index.observe_watcher_drops(1));
+            },
+        );
+        assert!(index.status().complete);
+        assert_eq!(index.processed_watcher_drops.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn repeated_build_invalidation_is_bounded_and_later_build_recovers() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("changing.txt");
+        std::fs::write(&file, "initial").unwrap();
+        let index = FileIndex::default();
+        let shutdown = AtomicBool::new(false);
+        let mut attempts = 0;
+        build_retrying(
+            || {
+                attempts += 1;
+                let mut started = Some(|| {});
+                let mut before_publish = Some(|| {
+                    std::fs::write(&file, "x".repeat(attempts)).unwrap();
+                    index.refresh(&file);
+                });
+                let retry = build_attempt(
+                    &index,
+                    &[temp.path().into()],
+                    &shutdown,
+                    &mut started,
+                    &mut before_publish,
+                );
+                assert!(
+                    attempts <= 3,
+                    "one worker must bound invalidated full scans"
+                );
+                retry
+            },
+            &shutdown,
+        );
+        assert_eq!(attempts, 3);
+        assert!(!index.status().complete);
+        build_blocking(&index, &[temp.path().into()], &shutdown);
+        assert!(index.status().complete);
+        assert_eq!(index.get(&file).unwrap().size, 3);
     }
 
     #[test]

@@ -148,6 +148,7 @@ export function ActiveChatsSectionView({
                 >
                   <StatusDot
                     aria-hidden="true"
+                    className={styles.rowDot}
                     pulse={lead === "streaming" || lead === "working"}
                     size="small"
                     status={REASON_DOT[lead]}

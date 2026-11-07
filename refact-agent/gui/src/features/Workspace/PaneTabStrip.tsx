@@ -217,6 +217,22 @@ function LocalTabButton({
       role="presentation"
       style={{ minWidth: minimumWidth }}
       data-pane-tab-key={tab.key}
+      onPointerDownCapture={(event) => {
+        if (event.button !== 1) return;
+        event.preventDefault();
+        event.stopPropagation();
+      }}
+      onMouseDownCapture={(event) => {
+        if (event.button !== 1) return;
+        event.preventDefault();
+        event.stopPropagation();
+      }}
+      onAuxClick={(event) => {
+        if (event.button !== 1) return;
+        event.preventDefault();
+        event.stopPropagation();
+        if (!tab.navigation || tab.navigation.onClose) close(tab);
+      }}
       onDragOver={(event) => {
         if (!canDrop) return;
         if (!hasSplittableTabDrag(event.dataTransfer)) return;

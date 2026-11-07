@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { render, screen, waitFor } from "../../utils/test-utils";
+import { render, screen, waitFor, within } from "../../utils/test-utils";
 import { Markdown } from "./Markdown";
 import {
   InternalLinkProvider,
@@ -63,9 +63,15 @@ describe("Markdown internal links", () => {
     });
     expect(trigger).toBeInTheDocument();
     await user.click(trigger);
-    expect(
-      screen.getByRole("application", { name: "Image pan and zoom" }),
-    ).toBeInTheDocument();
+    const viewer = within(
+      await screen.findByRole("dialog", { name: "Architecture" }),
+    );
+    expect(viewer.getByRole("img", { name: "Architecture" })).toHaveAttribute(
+      "src",
+      "https://example.com/architecture.png",
+    );
+    await user.click(viewer.getByRole("button", { name: "Zoom in" }));
+    expect(viewer.getByLabelText("Image zoom")).toHaveTextContent("125%");
   });
 
   it("clicking a refact chat link calls the internal link handler", async () => {

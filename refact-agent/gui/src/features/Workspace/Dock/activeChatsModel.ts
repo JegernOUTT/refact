@@ -55,23 +55,46 @@ export const activeChatReasons = (chat: ChatActivity): ActiveChatReason[] => {
 const leadRank = (entry: ActiveChatEntry): number =>
   Math.min(...entry.reasons.map((reason) => REASON_RANK[reason]));
 
+export const ACTIVE_CHAT_ATTENTION_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
 export const buildActiveChatEntries = (
   chats: readonly ChatActivity[],
+  nowMs = Date.now(),
 ): ActiveChatEntry[] => {
-  const byId = new Map<string, ActiveChatEntry>();
+  const latest = new Map<string, ChatActivity>();
   for (const chat of chats) {
-    const reasons = activeChatReasons(chat);
+    const previous = latest.get(chat.id);
+    const updatedAtMs = Number.isFinite(chat.updated_at_ms)
+      ? chat.updated_at_ms
+      : 0;
+    const previousUpdatedAtMs =
+      previous && Number.isFinite(previous.updated_at_ms)
+        ? previous.updated_at_ms
+        : 0;
+    if (!previous || previousUpdatedAtMs < updatedAtMs)
+      latest.set(chat.id, chat);
+  }
+  const entries: ActiveChatEntry[] = [];
+  for (const chat of latest.values()) {
+    const updatedAtMs = Number.isFinite(chat.updated_at_ms)
+      ? chat.updated_at_ms
+      : 0;
+    const recent =
+      updatedAtMs > 0 &&
+      updatedAtMs <= nowMs &&
+      nowMs - updatedAtMs <= ACTIVE_CHAT_ATTENTION_MAX_AGE_MS;
+    const reasons = activeChatReasons(chat).filter(
+      (reason) => reason !== "needs_attention" || recent,
+    );
     if (reasons.length === 0) continue;
-    const existing = byId.get(chat.id);
-    if (existing && existing.updatedAtMs >= chat.updated_at_ms) continue;
-    byId.set(chat.id, {
+    entries.push({
       id: chat.id,
       title: chat.title.trim() || "Untitled chat",
-      updatedAtMs: chat.updated_at_ms,
+      updatedAtMs,
       reasons,
     });
   }
-  return [...byId.values()].sort(
+  return entries.sort(
     (left, right) =>
       leadRank(left) - leadRank(right) ||
       right.updatedAtMs - left.updatedAtMs ||

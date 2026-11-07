@@ -1,3 +1,7 @@
+import {
+  ImageAttachmentEditorContext,
+  type ImageEditRequest,
+} from "../ImageAttachmentEditor/context";
 import React from "react";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
@@ -920,12 +924,20 @@ describe("ChatForm", () => {
   });
 
   test("pasting WebP and GIF images uses the image attachment path", async () => {
-    const { user, ...app } = render(<App />, {
-      preloadedState: {
-        chat: chatStateWithThread({ model: "openai/gpt-4o" }),
-        ...engineConfigState,
+    const pending: ImageEditRequest[] = [];
+    const { user, ...app } = render(
+      <ImageAttachmentEditorContext.Provider
+        value={(requests) => pending.push(...requests)}
+      >
+        <App />
+      </ImageAttachmentEditorContext.Provider>,
+      {
+        preloadedState: {
+          chat: chatStateWithThread({ model: "openai/gpt-4o" }),
+          ...engineConfigState,
+        },
       },
-    });
+    );
     const textarea = app.container.querySelector("textarea");
     expect(textarea).not.toBeNull();
     if (!textarea) return;
@@ -945,6 +957,18 @@ describe("ChatForm", () => {
       ),
     ).toBe(false);
 
+    expect(pending.map((request) => request.file.type)).toEqual([
+      "image/webp",
+      "image/gif",
+    ]);
+    expect(
+      app.store.getState().chat.threads[
+        app.store.getState().chat.current_thread_id
+      ]?.attached_images,
+    ).toHaveLength(0);
+    pending[1].accept(
+      new File(["edited"], "edited.png", { type: "image/png" }),
+    );
     await waitFor(() => {
       expect(
         app.store
@@ -952,7 +976,7 @@ describe("ChatForm", () => {
           .chat.threads[
             app.store.getState().chat.current_thread_id
           ]?.attached_images.map((image) => image.type),
-      ).toEqual(["image/webp", "image/gif"]);
+      ).toEqual(["image/png"]);
     });
   });
 

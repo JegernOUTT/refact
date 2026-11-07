@@ -1,6 +1,7 @@
 import React, {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -83,6 +84,7 @@ export const RetryForm: React.FC<{
   onClose: () => void;
 }> = (props) => {
   const { isMultimodalitySupportedForCurrentModel } = useCapsForToolUse();
+  const { processAndInsertImages } = useAttachedImages();
   const inputText = getTextFromUserMessage(props.value);
   const inputImages = getImageFromUserMessage(props.value);
   const [textValue, onChangeTextValue] = useState(inputText);
@@ -95,6 +97,17 @@ export const RetryForm: React.FC<{
     selectIsWaitingById(state, chatId),
   );
   const formRef = useRef<HTMLDivElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const pastedCaret = useRef<number | null>(null);
+
+  useLayoutEffect(() => {
+    if (pastedCaret.current === null) return;
+    textareaRef.current?.setSelectionRange(
+      pastedCaret.current,
+      pastedCaret.current,
+    );
+    pastedCaret.current = null;
+  }, [textValue]);
 
   const disableInput = useMemo(
     () => isStreaming || isWaiting,
@@ -118,7 +131,8 @@ export const RetryForm: React.FC<{
       const target = event.target as Node;
       if (
         target instanceof Element &&
-        target.closest(`.${styles.modelContent}`)
+        (target.closest(`.${styles.modelContent}`) ??
+          target.closest('[role="dialog"]'))
       ) {
         return;
       }
@@ -219,9 +233,37 @@ export const RetryForm: React.FC<{
 
         <div className={styles.textareaWrapper}>
           <TextArea
+            ref={textareaRef}
             value={textValue}
             onChange={(event) => onChangeTextValue(event.target.value)}
             onKeyDown={handleOnKeyDown}
+            onPaste={(event) => {
+              const files = Array.from(event.clipboardData.items)
+                .filter((item) => item.type.startsWith("image/"))
+                .map((item) => item.getAsFile())
+                .filter((file): file is File => file !== null);
+              if (!files.length) return;
+              event.preventDefault();
+              // Suppressing the native image paste must not discard companion text.
+              const text = event.clipboardData.getData("text/plain");
+              if (text) {
+                const { selectionStart, selectionEnd, value } =
+                  event.currentTarget;
+                pastedCaret.current = selectionStart + text.length;
+                onChangeTextValue(
+                  value.slice(0, selectionStart) +
+                    text +
+                    value.slice(selectionEnd),
+                );
+              }
+              processAndInsertImages(files, (image) => {
+                if (typeof image.content === "string")
+                  addImage({
+                    type: "image_url",
+                    image_url: { url: image.content },
+                  });
+              });
+            }}
             autoFocus
           />
         </div>
@@ -264,25 +306,14 @@ export const RetryForm: React.FC<{
 const RetryDropzone: React.FC<{
   addImage: (image: UserImage) => void;
 }> = ({ addImage }) => {
-  const { setError, setWarning } = useAttachedImages();
+  const { setError, processAndInsertImages } = useAttachedImages();
 
   const onDrop = useCallback(
     (acceptedFiles: File[], fileRejections: FileRejection[]) => {
-      acceptedFiles.forEach((file) => {
-        const reader = new FileReader();
-        reader.onabort = () =>
-          setWarning(`file ${file.name} reading was aborted`);
-        reader.onerror = () => setError(`file ${file.name} reading has failed`);
-        reader.onload = () => {
-          if (typeof reader.result === "string") {
-            const image: UserImage = {
-              type: "image_url",
-              image_url: { url: reader.result },
-            };
-            addImage(image);
-          }
-        };
-        reader.readAsDataURL(file);
+      processAndInsertImages(acceptedFiles, (image) => {
+        if (typeof image.content === "string") {
+          addImage({ type: "image_url", image_url: { url: image.content } });
+        }
       });
 
       if (fileRejections.length) {
@@ -295,7 +326,7 @@ const RetryDropzone: React.FC<{
         setError(rejectedFileMessage.join("\n"));
       }
     },
-    [addImage, setError, setWarning],
+    [addImage, setError, processAndInsertImages],
   );
 
   const { getRootProps, getInputProps, open } = useDropzone({
@@ -303,6 +334,7 @@ const RetryDropzone: React.FC<{
     disabled: false,
     noClick: true,
     noKeyboard: true,
+    noDragEventsBubbling: true,
     accept: {
       "image/*": [],
     },

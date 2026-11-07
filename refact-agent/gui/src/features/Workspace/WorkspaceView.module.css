@@ -77,48 +77,6 @@
   backdrop-filter: blur(var(--rf-blur-overlay));
 }
 
-.unsplitSplitAffordance {
-  position: absolute;
-  top: calc(var(--rf-space-2) + var(--rf-chat-gutter-y, 0px));
-  right: calc(var(--rf-space-2) + var(--rf-chat-gutter-x, 0px));
-  z-index: var(--rf-z-dropdown);
-  opacity: var(--rf-motion-opacity-visible);
-  transform: translateY(var(--rf-motion-distance-none));
-}
-
-@media (max-width: 767px) {
-  .unsplitSplitAffordance {
-    display: none;
-  }
-}
-
-@media (hover: hover) and (pointer: fine) {
-  .unsplitSplitAffordance {
-    opacity: var(--rf-motion-opacity-hidden);
-    transform: translateY(calc(-1 * var(--rf-motion-distance-xs)));
-  }
-
-  .unsplitSurfaceWrap:hover .unsplitSplitAffordance,
-  .unsplitSurfaceWrap:focus-within .unsplitSplitAffordance {
-    opacity: var(--rf-motion-opacity-visible);
-    transform: translateY(var(--rf-motion-distance-none));
-  }
-}
-
-.unsplitSplitButton {
-  color: var(--rf-color-muted);
-  background: var(--rf-surface-glass);
-  border: var(--rf-hairline) solid var(--rf-border);
-  box-shadow: var(--rf-elev-panel);
-  backdrop-filter: blur(var(--rf-blur-overlay));
-}
-
-.unsplitSplitButton:hover:not(:disabled) {
-  color: var(--rf-color-fg);
-  background: var(--rf-surface-1);
-}
-
-:global(.radix-themes[data-host="jetbrains"]) .unsplitSplitButton,
 :global(.radix-themes[data-host="jetbrains"]) .unsplitDropHint {
   backdrop-filter: none;
 }
@@ -127,9 +85,7 @@
   .body,
   .unsplitSurfaceWrap,
   .unsplitDropOverlay,
-  .unsplitDropHint,
-  .unsplitSplitAffordance,
-  .unsplitSplitButton {
+  .unsplitDropHint {
     transition:
       background var(--rf-dur-fast) var(--rf-ease-standard),
       border-color var(--rf-dur-fast) var(--rf-ease-standard),
@@ -142,7 +98,6 @@
 }
 
 @media (prefers-reduced-transparency: reduce) {
-  .unsplitSplitButton,
   .unsplitDropHint {
     background: var(--rf-surface-2);
     backdrop-filter: none;
@@ -153,13 +108,7 @@
   .body,
   .unsplitSurfaceWrap,
   .unsplitDropOverlay,
-  .unsplitDropHint,
-  .unsplitSplitAffordance,
-  .unsplitSplitButton {
+  .unsplitDropHint {
     transition: none;
-  }
-
-  .unsplitSplitAffordance {
-    transform: none;
   }
 }

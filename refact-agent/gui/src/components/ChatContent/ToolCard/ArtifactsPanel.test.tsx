@@ -1,4 +1,4 @@
-import { screen } from "@testing-library/react";
+import { screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { Theme } from "@radix-ui/themes";
 import { describe, expect, test } from "vitest";
@@ -116,13 +116,16 @@ describe("ArtifactsPanel", () => {
       name: "Open image: Screenshot 1",
     });
     await user.click(screenshot);
-    expect(
-      screen.getByRole("application", { name: "Image pan and zoom" }),
-    ).toBeInTheDocument();
-    expect(screen.getByRole("img", { name: "Screenshot 1" })).toHaveAttribute(
+    const viewer = within(
+      await screen.findByRole("dialog", { name: "Screenshot 1" }),
+    );
+    expect(viewer.getByRole("img", { name: "Screenshot 1" })).toHaveAttribute(
       "src",
       "data:image/png;base64,aW1hZ2U=",
     );
+
+    await user.click(viewer.getByRole("button", { name: "Zoom in" }));
+    expect(viewer.getByLabelText("Image zoom")).toHaveTextContent("125%");
 
     await user.keyboard("{Escape}");
     expect(
