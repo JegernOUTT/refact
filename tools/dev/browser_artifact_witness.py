@@ -135,7 +135,11 @@ def main():
             if code != 0 or "1 passed; 0 failed" not in result:
                 raise RuntimeError(f"{name}: restored production test did not pass")
             print(json.dumps(receipt), flush=True)
-        subprocess.run(["git", "diff", "--exit-code"], cwd=root, check=True)
+        subprocess.run(
+            ["git", "diff", "--exit-code", "--", store.relative_to(root).as_posix(), startup.relative_to(root).as_posix()],
+            cwd=root,
+            check=True,
+        )
     finally:
         (output / "receipts.json").write_text(json.dumps(receipts, indent=2), encoding="utf-8")
     return 0

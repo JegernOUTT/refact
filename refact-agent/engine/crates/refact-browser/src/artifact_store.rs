@@ -1038,6 +1038,8 @@ mod windows_platform {
                     .is_err()
             );
             let artifact = store.write(b"public", "text/plain").unwrap();
+            assert!(std::fs::remove_file(&artifact.path).is_err());
+            assert!(OpenOptions::new().write(true).open(&artifact.path).is_err());
             let mut reader = OpenOptions::new()
                 .access_mode(GENERIC_READ)
                 .share_mode(FILE_SHARE_READ)
