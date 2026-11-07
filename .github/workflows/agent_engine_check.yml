@@ -33,6 +33,10 @@ on:
         description: Run focused Windows browser artifact qualification
         type: boolean
         default: false
+      browser_artifact_witnesses:
+        description: Execute and restore controlled Windows artifact and startup faults
+        type: boolean
+        default: false
 
 concurrency:
   group: engine-check-${{ github.ref }}
@@ -240,3 +244,16 @@ jobs:
       - name: Verify pending Chrome startup pipe deadline
         shell: bash
         run: cargo test --locked --profile ci-test -p headless_chrome --lib pending_stderr_obeys_original_startup_deadline -- --nocapture --test-threads=1
+
+      - name: Execute controlled production fault witnesses
+        if: ${{ inputs.browser_artifact_witnesses }}
+        shell: bash
+        run: python ../../tools/dev/browser_artifact_witness.py
+
+      - name: Retain fault witness evidence
+        if: ${{ always() && inputs.browser_artifact_witnesses }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-artifact-witness-${{ github.sha }}
+          path: refact-agent/engine/target/browser-artifact-witness/
+          retention-days: 14

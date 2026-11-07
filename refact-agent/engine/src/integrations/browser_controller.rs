@@ -3673,15 +3673,16 @@ async fn execute_request_with_runtime_before_deadline(
                         browser_block_in_place(deadline, || {
                             refact_browser::adopt_new_tabs(&mut rt, Some(idx))
                         });
-                        let popup_id = rt
-                            .list_tab_infos()
+                        let popup_id = browser_block_in_place(deadline, || rt.list_tab_infos())
                             .into_iter()
                             .find(|tab| !wait.baseline.contains(&tab.id))
                             .map(|tab| tab.id);
                         popup_id.and_then(|tab_id| {
                             rt.tab_opened_by_step.entry(tab_id.clone()).or_insert(idx);
                             rt.set_active_tab_target_id(tab_id.clone());
-                            rt.list_tab_infos().into_iter().find(|tab| tab.id == tab_id)
+                            browser_block_in_place(deadline, || rt.list_tab_infos())
+                                .into_iter()
+                                .find(|tab| tab.id == tab_id)
                         })
                     };
                     if let Some(tab) = popup {
@@ -3777,7 +3778,7 @@ async fn execute_request_with_runtime_before_deadline(
         let mut rt = runtime_before!();
         browser_block_in_place(deadline, || refact_browser::adopt_new_tabs(&mut rt, None));
         new_tabs.extend(
-            rt.list_tab_infos()
+            browser_block_in_place(deadline, || rt.list_tab_infos())
                 .into_iter()
                 .filter(|tab| !initial_tab_ids.contains(&tab.id)),
         );
