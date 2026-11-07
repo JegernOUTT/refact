@@ -152,6 +152,22 @@ describe("queue presentation", () => {
       false,
     );
   });
+  it("keeps shared command and delivery timing descriptions distinct", () => {
+    const legacy = queueModeOptions(false);
+    expect(legacy.find((o) => o.value === "append")?.description).toBe(
+      "Runs in the order it was queued.",
+    );
+    expect(legacy.find((o) => o.value === "preempt")?.description).toBe(
+      "Moves ahead of the rest of the queue.",
+    );
+    const deliveries = queueModeOptions(true);
+    expect(deliveries.find((o) => o.value === "append")?.description).toBe(
+      "Delivered after the assistant response and all its tool results finish.",
+    );
+    expect(deliveries.find((o) => o.value === "preempt")?.label).toBe(
+      "Interrupt now",
+    );
+  });
   it("extracts process navigation and agent labels", () => {
     expect(
       describeQueuedItem({

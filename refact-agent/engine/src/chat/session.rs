@@ -63,6 +63,27 @@ fn has_non_metadata_extra(message: &ChatMessage) -> bool {
         .any(|key| !key.starts_with('_') && key != "openai_response_id")
 }
 
+fn has_actual_assistant_output(message: &ChatMessage) -> bool {
+    (match &message.content {
+        ChatContent::SimpleText(text) => !text.is_empty(),
+        ChatContent::Multimodal(parts) => !parts.is_empty(),
+        ChatContent::ContextFiles(files) => !files.is_empty(),
+    }) || message
+        .reasoning_content
+        .as_ref()
+        .is_some_and(|text| !text.is_empty())
+        || message
+            .tool_calls
+            .as_ref()
+            .is_some_and(|calls| !calls.is_empty())
+        || message
+            .thinking_blocks
+            .as_ref()
+            .is_some_and(|blocks| !blocks.is_empty())
+        || !message.citations.is_empty()
+        || !message.server_content_blocks.is_empty()
+}
+
 fn is_background_agent_terminal(status: &str) -> bool {
     matches!(status, "completed" | "failed" | "cancelled" | "interrupted")
 }
@@ -143,7 +164,10 @@ impl std::fmt::Display for AutoSubGoalLaneRefusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             AutoSubGoalLaneRefusal::NoGoal => write!(f, "chat is not pursuing a goal"),
-            AutoSubGoalLaneRefusal::CapReached { lanes, cap } => write!(
+            AutoSubGoalLaneRefusal::CapReached {
+                lanes,
+                cap,
+            } => write!(
                 f,
                 "goal already tracks {lanes} automatic sub-goal lanes, at the cap of {cap}; \
                  the child runs untracked"
@@ -693,10 +717,12 @@ impl ChatSession {
             }
             let valid = match &mut item.value {
                 QuestionResponseValue::Skipped => true,
-                QuestionResponseValue::Custom { answer } => {
-                    !answer.trim().is_empty() && answer.len() <= 32_768
-                }
-                QuestionResponseValue::Answered { answer } => {
+                QuestionResponseValue::Custom {
+                    answer,
+                } => !answer.trim().is_empty() && answer.len() <= 32_768,
+                QuestionResponseValue::Answered {
+                    answer,
+                } => {
                     if let Some(values) = answer.as_array_mut() {
                         values.sort_by_cached_key(|value| value.to_string());
                         values.dedup();
@@ -844,6 +870,8 @@ impl ChatSession {
             draft_message: None,
             draft_usage: None,
             command_queue: VecDeque::new(),
+            queued_user_merge_targets: HashMap::new(),
+            queued_user_restart_target: None,
             event_seq: 0,
             event_tx,
             trajectory_events_tx: None,
@@ -996,6 +1024,8 @@ impl ChatSession {
             draft_message: None,
             draft_usage: None,
             command_queue: VecDeque::new(),
+            queued_user_merge_targets: HashMap::new(),
+            queued_user_restart_target: None,
             event_seq: 0,
             event_tx,
             trajectory_events_tx: None,
@@ -1184,7 +1214,9 @@ impl ChatSession {
             return false;
         };
         goal.goal_record_verifier_attempt(tokens);
-        self.goal_ledger_append(GoalLedgerOp::VerifierAttemptRecorded { tokens });
+        self.goal_ledger_append(GoalLedgerOp::VerifierAttemptRecorded {
+            tokens,
+        });
         self.mark_persisted_runtime_changed();
         self.emit_goal_status();
         true
@@ -1279,7 +1311,9 @@ impl ChatSession {
             return false;
         };
         goal.snoozed_until_ms = until_ms;
-        self.goal_ledger_append(GoalLedgerOp::SnoozeSet { until_ms });
+        self.goal_ledger_append(GoalLedgerOp::SnoozeSet {
+            until_ms,
+        });
         self.mark_persisted_runtime_changed();
         self.emit_goal_status();
         true
@@ -1385,7 +1419,10 @@ impl ChatSession {
             .filter(|state| state.node.id.starts_with(AUTO_SUB_GOAL_LANE_PREFIX))
             .count();
         if lanes >= cap {
-            return Err(AutoSubGoalLaneRefusal::CapReached { lanes, cap });
+            return Err(AutoSubGoalLaneRefusal::CapReached {
+                lanes,
+                cap,
+            });
         }
         let node_id = format!("{AUTO_SUB_GOAL_LANE_PREFIX}{}", owner.id);
         let declaration = refact_chat_api::SubGoalDeclaration {
@@ -1411,7 +1448,9 @@ impl ChatSession {
     ) -> Result<u64, refact_chat_api::SubGoalDeclarationError> {
         self.sub_goal_graph()
             .validate_declaration(&declaration, crate::runtime_settings::sub_goal_limits())?;
-        let seq = self.goal_ledger_append(GoalLedgerOp::SubGoalsDeclared { declaration });
+        let seq = self.goal_ledger_append(GoalLedgerOp::SubGoalsDeclared {
+            declaration,
+        });
         self.mark_persisted_runtime_changed();
         Ok(seq)
     }
@@ -1478,7 +1517,12 @@ impl ChatSession {
         }
         wait.since_ms = at_ms;
         goal.wait = Some(wait.clone());
-        self.goal_ledger_append_at(GoalLedgerOp::WaitSet { wait: Some(wait) }, at_ms);
+        self.goal_ledger_append_at(
+            GoalLedgerOp::WaitSet {
+                wait: Some(wait),
+            },
+            at_ms,
+        );
         self.mark_persisted_runtime_changed();
         self.emit_goal_status();
         true
@@ -1498,7 +1542,12 @@ impl ChatSession {
             return None;
         }
         let settled = goal.wait.take();
-        self.goal_ledger_append_at(GoalLedgerOp::WaitSet { wait: None }, at_ms);
+        self.goal_ledger_append_at(
+            GoalLedgerOp::WaitSet {
+                wait: None,
+            },
+            at_ms,
+        );
         self.mark_persisted_runtime_changed();
         self.emit_goal_status();
         settled
@@ -1530,7 +1579,11 @@ impl ChatSession {
             .last()
             .map(|entry| entry.seq + 1)
             .unwrap_or(1);
-        self.goal_ledger.push(GoalLedgerEntry { seq, at_ms, op });
+        self.goal_ledger.push(GoalLedgerEntry {
+            seq,
+            at_ms,
+            op,
+        });
         self.invalidate_sub_goal_graph_cache();
         seq
     }
@@ -1660,7 +1713,9 @@ impl ChatSession {
             return false;
         };
         goal.goal_push_attempt(attempt.clone());
-        self.goal_ledger_append(GoalLedgerOp::AttemptPushed { attempt });
+        self.goal_ledger_append(GoalLedgerOp::AttemptPushed {
+            attempt,
+        });
         self.mark_persisted_runtime_changed();
         self.emit_goal_status();
         true
@@ -1671,7 +1726,9 @@ impl ChatSession {
             return false;
         };
         goal.goal_push_event(event.clone());
-        self.goal_ledger_append(GoalLedgerOp::EventPushed { event });
+        self.goal_ledger_append(GoalLedgerOp::EventPushed {
+            event,
+        });
         self.mark_persisted_runtime_changed();
         self.emit_goal_status();
         true
@@ -2093,18 +2150,29 @@ impl ChatSession {
 
     pub fn emit(&mut self, event: ChatEvent) {
         match &event {
-            ChatEvent::MessageAdded { message, .. } | ChatEvent::MessageUpdated { message, .. } => {
+            ChatEvent::MessageAdded {
+                message, ..
+            }
+            | ChatEvent::MessageUpdated {
+                message, ..
+            } => {
                 self.work_provenance.observe(
                     message,
                     self.messages.len(),
                     &crate::file_activity::settings(),
                 );
             }
-            ChatEvent::Snapshot { .. } => self.refresh_work_provenance(),
-            ChatEvent::MessageRemoved { .. } | ChatEvent::MessagesTruncated { .. }
-                if !self
-                    .work_provenance
-                    .matches_message_count(self.messages.len()) =>
+            ChatEvent::Snapshot {
+                ..
+            } => self.refresh_work_provenance(),
+            ChatEvent::MessageRemoved {
+                ..
+            }
+            | ChatEvent::MessagesTruncated {
+                ..
+            } if !self
+                .work_provenance
+                .matches_message_count(self.messages.len()) =>
             {
                 self.refresh_work_provenance();
             }
@@ -2366,6 +2434,132 @@ impl ChatSession {
         outcome
     }
 
+    fn queued_user_merge_target(&self) -> Option<String> {
+        if self.runner_lease.is_some()
+            || self.runtime.interruption.is_some()
+            || self.planner_paused()
+            || self.pending_context_rebuild.is_some()
+            || self.pending_mode_handoff.is_some()
+            || crate::chat::context_rebuild::compression_attempt_active(self)
+            || !(self.runtime.state == SessionState::Generating
+                || (self.runtime.state == SessionState::Idle
+                    && self.queued_user_restart_target.is_some()))
+            || self
+                .draft_message
+                .as_ref()
+                .is_some_and(has_actual_assistant_output)
+        {
+            return None;
+        }
+        let start =
+            refact_core::active_context::active_context_mutable_start(&self.messages).ok()?;
+        for message in self.messages.iter().skip(start).rev() {
+            match message.role.as_str() {
+                "user" => {
+                    if delivery_id_of_message(message).is_some() {
+                        return None;
+                    }
+                    if self
+                        .queued_user_restart_target
+                        .as_ref()
+                        .is_some_and(|id| id != &message.message_id)
+                    {
+                        return None;
+                    }
+                    return Some(message.message_id.clone());
+                }
+                "assistant" if has_actual_assistant_output(message) => return None,
+                "tool" | "diff" => return None,
+                _ => {}
+            }
+        }
+        None
+    }
+
+    pub(crate) fn add_or_merge_queued_user_message(
+        &mut self,
+        request_id: &str,
+        message: ChatMessage,
+    ) {
+        let target = self.queued_user_merge_targets.remove(request_id);
+        let start = refact_core::active_context::active_context_mutable_start(&self.messages).ok();
+        let index = target.as_ref().and_then(|id| {
+            self.messages.iter().position(|existing| {
+                &existing.message_id == id
+                    && existing.role == "user"
+                    && delivery_id_of_message(existing).is_none()
+            })
+        });
+        if let Some(index) = index.filter(|index| {
+            start.is_some_and(|start| *index >= start)
+                && !self.messages.iter().skip(*index + 1).any(|message| {
+                    message.role == "user"
+                        || message.role == "tool"
+                        || message.role == "diff"
+                        || (message.role == "assistant" && has_actual_assistant_output(message))
+                })
+        }) {
+            let mut merged = self.messages[index].clone();
+            let text = format!(
+                "{}\n{}",
+                merged.content.content_text_only(),
+                message.content.content_text_only()
+            );
+            let mut elements = Vec::new();
+            for content in [&merged.content, &message.content] {
+                if let ChatContent::Multimodal(parts) = content {
+                    elements.extend(parts.iter().filter(|part| part.m_type != "text").cloned());
+                }
+            }
+            merged.content = if elements.is_empty() {
+                ChatContent::SimpleText(text)
+            } else {
+                elements.insert(
+                    0,
+                    crate::call_validation::MultimodalElement {
+                        m_type: "text".into(),
+                        m_content: text,
+                    },
+                );
+                ChatContent::Multimodal(elements)
+            };
+            merged.checkpoints.extend(message.checkpoints);
+            let id = merged.message_id.clone();
+            self.update_message(&id, merged);
+        } else {
+            self.add_message(message);
+        }
+    }
+
+    pub(crate) fn add_queued_user_context(&mut self, request_id: &str, message: ChatMessage) {
+        let index = self
+            .queued_user_merge_targets
+            .get(request_id)
+            .and_then(|target| {
+                self.messages
+                    .iter()
+                    .position(|message| {
+                        &message.message_id == target
+                            && message.role == "user"
+                            && delivery_id_of_message(message).is_none()
+                    })
+                    .filter(|index| {
+                        self.mutable_message_start()
+                            .is_some_and(|start| *index >= start)
+                            && !self.messages.iter().skip(*index + 1).any(|message| {
+                                matches!(message.role.as_str(), "user" | "tool" | "diff")
+                                    || (message.role == "assistant"
+                                        && has_actual_assistant_output(message))
+                            })
+                    })
+            });
+        if let Some(index) = index {
+            self.insert_message(index, message);
+        } else {
+            self.add_message(message);
+        }
+    }
+
     pub fn enqueue_accepted_command(&mut self, request: CommandRequest) -> EnqueueCommandOutcome {
         if let Err(error) = super::queue::prepare_guarded_command(self, &request) {
             super::queue::reject_guard(self, &request.client_request_id, error);
@@ -2380,6 +2574,15 @@ impl ChatSession {
         if request.priority {
             self.enqueue_accepted_priority_command(request)
         } else {
+            if matches!(request.command, ChatCommand::UserMessage { .. }) {
+                if let Some(message_id) = self.queued_user_merge_target() {
+                    self.queued_user_restart_target = Some(message_id.clone());
+                    self.delivery_wake_sources.insert("queue-boundary".into());
+                    self.queued_user_merge_targets
+                        .insert(request.client_request_id.clone(), message_id);
+                    self.abort_stream();
+                }
+            }
             if perf_diagnostics::is_enabled() {
                 self.command_enqueued_at
                     .insert(request.client_request_id.clone(), Instant::now());
@@ -2435,10 +2638,13 @@ impl ChatSession {
 
     pub(crate) fn clear_discarded_queue_timestamps(&mut self) {
         self.command_enqueued_at.clear();
+        self.queued_user_merge_targets.clear();
+        self.queued_user_restart_target = None;
     }
 
     pub(crate) fn clear_queue_timestamp(&mut self, client_request_id: &str) {
         self.command_enqueued_at.remove(client_request_id);
+        self.queued_user_merge_targets.remove(client_request_id);
     }
 
     pub fn add_message(&mut self, message: ChatMessage) {
@@ -2485,7 +2691,10 @@ impl ChatSession {
         if affects_goal {
             self.rebuild_goal_projection_from_messages();
         }
-        self.emit(ChatEvent::MessageAdded { message, index });
+        self.emit(ChatEvent::MessageAdded {
+            message,
+            index,
+        });
         self.increment_version();
         self.touch();
     }
@@ -2658,6 +2867,9 @@ impl ChatSession {
         if self.command_queue.is_empty()
             || !(self.wait_delivery_boundary
                 || self.command_queue.iter().any(|request| {
+                    !request.priority && matches!(request.command, ChatCommand::UserMessage { .. })
+                })
+                || self.command_queue.iter().any(|request| {
                     request.priority
                         && matches!(
                             request.command,
@@ -2783,7 +2995,9 @@ impl ChatSession {
             let old_mode = self.thread.mode.clone();
             let (changed, sanitized) = super::queue::apply_setparams_patch(&mut self.thread, patch);
             if changed {
-                self.emit(ChatEvent::ThreadUpdated { params: sanitized });
+                self.emit(ChatEvent::ThreadUpdated {
+                    params: sanitized,
+                });
                 self.increment_version();
             }
             if old_mode != self.thread.mode {
@@ -3035,8 +3249,10 @@ impl ChatSession {
 
     fn record_dropped_delivery(&mut self, id: String, status: DeliveryStatus) {
         self.dropped_deliveries.retain(|known| known.id != id);
-        self.dropped_deliveries
-            .push_back(DeliveryStatusRecord { id, status });
+        self.dropped_deliveries.push_back(DeliveryStatusRecord {
+            id,
+            status,
+        });
         let retention = crate::file_activity::settings().delivery_status_retention;
         while self.dropped_deliveries.len() > retention {
             self.dropped_deliveries.pop_front();
@@ -3365,7 +3581,9 @@ impl ChatSession {
             if let Some(goal) = self.goal.as_mut() {
                 goal.criteria = criteria.clone();
             }
-            self.goal_ledger_append(GoalLedgerOp::CriteriaSet { criteria });
+            self.goal_ledger_append(GoalLedgerOp::CriteriaSet {
+                criteria,
+            });
         }
         self.goal_stopped_by_abort = false;
         self.emit_goal_status();
@@ -3413,13 +3631,17 @@ impl ChatSession {
             self.rebuild_goal_projection_from_messages();
         }
         match origin {
-            MessageOrigin::Stored { message_index } => {
+            MessageOrigin::Stored {
+                message_index,
+            } => {
                 self.emit(ChatEvent::MessageAdded {
                     message,
                     index: message_index,
                 });
             }
-            MessageOrigin::ReportPayload { report_index, .. } => {
+            MessageOrigin::ReportPayload {
+                report_index, ..
+            } => {
                 let report = self.messages[report_index].clone();
                 self.emit(ChatEvent::MessageUpdated {
                     message_id: report.message_id.clone(),
@@ -3535,7 +3757,9 @@ impl ChatSession {
             self.thread.previous_response_id = None;
             self.reset_cache_guard_snapshot();
             self.provider_usage_stale = true;
-            self.emit(ChatEvent::MessagesTruncated { from_index });
+            self.emit(ChatEvent::MessagesTruncated {
+                from_index,
+            });
             self.increment_version();
             self.touch();
         }
@@ -3564,7 +3788,10 @@ impl ChatSession {
 
     pub(crate) fn set_planner_pause(&mut self, since: String, by: Option<String>) {
         self.planner_pause_revision += 1;
-        self.planner_pause = Some(PlannerPause { since, by });
+        self.planner_pause = Some(PlannerPause {
+            since,
+            by,
+        });
         self.queue_notify.notify_one();
     }
 
@@ -3811,6 +4038,8 @@ impl ChatSession {
         };
         request.priority = priority;
         if priority {
+            self.queued_user_merge_targets.remove(client_request_id);
+            self.queued_user_restart_target = None;
             let insert_pos = self
                 .command_queue
                 .iter()
@@ -3865,6 +4094,10 @@ impl ChatSession {
             return EnqueueCommandOutcome::Full;
         }
         let interrupts_active_loop = Self::command_interrupts_active_loop(&request.command);
+        if interrupts_active_loop {
+            self.queued_user_restart_target = None;
+            self.queued_user_merge_targets.clear();
+        }
         let active = matches!(
             self.runtime.state,
             SessionState::Generating | SessionState::ExecutingTools
@@ -3945,7 +4178,9 @@ impl ChatSession {
         self.runtime.auto_approved_tool_ids = auto_approved_ids;
         self.runtime.accepted_tool_ids.clear();
         self.runtime.paused_message_index = message_index;
-        self.emit(ChatEvent::PauseRequired { reasons });
+        self.emit(ChatEvent::PauseRequired {
+            reasons,
+        });
         self.set_runtime_state(SessionState::Paused, None);
     }
 
@@ -3970,6 +4205,7 @@ impl ChatSession {
             return None;
         }
         self.wait_delivery_boundary = false;
+        self.queued_user_restart_target = None;
         self.wait_tool_window_active = false;
         self.delivery_wake_sources.remove("queue-boundary");
         self.abort_flag.store(false, Ordering::SeqCst);
@@ -4005,7 +4241,9 @@ impl ChatSession {
                 let mut applied = false;
                 for op in &ops {
                     match op {
-                        DeltaOp::AppendContent { text } => match &mut draft.content {
+                        DeltaOp::AppendContent {
+                            text,
+                        } => match &mut draft.content {
                             ChatContent::SimpleText(s) => {
                                 if !text.is_empty() {
                                     s.push_str(text);
@@ -4019,7 +4257,9 @@ impl ChatSession {
                                 }
                             }
                         },
-                        DeltaOp::AppendReasoning { text } => {
+                        DeltaOp::AppendReasoning {
+                            text,
+                        } => {
                             if !text.is_empty() {
                                 let reasoning =
                                     draft.reasoning_content.get_or_insert_with(String::new);
@@ -4027,14 +4267,18 @@ impl ChatSession {
                                 applied = true;
                             }
                         }
-                        DeltaOp::SetReasoning { text } => {
+                        DeltaOp::SetReasoning {
+                            text,
+                        } => {
                             if !text.is_empty() && draft.reasoning_content.as_deref() != Some(text)
                             {
                                 draft.reasoning_content = Some(text.clone());
                                 applied = true;
                             }
                         }
-                        DeltaOp::SetToolCalls { tool_calls } => {
+                        DeltaOp::SetToolCalls {
+                            tool_calls,
+                        } => {
                             let had_tool_calls = draft
                                 .tool_calls
                                 .as_ref()
@@ -4046,7 +4290,9 @@ impl ChatSession {
                                 }
                             }
                         }
-                        DeltaOp::SetThinkingBlocks { blocks } => {
+                        DeltaOp::SetThinkingBlocks {
+                            blocks,
+                        } => {
                             let had_blocks = draft
                                 .thinking_blocks
                                 .as_ref()
@@ -4056,25 +4302,33 @@ impl ChatSession {
                                 applied = true;
                             }
                         }
-                        DeltaOp::AddCitation { citation } => {
+                        DeltaOp::AddCitation {
+                            citation,
+                        } => {
                             if !citation.is_null() {
                                 draft.citations.push(citation.clone());
                                 applied = true;
                             }
                         }
-                        DeltaOp::AddServerContentBlock { block } => {
+                        DeltaOp::AddServerContentBlock {
+                            block,
+                        } => {
                             if !block.is_null() {
                                 draft.server_content_blocks.push(block.clone());
                                 applied = true;
                             }
                         }
-                        DeltaOp::SetUsage { usage } => {
+                        DeltaOp::SetUsage {
+                            usage,
+                        } => {
                             if let Ok(u) = serde_json::from_value(usage.clone()) {
                                 draft.usage = Some(u);
                                 applied = true;
                             }
                         }
-                        DeltaOp::MergeExtra { extra } => {
+                        DeltaOp::MergeExtra {
+                            extra,
+                        } => {
                             if !extra.is_empty() {
                                 draft.extra.extend(extra.clone());
                                 applied = true;
@@ -4086,7 +4340,10 @@ impl ChatSession {
             }
             None => return,
         };
-        self.emit(ChatEvent::StreamDelta { message_id, ops });
+        self.emit(ChatEvent::StreamDelta {
+            message_id,
+            ops,
+        });
         if applied {
             if perf_diagnostics::is_enabled() {
                 if let Some(started_at) = self.stream_started_at.take() {
@@ -4218,7 +4475,9 @@ impl ChatSession {
 
     pub fn update_recovery(&mut self, recovery: Option<refact_core::recovery::RecoveryRecord>) {
         self.runtime.recovery = recovery.clone();
-        self.emit(ChatEvent::RecoveryUpdated { recovery });
+        self.emit(ChatEvent::RecoveryUpdated {
+            recovery,
+        });
         self.mark_persisted_runtime_changed();
         self.touch();
     }
@@ -4333,6 +4592,8 @@ impl ChatSession {
     }
 
     pub(crate) fn apply_priority_abort(&mut self) {
+        self.queued_user_restart_target = None;
+        self.queued_user_merge_targets.clear();
         if let Some(budget) = &self.recovery_budget {
             budget.cancel();
         }
@@ -4676,6 +4937,239 @@ mod tests {
         ChatSession::new("test-chat".to_string())
     }
 
+    #[test]
+    fn queued_send_cancels_empty_draft_and_repeated_sends_merge_same_multimodal_turn() {
+        let mut session = make_session();
+        let user = ChatMessage {
+            message_id: "original-user".into(),
+            role: "user".into(),
+            content: ChatContent::Multimodal(vec![
+                crate::call_validation::MultimodalElement {
+                    m_type: "text".into(),
+                    m_content: "first".into(),
+                },
+                crate::call_validation::MultimodalElement {
+                    m_type: "image/png".into(),
+                    m_content: "old-image".into(),
+                },
+            ]),
+            extra: serde_json::Map::from_iter([
+                (
+                    "privacy".into(),
+                    json!({"files":[{"path":"secret.rs","zone":"restricted","attribution":"declared"}]}),
+                ),
+                (CLIENT_MESSAGE_ID_EXTRA_KEY.into(), json!("original-client")),
+            ]),
+            ..Default::default()
+        };
+        session.add_message(user.clone());
+        session.start_stream().unwrap();
+        session.turn_depth = 1;
+        let request = |id: &str| CommandRequest {
+            client_request_id: id.into(),
+            priority: false,
+            command: ChatCommand::UserMessage {
+                content: json!(id),
+                attachments: vec![],
+                context_files: vec![],
+                suppress_auto_enrichment: false,
+                client_message_id: None,
+            },
+            native_approval_guard: None,
+            supervision_guard: None,
+        };
+        assert_eq!(
+            session.enqueue_command(request("second")),
+            EnqueueCommandOutcome::Accepted
+        );
+        assert!(session.abort_flag.load(Ordering::SeqCst));
+        assert!(session.draft_message.is_none());
+        assert_eq!(
+            session.enqueue_command(request("third")),
+            EnqueueCommandOutcome::Accepted
+        );
+        assert_eq!(
+            session.enqueue_command(request("third")),
+            EnqueueCommandOutcome::Duplicate
+        );
+        assert!(session
+            .queued_user_merge_targets
+            .values()
+            .all(|id| id == "original-user"));
+        session.add_or_merge_queued_user_message(
+            "second",
+            ChatMessage {
+                role: "user".into(),
+                content: ChatContent::Multimodal(vec![
+                    crate::call_validation::MultimodalElement {
+                        m_type: "text".into(),
+                        m_content: "second".into(),
+                    },
+                    crate::call_validation::MultimodalElement {
+                        m_type: "image/png".into(),
+                        m_content: "new-image".into(),
+                    },
+                ]),
+                extra: serde_json::Map::from_iter([(
+                    CLIENT_MESSAGE_ID_EXTRA_KEY.into(),
+                    json!("incoming-client"),
+                )]),
+                ..Default::default()
+            },
+        );
+        session.add_or_merge_queued_user_message(
+            "third",
+            ChatMessage {
+                role: "user".into(),
+                content: ChatContent::SimpleText("third".into()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(session.messages.len(), 1);
+        assert_eq!(session.messages[0].message_id, "original-user");
+        assert_eq!(
+            session.messages[0].content.content_text_only(),
+            "first\nsecond\nthird"
+        );
+        let ChatContent::Multimodal(parts) = &session.messages[0].content else {
+            panic!("attachments lost")
+        };
+        assert_eq!(
+            parts
+                .iter()
+                .skip(1)
+                .map(|part| part.m_content.as_str())
+                .collect::<Vec<_>>(),
+            ["old-image", "new-image"]
+        );
+        assert_eq!(session.messages[0].extra, user.extra);
+        assert!(session.queued_user_merge_targets.is_empty());
+        assert_eq!(
+            session.enqueue_command(request("preparing")),
+            EnqueueCommandOutcome::Accepted
+        );
+        session.add_or_merge_queued_user_message(
+            "preparing",
+            ChatMessage {
+                role: "user".into(),
+                content: ChatContent::SimpleText("preparing".into()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(session.messages.len(), 1);
+        assert_eq!(
+            session.messages[0].content.content_text_only(),
+            "first\nsecond\nthird\npreparing"
+        );
+    }
+
+    #[test]
+    fn queued_send_preserves_thinking_and_yields_only_after_all_tool_results() {
+        let mut session = make_session();
+        session.add_message(ChatMessage {
+            role: "user".into(),
+            content: ChatContent::SimpleText("first".into()),
+            ..Default::default()
+        });
+        session.start_stream().unwrap();
+        session.emit_stream_delta(vec![DeltaOp::AppendReasoning {
+            text: " ".into(),
+        }]);
+        let draft = session.draft_message.clone().unwrap();
+        let request: CommandRequest = serde_json::from_value(json!({"client_request_id":"next", "type":"user_message", "content":"next", "priority":false})).unwrap();
+        assert_eq!(
+            session.enqueue_command(request),
+            EnqueueCommandOutcome::Accepted
+        );
+        assert!(!session.abort_flag.load(Ordering::SeqCst));
+        assert_eq!(
+            session.draft_message.as_ref().unwrap().reasoning_content,
+            draft.reasoning_content
+        );
+        assert!(!session.yield_to_queued_commands_at_boundary());
+        session.draft_message = None;
+        session.add_message(ChatMessage {
+            role: "assistant".into(), tool_calls: Some(vec![
+                serde_json::from_value(json!({"id":"a", "type":"function", "function":{"name":"cat", "arguments":"{}"}})).unwrap(),
+                serde_json::from_value(json!({"id":"b", "type":"function", "function":{"name":"cat", "arguments":"{}"}})).unwrap(),
+            ]), ..draft
+        });
+        session.add_message(ChatMessage {
+            role: "tool".into(),
+            tool_call_id: "a".into(),
+            content: ChatContent::SimpleText("a result".into()),
+            ..Default::default()
+        });
+        assert!(!session.yield_to_queued_commands_at_boundary());
+        session.add_message(ChatMessage {
+            role: "tool".into(),
+            tool_call_id: "b".into(),
+            content: ChatContent::SimpleText("b result".into()),
+            ..Default::default()
+        });
+        assert!(session.yield_to_queued_commands_at_boundary());
+        assert_eq!(session.messages[1].tool_calls.as_ref().unwrap().len(), 2);
+        assert_eq!(session.runtime.state, SessionState::Idle);
+    }
+
+    #[test]
+    fn queued_merge_revalidates_target_after_intervening_output() {
+        let mut session = make_session();
+        session.add_message(ChatMessage {
+            message_id: "first".into(),
+            role: "user".into(),
+            content: ChatContent::SimpleText("first".into()),
+            ..Default::default()
+        });
+        session.start_stream().unwrap();
+        let request: CommandRequest = serde_json::from_value(json!({"client_request_id":"next", "type":"user_message", "content":"next", "priority":false})).unwrap();
+        assert_eq!(
+            session.enqueue_command(request),
+            EnqueueCommandOutcome::Accepted
+        );
+        session.add_message(ChatMessage {
+            role: "assistant".into(),
+            reasoning_content: Some("intervening thinking".into()),
+            ..Default::default()
+        });
+        session.add_or_merge_queued_user_message(
+            "next",
+            ChatMessage {
+                role: "user".into(),
+                content: ChatContent::SimpleText("next".into()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(session.messages.len(), 3);
+        assert_eq!(session.messages[0].content.content_text_only(), "first");
+        assert_eq!(session.messages[2].content.content_text_only(), "next");
+    }
+
+    #[test]
+    fn queued_send_does_not_merge_into_delivery_stamped_user() {
+        let mut session = make_session();
+        let delivery = PendingDelivery::new(
+            vec![ChatMessage::new("user".into(), "scheduled prompt".into())],
+            PushMode::Append,
+            "scheduler",
+            false,
+        );
+        session.enqueue_delivery(delivery).unwrap();
+        assert!(delivery_id_of_message(&session.messages[0]).is_some());
+        session.start_stream().unwrap();
+        let request: CommandRequest = serde_json::from_value(json!({"client_request_id":"next", "type":"user_message", "content":"next", "priority":false})).unwrap();
+        assert_eq!(
+            session.enqueue_command(request),
+            EnqueueCommandOutcome::Accepted
+        );
+        assert!(!session.abort_flag.load(Ordering::SeqCst));
+        assert!(session.queued_user_merge_targets.is_empty());
+        assert_eq!(
+            session.messages[0].content.content_text_only(),
+            "scheduled prompt"
+        );
+    }
+
     fn question_set(tool_call_id: &str) -> PendingQuestionSet {
         PendingQuestionSet {
             tool_call_id: tool_call_id.to_string(),
@@ -4777,7 +5271,9 @@ mod tests {
                 },
                 QuestionResponseItem {
                     id: "many".into(),
-                    value: QuestionResponseValue::Answered { answer: json!([]) },
+                    value: QuestionResponseValue::Answered {
+                        answer: json!([]),
+                    },
                     explanation: String::new(),
                 },
                 QuestionResponseItem {
@@ -6982,10 +7478,13 @@ mod tests {
             ));
 
             assert!(session.goal.is_some());
-            assert!(session
-                .goal_ledger
-                .iter()
-                .any(|entry| matches!(entry.op, GoalLedgerOp::Installed { version: 1, .. })));
+            assert!(session.goal_ledger.iter().any(|entry| matches!(
+                entry.op,
+                GoalLedgerOp::Installed {
+                    version: 1,
+                    ..
+                }
+            )));
         }
 
         fn lane(id: &str, criteria: &[&str]) -> refact_chat_api::SubGoalNode {
@@ -7089,8 +7588,9 @@ mod tests {
             assert!(!session.record_sub_goal_report("lint", report));
             assert_eq!(serde_json::to_value(&session.goal_ledger).unwrap(), prefix);
             assert_eq!(session.trajectory_version, version);
-            let GoalLedgerOp::SubGoalReported { report, .. } =
-                &session.goal_ledger.last().unwrap().op
+            let GoalLedgerOp::SubGoalReported {
+                report, ..
+            } = &session.goal_ledger.last().unwrap().op
             else {
                 panic!("expected report");
             };
@@ -7771,7 +8271,9 @@ mod tests {
         let snap = session.snapshot();
         match snap {
             ChatEvent::Snapshot {
-                messages, runtime, ..
+                messages,
+                runtime,
+                ..
             } => {
                 assert_eq!(runtime.state, SessionState::Generating);
                 assert_eq!(messages.len(), 1);
@@ -7798,7 +8300,9 @@ mod tests {
 
         match snap {
             ChatEvent::Snapshot {
-                messages, runtime, ..
+                messages,
+                runtime,
+                ..
             } => {
                 assert_eq!(runtime.state, SessionState::Generating);
                 assert_eq!(messages.len(), 1);
@@ -7831,7 +8335,9 @@ mod tests {
         let snap = session.snapshot();
 
         match snap {
-            ChatEvent::Snapshot { messages, .. } => {
+            ChatEvent::Snapshot {
+                messages, ..
+            } => {
                 assert!(messages.is_empty());
             }
             _ => panic!("Expected Snapshot"),
@@ -7970,7 +8476,9 @@ mod tests {
         session.emit_stream_delta(vec![DeltaOp::AppendReasoning {
             text: "think".into(),
         }]);
-        session.emit_stream_delta(vec![DeltaOp::AppendReasoning { text: "ing".into() }]);
+        session.emit_stream_delta(vec![DeltaOp::AppendReasoning {
+            text: "ing".into(),
+        }]);
         let draft = session.draft_message.as_ref().unwrap();
         assert_eq!(draft.reasoning_content.as_ref().unwrap(), "thinking");
     }
@@ -8053,7 +8561,10 @@ mod tests {
         let mut saw_sleep_removed = false;
         while let Ok(json) = events.try_recv() {
             let envelope: EventEnvelope = serde_json::from_str(&json).unwrap();
-            if let ChatEvent::MessageUpdated { message, .. } = envelope.event {
+            if let ChatEvent::MessageUpdated {
+                message, ..
+            } = envelope.event
+            {
                 saw_sleep_removed =
                     message.message_id == "assistant-with-sleep" && message.tool_calls.is_none();
             }
@@ -8929,7 +9440,10 @@ mod tests {
         let mut event_roles = Vec::new();
         while let Ok(json) = rx.try_recv() {
             let envelope: EventEnvelope = serde_json::from_str(&json).unwrap();
-            if let ChatEvent::MessageAdded { message, .. } = envelope.event {
+            if let ChatEvent::MessageAdded {
+                message, ..
+            } = envelope.event
+            {
                 event_roles.push(message.role);
             }
         }
@@ -8975,12 +9489,18 @@ mod tests {
         while let Ok(json) = rx.try_recv() {
             let env: EventEnvelope = serde_json::from_str(&json).unwrap();
             match env.event {
-                ChatEvent::RuntimeUpdated { state, error, .. } => {
+                ChatEvent::RuntimeUpdated {
+                    state,
+                    error,
+                    ..
+                } => {
                     assert_eq!(state, SessionState::Paused);
                     assert_eq!(error, None);
                     saw_runtime_updated = true;
                 }
-                ChatEvent::PauseRequired { reasons } => {
+                ChatEvent::PauseRequired {
+                    reasons,
+                } => {
                     assert_eq!(reasons.len(), 1);
                     assert_eq!(reasons[0].tool_call_id, "tc2");
                     saw_pause_required = true;
@@ -9112,7 +9632,9 @@ mod tests {
         });
         let snap = session.snapshot();
         match snap {
-            ChatEvent::Snapshot { runtime, .. } => {
+            ChatEvent::Snapshot {
+                runtime, ..
+            } => {
                 assert_eq!(runtime.queue_size, 1);
                 assert_eq!(runtime.queued_items.len(), 1);
                 assert_eq!(runtime.queued_items[0].client_request_id, "req-1");
@@ -9129,7 +9651,9 @@ mod tests {
         let snap = session.snapshot();
 
         match snap {
-            ChatEvent::Snapshot { runtime, .. } => {
+            ChatEvent::Snapshot {
+                runtime, ..
+            } => {
                 assert!(runtime.is_compressing);
             }
             _ => panic!("Expected Snapshot"),
@@ -9381,7 +9905,10 @@ mod tests {
         let snapshot_start = Instant::now();
         for _ in 0..SNAPSHOT_RUNS {
             let snapshot = session.snapshot();
-            if let ChatEvent::Snapshot { messages, .. } = snapshot {
+            if let ChatEvent::Snapshot {
+                messages, ..
+            } = snapshot
+            {
                 assert_eq!(messages.len(), MESSAGE_COUNT);
             } else {
                 panic!("Expected Snapshot event");

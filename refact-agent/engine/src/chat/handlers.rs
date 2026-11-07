@@ -557,12 +557,12 @@ pub async fn handle_v1_chat_command(
 
     if let Some(policy) = &goal_policy {
         let validation = match &request.command {
-            ChatCommand::SetGoal { criteria, .. } => {
-                super::evidence::validate_goal_verify_commands(
-                    criteria.as_deref().unwrap_or_default(),
-                    policy,
-                )
-            }
+            ChatCommand::SetGoal {
+                criteria, ..
+            } => super::evidence::validate_goal_verify_commands(
+                criteria.as_deref().unwrap_or_default(),
+                policy,
+            ),
             _ => Ok(()),
         };
         if let Err(error) = validation {
@@ -669,11 +669,11 @@ pub async fn handle_v1_chat_command(
     ) {
         drop(session);
         let result = match request.command {
-            ChatCommand::DeliverMessages { delivery } => {
-                super::delivery::deliver_to_chat(app.clone(), &chat_id, delivery)
-                    .await
-                    .map(|outcome| serde_json::json!({"delivery_outcome": outcome}))
-            }
+            ChatCommand::DeliverMessages {
+                delivery,
+            } => super::delivery::deliver_to_chat(app.clone(), &chat_id, delivery)
+                .await
+                .map(|outcome| serde_json::json!({"delivery_outcome": outcome})),
             ChatCommand::UpdatePendingDelivery {
                 delivery_id,
                 push,
@@ -754,7 +754,10 @@ pub async fn handle_v1_chat_command(
             .unwrap());
     }
 
-    if let ChatCommand::GoalControl { action } = &request.command {
+    if let ChatCommand::GoalControl {
+        action,
+    } = &request.command
+    {
         if let Err(error) = super::queue::validate_goal_control(&session, action) {
             super::queue::reject_guard(&mut session, &request.client_request_id, error.clone());
             return Err(ScratchError::new(StatusCode::BAD_REQUEST, error));
@@ -810,7 +813,10 @@ pub async fn handle_v1_chat_command(
             .unwrap());
     }
 
-    if let ChatCommand::SetParams { ref patch } = request.command {
+    if let ChatCommand::SetParams {
+        ref patch,
+    } = request.command
+    {
         if let Err(error) = super::recovery::validate_policy_patch(patch) {
             session.emit(ChatEvent::Ack {
                 client_request_id: request.client_request_id,
@@ -1191,10 +1197,12 @@ pub async fn handle_v1_chat_cancel_queued(
         .command_queue
         .retain(|r| r.client_request_id != client_request_id);
     session.command_enqueued_at.remove(&client_request_id);
+    session.queued_user_merge_targets.remove(&client_request_id);
 
     if session.command_queue.len() < initial_len {
         session.touch();
         session.emit_queue_update();
+        session.queue_notify.notify_one();
         Ok(Response::builder()
             .status(StatusCode::OK)
             .header("Content-Type", "application/json")
@@ -1390,7 +1398,9 @@ mod tests {
             false,
         );
         for command in [
-            ChatCommand::DeliverMessages { delivery },
+            ChatCommand::DeliverMessages {
+                delivery,
+            },
             ChatCommand::UpdatePendingDelivery {
                 delivery_id: "live".into(),
                 push: Some(PushMode::Preempt),
@@ -1487,7 +1497,10 @@ mod tests {
         let mut saw_sleep_removed = false;
         while let Ok(json) = events.try_recv() {
             let envelope: EventEnvelope = serde_json::from_str(&json).unwrap();
-            if let ChatEvent::MessageUpdated { message, .. } = envelope.event {
+            if let ChatEvent::MessageUpdated {
+                message, ..
+            } = envelope.event
+            {
                 saw_sleep_removed =
                     message.message_id == "assistant-with-sleep" && message.tool_calls.is_none();
             }

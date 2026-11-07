@@ -1593,6 +1593,31 @@ describe("ChatForm", () => {
     expect(form.className).toContain("chatFormCollapsed");
   });
 
+  test("streaming queue control explains merge and delivery while routing queued and immediate sends", async () => {
+    const onSubmit = vi.fn();
+    const chat = chatStateWithThread({ model: "openai/gpt-4o" });
+    chat.threads[chat.current_thread_id].streaming = true;
+    const { user } = render(<App onSubmit={onSubmit} />, {
+      preloadedState: { chat, ...engineConfigState },
+    });
+
+    await user.type(screen.getByTestId("chat-form-textarea"), "follow up");
+    const queue = await screen.findByRole("button", { name: "Queue message" });
+    await user.hover(queue);
+    const tooltip = await screen.findByRole("tooltip");
+    expect(tooltip).toHaveTextContent("after response and tools");
+    expect(tooltip).toHaveTextContent(
+      "Before any output it joins your last message and restarts.",
+    );
+
+    await user.click(queue);
+    expect(onSubmit).toHaveBeenLastCalledWith("follow up\n", "after_flow");
+
+    await user.type(screen.getByTestId("chat-form-textarea"), "urgent");
+    await user.click(screen.getByRole("button", { name: "Send immediately" }));
+    expect(onSubmit).toHaveBeenLastCalledWith("urgent\n", "immediate");
+  });
+
   test("chat error banner hides locally without clearing runtime error and reappears on update", async () => {
     const commandSpy = vi.fn();
     const diagnosticsSpy = vi.fn();

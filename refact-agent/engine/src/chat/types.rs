@@ -253,11 +253,15 @@ pub enum ExternalReloadPending {
 
 impl ExternalReloadPending {
     pub(crate) fn update(source: TrajectorySourceIdentity) -> Self {
-        Self::Update { source }
+        Self::Update {
+            source,
+        }
     }
 
     pub(crate) fn delete(source: TrajectorySourceIdentity) -> Self {
-        Self::Delete { source }
+        Self::Delete {
+            source,
+        }
     }
 }
 
@@ -329,6 +333,8 @@ pub struct ChatSession {
     pub draft_message: Option<ChatMessage>,
     pub draft_usage: Option<ChatUsage>,
     pub command_queue: VecDeque<CommandRequest>,
+    pub(crate) queued_user_merge_targets: HashMap<String, String>,
+    pub(crate) queued_user_restart_target: Option<String>,
     pub event_seq: u64,
     pub event_tx: broadcast::Sender<Arc<String>>,
     pub trajectory_events_tx: Option<broadcast::Sender<super::trajectories::TrajectoryEvent>>,

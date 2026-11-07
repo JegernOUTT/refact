@@ -324,22 +324,25 @@ pub(super) async fn handle_queue_command(
             start_generation(context.app.clone(), context.session_arc.clone()).await;
             QueueCommandOutcome::Finished
         }
-        ChatCommand::RecoveryRetryNow { .. } => QueueCommandOutcome::Continue,
+        ChatCommand::RecoveryRetryNow {
+            ..
+        } => QueueCommandOutcome::Continue,
         ChatCommand::SetGoal {
             content,
             budget,
             criteria,
             plan,
         } => Box::pin(handle_set_goal(&context, content, budget, criteria, plan)).await,
-        ChatCommand::SetGoalBudget { budget } => {
-            Box::pin(handle_set_goal_budget(&context, budget)).await
-        }
-        ChatCommand::UpdateGoal { note, plan } => {
-            Box::pin(handle_update_goal(&context, note, plan)).await
-        }
-        ChatCommand::GoalControl { action } => {
-            Box::pin(handle_goal_control(&context, action)).await
-        }
+        ChatCommand::SetGoalBudget {
+            budget,
+        } => Box::pin(handle_set_goal_budget(&context, budget)).await,
+        ChatCommand::UpdateGoal {
+            note,
+            plan,
+        } => Box::pin(handle_update_goal(&context, note, plan)).await,
+        ChatCommand::GoalControl {
+            action,
+        } => Box::pin(handle_goal_control(&context, action)).await,
         ChatCommand::UserMessage {
             content,
             attachments,
@@ -370,7 +373,9 @@ pub(super) async fn handle_queue_command(
             ))
             .await
         }
-        ChatCommand::SetParams { patch } => Box::pin(handle_set_params(&context, patch)).await,
+        ChatCommand::SetParams {
+            patch,
+        } => Box::pin(handle_set_params(&context, patch)).await,
         ChatCommand::Abort {} => Box::pin(handle_abort(&context)).await,
         ChatCommand::AnswerQuestions {
             tool_call_id,
@@ -409,7 +414,9 @@ pub(super) async fn handle_queue_command(
             ))
             .await
         }
-        ChatCommand::CleanBackgroundProcesses { include_services } => {
+        ChatCommand::CleanBackgroundProcesses {
+            include_services,
+        } => {
             Box::pin(handle_clean_background_processes(
                 &context,
                 include_services,
@@ -420,9 +427,9 @@ pub(super) async fn handle_queue_command(
             tool_call_id,
             accepted,
         } => Box::pin(handle_tool_decision(&context, tool_call_id, accepted)).await,
-        ChatCommand::ToolDecisions { decisions } => {
-            Box::pin(handle_tool_decisions(&context, decisions)).await
-        }
+        ChatCommand::ToolDecisions {
+            decisions,
+        } => Box::pin(handle_tool_decisions(&context, decisions)).await,
         ChatCommand::IdeToolResult {
             tool_call_id,
             content,
@@ -456,9 +463,9 @@ pub(super) async fn handle_queue_command(
             regenerate,
         } => Box::pin(handle_remove_message(&context, message_id, regenerate)).await,
         ChatCommand::Regenerate {} => Box::pin(handle_regenerate(&context)).await,
-        ChatCommand::RestoreMessages { messages } => {
-            Box::pin(handle_restore_messages(&context, messages)).await
-        }
+        ChatCommand::RestoreMessages {
+            messages,
+        } => Box::pin(handle_restore_messages(&context, messages)).await,
         ChatCommand::BranchFromChat {
             source_chat_id,
             up_to_message_id,
@@ -495,9 +502,9 @@ pub(super) async fn handle_queue_command(
             ))
             .await
         }
-        ChatCommand::DeliverMessages { delivery } => {
-            Box::pin(handle_deliver_messages(&context, delivery)).await
-        }
+        ChatCommand::DeliverMessages {
+            delivery,
+        } => Box::pin(handle_deliver_messages(&context, delivery)).await,
         ChatCommand::UpdatePendingDelivery {
             delivery_id,
             push,
@@ -1739,6 +1746,14 @@ async fn handle_browser_context_decision(
     {
         let mut session = session_arc.lock().await;
 
+        if let Some(target) = session
+            .queued_user_merge_targets
+            .remove(&pending.pending_message_id)
+        {
+            session
+                .queued_user_merge_targets
+                .insert(request_id.clone(), target);
+        }
         if let Some(mut snap) = snapshot {
             browser_context::apply_decision_to_snapshot(
                 &mut snap,
@@ -1751,17 +1766,17 @@ async fn handle_browser_context_decision(
                 last_n_network,
             );
             let ctx_messages = browser_context::make_context_messages(&snap, screenshot);
-            session.add_message(ctx_messages.event);
+            session.add_queued_user_context(request_id, ctx_messages.event);
             if let Some(screenshot) = ctx_messages.screenshot {
-                session.add_message(screenshot);
+                session.add_queued_user_context(request_id, screenshot);
             }
         }
 
         if let Some(skill_msg) = pending.skill_context_msg {
-            session.add_message(skill_msg);
+            session.add_queued_user_context(request_id, skill_msg);
         }
         if !pending.context_files.is_empty() {
-            apply_manual_context_files(&mut session, &pending.context_files);
+            apply_manual_context_files(&mut session, &pending.context_files, request_id);
         }
 
         if pending.suppress_auto_enrichment && pending.context_files.is_empty() {
@@ -1774,7 +1789,7 @@ async fn handle_browser_context_decision(
             pending.checkpoints,
             pending.client_message_id,
         );
-        session.add_message(user_message);
+        session.add_or_merge_queued_user_message(request_id, user_message);
         note_user_turn_resets_goal_pursuit(&mut session);
 
         if let Some(ref skill_name) = pending.skill_activation_name {
@@ -2037,6 +2052,24 @@ async fn handle_user_message(
     QueueCommandOutcome::Finished
 }
 
+fn drain_user_batch_after_browser_context(
+    session: &mut ChatSession,
+    priority: bool,
+    browser_oversized: bool,
+) -> Vec<CommandRequest> {
+    if priority || browser_oversized {
+        return Vec::new();
+    }
+    let messages = drain_non_priority_user_messages(&mut session.command_queue);
+    if !messages.is_empty() {
+        for message in &messages {
+            session.record_command_queue_wait(&message.client_request_id);
+        }
+        session.emit_queue_update();
+    }
+    messages
+}
+
 async fn prepare_user_message(
     context: &QueueCommandContext,
     mut content: serde_json::Value,
@@ -2104,20 +2137,6 @@ async fn prepare_user_message(
         None
     };
 
-    let additional_messages = if !priority {
-        let mut session = session_arc.lock().await;
-        let msgs = drain_non_priority_user_messages(&mut session.command_queue);
-        if !msgs.is_empty() {
-            for message in &msgs {
-                session.record_command_queue_wait(&message.client_request_id);
-            }
-            session.emit_queue_update();
-        }
-        msgs
-    } else {
-        Vec::new()
-    };
-
     let (checkpoints_enabled, chat_id, latest_checkpoint, worktree) = {
         let session = session_arc.lock().await;
         (
@@ -2158,6 +2177,14 @@ async fn prepare_user_message(
     )
     .await;
 
+    let additional_messages = drain_user_batch_after_browser_context(
+        &mut *session_arc.lock().await,
+        priority,
+        browser_ctx_result
+            .as_ref()
+            .is_some_and(|(_, oversized)| *oversized),
+    );
+
     let (session_id_for_hook, project_dir_for_hook) = {
         let session = session_arc.lock().await;
         let sid = session.chat_id.clone();
@@ -2179,6 +2206,14 @@ async fn prepare_user_message(
         run_control_hooks(app.clone(), HookEvent::UserPromptSubmit, prompt_payload).await;
     if let ControlVerdict::Deny(reason) = prompt_verdict {
         let mut session = session_arc.lock().await;
+        session
+            .queued_user_merge_targets
+            .remove(&context.request_id);
+        for additional in &additional_messages {
+            session
+                .queued_user_merge_targets
+                .remove(&additional.client_request_id);
+        }
         let compression_phase = session.compression_phase;
         let compression_reason = session.compression_reason;
         let event = session.runtime_update_event(
@@ -2196,7 +2231,10 @@ async fn prepare_user_message(
     let additional_messages = {
         let mut approved = Vec::new();
         for additional in additional_messages {
-            let text = if let ChatCommand::UserMessage { ref content, .. } = additional.command {
+            let text = if let ChatCommand::UserMessage {
+                ref content, ..
+            } = additional.command
+            {
                 match content {
                     serde_json::Value::String(s) => s.clone(),
                     other => serde_json::to_string(other).unwrap_or_default(),
@@ -2218,6 +2256,12 @@ async fn prepare_user_message(
             .await;
             if !matches!(add_verdict, ControlVerdict::Deny(_)) {
                 approved.push(additional);
+            } else {
+                session_arc
+                    .lock()
+                    .await
+                    .queued_user_merge_targets
+                    .remove(&additional.client_request_id);
             }
         }
         approved
@@ -2277,6 +2321,14 @@ async fn handle_oversized_browser_context(
                     .len();
                 let pending_message_id = Uuid::new_v4().to_string();
                 let mut session = session_arc.lock().await;
+                if let Some(target) = session
+                    .queued_user_merge_targets
+                    .remove(&context.request_id)
+                {
+                    session
+                        .queued_user_merge_targets
+                        .insert(pending_message_id.clone(), target);
+                }
                 session.pending_browser_message = Some(PendingBrowserMessage {
                     pending_message_id: pending_message_id.clone(),
                     content: content.clone(),
@@ -2352,18 +2404,18 @@ async fn add_user_messages(context: &QueueCommandContext, prepared: PreparedUser
         questions_cancelled = session.cancel_pending_questions();
 
         if let Some((ctx_messages, _)) = browser_ctx_result {
-            session.add_message(ctx_messages.event);
+            session.add_queued_user_context(request_id, ctx_messages.event);
             if let Some(screenshot) = ctx_messages.screenshot {
-                session.add_message(screenshot);
+                session.add_queued_user_context(request_id, screenshot);
             }
         }
 
         if let Some(skill_msg) = skill_context_msg {
-            session.add_message(skill_msg);
+            session.add_queued_user_context(request_id, skill_msg);
         }
 
         if !context_files.is_empty() {
-            apply_manual_context_files(&mut session, &context_files);
+            apply_manual_context_files(&mut session, &context_files, request_id);
         }
 
         let parsed_content = parse_content_with_attachments(&content, &attachments);
@@ -2377,7 +2429,7 @@ async fn add_user_messages(context: &QueueCommandContext, prepared: PreparedUser
             checkpoints,
             client_message_id,
         );
-        session.add_message(user_message);
+        session.add_or_merge_queued_user_message(request_id, user_message);
         note_user_turn_resets_goal_pursuit(&mut session);
         if session.messages.iter().filter(|m| m.role == "user").count() == 1 {
             let chat_id = session.chat_id.clone();
@@ -2412,12 +2464,19 @@ async fn add_user_messages(context: &QueueCommandContext, prepared: PreparedUser
                 content: add_content,
                 attachments: add_attachments,
                 context_files: add_ctx_files,
-                suppress_auto_enrichment: _,
+                suppress_auto_enrichment: add_suppress_auto_enrichment,
                 client_message_id: add_client_message_id,
             } = additional.command
             {
                 if !add_ctx_files.is_empty() {
-                    apply_manual_context_files(&mut session, &add_ctx_files);
+                    apply_manual_context_files(
+                        &mut session,
+                        &add_ctx_files,
+                        &additional.client_request_id,
+                    );
+                }
+                if add_suppress_auto_enrichment && add_ctx_files.is_empty() {
+                    session.suppress_auto_enrichment_for_next_turn = true;
                 }
                 let add_parsed = parse_content_with_attachments(&add_content, &add_attachments);
                 accepted_user_messages.push(AcceptedUserMessage {
@@ -2430,7 +2489,8 @@ async fn add_user_messages(context: &QueueCommandContext, prepared: PreparedUser
                     Vec::new(),
                     add_client_message_id,
                 );
-                session.add_message(add_message);
+                session
+                    .add_or_merge_queued_user_message(&additional.client_request_id, add_message);
                 note_user_turn_resets_goal_pursuit(&mut session);
             }
         }
@@ -2468,4 +2528,247 @@ async fn add_user_messages(context: &QueueCommandContext, prepared: PreparedUser
         );
     }
     true
+}
+
+#[cfg(test)]
+mod queued_browser_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn queued_browser_decision_rebinds_pending_merge_without_new_user() {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
+            dir.path().join("cache"),
+            dir.path().join("config"),
+        )
+        .await;
+        gcx.documents_state
+            .workspace_folders
+            .lock()
+            .unwrap()
+            .push(dir.path().to_path_buf());
+        let app = AppState::from_gcx(gcx).await;
+        let mut session = ChatSession::new("queued-browser-decision".into());
+        session.thread.checkpoints_enabled = false;
+        session.add_message(ChatMessage {
+            message_id: "original".into(),
+            role: "user".into(),
+            content: ChatContent::SimpleText("first".into()),
+            ..Default::default()
+        });
+        session
+            .queued_user_merge_targets
+            .insert("pending-browser".into(), "original".into());
+        session.queued_user_restart_target = Some("original".into());
+        session.pending_browser_message = Some(PendingBrowserMessage {
+            pending_message_id: "pending-browser".into(),
+            content: serde_json::json!("second"),
+            attachments: vec![],
+            client_message_id: None,
+            checkpoints: vec![],
+            context_files: vec![],
+            suppress_auto_enrichment: false,
+            skill_activation_name: None,
+            skill_context_msg: None,
+        });
+        let image_data = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIW2Nk+M/wHwAF/gL+3MxZ5wAAAABJRU5ErkJggg==";
+        assert!(crate::call_validation::MultimodalElement::new(
+            "image/png".into(),
+            image_data.into()
+        )
+        .is_ok());
+        let third: CommandRequest = serde_json::from_value(serde_json::json!({
+            "client_request_id":"third", "type":"user_message", "priority":false,
+            "content":"third", "client_message_id":"third-client",
+            "attachments":[{"image_url":{"url":format!("data:image/png;base64,{image_data}")}}],
+            "context_files":[{"file_name":"third.rs", "file_content":"third context", "line1":1, "line2":1}]
+        })).unwrap();
+        session.command_queue.push_back(third.clone());
+        session
+            .queued_user_merge_targets
+            .insert("third".into(), "original".into());
+        assert!(drain_user_batch_after_browser_context(&mut session, false, true).is_empty());
+        assert_eq!(
+            session.command_queue.front().unwrap().client_request_id,
+            "third"
+        );
+        assert_eq!(
+            serde_json::to_value(&session.command_queue[0]).unwrap(),
+            serde_json::to_value(&third).unwrap()
+        );
+        session.set_planner_pause("test hold".into(), None);
+        let session_arc = Arc::new(AMutex::new(session));
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert("queued-browser-decision".into(), session_arc.clone());
+        let context = QueueCommandContext {
+            app,
+            session_arc: session_arc.clone(),
+            request_id: "decision-request".into(),
+            priority: true,
+            native_guard: None,
+            supervision_guard: None,
+            board_operation: AMutex::new(None),
+        };
+        handle_browser_context_decision(
+            &context,
+            "pending-browser".into(),
+            false,
+            false,
+            false,
+            false,
+            false,
+            None,
+            None,
+            None,
+        )
+        .await;
+        let session = session_arc.lock().await;
+        assert!(session.pending_browser_message.is_none());
+        assert_eq!(
+            session.messages[0].content.content_text_only(),
+            "first\nsecond"
+        );
+        assert_eq!(
+            session
+                .queued_user_merge_targets
+                .get("third")
+                .map(String::as_str),
+            Some("original")
+        );
+        assert!(
+            session.draft_message.is_none(),
+            "decision bypassed planner hold"
+        );
+        drop(session);
+        let third_context = QueueCommandContext {
+            request_id: "third".into(),
+            priority: false,
+            ..context
+        };
+        let third = session_arc.lock().await.command_queue.pop_front().unwrap();
+        let ChatCommand::UserMessage {
+            content,
+            attachments,
+            context_files,
+            suppress_auto_enrichment,
+            client_message_id,
+        } = third.command
+        else {
+            panic!("third request changed")
+        };
+        let prepared = prepare_user_message(
+            &third_context,
+            content,
+            attachments,
+            context_files,
+            suppress_auto_enrichment,
+            client_message_id,
+        )
+        .await
+        .unwrap();
+        assert!(add_user_messages(&third_context, prepared).await);
+        let session = session_arc.lock().await;
+        let users: Vec<_> = session
+            .messages
+            .iter()
+            .filter(|message| message.role == "user")
+            .collect();
+        assert_eq!(users.len(), 1);
+        assert_eq!(users[0].message_id, "original");
+        assert_eq!(users[0].content.content_text_only(), "first\nsecond\nthird");
+        let ChatContent::Multimodal(parts) = &users[0].content else {
+            panic!("third attachment lost")
+        };
+        assert!(parts
+            .iter()
+            .any(|part| part.m_type == "image/png" && part.m_content == image_data));
+        assert!(session.messages.iter().any(|message| matches!(&message.content, ChatContent::ContextFiles(files) if files.iter().any(|file| file.file_content == "third context"))));
+        assert!(session.queued_user_merge_targets.is_empty());
+    }
+
+    #[tokio::test]
+    async fn queued_browser_context_and_screenshot_precede_merged_user() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let app = AppState::from_gcx(gcx).await;
+        let mut session = ChatSession::new("queued-browser-merge".into());
+        session.thread.checkpoints_enabled = false;
+        session.add_message(ChatMessage {
+            message_id: "original".into(),
+            role: "user".into(),
+            content: ChatContent::SimpleText("first".into()),
+            ..Default::default()
+        });
+        session.start_stream().unwrap();
+        let request: CommandRequest = serde_json::from_value(serde_json::json!({"client_request_id":"queued", "type":"user_message", "content":"second", "priority":false})).unwrap();
+        assert_eq!(
+            session.enqueue_command(request),
+            types::EnqueueCommandOutcome::Accepted
+        );
+        let session_arc = Arc::new(AMutex::new(session));
+        let context = QueueCommandContext {
+            app,
+            session_arc: session_arc.clone(),
+            request_id: "queued".into(),
+            priority: false,
+            native_guard: None,
+            supervision_guard: None,
+            board_operation: AMutex::new(None),
+        };
+        let prepared = PreparedUserMessage {
+            content: serde_json::json!("second"),
+            attachments: vec![],
+            context_files: vec![],
+            suppress_auto_enrichment: false,
+            client_message_id: None,
+            checkpoints: vec![],
+            skill_activation_name: None,
+            skill_context_msg: None,
+            browser_chat_id: "queued-browser-merge".into(),
+            additional_messages: vec![],
+            browser_ctx_result: Some((
+                browser_context::BrowserContextMessages {
+                    event: ChatMessage {
+                        message_id: "browser-event".into(),
+                        role: "event".into(),
+                        content: ChatContent::SimpleText("browser context".into()),
+                        ..Default::default()
+                    },
+                    screenshot: Some(ChatMessage {
+                        message_id: "browser-image".into(),
+                        role: "user".into(),
+                        content: ChatContent::Multimodal(vec![
+                            crate::call_validation::MultimodalElement {
+                                m_type: "image/png".into(),
+                                m_content: "image-bytes".into(),
+                            },
+                        ]),
+                        ..Default::default()
+                    }),
+                },
+                false,
+            )),
+        };
+        assert!(add_user_messages(&context, prepared).await);
+        let session = session_arc.lock().await;
+        assert_eq!(
+            session
+                .messages
+                .iter()
+                .map(|message| message.message_id.as_str())
+                .collect::<Vec<_>>(),
+            ["browser-event", "browser-image", "original"]
+        );
+        assert_eq!(
+            session.messages[2].content.content_text_only(),
+            "first\nsecond"
+        );
+        let ChatContent::Multimodal(parts) = &session.messages[1].content else {
+            panic!("browser attachment lost")
+        };
+        assert_eq!(parts[0].m_content, "image-bytes");
+        assert!(session.queued_user_merge_targets.is_empty());
+    }
 }

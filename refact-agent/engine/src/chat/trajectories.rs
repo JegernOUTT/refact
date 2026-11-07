@@ -2447,7 +2447,9 @@ async fn find_validated_trajectory_path_for_source(
                 .collect();
             find_validated_trajectory_path_in_dirs(chat_id, dirs).await
         }
-        TrajectorySourceIdentity::Task { .. } => {
+        TrajectorySourceIdentity::Task {
+            ..
+        } => {
             let dirs = list_task_trajectory_dirs(&gcx).await;
             find_validated_trajectory_path_in_dirs(chat_id, dirs).await
         }
@@ -6243,9 +6245,12 @@ fn pending_reload_source_matches_session(
     session: &ChatSession,
 ) -> bool {
     match pending {
-        ExternalReloadPending::Update { source } | ExternalReloadPending::Delete { source } => {
-            source.matches_session_for_delete(session)
+        ExternalReloadPending::Update {
+            source,
         }
+        | ExternalReloadPending::Delete {
+            source,
+        } => source.matches_session_for_delete(session),
     }
 }
 
@@ -6840,7 +6845,9 @@ pub async fn check_external_reload_pending(
         (session.chat_id.clone(), pending)
     };
     match pending {
-        Some(ExternalReloadPending::Delete { source }) => {
+        Some(ExternalReloadPending::Delete {
+            source,
+        }) => {
             let expected_pending = ExternalReloadPending::delete(source.clone());
             apply_external_delete_with_revalidation(
                 gcx.clone(),
@@ -6851,7 +6858,9 @@ pub async fn check_external_reload_pending(
             )
             .await;
         }
-        Some(ExternalReloadPending::Update { source }) => {
+        Some(ExternalReloadPending::Update {
+            source,
+        }) => {
             let expected_pending = ExternalReloadPending::update(source.clone());
             if let Some(loaded) =
                 load_generic_trajectory_for_chat_matching_source(gcx.clone(), &chat_id, &source)
@@ -7040,7 +7049,9 @@ async fn process_trajectory_change_for_source(
                     session_error,
                 )
             }
-            ExternalDeleteRevalidationOutcome::Deleted { applied_to_session } => {
+            ExternalDeleteRevalidationOutcome::Deleted {
+                applied_to_session,
+            } => {
                 debug!(
                     "External delete revalidation for {} deleted list item; applied_to_session={}",
                     chat_id, applied_to_session
@@ -7481,7 +7492,9 @@ fn spawn_trajectory_watcher(
         .map(|root| dunce::simplified(&root).to_path_buf())
         .collect::<Vec<_>>();
         let recovery_roots = watched_roots.clone();
-        let _self_write_cleanup = TrajectorySelfWriteScope { watched_roots };
+        let _self_write_cleanup = TrajectorySelfWriteScope {
+            watched_roots,
+        };
 
         let tx_clone = tx.clone();
         let dropped_events_for_callback = dropped_events.clone();
@@ -13440,7 +13453,9 @@ mod tests {
             handle_v1_trajectories_get(
                 State(app.clone()),
                 AxumPath(chat_id.to_string()),
-                axum::extract::Query(TrajectoryGetQuery { metadata_only }),
+                axum::extract::Query(TrajectoryGetQuery {
+                    metadata_only,
+                }),
             )
         };
 
@@ -15421,7 +15436,9 @@ mod tests {
         let json = chat_rx.recv().await.unwrap();
         let envelope: EventEnvelope = serde_json::from_str(&json).unwrap();
         match envelope.event {
-            ChatEvent::Snapshot { messages, .. } => {
+            ChatEvent::Snapshot {
+                messages, ..
+            } => {
                 assert_eq!(messages.len(), 1);
             }
             other => panic!("expected Snapshot, got {other:?}"),
@@ -16030,7 +16047,9 @@ mod tests {
         let envelope: EventEnvelope = serde_json::from_str(&json).unwrap();
         match envelope.event {
             ChatEvent::Snapshot {
-                runtime, messages, ..
+                runtime,
+                messages,
+                ..
             } => {
                 assert!(messages.is_empty());
                 assert!(!runtime.is_compressing);
@@ -16130,7 +16149,9 @@ mod tests {
         let envelope: EventEnvelope = serde_json::from_str(&json).unwrap();
         match envelope.event {
             ChatEvent::Snapshot {
-                thread, messages, ..
+                thread,
+                messages,
+                ..
             } => {
                 assert_eq!(thread.title, "Reloaded After Stale Delete");
                 assert_eq!(messages.len(), 1);
@@ -16404,7 +16425,9 @@ mod tests {
         let envelope: EventEnvelope = serde_json::from_str(&json).unwrap();
         match envelope.event {
             ChatEvent::Snapshot {
-                thread, messages, ..
+                thread,
+                messages,
+                ..
             } => {
                 assert_eq!(thread.title, "Recreated Before Apply");
                 assert_eq!(messages.len(), 1);
@@ -17923,6 +17946,8 @@ mod tests {
             draft_message: None,
             draft_usage: None,
             command_queue: VecDeque::new(),
+            queued_user_merge_targets: Default::default(),
+            queued_user_restart_target: None,
             pending_deliveries: VecDeque::new(),
             runner_pending_deliveries: Vec::new(),
             delivered_delivery_ids: Default::default(),
@@ -18071,6 +18096,8 @@ mod tests {
             draft_message: None,
             draft_usage: None,
             command_queue: VecDeque::new(),
+            queued_user_merge_targets: Default::default(),
+            queued_user_restart_target: None,
             pending_deliveries: VecDeque::new(),
             runner_pending_deliveries: Vec::new(),
             delivered_delivery_ids: Default::default(),

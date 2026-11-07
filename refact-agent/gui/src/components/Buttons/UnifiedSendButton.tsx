@@ -64,7 +64,11 @@ export const UnifiedSendButton: React.FC<UnifiedSendButtonProps> = ({
       <span className={styles.group}>
         {hasText ? (
           <>
-            <KitTooltip label="Queue message" state="after tools complete">
+            <KitTooltip
+              label="Queue message"
+              state="after response and tools"
+              hint="Before any output it joins your last message and restarts."
+            >
               <ComposerTrigger
                 iconOnly
                 aria-label="Queue message"

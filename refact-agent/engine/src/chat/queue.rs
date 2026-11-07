@@ -84,6 +84,7 @@ async fn push_user_activity(app: AppState, action: UserAction) {
 fn apply_manual_context_files(
     session: &mut super::types::ChatSession,
     context_files: &[serde_json::Value],
+    request_id: &str,
 ) {
     const MAX_CTX_FILES: usize = 5;
     const MAX_TOTAL_CHARS: usize = 50_000;
@@ -108,7 +109,7 @@ fn apply_manual_context_files(
             tool_call_id: "manual_memory_enrichment".to_string(),
             ..Default::default()
         };
-        session.add_message(msg);
+        session.add_queued_user_context(request_id, msg);
     }
 }
 
@@ -153,6 +154,7 @@ async fn aborted_before_start_generation(
 }
 
 pub(crate) fn reject_guard(session: &mut ChatSession, request_id: &str, error: String) {
+    session.queued_user_merge_targets.remove(request_id);
     crate::buddy::decision_receipts::transition(session, request_id, "stale", Some(error.clone()));
     session.emit(ChatEvent::Ack {
         client_request_id: request_id.to_string(),
@@ -491,7 +493,11 @@ pub async fn inject_priority_messages_if_any(
             let accepted_user_message = {
                 let mut session = session_arc.lock().await;
                 if !context_files.is_empty() {
-                    apply_manual_context_files(&mut session, &context_files);
+                    apply_manual_context_files(
+                        &mut session,
+                        &context_files,
+                        &request.client_request_id,
+                    );
                 }
                 if suppress_auto_enrichment && context_files.is_empty() {
                     session.suppress_auto_enrichment_for_next_turn = true;
@@ -526,10 +532,18 @@ pub async fn inject_priority_messages_if_any(
 pub fn find_allowed_command_while_paused(queue: &VecDeque<CommandRequest>) -> Option<usize> {
     for (i, req) in queue.iter().enumerate() {
         match &req.command {
-            ChatCommand::ToolDecision { .. }
-            | ChatCommand::ToolDecisions { .. }
-            | ChatCommand::AnswerQuestions { .. }
-            | ChatCommand::SubmitQuestionResponse { .. }
+            ChatCommand::ToolDecision {
+                ..
+            }
+            | ChatCommand::ToolDecisions {
+                ..
+            }
+            | ChatCommand::AnswerQuestions {
+                ..
+            }
+            | ChatCommand::SubmitQuestionResponse {
+                ..
+            }
             | ChatCommand::Abort {} => {
                 return Some(i);
             }
@@ -542,7 +556,10 @@ pub fn find_allowed_command_while_paused(queue: &VecDeque<CommandRequest>) -> Op
 pub fn find_allowed_command_while_waiting_ide(queue: &VecDeque<CommandRequest>) -> Option<usize> {
     for (i, req) in queue.iter().enumerate() {
         match &req.command {
-            ChatCommand::IdeToolResult { .. } | ChatCommand::Abort {} => {
+            ChatCommand::IdeToolResult {
+                ..
+            }
+            | ChatCommand::Abort {} => {
                 return Some(i);
             }
             _ => {}
@@ -1733,8 +1750,24 @@ async fn select_next_command(session_arc: &Arc<AMutex<ChatSession>>) -> Option<S
                 .fetch_add(1, Ordering::Relaxed);
             (None, Some(waiter))
         }
+    } else if session.pending_browser_message.is_some() {
+        let command = session
+            .command_queue
+            .iter()
+            .position(|request| {
+                request.priority || !matches!(request.command, ChatCommand::UserMessage { .. })
+            })
+            .and_then(|index| session.command_queue.remove(index));
+        if let Some(request) = command.as_ref() {
+            session.record_command_queue_wait(&request.client_request_id);
+            session.emit_queue_update();
+            (command, None)
+        } else {
+            (None, Some(waiter))
+        }
     } else if !session.delivery_wake_sources.is_empty()
         && session.command_queue.is_empty()
+        && session.pending_browser_message.is_none()
         && !session
             .runtime
             .recovery
@@ -1780,7 +1813,10 @@ async fn select_next_command(session_arc: &Arc<AMutex<ChatSession>>) -> Option<S
         (cmd, None)
     };
 
-    Some(SelectedCommand { command, waiter })
+    Some(SelectedCommand {
+        command,
+        waiter,
+    })
 }
 
 async fn process_command_queue_inner(
@@ -1833,7 +1869,10 @@ async fn process_command_queue_inner(
 
     loop {
         super::refusal_followup::drain_pending(app.clone(), session_arc.clone()).await;
-        let Some(SelectedCommand { command, waiter }) = select_next_command(&session_arc).await
+        let Some(SelectedCommand {
+            command,
+            waiter,
+        }) = select_next_command(&session_arc).await
         else {
             return;
         };
@@ -1865,6 +1904,20 @@ async fn process_command_queue_inner(
             request,
         ))
         .await;
+        {
+            let mut session = session_arc.lock().await;
+            let mut queued_ids: std::collections::HashSet<_> = session
+                .command_queue
+                .iter()
+                .map(|request| request.client_request_id.clone())
+                .collect();
+            if let Some(pending) = &session.pending_browser_message {
+                queued_ids.insert(pending.pending_message_id.clone());
+            }
+            session
+                .queued_user_merge_targets
+                .retain(|id, _| queued_ids.contains(id));
+        }
         let has_receipts = !session_arc.lock().await.native_decision_receipts.is_empty();
         if has_receipts {
             let _ =
@@ -4041,7 +4094,10 @@ mod tests {
             loop {
                 let json = rx.recv().await.unwrap();
                 let envelope: EventEnvelope = serde_json::from_str(&json).unwrap();
-                if let ChatEvent::MessageAdded { message, .. } = envelope.event {
+                if let ChatEvent::MessageAdded {
+                    message, ..
+                } = envelope.event
+                {
                     if message.role == "event"
                         && message.extra.get("event").is_some_and(|event| {
                             event["subkind"] == json!("system_notice")
@@ -4401,7 +4457,9 @@ mod tests {
             .iter()
             .filter_map(|event| match event {
                 ChatEvent::Ack {
-                    accepted, result, ..
+                    accepted,
+                    result,
+                    ..
                 } => Some((accepted, result)),
                 _ => None,
             })
@@ -4866,6 +4924,445 @@ mod tests {
         assert!(session.command_queue.is_empty());
         drop(session);
         crate::tasks::admission::end(&chat_id).await;
+    }
+
+    #[tokio::test]
+    async fn queued_restart_waits_for_old_turn_and_handler_preserves_context() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        async fn request_body(socket: &mut tokio::net::TcpStream) -> serde_json::Value {
+            let mut bytes = Vec::new();
+            let mut chunk = [0u8; 4096];
+            loop {
+                let count = socket.read(&mut chunk).await.unwrap();
+                assert_ne!(count, 0, "provider request ended before body");
+                bytes.extend_from_slice(&chunk[..count]);
+                if let Some(end) = bytes.windows(4).position(|part| part == b"\r\n\r\n") {
+                    let headers = std::str::from_utf8(&bytes[..end]).unwrap();
+                    let length: usize = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (key, value) = line.split_once(':')?;
+                            key.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse().unwrap())
+                        })
+                        .unwrap();
+                    if bytes.len() >= end + 4 + length {
+                        return serde_json::from_slice(&bytes[end + 4..end + 4 + length]).unwrap();
+                    }
+                }
+            }
+        }
+        struct OwnedTasks(Vec<tokio::task::AbortHandle>);
+        impl Drop for OwnedTasks {
+            fn drop(&mut self) {
+                for task in &self.0 {
+                    task.abort();
+                }
+            }
+        }
+        let mut tasks = OwnedTasks(Vec::new());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let (replacement_tx, replacement_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut first, _) = listener.accept().await.unwrap();
+            let first_body = request_body(&mut first).await;
+            ready_tx.send(first_body).unwrap();
+            let mut byte = [0u8; 1];
+            assert_eq!(
+                first.read(&mut byte).await.unwrap(),
+                0,
+                "old provider request was not cancelled"
+            );
+            let (mut second, _) = listener.accept().await.unwrap();
+            let replacement = request_body(&mut second).await;
+            let body = "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"done\"},\"finish_reason\":null}]}\n\ndata: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
+            let response = format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+            second.write_all(response.as_bytes()).await.unwrap();
+            replacement_tx.send(replacement).unwrap();
+        });
+        tasks.0.push(server.abort_handle());
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let app = AppState::from_gcx(gcx.clone()).await;
+        *gcx.privacy_policy_load.write().unwrap() = refact_privacy::PolicyLoad::default();
+        let model_id = "test/queued-restart";
+        let mut caps = crate::caps::CodeAssistantCaps::default();
+        caps.chat_models.insert(
+            model_id.into(),
+            Arc::new(crate::caps::ChatModelRecord {
+                base: crate::caps::BaseModelRecord {
+                    id: model_id.into(),
+                    name: "queued-restart".into(),
+                    endpoint: format!("http://{address}/v1/chat/completions"),
+                    wire_format: crate::llm::WireFormat::OpenaiChatCompletions,
+                    tokenizer: "fake".into(),
+                    n_ctx: 8192,
+                    ..Default::default()
+                },
+                supports_tools: false,
+                supports_temperature: false,
+                ..Default::default()
+            }),
+        );
+        caps.defaults.chat_default_model = model_id.into();
+        {
+            let mut state = app.model.caps.write().await;
+            state.caps = Some(Arc::new(caps));
+            state.last_attempted_ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+        }
+        let mut session = ChatSession::new("queued-restart-handler".into());
+        session.thread.model = model_id.into();
+        session.thread.mode = "ask".into();
+        session.thread.include_project_info = false;
+        session.thread.checkpoints_enabled = false;
+        session.add_message(ChatMessage::new("system".into(), "system".into()));
+        session.add_message(ChatMessage {
+            message_id: "original".into(),
+            role: "user".into(),
+            content: ChatContent::SimpleText("first".into()),
+            ..Default::default()
+        });
+        let session_arc = Arc::new(AMutex::new(session));
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert("queued-restart-handler".into(), session_arc.clone());
+        let generation = tokio::spawn(start_generation(app.clone(), session_arc.clone()));
+        tasks.0.push(generation.abort_handle());
+        let initial = tokio::time::timeout(QUEUE_TEST_TIMEOUT, ready_rx)
+            .await
+            .expect("initial request not received")
+            .unwrap();
+        assert!(initial["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|message| message["content"] == "first"));
+        {
+            let mut session = session_arc.lock().await;
+            assert!(session.turn_depth > 0);
+            assert!(session.draft_message.is_some());
+            let request: CommandRequest = serde_json::from_value(json!({
+                "client_request_id":"queued", "type":"user_message", "content":"second", "priority":false,
+                "context_files":[{"file_name":"context.rs","file_content":"retained context","line1":1,"line2":1}]
+            })).unwrap();
+            assert_eq!(
+                session.enqueue_command(request),
+                EnqueueCommandOutcome::Accepted
+            );
+        }
+        let running = session_arc.lock().await.queue_processor_running.clone();
+        running.store(true, Ordering::SeqCst);
+        let processor = tokio::spawn(process_command_queue(app, session_arc.clone(), running));
+        tasks.0.push(processor.abort_handle());
+        let replacement = tokio::time::timeout(QUEUE_TEST_TIMEOUT, replacement_rx)
+            .await
+            .expect("merged replacement request not received")
+            .unwrap();
+        let messages = replacement["messages"].as_array().unwrap();
+        let users: Vec<_> = messages
+            .iter()
+            .filter(|message| message["role"] == "user")
+            .collect();
+        assert_eq!(
+            users.len(),
+            1,
+            "replacement split conversational user: {replacement}"
+        );
+        let parts = users[0]["content"]
+            .as_array()
+            .expect("context and user text must be provider multimodal parts");
+        assert_eq!(
+            parts.len(),
+            2,
+            "replacement lost context/user adjacency: {replacement}"
+        );
+        assert_eq!(parts[0]["text"], "📄 context.rs:1-1\nretained context");
+        assert_eq!(
+            parts[1]["text"], "first\nsecond",
+            "replacement request lost merged user: {replacement}"
+        );
+        tokio::time::timeout(QUEUE_TEST_TIMEOUT, generation)
+            .await
+            .unwrap()
+            .unwrap();
+        tokio::time::timeout(QUEUE_TEST_TIMEOUT, server)
+            .await
+            .unwrap()
+            .unwrap();
+        {
+            let session = session_arc.lock().await;
+            let users: Vec<_> = session
+                .messages
+                .iter()
+                .filter(|message| message.role == "user")
+                .collect();
+            assert_eq!(users.len(), 1);
+            assert_eq!(users[0].message_id, "original");
+            assert_eq!(users[0].content.content_text_only(), "first\nsecond");
+            let context = session
+                .messages
+                .iter()
+                .find(|message| {
+                    message.role == "context_file"
+                        && message.tool_call_id == "manual_memory_enrichment"
+                })
+                .expect("manual context preserved");
+            let ChatContent::ContextFiles(files) = &context.content else {
+                panic!("context files lost")
+            };
+            assert_eq!(files[0].file_content, "retained context");
+            let context_index = session
+                .messages
+                .iter()
+                .position(|message| message.message_id == context.message_id)
+                .unwrap();
+            let user_index = session
+                .messages
+                .iter()
+                .position(|message| message.message_id == "original")
+                .unwrap();
+            assert_eq!(
+                context_index + 1,
+                user_index,
+                "context must precede the tail user for enrichment"
+            );
+            assert!(session.queued_user_merge_targets.is_empty());
+        }
+        close_processor(&session_arc, processor).await;
+    }
+
+    #[tokio::test]
+    async fn queued_browser_pending_holds_only_ordinary_user_messages() {
+        let mut session = ChatSession::new("browser-fifo".into());
+        session.pending_browser_message = Some(PendingBrowserMessage {
+            pending_message_id: "pending".into(),
+            content: json!("second"),
+            attachments: vec![],
+            client_message_id: None,
+            checkpoints: vec![],
+            context_files: vec![],
+            suppress_auto_enrichment: false,
+            skill_activation_name: None,
+            skill_context_msg: None,
+        });
+        session.command_queue.push_back(serde_json::from_value(json!({"client_request_id":"third", "type":"user_message", "content":"third", "priority":false})).unwrap());
+        let session_arc = Arc::new(AMutex::new(session));
+        let selected = select_next_command(&session_arc).await.unwrap();
+        assert!(
+            selected.command.is_none(),
+            "ordinary user bypassed pending browser decision"
+        );
+        assert!(selected.waiter.is_some());
+        for command in [
+            json!({"client_request_id":"abort", "type":"abort", "priority":false}),
+            json!({"client_request_id":"priority", "type":"user_message", "content":"priority", "priority":true}),
+        ] {
+            let expected = command["client_request_id"].as_str().unwrap().to_string();
+            session_arc
+                .lock()
+                .await
+                .command_queue
+                .push_back(serde_json::from_value(command).unwrap());
+            assert_eq!(
+                select_next_command(&session_arc)
+                    .await
+                    .unwrap()
+                    .command
+                    .unwrap()
+                    .client_request_id,
+                expected
+            );
+            assert_eq!(
+                session_arc.lock().await.command_queue[0].client_request_id,
+                "third"
+            );
+        }
+        session_arc.lock().await.pending_browser_message = None;
+        assert_eq!(
+            select_next_command(&session_arc)
+                .await
+                .unwrap()
+                .command
+                .unwrap()
+                .client_request_id,
+            "third"
+        );
+    }
+
+    #[tokio::test]
+    async fn queued_cancelled_merge_recovers_only_after_holds_clear_and_abort_suppresses_wake() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let app = AppState::from_gcx(gcx).await;
+        let mut session = ChatSession::new("queued-cancel-recovery".into());
+        session.add_message(ChatMessage {
+            message_id: "original".into(),
+            role: "user".into(),
+            content: ChatContent::SimpleText("first".into()),
+            ..Default::default()
+        });
+        session.start_stream().unwrap();
+        let request: CommandRequest = serde_json::from_value(json!({"client_request_id":"cancelled", "type":"user_message", "content":"second", "priority":false})).unwrap();
+        assert_eq!(
+            session.enqueue_command(request),
+            EnqueueCommandOutcome::Accepted
+        );
+        session.pending_browser_message = Some(PendingBrowserMessage {
+            pending_message_id: "browser".into(),
+            content: json!("pending"),
+            attachments: vec![],
+            client_message_id: None,
+            checkpoints: vec![],
+            context_files: vec![],
+            suppress_auto_enrichment: false,
+            skill_activation_name: None,
+            skill_context_msg: None,
+        });
+        let session_arc = Arc::new(AMutex::new(session));
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert("queued-cancel-recovery".into(), session_arc.clone());
+        let notify = session_arc.lock().await.queue_notify.clone();
+        let _ = futures::FutureExt::now_or_never(notify.notified());
+        let notified = notify.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        assert!(
+            futures::FutureExt::now_or_never(notified.as_mut()).is_none(),
+            "cancel waiter already notified before handler"
+        );
+        let response = super::super::handlers::handle_v1_chat_cancel_queued(
+            axum::extract::State(app),
+            axum::extract::Path(("queued-cancel-recovery".into(), "cancelled".into())),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        tokio::time::timeout(QUEUE_TEST_TIMEOUT, notified)
+            .await
+            .expect("cancel handler failed to notify recovery");
+        assert!(session_arc
+            .lock()
+            .await
+            .queued_user_merge_targets
+            .is_empty());
+        assert!(
+            select_next_command(&session_arc)
+                .await
+                .unwrap()
+                .command
+                .is_none(),
+            "pending browser decision bypassed"
+        );
+        {
+            let mut session = session_arc.lock().await;
+            session.pending_browser_message = None;
+            session.set_planner_pause("now".into(), None);
+        }
+        assert!(
+            select_next_command(&session_arc)
+                .await
+                .unwrap()
+                .command
+                .is_none(),
+            "planner pause bypassed"
+        );
+        {
+            let mut session = session_arc.lock().await;
+            session.clear_planner_pause();
+            session.set_runtime_state(SessionState::Paused, None);
+        }
+        assert!(
+            select_next_command(&session_arc)
+                .await
+                .unwrap()
+                .command
+                .is_none(),
+            "confirmation pause bypassed"
+        );
+        session_arc
+            .lock()
+            .await
+            .set_runtime_state(SessionState::Idle, None);
+        let recovery = select_next_command(&session_arc)
+            .await
+            .unwrap()
+            .command
+            .expect("cancelled merge stranded original user");
+        assert!(matches!(recovery.command, ChatCommand::Regenerate {}));
+        assert!(recovery.client_request_id.starts_with("delivery-wake-"));
+        let mut session = session_arc.lock().await;
+        assert_eq!(session.messages.len(), 1);
+        assert_eq!(session.messages[0].content.content_text_only(), "first");
+        session
+            .delivery_wake_sources
+            .insert("queue-boundary".into());
+        session.apply_priority_abort();
+        drop(session);
+        assert!(
+            select_next_command(&session_arc)
+                .await
+                .unwrap()
+                .command
+                .is_none(),
+            "explicit abort restarted generation"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn queued_hook_denied_merge_recovers_original_without_denied_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
+            dir.path().join("cache"),
+            dir.path().join("config"),
+        )
+        .await;
+        std::fs::create_dir_all(&gcx.config_dir).unwrap();
+        let marker = dir.path().join("hook-ran");
+        std::fs::write(gcx.config_dir.join("hooks.yaml"), format!("hooks:\n  UserPromptSubmit:\n    - hooks:\n        - type: command\n          command: \"touch {}; echo denied >&2; exit 2\"\n", marker.display())).unwrap();
+        let app = AppState::from_gcx(gcx).await;
+        let mut session = ChatSession::new("queued-denied-recovery".into());
+        session.thread.checkpoints_enabled = false;
+        session.add_message(ChatMessage {
+            message_id: "original".into(),
+            role: "user".into(),
+            content: ChatContent::SimpleText("first".into()),
+            ..Default::default()
+        });
+        session.start_stream().unwrap();
+        let request: CommandRequest = serde_json::from_value(json!({"client_request_id":"denied", "type":"user_message", "content":"denied text", "priority":false})).unwrap();
+        assert_eq!(
+            session.enqueue_command(request),
+            EnqueueCommandOutcome::Accepted
+        );
+        let session_arc = Arc::new(AMutex::new(session));
+        let request = select_next_command(&session_arc)
+            .await
+            .unwrap()
+            .command
+            .unwrap();
+        command_handlers::handle_queue_command(app, session_arc.clone(), request).await;
+        assert!(marker.is_file(), "hook did not run");
+        {
+            let session = session_arc.lock().await;
+            assert_eq!(session.messages.len(), 1);
+            assert_eq!(session.messages[0].content.content_text_only(), "first");
+            assert!(session.queued_user_merge_targets.is_empty());
+        }
+        let recovery = select_next_command(&session_arc)
+            .await
+            .unwrap()
+            .command
+            .expect("denied merge stranded original user");
+        assert!(matches!(recovery.command, ChatCommand::Regenerate {}));
     }
 
     #[tokio::test]
