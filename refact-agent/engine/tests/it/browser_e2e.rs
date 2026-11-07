@@ -725,13 +725,25 @@ async fn same_process_reconnect_preserves_document_without_replaying_actions() {
     };
     case.setup_world();
     case.tab
-        .evaluate("window.__reconnectSentinel = {count: 1}; document.body.dataset.reconnect = 'kept'", false)
+        .evaluate(
+            "window.__reconnectSentinel = {count: 1}; document.body.dataset.reconnect = 'kept'",
+            false,
+        )
         .unwrap();
     case.runtime.checkpoint_document_identity().unwrap();
     let pid = case.runtime.ownership.process_id().unwrap();
     let runtime_id = case.runtime.runtime_id.clone();
     let epoch = case.runtime.ownership.connection_epoch();
     let target = case.tab.get_target_id().to_string();
+    {
+        let _deadline = headless_chrome::browser::transport::CommandDeadlineGuard::new(
+            std::time::Instant::now(),
+        );
+        let error = case.runtime.reconnect_same_process().unwrap_err();
+        assert!(error.contains("original deadline elapsed"), "{error}");
+        assert_eq!(case.runtime.ownership.connection_epoch(), epoch);
+        assert_eq!(case.runtime.ownership.process_id(), Some(pid));
+    }
     case.runtime.browser.disconnect_transport();
     assert!(refact_lsp::integrations::browser_runtime::pid_is_alive(pid));
     let outcome = case.runtime.reconnect_same_process().unwrap();

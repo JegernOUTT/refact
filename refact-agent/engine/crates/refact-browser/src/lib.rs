@@ -856,6 +856,12 @@ impl BrowserRuntime {
         let baseline = self.document_checkpoint.clone();
         let deadline = Instant::now() + Duration::from_secs(30);
         let _deadline = headless_chrome::browser::transport::CommandDeadlineGuard::new(deadline);
+        let deadline =
+            headless_chrome::browser::transport::CommandDeadlineGuard::current_deadline()
+                .unwrap_or(deadline);
+        if self.active_tab_target_id.is_none() || Instant::now() >= deadline {
+            return Err("Reconnect refused: no active target or original deadline elapsed".into());
+        }
         let connection = Browser::connect_with_timeout(
             self.ownership.endpoint.clone(),
             self.launch_options.transport_read_timeout(),

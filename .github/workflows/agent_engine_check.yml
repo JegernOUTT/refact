@@ -37,6 +37,10 @@ on:
         description: Execute and restore controlled Windows artifact and startup faults
         type: boolean
         default: false
+      expected_sha:
+        description: Exact qualification revision to execute
+        type: string
+        default: ""
 
 concurrency:
   group: engine-check-${{ github.ref }}
@@ -213,14 +217,21 @@ jobs:
     name: Browser artifact qualification (Windows x86_64)
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.browser_artifacts_only }}
     runs-on: windows-latest
-    timeout-minutes: 45
+    timeout-minutes: 90
     permissions:
       contents: read
     env:
       RUST_MIN_STACK: "16777216"
+      BROWSER_QUALIFICATION_SHA: ${{ inputs.expected_sha }}
     steps:
       - name: Checkout qualification revision
         uses: actions/checkout@v4
+
+      - name: Verify qualification revision
+        shell: bash
+        run: |
+          test -n "$BROWSER_QUALIFICATION_SHA"
+          test "$(git rev-parse HEAD)" = "$BROWSER_QUALIFICATION_SHA"
 
       - name: Install stable Rust without local development defaults
         shell: bash

@@ -462,7 +462,7 @@ mod windows_platform {
     use std::io::{Read, Seek, SeekFrom, Write};
     use std::os::windows::ffi::OsStrExt;
     use std::os::windows::fs::OpenOptionsExt;
-    use std::os::windows::io::AsRawHandle;
+    use std::os::windows::io::{AsRawHandle, FromRawHandle};
     use std::path::{Component, Prefix};
     use std::sync::Mutex;
     use std::time::{Duration, Instant};
@@ -580,8 +580,10 @@ mod windows_platform {
     }
     fn open_directory(path: &Path, delete: bool) -> Result<File, String> {
         let file = OpenOptions::new()
-            .access_mode(FILE_READ_ATTRIBUTES | if delete { DELETE } else { 0 })
-            .share_mode(FILE_SHARE_READ)
+            .access_mode(
+                FILE_READ_ATTRIBUTES | FILE_LIST_DIRECTORY | if delete { DELETE } else { 0 },
+            )
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
             .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
             .open(path)
             .map_err(ioerr)?;
@@ -625,6 +627,52 @@ mod windows_platform {
         }
         Ok((path, pins))
     }
+    fn reopen(file: &File, access: u32, share: u32) -> Result<File, String> {
+        let handle = unsafe { ReOpenFile(file.as_raw_handle().cast(), access, share, 0) };
+        if handle == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
+            return Err(last_error());
+        }
+        Ok(unsafe { File::from_raw_handle(handle.cast()) })
+    }
+    fn publish_read_handle(entry: &mut Entry) -> Result<(), String> {
+        let bridge = reopen(
+            &entry.file,
+            GENERIC_READ,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        )?;
+        drop(std::mem::replace(&mut entry.file, bridge));
+        entry.published = true;
+        let readonly = reopen(&entry.file, GENERIC_READ, FILE_SHARE_READ)?;
+        entry.file = readonly;
+        entry.published = true;
+        validate(entry, entry.bytes)
+    }
+    fn delete_entry(entry: &mut Entry) -> Result<(), String> {
+        if !entry.published {
+            return delete_owned(&entry.file);
+        }
+        let bridge = reopen(
+            &entry.file,
+            GENERIC_READ,
+            FILE_SHARE_READ | FILE_SHARE_DELETE,
+        )?;
+        drop(std::mem::replace(&mut entry.file, bridge));
+        let deletion = reopen(&entry.file, DELETE, FILE_SHARE_READ | FILE_SHARE_DELETE);
+        match deletion {
+            Ok(file) => {
+                let result = delete_owned(&file);
+                if result.is_err() {
+                    drop(file);
+                    entry.file = reopen(&entry.file, GENERIC_READ, FILE_SHARE_READ)?;
+                }
+                result
+            }
+            Err(error) => {
+                entry.file = reopen(&entry.file, GENERIC_READ, FILE_SHARE_READ)?;
+                Err(error)
+            }
+        }
+    }
     fn delete_owned(file: &File) -> Result<(), String> {
         let disposition = FILE_DISPOSITION_INFO {
             DeleteFile: true,
@@ -644,6 +692,7 @@ mod windows_platform {
     }
     struct Entry {
         file: File,
+        published: bool,
         identity: (u32, u32, u32),
         bytes: usize,
         last: Instant,
@@ -705,9 +754,9 @@ mod windows_platform {
             })
         }
         fn evict(&self, state: &mut State, id: &str) -> Result<(), String> {
-            let entry = state.entries.get(id).ok_or("artifact not found")?;
+            let entry = state.entries.get_mut(id).ok_or("artifact not found")?;
             validate(entry, entry.bytes)?;
-            delete_owned(&entry.file)?;
+            delete_entry(entry)?;
             let entry = state.entries.remove(id).unwrap();
             state.bytes -= entry.bytes;
             Ok(())
@@ -719,10 +768,13 @@ mod windows_platform {
                 .filter(|(_, e)| now.saturating_duration_since(e.last) >= TTL)
                 .map(|(id, _)| id.clone())
                 .collect();
+            let mut failure = None;
             for id in ids {
-                self.evict(state, &id)?;
+                if let Err(error) = self.evict(state, &id) {
+                    failure.get_or_insert(error);
+                }
             }
-            Ok(())
+            failure.map_or(Ok(()), Err)
         }
         pub fn maintenance(&self) -> Result<(), String> {
             let mut state = self.state.lock().map_err(|_| "artifact store poisoned")?;
@@ -750,15 +802,22 @@ mod windows_platform {
                 );
             }
             let now = (self.clock)();
-            self.expire(&mut state, now)?;
+            let _ = self.expire(&mut state, now);
             while state.entries.len() >= MAX_FILES || state.bytes + bytes.len() > MAX_BYTES {
-                let oldest = state
+                let mut candidates: Vec<_> = state
                     .entries
                     .iter()
-                    .min_by_key(|(_, e)| e.last)
-                    .map(|(id, _)| id.clone())
-                    .ok_or("artifact quota unavailable")?;
-                self.evict(&mut state, &oldest)?;
+                    .map(|(id, e)| (e.last, id.clone()))
+                    .collect();
+                candidates.sort_by_key(|(last, _)| *last);
+                if !candidates
+                    .into_iter()
+                    .any(|(_, id)| self.evict(&mut state, &id).is_ok())
+                {
+                    return Err(
+                        "artifact quota unavailable: owned artifacts could not be deleted".into(),
+                    );
+                }
             }
             let id = uuid::Uuid::new_v4().to_string();
             let file = OpenOptions::new()
@@ -766,13 +825,14 @@ mod windows_platform {
                 .write(true)
                 .create_new(true)
                 .access_mode(GENERIC_READ | GENERIC_WRITE | DELETE)
-                .share_mode(FILE_SHARE_READ)
+                .share_mode(FILE_SHARE_READ | FILE_SHARE_DELETE)
                 .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
                 .open(self.display_dir.join(&id))
                 .map_err(ioerr)?;
             let value = info(&file)?;
             let entry = Entry {
                 file,
+                published: false,
                 identity: identity(&value),
                 bytes: bytes.len(),
                 last: now,
@@ -784,13 +844,14 @@ mod windows_platform {
             let entry = state.entries.get_mut(&id).unwrap();
             let result = write(&mut entry.file, bytes)
                 .map_err(ioerr)
-                .and_then(|_| validate(entry, bytes.len()));
+                .and_then(|_| validate(entry, bytes.len()))
+                .and_then(|_| publish_read_handle(entry));
             if let Err(error) = result {
                 state.write_failed = true;
-                let entry = state.entries.get(&id).unwrap();
+                let entry = state.entries.get_mut(&id).unwrap();
                 if info(&entry.file)
                     .is_ok_and(|v| identity(&v) == entry.identity && v.nNumberOfLinks == 1)
-                    && delete_owned(&entry.file).is_ok()
+                    && delete_entry(entry).is_ok()
                 {
                     state.entries.remove(&id);
                     state.bytes -= bytes.len();
@@ -813,8 +874,11 @@ mod windows_platform {
         ) -> Result<ReportChunk, String> {
             let mut state = self.state.lock().map_err(|_| "artifact store poisoned")?;
             let now = (self.clock)();
-            self.expire(&mut state, now)?;
+            let _ = self.expire(&mut state, now);
             let entry = state.entries.get_mut(id).ok_or("artifact not found")?;
+            if now.saturating_duration_since(entry.last) >= TTL {
+                return Err("artifact expired but cleanup is blocked".into());
+            }
             if !entry.mime.starts_with("text/") && entry.mime != "application/json" {
                 return Err("artifact is not text".into());
             }
@@ -895,6 +959,33 @@ mod windows_platform {
             store.maintenance().unwrap();
             assert!(store.state.lock().unwrap().entries.is_empty());
             assert_eq!(store.state.lock().unwrap().bytes, 0);
+            let blocked = store.write(b"blocked", "text/plain").unwrap();
+            let reader = OpenOptions::new()
+                .access_mode(GENERIC_READ)
+                .share_mode(FILE_SHARE_READ)
+                .open(&blocked.path)
+                .unwrap();
+            ticks.store(3665, Ordering::SeqCst);
+            let removable = store.write(b"removable", "text/plain").unwrap();
+            ticks.store(7265, Ordering::SeqCst);
+            assert!(store.maintenance().is_err());
+            assert!(!store
+                .state
+                .lock()
+                .unwrap()
+                .entries
+                .contains_key(&removable.id));
+            assert!(store.read_report(&removable.id, 0, 16).is_err());
+            assert!(store.read_report(&blocked.id, 0, 16).is_err());
+            assert_eq!(store.state.lock().unwrap().bytes, 7);
+            let current = store.write(b"current", "text/plain").unwrap();
+            assert_eq!(
+                store.read_report(&current.id, 0, 16).unwrap().content,
+                "current"
+            );
+            drop(reader);
+            store.maintenance().unwrap();
+            assert!(!blocked.path.exists());
         }
         #[test]
         fn windows_byte_quota_and_file_ceiling() {
@@ -942,7 +1033,29 @@ mod windows_platform {
             let outside = root.path().join("outside");
             std::fs::write(&outside, b"secret").unwrap();
             let store = ArtifactStore::new(&root.path().join("root")).unwrap();
+            assert!(
+                std::fs::rename(root.path().join("root"), root.path().join("before-write"))
+                    .is_err()
+            );
             let artifact = store.write(b"public", "text/plain").unwrap();
+            let mut reader = OpenOptions::new()
+                .access_mode(GENERIC_READ)
+                .share_mode(FILE_SHARE_READ)
+                .open(&artifact.path)
+                .expect("published artifact must support read-only path consumers");
+            let mut content = String::new();
+            reader.read_to_string(&mut content).unwrap();
+            assert_eq!(content, "public");
+            assert!(store
+                .evict(&mut store.state.lock().unwrap(), &artifact.id)
+                .is_err());
+            assert_eq!(
+                store.read_report(&artifact.id, 0, 8).unwrap().content,
+                "public"
+            );
+            assert_eq!(store.state.lock().unwrap().bytes, 6);
+            assert_eq!(store.state.lock().unwrap().entries.len(), 1);
+            drop(reader);
             assert!(std::fs::remove_file(&artifact.path).is_err());
             assert!(std::fs::rename(&artifact.path, root.path().join("moved")).is_err());
             assert!(OpenOptions::new().write(true).open(&artifact.path).is_err());
