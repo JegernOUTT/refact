@@ -20,6 +20,19 @@ on:
       - "rust-toolchain.toml"
       - ".github/workflows/agent_engine_check.yml"
   workflow_dispatch:
+    inputs:
+      browser_artifacts_only:
+        description: Run focused Windows browser artifact qualification
+        type: boolean
+        default: false
+      browser_artifact_witnesses:
+        description: Execute and restore controlled Windows artifact and startup faults
+        type: boolean
+        default: false
+      expected_sha:
+        description: Exact qualification revision to execute
+        type: string
+        default: ""
 
 concurrency:
   group: engine-check-${{ github.ref }}
@@ -38,7 +51,7 @@ env:
 jobs:
   check:
     name: Engine correctness (Linux x86_64)
-    if: ${{ github.event_name != 'push' || github.ref == 'refs/heads/main' }}
+    if: ${{ !inputs.browser_artifacts_only && (github.event_name != 'push' || github.ref == 'refs/heads/main') }}
     runs-on: ubuntu-22.04
     steps:
       - name: Checkout repository
@@ -90,7 +103,7 @@ jobs:
 
   platform-tests:
     name: Platform tests (${{ matrix.target }})
-    if: ${{ github.event_name != 'push' || startsWith(github.ref, 'refs/tags/') }}
+    if: ${{ !inputs.browser_artifacts_only && (github.event_name != 'push' || startsWith(github.ref, 'refs/tags/')) }}
     env:
       REFACT_SKIP_GUI_BUILD: "1"
     strategy:
@@ -186,3 +199,59 @@ jobs:
           RUST_MIN_STACK: "16777216"
           OPENSSL_STATIC: "1"
         run: cargo test --workspace --exclude refact-lsp --profile ci-test --test '*' --target ${{ matrix.target }}
+
+  browser-artifacts-windows:
+    name: Browser artifact qualification (Windows x86_64)
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.browser_artifacts_only }}
+    runs-on: windows-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    env:
+      RUST_MIN_STACK: "16777216"
+      BROWSER_QUALIFICATION_SHA: ${{ inputs.expected_sha }}
+    steps:
+      - name: Checkout qualification revision
+        uses: actions/checkout@v4
+
+      - name: Verify qualification revision
+        shell: bash
+        run: |
+          test -n "$BROWSER_QUALIFICATION_SHA"
+          test "$(git rev-parse HEAD)" = "$BROWSER_QUALIFICATION_SHA"
+
+      - name: Install stable Rust without local development defaults
+        shell: bash
+        run: |
+          rm -f ../../.cargo/config.toml
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --no-self-update
+
+      - name: Restore browser crate build cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: refact-agent/engine -> target
+          key: browser-artifacts-windows-msvc-v1
+          cache-bin: false
+
+      - name: Verify browser crate and artifact consumers
+        shell: bash
+        run: |
+          git rev-parse HEAD
+          cargo test --locked --profile ci-test -p refact-browser --lib -- --nocapture --test-threads=1
+
+      - name: Verify pending Chrome startup pipe deadline
+        shell: bash
+        run: cargo test --locked --profile ci-test -p headless_chrome --lib pending_stderr_obeys_original_startup_deadline -- --nocapture --test-threads=1
+
+      - name: Execute controlled production fault witnesses
+        if: ${{ inputs.browser_artifact_witnesses }}
+        shell: bash
+        run: python ../../tools/dev/browser_artifact_witness.py
+
+      - name: Retain fault witness evidence
+        if: ${{ always() && inputs.browser_artifact_witnesses }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-artifact-witness-${{ github.sha }}
+          path: refact-agent/engine/target/browser-artifact-witness/
+          retention-days: 14

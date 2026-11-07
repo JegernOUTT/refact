@@ -387,6 +387,7 @@ async fn differentiator_09_tab_log_and_runtime_buffers_keep_independent_cursors(
     let report = execute_request_with_runtime(
         runtime.clone(),
         BrowserActionRequest {
+            acknowledge_session_generation: None,
             continue_on_error: false,
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
@@ -535,6 +536,7 @@ async fn differentiator_12_password_masking_survives_final_serialization() {
     let report = execute_request_with_runtime(
         runtime.clone(),
         BrowserActionRequest {
+            acknowledge_session_generation: None,
             continue_on_error: false,
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,

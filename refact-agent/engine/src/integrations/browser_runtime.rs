@@ -10,6 +10,34 @@ pub use refact_browser::*;
 
 use crate::http::routers::v1::browser_settings;
 
+/// Bound cancellable waits only: never use this around a launch worker or publication.
+pub(crate) async fn before_deadline<T>(
+    deadline: Instant,
+    future: impl std::future::Future<Output = T>,
+) -> Result<T, String> {
+    check_deadline(deadline)?;
+    tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), future)
+        .await
+        .map_err(|_| {
+            "Browser request deadline exceeded; no further action was dispatched".to_string()
+        })
+}
+
+fn check_deadline(deadline: Instant) -> Result<(), String> {
+    if Instant::now() >= deadline {
+        Err("Browser request deadline exceeded; no further action was dispatched".into())
+    } else {
+        Ok(())
+    }
+}
+
+fn command_before<T>(deadline: Instant, execute: impl FnOnce() -> T) -> T {
+    tokio::task::block_in_place(|| {
+        let _guard = headless_chrome::browser::transport::CommandDeadlineGuard::new(deadline);
+        execute()
+    })
+}
+
 pub fn get_browser_profile_dir(gcx_cache_dir: &PathBuf, thread_id: &str) -> PathBuf {
     gcx_cache_dir.join("browser_profiles").join(thread_id)
 }
@@ -343,7 +371,7 @@ pub fn clear_stale_profile_lock(profile_dir: &Path) -> Result<(), String> {
                 profile_dir.display(),
                 lock.pid,
                 lock.host
-            ))
+            ));
         }
         ProfileLockState::Foreign(lock) => {
             return Err(format!(
@@ -354,7 +382,7 @@ pub fn clear_stale_profile_lock(profile_dir: &Path) -> Result<(), String> {
                 lock.host,
                 local_hostname(),
                 profile_dir.display()
-            ))
+            ));
         }
     };
     let pid = lock.pid;
@@ -431,19 +459,47 @@ async fn take_browser_runtime(
     runtime_id: &str,
     delete_profile: bool,
 ) -> Option<Arc<AMutex<BrowserRuntime>>> {
-    let removed = app
-        .integrations
-        .browser_runtimes
-        .lock()
-        .await
-        .remove(runtime_id)?;
+    take_browser_runtime_before_deadline(
+        app,
+        runtime_id,
+        delete_profile,
+        Instant::now() + Duration::from_secs(300),
+    )
+    .await
+    .ok()
+    .flatten()
+}
+
+async fn take_browser_runtime_before_deadline(
+    app: &crate::app_state::AppState,
+    runtime_id: &str,
+    delete_profile: bool,
+    deadline: Instant,
+) -> Result<Option<Arc<AMutex<BrowserRuntime>>>, String> {
+    let removed = before_deadline(deadline, app.integrations.browser_runtimes.lock())
+        .await?
+        .remove(runtime_id);
+    let Some(removed) = removed else {
+        return Ok(None);
+    };
     let (pid, profile_dir) = match unindex_runtime_owner(runtime_id) {
-        Some(ownership) => (
-            ownership.process_id(),
-            ownership.profile_dir().to_path_buf(),
-        ),
-        None => match tokio::time::timeout(RUNTIME_LOCK_GRACE, removed.lock()).await {
-            Ok(rt) => (rt.browser.get_process_id(), rt.profile_dir.clone()),
+        Some(ownership) => {
+            ownership.invalidate();
+            (
+                ownership.process_id(),
+                ownership.profile_dir().to_path_buf(),
+            )
+        }
+        None => match tokio::time::timeout(
+            RUNTIME_LOCK_GRACE.min(deadline.saturating_duration_since(Instant::now())),
+            removed.lock(),
+        )
+        .await
+        {
+            Ok(rt) => {
+                rt.ownership.invalidate();
+                (rt.browser.get_process_id(), rt.profile_dir.clone())
+            }
             Err(_) => {
                 warn!(
                     "BrowserRuntime {runtime_id} is busy and has no ownership record; \
@@ -461,7 +517,7 @@ async fn take_browser_runtime(
     {
         warn!("Browser shutdown task for runtime {runtime_id} failed: {error}");
     }
-    Some(removed)
+    Ok(Some(removed))
 }
 
 /// Dropping the last handle of a runtime makes headless_chrome `wait()` for its Chrome child;
@@ -503,11 +559,15 @@ pub async fn discard_browser_runtime(app: crate::app_state::AppState, runtime_id
 
 pub const RUNTIME_RELEASE_TIMEOUT: Duration = Duration::from_secs(10);
 
-async fn release_runtime_and_wait(removed: Option<Arc<AMutex<BrowserRuntime>>>, runtime_id: &str) {
+async fn release_runtime_and_wait_before_deadline(
+    removed: Option<Arc<AMutex<BrowserRuntime>>>,
+    runtime_id: &str,
+    request_deadline: Instant,
+) {
     let Some(removed) = removed else {
         return;
     };
-    let deadline = std::time::Instant::now() + RUNTIME_RELEASE_TIMEOUT;
+    let deadline = request_deadline.min(std::time::Instant::now() + RUNTIME_RELEASE_TIMEOUT);
     while Arc::strong_count(&removed) > 1 {
         if std::time::Instant::now() >= deadline {
             warn!(
@@ -732,22 +792,55 @@ pub async fn launch_with_lock_recovery(
     options: BrowserLaunchOptions,
     previous_pid: Option<u32>,
 ) -> Result<BrowserRuntime, String> {
-    wait_for_profile_release(&profile_dir, previous_pid, PROFILE_RELEASE_TIMEOUT).await;
+    launch_with_lock_recovery_before_deadline(
+        profile_dir,
+        options,
+        previous_pid,
+        Instant::now() + Duration::from_secs(300),
+    )
+    .await
+}
+
+pub async fn launch_with_lock_recovery_before_deadline(
+    profile_dir: PathBuf,
+    options: BrowserLaunchOptions,
+    previous_pid: Option<u32>,
+    deadline: Instant,
+) -> Result<BrowserRuntime, String> {
+    check_deadline(deadline)?;
+    wait_for_profile_release(
+        &profile_dir,
+        previous_pid,
+        PROFILE_RELEASE_TIMEOUT.min(deadline.saturating_duration_since(Instant::now())),
+    )
+    .await;
+    check_deadline(deadline)?;
     clear_stale_profile_lock(&profile_dir)
         .map_err(|error| format!("{error}; the previous browser never exited"))?;
     let mut attempt = 1;
     loop {
+        check_deadline(deadline)?;
         let launch_dir = profile_dir.clone();
         let launch_options = options.clone();
-        let outcome =
-            tokio::task::spawn_blocking(move || BrowserRuntime::launch(launch_dir, launch_options))
-                .await
-                .map_err(|error| format!("browser launch task failed: {error}"))
-                .and_then(|outcome| outcome);
+        let outcome = tokio::task::spawn_blocking(move || {
+            let _guard = headless_chrome::browser::transport::CommandDeadlineGuard::new(deadline);
+            check_deadline(deadline)?;
+            let runtime = BrowserRuntime::launch(launch_dir, launch_options)?;
+            // The worker retains ownership through cleanup; no detached launch can publish later.
+            if let Err(error) = check_deadline(deadline) {
+                drop(runtime);
+                return Err(error);
+            }
+            Ok(runtime)
+        })
+        .await
+        .map_err(|error| format!("browser launch task failed: {error}"))
+        .and_then(|outcome| outcome);
         let error = match outcome {
             Ok(runtime) => return Ok(runtime),
             Err(error) => error,
         };
+        check_deadline(deadline)?;
         let lock = profile_lock_state(&profile_dir);
         if !should_retry_launch(&error, attempt, &lock) {
             return Err(format!(
@@ -764,7 +857,11 @@ pub async fn launch_with_lock_recovery(
         if let ProfileLockState::Stale(_) = lock {
             clear_stale_profile_lock(&profile_dir)?;
         }
-        tokio::time::sleep(browser_settings::current().relaunch_settle()).await;
+        before_deadline(
+            deadline,
+            tokio::time::sleep(browser_settings::current().relaunch_settle()),
+        )
+        .await?;
         attempt += 1;
     }
 }
@@ -1023,6 +1120,45 @@ pub async fn ensure_frame_emitter(
     }
 }
 
+/// Preflight-only recovery. Never resumes a dispatched batch or replaces a live process.
+pub async fn reconnect_runtime_for_chat(
+    app: crate::app_state::AppState,
+    chat_id: &str,
+) -> Result<ReconnectOutcome, String> {
+    reconnect_runtime_for_chat_before_deadline(
+        app,
+        chat_id,
+        Instant::now() + Duration::from_secs(300),
+    )
+    .await
+}
+
+pub async fn reconnect_runtime_for_chat_before_deadline(
+    app: crate::app_state::AppState,
+    chat_id: &str,
+    deadline: Instant,
+) -> Result<ReconnectOutcome, String> {
+    let lock = relaunch_lock_for_chat(chat_id);
+    let _guard = before_deadline(deadline, lock.lock()).await?;
+    let (id, runtime) = before_deadline(deadline, find_runtime_by_chat_id(app, chat_id))
+        .await?
+        .ok_or("No browser runtime to reconnect")?;
+    let owner = runtime_owner_record(&id).ok_or("No browser ownership record")?;
+    if !owner.is_current_generation()
+        || !owner.owns_browser_process()
+        || !owner.process_id().is_some_and(pid_is_alive)
+    {
+        return Err("Reconnect refused: original owned process is not alive".into());
+    }
+    let mut runtime = tokio::time::timeout(
+        RUNTIME_LOCK_GRACE.min(deadline.saturating_duration_since(Instant::now())),
+        runtime.lock(),
+    )
+    .await
+    .map_err(|_| "Reconnect refused: runtime busy; live browser retained")?;
+    command_before(deadline, || runtime.reconnect_same_process())
+}
+
 pub async fn relaunch_runtime_for_chat(
     app: crate::app_state::AppState,
     chat_id: &str,
@@ -1030,34 +1166,81 @@ pub async fn relaunch_runtime_for_chat(
     launch_options: BrowserLaunchOptions,
     window_bounds: Option<refact_chat_api::WindowBounds>,
 ) -> Result<String, String> {
+    relaunch_runtime_for_chat_before_deadline(
+        app,
+        chat_id,
+        profile_dir,
+        launch_options,
+        window_bounds,
+        Instant::now() + Duration::from_secs(300),
+    )
+    .await
+}
+
+pub async fn relaunch_runtime_for_chat_before_deadline(
+    app: crate::app_state::AppState,
+    chat_id: &str,
+    profile_dir: PathBuf,
+    launch_options: BrowserLaunchOptions,
+    window_bounds: Option<refact_chat_api::WindowBounds>,
+    deadline: Instant,
+) -> Result<String, String> {
+    check_deadline(deadline)?;
     let options = BrowserLaunchOptions {
         window_bounds: window_bounds.or(launch_options.window_bounds.clone()),
         ..launch_options
     };
 
     let relaunch_lock = relaunch_lock_for_chat(chat_id);
-    let _relaunch_guard = relaunch_lock.lock().await;
+    let _relaunch_guard = before_deadline(deadline, relaunch_lock.lock()).await?;
 
     let mut previous_pid = None;
-    let previous_emitter_active = match find_runtime_by_chat_id(app.clone(), chat_id).await {
+    let previous_emitter_active = match before_deadline(
+        deadline,
+        find_runtime_by_chat_id(app.clone(), chat_id),
+    )
+    .await?
+    {
         Some((runtime_id, runtime_arc)) => {
-            let (emitter_active, usable) =
-                match tokio::time::timeout(RUNTIME_LOCK_GRACE, runtime_arc.lock()).await {
-                    Ok(mut rt) => {
-                        let same_mode = rt.launch_options.headless == options.headless;
-                        let usable =
-                            same_mode && tokio::task::block_in_place(|| rt.check_connection());
-                        (rt.frame_emitter_active, usable)
+            // Capture ownership before waiting for the execution lock. Socket failure alone
+            // must never authorize killing a live owned process.
+            let owner = runtime_owner_record(&runtime_id);
+            let original_alive = owner
+                .as_ref()
+                .is_some_and(|o| o.process_id().is_some_and(pid_is_alive));
+            let (emitter_active, usable) = match tokio::time::timeout(
+                RUNTIME_LOCK_GRACE.min(deadline.saturating_duration_since(Instant::now())),
+                runtime_arc.lock(),
+            )
+            .await
+            {
+                Ok(mut rt) => {
+                    let same_mode = rt.launch_options.headless == options.headless;
+                    let process_alive = rt.ownership.process_id().is_none_or(pid_is_alive);
+                    let usable = same_mode
+                        && process_alive
+                        && command_before(deadline, || rt.check_connection());
+                    if !usable && original_alive && same_mode {
+                        command_before(deadline, || rt.reconnect_same_process())?;
+                        return Ok(runtime_id);
                     }
-                    Err(_) => {
-                        warn!(
-                            "BrowserRuntime {} for chat {} did not release its lock within {:?}; \
-                             replacing it without waiting",
-                            runtime_id, chat_id, RUNTIME_LOCK_GRACE
+                    (rt.frame_emitter_active, usable)
+                }
+                Err(_) => {
+                    if original_alive {
+                        return Err(
+                            "Browser runtime busy; live owned browser retained, not relaunched"
+                                .into(),
                         );
-                        (false, false)
                     }
-                };
+                    warn!(
+                        "BrowserRuntime {} for chat {} did not release its lock within {:?}; \
+                             replacing it without waiting",
+                        runtime_id, chat_id, RUNTIME_LOCK_GRACE
+                    );
+                    (false, false)
+                }
+            };
             if usable {
                 info!(
                     "BrowserRuntime {} is already live for chat {}, reusing it instead of relaunching",
@@ -1067,39 +1250,63 @@ pub async fn relaunch_runtime_for_chat(
             }
             drop(runtime_arc);
             previous_pid = runtime_owner_record(&runtime_id).and_then(|owner| owner.process_id());
-            let removed = take_browser_runtime(&app, &runtime_id, false).await;
-            release_runtime_and_wait(removed, &runtime_id).await;
-            tokio::time::sleep(browser_settings::current().relaunch_settle()).await;
+            let removed =
+                take_browser_runtime_before_deadline(&app, &runtime_id, false, deadline).await?;
+            release_runtime_and_wait_before_deadline(removed, &runtime_id, deadline).await;
+            before_deadline(
+                deadline,
+                tokio::time::sleep(browser_settings::current().relaunch_settle()),
+            )
+            .await?;
             emitter_active
         }
         None => false,
     };
 
     let mode = options.mode_label();
-    let mut runtime = launch_with_lock_recovery(profile_dir, options, previous_pid)
-        .await
-        .map_err(|error| format!("Failed to relaunch browser in {mode} mode: {error}"))?;
+    let mut runtime =
+        launch_with_lock_recovery_before_deadline(profile_dir, options, previous_pid, deadline)
+            .await
+            .map_err(|error| format!("Failed to relaunch browser in {mode} mode: {error}"))?;
     runtime.reattach(chat_id);
     runtime.fence_after_relaunch(RELAUNCH_FENCE);
-    let runtime_id = register_browser_runtime(app.clone(), runtime).await;
-
-    let runtime_arc = {
-        let browser_runtimes = app.integrations.browser_runtimes.clone();
-        let browser_runtimes = browser_runtimes.lock().await;
-        browser_runtimes.get(&runtime_id).cloned()
-    };
-    if let Some(runtime_arc) = runtime_arc {
-        let mut rt = runtime_arc.lock().await;
-        if let Err(e) = setup_recording_for_runtime(&mut rt) {
-            warn!(
-                "Browser recording setup failed after {} relaunch (non-fatal): {}",
-                mode, e
-            );
-        }
+    // Configure before publication, retaining ownership on any deadline failure.
+    runtime.set_allowed_roots(workspace_roots(&app));
+    if let Err(error) = check_deadline(deadline) {
+        command_before(deadline, || drop(runtime));
+        return Err(error);
     }
-
+    if let Err(error) = command_before(deadline, || setup_recording_for_runtime(&mut runtime)) {
+        warn!("Browser recording setup failed after {mode} relaunch (non-fatal): {error}");
+    }
+    let runtime_id = runtime.runtime_id.clone();
+    let mut runtimes =
+        match before_deadline(deadline, app.integrations.browser_runtimes.lock()).await {
+            Ok(runtimes) => runtimes,
+            Err(error) => {
+                command_before(deadline, || drop(runtime));
+                return Err(error);
+            }
+        };
+    if let Err(error) = check_deadline(deadline) {
+        drop(runtimes);
+        command_before(deadline, || drop(runtime));
+        return Err(error);
+    }
+    index_runtime_owner(&runtime.ownership);
     if previous_emitter_active {
-        ensure_frame_emitter(app, chat_id, &runtime_id).await;
+        runtime.frame_emitter_active = true;
+    }
+    runtimes.insert(runtime_id.clone(), Arc::new(AMutex::new(runtime)));
+    drop(runtimes);
+    if previous_emitter_active {
+        tokio::spawn(
+            crate::http::routers::v1::v1_browser::browser_frame_emission_task(
+                app.gcx.clone(),
+                chat_id.to_string(),
+                runtime_id.clone(),
+            ),
+        );
     }
 
     info!(
@@ -1268,15 +1475,10 @@ enum RuntimeCheck {
 /// as wedged so its process gets replaced.
 async fn check_busy_runtime(runtime_id: &str, ownership: Arc<RuntimeOwnership>) -> RuntimeCheck {
     let probe = ownership.clone();
-    let outcome = tokio::time::timeout(
-        HEALTH_PROBE_TIMEOUT,
-        tokio::task::spawn_blocking(move || probe.probe_connection()),
-    )
-    .await;
-    let connected = match outcome {
-        Ok(Ok(Some(connected))) => Some(connected),
-        Ok(Ok(None)) | Ok(Err(_)) | Err(_) => None,
-    };
+    let connected = tokio::task::spawn_blocking(move || probe.probe_connection())
+        .await
+        .ok()
+        .flatten();
     match connected {
         Some(true) => return RuntimeCheck::Healthy,
         Some(false) => {
@@ -1353,6 +1555,12 @@ pub async fn browser_monitor_background_task(app: crate::app_state::AppState) {
 
             let check = match tokio::time::timeout(MONITOR_LOCK_TIMEOUT, runtime_arc.lock()).await {
                 Ok(mut rt) => RuntimeCheck::Inspected(tokio::task::block_in_place(|| {
+                    let _deadline = headless_chrome::browser::transport::CommandDeadlineGuard::new(
+                        Instant::now() + Duration::from_secs(5),
+                    );
+                    if let Err(error) = rt.maintain_artifacts() {
+                        warn!("Browser artifact maintenance failed: {error}");
+                    }
                     refact_browser::adopt_new_tabs(&mut rt, None);
                     let was_connected = rt.is_connected;
                     let still_connected = rt.check_connection();
@@ -1415,6 +1623,14 @@ pub async fn browser_monitor_background_task(app: crate::app_state::AppState) {
                 if let Some(chat_id) = &chat_id {
                     budgets.remove(chat_id);
                 }
+                continue;
+            }
+
+            // Disconnected live browsers are retained for qualified preflight reconnect.
+            // Monitor retirement/relaunch is never permission to destroy in-page state.
+            if runtime_owner_record(rid)
+                .is_some_and(|owner| owner.process_id().is_some_and(pid_is_alive))
+            {
                 continue;
             }
 
@@ -1483,7 +1699,11 @@ pub async fn browser_monitor_background_task(app: crate::app_state::AppState) {
                         delay,
                         error
                     );
-                    remove_browser_runtime(app.clone(), &plan.runtime_id).await;
+                    if !runtime_owner_record(&plan.runtime_id)
+                        .is_some_and(|owner| owner.process_id().is_some_and(pid_is_alive))
+                    {
+                        remove_browser_runtime(app.clone(), &plan.runtime_id).await;
+                    }
                 }
             }
         }

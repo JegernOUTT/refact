@@ -250,6 +250,7 @@ async fn a_default_navigate_batch_returns_a_snapshot_context_and_zero_images() {
     let report = execute_request_with_runtime(
         runtime,
         BrowserActionRequest {
+            acknowledge_session_generation: None,
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
             attach_screenshot: None,
@@ -310,6 +311,7 @@ async fn transactional_report_settles_fetch_and_returns_console_once() {
     case.setup_world();
     let runtime = Arc::new(tokio::sync::Mutex::new(case.runtime));
     let request = BrowserActionRequest {
+        acknowledge_session_generation: None,
         session: SessionPolicy::SharedDefault,
         target: TabTarget::Active,
         attach_screenshot: None,
@@ -346,6 +348,7 @@ async fn transactional_report_settles_fetch_and_returns_console_once() {
         execute_request_with_runtime(
             runtime,
             BrowserActionRequest {
+                acknowledge_session_generation: None,
                 session: SessionPolicy::SharedDefault,
                 target: TabTarget::Active,
                 attach_screenshot: None,
@@ -378,6 +381,7 @@ async fn status_filtered_response_wait_skips_the_first_failure_and_matches_the_r
     let report = execute_request_with_runtime(
         runtime,
         BrowserActionRequest {
+            acknowledge_session_generation: None,
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
             attach_screenshot: None,
@@ -436,6 +440,7 @@ async fn console_wait_catches_a_delayed_error_and_ignores_quieter_levels() {
     let report = execute_request_with_runtime(
         runtime,
         BrowserActionRequest {
+            acknowledge_session_generation: None,
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
             attach_screenshot: None,
@@ -486,6 +491,7 @@ async fn network_waits_coexist_with_locator_handlers_and_dialogs_in_one_batch() 
     let report = execute_request_with_runtime(
         runtime,
         BrowserActionRequest {
+            acknowledge_session_generation: None,
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
             attach_screenshot: None,
@@ -691,6 +697,7 @@ async fn an_idle_session_outlives_its_own_idle_eviction_window() {
     let report = execute_request_with_runtime(
         runtime,
         BrowserActionRequest {
+            acknowledge_session_generation: None,
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
             attach_screenshot: None,
@@ -712,7 +719,53 @@ async fn an_idle_session_outlives_its_own_idle_eviction_window() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
-async fn dead_cdp_transport_is_relaunched_and_the_batch_is_retried_once() {
+async fn same_process_reconnect_preserves_document_without_replaying_actions() {
+    let Some(mut case) = BrowserCase::start("delayed-button.html").await else {
+        return;
+    };
+    case.setup_world();
+    case.tab
+        .evaluate(
+            "window.__reconnectSentinel = {count: 1}; document.body.dataset.reconnect = 'kept'",
+            false,
+        )
+        .unwrap();
+    case.runtime.checkpoint_document_identity().unwrap();
+    let pid = case.runtime.ownership.process_id().unwrap();
+    let runtime_id = case.runtime.runtime_id.clone();
+    let epoch = case.runtime.ownership.connection_epoch();
+    let target = case.tab.get_target_id().to_string();
+    {
+        let _deadline = headless_chrome::browser::transport::CommandDeadlineGuard::new(
+            std::time::Instant::now(),
+        );
+        let error = case.runtime.reconnect_same_process().unwrap_err();
+        assert!(error.contains("original deadline elapsed"), "{error}");
+        assert_eq!(case.runtime.ownership.connection_epoch(), epoch);
+        assert_eq!(case.runtime.ownership.process_id(), Some(pid));
+    }
+    case.runtime.browser.disconnect_transport();
+    assert!(refact_lsp::integrations::browser_runtime::pid_is_alive(pid));
+    let outcome = case.runtime.reconnect_same_process().unwrap();
+    assert!(outcome.same_state_verified, "{outcome:?}");
+    assert_eq!(outcome.runtime_id, runtime_id);
+    assert_eq!(outcome.connection_epoch, epoch + 1);
+    assert!(!case.runtime.ownership.is_connection_epoch(epoch));
+    assert_eq!(case.runtime.ownership.process_id(), Some(pid));
+    let tab = case.runtime.get_active_tab().unwrap();
+    assert_eq!(tab.get_target_id(), &target);
+    let rendered = tab
+        .evaluate("JSON.stringify({count: window.__reconnectSentinel.count, marker: document.body.dataset.reconnect})", false)
+        .unwrap()
+        .value
+        .unwrap();
+    let value: serde_json::Value = serde_json::from_str(rendered.as_str().unwrap()).unwrap();
+    assert_eq!(value, serde_json::json!({"count": 1, "marker": "kept"}));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn dead_cdp_preflight_requires_current_generation_acknowledgement() {
     let Some(mut case) = BrowserCase::start("delayed-button.html").await else {
         return;
     };
@@ -747,33 +800,36 @@ async fn dead_cdp_transport_is_relaunched_and_the_batch_is_retried_once() {
             .await
             .expect("registered runtime must resolve by chat id");
 
-    {
-        let mut rt = runtime_arc.lock().await;
-        let session = rt.cdp_session().expect("raw cdp session must connect");
-        let _ = session.send("Browser.close", None, None);
-    }
+    let pid = runtime_arc
+        .lock()
+        .await
+        .browser
+        .get_process_id()
+        .expect("fixture owns a Chrome process");
+    #[cfg(unix)]
+    assert_eq!(unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) }, 0);
+    #[cfg(windows)]
+    assert!(std::process::Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/T", "/F"])
+        .status()
+        .unwrap()
+        .success());
     for _ in 0..50 {
-        let dead = {
-            let mut rt = runtime_arc.lock().await;
-            !rt.check_connection()
-        };
-        if dead {
+        if !refact_lsp::integrations::browser_runtime::pid_is_alive(pid) {
             break;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    {
-        let mut rt = runtime_arc.lock().await;
-        assert!(
-            !rt.check_connection(),
-            "closing the browser must kill the cdp transport"
-        );
-    }
+    assert!(
+        !refact_lsp::integrations::browser_runtime::pid_is_alive(pid),
+        "fixture Chrome must exit before testing preflight recovery"
+    );
 
     let report =
         refact_lsp::integrations::browser_controller::execute_request_with_runtime_validated(
             runtime_arc,
             BrowserActionRequest {
+                acknowledge_session_generation: None,
                 session: SessionPolicy::SharedDefault,
                 target: TabTarget::Active,
                 attach_screenshot: None,
@@ -792,15 +848,17 @@ async fn dead_cdp_transport_is_relaunched_and_the_batch_is_retried_once() {
         .await
         .expect("dead transport must be recovered, not surfaced");
 
-    assert!(report.ok, "relaunched batch must succeed: {report:?}");
     assert!(
-        report
-            .warnings
-            .iter()
-            .any(|warning| warning == refact_lsp::integrations::browser_runtime::RELAUNCH_WARNING),
-        "recovery must be visible in the report: {:?}",
-        report.warnings
+        !report.ok,
+        "preflight replacement must not dispatch the batch"
     );
+    assert!(report.recovery.as_ref().unwrap().state_lost);
+    assert!(!report.recovery.as_ref().unwrap().retry_safe);
+    assert!(report.steps.iter().all(|step| step.skipped));
+    let generation = report
+        .session_generation
+        .clone()
+        .expect("replacement generation");
 
     let (live_runtime_id, live_runtime) =
         refact_lsp::integrations::browser_runtime::find_runtime_by_chat_id(app.clone(), CHAT_ID)
@@ -814,6 +872,29 @@ async fn dead_cdp_transport_is_relaunched_and_the_batch_is_retried_once() {
         assert_eq!(rt.profile_dir, case._profile.path());
     }
 
+    assert_eq!(generation, live_runtime_id);
+    let bootstrap = execute_request_with_runtime(
+        live_runtime.clone(),
+        serde_json::from_value(serde_json::json!({
+            "acknowledge_session_generation": generation,
+            "steps": [{"action": "open_tab", "url": case.server.url("delayed-button.html")}]
+        }))
+        .unwrap(),
+        &ImagePolicy::browser_capture(),
+    )
+    .await
+    .unwrap();
+    assert!(
+        bootstrap.ok,
+        "explicit current-generation bootstrap: {bootstrap:?}"
+    );
+    assert!(live_runtime
+        .lock()
+        .await
+        .get_active_tab()
+        .unwrap()
+        .get_url()
+        .ends_with("delayed-button.html"));
     refact_lsp::integrations::browser_runtime::remove_browser_runtime(app, &live_runtime_id).await;
 }
 
@@ -850,6 +931,7 @@ async fn artifacts_capture_page_clip_element_pdf_and_highlight_lifecycle() {
     let report = execute_request_with_runtime(
         runtime.clone(),
         BrowserActionRequest {
+            acknowledge_session_generation: None,
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
             attach_screenshot: None,
@@ -2670,6 +2752,7 @@ async fn locator_handler_clears_cookie_banner_before_click_and_records_firing() 
     let report = execute_request_with_runtime(
         runtime.clone(),
         BrowserActionRequest {
+            acknowledge_session_generation: None,
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
             attach_screenshot: None,
@@ -2730,6 +2813,7 @@ async fn locator_handler_clears_interstitial_that_appears_between_actions() {
     let report = execute_request_with_runtime(
         runtime.clone(),
         BrowserActionRequest {
+            acknowledge_session_generation: None,
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
             attach_screenshot: None,
@@ -2890,6 +2974,7 @@ async fn wait_for_popup_click_and_popup_action_share_one_batch() {
     let report = execute_request_with_runtime(
         runtime.clone(),
         BrowserActionRequest {
+            acknowledge_session_generation: None,
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
             attach_screenshot: None,
@@ -2948,6 +3033,7 @@ async fn network_routes_fulfill_abort_modify_redirects_unroute_and_reach_popups(
     let fulfill = execute_request_with_runtime(
         runtime.clone(),
         BrowserActionRequest {
+            acknowledge_session_generation: None,
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
             attach_screenshot: None,
@@ -2994,6 +3080,7 @@ async fn network_routes_fulfill_abort_modify_redirects_unroute_and_reach_popups(
     let abort = execute_request_with_runtime(
         runtime.clone(),
         BrowserActionRequest {
+            acknowledge_session_generation: None,
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
             attach_screenshot: None,
@@ -3041,6 +3128,7 @@ async fn network_routes_fulfill_abort_modify_redirects_unroute_and_reach_popups(
     let modified = execute_request_with_runtime(
         runtime.clone(),
         BrowserActionRequest {
+            acknowledge_session_generation: None,
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
             attach_screenshot: None,
@@ -3102,6 +3190,7 @@ async fn network_routes_fulfill_abort_modify_redirects_unroute_and_reach_popups(
     let unroute = execute_request_with_runtime(
         runtime.clone(),
         BrowserActionRequest {
+            acknowledge_session_generation: None,
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
             attach_screenshot: None,
@@ -3140,6 +3229,7 @@ async fn network_routes_fulfill_abort_modify_redirects_unroute_and_reach_popups(
     let popup = execute_request_with_runtime(
         runtime,
         BrowserActionRequest {
+            acknowledge_session_generation: None,
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
             attach_screenshot: None,
@@ -3203,6 +3293,7 @@ async fn newest_route_falls_back_to_the_older_handler_and_times_expires_it() {
     let chained = execute_request_with_runtime(
         runtime.clone(),
         BrowserActionRequest {
+            acknowledge_session_generation: None,
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
             attach_screenshot: None,
@@ -3263,6 +3354,7 @@ async fn newest_route_falls_back_to_the_older_handler_and_times_expires_it() {
     let expired = execute_request_with_runtime(
         runtime.clone(),
         BrowserActionRequest {
+            acknowledge_session_generation: None,
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
             attach_screenshot: None,
@@ -3297,6 +3389,7 @@ async fn fetch_and_fulfill_replays_the_real_response_with_overrides() {
     let fetched = execute_request_with_runtime(
         runtime.clone(),
         BrowserActionRequest {
+            acknowledge_session_generation: None,
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
             attach_screenshot: None,
@@ -3362,6 +3455,7 @@ async fn websocket_route_registers_page_socket_and_delivers_mock_frame() {
     let report = execute_request_with_runtime(
         runtime.clone(),
         BrowserActionRequest {
+            acknowledge_session_generation: None,
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
             attach_screenshot: None,
@@ -3461,6 +3555,7 @@ async fn intercept_case(
     let report = execute_request_with_runtime(
         runtime.clone(),
         BrowserActionRequest {
+            acknowledge_session_generation: None,
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
             attach_screenshot: None,
@@ -3843,6 +3938,7 @@ async fn dialog_fixture_auto_dismisses_confirm_and_reports_it() {
     let report = execute_request_with_runtime(
         runtime,
         BrowserActionRequest {
+            acknowledge_session_generation: None,
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
             attach_screenshot: None,
@@ -3886,6 +3982,7 @@ async fn dialog_fixture_uses_armed_accept_and_prompt_text() {
     let accept_report = execute_request_with_runtime(
         runtime.clone(),
         BrowserActionRequest {
+            acknowledge_session_generation: None,
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
             attach_screenshot: None,
@@ -3922,6 +4019,7 @@ async fn dialog_fixture_uses_armed_accept_and_prompt_text() {
     let prompt_report = execute_request_with_runtime(
         runtime,
         BrowserActionRequest {
+            acknowledge_session_generation: None,
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
             attach_screenshot: None,
@@ -5312,6 +5410,7 @@ struct ClockCase {
 
 fn clock_request(steps: Vec<BrowserStep>) -> BrowserActionRequest {
     BrowserActionRequest {
+        acknowledge_session_generation: None,
         session: SessionPolicy::SharedDefault,
         target: TabTarget::Active,
         attach_screenshot: None,
@@ -5936,6 +6035,7 @@ async fn set_content_replaces_the_document_and_is_visible_in_the_next_snapshot()
     let report = execute_request_with_runtime(
         runtime.clone(),
         BrowserActionRequest {
+            acknowledge_session_generation: None,
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
             attach_screenshot: Some(false),
@@ -5988,6 +6088,7 @@ async fn cdp_send_reaches_page_and_browser_targets_and_keeps_overrides() {
     let report = execute_request_with_runtime(
         runtime.clone(),
         BrowserActionRequest {
+            acknowledge_session_generation: None,
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
             attach_screenshot: Some(false),
@@ -6075,6 +6176,7 @@ async fn init_script_survives_navigation_and_clears_on_remove_and_reset() {
     let added = execute_request_with_runtime(
         runtime.clone(),
         BrowserActionRequest {
+            acknowledge_session_generation: None,
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
             attach_screenshot: Some(false),
@@ -6114,6 +6216,7 @@ async fn init_script_survives_navigation_and_clears_on_remove_and_reset() {
     let removed = execute_request_with_runtime(
         runtime.clone(),
         BrowserActionRequest {
+            acknowledge_session_generation: None,
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
             attach_screenshot: Some(false),
@@ -6145,6 +6248,7 @@ async fn init_script_survives_navigation_and_clears_on_remove_and_reset() {
     let reset = execute_request_with_runtime(
         runtime,
         BrowserActionRequest {
+            acknowledge_session_generation: None,
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
             attach_screenshot: Some(false),
@@ -6279,6 +6383,7 @@ async fn dispatch_event_fires_listeners_with_the_inferred_class_and_detail() {
             execute_request_with_runtime(
                 runtime,
                 BrowserActionRequest {
+                    acknowledge_session_generation: None,
                     session: SessionPolicy::SharedDefault,
                     target: TabTarget::Active,
                     attach_screenshot: Some(false),
@@ -6819,6 +6924,7 @@ async fn a_page_streaming_twelve_megabytes_of_sse_keeps_the_browser_alive() {
     let report = execute_request_with_runtime(
         runtime.clone(),
         BrowserActionRequest {
+            acknowledge_session_generation: None,
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
             attach_screenshot: None,

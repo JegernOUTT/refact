@@ -11,6 +11,8 @@ const MIN_ACTION_SUGGESTION_SCORE: usize = 3;
 #[serde(deny_unknown_fields)]
 struct BrowserActionRequestEnvelope {
     #[serde(default)]
+    acknowledge_session_generation: Option<String>,
+    #[serde(default)]
     session: SessionPolicy,
     #[serde(default)]
     target: TabTarget,
@@ -35,6 +37,7 @@ pub fn parse_browser_action_request(value: Value) -> Result<BrowserActionRequest
         steps.push(parse_browser_step(index, raw_step)?);
     }
     Ok(BrowserActionRequest {
+        acknowledge_session_generation: envelope.acknowledge_session_generation,
         session: envelope.session,
         target: envelope.target,
         attach_screenshot: envelope.attach_screenshot,

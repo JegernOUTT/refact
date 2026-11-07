@@ -106,6 +106,7 @@ docs/_build/
 # PyBuilder
 target/
 target-e2e/
+/refact-agent/engine/target-cdp-deadline/
 
 # Jupyter Notebook
 .ipynb_checkpoints

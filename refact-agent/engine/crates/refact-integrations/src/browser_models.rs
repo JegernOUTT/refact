@@ -1964,6 +1964,13 @@ pub enum BrowserStep {
     },
 
     TabLog,
+    ReadArtifact {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        offset: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<u64>,
+    },
 
     AddLocatorHandler {
         name: String,
@@ -2329,6 +2336,7 @@ impl BrowserStep {
         "remove_init_script",
         "dispatch_event",
         "tab_log",
+        "read_artifact",
         "add_locator_handler",
         "remove_locator_handler",
         "handle_dialog",
@@ -2781,6 +2789,7 @@ impl BrowserStep {
             &[],
         ),
         ("tab_log", &[], &[], &[]),
+        ("read_artifact", &["id"], &["offset", "limit"], &[]),
         (
             "add_locator_handler",
             &["handler", "locator", "name"],
@@ -2843,6 +2852,9 @@ impl PageContextMode {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BrowserActionRequest {
+    /// Compare-and-set acknowledgement of a replacement runtime, never replay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acknowledge_session_generation: Option<String>,
     #[serde(default)]
     pub session: SessionPolicy,
     #[serde(default)]
@@ -2937,6 +2949,8 @@ pub struct BrowserAssertionResult {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StepResult {
     pub step_index: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<String>,
     pub ok: bool,
     pub summary: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2965,6 +2979,7 @@ impl StepResult {
     pub fn success(step_index: usize, summary: impl Into<String>) -> Self {
         Self {
             step_index,
+            outcome: None,
             ok: true,
             summary: summary.into(),
             error: None,
@@ -2987,6 +3002,7 @@ impl StepResult {
     ) -> Self {
         Self {
             step_index,
+            outcome: None,
             ok: false,
             summary: summary.into(),
             error: Some(error.into()),
@@ -3009,6 +3025,7 @@ impl StepResult {
         );
         result.ok = false;
         result.skipped = true;
+        result.outcome = Some("skipped".to_string());
         result
     }
 
@@ -3084,7 +3101,19 @@ pub struct BrowserPageContext {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BrowserRecovery {
+    pub incomplete: bool,
+    pub state_lost: bool,
+    pub effect_unknown: bool,
+    pub retry_safe: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ExecutionReport {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_generation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery: Option<BrowserRecovery>,
     pub ok: bool,
     pub steps: Vec<StepResult>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -4002,6 +4031,11 @@ mod tests {
                 event_init: Some(serde_json::json!({"detail": 2})),
             },
             BrowserStep::TabLog,
+            BrowserStep::ReadArtifact {
+                id: "session-owned-report".to_string(),
+                offset: Some(0),
+                limit: Some(8192),
+            },
             BrowserStep::AddLocatorHandler {
                 name: "overlay".to_string(),
                 locator: locator(),
@@ -4940,6 +4974,8 @@ mod tests {
     #[test]
     fn test_execution_report_serde() {
         let report = ExecutionReport {
+            session_generation: None,
+            recovery: None,
             ok: true,
             warnings: vec!["browser session was dead; relaunched and retried".to_string()],
             steps: vec![

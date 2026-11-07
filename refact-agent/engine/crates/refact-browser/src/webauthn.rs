@@ -45,6 +45,13 @@ pub struct WebAuthnManager {
 }
 
 impl WebAuthnManager {
+    pub fn has_active_session(&self) -> bool {
+        self.sessions
+            .lock()
+            .map(|sessions| sessions.values().any(|session| session.enabled))
+            .unwrap_or(true)
+    }
+
     pub fn add_virtual_authenticator(
         &self,
         tab: &Tab,

@@ -59,6 +59,7 @@ pub struct FormError {
     pub message: String,
     pub retries: u32,
     pub actionability: Option<ActionabilityDiagnostics>,
+    pub effect_unknown: bool,
 }
 
 impl FormError {
@@ -67,6 +68,7 @@ impl FormError {
             message: message.into(),
             retries: 0,
             actionability: None,
+            effect_unknown: false,
         }
     }
 
@@ -75,12 +77,38 @@ impl FormError {
             message: message.into(),
             retries,
             actionability: None,
+            effect_unknown: false,
         }
     }
 
     fn with_actionability(mut self, actionability: Option<ActionabilityDiagnostics>) -> Self {
         self.actionability = actionability;
         self
+    }
+
+    fn unknown(message: impl Into<String>) -> Self {
+        Self {
+            effect_unknown: true,
+            ..Self::new(message)
+        }
+    }
+
+    fn from_actionability(error: crate::ActionabilityError, action: ActionKind) -> Self {
+        let effect_unknown = match &error {
+            crate::ActionabilityError::Failed {
+                diagnostic, ..
+            } => matches!(diagnostic, ActionabilityDiagnostic::EffectUnknown { .. }),
+            crate::ActionabilityError::Timeout(error) => matches!(
+                error.diagnostic,
+                ActionabilityDiagnostic::EffectUnknown { .. }
+            ),
+        };
+        let diagnostics = error.diagnostics(action);
+        Self {
+            effect_unknown,
+            ..Self::after_retries(error.to_string(), diagnostics.attempts.unwrap_or_default())
+                .with_actionability(Some(diagnostics))
+        }
     }
 }
 
@@ -139,14 +167,7 @@ fn run_actionability(
     };
     match engine.execute_form_logged("resolved form element", action, &mut driver) {
         Ok(success) => Ok(success.diagnostics(action)),
-        Err(error) => {
-            let diagnostics = error.diagnostics(action);
-            Err(FormError::after_retries(
-                error.to_string(),
-                diagnostics.attempts.unwrap_or_default(),
-            )
-            .with_actionability(Some(diagnostics)))
-        }
+        Err(error) => Err(FormError::from_actionability(error, action)),
     }
 }
 
@@ -192,7 +213,7 @@ fn trusted_click(
     let mut mouse = Mouse::new(dispatcher, &keyboard);
     let action_result = mouse.click(point.x, point.y, MouseButton::Left);
     let hit_result = hit_target.take_result(tab, world, token);
-    action_result.map_err(|error| ActionabilityDiagnostic::PrecheckFailed {
+    action_result.map_err(|error| ActionabilityDiagnostic::EffectUnknown {
         description: error.to_string(),
     })?;
     match hit_result {
@@ -202,8 +223,12 @@ fn trusted_click(
         }) => Err(ActionabilityDiagnostic::InterceptsPointerEvents {
             description,
         }),
-        Ok(HitTargetResult::NotConnected) => Err(ActionabilityDiagnostic::Detached),
-        Err(error) => Err(ActionabilityDiagnostic::PrecheckFailed {
+        Ok(HitTargetResult::NotConnected) => Err(ActionabilityDiagnostic::EffectUnknown {
+            description:
+                "Form click was dispatched, but its target disconnected before verification"
+                    .to_string(),
+        }),
+        Err(error) => Err(ActionabilityDiagnostic::EffectUnknown {
             description: error.to_string(),
         }),
     }
@@ -366,7 +391,7 @@ pub fn clear(
         FieldKind::Select => {
             let actionability =
                 run_actionability(tab, world, handle, ActionKind::SelectOption, false)?;
-            let result = call_json(
+            let result = call_mutating_json(
                 tab,
                 world,
                 handle,
@@ -388,8 +413,7 @@ pub fn clear(
   return { had_empty_option: hadEmpty };
 }"#,
                 Vec::new(),
-            )
-            .map_err(FormError::new)?;
+            )?;
             let had_empty = result
                 .get("had_empty_option")
                 .and_then(Value::as_bool)
@@ -425,7 +449,7 @@ pub fn select_option(
     value: &str,
 ) -> Result<SelectOptionOutcome, FormError> {
     let actionability = run_actionability(tab, world, handle, ActionKind::SelectOption, false)?;
-    let result = call_json(
+    let result = call_mutating_json(
         tab,
         world,
         handle,
@@ -453,7 +477,7 @@ pub fn select_option(
 }"#,
         vec![Value::String(value.to_string())],
     )
-    .map_err(|error| FormError::new(error).with_actionability(Some(actionability.clone())))?;
+    .map_err(|error| error.with_actionability(Some(actionability.clone())))?;
     if let Some(code) = result.get("error_code").and_then(Value::as_str) {
         return Err(
             FormError::new(select_option_diagnostic(code)).with_actionability(Some(actionability))
@@ -491,8 +515,9 @@ pub fn set_checked(
     if !needs_click {
         return Ok(checked_outcome(before.checked, check, Some(actionability)));
     }
-    let after = checked_state(tab, world, handle)
-        .map_err(|error| FormError::new(error).with_actionability(Some(actionability.clone())))?;
+    let after = checked_state(tab, world, handle).map_err(|error| {
+        FormError::unknown(error).with_actionability(Some(actionability.clone()))
+    })?;
     verify_checked_transition(before.checked, after.checked, check, Some(actionability))
 }
 
@@ -502,7 +527,7 @@ trait FillExecutor {
         strategy: &FillStrategy,
         text: &str,
         clear_first: bool,
-    ) -> Result<(), String>;
+    ) -> Result<(), FormError>;
     fn matches(&mut self, expected: &str) -> Result<bool, String>;
 }
 
@@ -533,7 +558,9 @@ fn run_fill<E: FillExecutor>(
                             last_error = "Verification failed: value mismatch".to_string();
                         }
                         Err(error) => {
-                            last_error = format!("Verification error: {error}");
+                            return Err(FormError::unknown(sanitize_error(
+                                field_kind, text, &error,
+                            )));
                         }
                     }
                 } else {
@@ -546,7 +573,14 @@ fn run_fill<E: FillExecutor>(
                 }
             }
             Err(error) => {
-                last_error = sanitize_error(field_kind, text, &error);
+                if error.effect_unknown {
+                    return Err(FormError {
+                        message: sanitize_error(field_kind, text, &error.message),
+                        retries,
+                        ..error
+                    });
+                }
+                last_error = sanitize_error(field_kind, text, &error.message);
             }
         }
         retries += 1;
@@ -566,9 +600,9 @@ impl FillExecutor for CdpFillExecutor<'_> {
         strategy: &FillStrategy,
         text: &str,
         clear_first: bool,
-    ) -> Result<(), String> {
+    ) -> Result<(), FormError> {
         if matches!(strategy, FillStrategy::NativeTyping) {
-            let preparation = call_json(
+            let preparation = call_mutating_json(
                 self.tab,
                 self.world,
                 self.handle,
@@ -579,7 +613,9 @@ impl FillExecutor for CdpFillExecutor<'_> {
                 return Ok(());
             }
             if preparation.get("needs_input").and_then(Value::as_bool) != Some(true) {
-                return Err("Playwright fill did not prepare the field for input".to_string());
+                return Err(FormError::new(
+                    "Playwright fill did not prepare the field for input",
+                ));
             }
             let mut keyboard = Keyboard::new(CdpKeyboardDispatcher::new(self.tab));
             if text.is_empty() {
@@ -587,8 +623,9 @@ impl FillExecutor for CdpFillExecutor<'_> {
             } else {
                 keyboard.insert_text(text)
             }
+            .map_err(FormError::unknown)
         } else {
-            call_json(
+            call_mutating_json(
                 self.tab,
                 self.world,
                 self.handle,
@@ -768,6 +805,28 @@ fn call_json(
     Ok(value)
 }
 
+fn call_mutating_json(
+    tab: &Tab,
+    world: &WorldManager,
+    handle: &ElementHandle,
+    function: &str,
+    arguments: Vec<Value>,
+) -> Result<Value, FormError> {
+    let value = world
+        .call_function_on(tab, handle, function, arguments)
+        .map_err(|error| {
+            if matches!(error, HandleError::Invalidated { .. }) {
+                FormError::new(error.to_string())
+            } else {
+                FormError::unknown(error.to_string())
+            }
+        })?;
+    if let Some(error) = value.get("error").and_then(Value::as_str) {
+        return Err(FormError::unknown(error));
+    }
+    Ok(value)
+}
+
 #[derive(Clone, Copy)]
 struct CheckedState {
     supported: bool,
@@ -895,7 +954,7 @@ mod tests {
 
     struct FakeExecutor {
         executions: Vec<FillStrategy>,
-        results: VecDeque<Result<(), String>>,
+        results: VecDeque<Result<(), FormError>>,
         matches: VecDeque<Result<bool, String>>,
     }
 
@@ -905,7 +964,7 @@ mod tests {
             strategy: &FillStrategy,
             _text: &str,
             _clear_first: bool,
-        ) -> Result<(), String> {
+        ) -> Result<(), FormError> {
             self.executions.push(strategy.clone());
             self.results.pop_front().unwrap_or(Ok(()))
         }
@@ -913,6 +972,62 @@ mod tests {
         fn matches(&mut self, _expected: &str) -> Result<bool, String> {
             self.matches.pop_front().unwrap_or(Ok(true))
         }
+    }
+
+    #[test]
+    fn uncertain_form_dispatch_stops_fill_fallback() {
+        struct Driver;
+        impl ActionabilityDriver for Driver {
+            type Output = ();
+            fn resolve(&mut self) -> LocatorOutcome {
+                LocatorOutcome::Found {
+                    preview: "input".to_string(),
+                }
+            }
+            fn element_state(&mut self) -> Result<crate::ElementState, ActionabilityDiagnostic> {
+                Ok(crate::ElementState {
+                    visible: true,
+                    enabled: true,
+                    editable: Some(true),
+                    checked: None,
+                    stable: true,
+                })
+            }
+            fn perform(&mut self) -> Result<(), ActionabilityDiagnostic> {
+                Err(ActionabilityDiagnostic::EffectUnknown {
+                    description: "dispatch reply lost".to_string(),
+                })
+            }
+        }
+        let engine =
+            ActionabilityEngine::new(SystemClock::default(), ActionabilityTimeouts::default());
+        let error = engine
+            .execute_form_logged("input", ActionKind::Fill, &mut Driver)
+            .unwrap_err();
+        let error = FormError::from_actionability(error, ActionKind::Fill);
+        assert!(
+            error.effect_unknown,
+            "typed dispatch uncertainty must survive form mapping"
+        );
+        let mut executor = FakeExecutor {
+            executions: Vec::new(),
+            results: VecDeque::from([Err(error), Ok(())]),
+            matches: VecDeque::from([Ok(true)]),
+        };
+        let result = run_fill(
+            &mut executor,
+            &FieldKind::TextInput,
+            &choose_fill_strategies(&FieldKind::TextInput),
+            "value",
+            true,
+            true,
+        );
+        assert_eq!(
+            executor.executions,
+            vec![FillStrategy::NativeTyping],
+            "unknown-effect strategy must not dispatch a fallback"
+        );
+        assert!(result.unwrap_err().effect_unknown);
     }
 
     #[test]
@@ -967,7 +1082,7 @@ mod tests {
     fn strategy_error_advances_the_pyramid() {
         let mut executor = FakeExecutor {
             executions: Vec::new(),
-            results: VecDeque::from([Err("blocked".to_string()), Ok(())]),
+            results: VecDeque::from([Err(FormError::new("blocked")), Ok(())]),
             matches: VecDeque::from([Ok(true)]),
         };
         let outcome = run_fill(

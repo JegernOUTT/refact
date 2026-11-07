@@ -254,15 +254,26 @@ fn mask_diagnostic_text(message: &str) -> String {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ActionabilityDiagnostic {
     NotFound,
-    MultipleMatches { count: usize, previews: Vec<String> },
+    MultipleMatches {
+        count: usize,
+        previews: Vec<String>,
+    },
     NotVisible,
     NotStable,
     NotEnabled,
     NotEditable,
     OutsideViewport,
     Detached,
-    InterceptsPointerEvents { description: String },
-    PrecheckFailed { description: String },
+    InterceptsPointerEvents {
+        description: String,
+    },
+    PrecheckFailed {
+        description: String,
+    },
+    /// Dispatch may already have happened: never retry this action.
+    EffectUnknown {
+        description: String,
+    },
 }
 
 impl ActionabilityDiagnostic {
@@ -286,6 +297,9 @@ impl ActionabilityDiagnostic {
                 format!("{description} intercepts pointer events")
             }
             Self::PrecheckFailed {
+                description,
+            }
+            | Self::EffectUnknown {
                 description,
             } => description.clone(),
         }
@@ -848,6 +862,17 @@ impl<C: Clock> ActionabilityEngine<C> {
                                 receives_events,
                             });
                         }
+                        ActionLoopResult::Fatal(diagnostic) => {
+                            return Err(ActionabilityError::Failed {
+                                diagnostic,
+                                call_log,
+                                elapsed: self.clock.now().saturating_sub(started_at),
+                                attempts,
+                                attached,
+                                state: last_state,
+                                receives_events,
+                            });
+                        }
                         ActionLoopResult::RetryLocator => {}
                         ActionLoopResult::TimedOut => {
                             return Err(timeout_error(
@@ -1007,6 +1032,9 @@ impl<C: Clock> ActionabilityEngine<C> {
                     Err(diagnostic) => {
                         call_log.push(diagnostic.log_line());
                         *last_diagnostic = diagnostic.clone();
+                        if terminal_action_diagnostic(&diagnostic) {
+                            return ActionLoopResult::Fatal(diagnostic);
+                        }
                         if diagnostic == ActionabilityDiagnostic::Detached {
                             return ActionLoopResult::RetryLocator;
                         }
@@ -1034,6 +1062,9 @@ impl<C: Clock> ActionabilityEngine<C> {
                     }
                     call_log.push(diagnostic.log_line());
                     *last_diagnostic = diagnostic.clone();
+                    if terminal_action_diagnostic(&diagnostic) {
+                        return ActionLoopResult::Fatal(diagnostic);
+                    }
                     if diagnostic == ActionabilityDiagnostic::Detached {
                         return ActionLoopResult::RetryLocator;
                     }
@@ -1057,10 +1088,17 @@ impl<C: Clock> ActionabilityEngine<C> {
     }
 }
 
+fn terminal_action_diagnostic(diagnostic: &ActionabilityDiagnostic) -> bool {
+    matches!(diagnostic, ActionabilityDiagnostic::EffectUnknown { .. })
+        || matches!(diagnostic, ActionabilityDiagnostic::PrecheckFailed { description }
+            if crate::is_transport_dead_error(description))
+}
+
 enum ActionLoopResult<T> {
     Done(T),
     RetryLocator,
     TimedOut,
+    Fatal(ActionabilityDiagnostic),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1526,6 +1564,34 @@ mod tests {
             }) if description.contains("ref e5 is stale")
         ));
         assert_eq!(driver.resolve_calls, 1);
+        assert!(clock.sleeps.borrow().is_empty());
+    }
+
+    #[test]
+    fn uncertain_dispatch_is_never_repeated() {
+        let clock = MockClock::default();
+        let engine = ActionabilityEngine::new(clock.clone(), ActionabilityTimeouts::default());
+        let mut driver = MockDriver::new();
+        driver.actions = VecDeque::from([
+            Err(ActionabilityDiagnostic::EffectUnknown {
+                description: "target closed after dispatch".to_string(),
+            }),
+            Ok("duplicate side effect"),
+        ]);
+        let result = engine.execute("button", ActionKind::Click, &mut driver);
+        assert!(
+            result.is_err(),
+            "uncertain dispatch must not become success through retry"
+        );
+        assert_eq!(
+            driver.action_calls, 1,
+            "a committed side effect must not be dispatched twice"
+        );
+        assert_eq!(
+            driver.actions.len(),
+            1,
+            "the second dispatch sentinel must remain unconsumed"
+        );
         assert!(clock.sleeps.borrow().is_empty());
     }
 

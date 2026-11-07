@@ -13,7 +13,7 @@ use crate::config::limits;
 use crate::line_truncation::{truncate_tool_line, truncate_tool_text_lines};
 use crate::pp_context_files::postprocess_context_files;
 use crate::pp_context_provider::PPContextTrait;
-use crate::pp_plain_text::postprocess_plain_text;
+use crate::pp_plain_text::{is_structured_report, postprocess_plain_text};
 
 fn canonical_path_simple(path: &str) -> PathBuf {
     let p = PathBuf::from(path);
@@ -148,7 +148,7 @@ pub async fn postprocess_tool_results(
 
     let code_budget = total_budget.saturating_sub(text_budget) + text_remaining;
 
-    let (file_message, notes, _code_used) = if !context_files.is_empty() {
+    let (file_message, notes, code_used) = if !context_files.is_empty() {
         postprocess_context_file_results(
             ctx,
             tokenizer.clone(),
@@ -165,8 +165,25 @@ pub async fn postprocess_tool_results(
     if !notes.is_empty() {
         if let Some(last_tool_msg) = result.iter_mut().rev().find(|m| m.role == "tool") {
             if let ChatContent::SimpleText(ref mut text) = last_tool_msg.content {
-                text.push_str("\n\n");
-                text.push_str(&notes.join("\n"));
+                let structured = is_structured_report(text);
+                let retained_budget = refact_core::chunk_utils::count_text_tokens_with_fallback(
+                    tokenizer.clone(),
+                    text,
+                )
+                .saturating_add(code_budget.saturating_sub(code_used));
+                append_postprocess_notes(text, &notes);
+                if structured {
+                    let (mut reduced, _) = postprocess_plain_text(
+                        vec![last_tool_msg.clone()],
+                        tokenizer.clone(),
+                        retained_budget,
+                        &None,
+                    )
+                    .await;
+                    if let Some(message) = reduced.pop() {
+                        *last_tool_msg = message;
+                    }
+                }
             }
         }
     }
@@ -176,6 +193,22 @@ pub async fn postprocess_tool_results(
     }
 
     result
+}
+
+/// Append context-file notes to a tool result. A structured JSON report receives them as a
+/// `postprocess_notes` field so it stays valid JSON; plain text gets them appended.
+fn append_postprocess_notes(text: &mut String, notes: &[String]) {
+    if is_structured_report(text) {
+        if let Ok(serde_json::Value::Object(mut report)) = serde_json::from_str(text) {
+            report.insert("postprocess_notes".to_string(), serde_json::json!(notes));
+            if let Ok(encoded) = serde_json::to_string(&serde_json::Value::Object(report)) {
+                *text = encoded;
+                return;
+            }
+        }
+    }
+    text.push_str("\n\n");
+    text.push_str(&notes.join("\n"));
 }
 
 fn normalize_title_key(title: &str) -> String {
@@ -1572,5 +1605,130 @@ mod tests {
                 .content_text_only()
                 .contains("Truncated: too many tokens"));
         }
+    }
+
+    #[tokio::test]
+    async fn structured_browser_report_survives_shipping_pipeline_as_valid_json() {
+        let steps: Vec<serde_json::Value> = (0..60)
+            .map(|index| {
+                serde_json::json!({
+                    "step_index": index,
+                    "ok": index != 13,
+                    "outcome": if index == 21 { "effect_unknown" } else { "ok" },
+                    "summary": format!("步骤 {index} — {}", "Ünïcödé текст ".repeat(150)),
+                })
+            })
+            .collect();
+        let report = serde_json::json!({
+            "tool": "chrome",
+            "ok": false,
+            "summary": "step 13 failed; step 21 effect unknown",
+            "completion": {"steps_requested": 60, "steps_reported": 60, "incomplete": true},
+            "recovery": {"incomplete": true, "effect_unknown": true, "retry_safe": false},
+            "session_generation": "rt-7",
+            "steps": steps,
+        })
+        .to_string();
+        assert!(report.len() > 32_768);
+        let messages = vec![
+            make_tool_message(&report, "call_browser"),
+            make_tool_message(&"plain line\n".repeat(2000), "call_plain"),
+        ];
+        let result = postprocess_tool_results(
+            Arc::new(NoopPPContext),
+            None,
+            messages,
+            vec![],
+            ToolBudget {
+                tokens_for_code: 600,
+                tokens_for_text: 600,
+            },
+            PostprocessSettings::default(),
+            &[],
+            &HashSet::new(),
+        )
+        .await;
+        assert_eq!(result.len(), 2);
+        let browser_text = result[0].content.content_text_only();
+        let parsed: serde_json::Value = serde_json::from_str(&browser_text)
+            .unwrap_or_else(|error| panic!("not JSON ({error}): {browser_text}"));
+        assert_eq!(parsed["ok"], false);
+        assert_eq!(parsed["session_generation"], "rt-7");
+        assert_eq!(parsed["recovery"]["effect_unknown"], true);
+        let protected = parsed
+            .get("steps")
+            .or_else(|| parsed.get("failed_or_unknown_steps"))
+            .unwrap()
+            .to_string();
+        assert!(protected.contains("\"step_index\":13"), "{browser_text}");
+        assert!(protected.contains("\"step_index\":21"), "{browser_text}");
+        assert!(result[1]
+            .content
+            .content_text_only()
+            .contains("Truncated: too many tokens"));
+    }
+
+    #[tokio::test]
+    async fn context_notes_keep_structured_report_valid_json() {
+        let report = serde_json::json!({
+            "tool": "chrome",
+            "ok": false,
+            "incomplete": true,
+            "effect_unknown": true,
+            "omitted": {"reduction": "verdict_only"},
+        })
+        .to_string();
+        let mut missing = make_context_file("/nonexistent/missing.rs", 1, 5);
+        missing.skip_pp = true;
+        let result = postprocess_tool_results(
+            Arc::new(NoopPPContext),
+            None,
+            vec![make_tool_message(&report, "call_browser")],
+            vec![missing],
+            ToolBudget {
+                tokens_for_code: 4_000,
+                tokens_for_text: 2_000,
+            },
+            PostprocessSettings::default(),
+            &[],
+            &HashSet::new(),
+        )
+        .await;
+        let browser = result
+            .iter()
+            .find(|m| m.tool_call_id == "call_browser")
+            .unwrap()
+            .content
+            .content_text_only();
+        let parsed: serde_json::Value = serde_json::from_str(&browser)
+            .unwrap_or_else(|error| panic!("notes broke JSON ({error}): {browser}"));
+        assert_eq!(parsed["ok"], false);
+        assert_eq!(parsed["incomplete"], true);
+        assert_eq!(parsed["effect_unknown"], true);
+        let notes = parsed["postprocess_notes"].to_string();
+        assert!(notes.contains("missing.rs"), "{browser}");
+    }
+
+    #[tokio::test]
+    async fn plain_tool_results_still_receive_appended_notes() {
+        let mut missing = make_context_file("/nonexistent/missing.rs", 1, 5);
+        missing.skip_pp = true;
+        let result = postprocess_tool_results(
+            Arc::new(NoopPPContext),
+            None,
+            vec![make_tool_message("plain output", "call_plain")],
+            vec![missing],
+            ToolBudget {
+                tokens_for_code: 4_000,
+                tokens_for_text: 2_000,
+            },
+            PostprocessSettings::default(),
+            &[],
+            &HashSet::new(),
+        )
+        .await;
+        let text = result[0].content.content_text_only();
+        assert!(text.starts_with("plain output\n\n"), "{text}");
+        assert!(text.contains("missing.rs"), "{text}");
     }
 }

@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+use crate::artifact_store::ArtifactStore;
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
@@ -231,23 +232,10 @@ pub fn response_body_extension(content_type: Option<&str>) -> &'static str {
 
 pub fn save_response_body(
     bytes: &[u8],
-    artifacts_dir: &Path,
-    file_name: &str,
+    store: &ArtifactStore,
+    mime: &str,
 ) -> Result<PathBuf, String> {
-    std::fs::create_dir_all(artifacts_dir).map_err(|error| {
-        format!(
-            "Failed to create browser artifacts directory {}: {error}",
-            artifacts_dir.display()
-        )
-    })?;
-    let path = artifacts_dir.join(file_name);
-    std::fs::write(&path, bytes).map_err(|error| {
-        format!(
-            "Failed to save HTTP response artifact {}: {error}",
-            path.display()
-        )
-    })?;
-    Ok(path)
+    store.write(bytes, mime).map(|stored| stored.path)
 }
 
 pub async fn send_http_request(
@@ -568,6 +556,23 @@ fn parse_cookie_expires(value: &str) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn automatic_response_artifacts_share_retention_and_reject_oversize() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ArtifactStore::new(dir.path()).unwrap();
+        let first = save_response_body(b"first", &store, "text/plain").unwrap();
+        for _ in 0..64 {
+            save_response_body(b"next", &store, "text/plain").unwrap();
+        }
+        assert!(!first.exists(), "consumer bypassed the shared file quota");
+        assert!(save_response_body(
+            &vec![0; 8 * 1024 * 1024 + 1],
+            &store,
+            "application/octet-stream"
+        )
+        .is_err());
+    }
 
     #[test]
     fn the_redirect_chain_shares_one_timeout_budget() {

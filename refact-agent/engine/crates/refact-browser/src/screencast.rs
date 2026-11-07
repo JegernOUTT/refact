@@ -1,9 +1,10 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+use crate::artifact_store::ArtifactStore;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use headless_chrome::Tab;
@@ -114,21 +115,27 @@ pub struct TimedCapture {
 
 impl TimedCapture {
     pub fn warning(&self) -> Option<String> {
-        if !self.budget_exhausted && self.dropped_frames == 0 {
+        if !self.budget_exhausted && self.dropped_frames == 0 && self.frames.len() >= 2 {
             return None;
         }
-        Some(format!(
-            "capture_frames recorded {} of {} planned frames: each capture took longer than the requested cadence and the {}ms wall-clock budget was exhausted after {}ms",
+        let mut warning = format!(
+            "capture_frames recorded {} of {} planned frames in {}ms ({}ms wall-clock budget for scheduling; synchronous captures may overrun it)",
             self.frames.len(),
             self.planned,
-            self.budget_ms,
-            self.elapsed_ms
-        ))
+            self.elapsed_ms,
+            self.budget_ms
+        );
+        if self.budget_exhausted {
+            warning.push_str("; scheduling budget exhausted");
+        }
+        if self.frames.len() < 2 {
+            warning.push_str("; fewer than two frames are insufficient evidence of motion");
+        }
+        Some(warning)
     }
 }
 
-/// Wall-clock ceiling for a timed burst: the requested span plus at least
-/// `TIMED_CAPTURE_MIN_OVERRUN_MS` (or the span again, whichever is larger) for slow captures.
+/// Scheduling budget for a timed burst. Synchronous captures can exceed this budget.
 pub fn timed_capture_budget(plan: &FrameBurstPlan) -> Duration {
     Duration::from_millis(plan.duration_ms + plan.duration_ms.max(TIMED_CAPTURE_MIN_OVERRUN_MS))
 }
@@ -151,10 +158,9 @@ fn capture_now() -> Instant {
     Instant::now()
 }
 
-/// Captures every planned frame as soon as its offset arrives (or immediately when the
-/// previous capture already overran it) while staying inside `budget`, so a slow capture
-/// path can stretch a burst but never multiply it; timestamps are always the real elapsed
-/// time of each capture.
+/// Schedule frames against one absolute budget, checking both before and after each wait.
+/// This cannot interrupt a synchronous capture already in progress. Frame offsets are
+/// measured at capture start; elapsed time includes capture work.
 pub fn capture_timed_frames_within(
     plan: &FrameBurstPlan,
     budget: Duration,
@@ -170,27 +176,30 @@ pub fn capture_timed_frames_within(
     for offset_ms in offsets {
         let target = started + Duration::from_millis(offset_ms);
         let current = now();
-        if !frames.is_empty() && current.saturating_duration_since(started) >= budget {
+        if current.saturating_duration_since(started) >= budget {
             budget_exhausted = true;
             break;
         }
-        let remaining = target.saturating_duration_since(current);
+        let remaining = target
+            .saturating_duration_since(current)
+            .min(budget.saturating_sub(current.saturating_duration_since(started)));
         if !remaining.is_zero() {
             wait_until(remaining);
         }
-        let elapsed = now()
-            .saturating_duration_since(started)
-            .as_millis()
-            .min(u64::MAX as u128) as u64;
+        let elapsed_duration = now().saturating_duration_since(started);
+        if elapsed_duration >= budget {
+            budget_exhausted = true;
+            break;
+        }
+        let elapsed = elapsed_duration.as_millis().min(u64::MAX as u128) as u64;
         frames.push(CapturedFrame {
             offset_ms: elapsed,
             data: capture()?,
         });
     }
-    let elapsed_ms = now()
-        .saturating_duration_since(started)
-        .as_millis()
-        .min(u64::MAX as u128) as u64;
+    let elapsed = now().saturating_duration_since(started);
+    budget_exhausted |= elapsed >= budget;
+    let elapsed_ms = elapsed.as_millis().min(u64::MAX as u128) as u64;
     Ok(TimedCapture {
         dropped_frames: planned.saturating_sub(frames.len()),
         frames,
@@ -358,6 +367,13 @@ pub struct ScreencastManager {
 }
 
 impl ScreencastManager {
+    pub fn has_active_session(&self) -> bool {
+        self.active
+            .lock()
+            .map(|session| session.is_some())
+            .unwrap_or(true)
+    }
+
     pub fn start(&self, tab: &Arc<Tab>, options: ScreencastSessionOptions) -> Result<(), String> {
         let mut active = self
             .active
@@ -734,8 +750,8 @@ pub struct FilmstripResult {
 
 pub fn build_filmstrip(
     frames: &[CapturedFrame],
-    artifacts_dir: &Path,
-    label: &str,
+    store: &ArtifactStore,
+    _label: &str,
     policy: &ImagePolicy,
     warnings: Vec<String>,
 ) -> Result<FilmstripResult, String> {
@@ -758,17 +774,6 @@ pub fn build_filmstrip(
     let frame_policy = policy
         .clone()
         .with_format(ImageFormat::Jpeg, policy.quality);
-    std::fs::create_dir_all(artifacts_dir).map_err(|error| {
-        format!(
-            "Failed to create browser artifacts directory {}: {error}",
-            artifacts_dir.display()
-        )
-    })?;
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis();
-
     let mut cells = Vec::with_capacity(decoded.len());
     let mut records = Vec::with_capacity(decoded.len());
     let mut previous_cell: Option<RgbaImage> = None;
@@ -779,8 +784,7 @@ pub fn build_filmstrip(
         let changed_percent = previous_cell
             .as_ref()
             .and_then(|previous| frame_change_percent(previous, &cell));
-        let path = artifacts_dir.join(format!("frame-{label}-{nonce}-{index:02}.jpg"));
-        let artifact = write_image_artifact("frame", &frame.data, &path, &frame_policy)?;
+        let artifact = write_image_artifact("frame", &frame.data, store, &frame_policy)?.0;
         records.push(FrameRecord {
             index,
             offset_ms: frame.offset_ms,
@@ -799,12 +803,9 @@ pub fn build_filmstrip(
             image::ImageFormat::Png,
         )
         .map_err(|error| format!("Filmstrip encode failed: {error}"))?;
-    let path = artifacts_dir.join(format!("filmstrip-{label}-{nonce}.jpg"));
-    let filmstrip = write_image_artifact("filmstrip", &encoded, &path, &frame_policy)?;
-    let filmstrip_data = base64::prelude::BASE64_STANDARD.encode(
-        std::fs::read(&filmstrip.path)
-            .map_err(|error| format!("Failed to read the filmstrip artifact: {error}"))?,
-    );
+    let (filmstrip, filmstrip_bytes) =
+        write_image_artifact("filmstrip", &encoded, store, &frame_policy)?;
+    let filmstrip_data = base64::prelude::BASE64_STANDARD.encode(filmstrip_bytes);
 
     Ok(FilmstripResult {
         duration_ms: frames
@@ -823,9 +824,9 @@ pub fn build_filmstrip(
 fn write_image_artifact(
     kind: &'static str,
     bytes: &[u8],
-    path: &Path,
+    store: &ArtifactStore,
     policy: &ImagePolicy,
-) -> Result<FrameArtifact, String> {
+) -> Result<(FrameArtifact, Vec<u8>), String> {
     let source_mime = image::guess_format(bytes)
         .map_err(|error| format!("Screencast frame format detection failed: {error}"))
         .map(|format| match format {
@@ -836,25 +837,60 @@ fn write_image_artifact(
     let (encoded, mime) = resize_to_policy(bytes, source_mime, policy)?;
     let decoded = image::load_from_memory(&encoded)
         .map_err(|error| format!("Screencast frame decode failed: {error}"))?;
-    std::fs::write(path, &encoded).map_err(|error| {
-        format!(
-            "Failed to save the screencast artifact {}: {error}",
-            path.display()
-        )
-    })?;
-    Ok(FrameArtifact {
-        kind,
-        mime,
-        path: path.to_path_buf(),
-        bytes: encoded.len(),
-        width: decoded.width(),
-        height: decoded.height(),
-    })
+    let stored = store.write(&encoded, &mime)?;
+    Ok((
+        FrameArtifact {
+            kind,
+            mime,
+            path: stored.path,
+            bytes: encoded.len(),
+            width: decoded.width(),
+            height: decoded.height(),
+        },
+        encoded,
+    ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn filmstrip_artifacts_use_shared_store_and_keep_encoded_dimensions() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ArtifactStore::new(dir.path()).unwrap();
+        let image =
+            DynamicImage::ImageRgba8(RgbaImage::from_pixel(8, 6, image::Rgba([255, 0, 0, 255])));
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        image.write_to(&mut bytes, image::ImageFormat::Png).unwrap();
+        let frames = vec![CapturedFrame {
+            offset_ms: 0,
+            data: bytes.into_inner(),
+        }];
+        let result =
+            build_filmstrip(&frames, &store, "test", &ImagePolicy::default(), vec![]).unwrap();
+        let saved = std::fs::read(&result.frames[0].artifact.path).unwrap();
+        let decoded = image::load_from_memory(&saved).unwrap();
+        assert_eq!(result.frames[0].artifact.bytes, saved.len());
+        assert_eq!(
+            (
+                result.frames[0].artifact.width,
+                result.frames[0].artifact.height
+            ),
+            (decoded.width(), decoded.height())
+        );
+        assert_eq!(
+            base64::prelude::BASE64_STANDARD
+                .decode(&result.filmstrip_data)
+                .unwrap(),
+            std::fs::read(&result.filmstrip.path).unwrap()
+        );
+        let first = result.filmstrip.path;
+        for _ in 0..64 {
+            store.write(b"other", "text/plain").unwrap();
+        }
+        assert!(!first.exists(), "filmstrip bypassed shared quota");
+    }
 
     #[test]
     fn burst_plan_enforces_every_cap_with_a_clear_error() {
@@ -959,5 +995,76 @@ mod tests {
         let warning = capture.warning().unwrap();
         assert!(warning.contains("1 of 3 planned frames"), "{warning}");
         assert!(warning.contains("5300ms wall-clock budget"), "{warning}");
+        assert!(
+            warning.contains("insufficient evidence of motion"),
+            "{warning}"
+        );
+    }
+
+    #[test]
+    fn exhausted_budget_never_starts_even_the_first_capture() {
+        let plan = FrameBurstPlan::resolve(Some(800), Some(5), None).unwrap();
+        let clock = FakeClock::new();
+        let capture = capture_timed_frames_within(
+            &plan,
+            Duration::ZERO,
+            || clock.now.get(),
+            || panic!("capture must not start after deadline"),
+            |_| panic!("wait must not start after deadline"),
+        )
+        .unwrap();
+        assert_eq!(capture.frames.len(), 0);
+        assert_eq!(capture.dropped_frames, 5);
+        assert!(capture.budget_exhausted);
+        assert!(capture
+            .warning()
+            .unwrap()
+            .contains("insufficient evidence of motion"));
+    }
+
+    #[test]
+    fn oversleep_does_not_start_another_capture() {
+        let plan = FrameBurstPlan::resolve(Some(800), Some(5), None).unwrap();
+        let clock = FakeClock::new();
+        let mut calls = 0;
+        let capture = capture_timed_frames_within(
+            &plan,
+            Duration::from_millis(300),
+            || clock.now.get(),
+            || {
+                calls += 1;
+                Ok(vec![1])
+            },
+            |_| clock.advance(Duration::from_millis(400)),
+        )
+        .unwrap();
+        assert_eq!(calls, 1);
+        assert_eq!(capture.elapsed_ms, 400);
+        assert_eq!(capture.dropped_frames, 4);
+        assert!(capture.budget_exhausted);
+    }
+
+    #[test]
+    fn final_capture_overrun_is_reported_even_without_dropped_frames() {
+        let plan = FrameBurstPlan::resolve(Some(100), Some(2), None).unwrap();
+        let clock = FakeClock::new();
+        let capture = capture_timed_frames_within(
+            &plan,
+            Duration::from_millis(200),
+            || clock.now.get(),
+            || {
+                clock.advance(Duration::from_millis(150));
+                Ok(vec![1])
+            },
+            |duration| clock.advance(duration),
+        )
+        .unwrap();
+        assert_eq!(capture.frames.len(), 2);
+        assert_eq!(capture.elapsed_ms, 300);
+        assert!(capture.budget_exhausted);
+        assert!(capture
+            .warning()
+            .unwrap()
+            .contains("synchronous captures may overrun"));
     }
 }
