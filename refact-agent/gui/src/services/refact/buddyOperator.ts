@@ -73,6 +73,51 @@ export type OperatorUnavailableReason = {
   retry_in_seconds?: number;
 };
 
+export type PendingPublication = {
+  run_id: string;
+  workflow_id: string;
+  started_at: string;
+};
+export type PublicationRecoveryArgs = {
+  endpoint_identity: string;
+  project: ProjectIdentity;
+  worker: WorkerIdentity;
+  run_id?: string;
+};
+
+export function parsePendingPublications(value: unknown): PendingPublication[] {
+  if (!Array.isArray(value) || value.length > 64)
+    throw new Error("Invalid pending publication list");
+  const seen = new Set<string>();
+  return value.map((entry: unknown) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry))
+      throw new Error("Invalid pending publication");
+    const row = entry as Record<string, unknown>;
+    if (
+      Object.keys(row).length !== 3 ||
+      Object.keys(row).some(
+        (key) => !["run_id", "workflow_id", "started_at"].includes(key),
+      ) ||
+      typeof row.run_id !== "string" ||
+      !row.run_id ||
+      row.run_id.length > 256 ||
+      typeof row.workflow_id !== "string" ||
+      !row.workflow_id ||
+      row.workflow_id.length > 256 ||
+      typeof row.started_at !== "string" ||
+      !Number.isFinite(Date.parse(row.started_at)) ||
+      seen.has(row.run_id)
+    )
+      throw new Error("Invalid pending publication metadata");
+    seen.add(row.run_id);
+    return {
+      run_id: row.run_id,
+      workflow_id: row.workflow_id,
+      started_at: row.started_at,
+    };
+  });
+}
+
 function parseOperatorUnavailableReason(
   value: unknown,
 ): OperatorUnavailableReason {
@@ -499,6 +544,43 @@ function parseRecord<T>(
 
 export const buddyOperatorApi = buddyApi.injectEndpoints({
   endpoints: (builder) => ({
+    recoverBuddyPublication: builder.mutation<
+      PendingPublication[],
+      PublicationRecoveryArgs
+    >({
+      queryFn: async (args, api, _opts, baseQuery) => {
+        const state = api.getState() as BuddyOperatorState;
+        if (args.endpoint_identity !== buddyOperatorIdentity(state))
+          return invalidResponse(new Error("Operator connection changed"));
+        const path =
+          "/v1/buddy/operator/pending-publications" +
+          (args.run_id ? `/${encodeURIComponent(args.run_id)}/retry` : "");
+        const result = await baseQuery({
+          url: buildApiUrlFromState(state, path),
+          method: "POST",
+          body: { project: args.project, worker: args.worker },
+        });
+        if (result.error) return { error: result.error };
+        try {
+          if (
+            args.endpoint_identity !==
+            buddyOperatorIdentity(api.getState() as BuddyOperatorState)
+          )
+            throw new Error("Operator connection changed");
+          const parsed = parseEnvelope(
+            result.data,
+            parsePendingPublications,
+            args.project.project_id,
+          );
+          if (parsed.project.canonical_root !== args.project.canonical_root)
+            throw new Error("Publication project changed");
+          return { data: parsed.data };
+        } catch (error) {
+          return invalidResponse(error);
+        }
+      },
+      invalidatesTags: ["BuddySnapshot"],
+    }),
     getBuddyOperatorStatus: builder.query<OperatorStatus, string>({
       queryFn: async (identity, api, _opts, baseQuery) => {
         const state = api.getState() as BuddyOperatorState;
@@ -1146,6 +1228,7 @@ export const buddyOperatorApi = buddyApi.injectEndpoints({
 });
 
 export const {
+  useRecoverBuddyPublicationMutation,
   useGetBuddyLegacyDraftWorkQuery,
   useGetBuddyOperatorStatusQuery,
   useReopenBuddyOperatorMutation,

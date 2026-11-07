@@ -34,6 +34,7 @@ pub struct InboxMessage {
 #[derive(Debug)]
 pub struct AgentMessageReceipt {
     pub outcome: DeliveryOutcome,
+    pub followup_stored: bool,
     pub finished_status: Option<BgAgentStatus>,
     pub dropped_followups: Vec<String>,
 }
@@ -694,8 +695,9 @@ impl BackgroundAgentRegistry {
         error: String,
         cancelled: bool,
     ) -> Result<BackgroundAgent, String> {
+        let write = self.storage_write.lock().await;
         let mut records = self.records.write().await;
-        let mut runtime = self.runtime.write().await;
+        let runtime = self.runtime.read().await;
         let current = records.get(agent_id).ok_or("child unavailable")?;
         if current.run_generation != generation {
             return Err("child moved to another generation".into());
@@ -710,6 +712,7 @@ impl BackgroundAgentRegistry {
         {
             return Err("queued child attempt identity changed".into());
         }
+        drop(runtime);
         let mut updated = current.clone();
         let now = Utc::now();
         updated.status = if cancelled || abort.load(Ordering::Acquire) {
@@ -720,15 +723,16 @@ impl BackgroundAgentRegistry {
         updated.error = Some(error);
         updated.finished_at = Some(now);
         updated.result_payload_path = None;
-        self.settle_terminal(&mut updated, now);
-        touch_record(&mut updated, now);
+        self.save_terminal_candidate(&records, &mut updated, now)
+            .await?;
         records.insert(agent_id.to_string(), updated.clone());
-        if let Some(run) = runtime.remove(agent_id) {
-            run.notify.notify_waiters();
-        }
-        drop(runtime);
         drop(records);
-        self.flush_records(Vec::new()).await?;
+        self.record_write_completed().await;
+        drop(write);
+        if let Some(notify) = self.notify_for(agent_id).await {
+            notify.notify_waiters();
+        }
+        self.retire_runtime(agent_id, updated.run_generation).await;
         Ok(updated)
     }
 
@@ -1148,47 +1152,41 @@ impl BackgroundAgentRegistry {
         agent_id: &str,
         text: String,
     ) -> Result<(BackgroundAgent, String), String> {
+        let _write = self.storage_write.lock().await;
+        let mut records = self.records.write().await;
+        let mut updated = records.get(agent_id).cloned().ok_or("agent not found")?;
+        if updated.status.is_terminal() {
+            return Err("agent already finished".into());
+        }
+        let now = Utc::now();
         let question_id = Uuid::new_v4().simple().to_string()[..8].to_string();
-        let answerer = {
-            let records = self.records.read().await;
-            let record = records
-                .get(agent_id)
-                .ok_or_else(|| "agent not found".to_string())?;
-            if record.status.is_terminal() {
-                return Err("agent already finished".to_string());
-            }
-            record.parent_chat_id.clone()
-        };
-        let question = self
-            .questions
+        let staged = QuestionRegistry::new(self.questions.limits())?;
+        staged.restore(self.questions.snapshot(), now);
+        let question = staged
             .ask(
                 AskQuestion::new(
                     QuestionKind::AgentParent,
                     agent_id,
-                    answerer,
+                    &updated.parent_chat_id,
                     format!("{agent_id}:{question_id}"),
                     text,
                 )
                 .with_id(&question_id),
-                Utc::now(),
+                now,
             )
             .map_err(|error| error.to_string())?;
-        let updated = self
-            .update_record(agent_id, |record, _| {
-                if record.status.is_terminal() {
-                    return Err("agent already finished".to_string());
-                }
-                record.questions.push(question);
-                Ok(())
-            })
-            .await;
-        match updated {
-            Ok(updated) => Ok((updated, question_id)),
-            Err(error) => {
-                let _ = self.questions.cancel(&question_id, agent_id, Utc::now());
-                Err(error)
-            }
-        }
+        let reservation = self
+            .questions
+            .reserve_registration(question.clone(), now)
+            .map_err(|error| error.to_string())?;
+        updated.questions.push(question);
+        touch_record(&mut updated, now);
+        self.save_candidate(&records, &updated).await?;
+        reservation.commit();
+        records.insert(agent_id.to_string(), updated.clone());
+        drop(records);
+        self.record_write_completed().await;
+        Ok((updated, question_id))
     }
 
     pub async fn answer_question(
@@ -1197,41 +1195,38 @@ impl BackgroundAgentRegistry {
         question_id: &str,
         answer: String,
     ) -> Result<BackgroundAgent, String> {
-        let answerer = {
-            let records = self.records.read().await;
-            let record = records
-                .get(agent_id)
-                .ok_or_else(|| "agent not found".to_string())?;
-            if record.status.is_terminal() {
-                return Err(
-                    "question was withdrawn when the agent finished; nothing was delivered".into(),
-                );
-            }
-            record.parent_chat_id.clone()
-        };
-        let settled = match self
+        let _write = self.storage_write.lock().await;
+        let mut records = self.records.write().await;
+        let mut updated = records.get(agent_id).cloned().ok_or("agent not found")?;
+        if updated.status.is_terminal() {
+            return Err(
+                "question was withdrawn when the agent finished; nothing was delivered".into(),
+            );
+        }
+        let now = Utc::now();
+        let reservation = self
             .questions
-            .answer(question_id, &answerer, answer, Utc::now())
-        {
-            Ok(settled) => settled,
-            Err(refact_chat_api::QuestionError::AlreadyAnswered) => {
-                return Err("question already answered".to_string())
-            }
-            Err(refact_chat_api::QuestionError::NotFound) => {
-                return Err("question not found".to_string())
-            }
-            Err(error) => return Err(error.to_string()),
-        };
-        self.update_record(agent_id, |record, _| {
-            let question = record
-                .questions
-                .iter_mut()
-                .find(|question| question.id == settled.id)
-                .ok_or_else(|| "question not found".to_string())?;
-            *question = settled;
-            Ok(())
-        })
-        .await
+            .reserve_answer(question_id, &updated.parent_chat_id, answer, now)
+            .map_err(|error| match error {
+                refact_chat_api::QuestionError::AlreadyAnswered => {
+                    "question already answered".into()
+                }
+                refact_chat_api::QuestionError::NotFound => "question not found".into(),
+                error => error.to_string(),
+            })?;
+        let question = updated
+            .questions
+            .iter_mut()
+            .find(|question| question.id == question_id)
+            .ok_or("question not found")?;
+        *question = reservation.contract().clone();
+        touch_record(&mut updated, now);
+        self.save_candidate(&records, &updated).await?;
+        reservation.commit();
+        records.insert(agent_id.to_string(), updated.clone());
+        drop(records);
+        self.record_write_completed().await;
+        Ok(updated)
     }
 
     pub async fn mark_completed(
@@ -1239,6 +1234,7 @@ impl BackgroundAgentRegistry {
         agent_id: &str,
         completion: AgentCompletion,
     ) -> Result<BackgroundAgent, String> {
+        let write = self.storage_write.lock().await;
         let updated = {
             let mut records = self.records.write().await;
             let current = records
@@ -1285,14 +1281,13 @@ impl BackgroundAgentRegistry {
             }
             updated.error = None;
             updated.finished_at = Some(now);
-            self.settle_terminal(&mut updated, now);
-            touch_record(&mut updated, now);
+            self.save_terminal_candidate(&records, &mut updated, now)
+                .await?;
             records.insert(agent_id.to_string(), updated.clone());
-            let snapshot: Vec<BackgroundAgent> = records.values().cloned().collect();
-            drop(records);
-            self.flush_records(snapshot).await?;
             updated
         };
+        self.record_write_completed().await;
+        drop(write);
         if let Some(notify) = self.notify_for(agent_id).await {
             notify.notify_waiters();
         }
@@ -1305,6 +1300,7 @@ impl BackgroundAgentRegistry {
         agent_id: &str,
         error: String,
     ) -> Result<BackgroundAgent, String> {
+        let write = self.storage_write.lock().await;
         let updated = {
             let mut records = self.records.write().await;
             let current = records
@@ -1334,14 +1330,13 @@ impl BackgroundAgentRegistry {
             updated.current_tool = None;
             updated.result_payload_path = Some(result_payload_path);
             updated.finished_at = Some(now);
-            self.settle_terminal(&mut updated, now);
-            touch_record(&mut updated, now);
+            self.save_terminal_candidate(&records, &mut updated, now)
+                .await?;
             records.insert(agent_id.to_string(), updated.clone());
-            let snapshot: Vec<BackgroundAgent> = records.values().cloned().collect();
-            drop(records);
-            self.flush_records(snapshot).await?;
             updated
         };
+        self.record_write_completed().await;
+        drop(write);
         if let Some(notify) = self.notify_for(agent_id).await {
             notify.notify_waiters();
         }
@@ -1354,6 +1349,7 @@ impl BackgroundAgentRegistry {
         agent_id: &str,
         reason: Option<String>,
     ) -> Result<BackgroundAgent, String> {
+        let write = self.storage_write.lock().await;
         let updated = {
             let mut records = self.records.write().await;
             let current = records
@@ -1376,14 +1372,13 @@ impl BackgroundAgentRegistry {
             updated.current_tool = None;
             updated.result_payload_path = Some(result_payload_path);
             updated.finished_at = Some(now);
-            self.settle_terminal(&mut updated, now);
-            touch_record(&mut updated, now);
+            self.save_terminal_candidate(&records, &mut updated, now)
+                .await?;
             records.insert(agent_id.to_string(), updated.clone());
-            let snapshot: Vec<BackgroundAgent> = records.values().cloned().collect();
-            drop(records);
-            self.flush_records(snapshot).await?;
             updated
         };
+        self.record_write_completed().await;
+        drop(write);
         if let Some(notify) = self.notify_for(agent_id).await {
             notify.notify_waiters();
         }
@@ -1396,6 +1391,7 @@ impl BackgroundAgentRegistry {
         agent_id: &str,
         reason: String,
     ) -> Result<BackgroundAgent, String> {
+        let write = self.storage_write.lock().await;
         let updated = {
             let mut records = self.records.write().await;
             let current = records
@@ -1411,14 +1407,13 @@ impl BackgroundAgentRegistry {
             updated.error = Some(reason);
             updated.current_tool = None;
             updated.finished_at = Some(now);
-            self.settle_terminal(&mut updated, now);
-            touch_record(&mut updated, now);
+            self.save_terminal_candidate(&records, &mut updated, now)
+                .await?;
             records.insert(agent_id.to_string(), updated.clone());
-            let snapshot: Vec<BackgroundAgent> = records.values().cloned().collect();
-            drop(records);
-            self.flush_records(snapshot).await?;
             updated
         };
+        self.record_write_completed().await;
+        drop(write);
         if let Some(notify) = self.notify_for(agent_id).await {
             notify.notify_waiters();
         }
@@ -2098,6 +2093,7 @@ impl BackgroundAgentRegistry {
         mut delivery: PendingDelivery,
         allow_followup: bool,
     ) -> Result<AgentMessageReceipt, String> {
+        let generation = self.get_any(agent_id).await?.run_generation;
         let runtime = self.runtime.read().await.get(agent_id).cloned();
         let state = match &runtime {
             Some(runtime) => Some(runtime.delivery_state.lock().await),
@@ -2105,6 +2101,7 @@ impl BackgroundAgentRegistry {
         };
         let mut receipt = AgentMessageReceipt {
             outcome: DeliveryOutcome::Queued,
+            followup_stored: false,
             finished_status: None,
             dropped_followups: Vec::new(),
         };
@@ -2116,6 +2113,9 @@ impl BackgroundAgentRegistry {
         let settings = refact_work_core::coordination_settings();
         delivery.ensure_ttl_secs(now_ms(), settings.delivery_default_ttl_secs);
         self.update_record(agent_id, |record, now| {
+            if record.run_generation != generation {
+                return Err("agent moved to another generation before message acceptance".into());
+            }
             if record.delivery_ids.contains(&delivery.id)
                 || record
                     .followups
@@ -2137,11 +2137,12 @@ impl BackgroundAgentRegistry {
             if terminal && !allow_followup {
                 return Err("agent already finished".to_string());
             }
+            let sealed = state.as_ref().is_some_and(|state| state.sealed);
             if !terminal {
                 let state = state
                     .as_ref()
                     .ok_or("agent is not running in this process")?;
-                if state.sealed {
+                if state.sealed && !allow_followup {
                     return Err("agent delivery turn already finished".to_string());
                 }
             }
@@ -2150,13 +2151,14 @@ impl BackgroundAgentRegistry {
                 receipt.outcome = DeliveryOutcome::Expired;
                 return Ok(());
             }
-            if terminal {
+            if terminal || sealed {
                 if followup_bytes(&delivery) > settings.agent_followup_max_bytes {
                     return Err("message exceeds the configured follow-up byte limit".into());
                 }
                 record.followups.push(delivery);
                 receipt.dropped_followups = trim_followups(record);
-                receipt.finished_status = Some(record.status);
+                receipt.followup_stored = true;
+                receipt.finished_status = terminal.then_some(record.status);
                 return Ok(());
             }
             if delivery.supersede_key.is_some() {
@@ -2182,10 +2184,7 @@ impl BackgroundAgentRegistry {
             Ok(())
         })
         .await?;
-        if preempt
-            && receipt.outcome == DeliveryOutcome::Queued
-            && receipt.finished_status.is_none()
-        {
+        if preempt && receipt.outcome == DeliveryOutcome::Queued && !receipt.followup_stored {
             if let Some(runtime) = &runtime {
                 runtime.interrupt_notify.notify_one();
             }
@@ -2701,26 +2700,36 @@ impl BackgroundAgentRegistry {
     where
         F: FnOnce(&mut BackgroundAgent, DateTime<Utc>) -> Result<(), String>,
     {
+        let _write = self.storage_write.lock().await;
         let updated = {
             let mut records = self.records.write().await;
-            let current = records
-                .get(agent_id)
-                .cloned()
-                .ok_or_else(|| "agent not found".to_string())?;
-            let mut updated = current;
+            let mut updated = records.get(agent_id).cloned().ok_or("agent not found")?;
             let now = Utc::now();
             update(&mut updated, now)?;
             touch_record(&mut updated, now);
+            self.save_candidate(&records, &updated).await?;
             records.insert(agent_id.to_string(), updated.clone());
-            let snapshot: Vec<BackgroundAgent> = records.values().cloned().collect();
-            drop(records);
-            self.flush_records(snapshot).await?;
             updated
         };
+        self.record_write_completed().await;
         if let Some(notify) = self.notify_for(agent_id).await {
             notify.notify_waiters();
         }
         Ok(updated)
+    }
+
+    async fn save_candidate(
+        &self,
+        records: &AgentRecords,
+        updated: &BackgroundAgent,
+    ) -> Result<(), String> {
+        let snapshot = records
+            .values()
+            .filter(|record| record.agent_id != updated.agent_id)
+            .cloned()
+            .chain(std::iter::once(updated.clone()))
+            .collect();
+        storage::save_all(&self.storage_root, snapshot).await
     }
 
     async fn update_record_if_not_terminal<F>(
@@ -2732,26 +2741,36 @@ impl BackgroundAgentRegistry {
     where
         F: FnOnce(&mut BackgroundAgent, DateTime<Utc>) -> Result<(), String>,
     {
+        let write = self.storage_write.lock().await;
+        let flush_now = !debounce_write
+            || self
+                .write_state
+                .lock()
+                .await
+                .last_write
+                .is_none_or(|last| last.elapsed() >= WRITE_DEBOUNCE);
         let updated = {
             let mut records = self.records.write().await;
-            let current = records
-                .get(agent_id)
-                .cloned()
-                .ok_or_else(|| "agent not found".to_string())?;
-            if current.status.is_terminal() {
-                return Ok(current);
+            let mut updated = records.get(agent_id).cloned().ok_or("agent not found")?;
+            if updated.status.is_terminal() {
+                return Ok(updated);
             }
-            let mut updated = current;
             let now = Utc::now();
             update(&mut updated, now)?;
             touch_record(&mut updated, now);
+            if flush_now {
+                self.save_candidate(&records, &updated).await?;
+            }
             records.insert(agent_id.to_string(), updated.clone());
-            let snapshot: Vec<BackgroundAgent> = records.values().cloned().collect();
-            drop(records);
-            self.schedule_or_flush_records(snapshot, !debounce_write)
-                .await?;
             updated
         };
+        if flush_now {
+            self.record_write_completed().await;
+        }
+        drop(write);
+        if !flush_now {
+            self.schedule_or_flush_records(Vec::new(), false).await?;
+        }
         if let Some(notify) = self.notify_for(agent_id).await {
             notify.notify_waiters();
         }
@@ -2781,6 +2800,48 @@ impl BackgroundAgentRegistry {
         }
     }
 
+    async fn save_terminal_candidate(
+        &self,
+        records: &AgentRecords,
+        updated: &mut BackgroundAgent,
+        now: DateTime<Utc>,
+    ) -> Result<(), String> {
+        let snapshot = self.questions.snapshot();
+        let mut reservations = Vec::new();
+        for question in snapshot.iter().filter(|question| {
+            question.kind == QuestionKind::AgentParent
+                && question.asker == updated.agent_id
+                && question.state == refact_chat_api::QuestionState::Pending
+        }) {
+            reservations.push(
+                self.questions
+                    .reserve_withdraw(&question.id, &question.asker, now)
+                    .map_err(|error| error.to_string())?,
+            );
+        }
+        let staged = QuestionRegistry::new(self.questions.limits())?;
+        staged.restore(snapshot, now);
+        settle_terminal_record(&staged, updated, now);
+        for reservation in &reservations {
+            let contract = reservation.contract();
+            if let Some(question) = updated
+                .questions
+                .iter_mut()
+                .find(|question| question.id == contract.id)
+            {
+                *question = contract.clone();
+            } else {
+                updated.questions.push(contract.clone());
+            }
+        }
+        touch_record(updated, now);
+        self.save_candidate(records, updated).await?;
+        for reservation in reservations {
+            reservation.commit();
+        }
+        Ok(())
+    }
+
     fn settle_terminal(&self, record: &mut BackgroundAgent, now: DateTime<Utc>) {
         settle_terminal_record(&self.questions, record, now);
     }
@@ -2797,13 +2858,17 @@ impl BackgroundAgentRegistry {
         let _write = self.storage_write.lock().await;
         let records = self.records.read().await.values().cloned().collect();
         storage::save_all(&self.storage_root, records).await?;
+        self.record_write_completed().await;
+        Ok(())
+    }
+
+    async fn record_write_completed(&self) {
         let mut write_state = self.write_state.lock().await;
         write_state.pending = false;
         write_state.last_write = Some(Instant::now());
         if let Some(handle) = write_state.flush_task.take() {
             handle.abort();
         }
-        Ok(())
     }
 
     async fn schedule_or_flush_records(
@@ -3573,6 +3638,334 @@ mod tests {
 
     fn delivery(push: PushMode) -> PendingDelivery {
         PendingDelivery::new(Vec::new(), push, "registry-test".to_string(), true)
+    }
+
+    #[tokio::test]
+    async fn regression_terminal_write_failure_preserves_live_questions_and_deliveries() {
+        for method in 0..5 {
+            for fault in [
+                storage::RecordWriteFault::Write,
+                storage::RecordWriteFault::Rename,
+            ] {
+                let (_temp, registry) = registry().await;
+                let (record, abort, _) = registry.create(request("parent")).await.unwrap();
+                let (_, question_id) = registry
+                    .add_question(&record.agent_id, "May I?".into())
+                    .await
+                    .unwrap();
+                let mut pending = delivery(PushMode::Append);
+                pending.set_ttl_secs(3600);
+                registry
+                    .enqueue_agent_message(&record.agent_id, pending.clone())
+                    .await
+                    .unwrap();
+                let before = registry.get_any(&record.agent_id).await.unwrap();
+                let question = registry.questions.get(&question_id).unwrap();
+                let disk = tokio::fs::read(registry.storage_root.join("records.json"))
+                    .await
+                    .unwrap();
+                storage::fail_next_record_write(&registry.storage_root, fault);
+                let result = match method {
+                    0 => {
+                        registry
+                            .mark_completed(&record.agent_id, completion())
+                            .await
+                    }
+                    1 => {
+                        registry
+                            .mark_failed(&record.agent_id, "failure".into())
+                            .await
+                    }
+                    2 => registry.mark_cancelled(&record.agent_id, None).await,
+                    3 => {
+                        registry
+                            .mark_interrupted(&record.agent_id, "interrupted".into())
+                            .await
+                    }
+                    _ => {
+                        registry
+                            .finish_queued_resume(
+                                &record.agent_id,
+                                1,
+                                &abort,
+                                "setup failed".into(),
+                                false,
+                            )
+                            .await
+                    }
+                };
+                assert!(result.unwrap_err().contains("28"));
+                assert_eq!(
+                    registry.get_any(&record.agent_id).await.unwrap(),
+                    before,
+                    "method {method}"
+                );
+                assert_eq!(registry.questions.get(&question_id), Some(question));
+                assert_eq!(
+                    registry
+                        .delivery_status(&record.agent_id, &pending.id)
+                        .await,
+                    DeliveryStatus::Pending
+                );
+                assert_eq!(
+                    tokio::fs::read(registry.storage_root.join("records.json"))
+                        .await
+                        .unwrap(),
+                    disk
+                );
+                assert!(registry.has_runtime(&record.agent_id).await);
+                assert!(!abort.load(Ordering::SeqCst));
+                let finished = registry
+                    .mark_failed(&record.agent_id, "retry".into())
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    finished.questions[0].state,
+                    refact_chat_api::QuestionState::Withdrawn
+                );
+                assert_eq!(
+                    registry.questions.get(&question_id).unwrap().state,
+                    refact_chat_api::QuestionState::Withdrawn
+                );
+                assert_eq!(finished.followups, vec![pending]);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn regression_mail_enospc_preserves_ram_disk_and_retry_identity() {
+        for fault in [
+            storage::RecordWriteFault::Write,
+            storage::RecordWriteFault::Rename,
+        ] {
+            let (_temp, registry) = registry().await;
+            let (record, _, _) = registry.create(request("parent")).await.unwrap();
+            let disk = tokio::fs::read(registry.storage_root.join("records.json"))
+                .await
+                .unwrap();
+            let mut pending = delivery(PushMode::Preempt);
+            pending.set_ttl_secs(3600);
+            let interrupt = registry.interrupt_notify(&record.agent_id).await.unwrap();
+            storage::fail_next_record_write(&registry.storage_root, fault);
+            let error = registry
+                .enqueue_agent_message(&record.agent_id, pending.clone())
+                .await
+                .unwrap_err();
+            assert!(error.contains("28"), "{error}");
+            assert_eq!(registry.get_any(&record.agent_id).await.unwrap(), record);
+            assert_eq!(
+                tokio::fs::read(registry.storage_root.join("records.json"))
+                    .await
+                    .unwrap(),
+                disk
+            );
+            assert_eq!(
+                registry
+                    .delivery_status(&record.agent_id, &pending.id)
+                    .await,
+                DeliveryStatus::Unknown
+            );
+            let wake = interrupt.notified();
+            tokio::pin!(wake);
+            assert!(
+                std::future::poll_fn(|cx| std::task::Poll::Ready(wake.as_mut().poll(cx)))
+                    .await
+                    .is_pending()
+            );
+            assert_eq!(
+                registry
+                    .enqueue_agent_message(&record.agent_id, pending.clone())
+                    .await
+                    .unwrap()
+                    .outcome,
+                DeliveryOutcome::Queued
+            );
+            assert_eq!(
+                registry.pending_deliveries(&record.agent_id).await,
+                vec![pending]
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn regression_question_write_failure_has_no_live_settlement() {
+        let (_temp, registry) = registry().await;
+        let (record, _, _) = registry.create(request("parent")).await.unwrap();
+        storage::fail_next_record_write(&registry.storage_root, storage::RecordWriteFault::Write);
+        assert!(registry
+            .add_question(&record.agent_id, "May I?".into())
+            .await
+            .is_err());
+        assert!(registry.questions.snapshot().is_empty());
+        assert_eq!(registry.get_any(&record.agent_id).await.unwrap(), record);
+        let (asked, id) = registry
+            .add_question(&record.agent_id, "May I?".into())
+            .await
+            .unwrap();
+        let live = registry.questions.get(&id).unwrap();
+        storage::fail_next_record_write(&registry.storage_root, storage::RecordWriteFault::Rename);
+        assert!(registry
+            .answer_question(&record.agent_id, &id, "yes".into())
+            .await
+            .is_err());
+        assert_eq!(registry.questions.get(&id).unwrap(), live);
+        assert_eq!(registry.get_any(&record.agent_id).await.unwrap(), asked);
+        let answered = registry
+            .answer_question(&record.agent_id, &id, "yes".into())
+            .await
+            .unwrap();
+        assert_eq!(answered.questions[0].answer.as_deref(), Some("yes"));
+    }
+
+    #[tokio::test]
+    async fn regression_sealed_followup_bounds_expiry_and_failed_save() {
+        let (_temp, registry) = registry().await;
+        let (record, _, _) = registry.create(request("parent")).await.unwrap();
+        registry
+            .finish_delivery_turn(&record.agent_id)
+            .await
+            .unwrap();
+        let mut expired = delivery(PushMode::Preempt);
+        expired.expires_at_ms = Some(0);
+        let receipt = registry
+            .enqueue_agent_message(&record.agent_id, expired)
+            .await
+            .unwrap();
+        assert_eq!(receipt.outcome, DeliveryOutcome::Expired);
+        assert!(!receipt.followup_stored);
+        let before = registry.get_any(&record.agent_id).await.unwrap();
+        let mut pending = delivery(PushMode::Preempt);
+        pending.set_ttl_secs(3600);
+        storage::fail_next_record_write(&registry.storage_root, storage::RecordWriteFault::Rename);
+        assert!(registry
+            .enqueue_agent_message(&record.agent_id, pending.clone())
+            .await
+            .is_err());
+        assert_eq!(registry.get_any(&record.agent_id).await.unwrap(), before);
+        let stored = registry
+            .enqueue_agent_message(&record.agent_id, pending.clone())
+            .await
+            .unwrap();
+        assert!(stored.followup_stored);
+        assert_eq!(stored.finished_status, None);
+        let duplicate = registry
+            .enqueue_agent_message(&record.agent_id, pending.clone())
+            .await
+            .unwrap();
+        assert_eq!(duplicate.outcome, DeliveryOutcome::Duplicate);
+        assert!(!duplicate.followup_stored);
+        let mut oversized = delivery(PushMode::Append);
+        oversized.source =
+            "x".repeat(refact_work_core::coordination_settings().agent_followup_max_bytes);
+        assert!(registry
+            .enqueue_agent_message(&record.agent_id, oversized)
+            .await
+            .is_err());
+        assert_eq!(
+            registry.get_any(&record.agent_id).await.unwrap().followups,
+            vec![pending]
+        );
+    }
+
+    #[tokio::test]
+    async fn regression_waiting_mail_revalidates_generation() {
+        let (_temp, registry) = registry().await;
+        let (record, _, _) = registry.create(request("parent")).await.unwrap();
+        let runtime = registry.runtime.read().await[&record.agent_id].clone();
+        let held = runtime.delivery_state.lock().await;
+        let pending = delivery(PushMode::Append);
+        let enqueue = registry.enqueue_agent_message(&record.agent_id, pending.clone());
+        tokio::pin!(enqueue);
+        assert!(
+            std::future::poll_fn(|cx| std::task::Poll::Ready(enqueue.as_mut().poll(cx)))
+                .await
+                .is_pending()
+        );
+        let terminal = registry
+            .mark_completed(&record.agent_id, completion())
+            .await
+            .unwrap();
+        let reopened = registry
+            .reopen(&record.agent_id, "parent", terminal.change_seq, false)
+            .await
+            .unwrap()
+            .0;
+        drop(held);
+        assert!(enqueue.await.unwrap_err().contains("generation"));
+        assert_eq!(registry.get_any(&record.agent_id).await.unwrap(), reopened);
+        assert_eq!(
+            registry
+                .delivery_status(&record.agent_id, &pending.id)
+                .await,
+            DeliveryStatus::Unknown
+        );
+    }
+
+    #[tokio::test]
+    async fn regression_blocked_durable_writer_does_not_publish_or_lose_second_writer() {
+        let (_temp, registry) = registry().await;
+        let (record, _, _) = registry.create(request("parent")).await.unwrap();
+        let disk = registry.storage_write.lock().await;
+        let first = registry.add_usage(&record.agent_id, 3, None);
+        let second = registry.update_progress(&record.agent_id, "second".into(), 2);
+        tokio::pin!(first, second);
+        assert!(
+            std::future::poll_fn(|cx| std::task::Poll::Ready(first.as_mut().poll(cx)))
+                .await
+                .is_pending()
+        );
+        assert!(
+            std::future::poll_fn(|cx| std::task::Poll::Ready(second.as_mut().poll(cx)))
+                .await
+                .is_pending()
+        );
+        assert_eq!(registry.get_any(&record.agent_id).await.unwrap(), record);
+        storage::fail_next_record_write(&registry.storage_root, storage::RecordWriteFault::Rename);
+        drop(disk);
+        let (first, second) = tokio::join!(first, second);
+        assert!(first.is_err());
+        second.unwrap();
+        registry.flush_pending_writes_for_test().await.unwrap();
+        let after = registry.get_any(&record.agent_id).await.unwrap();
+        assert_eq!(after.tokens_used, 0);
+        assert_eq!(after.progress.as_deref(), Some("second"));
+        assert_eq!(
+            storage::load_all(&registry.storage_root).await.unwrap()[&record.agent_id],
+            after
+        );
+    }
+
+    #[tokio::test]
+    async fn regression_sealed_turn_retains_followup_without_rearming() {
+        let (_temp, registry) = registry().await;
+        let (record, abort, _) = registry.create(request("parent")).await.unwrap();
+        assert!(registry
+            .finish_delivery_turn(&record.agent_id)
+            .await
+            .unwrap()
+            .is_empty());
+        let mut pending = delivery(PushMode::Preempt);
+        pending.set_ttl_secs(3600);
+        let receipt = registry
+            .enqueue_agent_message(&record.agent_id, pending.clone())
+            .await
+            .unwrap();
+        assert_eq!(receipt.outcome, DeliveryOutcome::Queued);
+        let after = registry.get_any(&record.agent_id).await.unwrap();
+        assert_eq!(after.status, BgAgentStatus::Queued);
+        assert_eq!(after.run_generation, record.run_generation);
+        assert_eq!(after.followups, vec![pending.clone()]);
+        assert!(after.pending_deliveries.is_empty());
+        assert!(!registry.has_preempt(&record.agent_id).await);
+        assert!(!abort.load(Ordering::SeqCst));
+        assert_eq!(
+            registry
+                .enqueue_agent_message(&record.agent_id, pending)
+                .await
+                .unwrap()
+                .outcome,
+            DeliveryOutcome::Duplicate
+        );
     }
 
     #[tokio::test]

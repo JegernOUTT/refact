@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 id: buddy_docs_gardener
 title: Docs Gardener
 description: Find documentation gaps and make small safe doc improvements.
@@ -28,8 +28,16 @@ messages:
     2. Identify a focused documentation gap or stale statement.
     3. Describe the minimal doc improvement (file, stale/missing statement, exact suggested text)
        in your buddy_runtime_event description so the user can apply it.
-    4. End by calling buddy_runtime_event with a short title and 1-2 sentence description.
-    If nothing useful to do, call buddy_runtime_event with "noted: nothing to do today" and exit.
+    4. Record completion with buddy_runtime_event with a short title and 1-2 sentence description.
+    If nothing useful to do, call buddy_runtime_event with "noted: nothing to do today" then finish with a short final assistant assessment.
+
+    After any tool calls, finish with a nonempty final assistant assessment describing the evidence, outcome, or reason no action was needed.
+    Runtime events are notifications, not the saved assessment; do not end on a tool call.
+
+    Tool argument examples below are illustrative: replace example text with evidence-based values.
+    buddy_runtime_event({"title":"Review complete","status":"completed","description":"Review finished."})
+    Include a short title and string description; use status completed only when finished,
+    failed on failure, or started/in_progress while work is underway. A no-op can be completed.
   user_template: |
     Workflow: {{workflow_id}}
     Title: {{title}}

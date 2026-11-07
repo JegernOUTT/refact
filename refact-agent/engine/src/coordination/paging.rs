@@ -285,6 +285,29 @@ impl WorkViews {
         now_ms: u64,
         revalidate: impl FnOnce(&WorkSnapshot) -> Result<(), WorkError>,
     ) -> Result<FrozenPage, WorkError> {
+        self.frozen_page_select(
+            binding,
+            current,
+            limit,
+            cursor,
+            settings,
+            now_ms,
+            revalidate,
+            |_, _, end| Ok(end),
+        )
+    }
+
+    pub(super) fn frozen_page_select(
+        &self,
+        binding: ViewBinding,
+        current: WorkSnapshot,
+        limit: usize,
+        cursor: Option<&str>,
+        settings: &CoordinationSettings,
+        now_ms: u64,
+        revalidate: impl FnOnce(&WorkSnapshot) -> Result<(), WorkError>,
+        select_end: impl FnOnce(&WorkSnapshot, usize, usize) -> Result<usize, WorkError>,
+    ) -> Result<FrozenPage, WorkError> {
         settings
             .validate()
             .map_err(|_| WorkError::projection_failure(WorkFailureCause::SettingsUnavailable))?;
@@ -378,7 +401,13 @@ impl WorkViews {
         if offset > total {
             return Err(WorkError::cursor_expired());
         }
-        let end = offset.saturating_add(limit).min(total);
+        let requested_end = offset.saturating_add(limit).min(total);
+        let end = select_end(&saved.snapshot, offset, requested_end)?;
+        if end > requested_end || end < offset || (end == offset && offset < total) {
+            return Err(WorkError::projection_failure(
+                WorkFailureCause::ProvenanceCapacity,
+            ));
+        }
         let snapshot = saved.snapshot.slice(offset, end);
         let observed_at = saved.observed_at;
         let expires_at = saved.expires_at;

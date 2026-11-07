@@ -579,7 +579,7 @@ pub(crate) async fn resolve_registered_task_card(
     })
 }
 
-async fn planner_identity(
+pub(crate) async fn planner_identity(
     app: &AppState,
     chat_id: &str,
     expected: &TaskMeta,
@@ -616,6 +616,23 @@ async fn planner_identity(
         "source":session.work_project_root,"root":session.thread.root_chat_id,
         "parent":session.thread.parent_id,"model":session.thread.model}),
     )
+}
+
+pub(crate) async fn ensure_card_agent_stopped(
+    app: &AppState,
+    task: &TaskMeta,
+    owner: &str,
+    source: &Path,
+    card: &BoardCard,
+    worktree: &WorktreeMeta,
+) -> Result<(), String> {
+    let authority = TaskCardAuthority {
+        task: task.clone(),
+        owner: owner.to_string(),
+        source: source.to_path_buf(),
+        verifier: None,
+    };
+    ensure_agent_stopped(app, &authority, card, worktree).await
 }
 
 async fn ensure_agent_stopped(

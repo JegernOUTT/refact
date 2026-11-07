@@ -7,6 +7,71 @@ use std::sync::Arc;
 use serial_test::serial;
 use tokio::sync::Mutex;
 
+#[serial(coordination_work_overview)]
+#[tokio::test]
+async fn provenance_budget_paginates_complete_rows_without_skipping_or_splicing() {
+    let (app, dir, caller) = fixture().await;
+    app.chat.sessions.write().await.remove("c");
+    for id in ["a", "b"] {
+        let records = (0..150).map(|n| refact_privacy::FileRecord {
+            path: dir
+                .path()
+                .join(format!("{id}-{n}.rs"))
+                .to_string_lossy()
+                .into_owned(),
+            zone: "normal".into(),
+            attribution: refact_privacy::Attribution::Declared,
+        });
+        let mut message = crate::call_validation::ChatMessage::new("user".into(), "source".into());
+        crate::privacy::records::merge_records(&mut message, records);
+        app.chat
+            .sessions
+            .read()
+            .await
+            .get(id)
+            .unwrap()
+            .lock()
+            .await
+            .add_message(message);
+    }
+    let request = WorkOverviewRequest {
+        rows: Some(2),
+        ..Default::default()
+    };
+    let first = overview(&app, &caller, request.clone()).await.unwrap();
+    assert_eq!(first.total, 2);
+    assert_eq!(
+        first.returned, 1,
+        "complete provenance union must determine page end"
+    );
+    let mut message = crate::call_validation::ChatMessage::default();
+    attach_provenance(&app, &mut message, &first, None).unwrap();
+    let privacy: refact_privacy::PrivacyRecord =
+        serde_json::from_value(message.extra["privacy"].clone()).unwrap();
+    assert!(first.rows[0]
+        .source_records
+        .iter()
+        .all(|record| privacy.files.contains(record)));
+    let continuation = WorkOverviewRequest {
+        cursor: first.next_cursor.clone(),
+        ..request.clone()
+    };
+    let second = overview(&app, &caller, continuation.clone()).await.unwrap();
+    assert_eq!(second.returned, 1);
+    assert_eq!(second.snapshot_id, first.snapshot_id);
+    assert_eq!(second.seq, first.seq);
+    assert_ne!(second.rows[0].key, first.rows[0].key);
+    assert!(second.next_cursor.is_none());
+    let retry = overview(&app, &caller, request).await.unwrap();
+    assert_eq!(retry.rows, first.rows);
+    assert_eq!(retry.next_cursor, first.next_cursor);
+    let mut changed = caller;
+    changed.model.as_mut().unwrap().id = "other/model".into();
+    let error = overview(&app, &changed, continuation).await.unwrap_err();
+    assert_eq!(error.code, "invalid_cursor");
+    assert!(!error.to_string().contains(dir.path().to_str().unwrap()));
+}
+
 async fn fixture() -> (AppState, tempfile::TempDir, WorkCaller) {
     let dir = tempfile::tempdir_in(dunce::canonicalize(std::env::temp_dir()).unwrap()).unwrap();
     let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
@@ -37,6 +102,185 @@ async fn fixture() -> (AppState, tempfile::TempDir, WorkCaller) {
             .insert(id.into(), Arc::new(Mutex::new(session)));
     }
     (app, dir, caller)
+}
+
+#[serial(coordination_work_overview)]
+#[tokio::test]
+async fn provenance_budget_single_detail_capacity_is_typed_not_encoding() {
+    let (app, dir, caller) = fixture().await;
+    let mut message = crate::call_validation::ChatMessage::default();
+    crate::privacy::records::merge_records(
+        &mut message,
+        (0..257).map(|n| refact_privacy::FileRecord {
+            path: dir
+                .path()
+                .join(format!("detail-{n}.rs"))
+                .to_string_lossy()
+                .into_owned(),
+            zone: "normal".into(),
+            attribution: refact_privacy::Attribution::Declared,
+        }),
+    );
+    app.chat
+        .sessions
+        .read()
+        .await
+        .get("a")
+        .unwrap()
+        .lock()
+        .await
+        .add_message(message);
+    let error = inspect(
+        &app,
+        &caller,
+        InspectRequest {
+            selector: InspectSelector::Work {
+                work_id: "a".into(),
+            },
+            cursor: None,
+            limit: Some(1),
+        },
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        serde_json::to_value(error.cause).unwrap(),
+        "provenance_capacity"
+    );
+    assert!(error.message.contains("narrow"));
+    assert!(uuid::Uuid::parse_str(&error.request_id).is_ok());
+    assert!(!error.to_string().contains(dir.path().to_str().unwrap()));
+}
+
+#[serial(coordination_work_overview)]
+#[tokio::test]
+async fn provenance_budget_attachment_exact_count_bytes_and_duplicate_boundaries() {
+    let (app, _dir, caller) = fixture().await;
+    let mut page = overview(&app, &caller, WorkOverviewRequest::default())
+        .await
+        .unwrap();
+    page.rows.clear();
+    page.roots.clear();
+    let record = |path: String| refact_privacy::FileRecord {
+        path,
+        zone: "normal".into(),
+        attribution: refact_privacy::Attribution::Declared,
+    };
+    page.source_records = (0..256).map(|n| record(format!("file-{n}.rs"))).collect();
+    let mut message = crate::call_validation::ChatMessage::default();
+    attach_provenance(&app, &mut message, &page, None).unwrap();
+    assert_eq!(
+        message.extra["privacy"]["files"].as_array().unwrap().len(),
+        256
+    );
+    page.source_records.extend(page.source_records.clone());
+    attach_provenance(&app, &mut message, &page, None).unwrap();
+    page.source_records.push(record("one-too-many.rs".into()));
+    let error = attach_provenance(&app, &mut message, &page, None).unwrap_err();
+    assert_eq!(
+        serde_json::to_value(error.cause).unwrap(),
+        "provenance_capacity"
+    );
+    let cap = 64 * 1024 - 64;
+    let overhead = serde_json::to_vec(&vec![record(String::new())])
+        .unwrap()
+        .len();
+    for delta in [-1isize, 0, 1] {
+        page.source_records = vec![record(
+            "x".repeat((cap - overhead).checked_add_signed(delta).unwrap()),
+        )];
+        assert_eq!(
+            serde_json::to_vec(&page.source_records).unwrap().len(),
+            cap.checked_add_signed(delta).unwrap()
+        );
+        let result = attach_provenance(
+            &app,
+            &mut crate::call_validation::ChatMessage::default(),
+            &page,
+            None,
+        );
+        if delta <= 0 {
+            result.unwrap();
+        } else {
+            assert_eq!(
+                serde_json::to_value(result.unwrap_err().cause).unwrap(),
+                "provenance_capacity"
+            );
+        }
+    }
+}
+
+#[serial(coordination_work_overview)]
+#[tokio::test]
+async fn provenance_budget_inventory_roots_and_fixed_guards_are_complete() {
+    let (app, _dir, caller) = fixture().await;
+    let seed = overview(&app, &caller, WorkOverviewRequest::default())
+        .await
+        .unwrap();
+    let mut first = seed.roots[0].clone();
+    first.id = "inventory-a".into();
+    first.path = Some(format!("/{}", "a".repeat(34_000)));
+    first.source_path = Some("/source-a".into());
+    let mut second = first.clone();
+    second.id = "inventory-b".into();
+    second.path = Some(format!("/{}", "b".repeat(34_000)));
+    second.source_path = Some("/source-b".into());
+    let snapshot = WorkSnapshot {
+        roots: vec![first.clone(), second.clone()],
+        ..Default::default()
+    };
+    let views = super::paging::WorkViews::default();
+    let binding = super::paging::ViewBinding {
+        project: "p".into(),
+        principal: "caller".into(),
+        disclosure: "policy".into(),
+        filter: "inventory".into(),
+    };
+    let settings = crate::file_activity::settings();
+    let page = views
+        .frozen_page_select(
+            binding.clone(),
+            snapshot.clone(),
+            2,
+            None,
+            &settings,
+            1,
+            |_| Ok(()),
+            |saved, start, end| budget_page(&app, saved, start, end).map(|result| result.0),
+        )
+        .unwrap();
+    assert_eq!(page.snapshot.roots, vec![first]);
+    assert_eq!(page.window.end, 1);
+    let next = views
+        .frozen_page_select(
+            binding,
+            snapshot,
+            2,
+            page.window.next_cursor.as_deref(),
+            &settings,
+            2,
+            |_| Ok(()),
+            |saved, start, end| budget_page(&app, saved, start, end).map(|result| result.0),
+        )
+        .unwrap();
+    assert_eq!(next.snapshot.roots, vec![second]);
+    assert!(next.window.next_cursor.is_none());
+    let mut oversized = seed.rows[0].clone();
+    oversized.source_records = (0..257)
+        .map(|n| refact_privacy::FileRecord {
+            path: format!("guard-{n}"),
+            zone: "normal".into(),
+            attribution: refact_privacy::Attribution::Declared,
+        })
+        .collect();
+    let guarded = WorkSnapshot {
+        guard_rows: vec![oversized],
+        ..Default::default()
+    };
+    assert_eq!(
+        budget_page(&app, &guarded, 0, 0).unwrap_err().cause,
+        Some(super::error::WorkFailureCause::ProvenanceCapacity)
+    );
 }
 
 /// Register one worktree against the fixture project exactly as the worktree

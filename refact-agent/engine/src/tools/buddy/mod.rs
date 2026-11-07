@@ -3,3 +3,6 @@ pub mod memory;
 pub mod refact_engine;
 pub mod surface;
 pub mod user_prefs;
+
+#[cfg(test)]
+mod contract_tests;

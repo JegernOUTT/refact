@@ -865,6 +865,7 @@ async fn get_builtin_tools(
     let worktree_tools: Vec<Box<dyn Tool + Send>> = vec![
         Box::new(crate::tools::tool_worktree_create::ToolWorktreeCreate),
         Box::new(crate::tools::tool_worktree_merge::ToolWorktreeMerge::new()),
+        Box::new(crate::tools::tool_worktree_sync::ToolWorktreeSync),
     ];
 
     let mut tool_groups = vec![

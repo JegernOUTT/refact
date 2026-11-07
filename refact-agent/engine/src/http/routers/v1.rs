@@ -135,7 +135,7 @@ use crate::http::routers::v1::worktrees::{
     handle_v1_worktrees_cleanup, handle_v1_worktrees_cleanup_dry_run, handle_v1_worktrees_create,
     handle_v1_worktrees_delete, handle_v1_worktrees_diff, handle_v1_worktrees_get,
     handle_v1_worktrees_list, handle_v1_worktrees_merge, handle_v1_worktrees_open,
-    handle_v1_worktrees_summary,
+    handle_v1_worktrees_summary, handle_v1_worktrees_sync,
 };
 use crate::http::routers::v1::background_agents::{
     handle_v1_background_agents_cancel, handle_v1_background_agents_get,
@@ -529,6 +529,7 @@ fn worktrees_routes() -> Router<AppState> {
         )
         .route("/worktrees/:id/diff", get(handle_v1_worktrees_diff))
         .route("/worktrees/:id/merge", post(handle_v1_worktrees_merge))
+        .route("/worktrees/:id/sync", post(handle_v1_worktrees_sync))
         .route("/worktrees/:id/open", post(handle_v1_worktrees_open))
 }
 
@@ -1536,6 +1537,14 @@ fn buddy_operator_routes() -> Router<AppState> {
         .route(
             "/buddy/operator/reopen",
             post(buddy_operator::handle_operator_reopen),
+        )
+        .route(
+            "/buddy/operator/pending-publications",
+            post(buddy_operator::handle_pending_publications),
+        )
+        .route(
+            "/buddy/operator/pending-publications/:id/retry",
+            post(buddy_operator::handle_retry_publication),
         )
         .route(
             "/buddy/operator/legacy-drafts/:id/work",

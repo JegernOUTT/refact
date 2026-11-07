@@ -833,47 +833,54 @@ pub(crate) mod tests {
             mut future: std::pin::Pin<&mut F>,
         ) -> PendingApproval {
             tokio::time::timeout(std::time::Duration::from_secs(10), async {
-                loop {
-                    let polled = futures::poll!(future.as_mut());
-                    assert!(
-                        polled.is_pending(),
-                        "approval ended before decision: {polled:?}"
-                    );
-                    if let Some(pending) = self
-                        .app
-                        .agent_approvals
-                        .list_for_parent("parent", now_ms())
-                        .first()
-                        .cloned()
-                    {
-                        let waiting = if self.agent_id.starts_with("board:") {
-                            let id = self.ccx.lock().await.chat_id.clone();
-                            let child = self
+                tokio::select! {
+                    result = future.as_mut() => panic!("approval ended before decision: {result:?}"),
+                    pending = async {
+                        loop {
+                            if let Some(pending) = self
                                 .app
-                                .chat
-                                .sessions
-                                .read()
-                                .await
-                                .get(&id)
+                                .agent_approvals
+                                .list_for_parent("parent", now_ms())
+                                .first()
                                 .cloned()
-                                .unwrap();
-                            let waiting = child.lock().await.runtime.state
-                                == crate::chat::types::SessionState::WaitingUserInput;
-                            waiting
-                        } else {
-                            self.app
-                                .agents
-                                .get_any(&self.agent_id)
-                                .await
-                                .unwrap()
-                                .status
-                                == crate::agents::types::BgAgentStatus::WaitingForApproval
-                        };
-                        if waiting {
-                            break pending;
+                            {
+                                let waiting = if self.agent_id.starts_with("board:") {
+                                    let id = self.ccx.lock().await.chat_id.clone();
+                                    let child = self
+                                        .app
+                                        .chat
+                                        .sessions
+                                        .read()
+                                        .await
+                                        .get(&id)
+                                        .cloned()
+                                        .unwrap();
+                                    let waiting = child.lock().await.runtime.state
+                                        == crate::chat::types::SessionState::WaitingUserInput;
+                                    waiting
+                                } else {
+                                    self.app
+                                        .agents
+                                        .get_any(&self.agent_id)
+                                        .await
+                                        .unwrap()
+                                        .status
+                                        == crate::agents::types::BgAgentStatus::WaitingForApproval
+                                };
+                                if waiting {
+                                    if !self.agent_id.starts_with("board:") {
+                                        self.app
+                                            .agents
+                                            .flush_pending_writes_for_test()
+                                            .await
+                                            .unwrap();
+                                    }
+                                    break pending;
+                                }
+                            }
+                            tokio::task::yield_now().await;
                         }
-                    }
-                    tokio::task::yield_now().await;
+                    } => pending,
                 }
             })
             .await

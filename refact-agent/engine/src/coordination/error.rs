@@ -8,6 +8,7 @@ pub enum WorkFailureCause {
     ScopedSourceUnavailable,
     PolicyUnavailable,
     SettingsUnavailable,
+    ProvenanceCapacity,
     SnapshotEncodingUnavailable,
     ProjectionUnavailable,
 }
@@ -60,6 +61,10 @@ impl WorkError {
             WorkFailureCause::SnapshotEncodingUnavailable => (
                 "unavailable",
                 "work snapshot could not be encoded; retry with a fresh snapshot and report request_id to the local operator if it persists",
+            ),
+            WorkFailureCause::ProvenanceCapacity => (
+                "unavailable",
+                "a single work item or fixed inspection metadata exceeds the complete provenance capacity; narrow scope or selected paths and fetch a fresh snapshot. If the item still cannot fit, report request_id to the local operator",
             ),
             WorkFailureCause::ProjectionUnavailable => (
                 "unavailable",

@@ -335,9 +335,146 @@ pub struct OutcomeRuntime {
     /// a restart starts the count again, but an already published blocked item
     /// survives in the store and still clears on the next success.
     housekeeping_failures: Arc<Mutex<HashMap<String, u32>>>,
+    pending_publications: Arc<Mutex<HashMap<String, PendingWorkflowPublication>>>,
+    publication_retry: Arc<tokio::sync::Mutex<()>>,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+pub(crate) enum PendingWorkflowPublication {
+    Report {
+        start: WorkflowOutcomeStart,
+        title: String,
+        body: String,
+        evidence: Vec<EvidenceRef>,
+        terminal: WorkflowTerminal,
+    },
+    Housekeeping {
+        start: WorkflowOutcomeStart,
+        terminal: WorkflowTerminal,
+        category: Option<WorkflowFailureCategory>,
+        blocked: bool,
+    },
+}
+
+impl PendingWorkflowPublication {
+    fn start(&self) -> &WorkflowOutcomeStart {
+        match self {
+            Self::Report {
+                start, ..
+            }
+            | Self::Housekeeping {
+                start, ..
+            } => start,
+        }
+    }
+
+    pub(crate) async fn publish(&self, runtime: &OutcomeRuntime) -> Result<(), String> {
+        match self.clone() {
+            Self::Report {
+                start,
+                title,
+                body,
+                evidence,
+                terminal,
+            } => runtime
+                .publish_report(start, title, body, evidence, terminal)
+                .await
+                .map(|_| ()),
+            Self::Housekeeping {
+                start,
+                terminal,
+                category,
+                blocked,
+            } => {
+                runtime
+                    .publish_housekeeping_result_recorded(start, terminal, category, blocked)
+                    .await
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct PendingPublicationInfo {
+    pub run_id: String,
+    pub workflow_id: String,
+    pub started_at: String,
 }
 
 impl OutcomeRuntime {
+    pub(crate) fn pending_publications(&self) -> Result<Vec<PendingPublicationInfo>, String> {
+        let pending = self
+            .pending_publications
+            .lock()
+            .map_err(|_| "pending publication lock poisoned")?;
+        Ok(pending
+            .values()
+            .map(|publication| {
+                let start = publication.start();
+                PendingPublicationInfo {
+                    run_id: start.run_id.clone(),
+                    workflow_id: start.workflow.clone(),
+                    started_at: start.started_at.clone(),
+                }
+            })
+            .collect())
+    }
+
+    pub(crate) fn retain_pending_publication(
+        &self,
+        publication: PendingWorkflowPublication,
+    ) -> Result<(), String> {
+        if publication.start().project != self.project || publication.start().worker != self.worker
+        {
+            return Err("pending publication belongs to another project or worker".into());
+        }
+        let mut pending = self
+            .pending_publications
+            .lock()
+            .map_err(|_| "pending publication lock poisoned")?;
+        let run_id = publication.start().run_id.clone();
+        if let Some(existing) = pending.get(&run_id) {
+            return if serde_json::to_vec(existing).ok() == serde_json::to_vec(&publication).ok() {
+                Ok(())
+            } else {
+                Err("a different publication is already retained for this run".into())
+            };
+        }
+        let bytes = serde_json::to_vec(&publication)
+            .map_err(|error| error.to_string())?
+            .len();
+        let used: usize = pending
+            .values()
+            .map(|value| {
+                serde_json::to_vec(value)
+                    .map(|bytes| bytes.len())
+                    .unwrap_or(usize::MAX)
+            })
+            .fold(0usize, usize::saturating_add);
+        if pending.len() >= 64 || used.saturating_add(bytes) > 4 * 1024 * 1024 {
+            return Err("pending publication capacity reached; retain the returned report before retrying publication".into());
+        }
+        pending.insert(run_id, publication);
+        Ok(())
+    }
+
+    pub(crate) async fn retry_pending_publication(&self, run_id: &str) -> Result<(), String> {
+        let _retry = self.publication_retry.lock().await;
+        let publication = self
+            .pending_publications
+            .lock()
+            .map_err(|_| "pending publication lock poisoned")?
+            .get(run_id)
+            .cloned()
+            .ok_or("no retained publication for this run")?;
+        publication.publish(self).await?;
+        self.pending_publications
+            .lock()
+            .map_err(|_| "pending publication lock poisoned")?
+            .remove(run_id);
+        Ok(())
+    }
+
     pub(crate) fn same_owner(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.store, &other.store) && Arc::ptr_eq(&self.closed, &other.closed)
     }
@@ -731,6 +868,8 @@ impl OutcomeRuntime {
             worker,
             closed: Arc::new(AtomicBool::new(false)),
             housekeeping_failures: Arc::new(Mutex::new(HashMap::new())),
+            pending_publications: Arc::new(Mutex::new(HashMap::new())),
+            publication_retry: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -928,9 +1067,21 @@ impl OutcomeRuntime {
     /// appear, and it is refreshed rather than duplicated on every repeat.
     pub(crate) async fn publish_housekeeping_result(
         &self,
+        start: WorkflowOutcomeStart,
+        terminal: WorkflowTerminal,
+        failure: Option<WorkflowFailureCategory>,
+    ) -> Result<(), String> {
+        let blocked = self.record_housekeeping_terminal(&start.workflow, &terminal);
+        self.publish_housekeeping_result_recorded(start, terminal, failure, blocked)
+            .await
+    }
+
+    async fn publish_housekeeping_result_recorded(
+        &self,
         mut start: WorkflowOutcomeStart,
         terminal: WorkflowTerminal,
         failure: Option<WorkflowFailureCategory>,
+        blocked: bool,
     ) -> Result<(), String> {
         let subject = housekeeping_subject(&self.project, &start.workflow)
             .map_err(|error| error.to_string())?;
@@ -941,8 +1092,7 @@ impl OutcomeRuntime {
         start.coverage = HOUSEKEEPING_COVERAGE.to_string();
         start.input_fingerprint = "housekeeping-v1".to_string();
         let workflow = start.workflow.clone();
-        let blocked = self.record_housekeeping_terminal(&workflow, &terminal);
-        let outcome = build_workflow_outcome(
+        let mut outcome = build_workflow_outcome(
             start,
             WorkflowOutcomeCheckpoint::from_evidence([]),
             terminal,
@@ -969,6 +1119,9 @@ impl OutcomeRuntime {
             }
             // Healthy, transiently unlucky, or already covered by R-4's item:
             // the outcome is still recorded, but nothing reaches the Desk.
+            if let Some(recorded) = store.get_run_outcome(&outcome.run_id)? {
+                outcome.ended_at = recorded.value.ended_at;
+            }
             store.append_run_outcome(&outcome)?;
             retire_work_item_in_store(store, &subject.work_item_id())?;
             Ok(())
@@ -980,7 +1133,11 @@ impl OutcomeRuntime {
     /// Count consecutive failed housekeeping runs and report whether the loop is
     /// now durably blocked. Anything that is not an outright failure resets the
     /// count, which is what makes the blocked item clear on recovery.
-    fn record_housekeeping_terminal(&self, workflow: &str, terminal: &WorkflowTerminal) -> bool {
+    pub(crate) fn record_housekeeping_terminal(
+        &self,
+        workflow: &str,
+        terminal: &WorkflowTerminal,
+    ) -> bool {
         let failed = matches!(
             terminal,
             WorkflowTerminal::Failed { .. } | WorkflowTerminal::Blocked { .. }

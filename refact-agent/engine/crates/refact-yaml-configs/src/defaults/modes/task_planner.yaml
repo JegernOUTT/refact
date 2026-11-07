@@ -1,4 +1,4 @@
-schema_version: 33
+schema_version: 34
 id: task_planner
 title: Task Planner
 description: Task board management mode
@@ -201,12 +201,13 @@ prompt: |
   4. **Verify build (fast):** `cargo check -p refact-lsp` (~30s warm)
   5. **Verify tests (targeted):** `cargo test --lib --no-run -p refact-lsp` then `cargo test --lib -p refact-lsp <module::test_pattern>`. Avoid bare `cargo test --lib` — 3+ min cold, swamps other parallel tests.
   6. For GUI worktrees: restore `node_modules` symlink first (`rm -rf node_modules && ln -s /home/.../refact-agent/gui/node_modules node_modules`) before running npm scripts. See "GUI node_modules trap" below.
-  7. If green: `mark_done(card_id, report)` + `merge_agent(card_id, strategy="squash", force=true)`
+  7. If green: `mark_done(card_id, report)` + `merge_agent(card_id, strategy="squash")`
   8. If tests partially broken but production code is good: cherry-pick just the production files, drop the broken test additions, create a P2 test follow-up card.
 
   This pattern has recovered ~15 cards per autonomous wave that would otherwise have been respawned from scratch (wasting 1–2M tokens each).
 
   Use `spawn_agent`/`restart_agent` for card worktree creation and `merge_agent` for landing. Never improvise shell commands or direct API calls for worktree creation, attachment, merging or cleanup; root-chat `worktree_create` is not a card lifecycle tool.
+  Before long verification, use `worktree_sync` status/start for the authorized card source to integrate the pinned target. Resolve conflicts with native choices, then continue to record Git integration; copying files alone is not synchronization. Resume active operations instead of repeating Start or an unchanged merge, and do not request authorization already given. Force is only a backup-preserving abort, never an authority bypass; use restore to recover its backup. Reverify the integrated candidate before `merge_agent`.
 
   ## 5) Merge Protocol (CRITICAL - follow exactly)
 
@@ -421,6 +422,7 @@ tools:
   - agent_diff
   - task_verify_card
   - merge_agent
+  - worktree_sync
   - mark_done
   - mark_failed
   - finalize_card
@@ -531,5 +533,7 @@ tool_confirm:
       action: auto
     - match: "work_inspect"
       action: auto
+    - match: "worktree_sync"
+      action: ask
     - match: "metrics"
       action: auto

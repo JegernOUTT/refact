@@ -43,6 +43,41 @@ struct CoverageScanCache {
 struct CoverageAutonomousResult {
     chat_id: String,
     completed_at: String,
+    #[serde(default)]
+    signal_hash: Option<String>,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    failure_category: Option<crate::buddy::workflows::WorkflowFailureCategory>,
+    #[serde(default)]
+    consecutive_failures: Option<u32>,
+    #[serde(default)]
+    preflight_fingerprint: Option<String>,
+}
+
+impl CoverageScanCache {
+    fn autonomous_result(&self) -> Option<AutonomousLastResult> {
+        let last = self.autonomous.as_ref()?;
+        Some(AutonomousLastResult {
+            signal_hash: last
+                .signal_hash
+                .clone()
+                .unwrap_or_else(|| self.signal_hash.clone()),
+            chat_id: last.chat_id.clone(),
+            completed_at: last.completed_at.clone(),
+            status: last.status.clone(),
+            failure_category: last.failure_category.clone(),
+            consecutive_failures: last.consecutive_failures,
+            preflight_fingerprint: last.preflight_fingerprint.clone(),
+        })
+    }
+}
+
+fn autonomous_context(mut ctx: BuddyJobContext) -> BuddyJobContext {
+    ctx.job_state.last_result = cached_scan(&ctx)
+        .and_then(|cache| cache.autonomous_result())
+        .map(|last| super::autonomous_chats::serialize_last_autonomous_result(&last));
+    ctx
 }
 
 fn serialize_scan(signal_hash: &str, scan: &CoverageScanResult) -> String {
@@ -67,6 +102,11 @@ fn serialize_scan_with_autonomous(
         autonomous: Some(CoverageAutonomousResult {
             chat_id: last.chat_id.clone(),
             completed_at: last.completed_at.clone(),
+            signal_hash: Some(last.signal_hash.clone()),
+            status: last.status.clone(),
+            failure_category: last.failure_category.clone(),
+            consecutive_failures: last.consecutive_failures,
+            preflight_fingerprint: last.preflight_fingerprint.clone(),
         }),
     })
     .unwrap_or_default()
@@ -313,7 +353,7 @@ impl BuddyJob for BuddyTestCoverageWatcherJob {
         false
     }
 
-    async fn should_run(&self, _gcx: AppState, ctx: &BuddyJobContext) -> bool {
+    async fn should_run(&self, gcx: AppState, ctx: &BuddyJobContext) -> bool {
         let Some(cache) = cached_scan(ctx) else {
             return true;
         };
@@ -325,9 +365,14 @@ impl BuddyJob for BuddyTestCoverageWatcherJob {
             return false;
         }
         let spec = build_test_coverage_spec(ctx, &scan);
-        !cache
-            .autonomous
-            .is_some_and(|_| cache.signal_hash == spec.signal_hash)
+        super::autonomous_chats::autonomous_should_run(
+            &gcx,
+            &autonomous_context(ctx.clone()),
+            self.id(),
+            &spec.signal_hash,
+            self.cooldown_seconds(),
+        )
+        .await
     }
 
     async fn execute(&self, gcx: AppState, ctx: BuddyJobContext) -> BuddyJobResult {
@@ -345,30 +390,10 @@ impl BuddyJob for BuddyTestCoverageWatcherJob {
             };
         }
         let spec = build_test_coverage_spec(&ctx, &scan);
-        if let Some(last) = cached_scan(&ctx).and_then(|cache| {
-            if cache.signal_hash != spec.signal_hash {
-                return None;
-            }
-            cache.autonomous.map(|autonomous| AutonomousLastResult {
-                signal_hash: spec.signal_hash.clone(),
-                chat_id: autonomous.chat_id,
-                completed_at: autonomous.completed_at,
-                status: None,
-                failure_category: None,
-                consecutive_failures: None,
-            })
-        }) {
-            return BuddyJobResult {
-                last_result: Some(serialize_scan_with_autonomous(
-                    &spec.signal_hash,
-                    &scan,
-                    &last,
-                )),
-                ..Default::default()
-            };
-        }
+        let autonomous_ctx = autonomous_context(ctx);
         let mut result =
-            execute_autonomous_spec(gcx, &ctx, spec.clone(), self.cooldown_seconds()).await;
+            execute_autonomous_spec(gcx, &autonomous_ctx, spec.clone(), self.cooldown_seconds())
+                .await;
         if let Some(last) = parse_last_autonomous_result(result.last_result.as_deref()) {
             result.last_result = Some(serialize_scan_with_autonomous(
                 &spec.signal_hash,
@@ -386,4 +411,118 @@ impl BuddyJob for BuddyTestCoverageWatcherJob {
 mod tests {
     use super::*;
     use std::path::Path;
+
+    fn context() -> BuddyJobContext {
+        BuddyJobContext {
+            identity_name: "Pixel".into(),
+            personality: Default::default(),
+            onboarding: Default::default(),
+            recent_diagnostics: vec![],
+            project_root: std::path::PathBuf::from("/tmp/coverage-test"),
+            job_state: Default::default(),
+            workflow_summaries: vec![],
+            total_workflow_runs: 0,
+            suggestion_state: vec![],
+            pet: Default::default(),
+            active_quest: None,
+            settings: Default::default(),
+            pulse: Default::default(),
+            facts: vec![],
+            recent_activities: vec![],
+        }
+    }
+
+    fn scan() -> CoverageScanResult {
+        CoverageScanResult {
+            candidates: vec![CoverageCandidate {
+                path: "src/lib.rs".into(),
+                status: "missing_cfg_test_or_tests_dir".into(),
+            }],
+        }
+    }
+
+    #[tokio::test]
+    async fn serialized_coverage_cache_preserves_failures_backoff_and_deferred_no_replay() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let app = AppState::from_gcx(gcx).await;
+        let job = BuddyTestCoverageWatcherJob;
+        for (status, old, expected_run) in [
+            ("failed", false, false),
+            ("failed", true, true),
+            ("blocked", false, true),
+            ("superseded", false, true),
+            ("deferred", false, false),
+        ] {
+            let mut ctx = context();
+            let scan = scan();
+            let spec = build_test_coverage_spec(&ctx, &scan);
+            let mut last = AutonomousLastResult::new(&spec.signal_hash, "retained-chat");
+            last.status = Some(status.into());
+            last.failure_category =
+                Some(crate::buddy::workflows::WorkflowFailureCategory::ProviderTransient);
+            last.consecutive_failures = Some(3);
+            last.preflight_fingerprint = Some("old-model-configuration".into());
+            if old {
+                last.completed_at = (Utc::now() - chrono::Duration::days(2)).to_rfc3339();
+            }
+            ctx.job_state.last_result = Some(serialize_scan_with_autonomous(
+                &spec.signal_hash,
+                &scan,
+                &last,
+            ));
+            assert_eq!(
+                cached_scan(&ctx).unwrap().autonomous_result(),
+                Some(last.clone())
+            );
+            assert_eq!(
+                job.should_run(app.clone(), &ctx).await,
+                expected_run,
+                "{status}, old={old}"
+            );
+            if !expected_run {
+                let result = job.execute(app.clone(), ctx).await;
+                let cache: CoverageScanCache =
+                    serde_json::from_str(result.last_result.as_deref().unwrap()).unwrap();
+                assert_eq!(cache.autonomous_result(), Some(last));
+                assert!(result.activity.is_none());
+                assert!(result.workflow_failure.is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_coverage_cache_remains_historical_success() {
+        let cache: CoverageScanCache = serde_json::from_value(serde_json::json!({
+            "scanned_at": 0, "signal_hash": "signal", "scan": {"candidates": []},
+            "autonomous": {"chat_id": "historical-chat", "completed_at": "2026-01-01T00:00:00Z"}
+        }))
+        .unwrap();
+        assert_eq!(cache.autonomous_result().unwrap().status, None);
+    }
+
+    #[tokio::test]
+    async fn coverage_blocked_execute_preserves_current_preflight_and_suppresses_unchanged_config()
+    {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let app = AppState::from_gcx(gcx).await;
+        let job = BuddyTestCoverageWatcherJob;
+        let mut ctx = context();
+        let scan = scan();
+        let spec = build_test_coverage_spec(&ctx, &scan);
+        ctx.job_state.last_result = Some(serialize_scan(&spec.signal_hash, &scan));
+        let result = job.execute(app.clone(), ctx.clone()).await;
+        ctx.job_state.last_result = result.last_result;
+        let last = cached_scan(&ctx).unwrap().autonomous_result().unwrap();
+        assert_eq!(last.status.as_deref(), Some("blocked"));
+        assert!(last.preflight_fingerprint.is_some());
+        assert!(!job.should_run(app.clone(), &ctx).await);
+        let mut changed = last;
+        changed.preflight_fingerprint = Some("previous-config".into());
+        ctx.job_state.last_result = Some(serialize_scan_with_autonomous(
+            &spec.signal_hash,
+            &scan,
+            &changed,
+        ));
+        assert!(job.should_run(app, &ctx).await);
+    }
 }

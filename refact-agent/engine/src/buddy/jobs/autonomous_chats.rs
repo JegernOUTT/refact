@@ -182,6 +182,8 @@ pub struct AutonomousLastResult {
     pub failure_category: Option<WorkflowFailureCategory>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub consecutive_failures: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preflight_fingerprint: Option<String>,
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -194,6 +196,7 @@ impl AutonomousLastResult {
             status: None,
             failure_category: None,
             consecutive_failures: None,
+            preflight_fingerprint: None,
         }
     }
 }
@@ -252,6 +255,7 @@ pub fn serialize_last_autonomous_result(result: &AutonomousLastResult) -> String
         "status": result.status,
         "failure_category": result.failure_category,
         "consecutive_failures": result.consecutive_failures,
+        "preflight_fingerprint": result.preflight_fingerprint,
     })
     .to_string()
 }
@@ -286,20 +290,53 @@ fn failure_backoff_active(last: &AutonomousLastResult, cooldown_seconds: u64) ->
 #[cfg_attr(not(test), allow(dead_code))]
 pub fn same_signal(ctx: &BuddyJobContext, hash: &str) -> bool {
     parse_last_autonomous_result(ctx.job_state.last_result.as_deref())
-        .map(|last| last.signal_hash == hash && last.status.as_deref() != Some("failed"))
+        .map(|last| {
+            last.signal_hash == hash
+                && !matches!(last.status.as_deref(), Some("failed" | "blocked"))
+        })
         .unwrap_or(false)
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
-fn same_signal_or_failed_backoff(ctx: &BuddyJobContext, hash: &str, cooldown_seconds: u64) -> bool {
+pub(super) fn same_signal_or_failed_backoff(
+    ctx: &BuddyJobContext,
+    hash: &str,
+    cooldown_seconds: u64,
+) -> bool {
     parse_last_autonomous_result(ctx.job_state.last_result.as_deref())
         .map(|last| {
+            if matches!(last.status.as_deref(), Some("blocked" | "superseded")) {
+                return false;
+            }
             if last.status.as_deref() == Some("failed") {
                 return failure_backoff_active(&last, cooldown_seconds);
             }
             last.signal_hash == hash
         })
         .unwrap_or(false)
+}
+
+pub(super) async fn autonomous_should_run(
+    gcx: &AppState,
+    ctx: &BuddyJobContext,
+    workflow_id: &str,
+    hash: &str,
+    cooldown_seconds: u64,
+) -> bool {
+    if same_signal_or_failed_backoff(ctx, hash, cooldown_seconds) {
+        return false;
+    }
+    if let Some(last) = parse_last_autonomous_result(ctx.job_state.last_result.as_deref()) {
+        if last.status.as_deref() == Some("blocked") && last.signal_hash == hash {
+            return last.preflight_fingerprint.as_deref()
+                != Some(
+                    autonomous_preflight_fingerprint(gcx, workflow_id)
+                        .await
+                        .as_str(),
+                );
+        }
+    }
+    true
 }
 
 fn preserve_last_result(ctx: &BuddyJobContext) -> BuddyJobResult {
@@ -641,23 +678,24 @@ fn apply_autonomous_runtime_chat_notification(event: &mut BuddyRuntimeEvent, des
 }
 
 fn called_buddy_runtime_report(messages: &[ChatMessage]) -> bool {
-    messages.iter().any(|message| {
-        message.tool_calls.as_ref().is_some_and(|tool_calls| {
-            tool_calls.iter().any(|tool_call| {
-                matches!(
-                    tool_call.function.name.as_str(),
-                    "buddy_runtime_event" | "buddy_log_activity"
-                )
-            })
-        })
-    })
+    ["buddy_runtime_event", "buddy_log_activity"]
+        .iter()
+        .any(|name| assistant_tool_call_succeeded(messages, name))
 }
 
 fn last_assistant_text(messages: &[ChatMessage]) -> String {
     messages
         .iter()
         .rev()
-        .find(|message| message.role == "assistant")
+        .find(|message| {
+            matches!(
+                message.role.as_str(),
+                "assistant" | "user" | "tool" | "diff"
+            )
+        })
+        .filter(|message| {
+            message.role == "assistant" && message.tool_calls.as_ref().is_none_or(Vec::is_empty)
+        })
         .map(|message| message.content.content_text_only())
         .unwrap_or_default()
 }
@@ -678,29 +716,21 @@ fn assistant_tool_call_succeeded(messages: &[ChatMessage], tool_name: &str) -> b
     }
     messages.iter().any(|message| {
         matches!(message.role.as_str(), "tool" | "diff")
-            && message.tool_failed != Some(true)
+            && message.tool_failed == Some(false)
             && call_ids.contains(message.tool_call_id.as_str())
     })
 }
 
 fn autonomous_subchat_successful(messages: &[ChatMessage]) -> bool {
-    let Some(last_assistant) = messages
-        .iter()
-        .rev()
-        .find(|message| message.role == "assistant")
-    else {
-        return false;
-    };
-    if !last_assistant.content.content_text_only().trim().is_empty() {
-        return true;
-    }
-    [
-        "buddy_runtime_event",
-        "buddy_create_draft",
-        "buddy_memory_create",
-    ]
-    .iter()
-    .any(|tool_name| assistant_tool_call_succeeded(messages, tool_name))
+    !last_assistant_text(messages).trim().is_empty()
+}
+
+fn runner_superseded(error: &str) -> bool {
+    matches!(
+        error,
+        "Runner no longer owns the current session"
+            | "Runner no longer owns the current session; retain its history and checkout"
+    )
 }
 
 fn autonomous_failure_result(
@@ -708,7 +738,12 @@ fn autonomous_failure_result(
     spec: &AutonomousBuddyChatSpec,
     error: String,
 ) -> BuddyJobResult {
-    let category = WorkflowFailureCategory::classify(&error);
+    let superseded = runner_superseded(&error);
+    let category = if superseded {
+        WorkflowFailureCategory::Cancelled
+    } else {
+        WorkflowFailureCategory::classify(&error)
+    };
     let detail = redact_and_cap_text(&error, 1_000);
     let summary = super::super::workflows::workflow_failure_summary(&category, &error);
     let previous = parse_last_autonomous_result(ctx.job_state.last_result.as_deref());
@@ -729,9 +764,19 @@ fn autonomous_failure_result(
             fact_kind_name(BuddyFactKind::BrokenModelReference)
         ),
         completed_at: Utc::now().to_rfc3339(),
-        status: Some("failed".to_string()),
+        status: Some(
+            if superseded {
+                "superseded"
+            } else if error.starts_with("Assessment could not be saved to Buddy Desk:") {
+                "deferred"
+            } else {
+                "failed"
+            }
+            .to_string(),
+        ),
         failure_category: Some(category.clone()),
         consecutive_failures: Some(consecutive_failures),
+        preflight_fingerprint: None,
     };
     BuddyJobResult {
         workflow_failure: Some(WorkflowFailureReport {
@@ -779,6 +824,10 @@ pub(crate) async fn execute_autonomous_spec(
     }
     if same_signal_or_failed_backoff(ctx, &spec.signal_hash, cooldown_seconds) {
         return preserve_last_result(ctx);
+    }
+    if let Err(error) = autonomous_model_preflight(&gcx, &spec.workflow_id).await {
+        let fingerprint = autonomous_preflight_fingerprint(&gcx, &spec.workflow_id).await;
+        return preflight_blocked_result(ctx, &spec, fingerprint, error);
     }
     if crate::buddy::actor::buddy_llm_budget_exhausted(&gcx).await {
         tracing::info!(
@@ -2012,7 +2061,12 @@ impl BuddyJob for BuddyBehaviorLearnerJob {
         }
         let mut result =
             execute_autonomous_spec(gcx.clone(), &ctx, spec, self.cooldown_seconds()).await;
-        if result.last_result.is_some() {
+        if result
+            .last_result
+            .as_deref()
+            .and_then(|raw| parse_last_autonomous_result(Some(raw)))
+            .is_some_and(|last| last.status.is_none())
+        {
             let queued = enqueue_behavior_preferences(gcx, &candidates).await;
             if queued > 0 {
                 if let Some(activity) = result.activity.as_mut() {
@@ -2193,38 +2247,76 @@ async fn autonomous_chats_enabled(gcx: AppState) -> Result<bool, String> {
     Ok(load_settings(&project_root).await.autonomous_chats_enabled)
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
-/// C1: pick the model-type mode whose configured default model actually exists in caps.
-/// A stale `chat_buddy_model` (e.g. a removed model id) must not fail the whole autonomous
-/// fleet; fall back to default/thinking/light. Returns "buddy" when caps are unavailable or
-/// nothing resolves, so the normal error path can surface.
-async fn pick_available_buddy_mode(gcx: AppState) -> String {
-    let caps_state = gcx.model.caps.read().await;
-    let Some(caps) = caps_state.caps.as_ref() else {
-        return "buddy".to_string();
-    };
-    // Use the same resolution as the real subchat path (handles provider-prefixed and
-    // finetune model ids), so a valid `model:ft-...` default is not treated as missing.
-    let avail = |m: &str| {
-        let m = m.trim();
-        !m.is_empty() && crate::caps::resolve_model(&caps.chat_models, m).is_ok()
-    };
-    let d = &caps.defaults;
-    if avail(&d.chat_buddy_model) {
-        "buddy".to_string()
-    } else if avail(&d.chat_default_model) {
-        tracing::warn!(
-            "buddy: chat_buddy_model '{}' unavailable, falling back to chat_default_model",
-            d.chat_buddy_model
-        );
-        "default".to_string()
-    } else if avail(&d.chat_thinking_model) {
-        "thinking".to_string()
-    } else if avail(&d.chat_light_model) {
-        "light".to_string()
-    } else {
-        "buddy".to_string()
+async fn autonomous_model_preflight(gcx: &AppState, workflow_id: &str) -> Result<String, String> {
+    let params = crate::subchat::resolve_subchat_params(gcx.gcx.clone(), workflow_id).await?;
+    let model = crate::subchat::resolve_subchat_model(gcx.gcx.clone(), &params).await?;
+    let caps = gcx.model.caps.read().await;
+    let caps = caps
+        .caps
+        .as_ref()
+        .ok_or("Model capabilities unavailable; retry after refresh")?;
+    let record = crate::caps::resolve_model(&caps.chat_models, &model)?;
+    if !record.supports_tools {
+        return Err("Configured workflow model does not support tools; configure a tool-capable model explicitly".into());
     }
+    Ok(model)
+}
+
+async fn autonomous_preflight_fingerprint(gcx: &AppState, workflow_id: &str) -> String {
+    let config = crate::yaml_configs::customization_registry::get_subagent_config(
+        gcx.gcx.clone(),
+        workflow_id,
+        None,
+    )
+    .await;
+    let requirements = config.map(|config| (config.subchat, config.tools));
+    let caps = gcx.model.caps.read().await;
+    let capabilities = caps.caps.as_ref().map(|caps| {
+        let models: BTreeMap<_, _> = caps
+            .chat_models
+            .iter()
+            .map(|(id, model)| {
+                (
+                    id,
+                    (
+                        &model.base.id,
+                        model.supports_tools,
+                        model.supports_agent,
+                        model.base.n_ctx,
+                    ),
+                )
+            })
+            .collect();
+        serde_json::json!({
+            "revision": caps.caps_version,
+            "defaults": caps.defaults,
+            "models": models,
+        })
+    });
+    signal_hash([
+        serde_json::to_string(&requirements).unwrap_or_default(),
+        serde_json::to_string(&capabilities).unwrap_or_default(),
+    ])
+}
+
+fn preflight_blocked_result(
+    ctx: &BuddyJobContext,
+    spec: &AutonomousBuddyChatSpec,
+    fingerprint: String,
+    error: String,
+) -> BuddyJobResult {
+    if parse_last_autonomous_result(ctx.job_state.last_result.as_deref()).is_some_and(|last| {
+        last.status.as_deref() == Some("blocked")
+            && last.preflight_fingerprint.as_deref() == Some(fingerprint.as_str())
+    }) {
+        return preserve_last_result(ctx);
+    }
+    let mut result = autonomous_failure_result(ctx, spec, error);
+    let mut last = parse_last_autonomous_result(result.last_result.as_deref()).unwrap();
+    last.status = Some("blocked".into());
+    last.preflight_fingerprint = Some(fingerprint);
+    result.last_result = Some(serialize_last_autonomous_result(&last));
+    result
 }
 
 pub fn sum_llm_usage(messages: &[ChatMessage]) -> (u64, u64, u64) {
@@ -2353,12 +2445,8 @@ fn autonomous_finalization(
     if !observation.record_outcome {
         return None;
     }
-    if observation.successful && !observation.aborted {
-        let report = if observation.report.trim().is_empty() {
-            "The workflow reported through Buddy tools without a written summary.".to_string()
-        } else {
-            observation.report.clone()
-        };
+    if observation.successful && !observation.aborted && !observation.report.trim().is_empty() {
+        let report = observation.report.clone();
         return Some(AutonomousFinalization {
             terminal: WorkflowTerminal::Inconclusive,
             title: crate::buddy::outcome_runtime::workflow_result_title(
@@ -2381,6 +2469,13 @@ fn autonomous_finalization(
         AutonomousRunStage::Blocked => WorkflowTerminal::Blocked {
             failure_class: Some("precondition".to_string()),
         },
+        AutonomousRunStage::Failed
+            if observation.error.as_deref().is_some_and(runner_superseded) =>
+        {
+            WorkflowTerminal::Cancelled {
+                failure_class: Some("superseded".into()),
+            }
+        }
         AutonomousRunStage::Failed => terminal_from_workflow_result(&Err(observation
             .error
             .clone()
@@ -2463,27 +2558,24 @@ async fn publish_autonomous_finalization(
     {
         tracing::warn!(workflow_id = %spec.workflow_id, error = %error, "autonomous run checkpoint was not persisted; attempting terminal publication");
     }
-    if finalization.successful {
-        runtime
-            .publish_assessment(
-                start,
-                finalization.title.clone(),
-                finalization.report.clone(),
-                evidence,
-            )
-            .await
-            .map(|_| ())
-    } else {
-        runtime
-            .publish_report(
-                start,
-                finalization.title.clone(),
-                finalization.report.clone(),
-                evidence,
-                finalization.terminal.clone(),
-            )
-            .await
-            .map(|_| ())
+    use crate::buddy::outcome_runtime::{PendingWorkflowPublication, WorkflowTerminal};
+    let pending = PendingWorkflowPublication::Report {
+        start,
+        title: finalization.title.clone(),
+        body: finalization.report.clone(),
+        evidence,
+        terminal: if finalization.successful {
+            WorkflowTerminal::Inconclusive
+        } else {
+            finalization.terminal.clone()
+        },
+    };
+    match pending.publish(runtime).await {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            let retained = runtime.retain_pending_publication(pending).is_ok();
+            Err(format!("{error}; publication retained in memory: {retained}; not durable across restart. Retry saving from Buddy, not workflow execution."))
+        }
     }
 }
 
@@ -2520,6 +2612,9 @@ async fn finalize_autonomous_run(
         return Err(format!(
             "Assessment could not be saved to Buddy Desk: {error}"
         ));
+    }
+    if !observation.successful || observation.report.trim().is_empty() {
+        return Err("autonomous buddy subchat completed without a successful report".into());
     }
     observation
         .chat_id
@@ -2561,6 +2656,10 @@ async fn observe_autonomous_run(
         Err(err) => return AutonomousRunObservation::blocked(err, true),
     }
 
+    let admitted_model = match autonomous_model_preflight(&gcx, &spec.workflow_id).await {
+        Ok(model) => model,
+        Err(error) => return AutonomousRunObservation::blocked(error, true),
+    };
     if let Some(runtime) = outcome_runtime {
         if let Err(error) = runtime
             .begin_workflow(autonomous_outcome_start(
@@ -2595,7 +2694,7 @@ async fn observe_autonomous_run(
         max_steps,
         false,
         None,
-        pick_available_buddy_mode(gcx.clone()).await,
+        "buddy".to_string(),
     )
     .await
     {
@@ -2614,6 +2713,12 @@ async fn observe_autonomous_run(
         source_created_at: None,
     });
 
+    match autonomous_model_preflight(&gcx, &spec.workflow_id).await {
+        Ok(model) if model == admitted_model && config.model == admitted_model => {}
+        _ => return AutonomousRunObservation::blocked(
+            "Configured workflow model changed before dispatch; retry with the current configuration".into(), true,
+        ),
+    }
     let result = match crate::subchat::run_subchat(gcx.gcx.clone(), messages, config).await {
         Ok(result) => result,
         Err(err) => return AutonomousRunObservation::failed(err),
@@ -3350,6 +3455,7 @@ async fn publish_source_check_outcome(
         status: Some(status.to_string()),
         failure_category: None,
         consecutive_failures: None,
+        preflight_fingerprint: None,
     };
     BuddyJobResult {
         last_result: Some(serialize_last_autonomous_result(&last)),
@@ -3525,6 +3631,10 @@ async fn execute_built_autonomous_job(
 ) -> BuddyJobResult {
     if same_signal_or_failed_backoff(ctx, &spec.signal_hash, definition.cooldown_seconds) {
         return preserve_last_result(ctx);
+    }
+    if let Err(error) = autonomous_model_preflight(&gcx, &spec.workflow_id).await {
+        let fingerprint = autonomous_preflight_fingerprint(&gcx, &spec.workflow_id).await;
+        return preflight_blocked_result(ctx, &spec, fingerprint, error);
     }
     if crate::buddy::actor::buddy_llm_budget_exhausted(&gcx).await {
         tracing::info!(
@@ -5223,6 +5333,193 @@ mod tests {
     use crate::buddy::types::{BuddyFact, BuddyJobState, BuddyOnboarding, BuddyPetState, BuddyPulse};
     use crate::stats::event::LlmCallEvent;
 
+    #[test]
+    fn report_attempt_failed_unknown_and_notification_only_are_not_reports() {
+        let call: ChatMessage = serde_json::from_value(serde_json::json!({
+            "role": "assistant", "content": "", "tool_calls": [{
+                "id": "report-call", "type": "function",
+                "function": {"name": "buddy_runtime_event", "arguments": "{}"}
+            }]
+        }))
+        .unwrap();
+        assert!(!called_buddy_runtime_report(&[call.clone()]));
+        for failed in [Some(true), None, Some(false)] {
+            let mut answer = ChatMessage::new("tool".into(), "Runtime event enqueued".into());
+            answer.tool_call_id = "report-call".into();
+            answer.tool_failed = failed;
+            let messages = vec![call.clone(), answer];
+            assert_eq!(
+                called_buddy_runtime_report(&messages),
+                failed == Some(false)
+            );
+            assert!(!autonomous_subchat_successful(&messages));
+        }
+        let report = ChatMessage::new("assistant".into(), "Observed scope: manifests. Findings: one missing lockfile. Uncertainty: dependencies were not fetched. Next check: review locally.".into());
+        assert!(autonomous_subchat_successful(&[report]));
+        let mut commentary = call.clone();
+        commentary.content =
+            ChatMessage::new("assistant".into(), "I'll inspect the manifests".into()).content;
+        assert!(!autonomous_subchat_successful(&[commentary.clone()]));
+        let mut answer = ChatMessage::new("tool".into(), "Read manifests".into());
+        answer.tool_call_id = commentary.tool_calls.as_ref().unwrap()[0].id.clone();
+        answer.tool_failed = Some(false);
+        assert!(!autonomous_subchat_successful(&[
+            commentary.clone(),
+            answer.clone(),
+        ]));
+        assert!(autonomous_subchat_successful(&[
+            commentary,
+            answer,
+            ChatMessage::new("assistant".into(), "Manifest inspection complete".into()),
+        ]));
+        assert!(!autonomous_subchat_successful(&[ChatMessage::new(
+            "assistant".into(),
+            "  ".into()
+        )]));
+    }
+
+    #[test]
+    fn only_proven_custody_loss_is_superseded_not_busy_or_provider_failures() {
+        let ctx = context_with_last_result(None);
+        let spec = AutonomousBuddyChatSpec::new(
+            MEMORY_GARDENER_WORKFLOW_ID,
+            "Memory",
+            "Prompt",
+            "Evidence",
+        );
+        for (error, expected) in [
+            ("Runner no longer owns the current session", "superseded"),
+            (
+                "Runner no longer owns the current session; retain its history and checkout",
+                "superseded",
+            ),
+            ("Runner session busy; retain progress", "failed"),
+            (
+                "Provider error: Runner no longer owns the current session",
+                "failed",
+            ),
+        ] {
+            let result = autonomous_failure_result(&ctx, &spec, error.into());
+            let last = parse_last_autonomous_result(result.last_result.as_deref()).unwrap();
+            assert_eq!(last.status.as_deref(), Some(expected));
+            let observation = AutonomousRunObservation::failed(error.into());
+            let finalization = autonomous_finalization(&spec, &observation).unwrap();
+            assert_eq!(
+                matches!(
+                    finalization.terminal,
+                    crate::buddy::outcome_runtime::WorkflowTerminal::Cancelled { .. }
+                ),
+                expected == "superseded"
+            );
+        }
+    }
+
+    #[test]
+    fn blocked_preflight_is_quiet_until_configuration_changes() {
+        let spec = AutonomousBuddyChatSpec::new(
+            MEMORY_GARDENER_WORKFLOW_ID,
+            "Memory",
+            "Prompt",
+            "Evidence",
+        );
+        let ctx = context_with_last_result(None);
+        let first = preflight_blocked_result(
+            &ctx,
+            &spec,
+            "caps-a".into(),
+            "Model unavailable token=secret123".into(),
+        );
+        let last = parse_last_autonomous_result(first.last_result.as_deref()).unwrap();
+        assert_eq!(last.status.as_deref(), Some("blocked"));
+        assert!(first.workflow_failure.is_some());
+        assert!(!first.workflow_failure.unwrap().detail.contains("secret123"));
+        let ctx = context_with_last_result(first.last_result);
+        assert!(!same_signal_or_failed_backoff(&ctx, &spec.signal_hash, 300));
+        let repeated =
+            preflight_blocked_result(&ctx, &spec, "caps-a".into(), "Model unavailable".into());
+        assert_eq!(repeated.last_result, ctx.job_state.last_result);
+        assert!(repeated.workflow_failure.is_none());
+        let changed =
+            preflight_blocked_result(&ctx, &spec, "caps-b".into(), "Model unavailable".into());
+        assert!(changed.workflow_failure.is_some());
+        assert_ne!(changed.last_result, ctx.job_state.last_result);
+    }
+
+    #[tokio::test]
+    async fn unavailable_configured_model_blocks_before_chat_spawn_without_fallback() {
+        let app = AppState::from_gcx(crate::global_context::tests::make_test_gcx().await).await;
+        let mut caps = crate::caps::CodeAssistantCaps::default();
+        caps.defaults.chat_buddy_model = "private/missing".into();
+        caps.defaults.chat_light_model = "private/missing".into();
+        caps.defaults.chat_default_model = "other/available".into();
+        let mut alternate = crate::caps::ChatModelRecord::default();
+        alternate.base.id = "other/available".into();
+        alternate.base.endpoint = "https://alternate.invalid/v1/chat/completions".into();
+        alternate.supports_tools = true;
+        caps.chat_models
+            .insert(alternate.base.id.clone(), std::sync::Arc::new(alternate));
+        {
+            let mut state = app.model.caps.write().await;
+            state.caps = Some(std::sync::Arc::new(caps));
+            // Keep the isolated fixture from refreshing its deliberately missing
+            // model out of local provider configuration during preflight.
+            state.last_attempted_ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+                .saturating_add(60);
+        }
+        let spec = AutonomousBuddyChatSpec::new(
+            MEMORY_GARDENER_WORKFLOW_ID,
+            "Memory",
+            "Prompt",
+            "Evidence",
+        );
+        let error = autonomous_model_preflight(&app, &spec.workflow_id)
+            .await
+            .unwrap_err();
+        assert!(error.contains("private/missing"), "{error}");
+        let ctx = context_with_last_result(None);
+        let first = execute_autonomous_spec(app.clone(), &ctx, spec.clone(), 300).await;
+        assert_eq!(
+            parse_last_autonomous_result(first.last_result.as_deref())
+                .unwrap()
+                .status
+                .as_deref(),
+            Some("blocked")
+        );
+        assert!(app.chat.sessions.read().await.is_empty());
+        let ctx = context_with_last_result(first.last_result);
+        let repeated = execute_autonomous_spec(app.clone(), &ctx, spec, 300).await;
+        assert_eq!(repeated.last_result, ctx.job_state.last_result);
+        assert!(repeated.workflow_failure.is_none());
+        assert!(app.chat.sessions.read().await.is_empty());
+        let before = autonomous_preflight_fingerprint(&app, MEMORY_GARDENER_WORKFLOW_ID).await;
+        {
+            let mut state = app.model.caps.write().await;
+            let mut caps = state.caps.as_ref().unwrap().as_ref().clone();
+            let mut configured = crate::caps::ChatModelRecord::default();
+            configured.base.id = "private/missing".into();
+            configured.base.endpoint = "https://private.invalid/v1/chat/completions".into();
+            configured.base.n_ctx = 128_000;
+            configured.supports_tools = true;
+            caps.chat_models
+                .insert(configured.base.id.clone(), std::sync::Arc::new(configured));
+            state.caps = Some(std::sync::Arc::new(caps));
+        }
+        assert_ne!(
+            before,
+            autonomous_preflight_fingerprint(&app, MEMORY_GARDENER_WORKFLOW_ID).await
+        );
+        assert_eq!(
+            autonomous_model_preflight(&app, MEMORY_GARDENER_WORKFLOW_ID)
+                .await
+                .unwrap(),
+            "private/missing"
+        );
+        assert!(app.chat.sessions.read().await.is_empty());
+    }
+
     fn create_symlink_dir_for_test(target: &Path, link: &Path) -> bool {
         #[cfg(unix)]
         let result = std::os::unix::fs::symlink(target, link);
@@ -5764,6 +6061,7 @@ mod tests {
             status: None,
             failure_category: None,
             consecutive_failures: None,
+            preflight_fingerprint: None,
         });
         let ctx = context_with_last_result(Some(stored.clone()));
         let gcx = AppState::from_gcx(crate::global_context::tests::make_test_gcx().await).await;
@@ -5860,6 +6158,29 @@ mod tests {
                 },
             )
             .unwrap()
+        }
+
+        #[tokio::test]
+        async fn empty_report_cannot_be_published_as_success_even_with_inconsistent_observation() {
+            let spec = finalization_spec();
+            let observation = ran(Some("chat-empty"), "  ", true, false, None);
+            let finalization = autonomous_finalization(&spec, &observation).unwrap();
+            assert!(!finalization.successful);
+            assert!(matches!(
+                finalization.terminal,
+                WorkflowTerminal::Partial { .. }
+            ));
+            assert_eq!(
+                finalize_autonomous_run(
+                    None,
+                    &spec,
+                    "run-empty",
+                    "2026-09-05T00:00:00Z",
+                    &observation
+                )
+                .await,
+                Err("autonomous buddy subchat completed without a successful report".into())
+            );
         }
 
         #[test]

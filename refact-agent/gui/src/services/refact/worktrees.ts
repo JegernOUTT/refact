@@ -194,6 +194,114 @@ export type MergeWorktreeResponse = {
   warnings?: string[];
 };
 
+export type WorktreeSyncResolutionChoice =
+  | "working_tree"
+  | "source"
+  | "target"
+  | "delete";
+
+export type WorktreeSyncResolution = {
+  path: string;
+  choice: WorktreeSyncResolutionChoice;
+};
+
+export type WorktreeSyncRequest =
+  | { action: "status"; target_branch?: string }
+  | {
+      action: "start";
+      target_branch?: string;
+      expected_source_head: string;
+      expected_target_head: string;
+      checkpoint?: boolean;
+    }
+  | {
+      action: "resolve";
+      operation_id: string;
+      expected_revision: number;
+      resolutions: WorktreeSyncResolution[];
+    }
+  | {
+      action: "continue";
+      operation_id: string;
+      expected_revision: number;
+      commit_message?: string;
+    }
+  | {
+      action: "restore";
+      archive_id?: string;
+      operation_id: string;
+      expected_revision: number;
+    }
+  | {
+      action: "recover";
+      expected_journal_digest: string;
+    }
+  | {
+      action: "abort";
+      operation_id: string;
+      expected_revision: number;
+      force?: boolean;
+    };
+
+export type WorktreeSyncStatus =
+  | "idle"
+  | "conflicts"
+  | "ready"
+  | "completed"
+  | "aborted"
+  | "recovery_required"
+  | "target_advanced";
+
+export type WorktreeSyncOperation = {
+  operation_id: string;
+  revision: number;
+  source_head: string;
+  target_branch: string;
+  target_head: string;
+  phase: string;
+  checkpoint_commit?: string | null;
+  recovery_path?: string | null;
+  initiator?: string | null;
+};
+
+export type WorktreeSyncStage = {
+  oid: string;
+  mode: number;
+};
+
+export type WorktreeSyncConflict = {
+  path: string;
+  kind: string;
+  base?: WorktreeSyncStage | null;
+  source?: WorktreeSyncStage | null;
+  target?: WorktreeSyncStage | null;
+};
+
+export type WorktreeSyncResponse = {
+  id: string;
+  status: WorktreeSyncStatus;
+  source_head: string;
+  target_branch?: string | null;
+  target_head?: string | null;
+  operation?: WorktreeSyncOperation | null;
+  conflicts: WorktreeSyncConflict[];
+  warnings: string[];
+  instructions: string;
+  recovery_journal_digest?: string | null;
+  restore_archive_id?: string | null;
+  recovery_archives?: { archive_id: string; path: string }[];
+};
+
+export type GetWorktreeSyncStatusRequest = GetWorktreeRequest & {
+  target_branch?: string;
+};
+
+export type SyncWorktreeRequest = {
+  id: string;
+  source_workspace_root?: string;
+  request: WorktreeSyncRequest;
+};
+
 export type DeleteWorktreeRequest = {
   id: string;
   source_workspace_root?: string;
@@ -528,6 +636,63 @@ export const worktreesApi = createApi({
         { type: "Worktrees", id: "SUMMARY" },
       ],
     }),
+    getWorktreeSyncStatus: builder.query<
+      WorktreeSyncResponse,
+      GetWorktreeSyncStatusRequest
+    >({
+      queryFn: async (
+        { id, source_workspace_root, target_branch },
+        api,
+        _opts,
+        baseQuery,
+      ) => {
+        const state = api.getState() as RootState;
+        const result = await baseQuery({
+          url: buildWorktreeUrl(
+            state,
+            `/worktrees/${encodeURIComponent(id)}/sync`,
+            { source_workspace_root },
+          ),
+          method: "POST",
+          body: {
+            action: "status",
+            target_branch,
+          } satisfies WorktreeSyncRequest,
+        });
+        if (result.error) return { error: result.error };
+        return { data: result.data as WorktreeSyncResponse };
+      },
+      providesTags: (_result, _error, { id }) => [
+        { type: "Worktrees", id: `SYNC:${id}` },
+      ],
+    }),
+    syncWorktree: builder.mutation<WorktreeSyncResponse, SyncWorktreeRequest>({
+      queryFn: async (
+        { id, source_workspace_root, request },
+        api,
+        _opts,
+        baseQuery,
+      ) => {
+        const state = api.getState() as RootState;
+        const result = await baseQuery({
+          url: buildWorktreeUrl(
+            state,
+            `/worktrees/${encodeURIComponent(id)}/sync`,
+            { source_workspace_root },
+          ),
+          method: "POST",
+          body: request,
+        });
+        if (result.error) return { error: result.error };
+        return { data: result.data as WorktreeSyncResponse };
+      },
+      invalidatesTags: (_result, _error, { id }) => [
+        { type: "Worktrees", id },
+        { type: "Worktrees", id: `SYNC:${id}` },
+        { type: "Worktrees", id: "LIST" },
+        { type: "Worktrees", id: "SUMMARY" },
+      ],
+    }),
     deleteWorktree: builder.mutation<
       DeleteWorktreeResponse,
       DeleteWorktreeRequest
@@ -585,6 +750,8 @@ export const {
   useGetWorktreeQuery,
   useGetWorktreeDiffQuery,
   useMergeWorktreeMutation,
+  useGetWorktreeSyncStatusQuery,
+  useSyncWorktreeMutation,
   useDeleteWorktreeMutation,
   useOpenWorktreeMutation,
 } = worktreesApi;

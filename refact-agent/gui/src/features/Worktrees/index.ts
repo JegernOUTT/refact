@@ -7,7 +7,11 @@ export {
 } from "./CreateWorktreeModal";
 export { WorktreeStatusBadge } from "./WorktreeStatusBadge";
 export { WorktreeDiffPanel } from "./WorktreeDiffPanel";
-export { MergeWorktreeModal } from "./MergeWorktreeModal";
+export {
+  MergeWorktreeModal,
+  type WorktreeConflictHandoff,
+} from "./MergeWorktreeModal";
+export { WorktreeSyncPanel } from "./WorktreeSyncPanel";
 export {
   buildWorktreeConflictPrompt,
   mergeConflictFiles,

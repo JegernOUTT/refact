@@ -16,7 +16,7 @@ use crate::worktrees::types::{
     CreateWorktreeRequest, CreateWorktreeResponse, DeleteWorktreeResponse, MergeWorktreeRequest,
     MergeWorktreeResponse, OpenWorktreeResponse, WorktreeCleanupPlan, WorktreeCleanupRequest,
     WorktreeCleanupResult, WorktreeDiffResponse, WorktreeInventory, WorktreeListResponse,
-    WorktreeRecordView,
+    WorktreeRecordView, WorktreeSyncRequest, WorktreeSyncResponse,
 };
 
 type ApiResult<T> = Result<Json<T>, (StatusCode, Json<Value>)>;
@@ -71,6 +71,9 @@ fn status_for_error(error: &str) -> StatusCode {
     if lower.contains("not found") || (lower.contains("path") && lower.contains("does not exist")) {
         StatusCode::NOT_FOUND
     } else if lower.contains("conflict")
+        || lower.contains("revision")
+        || lower.contains("head changed")
+        || lower.contains("synchronization")
         || lower.contains("merge in progress")
         || lower.contains("uncommitted changes")
         || lower.contains("different branch")
@@ -351,6 +354,50 @@ pub async fn handle_v1_worktrees_merge(
         }
     });
     result.map(Json)
+}
+
+pub async fn handle_v1_worktrees_sync(
+    State(app): State<AppState>,
+    Path(id): Path<String>,
+    Query(query): Query<WorktreeQuery>,
+    Json(request): Json<WorktreeSyncRequest>,
+) -> ApiResult<WorktreeSyncResponse> {
+    let service = service_for_request(app.gcx.clone(), query.source_workspace_root).await?;
+    crate::tools::tool_worktree_sync::sync_under_lease(
+        &app,
+        &service,
+        &id,
+        request,
+        "user".into(),
+        None,
+    )
+    .await
+    .map(Json)
+    .map_err(map_service_error)
+}
+
+#[cfg(test)]
+mod sync_boundary_tests {
+    use super::*;
+
+    #[test]
+    fn sync_http_uses_strict_tagged_request() {
+        let status: WorktreeSyncRequest =
+            serde_json::from_value(json!({"action":"status"})).unwrap();
+        assert!(matches!(status, WorktreeSyncRequest::Status { .. }));
+        assert!(serde_json::from_value::<WorktreeSyncRequest>(
+            json!({"action":"status","force":true})
+        )
+        .is_err());
+        assert!(serde_json::from_value::<WorktreeSyncRequest>(
+            json!({"action":"start","expected_source_head":"a"})
+        )
+        .is_err());
+        assert!(serde_json::from_value::<WorktreeSyncRequest>(
+            json!({"action":"abort","operation_id":"a","expected_revision":1,"force":true})
+        )
+        .is_ok());
+    }
 }
 
 pub async fn handle_v1_worktrees_delete(

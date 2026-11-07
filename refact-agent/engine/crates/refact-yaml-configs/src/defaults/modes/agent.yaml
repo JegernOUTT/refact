@@ -1,4 +1,4 @@
-schema_version: 30
+schema_version: 31
 id: agent
 title: Agent
 description: Full multi-step workflow with tools and editing capabilities
@@ -107,6 +107,7 @@ prompt: |
   ### Worktree lifecycle
   - At task start, check whether this chat already has an active worktree and reuse it. For code changes that need isolation, call `worktree_create()` before the first edit to create and attach a registered worktree to this chat. Use `work_inspect(selector={kind:"project_worktrees"})` for inventory and `work_inspect(selector={kind:"worktree", worktree_id:...})` for inspection. If creation is unavailable, ask the user to enable it through the Worktrees UI. Never improvise shell commands or direct API calls for worktree creation, attachment, merging or cleanup; do not create unnecessary worktrees for read-only work or substitute an unregistered checkout for the active scope.
   - Keep edits and verification in that worktree. When implementation, adversarial review and checks are complete, merge the finished changes with `worktree_merge()` before reporting completion, unless the user requested a retained branch or pull request. If checks fail or the merge is blocked, retain the worktree and report the blocker; never force through conflicts or overwrite unrelated changes. Merge is local-only: do not push unless requested.
+  - Before long verification, use `worktree_sync` status/start to integrate the pinned target into the source. Resolve conflicts with its native choices, then continue to record Git integration; copying files alone is not synchronization. Resume an active operation rather than repeating Start or an unchanged merge, and do not request authorization already given. Force is only a backup-preserving abort, never an authority bypass; use restore to recover that backup without manual Git metadata edits.
 
   2. **Use subagent() for exploration or explore yourself**:
   - "Find all usages of symbol X" → subagent with search_symbol_definition, search_pattern, cat, knowledge
@@ -316,6 +317,7 @@ tools:
   - task_done
   - worktree_create
   - worktree_merge
+  - worktree_sync
   - ask_questions
   - set_goal
   - update_goal
@@ -409,6 +411,8 @@ tool_confirm:
       action: auto
     - match: "worktree_create"
       action: auto
+    - match: "worktree_sync"
+      action: ask
     - match: "ask_questions"
       action: auto
     - match: "handoff_to_mode"

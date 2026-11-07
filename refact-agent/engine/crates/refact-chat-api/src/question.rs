@@ -390,16 +390,76 @@ impl AskQuestion {
 /// and final.
 #[derive(Clone)]
 pub struct QuestionRegistry {
-    entries: Arc<Mutex<HashMap<String, QuestionContract>>>,
+    entries: Arc<Mutex<QuestionEntries>>,
     notify: Arc<Notify>,
     limits: QuestionLimits,
+}
+
+#[derive(Default)]
+struct QuestionEntries {
+    contracts: HashMap<String, QuestionContract>,
+    reserved: HashMap<String, QuestionContract>,
+}
+
+impl std::ops::Deref for QuestionEntries {
+    type Target = HashMap<String, QuestionContract>;
+    fn deref(&self) -> &Self::Target {
+        &self.contracts
+    }
+}
+
+impl std::ops::DerefMut for QuestionEntries {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.contracts
+    }
+}
+
+pub struct QuestionReservation {
+    registry: QuestionRegistry,
+    contract: Option<QuestionContract>,
+    #[cfg(test)]
+    after_publish: Option<Box<dyn FnOnce() + Send>>,
+}
+
+impl QuestionReservation {
+    pub fn contract(&self) -> &QuestionContract {
+        self.contract
+            .as_ref()
+            .expect("uncommitted question reservation")
+    }
+
+    pub fn commit(mut self) {
+        let mut entries = self.registry.guard();
+        let contract = self
+            .contract
+            .take()
+            .expect("uncommitted question reservation");
+        if let Some(contract) = entries.reserved.remove(&contract.id) {
+            entries.insert(contract.id.clone(), contract);
+        }
+        drop(entries);
+        self.registry.notify.notify_waiters();
+        #[cfg(test)]
+        if let Some(after_publish) = self.after_publish.take() {
+            after_publish();
+        }
+    }
+}
+
+impl Drop for QuestionReservation {
+    fn drop(&mut self) {
+        if let Some(contract) = self.contract.take() {
+            self.registry.guard().reserved.remove(&contract.id);
+            self.registry.notify.notify_waiters();
+        }
+    }
 }
 
 impl QuestionRegistry {
     pub fn new(limits: QuestionLimits) -> Result<Self, String> {
         limits.validate()?;
         Ok(Self {
-            entries: Arc::new(Mutex::new(HashMap::new())),
+            entries: Arc::new(Mutex::new(QuestionEntries::default())),
             notify: Arc::new(Notify::new()),
             limits,
         })
@@ -409,7 +469,7 @@ impl QuestionRegistry {
         self.limits
     }
 
-    fn guard(&self) -> MutexGuard<'_, HashMap<String, QuestionContract>> {
+    fn guard(&self) -> MutexGuard<'_, QuestionEntries> {
         self.entries
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -456,14 +516,18 @@ impl QuestionRegistry {
         contract.validate().map_err(QuestionError::Invalid)?;
         let mut entries = self.guard();
         Self::expire_locked(&mut entries, now);
-        if entries.contains_key(&contract.id) {
+        if entries.contains_key(&contract.id) || entries.reserved.contains_key(&contract.id) {
             return Err(QuestionError::Duplicate);
         }
         if contract.state == QuestionState::Pending {
-            if entries.values().any(|entry| {
-                entry.state == QuestionState::Pending
-                    && entry.correlation_id == contract.correlation_id
-            }) {
+            if entries
+                .values()
+                .chain(entries.reserved.values())
+                .any(|entry| {
+                    entry.state == QuestionState::Pending
+                        && entry.correlation_id == contract.correlation_id
+                })
+            {
                 return Err(QuestionError::Duplicate);
             }
             if Self::pending_count(&entries) >= self.limits.max_pending {
@@ -473,6 +537,118 @@ impl QuestionRegistry {
         entries.insert(contract.id.clone(), contract);
         self.prune_locked(&mut entries);
         Ok(())
+    }
+
+    pub fn reserve_registration(
+        &self,
+        contract: QuestionContract,
+        now: DateTime<Utc>,
+    ) -> Result<QuestionReservation, QuestionError> {
+        contract.validate().map_err(QuestionError::Invalid)?;
+        let mut entries = self.guard();
+        Self::expire_locked(&mut entries, now);
+        if entries.contains_key(&contract.id) || entries.reserved.contains_key(&contract.id) {
+            return Err(QuestionError::Duplicate);
+        }
+        if contract.state == QuestionState::Pending {
+            if entries
+                .values()
+                .chain(entries.reserved.values())
+                .any(|entry| {
+                    entry.state == QuestionState::Pending
+                        && entry.correlation_id == contract.correlation_id
+                })
+            {
+                return Err(QuestionError::Duplicate);
+            }
+            if Self::pending_count(&entries) >= self.limits.max_pending {
+                return Err(QuestionError::Capacity);
+            }
+        }
+        entries
+            .reserved
+            .insert(contract.id.clone(), contract.clone());
+        Ok(QuestionReservation {
+            registry: self.clone(),
+            contract: Some(contract),
+            #[cfg(test)]
+            after_publish: None,
+        })
+    }
+
+    pub fn reserve_answer(
+        &self,
+        id: &str,
+        answerer: &str,
+        answer: String,
+        now: DateTime<Utc>,
+    ) -> Result<QuestionReservation, QuestionError> {
+        let mut entries = self.guard();
+        Self::expire_locked(&mut entries, now);
+        if entries.reserved.contains_key(id) {
+            return Err(QuestionError::Invalid(
+                "question mutation is being committed".into(),
+            ));
+        }
+        let mut contract = entries.get(id).cloned().ok_or(QuestionError::NotFound)?;
+        if contract.answerer != answerer {
+            return Err(QuestionError::NotAnswerer);
+        }
+        if contract.state != QuestionState::Pending {
+            return Err(QuestionError::AlreadyAnswered);
+        }
+        contract.state = QuestionState::Answered;
+        contract.answer = Some(answer);
+        contract.answered_at = Some(now);
+        contract.validate().map_err(QuestionError::Invalid)?;
+        entries.reserved.insert(id.into(), contract.clone());
+        Ok(QuestionReservation {
+            registry: self.clone(),
+            contract: Some(contract),
+            #[cfg(test)]
+            after_publish: None,
+        })
+    }
+
+    /// Reserve an asker's withdrawal without publishing it before durable storage.
+    pub fn reserve_withdraw(
+        &self,
+        id: &str,
+        asker: &str,
+        now: DateTime<Utc>,
+    ) -> Result<QuestionReservation, QuestionError> {
+        let mut entries = self.guard();
+        if entries.reserved.contains_key(id) {
+            return Err(QuestionError::Invalid(
+                "question mutation is being committed".into(),
+            ));
+        }
+        let mut contract = entries.get(id).cloned().ok_or(QuestionError::NotFound)?;
+        if contract.asker != asker {
+            return Err(QuestionError::NotAsker);
+        }
+        if contract.state != QuestionState::Pending {
+            return Err(QuestionError::AlreadySettled(contract.state));
+        }
+        if contract.expires_at.is_some_and(|expiry| expiry <= now) {
+            match contract.defaultable().map(str::to_string) {
+                Some(default) => {
+                    contract.state = QuestionState::Defaulted;
+                    contract.answer = Some(default);
+                    contract.answered_at = Some(now);
+                }
+                None => contract.state = QuestionState::Expired,
+            }
+        } else {
+            contract.state = QuestionState::Withdrawn;
+        }
+        entries.reserved.insert(id.into(), contract.clone());
+        Ok(QuestionReservation {
+            registry: self.clone(),
+            contract: Some(contract),
+            #[cfg(test)]
+            after_publish: None,
+        })
     }
 
     pub fn get(&self, id: &str) -> Option<QuestionContract> {
@@ -562,6 +738,11 @@ impl QuestionRegistry {
         let settled = {
             let mut entries = self.guard();
             Self::expire_locked(&mut entries, now);
+            if entries.reserved.contains_key(id) {
+                return Err(QuestionError::Invalid(
+                    "question mutation is being committed".into(),
+                ));
+            }
             let entry = entries.get_mut(id).ok_or(QuestionError::NotFound)?;
             let owner = if require_asker {
                 &entry.asker
@@ -642,15 +823,31 @@ impl QuestionRegistry {
                     tokio::select! {
                         _ = timeout.as_mut() => {
                             let expiry = snapshot.expires_at.unwrap_or(current);
-                            return Ok(self
-                                .observe(id, &snapshot, expiry)
-                                .unwrap_or(QuestionSettlement::Expired));
+                            if let Some(settlement) = self.observe(id, &snapshot, expiry) {
+                                return Ok(settlement);
+                            }
+                            break;
                         }
                         _ = &mut notification => {}
                     }
                 }
                 None => notification.await,
             }
+        }
+        loop {
+            let notification = self.notify.notified();
+            tokio::pin!(notification);
+            notification.as_mut().enable();
+            if let Some(settlement) = self.observe(
+                id,
+                &snapshot,
+                now + ChronoDuration::milliseconds(
+                    started.elapsed().as_millis().min(i64::MAX as u128) as i64,
+                ),
+            ) {
+                return Ok(settlement);
+            }
+            notification.await;
         }
     }
 
@@ -720,19 +917,31 @@ impl QuestionRegistry {
         }
     }
 
-    fn pending_count(entries: &HashMap<String, QuestionContract>) -> usize {
+    fn pending_count(entries: &QuestionEntries) -> usize {
         entries
             .values()
             .filter(|entry| entry.state == QuestionState::Pending)
             .count()
+            + entries
+                .reserved
+                .values()
+                .filter(|entry| {
+                    !entries.contains_key(&entry.id) && entry.state == QuestionState::Pending
+                })
+                .count()
     }
 
     /// The single deadline path. A low-stakes question with an explicit safe
     /// default settles as `Defaulted` and records the default it used;
     /// everything else — every approval, every escalation — simply expires.
-    fn expire_locked(entries: &mut HashMap<String, QuestionContract>, now: DateTime<Utc>) {
-        for entry in entries.values_mut() {
-            if entry.state != QuestionState::Pending
+    fn expire_locked(entries: &mut QuestionEntries, now: DateTime<Utc>) {
+        let QuestionEntries {
+            contracts,
+            reserved,
+        } = entries;
+        for entry in contracts.values_mut() {
+            if reserved.contains_key(&entry.id)
+                || entry.state != QuestionState::Pending
                 || !entry.expires_at.is_some_and(|expires_at| expires_at <= now)
             {
                 continue;
@@ -748,7 +957,7 @@ impl QuestionRegistry {
         }
     }
 
-    fn prune_locked(&self, entries: &mut HashMap<String, QuestionContract>) {
+    fn prune_locked(&self, entries: &mut QuestionEntries) {
         let mut settled: Vec<_> = entries
             .values()
             .filter(|entry| entry.state != QuestionState::Pending)
@@ -768,6 +977,158 @@ impl QuestionRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn regression_committed_registration_drop_cannot_remove_next_reservation() {
+        let registry = registry();
+        let now = Utc::now();
+        let staged = QuestionRegistry::new(registry.limits()).unwrap();
+        let question = staged
+            .ask(ask(QuestionKind::AgentParent, "aba"), now)
+            .unwrap();
+        let mut registration = registry
+            .reserve_registration(question.clone(), now)
+            .unwrap();
+        let (published_tx, published_rx) = std::sync::mpsc::channel();
+        let (reserved_tx, reserved_rx) = std::sync::mpsc::channel();
+        registration.after_publish = Some(Box::new(move || {
+            published_tx.send(()).unwrap();
+            reserved_rx.recv().unwrap();
+        }));
+        let publisher = std::thread::spawn(move || registration.commit());
+        published_rx.recv().unwrap();
+        let answer = registry
+            .reserve_answer(&question.id, "answerer", "yes".into(), now)
+            .unwrap();
+        reserved_tx.send(()).unwrap();
+        publisher.join().unwrap();
+        assert!(registry.withdraw(&question.id, "asker", now).is_err());
+        answer.commit();
+        assert_eq!(registry.get(&question.id).unwrap().answered(), Some("yes"));
+    }
+
+    #[test]
+    fn reserved_registration_holds_capacity_without_publishing_and_drop_releases_it() {
+        let limits = QuestionLimits {
+            max_pending: 1,
+            ..QuestionLimits::default()
+        };
+        let registry = QuestionRegistry::new(limits).unwrap();
+        let now = Utc::now();
+        let staged = QuestionRegistry::new(limits).unwrap();
+        let contract = staged
+            .ask(
+                AskQuestion::new(
+                    QuestionKind::AgentParent,
+                    "child",
+                    "parent",
+                    "one",
+                    "May I?",
+                )
+                .with_id("one"),
+                now,
+            )
+            .unwrap();
+        let reserved = registry
+            .reserve_registration(contract.clone(), now)
+            .unwrap();
+        assert!(registry.get("one").is_none());
+        assert!(matches!(
+            registry.ask(
+                AskQuestion::new(QuestionKind::UserInput, "other", "parent", "two", "Other?"),
+                now
+            ),
+            Err(QuestionError::Capacity)
+        ));
+        drop(reserved);
+        assert!(registry.get("one").is_none());
+        let reserved = registry
+            .reserve_registration(contract.clone(), now)
+            .unwrap();
+        reserved.commit();
+        assert_eq!(registry.get("one"), Some(contract));
+    }
+
+    #[test]
+    fn reserved_answer_defers_expiry_and_competing_settlement_until_commit_or_drop() {
+        let registry = QuestionRegistry::new(QuestionLimits::default()).unwrap();
+        let now = Utc::now();
+        let question = registry
+            .ask(
+                AskQuestion::new(
+                    QuestionKind::AgentParent,
+                    "child",
+                    "parent",
+                    "one",
+                    "May I?",
+                )
+                .with_id("one")
+                .with_expiry_secs(Some(1)),
+                now,
+            )
+            .unwrap();
+        let reservation = registry
+            .reserve_answer("one", "parent", "yes".into(), now)
+            .unwrap();
+        registry.expire(now + ChronoDuration::seconds(2));
+        assert_eq!(registry.get("one"), Some(question.clone()));
+        assert!(registry.withdraw("one", "child", now).is_err());
+        reservation.commit();
+        assert_eq!(registry.get("one").unwrap().answered(), Some("yes"));
+
+        let question = registry
+            .ask(
+                AskQuestion::new(
+                    QuestionKind::AgentParent,
+                    "child",
+                    "parent",
+                    "two",
+                    "Again?",
+                )
+                .with_id("two")
+                .with_expiry_secs(Some(1)),
+                now,
+            )
+            .unwrap();
+        let reservation = registry
+            .reserve_answer("two", "parent", "yes".into(), now)
+            .unwrap();
+        drop(reservation);
+        assert_eq!(registry.get("two"), Some(question));
+        registry.expire(now + ChronoDuration::seconds(2));
+        assert_eq!(registry.get("two").unwrap().state, QuestionState::Expired);
+    }
+
+    #[test]
+    fn reserved_withdrawal_is_unpublished_reversible_and_principal_bound() {
+        let registry = registry();
+        let now = Utc::now();
+        let question = registry
+            .ask(ask(QuestionKind::AgentParent, "withdraw"), now)
+            .unwrap();
+        assert!(matches!(
+            registry.reserve_withdraw(&question.id, "other", now),
+            Err(QuestionError::NotAsker)
+        ));
+        let reservation = registry
+            .reserve_withdraw(&question.id, "asker", now)
+            .unwrap();
+        assert_eq!(reservation.contract().state, QuestionState::Withdrawn);
+        assert_eq!(registry.get(&question.id), Some(question.clone()));
+        assert!(registry
+            .answer(&question.id, "answerer", "yes".into(), now)
+            .is_err());
+        drop(reservation);
+        assert_eq!(registry.get(&question.id), Some(question.clone()));
+        registry
+            .reserve_withdraw(&question.id, "asker", now)
+            .unwrap()
+            .commit();
+        assert_eq!(
+            registry.get(&question.id).unwrap().state,
+            QuestionState::Withdrawn
+        );
+    }
 
     const KINDS: [QuestionKind; 5] = [
         QuestionKind::UserInput,

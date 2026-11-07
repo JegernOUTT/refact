@@ -4,6 +4,231 @@ use serde::{Deserialize, Serialize};
 
 pub use refact_core::worktree_meta::WorktreeMeta;
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WorktreeSyncRequest {
+    Status {
+        #[serde(default)]
+        target_branch: Option<String>,
+    },
+    Recover {
+        expected_journal_digest: String,
+    },
+    Start {
+        target_branch: Option<String>,
+        expected_source_head: String,
+        expected_target_head: String,
+        #[serde(default)]
+        checkpoint: bool,
+    },
+    Resolve {
+        operation_id: String,
+        expected_revision: u64,
+        resolutions: Vec<WorktreeSyncResolution>,
+    },
+    Continue {
+        operation_id: String,
+        expected_revision: u64,
+        commit_message: Option<String>,
+    },
+    Restore {
+        operation_id: String,
+        expected_revision: u64,
+        archive_id: Option<String>,
+    },
+    Abort {
+        operation_id: String,
+        expected_revision: u64,
+        #[serde(default)]
+        force: bool,
+    },
+}
+
+impl<'de> Deserialize<'de> for WorktreeSyncRequest {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+        enum Wire {
+            Status {
+                #[serde(default)]
+                target_branch: Option<String>,
+            },
+            Recover {
+                expected_journal_digest: String,
+            },
+            Start {
+                target_branch: Option<String>,
+                expected_source_head: String,
+                expected_target_head: String,
+                #[serde(default)]
+                checkpoint: bool,
+            },
+            Resolve {
+                operation_id: String,
+                expected_revision: u64,
+                resolutions: Vec<WorktreeSyncResolution>,
+            },
+            Continue {
+                operation_id: String,
+                expected_revision: u64,
+                commit_message: Option<String>,
+            },
+            Restore {
+                operation_id: String,
+                expected_revision: u64,
+                archive_id: Option<String>,
+            },
+            Abort {
+                operation_id: String,
+                expected_revision: u64,
+                #[serde(default)]
+                force: bool,
+            },
+        }
+        Ok(match Wire::deserialize(deserializer)? {
+            Wire::Status {
+                target_branch,
+            } => Self::Status {
+                target_branch,
+            },
+            Wire::Recover {
+                expected_journal_digest,
+            } => Self::Recover {
+                expected_journal_digest,
+            },
+            Wire::Start {
+                target_branch,
+                expected_source_head,
+                expected_target_head,
+                checkpoint,
+            } => Self::Start {
+                target_branch,
+                expected_source_head,
+                expected_target_head,
+                checkpoint,
+            },
+            Wire::Resolve {
+                operation_id,
+                expected_revision,
+                resolutions,
+            } => Self::Resolve {
+                operation_id,
+                expected_revision,
+                resolutions,
+            },
+            Wire::Continue {
+                operation_id,
+                expected_revision,
+                commit_message,
+            } => Self::Continue {
+                operation_id,
+                expected_revision,
+                commit_message,
+            },
+            Wire::Restore {
+                operation_id,
+                expected_revision,
+                archive_id,
+            } => Self::Restore {
+                operation_id,
+                expected_revision,
+                archive_id,
+            },
+            Wire::Abort {
+                operation_id,
+                expected_revision,
+                force,
+            } => Self::Abort {
+                operation_id,
+                expected_revision,
+                force,
+            },
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorktreeSyncResolution {
+    pub path: String,
+    pub choice: WorktreeSyncResolutionChoice,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorktreeSyncResolutionChoice {
+    WorkingTree,
+    Source,
+    Target,
+    Delete,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorktreeSyncStatus {
+    Idle,
+    Conflicts,
+    Ready,
+    Completed,
+    Aborted,
+    RecoveryRequired,
+    TargetAdvanced,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorktreeSyncOperation {
+    #[serde(default)]
+    pub initiator: Option<String>,
+    pub operation_id: String,
+    pub revision: u64,
+    pub source_head: String,
+    pub target_branch: String,
+    pub target_head: String,
+    pub phase: String,
+    pub checkpoint_commit: Option<String>,
+    pub recovery_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorktreeSyncStage {
+    pub oid: String,
+    pub mode: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorktreeSyncConflict {
+    pub path: String,
+    pub kind: String,
+    pub base: Option<WorktreeSyncStage>,
+    pub source: Option<WorktreeSyncStage>,
+    pub target: Option<WorktreeSyncStage>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorktreeSyncArchive {
+    pub archive_id: String,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorktreeSyncResponse {
+    #[serde(default)]
+    pub recovery_journal_digest: Option<String>,
+    #[serde(default)]
+    pub recovery_archives: Vec<WorktreeSyncArchive>,
+    #[serde(default)]
+    pub restore_archive_id: Option<String>,
+    pub id: String,
+    pub status: WorktreeSyncStatus,
+    pub source_head: String,
+    pub target_branch: Option<String>,
+    pub target_head: Option<String>,
+    pub operation: Option<WorktreeSyncOperation>,
+    pub conflicts: Vec<WorktreeSyncConflict>,
+    pub warnings: Vec<String>,
+    pub instructions: String,
+}
+
 fn serialize_path<S: serde::Serializer>(path: &PathBuf, serializer: S) -> Result<S::Ok, S::Error> {
     serializer.serialize_str(&path.to_string_lossy())
 }

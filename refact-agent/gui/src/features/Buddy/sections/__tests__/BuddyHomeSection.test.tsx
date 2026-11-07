@@ -57,6 +57,13 @@ const operatorStatus = (
 // Existing legacy tests explicitly exercise the disabled compatibility contract.
 beforeEach(() => {
   server.use(
+    http.post("*/v1/buddy/operator/pending-publications", () =>
+      HttpResponse.json({
+        schema_version: 1,
+        project: { project_id: "fixture", canonical_root: "/fixture" },
+        data: [],
+      }),
+    ),
     http.get("*/v1/buddy/operator/status", () =>
       HttpResponse.json(operatorStatus("disabled")),
     ),

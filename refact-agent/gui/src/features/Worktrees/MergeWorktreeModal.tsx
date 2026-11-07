@@ -21,9 +21,11 @@ import {
   type KitTone,
 } from "../../components/ComposerKit";
 import { useAppDispatch } from "../../hooks";
+import { useWorktreeSync } from "../../hooks/useWorktreeActions";
 import {
   useMergeWorktreeMutation,
   type MergeWorktreeResponse,
+  type WorktreeSyncResponse,
   type WorktreeMergeStrategy,
   type WorktreeMeta,
   type WorktreeRecordView,
@@ -31,7 +33,13 @@ import {
 import { tasksApi } from "../../services/refact/tasks";
 import { mergeConflictFiles } from "./worktreeConflict";
 import { worktreeErrorText } from "./worktreeError";
+import { WorktreeSyncPanel } from "./WorktreeSyncPanel";
 import styles from "./Worktrees.module.css";
+
+export type WorktreeConflictHandoff = {
+  sync: WorktreeSyncResponse;
+  toolAvailable: boolean | undefined;
+};
 
 type MergeWorktreeModalProps = {
   open: boolean;
@@ -45,6 +53,7 @@ type MergeWorktreeModalProps = {
   onAskRefact?: (
     files: string[],
     response: MergeWorktreeResponse,
+    handoff: WorktreeConflictHandoff,
   ) => void | Promise<void>;
   onOpenWorktree?: () => void | Promise<void>;
 };
@@ -169,6 +178,13 @@ export const MergeWorktreeModal: React.FC<MergeWorktreeModalProps> = ({
   const queryId = worktreeId ?? record?.meta.id ?? worktree?.id ?? "";
   const sourceWorkspaceRoot =
     record?.meta.source_workspace_root ?? worktree?.source_workspace_root;
+  const sync = useWorktreeSync({
+    worktreeId: queryId,
+    sourceWorkspaceRoot,
+    targetBranch,
+    enabled: open && queryId.length > 0,
+    sourceDirty: record?.status.dirty ?? worktree?.status?.dirty ?? false,
+  });
   const label =
     completedResult?.label ?? displayWorktreeLabel(worktree, record);
   const canActOnWorktree =
@@ -271,16 +287,35 @@ export const MergeWorktreeModal: React.FC<MergeWorktreeModalProps> = ({
     targetBranch,
   ]);
 
+  const { start: startSync, isToolAvailable } = sync;
   const handleAskRefact = useCallback(async () => {
     if (!result || !onAskRefact || !canActOnWorktree) return;
     setActionFeedback(null);
+    const started = await startSync();
+    if (!started?.operation) {
+      setActionFeedback(
+        "Synchronization did not start, so no request was sent to Refact.",
+      );
+      return;
+    }
     try {
-      await onAskRefact(conflictFiles, result);
+      const toolAvailable = await isToolAvailable();
+      await onAskRefact(conflictFiles, result, {
+        sync: started,
+        toolAvailable,
+      });
       setActionFeedback("Conflict resolution request sent to Refact.");
     } catch (askError) {
       setActionFeedback(`Could not ask Refact: ${worktreeErrorText(askError)}`);
     }
-  }, [canActOnWorktree, conflictFiles, onAskRefact, result]);
+  }, [
+    canActOnWorktree,
+    conflictFiles,
+    isToolAvailable,
+    onAskRefact,
+    result,
+    startSync,
+  ]);
 
   const handleOpenWorktree = useCallback(async () => {
     if (!onOpenWorktree || !canActOnWorktree) return;
@@ -294,11 +329,28 @@ export const MergeWorktreeModal: React.FC<MergeWorktreeModalProps> = ({
     }
   }, [canActOnWorktree, onOpenWorktree]);
 
+  const handleAskRefactForSync = useCallback(async () => {
+    const active = sync.current;
+    if (!onAskRefact || !canActOnWorktree || !active?.operation) return;
+    setActionFeedback(null);
+    try {
+      const toolAvailable = await isToolAvailable();
+      await onAskRefact(
+        active.conflicts.map((conflict) => conflict.path),
+        result ?? {},
+        { sync: active, toolAvailable },
+      );
+      setActionFeedback("Conflict resolution request sent.");
+    } catch (askError) {
+      setActionFeedback(`Could not ask Refact: ${worktreeErrorText(askError)}`);
+    }
+  }, [canActOnWorktree, isToolAvailable, onAskRefact, result, sync]);
+
   const conflicted = result ? hasMergeConflict(result) : false;
   const merged = result ? isMerged(result) : false;
 
   const isBusy = mergeState.isLoading;
-  const controlsDisabled = isBusy || !canActOnWorktree;
+  const controlsDisabled = isBusy || !canActOnWorktree || sync.isActive;
 
   return (
     <KitDialog
@@ -322,6 +374,19 @@ export const MergeWorktreeModal: React.FC<MergeWorktreeModalProps> = ({
         </>
       }
     >
+      <WorktreeSyncPanel
+        controller={sync}
+        disabled={!canActOnWorktree}
+        onAskRefact={onAskRefact ? handleAskRefactForSync : undefined}
+      />
+      {sync.targetMismatch ? (
+        <p className={styles.warningText} role="alert">
+          The active synchronization is pinned to{" "}
+          {sync.current?.operation?.target_branch}; finish or abort it before
+          changing targets.
+        </p>
+      ) : null}
+
       <KitSection>Strategy</KitSection>
       <div
         role="radiogroup"

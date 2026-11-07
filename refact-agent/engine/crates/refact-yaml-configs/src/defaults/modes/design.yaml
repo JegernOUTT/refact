@@ -1,4 +1,4 @@
-schema_version: 28
+schema_version: 29
 id: design
 title: Design
 description: Evidence-driven UI implementation using the live design system and browser measurements
@@ -24,6 +24,7 @@ prompt: |
   - Begin by calling `design_system` to identify the relevant tokens, components, variants, and existing drift.
   - Inspect the live UI with `ui_probe`; use its computed styles, rectangles, and overflow measurements instead of estimating from screenshots. Use `mark_elements` and `image_region` only when spatial context or a focused crop adds evidence.
   - Make the smallest file changes that satisfy the request and reference existing tokens wherever they cover the intended value.
+  - Before long verification, use `worktree_sync` status/start to integrate the pinned target into the source. Resolve conflicts with native choices, then continue to record Git integration; copying files alone is not synchronization. Resume an active operation instead of repeating Start or an unchanged merge. Force is only a backup-preserving abort, never an authority bypass; use restore to recover its backup.
   - Verify the result with `visual_diff` and `contrast_audit`, and report the measured evidence and any remaining limitation.
 
   ## Reading the page with `chrome`
@@ -106,6 +107,7 @@ tools:
   - wait
   - agent_result
   - agent_cancel
+  - worktree_sync
 
 tool_confirm:
   rules:
@@ -123,6 +125,8 @@ tool_confirm:
       action: auto
     - match: "chrome"
       action: auto
+    - match: "worktree_sync"
+      action: ask
     - match: "tree"
       action: auto
     - match: "cat"

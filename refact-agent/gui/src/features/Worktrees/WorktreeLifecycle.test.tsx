@@ -264,7 +264,23 @@ function taskHandlers(record: WorktreeRecordView) {
 }
 
 beforeEach(() => {
-  server.use(worktreesList([]));
+  server.use(
+    worktreesList([]),
+    http.post("*/v1/worktrees/:id/sync", ({ params }) =>
+      HttpResponse.json({
+        id: String(params.id),
+        status: "idle",
+        source_head: "src-head",
+        target_branch: "main",
+        target_head: "tgt-head",
+        operation: null,
+        conflicts: [],
+        warnings: [],
+        instructions: "",
+      }),
+    ),
+    http.get("*/v1/tools", () => HttpResponse.json([])),
+  );
 });
 
 describe("Worktree lifecycle GUI", () => {
@@ -738,9 +754,42 @@ describe("Worktree lifecycle GUI", () => {
   });
 
   test("merge conflict path lists files and exposes Ask Refact action", async () => {
-    const record = makeRecord();
+    const dirtyRecord = makeRecord();
+    const record = {
+      ...dirtyRecord,
+      status: { ...dirtyRecord.status, dirty: false },
+    };
     const askRefact = vi.fn();
+    const syncActions: string[] = [];
     server.use(
+      http.post("*/v1/worktrees/:id/sync", async ({ request }) => {
+        const body = (await request.json()) as { action: string };
+        syncActions.push(body.action);
+        return HttpResponse.json({
+          id: record.meta.id,
+          status: body.action === "start" ? "conflicts" : "idle",
+          source_head: "src-head",
+          target_branch: "main",
+          target_head: "tgt-head",
+          operation:
+            body.action === "start"
+              ? {
+                  operation_id: "op-1",
+                  revision: 1,
+                  source_head: "src-head",
+                  target_branch: "main",
+                  target_head: "tgt-head",
+                  phase: "integrating",
+                }
+              : null,
+          conflicts:
+            body.action === "start"
+              ? [{ path: "src/conflict.ts", kind: "unmerged" }]
+              : [],
+          warnings: [],
+          instructions: "",
+        });
+      }),
       mergeHandler(
         {
           id: record.meta.id,
@@ -779,14 +828,24 @@ describe("Worktree lifecycle GUI", () => {
     expect(
       await screen.findByText("Merge conflicts detected."),
     ).toBeInTheDocument();
-    expect(screen.getByText("src/conflict.ts")).toBeInTheDocument();
+    expect(screen.getAllByText("src/conflict.ts").length).toBeGreaterThan(0);
     await user.click(
       screen.getByRole("button", { name: "Ask Refact to resolve conflicts" }),
     );
-    expect(askRefact).toHaveBeenCalledWith(
-      ["src/conflict.ts"],
-      expect.objectContaining({ status: "conflict" }),
-    );
+    await waitFor(() => expect(askRefact).toHaveBeenCalledOnce());
+    expect(syncActions).toContain("start");
+    const [files, response, handoff] = askRefact.mock.calls[0] as unknown as [
+      string[],
+      MergeWorktreeResponse,
+      {
+        toolAvailable: boolean;
+        sync: { operation?: { operation_id: string } };
+      },
+    ];
+    expect(files).toEqual(["src/conflict.ts"]);
+    expect(response.status).toBe("conflict");
+    expect(handoff.toolAvailable).toBeUndefined();
+    expect(handoff.sync.operation?.operation_id).toBe("op-1");
   });
 
   test("menu review row opens diff and merge flows", async () => {

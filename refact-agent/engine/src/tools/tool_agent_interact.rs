@@ -445,7 +445,7 @@ fn overview_line(record: &BackgroundAgent, depth: usize) -> String {
     let questions = record
         .questions
         .iter()
-        .filter(|question| question.answer.is_none())
+        .filter(|question| question.state == refact_chat_api::QuestionState::Pending)
         .count();
     let model = record
         .model_type
@@ -687,13 +687,15 @@ impl Tool for ToolAgentMessage {
         let receipt = app.agents.enqueue_agent_message(&to, delivery).await?;
         crate::agents::delivery::publish_runner_queue(&app, &to).await;
         let outcome = receipt.outcome;
-        let saved = receipt.finished_status.is_some();
-        let mut text = match receipt.finished_status {
-            Some(status) => format!(
-                "Agent {to} finished (status {}); message saved as a follow-up for explicit agent_lifecycle action=continue; it has not been delivered and remains subject to its TTL and current authority.",
-                status.as_str(),
-            ),
-            None => delivery_outcome_text(&to, outcome),
+        let saved = receipt.followup_stored;
+        let mut text = if saved {
+            let state = receipt
+                .finished_status
+                .map(|status| format!("finished (status {})", status.as_str()))
+                .unwrap_or_else(|| "sealed its current delivery turn".into());
+            format!("Agent {to} {state}; message saved as a follow-up for explicit agent_lifecycle action=continue after the run finishes; it has not been delivered and remains subject to its TTL and current authority.")
+        } else {
+            delivery_outcome_text(&to, outcome)
         };
         if !receipt.dropped_followups.is_empty() {
             text.push_str(&format!(
@@ -710,6 +712,7 @@ impl Tool for ToolAgentMessage {
                     "kind": "agent_message",
                     "delivery_id": delivery_id,
                     "outcome": if saved { json!("followup_saved") } else { json!(outcome) },
+                    "followup_stored": saved,
                     "finished_status": receipt.finished_status.map(|status| status.as_str()),
                     "dropped_followups": receipt.dropped_followups,
                     "accepted": saved || matches!(
@@ -1108,6 +1111,39 @@ mod tests {
             .0
     }
 
+    #[tokio::test]
+    async fn overview_counts_only_pending_questions() {
+        use refact_chat_api::{QuestionContract, QuestionKind, QuestionState};
+
+        let (app, _) = test_context("root", "root", None).await;
+        let mut record = create(&app, "root", "child").await;
+        for state in [
+            QuestionState::Withdrawn,
+            QuestionState::Cancelled,
+            QuestionState::Rejected,
+            QuestionState::Expired,
+            QuestionState::Pending,
+        ] {
+            let mut question = QuestionContract::pending(
+                format!("{state:?}"),
+                QuestionKind::AgentParent,
+                &record.agent_id,
+                "root",
+                format!("{}:{state:?}", record.agent_id),
+                "Continue?",
+                None,
+                Utc::now(),
+                None,
+            )
+            .unwrap();
+            question.state = state;
+            record.questions.push(question);
+        }
+        assert!(overview_line(&record, 0).ends_with("questions: 1"));
+        record.questions.pop();
+        assert!(overview_line(&record, 0).ends_with("questions: 0"));
+    }
+
     async fn parent_delivery_fixture(
         app: &AppState,
         chat_id: &str,
@@ -1216,6 +1252,48 @@ mod tests {
             panic!("expected text")
         };
         text
+    }
+
+    #[tokio::test]
+    async fn sealed_delivery_turn_receipt_is_stored_not_finished_or_delivered() {
+        let (app, ccx) = test_context("root", "root", None).await;
+        let child = create(&app, "root", "child").await;
+        app.agents
+            .finish_delivery_turn(&child.agent_id)
+            .await
+            .unwrap();
+        let result = ToolAgentMessage {
+            config_path: String::new(),
+        }
+        .tool_execute(
+            ccx,
+            &"sealed".into(),
+            &args(&[
+                ("to", json!(child.agent_id)),
+                ("text", json!("later")),
+                ("push", json!("preempt")),
+            ]),
+        )
+        .await
+        .unwrap();
+        let receipt = receipt_of(&result);
+        assert_eq!(receipt["outcome"], "followup_saved");
+        assert_eq!(receipt["followup_stored"], true);
+        assert_eq!(receipt["finished_status"], Value::Null);
+        assert_eq!(receipt["accepted"], true);
+        let rendered = text(result);
+        assert!(rendered.contains("sealed its current delivery turn"));
+        assert!(rendered.contains("has not been delivered"));
+        assert_eq!(
+            app.agents
+                .get_any(&child.agent_id)
+                .await
+                .unwrap()
+                .followups
+                .len(),
+            1
+        );
+        assert!(!app.agents.has_preempt(&child.agent_id).await);
     }
 
     #[tokio::test]

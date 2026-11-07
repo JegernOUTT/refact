@@ -1,4 +1,4 @@
-schema_version: 3
+schema_version: 4
 id: buddy_behavior_learner
 title: Behavior Learner
 description: Learn stable user preferences from repeated behavior signals.
@@ -27,8 +27,16 @@ messages:
     1. Review current preferences and the behavior evidence.
     2. Upsert or remove a preference only when the signal is stable.
     3. Leave uncertain observations untouched.
-    4. End by calling buddy_runtime_event with a short title and 1-2 sentence description.
-    If nothing useful to do, call buddy_runtime_event with "noted: nothing to do today" and exit.
+    4. Record completion with buddy_runtime_event with a short title and 1-2 sentence description.
+    If nothing useful to do, call buddy_runtime_event with "noted: nothing to do today" then finish with a short final assistant assessment.
+
+    After any tool calls, finish with a nonempty final assistant assessment describing the evidence, outcome, or reason no action was needed.
+    Runtime events are notifications, not the saved assessment; do not end on a tool call.
+
+    Tool argument examples below are illustrative: replace example text with evidence-based values.
+    buddy_runtime_event({"title":"Review complete","status":"completed","description":"Review finished."})
+    Include a short title and string description; use status completed only when finished,
+    failed on failure, or started/in_progress while work is underway. A no-op can be completed.
   user_template: |
     Workflow: {{workflow_id}}
     Title: {{title}}

@@ -172,8 +172,6 @@ where
     started.speech_text = Some(format!("I'm working on {}...", label));
     started.scene = Some("working".to_string());
     started.persistent = true;
-    crate::buddy::actor::buddy_enqueue_event(gcx.clone(), started).await;
-
     let outcome_runtime = {
         let buddy = gcx.buddy.buddy.lock().await;
         buddy
@@ -189,11 +187,15 @@ where
         start
     });
     if let (Some(runtime), Some(start)) = (&outcome_runtime, &outcome_start) {
-        if let Err(error) = runtime.begin_workflow(start.clone()).await {
-            tracing::error!(workflow_id, error = %error, "buddy workflow start was not persisted; crash recovery capture unavailable");
-        }
+        runtime
+            .begin_workflow(start.clone())
+            .await
+            .map_err(|error| {
+                format!("Workflow start could not be persisted; workflow was not run: {error}")
+            })?;
     }
 
+    crate::buddy::actor::buddy_enqueue_event(gcx.clone(), started).await;
     let result = workflow_fn().await;
 
     let (success, summary) = match &result {
@@ -205,46 +207,82 @@ where
         // A housekeeping workflow's terminal result never becomes a per-run work
         // item. The outcome is still recorded; the Desk stays empty until the
         // loop is durably blocked.
-        let publication = if workflow_visibility(workflow_id).is_housekeeping() {
-            let terminal = match result.as_ref() {
-                Ok(_) => super::outcome_runtime::WorkflowTerminal::Inconclusive,
-                Err(error) => terminal_from_workflow_result(&Err(error.clone())),
-            };
-            let category = result
-                .as_ref()
-                .err()
-                .map(|error| WorkflowFailureCategory::classify(error));
-            runtime
-                .publish_housekeeping_result(start, terminal, category)
-                .await
-                .map(|()| None)
-        } else if let Some(report) = report_fn(&result) {
-            runtime
-                .publish_report(
-                    start,
-                    report.title,
-                    report.body,
-                    report.evidence,
-                    report.terminal,
-                )
-                .await
-                .map(Some)
+        let run_id = start.run_id.clone();
+        let report = if workflow_visibility(workflow_id).is_housekeeping() {
+            None
         } else {
-            let terminal = match result.as_ref() {
-                Ok(_) => super::outcome_runtime::WorkflowTerminal::Inconclusive,
-                Err(error) => terminal_from_workflow_result(&Err(error.clone())),
-            };
-            runtime
-                .publish_workflow_result(start, summary.clone(), terminal)
-                .await
-                .map(Some)
+            report_fn(&result)
         };
-        if let Err(error) = publication {
-            tracing::error!(
-                workflow_id,
-                error = %error,
-                "buddy operator outcome was not persisted; no operator delivery was recorded"
+        let retained_report = super::jobs::autonomous_chats::redact_and_cap_text(
+            report
+                .as_ref()
+                .map(|report| report.body.as_str())
+                .unwrap_or(&summary),
+            24_000,
+        );
+        use super::outcome_runtime::PendingWorkflowPublication;
+        let terminal = match result.as_ref() {
+            Ok(_) => super::outcome_runtime::WorkflowTerminal::Inconclusive,
+            Err(error) => terminal_from_workflow_result(&Err(error.clone())),
+        };
+        let pending = if workflow_visibility(workflow_id).is_housekeeping() {
+            PendingWorkflowPublication::Housekeeping {
+                blocked: runtime.record_housekeeping_terminal(workflow_id, &terminal),
+                start,
+                terminal,
+                category: result
+                    .as_ref()
+                    .err()
+                    .map(|error| WorkflowFailureCategory::classify(error)),
+            }
+        } else if let Some(report) = report {
+            PendingWorkflowPublication::Report {
+                start,
+                title: report.title,
+                body: report.body,
+                evidence: report.evidence,
+                terminal: report.terminal,
+            }
+        } else {
+            PendingWorkflowPublication::Report {
+                title: super::outcome_runtime::workflow_result_title(&label, &terminal),
+                start,
+                body: if summary.trim().is_empty() {
+                    "The workflow returned no readable summary.".into()
+                } else {
+                    summary.clone()
+                },
+                evidence: vec![],
+                terminal,
+            }
+        };
+        if let Err(error) = pending.publish(&runtime).await {
+            let retention = match runtime.retain_pending_publication(pending) {
+                Ok(()) => {
+                    "Publication retained in memory for explicit retry; not durable across restart"
+                        .to_string()
+                }
+                Err(error) => format!("Publication not retained in memory: {error}"),
+            };
+            crate::buddy::actor::buddy_complete_event(gcx.clone(), &dedupe_key, "failed").await;
+            let retained = format!(
+                "Workflow {workflow_id}; run {run_id}; publication blocked. Execution success: {success}. {retention}. Do not automatically rerun side effects.\nExecution summary: {}\n\n{retained_report}",
+                super::jobs::autonomous_chats::redact_and_cap_text(&summary, 1_000),
             );
+            let roots = crate::files_correction::get_project_dirs(gcx.gcx.clone()).await;
+            if let Some(root) = roots.first() {
+                crate::buddy::actor::BuddyService::append_workflow_transcript_to_path(
+                    root,
+                    workflow_id,
+                    &retained,
+                    false,
+                )
+                .await;
+            }
+            let error = super::jobs::autonomous_chats::redact_and_cap_text(&error, 1_000);
+            return Err(format!(
+                "Workflow result could not be persisted; execution may have completed. Do not automatically rerun side effects: {error}\n{retained}"
+            ));
         }
     }
 
@@ -543,44 +581,160 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn wrapper_publication_failure_does_not_change_callback_results_or_side_effects() {
+    async fn wrapper_start_persistence_failure_does_not_run_or_publish_success() {
         let (_dir, app, runtime) = isolated_app().await;
         runtime.shutdown().await;
-        for expected in [
-            Ok("original value".to_string()),
-            Err("original error".to_string()),
-        ] {
-            let result = buddy_wrap_workflow_report(
-                app.clone(),
-                "commit_message",
-                "x",
-                0,
-                |_| "Legacy summary".into(),
-                typed_scope(),
-                |_| typed_report("Report cannot be stored".into()),
-                || async { expected.clone() },
-            )
-            .await;
-            assert_eq!(result, expected);
-            drain_side_effects(&app).await;
-            let buddy = app.buddy.buddy.lock().await;
-            let summary = buddy
-                .as_ref()
-                .unwrap()
-                .state
-                .workflow_summaries
-                .iter()
-                .find(|summary| summary.workflow_id == "commit_message")
-                .unwrap();
-            assert_eq!(
-                summary.last_outcome.as_deref(),
-                Some(if expected.is_ok() {
-                    "success"
-                } else {
-                    "failed:unknown"
-                })
-            );
+        let called = std::sync::atomic::AtomicBool::new(false);
+        let result = buddy_wrap_workflow_report(
+            app.clone(),
+            "commit_message",
+            "x",
+            0,
+            |_| "Legacy summary".into(),
+            typed_scope(),
+            |_| typed_report("Report cannot be stored".into()),
+            || async {
+                called.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok::<_, String>("original value".to_string())
+            },
+        )
+        .await;
+        assert!(result.unwrap_err().contains("workflow was not run"));
+        assert!(!called.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(app
+            .buddy
+            .buddy
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .runtime_queue
+            .items
+            .is_empty());
+        assert!(app
+            .buddy
+            .buddy
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .state
+            .workflow_summaries
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn wrapper_terminal_persistence_failure_does_not_publish_success_or_rerun() {
+        let (_dir, app, runtime) = isolated_app().await;
+        let called = std::sync::atomic::AtomicUsize::new(0);
+        let result = buddy_wrap_workflow_report(
+            app.clone(),
+            "commit_message",
+            "x",
+            0,
+            |_| "Legacy summary".into(),
+            typed_scope(),
+            |_| typed_report("Retain this assessment".into()),
+            || async {
+                called.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                runtime.shutdown().await;
+                Ok::<_, String>("original value".to_string())
+            },
+        )
+        .await;
+        let error = result.unwrap_err();
+        assert!(error.contains("Do not automatically rerun side effects"));
+        assert!(error.contains("Retain this assessment"));
+        assert!(error.contains("not durable across restart"));
+        let pending = runtime.pending_publications().unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].workflow_id, "commit_message");
+        assert!(error.contains(&pending[0].run_id));
+        assert!(runtime
+            .retry_pending_publication(&pending[0].run_id)
+            .await
+            .is_err());
+        assert_eq!(runtime.pending_publications().unwrap().len(), 1);
+        assert_eq!(called.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let buddy = app.buddy.buddy.lock().await;
+        assert!(buddy.as_ref().unwrap().state.workflow_summaries.is_empty());
+        assert!(buddy.as_ref().unwrap().state.recent_activities.is_empty());
+        assert!(buddy
+            .as_ref()
+            .unwrap()
+            .runtime_queue
+            .items
+            .iter()
+            .all(|event| event.status != "started"));
+    }
+
+    #[tokio::test]
+    async fn pending_publication_explicit_retry_publishes_retained_report_only_once() {
+        use super::super::outcome_runtime::PendingWorkflowPublication;
+        let (_dir, _app, runtime) = isolated_app().await;
+        let start = runtime.start_workflow("commit_message", Utc::now().to_rfc3339());
+        let run_id = start.run_id.clone();
+        runtime.begin_workflow(start.clone()).await.unwrap();
+        let pending = PendingWorkflowPublication::Report {
+            start,
+            title: "Retained title".into(),
+            body: "Retained full body".into(),
+            evidence: vec![],
+            terminal: super::super::outcome_runtime::WorkflowTerminal::Completed,
+        };
+        runtime.retain_pending_publication(pending.clone()).unwrap();
+        runtime.retain_pending_publication(pending).unwrap();
+        runtime.retry_pending_publication(&run_id).await.unwrap();
+        assert!(runtime.pending_publications().unwrap().is_empty());
+        assert!(runtime.retry_pending_publication(&run_id).await.is_err());
+        let outcome = runtime
+            .get_run_outcome(run_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .value;
+        let work = runtime
+            .get_work_item(outcome.work_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .value;
+        let artifact = runtime
+            .get_artifact_revision(work.current_artifact_id.unwrap(), None)
+            .await
+            .unwrap()
+            .unwrap()
+            .value;
+        assert_eq!(artifact.body, "Retained full body");
+        assert_eq!(work.current_artifact_revision, Some(1));
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn housekeeping_publication_retries_do_not_count_as_new_executions() {
+        use super::super::outcome_runtime::{PendingWorkflowPublication, WorkflowTerminal};
+        let (_dir, _app, runtime) = isolated_app().await;
+        let start = runtime.start_workflow("memo_extraction", Utc::now().to_rfc3339());
+        let run_id = start.run_id.clone();
+        let terminal = WorkflowTerminal::Failed {
+            failure_class: Some("provider_transient".into()),
+        };
+        let pending = PendingWorkflowPublication::Housekeeping {
+            blocked: runtime.record_housekeeping_terminal("memo_extraction", &terminal),
+            start,
+            terminal: terminal.clone(),
+            category: Some(WorkflowFailureCategory::ProviderTransient),
+        };
+        runtime.shutdown().await;
+        assert!(pending.publish(&runtime).await.is_err());
+        runtime.retain_pending_publication(pending).unwrap();
+        for _ in 0..2 {
+            assert!(runtime.retry_pending_publication(&run_id).await.is_err());
         }
+        for _ in 1..refact_buddy_core::workflows::HOUSEKEEPING_BLOCK_THRESHOLD - 1 {
+            assert!(!runtime.record_housekeeping_terminal("memo_extraction", &terminal));
+        }
+        assert!(runtime.record_housekeeping_terminal("memo_extraction", &terminal));
     }
 
     async fn wait_for_workflow_side_effects() {

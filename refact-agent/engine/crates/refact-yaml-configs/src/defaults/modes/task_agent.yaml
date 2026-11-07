@@ -1,4 +1,4 @@
-schema_version: 29
+schema_version: 30
 id: task_agent
 title: Task Agent
 description: Execute single task card
@@ -35,6 +35,7 @@ prompt: |
   **Without this call, your work is NOT recorded!**
 
   Your task runtime provides and activates an isolated registered worktree. Reuse that scope; do not create or attach another checkout with shell commands or root-chat tools. The planner manages worktree creation, recovery and merging through the task lifecycle tools. Changes don't affect main until merged.
+  Before long verification, use `worktree_sync` status/start to integrate the pinned target into your own source worktree. Resolve conflicts with native choices, then continue to record Git integration; copying files alone is not synchronization. Resume active operations instead of repeating Start or unchanged merges, and do not request authorization already given. Force is only a backup-preserving abort, never an authority bypass; use restore to recover its backup. The planner still controls final landing.
 
   ## Workflow
 
@@ -264,6 +265,7 @@ tools:
   - agent_lifecycle
   - work_overview
   - work_inspect
+  - worktree_sync
   - board_claim
   - board_discover
   - metrics

@@ -1,6 +1,6 @@
 //! One bounded read projection for model tools, HTTP and the Work panel.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -67,6 +67,124 @@ fn digest(value: &impl Serialize) -> Result<String, WorkError> {
     serde_json::to_string(value)
         .map(|v| crate::file_activity::digest_of(&v))
         .map_err(|_| WorkError::unavailable())
+}
+
+fn encoding_failure(cause: serde_json::Error) -> WorkError {
+    let error = WorkError::projection_failure(WorkFailureCause::SnapshotEncodingUnavailable);
+    tracing::debug!(request_id = %error.request_id, internal_cause = %cause, "work encoding failure");
+    error
+}
+
+const PROVENANCE_RECORD_CAP: usize = 256;
+const PROVENANCE_BYTE_CAP: usize = 64 * 1024 - 64;
+
+struct ProvenanceBudget {
+    records: Vec<refact_privacy::FileRecord>,
+    seen: HashSet<refact_privacy::FileRecord>,
+    bytes: usize,
+}
+
+impl ProvenanceBudget {
+    fn new() -> Self {
+        Self {
+            records: Vec::new(),
+            seen: HashSet::new(),
+            bytes: 2,
+        }
+    }
+
+    fn extend(
+        &mut self,
+        records: impl IntoIterator<Item = refact_privacy::FileRecord>,
+    ) -> Result<(), WorkError> {
+        for record in records {
+            if self.seen.contains(&record) {
+                continue;
+            }
+            let bytes = super::bounds::exact_serialized_size(&record).map_err(encoding_failure)?;
+            let bytes = self
+                .bytes
+                .saturating_add(bytes)
+                .saturating_add(usize::from(!self.records.is_empty()));
+            if self.records.len() == PROVENANCE_RECORD_CAP || bytes > PROVENANCE_BYTE_CAP {
+                return Err(WorkError::projection_failure(
+                    WorkFailureCause::ProvenanceCapacity,
+                ));
+            }
+            self.bytes = bytes;
+            self.seen.insert(record.clone());
+            self.records.push(record);
+        }
+        Ok(())
+    }
+
+    fn roots<'a>(
+        &mut self,
+        app: &AppState,
+        roots: impl IntoIterator<Item = &'a WorkRootRef>,
+    ) -> Result<(), WorkError> {
+        let paths = roots
+            .into_iter()
+            .flat_map(|root| root.path.iter().chain(root.source_path.iter()))
+            .map(PathBuf::from);
+        self.extend(
+            crate::privacy::records::declared_file_records(&app.gcx, paths)
+                .map_err(|_| WorkError::policy_unavailable())?,
+        )
+    }
+
+    fn row(&mut self, app: &AppState, row: &WorkRow) -> Result<(), WorkError> {
+        self.extend(row.source_records.iter().cloned())?;
+        self.roots(app, [&row.root])
+    }
+}
+
+pub(super) fn budget_page(
+    app: &AppState,
+    snapshot: &WorkSnapshot,
+    offset: usize,
+    requested_end: usize,
+) -> Result<(usize, Vec<refact_privacy::FileRecord>), WorkError> {
+    let mut budget = ProvenanceBudget::new();
+    let paths = snapshot.selected_paths.iter().cloned().chain(
+        snapshot
+            .file_provenance
+            .iter()
+            .map(|entry| PathBuf::from(&entry.path)),
+    );
+    budget.extend(
+        crate::privacy::records::declared_file_records(&app.gcx, paths)
+            .map_err(|_| WorkError::policy_unavailable())?,
+    )?;
+    for row in snapshot.detail.iter().chain(snapshot.guard_rows.iter()) {
+        budget.row(app, row)?;
+    }
+    let roots_by_id: HashMap<_, _> = snapshot.roots.iter().map(|root| (&root.id, root)).collect();
+    let mut end = offset;
+    for index in offset..requested_end {
+        let count = budget.records.len();
+        let bytes = budget.bytes;
+        let result = if snapshot.rows.is_empty() {
+            budget.roots(app, [&snapshot.roots[index]])
+        } else {
+            let row = &snapshot.rows[index];
+            budget
+                .row(app, row)
+                .and_then(|_| budget.roots(app, roots_by_id.get(&row.root.id).copied()))
+        };
+        if let Err(error) = result {
+            if error.cause != Some(WorkFailureCause::ProvenanceCapacity) || index == offset {
+                return Err(error);
+            }
+            for record in budget.records.drain(count..) {
+                budget.seen.remove(&record);
+            }
+            budget.bytes = bytes;
+            break;
+        }
+        end = index + 1;
+    }
+    Ok((end, budget.records))
 }
 
 pub async fn visible_projection(
@@ -266,9 +384,7 @@ impl WorkSnapshot {
             bytes: 0,
             hash: Sha256::new(),
         };
-        serde_json::to_writer(&mut output, &(binding, self)).map_err(|_| {
-            WorkError::projection_failure(WorkFailureCause::SnapshotEncodingUnavailable)
-        })?;
+        serde_json::to_writer(&mut output, &(binding, self)).map_err(encoding_failure)?;
         for row in self
             .rows
             .iter()
@@ -283,9 +399,7 @@ impl WorkSnapshot {
                     row.metadata.source_revision,
                 ),
             )
-            .map_err(|_| {
-                WorkError::projection_failure(WorkFailureCause::SnapshotEncodingUnavailable)
-            })?;
+            .map_err(encoding_failure)?;
         }
         Ok((hex::encode(output.hash.finalize()), output.bytes))
     }
@@ -476,7 +590,8 @@ fn page(
         filter,
     };
     let provenance = snapshot.file_provenance.clone();
-    let frozen = app.work_views.frozen_page(
+    let mut records = Vec::new();
+    let frozen = app.work_views.frozen_page_select(
         binding,
         snapshot,
         request.rows.unwrap_or(settings.overview_default_rows),
@@ -484,6 +599,14 @@ fn page(
         &settings,
         now_ms(),
         |saved| revalidate_snapshot(app, caller, &disclosure, catalog, &provenance, saved),
+        |saved, offset, end| {
+            if caller.model.is_none() {
+                return Ok(end);
+            }
+            let (end, complete) = budget_page(app, saved, offset, end)?;
+            records = complete;
+            Ok(end)
+        },
     )?;
     let window = frozen.window;
     let snapshot = frozen.snapshot;
@@ -492,22 +615,7 @@ fn page(
     } else {
         "work"
     };
-    let mut records = Vec::new();
     if caller.model.is_some() {
-        let paths = snapshot.selected_paths.iter().cloned().chain(
-            snapshot
-                .file_provenance
-                .iter()
-                .map(|entry| PathBuf::from(&entry.path)),
-        );
-        records = crate::privacy::records::declared_file_records(&app.gcx, paths)
-            .map_err(|_| WorkError::policy_unavailable())?;
-        records.extend(
-            snapshot
-                .guard_rows
-                .iter()
-                .flat_map(|row| row.source_records.clone()),
-        );
         if privacy_guard::policy_key(
             &app.gcx,
             caller
@@ -769,29 +877,12 @@ pub fn attach_provenance(
     page: &WorkOverview,
     detail: Option<&WorkRow>,
 ) -> Result<(), WorkError> {
-    let records = page
-        .rows
-        .iter()
-        .chain(detail)
-        .flat_map(|row| row.source_records.clone());
-    let paths = page
-        .roots
-        .iter()
-        .flat_map(|root| root.path.iter().chain(root.source_path.iter()))
-        .map(PathBuf::from);
-    let roots = crate::privacy::records::declared_file_records(&app.gcx, paths)
-        .map_err(|_| WorkError::policy_unavailable())?;
-    let mut seen = HashSet::new();
-    let records: Vec<_> = records
-        .chain(roots)
-        .chain(page.source_records.clone())
-        .filter(|record| seen.insert(record.clone()))
-        .collect();
-    if records.len() > 256 || super::bounds::serialized_size(&records, 64 * 1024 - 64).is_none() {
-        return Err(WorkError::projection_failure(
-            WorkFailureCause::SnapshotEncodingUnavailable,
-        ));
+    let mut budget = ProvenanceBudget::new();
+    budget.extend(page.source_records.iter().cloned())?;
+    for row in page.rows.iter().chain(detail) {
+        budget.row(app, row)?;
     }
-    crate::privacy::records::merge_records(message, records);
+    budget.roots(app, &page.roots)?;
+    crate::privacy::records::merge_records(message, budget.records);
     Ok(())
 }

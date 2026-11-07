@@ -97,6 +97,86 @@ pub async fn handle_operator_reopen(
     handle_operator_status(State(app)).await
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PublicationScope {
+    pub project: ProjectIdentity,
+    pub worker: refact_buddy_core::operator_types::WorkerIdentity,
+}
+
+/// Recovery exposes identifiers only, never retained report bodies. Both calls
+/// are authenticated and bound to the live project and worker, not a stale tab.
+pub async fn handle_pending_publications(
+    State(app): State<AppState>,
+    headers: HeaderMap,
+    axum::Json(scope): axum::Json<PublicationScope>,
+) -> Result<
+    axum::Json<OperatorEnvelope<Vec<crate::buddy::outcome_runtime::PendingPublicationInfo>>>,
+    ScratchError,
+> {
+    authenticated_operator_request(&app, &headers).map_err(action_error)?;
+    let runtime = gated_runtime(&app, OperatorCapability::Storage)
+        .await
+        .map_err(action_error)?;
+    let buddy = app.buddy.buddy.lock().await;
+    validate_publication_owner(
+        &runtime,
+        buddy.as_ref().and_then(|s| s.outcome_runtime.as_ref()),
+        &scope,
+    )?;
+    Ok(envelope(
+        runtime.project(),
+        runtime.pending_publications().map_err(action_error)?,
+        None,
+    ))
+}
+
+fn validate_publication_owner(
+    runtime: &OutcomeRuntime,
+    current: Option<&OutcomeRuntime>,
+    scope: &PublicationScope,
+) -> Result<(), ScratchError> {
+    if runtime.is_closed()
+        || current.is_none_or(|current| !runtime.same_owner(current))
+        || scope.project != runtime.project()
+        || scope.worker != runtime.worker()
+    {
+        return Err(action_error(
+            "publication project or runtime owner changed; reload Buddy",
+        ));
+    }
+    Ok(())
+}
+
+pub async fn handle_retry_publication(
+    State(app): State<AppState>,
+    Path(run_id): Path<String>,
+    headers: HeaderMap,
+    axum::Json(scope): axum::Json<PublicationScope>,
+) -> Result<
+    axum::Json<OperatorEnvelope<Vec<crate::buddy::outcome_runtime::PendingPublicationInfo>>>,
+    ScratchError,
+> {
+    authenticated_operator_request(&app, &headers).map_err(action_error)?;
+    let runtime = gated_runtime(&app, OperatorCapability::Storage)
+        .await
+        .map_err(action_error)?;
+    // Pin the service owner until publication finishes. This path never invokes
+    // a workflow, chat, tools, or housekeeping accounting.
+    let buddy = app.buddy.buddy.lock().await;
+    validate_publication_owner(
+        &runtime,
+        buddy.as_ref().and_then(|s| s.outcome_runtime.as_ref()),
+        &scope,
+    )?;
+    runtime.retry_pending_publication(&run_id).await.map_err(|_| action_error("Retained publication could not be saved. It remains memory-only; resolve storage availability and retry before restarting."))?;
+    Ok(envelope(
+        runtime.project(),
+        runtime.pending_publications().map_err(action_error)?,
+        None,
+    ))
+}
+
 use crate::buddy::resource_execution as resources;
 use crate::buddy::action_execution::{
     ActionRequest, ActionResult, PreparedAction, AsyncActionRepository, Authorizer,
@@ -942,6 +1022,46 @@ pub async fn handle_v1_buddy_operator_action_execute(
 #[cfg(test)]
 mod resource_http_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn pending_publication_owner_change_is_refused_and_metadata_is_bounded() {
+        use crate::buddy::outcome_runtime::{PendingWorkflowPublication, WorkflowTerminal};
+        let dir = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(dir.path()).unwrap();
+        let runtime = crate::buddy::operator_runtime::open_project_runtime(&root).unwrap();
+        let scope = PublicationScope {
+            project: runtime.project(),
+            worker: runtime.worker(),
+        };
+        validate_publication_owner(&runtime, Some(&runtime), &scope).unwrap();
+        let mut wrong = PublicationScope {
+            project: runtime.project(),
+            worker: runtime.worker(),
+        };
+        wrong.worker.epoch += 1;
+        assert!(validate_publication_owner(&runtime, Some(&runtime), &wrong).is_err());
+        assert!(validate_publication_owner(&runtime, None, &scope).is_err());
+        let start = runtime.start_workflow("commit_message", chrono::Utc::now().to_rfc3339());
+        let run_id = start.run_id.clone();
+        runtime
+            .retain_pending_publication(PendingWorkflowPublication::Report {
+                start,
+                title: "Retained".into(),
+                body: "private report bytes".into(),
+                evidence: vec![],
+                terminal: WorkflowTerminal::Completed,
+            })
+            .unwrap();
+        let metadata = serde_json::to_string(&runtime.pending_publications().unwrap()).unwrap();
+        assert!(!metadata.contains("private report bytes"));
+        runtime.retry_pending_publication(&run_id).await.unwrap();
+        assert!(runtime.pending_publications().unwrap().is_empty());
+        runtime.shutdown().await;
+        let reopened = crate::buddy::operator_runtime::open_project_runtime(&root).unwrap();
+        assert!(validate_publication_owner(&runtime, Some(&reopened), &scope).is_err());
+        assert!(validate_publication_owner(&reopened, Some(&reopened), &scope).is_err());
+        reopened.shutdown().await;
+    }
 
     #[tokio::test]
     async fn unavailable_status_reports_the_owner_and_manual_reopen_recovers() {

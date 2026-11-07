@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 id: buddy_refactor_hunter
 title: Refactor Hunter
 description: Weekly hunt for small refactor wins
@@ -23,7 +23,19 @@ messages:
     1. Pick 1 high-confidence candidate.
     2. Describe the proposed refactor precisely (file, symbol, before/after sketch); never edit files.
     3. If you found a generalizable lesson, use buddy_memory_create with kind=lesson.
-    4. End with buddy_runtime_event describing the win.
+    4. Record completion with buddy_runtime_event describing the win.
+
+    After any tool calls, finish with a nonempty final assistant assessment describing the evidence, outcome, or reason no action was needed.
+    Runtime events are notifications, not the saved assessment; do not end on a tool call.
+
+    Tool argument examples below are illustrative: replace example text with evidence-based values.
+    buddy_runtime_event({"title":"Review complete","status":"completed","description":"Review finished."})
+    Include a short title and string description; use status completed only when finished,
+    failed on failure, or started/in_progress while work is underway. A no-op can be completed.
+    buddy_memory_create({"title":"Example insight","content":"Evidence-based reusable insight.","tags":["example"],"kind":"insight","source_id":"buddy_refactor_hunter:example-topic"})
+    For each real memory derive source_id as buddy_refactor_hunter:<stable-topic> from the finding;
+    never reuse the illustrative topic or invent evidence. Use a stable topic rather than a line number;
+    set title, content, tags (an array of strings), and kind from the actual insight.
   user_template: |
     Workflow: {{workflow_id}}
     Project root: {{project_root}}

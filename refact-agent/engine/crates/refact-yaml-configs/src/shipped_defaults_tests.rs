@@ -62,6 +62,48 @@ fn manifest_versions_are_unique_and_increasing() {
     }
 }
 
+#[test]
+fn worktree_sync_is_available_to_lifecycle_modes_only() {
+    let modes = embedded_defaults("modes");
+    let parse = |name: &str| {
+        let content = modes
+            .iter()
+            .find(|(filename, _)| filename == &format!("{name}.yaml"))
+            .unwrap_or_else(|| panic!("missing mode {name}"));
+        serde_yaml::from_str::<serde_yaml::Value>(&content.1).unwrap()
+    };
+    for (name, previous_version) in [
+        ("agent", 30),
+        ("solo", 2),
+        ("task_agent", 29),
+        ("task_planner", 33),
+        ("design", 28),
+    ] {
+        let mode = parse(name);
+        let tools = mode["tools"].as_sequence().expect("mode tools list");
+        assert!(
+            tools
+                .iter()
+                .any(|tool| tool.as_str() == Some("worktree_sync")),
+            "{name} must expose worktree_sync"
+        );
+        assert!(
+            mode["schema_version"].as_u64().unwrap() > previous_version,
+            "{name} must upgrade existing installations"
+        );
+    }
+    for name in ["ask", "brainstorming", "debug", "explore", "learn", "plan"] {
+        let mode = parse(name);
+        let tools = mode["tools"].as_sequence().expect("mode tools list");
+        assert!(
+            !tools
+                .iter()
+                .any(|tool| tool.as_str() == Some("worktree_sync")),
+            "read-only mode {name} must not expose worktree_sync"
+        );
+    }
+}
+
 #[tokio::test]
 async fn bumped_default_upgrades_an_unmodified_install() {
     let manifest = shipped_defaults();

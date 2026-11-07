@@ -1,4 +1,4 @@
-schema_version: 3
+schema_version: 4
 id: buddy_onboarding
 title: Onboarding
 description: Keep AGENTS.md aligned with new top-level project areas
@@ -25,7 +25,15 @@ messages:
     2. Only if there is a clear missing onboarding note, draft the updated AGENTS.md section
        via buddy_create_draft with kind=agents_md so the user can review and save it.
     3. Keep the draft small and factual.
-    4. End with buddy_runtime_event describing the draft or why nothing changed.
+    4. Record completion with buddy_runtime_event describing the draft or why nothing changed.
+
+    After any tool calls, finish with a nonempty final assistant assessment describing the evidence, outcome, or reason no action was needed.
+    Runtime events are notifications, not the saved assessment; do not end on a tool call.
+
+    Tool argument examples below are illustrative: replace example text with evidence-based values.
+    buddy_runtime_event({"title":"Review complete","status":"completed","description":"Review finished."})
+    Include a short title and string description; use status completed only when finished,
+    failed on failure, or started/in_progress while work is underway. A no-op can be completed.
   user_template: |
     Workflow: {{workflow_id}}
     Project root: {{project_root}}

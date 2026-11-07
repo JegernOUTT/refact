@@ -31,7 +31,10 @@ import { useAppSelector } from "../../hooks";
 import { selectApiKey, selectConfig } from "../Config/configSlice";
 import { WorktreeStatusBadge } from "./WorktreeStatusBadge";
 import { WorktreeDiffPanel } from "./WorktreeDiffPanel";
-import { MergeWorktreeModal } from "./MergeWorktreeModal";
+import {
+  MergeWorktreeModal,
+  type WorktreeConflictHandoff,
+} from "./MergeWorktreeModal";
 import { buildWorktreeConflictPrompt } from "./worktreeConflict";
 import { worktreeErrorText } from "./worktreeError";
 import styles from "./Worktrees.module.css";
@@ -121,7 +124,11 @@ export const WorktreeMenu: React.FC<WorktreeMenuProps> = ({
     : "Already using main workspace";
 
   const handleAskRefact = useCallback(
-    async (files: string[], response: MergeWorktreeResponse) => {
+    async (
+      files: string[],
+      response: MergeWorktreeResponse,
+      handoff: WorktreeConflictHandoff,
+    ) => {
       if (!currentWorktree || !chatId) {
         throw new Error("No active worktree chat is available.");
       }
@@ -129,7 +136,10 @@ export const WorktreeMenu: React.FC<WorktreeMenuProps> = ({
         worktree: currentWorktree,
         record: currentRecord,
         response,
+        sync: handoff.sync,
+        toolAvailable: handoff.toolAvailable,
         files,
+        selector: { worktree_id: handoff.sync.id },
       });
       await sendUserMessage(chatId, prompt, config, apiKey, true);
       setLocalFeedback("Conflict resolution request sent to Refact.");

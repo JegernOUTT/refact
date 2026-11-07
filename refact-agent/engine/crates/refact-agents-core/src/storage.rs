@@ -18,6 +18,36 @@ static TMP_WRITE_COUNTER: AtomicU64 = AtomicU64::new(0);
 const RENAME_ATTEMPTS: usize = 5;
 const RENAME_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(50);
 
+#[cfg(test)]
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum RecordWriteFault {
+    Write,
+    Rename,
+}
+
+#[cfg(test)]
+static RECORD_WRITE_FAULTS: std::sync::LazyLock<
+    std::sync::Mutex<HashMap<PathBuf, RecordWriteFault>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+#[cfg(test)]
+pub(crate) fn fail_next_record_write(root: &Path, fault: RecordWriteFault) {
+    RECORD_WRITE_FAULTS
+        .lock()
+        .unwrap()
+        .insert(root.into(), fault);
+}
+
+#[cfg(test)]
+fn record_write_fault(root: &Path, stage: RecordWriteFault) -> Result<(), std::io::Error> {
+    let mut faults = RECORD_WRITE_FAULTS.lock().unwrap();
+    if faults.get(root) == Some(&stage) {
+        faults.remove(root);
+        return Err(std::io::Error::from_raw_os_error(28));
+    }
+    Ok(())
+}
+
 // A shared temp name makes concurrent savers steal each other's file: the first rename moves it
 // away and the second fails with ENOENT.
 fn tmp_path_for(dest_path: &Path) -> PathBuf {
@@ -158,9 +188,17 @@ pub async fn save_all(
     let tmp_path = tmp_path_for(&records_path);
     let content = serde_json::to_string_pretty(&records)
         .map_err(|e| format!("Failed to serialize background agents: {e}"))?;
+    #[cfg(test)]
+    record_write_fault(storage_root, RecordWriteFault::Write)
+        .map_err(|e| format!("Failed to write background agents file: {e}"))?;
     if let Err(e) = fs::write(&tmp_path, content).await {
         let _ = fs::remove_file(&tmp_path).await;
         return Err(format!("Failed to write background agents file: {e}"));
+    }
+    #[cfg(test)]
+    if let Err(e) = record_write_fault(storage_root, RecordWriteFault::Rename) {
+        let _ = fs::remove_file(&tmp_path).await;
+        return Err(format!("Failed to rename background agents file: {e}"));
     }
     atomic_write_file(&tmp_path, &records_path).await?;
     let retained: std::collections::HashSet<&str> =

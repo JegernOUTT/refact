@@ -626,6 +626,7 @@ fn merge_response_message(response: &MergeWorktreeResponse) -> String {
             conflict.instructions
         );
         append_warnings(&mut message, &response_warnings(response));
+        message.push_str("\n\nUse worktree_sync on the authorized source checkout to synchronize and resolve conflicts, then reverify before attempting merge again; do not retry unchanged.");
         return message;
     }
 
@@ -894,7 +895,7 @@ impl Tool for ToolWorktreeMerge {
             },
             experimental: false,
             allow_parallel: false,
-            description: "Merge a registered worktree back into its target branch. Generates a commit message from the worktree diff unless commit_message is provided. By default uses squash merge and deletes the worktree/branch after successful merge or no-op cleanup.".to_string(),
+            description: "Merge a registered worktree back into its target branch. Before long verification, use worktree_sync to synchronize its source; on conflict synchronize and resolve there, then reverify rather than retry unchanged. Generates a commit message unless supplied. By default uses squash and deletes the worktree/branch after successful merge or no-op cleanup.".to_string(),
             input_schema: json_schema_from_params(
                 &[
                     ("worktree_id", "string", "Registered worktree id to merge. Defaults to the active chat worktree when omitted."),

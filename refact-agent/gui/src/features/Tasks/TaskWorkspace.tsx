@@ -94,6 +94,7 @@ import {
   WorktreeStatusBadge,
   buildWorktreeConflictPrompt,
   worktreeErrorText,
+  type WorktreeConflictHandoff,
 } from "../Worktrees";
 import {
   loadTaskWorkspaceTab,
@@ -2038,7 +2039,11 @@ const TaskWorkspaceContent: React.FC<TaskWorkspaceProps> = ({
   );
 
   const handleAskRefactForMerge = useCallback(
-    async (files: string[], response: MergeWorktreeResponse) => {
+    async (
+      files: string[],
+      response: MergeWorktreeResponse,
+      handoff: WorktreeConflictHandoff,
+    ) => {
       if (!mergeTarget) throw new Error("No task worktree is selected.");
       const fallbackPlannerId =
         activeChat?.type === "planner"
@@ -2051,9 +2056,17 @@ const TaskWorkspaceContent: React.FC<TaskWorkspaceProps> = ({
         worktree: mergeTarget.worktree.meta,
         record: mergeTarget.worktree.record,
         response,
+        sync: handoff.sync,
+        toolAvailable: handoff.toolAvailable,
         files,
         taskId,
         cardId: mergeTarget.card.id,
+        selector: {
+          worktree_id: handoff.sync.id,
+          ...(!mergeTarget.card.agent_chat_id
+            ? { card_id: mergeTarget.card.id }
+            : {}),
+        },
       });
       if (mergeTarget.card.agent_chat_id) {
         dispatch(

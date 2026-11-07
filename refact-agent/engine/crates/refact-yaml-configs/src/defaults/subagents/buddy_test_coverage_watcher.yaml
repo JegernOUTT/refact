@@ -1,4 +1,4 @@
-schema_version: 3
+schema_version: 4
 id: buddy_test_coverage_watcher
 title: Test Coverage Watcher
 description: Detect changed Rust files that may need focused tests
@@ -24,7 +24,15 @@ messages:
     2. Identify the smallest meaningful test addition or test plan.
     3. Describe the smallest meaningful test addition or test plan in your
        buddy_runtime_event description; never edit files.
-    4. End with buddy_runtime_event, and open an issue if follow-up is needed.
+    4. Record completion with buddy_runtime_event, and open an issue if follow-up is needed.
+
+    After any tool calls, finish with a nonempty final assistant assessment describing the evidence, outcome, or reason no action was needed.
+    Runtime events are notifications, not the saved assessment; do not end on a tool call.
+
+    Tool argument examples below are illustrative: replace example text with evidence-based values.
+    buddy_runtime_event({"title":"Review complete","status":"completed","description":"Review finished."})
+    Include a short title and string description; use status completed only when finished,
+    failed on failure, or started/in_progress while work is underway. A no-op can be completed.
   user_template: |
     Workflow: {{workflow_id}}
     Project root: {{project_root}}

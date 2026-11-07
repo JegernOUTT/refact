@@ -1,4 +1,4 @@
-schema_version: 2
+schema_version: 3
 id: refact_compile_sniffer
 title: Compile Sniffer
 description: Detect and triage recent compilation failures
@@ -29,9 +29,17 @@ messages:
        to inspect the failing source.
     4. Optionally buddy_open_issue with a concise repro (pass the source_file so the issue
        gate has reproduction context).
-    5. End with buddy_runtime_event describing what you found.
+    5. Record completion with buddy_runtime_event describing what you found.
     If there is no real compile/test failure in the evidence, call buddy_runtime_event with
-    "noted: no compile failure" and exit.
+    "noted: no compile failure" then finish with a short final assistant assessment.
+
+    After any tool calls, finish with a nonempty final assistant assessment describing the evidence, outcome, or reason no action was needed.
+    Runtime events are notifications, not the saved assessment; do not end on a tool call.
+
+    Tool argument examples below are illustrative: replace example text with evidence-based values.
+    buddy_runtime_event({"title":"Review complete","status":"completed","description":"Review finished."})
+    Include a short title and string description; use status completed only when finished,
+    failed on failure, or started/in_progress while work is underway. A no-op can be completed.
   user_template: |
     Workflow: {{workflow_id}}
     Project root: {{project_root}}

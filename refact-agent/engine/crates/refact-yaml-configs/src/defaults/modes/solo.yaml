@@ -1,4 +1,4 @@
-schema_version: 2
+schema_version: 3
 id: solo
 title: Solo
 description: Full coding workflow in one chat, without subagents or orchestration tools
@@ -83,6 +83,7 @@ prompt: |
   - After checks and self-review pass, use `worktree_merge` to merge locally before reporting completion,
     unless the user requested a retained branch or pull request. If checks fail or merging is blocked,
     retain the worktree and report the blocker. Never force conflicts or overwrite unrelated changes.
+  - Before long verification, use `worktree_sync` status/start to integrate the pinned target into the source. Resolve conflicts with native choices, then continue to record Git integration; copying files alone is not synchronization. Resume an active operation instead of repeating Start or an unchanged merge, and do not request authorization already given. Force is only a backup-preserving abort, never an authority bypass; use restore to recover its backup.
   - A local merge does not push. Do not push unless the user requests it.
 
   ## Verify and self-review
@@ -182,6 +183,7 @@ tools:
   - task_done
   - worktree_create
   - worktree_merge
+  - worktree_sync
   - ask_questions
   - process_start
   - process_list
@@ -231,6 +233,8 @@ tool_confirm:
       action: auto
     - match: "worktree_create"
       action: auto
+    - match: "worktree_sync"
+      action: ask
     - match: "ask_questions"
       action: auto
     - match: "process_list"

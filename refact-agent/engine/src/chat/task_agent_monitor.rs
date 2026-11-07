@@ -5,7 +5,7 @@
 // - Agent becomes stuck (no activity beyond threshold)
 // - Session ends in Error state without calling agent_finish
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
@@ -30,7 +30,6 @@ use crate::chat::get_or_create_session_with_trajectory;
 use crate::chat::delivery::deliver_to_chat;
 use refact_core::chat_types::{DeliveryOutcome, PendingDelivery, PushMode};
 use crate::worktrees::service::WorktreeService;
-use crate::worktrees::git;
 use refact_buddy_core::types::BuddyRuntimeEvent;
 use uuid::Uuid;
 
@@ -1530,136 +1529,12 @@ pub(crate) async fn notify_planner_agents_finished(
     Ok(())
 }
 
-fn expected_agent_branch_prefix(task_id: &str, card_id: &str) -> String {
-    format!("refact/task/{}/card/{}/", task_id, card_id)
-}
-
-fn validate_agent_branch_for_cleanup(
-    task_id: &str,
-    card_id: &str,
-    branch: &str,
-) -> Result<(), String> {
-    let expected_prefix = expected_agent_branch_prefix(task_id, card_id);
-    if branch.starts_with(&expected_prefix) {
-        Ok(())
-    } else {
-        Err(format!(
-            "Refusing to delete unsafe branch '{}'; expected prefix '{}'.",
-            branch, expected_prefix
-        ))
-    }
-}
-
-fn canonical_existing_path(path: &Path) -> Result<PathBuf, String> {
-    dunce::canonicalize(path)
-        .map_err(|e| format!("Failed to canonicalize '{}': {}", path.display(), e))
-}
-
-fn validate_agent_worktree_path_for_cleanup(
-    cache_dir: &Path,
-    workspace_roots: &[PathBuf],
-    worktree: &Path,
-) -> Result<PathBuf, String> {
-    let worktree = canonical_existing_path(worktree)?;
-    let cache_dir = canonical_existing_path(cache_dir)?;
-    let cache_root = cache_dir.join("worktrees");
-    let cache_root = if cache_root.exists() {
-        canonical_existing_path(&cache_root)?
-    } else {
-        return Err(format!(
-            "Refusing to delete worktree path '{}': worktree cache '{}' does not exist.",
-            worktree.display(),
-            cache_root.display()
-        ));
-    };
-
-    if worktree == Path::new("/") || worktree == cache_dir || worktree == cache_root {
-        return Err(format!(
-            "Refusing to delete unsafe worktree path '{}'.",
-            worktree.display()
-        ));
-    }
-
-    for workspace_root in workspace_roots {
-        if let Ok(workspace_root) = canonical_existing_path(workspace_root) {
-            if worktree == workspace_root {
-                return Err(format!(
-                    "Refusing to delete workspace root '{}'.",
-                    worktree.display()
-                ));
-            }
-        }
-    }
-
-    if !worktree.starts_with(&cache_root) {
-        return Err(format!(
-            "Refusing to delete worktree path '{}' outside Refact worktree cache '{}'.",
-            worktree.display(),
-            cache_root.display()
-        ));
-    }
-
-    Ok(worktree)
-}
-
-fn fallback_remove_worktree_and_branch(
-    cache_dir: PathBuf,
-    workspace_root: PathBuf,
-    workspace_roots: Vec<PathBuf>,
-    task_id: String,
-    card_id: String,
-    agent_worktree: String,
-    agent_branch: String,
-    remove_worktree: bool,
-    remove_branch: bool,
-) -> (bool, bool) {
-    let branch_is_safe = match validate_agent_branch_for_cleanup(&task_id, &card_id, &agent_branch)
-    {
-        Ok(()) => true,
-        Err(e) => {
-            tracing::warn!("Skipping fallback agent branch cleanup: {}", e);
-            false
-        }
-    };
-
-    let mut worktree_removed = false;
-    if remove_worktree {
-        match validate_agent_worktree_path_for_cleanup(
-            &cache_dir,
-            &workspace_roots,
-            Path::new(&agent_worktree),
-        ) {
-            Ok(worktree) => {
-                worktree_removed = !worktree.exists();
-                if !worktree_removed {
-                    let warnings = git::remove_worktree_path(&workspace_root, &worktree);
-                    for warning in warnings {
-                        tracing::warn!("Fallback agent worktree cleanup warning: {}", warning);
-                    }
-                    worktree_removed = !worktree.exists();
-                }
-            }
-            Err(e) => tracing::warn!("Skipping fallback agent worktree cleanup: {}", e),
-        }
-    }
-
-    let mut branch_deleted = false;
-    if remove_branch && branch_is_safe {
-        match git::delete_branch(&workspace_root, &agent_branch) {
-            Ok(deleted) => branch_deleted = deleted,
-            Err(e) => tracing::warn!("Fallback agent branch cleanup failed: {}", e),
-        }
-    }
-
-    (worktree_removed, branch_deleted)
-}
-
 pub(crate) async fn remove_agent_worktree_and_branch(
     app: AppState,
-    task_id: &str,
+    _task_id: &str,
     card_id: &str,
     agent_worktree: &str,
-    agent_branch: &str,
+    _agent_branch: &str,
     agent_worktree_name: Option<&str>,
 ) -> (bool, bool) {
     let cache_dir = app.paths.cache_dir.clone();
@@ -1691,6 +1566,7 @@ pub(crate) async fn remove_agent_worktree_and_branch(
                             warning
                         );
                     }
+                    return (worktree_removed, branch_deleted);
                 }
                 Err(e) => {
                     tracing::warn!(
@@ -1698,45 +1574,15 @@ pub(crate) async fn remove_agent_worktree_and_branch(
                         worktree_id,
                         e
                     );
+                    return (worktree_removed, branch_deleted);
                 }
             }
+        } else {
+            return (worktree_removed, branch_deleted);
         }
+    } else {
+        return (worktree_removed, branch_deleted);
     }
-
-    if worktree_removed && branch_deleted {
-        return (true, true);
-    }
-
-    let remove_worktree = !worktree_removed;
-    let remove_branch = !branch_deleted;
-    let task_id = task_id.to_string();
-    let card_id = card_id.to_string();
-    let agent_worktree = agent_worktree.to_string();
-    let agent_branch = agent_branch.to_string();
-    tokio::task::spawn_blocking(move || {
-        fallback_remove_worktree_and_branch(
-            cache_dir,
-            workspace_root,
-            project_dirs,
-            task_id,
-            card_id,
-            agent_worktree,
-            agent_branch,
-            remove_worktree,
-            remove_branch,
-        )
-    })
-    .await
-    .map(|(fallback_worktree_removed, fallback_branch_deleted)| {
-        (
-            worktree_removed || fallback_worktree_removed,
-            branch_deleted || fallback_branch_deleted,
-        )
-    })
-    .unwrap_or_else(|e| {
-        tracing::warn!("Fallback agent cleanup task failed: {}", e);
-        (worktree_removed, branch_deleted)
-    })
 }
 
 pub(crate) async fn capture_failed_agent_diff(

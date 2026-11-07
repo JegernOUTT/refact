@@ -77,6 +77,7 @@ import {
   useReopenBuddyOperatorMutation,
 } from "../../services/refact/buddyOperator";
 import { BuddyNativeDecisions } from "./BuddyNativeDecisions";
+import { BuddyPublicationRecovery } from "./BuddyPublicationRecovery";
 import { BuddyNativeApprovals } from "./BuddyNativeApprovals";
 import { BuddySupervision } from "./BuddySupervision";
 import {
@@ -1196,6 +1197,16 @@ const BuddyHomeContent: React.FC<BuddyHomeProps> = ({
               isRetrying={isReopeningOperator}
               retryOutcome={operatorRetryOutcome}
               onRetry={handleRetryOperator}
+            />
+          )}
+
+          {operator.currentData?.mode === "enabled" && (
+            <BuddyPublicationRecovery
+              key={`${operatorIdentity}:${JSON.stringify(
+                operator.currentData.worker,
+              )}`}
+              status={operator.currentData}
+              identity={operatorIdentity}
             />
           )}
 
