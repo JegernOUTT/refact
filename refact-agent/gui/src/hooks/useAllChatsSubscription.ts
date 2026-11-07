@@ -17,7 +17,7 @@ import {
   hasUsableEngineEndpoint,
   type EngineApiConfig,
 } from "../services/refact/apiUrl";
-import { subscribeToChatEvents } from "../services/refact/chatSubscription";
+import { createChatEventMultiplexer } from "../services/refact/chatSubscription";
 import { invalidateChatParamsSyncState } from "../services/refact/chatCommands";
 import {
   setSseStatus,
@@ -141,6 +141,8 @@ export function useAllChatsSubscription() {
   const sseRefreshRequested = useAppSelector(selectSseRefreshRequested);
   const [documentVisible, setDocumentVisible] = useState(isDocumentVisible);
 
+  const multiplexerRef =
+    useRef<ReturnType<typeof createChatEventMultiplexer>>();
   const subscriptionsRef = useRef<Map<string, () => void>>(new Map());
   const attemptsRef = useRef(new Map<string, symbol>());
   const seqMapRef = useRef<Map<string, bigint>>(new Map());
@@ -149,6 +151,10 @@ export function useAllChatsSubscription() {
   const retryCountRef = useRef<Map<string, number>>(new Map());
   const timeoutRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(
     new Map(),
+  );
+  const groupRetryIdsRef = useRef(new Set<string>());
+  const groupRetryTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
   );
   const lastActivityDispatchRef = useRef<Map<string, number>>(new Map());
   const lastActivityAtRef = useRef<Map<string, number>>(new Map());
@@ -207,6 +213,14 @@ export function useAllChatsSubscription() {
   const activeChatId = currentThreadId;
 
   const clearPendingTimeout = useCallback((chatId: string) => {
+    groupRetryIdsRef.current.delete(chatId);
+    if (
+      groupRetryIdsRef.current.size === 0 &&
+      groupRetryTimeoutRef.current !== null
+    ) {
+      clearTimeout(groupRetryTimeoutRef.current);
+      groupRetryTimeoutRef.current = null;
+    }
     const existingTimeout = timeoutRef.current.get(chatId);
     if (existingTimeout) {
       clearTimeout(existingTimeout);
@@ -216,6 +230,9 @@ export function useAllChatsSubscription() {
 
   const clearRetryStateForUndesiredChats = useCallback(
     (desired: Set<string>) => {
+      for (const chatId of groupRetryIdsRef.current) {
+        if (!desired.has(chatId)) clearPendingTimeout(chatId);
+      }
       for (const chatId of Array.from(timeoutRef.current.keys())) {
         if (desired.has(chatId)) continue;
         clearPendingTimeout(chatId);
@@ -499,6 +516,22 @@ export function useAllChatsSubscription() {
       const retryCount = retryCountRef.current.get(chatId) ?? 0;
       const delay = useBackoff ? calculateBackoff(retryCount) : 100;
 
+      if (useBackoff) {
+        groupRetryIdsRef.current.add(chatId);
+        if (groupRetryTimeoutRef.current !== null) return;
+        groupRetryTimeoutRef.current = setTimeout(() => {
+          groupRetryTimeoutRef.current = null;
+          const chatIds = [...groupRetryIdsRef.current];
+          groupRetryIdsRef.current.clear();
+          for (const id of chatIds) {
+            if (!desiredIdsRef.current.has(id)) continue;
+            if (subscriptionsRef.current.has(id)) continue;
+            subscribeRef.current?.(id);
+          }
+        }, delay);
+        return;
+      }
+
       const timeoutId = setTimeout(() => {
         timeoutRef.current.delete(chatId);
         if (!desiredIdsRef.current.has(chatId)) return;
@@ -529,153 +562,151 @@ export function useAllChatsSubscription() {
       const connection = dispatch(captureAgentRosterConnection());
       const rosterSource = connection.source;
       let chatDenied = false;
-      const unsubscribe = subscribeToChatEvents(
-        chatId,
+      multiplexerRef.current ??= createChatEventMultiplexer(
         connection.config,
-        {
-          onEvent: (envelope) => {
-            if (!isCurrentAttempt()) return;
-            const seq = BigInt(envelope.seq);
-            const lastSeq = seqMapRef.current.get(chatId) ?? 0n;
-
-            if (envelope.type === "snapshot") {
-              flushPendingStreamDeltaForChatRef.current?.(chatId);
-              streamedBytesRef.current.delete(chatId);
-              pendingBytesRef.current.delete(chatId);
-              seqMapRef.current.set(chatId, seq);
-              retryCountRef.current.set(chatId, 0);
-              dispatch(setSseStatus({ chatId, status: "connected" }));
-            } else {
-              if (seq <= lastSeq) return;
-              if (seq > lastSeq + 1n) {
-                flushPendingStreamDeltaForChatRef.current?.(chatId);
-                clearSubchatFlushForChat(chatId);
-                flushPendingSubchatUpdateForChat(chatId);
-                clearBackgroundAgentFlushForChat(chatId);
-                flushPendingBackgroundAgentUpdatesForChat(chatId);
-                unsubscribeRef.current?.(chatId);
-                dispatch(setSseStatus({ chatId, status: "connecting" }));
-                scheduleResubscribe(chatId, false);
-                return;
-              }
-              seqMapRef.current.set(chatId, seq);
-            }
-            const rosterAllowed =
-              connection.rosterAllowed &&
-              dispatch(receiveAgentRosterEvent(rosterSource, envelope));
-            if (envelope.type === "background_agent_updated" && !rosterAllowed)
-              return;
-            if (envelope.type === "snapshot" && !rosterAllowed)
-              envelope = { ...envelope, background_agents: [] };
-            if (envelope.type === "stream_delta") {
-              enqueueStreamDeltaRef.current?.(chatId, envelope);
-            } else if (envelope.type === "subchat_update") {
-              flushPendingStreamDeltaForChatRef.current?.(chatId);
-              enqueueSubchatUpdate(chatId, envelope);
-            } else if (envelope.type === "background_agent_updated") {
-              flushPendingStreamDeltaForChatRef.current?.(chatId);
-              enqueueBackgroundAgentUpdate(chatId, envelope, rosterSource);
-            } else {
-              clearBackgroundAgentFlushForChat(chatId);
-              flushPendingBackgroundAgentUpdatesForChat(chatId);
-              clearSubchatFlushForChat(chatId);
-              flushPendingSubchatUpdateForChat(chatId);
-              flushPendingStreamDeltaForChatRef.current?.(chatId);
-              if (envelope.type === "stream_finished") {
-                streamedBytesRef.current.delete(chatId);
-                pendingBytesRef.current.delete(chatId);
-              }
-              if (envelope.type === "process_completed") {
-                dispatch(processCompleted(envelope));
-              }
-              dispatch(applyChatEvent(envelope));
-            }
-          },
-          onConnected: () => {
-            if (!isCurrentAttempt()) return;
-            dispatch(setSseStatus({ chatId, status: "connected" }));
-          },
-          onAgentRosterDenied: (event) => {
-            if (!isCurrentAttempt()) return;
-            if (
-              event.type === "background_agent_updated" &&
-              BigInt(event.seq) === (seqMapRef.current.get(chatId) ?? 0n) + 1n
-            )
-              seqMapRef.current.set(chatId, BigInt(event.seq));
-            dispatch(
-              rejectAgentRosterStream(
-                rosterSource,
-                new Error("Invalid agent roster schema"),
-              ),
-            );
-          },
-          onError: (error) => {
-            if (!isCurrentAttempt()) return;
-            chatDenied = isChatAuthorizationDenial(error);
-            dispatch(rejectAgentRosterStream(rosterSource, error));
-            invalidateChatParamsSyncState(chatId, configRef.current);
-            clearStreamDeltaFlushForChatRef.current?.(chatId);
-            flushPendingStreamDeltaForChatRef.current?.(chatId);
-            clearSubchatFlushForChat(chatId);
-            flushPendingSubchatUpdateForChat(chatId);
-            clearBackgroundAgentFlushForChat(chatId);
-            flushPendingBackgroundAgentUpdatesForChat(chatId);
-            dispatch(markThreadSseError({ id: chatId, error: error.message }));
-            attemptsRef.current.delete(chatId);
-            subscriptionsRef.current.delete(chatId);
-            clearChatStreamState(chatId);
-            const count = (retryCountRef.current.get(chatId) ?? 0) + 1;
-            retryCountRef.current.set(chatId, count);
-            dispatch(
-              setSseStatus({
-                chatId,
-                status: "disconnected",
-                error: error.message,
-              }),
-            );
-            if (!chatDenied && !manualCloseRef.current.has(chatId)) {
-              scheduleResubscribe(chatId, true);
-            }
-          },
-          onDisconnected: () => {
-            if (!isCurrentAttempt()) return;
-            dispatch(
-              rejectAgentRosterStream(
-                rosterSource,
-                new Error("Agent stream disconnected"),
-              ),
-            );
-            invalidateChatParamsSyncState(chatId, configRef.current);
-            clearStreamDeltaFlushForChatRef.current?.(chatId);
-            flushPendingStreamDeltaForChatRef.current?.(chatId);
-            clearSubchatFlushForChat(chatId);
-            flushPendingSubchatUpdateForChat(chatId);
-            clearBackgroundAgentFlushForChat(chatId);
-            flushPendingBackgroundAgentUpdatesForChat(chatId);
-            attemptsRef.current.delete(chatId);
-            subscriptionsRef.current.delete(chatId);
-            clearChatStreamState(chatId);
-            const count = (retryCountRef.current.get(chatId) ?? 0) + 1;
-            retryCountRef.current.set(chatId, count);
-            dispatch(setSseStatus({ chatId, status: "disconnected" }));
-            if (!chatDenied && !manualCloseRef.current.has(chatId)) {
-              scheduleResubscribe(chatId, true);
-            }
-          },
-          onActivity: () => {
-            if (!isCurrentAttempt()) return;
-            const now = Date.now();
-            lastActivityAtRef.current.set(chatId, now);
-            const lastDispatch =
-              lastActivityDispatchRef.current.get(chatId) ?? 0;
-            if (now - lastDispatch >= ACTIVITY_THROTTLE_MS) {
-              lastActivityDispatchRef.current.set(chatId, now);
-              dispatch(sseEventReceived({ chatId }));
-            }
-          },
-        },
         connection.config.apiKey ?? undefined,
       );
+      const unsubscribe = multiplexerRef.current.subscribe(chatId, {
+        onEvent: (envelope) => {
+          if (!isCurrentAttempt()) return;
+          const seq = BigInt(envelope.seq);
+          const lastSeq = seqMapRef.current.get(chatId) ?? 0n;
+
+          if (envelope.type === "snapshot") {
+            flushPendingStreamDeltaForChatRef.current?.(chatId);
+            streamedBytesRef.current.delete(chatId);
+            pendingBytesRef.current.delete(chatId);
+            seqMapRef.current.set(chatId, seq);
+            retryCountRef.current.set(chatId, 0);
+            dispatch(setSseStatus({ chatId, status: "connected" }));
+          } else {
+            if (seq <= lastSeq) return;
+            if (seq > lastSeq + 1n) {
+              flushPendingStreamDeltaForChatRef.current?.(chatId);
+              clearSubchatFlushForChat(chatId);
+              flushPendingSubchatUpdateForChat(chatId);
+              clearBackgroundAgentFlushForChat(chatId);
+              flushPendingBackgroundAgentUpdatesForChat(chatId);
+              unsubscribeRef.current?.(chatId);
+              dispatch(setSseStatus({ chatId, status: "connecting" }));
+              scheduleResubscribe(chatId, false);
+              return;
+            }
+            seqMapRef.current.set(chatId, seq);
+          }
+          const rosterAllowed =
+            connection.rosterAllowed &&
+            dispatch(receiveAgentRosterEvent(rosterSource, envelope));
+          if (envelope.type === "background_agent_updated" && !rosterAllowed)
+            return;
+          if (envelope.type === "snapshot" && !rosterAllowed)
+            envelope = { ...envelope, background_agents: [] };
+          if (envelope.type === "stream_delta") {
+            enqueueStreamDeltaRef.current?.(chatId, envelope);
+          } else if (envelope.type === "subchat_update") {
+            flushPendingStreamDeltaForChatRef.current?.(chatId);
+            enqueueSubchatUpdate(chatId, envelope);
+          } else if (envelope.type === "background_agent_updated") {
+            flushPendingStreamDeltaForChatRef.current?.(chatId);
+            enqueueBackgroundAgentUpdate(chatId, envelope, rosterSource);
+          } else {
+            clearBackgroundAgentFlushForChat(chatId);
+            flushPendingBackgroundAgentUpdatesForChat(chatId);
+            clearSubchatFlushForChat(chatId);
+            flushPendingSubchatUpdateForChat(chatId);
+            flushPendingStreamDeltaForChatRef.current?.(chatId);
+            if (envelope.type === "stream_finished") {
+              streamedBytesRef.current.delete(chatId);
+              pendingBytesRef.current.delete(chatId);
+            }
+            if (envelope.type === "process_completed") {
+              dispatch(processCompleted(envelope));
+            }
+            dispatch(applyChatEvent(envelope));
+          }
+        },
+        onConnected: () => {
+          if (!isCurrentAttempt()) return;
+          dispatch(setSseStatus({ chatId, status: "connected" }));
+        },
+        onAgentRosterDenied: (event) => {
+          if (!isCurrentAttempt()) return;
+          if (
+            event.type === "background_agent_updated" &&
+            BigInt(event.seq) === (seqMapRef.current.get(chatId) ?? 0n) + 1n
+          )
+            seqMapRef.current.set(chatId, BigInt(event.seq));
+          dispatch(
+            rejectAgentRosterStream(
+              rosterSource,
+              new Error("Invalid agent roster schema"),
+            ),
+          );
+        },
+        onError: (error) => {
+          if (!isCurrentAttempt()) return;
+          chatDenied = isChatAuthorizationDenial(error);
+          dispatch(rejectAgentRosterStream(rosterSource, error));
+          invalidateChatParamsSyncState(chatId, configRef.current);
+          clearStreamDeltaFlushForChatRef.current?.(chatId);
+          flushPendingStreamDeltaForChatRef.current?.(chatId);
+          clearSubchatFlushForChat(chatId);
+          flushPendingSubchatUpdateForChat(chatId);
+          clearBackgroundAgentFlushForChat(chatId);
+          flushPendingBackgroundAgentUpdatesForChat(chatId);
+          dispatch(markThreadSseError({ id: chatId, error: error.message }));
+          attemptsRef.current.delete(chatId);
+          subscriptionsRef.current.delete(chatId);
+          clearChatStreamState(chatId);
+          const count = (retryCountRef.current.get(chatId) ?? 0) + 1;
+          retryCountRef.current.set(chatId, count);
+          dispatch(
+            setSseStatus({
+              chatId,
+              status: "disconnected",
+              error: error.message,
+            }),
+          );
+          if (!chatDenied && !manualCloseRef.current.has(chatId)) {
+            scheduleResubscribe(chatId, true);
+          }
+        },
+        onDisconnected: () => {
+          if (!isCurrentAttempt()) return;
+          dispatch(
+            rejectAgentRosterStream(
+              rosterSource,
+              new Error("Agent stream disconnected"),
+            ),
+          );
+          invalidateChatParamsSyncState(chatId, configRef.current);
+          clearStreamDeltaFlushForChatRef.current?.(chatId);
+          flushPendingStreamDeltaForChatRef.current?.(chatId);
+          clearSubchatFlushForChat(chatId);
+          flushPendingSubchatUpdateForChat(chatId);
+          clearBackgroundAgentFlushForChat(chatId);
+          flushPendingBackgroundAgentUpdatesForChat(chatId);
+          attemptsRef.current.delete(chatId);
+          subscriptionsRef.current.delete(chatId);
+          clearChatStreamState(chatId);
+          const count = (retryCountRef.current.get(chatId) ?? 0) + 1;
+          retryCountRef.current.set(chatId, count);
+          dispatch(setSseStatus({ chatId, status: "disconnected" }));
+          if (!chatDenied && !manualCloseRef.current.has(chatId)) {
+            scheduleResubscribe(chatId, true);
+          }
+        },
+        onActivity: () => {
+          if (!isCurrentAttempt()) return;
+          const now = Date.now();
+          lastActivityAtRef.current.set(chatId, now);
+          const lastDispatch = lastActivityDispatchRef.current.get(chatId) ?? 0;
+          if (now - lastDispatch >= ACTIVITY_THROTTLE_MS) {
+            lastActivityDispatchRef.current.set(chatId, now);
+            dispatch(sseEventReceived({ chatId }));
+          }
+        },
+      });
 
       subscriptionsRef.current.set(chatId, unsubscribe);
     },
@@ -738,6 +769,11 @@ export function useAllChatsSubscription() {
     for (const timeoutId of timeoutRef.current.values()) {
       clearTimeout(timeoutId);
     }
+    if (groupRetryTimeoutRef.current !== null) {
+      clearTimeout(groupRetryTimeoutRef.current);
+      groupRetryTimeoutRef.current = null;
+    }
+    groupRetryIdsRef.current.clear();
     for (const flushHandle of streamDeltaFlushRef.current.values()) {
       cancelScheduledFlush(flushHandle);
     }
@@ -748,6 +784,7 @@ export function useAllChatsSubscription() {
       cancelScheduledFlush(flushHandle);
     }
     subscriptionsRef.current.clear();
+    multiplexerRef.current = undefined;
     seqMapRef.current.clear();
     manualCloseRef.current.clear();
     desiredIdsRef.current.clear();

@@ -98,10 +98,10 @@ use crate::http::routers::v1::files::{
 use crate::http::routers::v1::code_edit::handle_v1_code_edit;
 use crate::http::routers::v1::workspace::handle_v1_get_app_searchable_id;
 use crate::chat::{
-    handle_v1_chat_subscribe, handle_v1_chat_command, handle_v1_chat_cancel_queued,
-    handle_v1_chat_reprioritize_queued, handle_v1_trajectories_list, handle_v1_trajectories_all,
-    handle_v1_trajectories_get, handle_v1_trajectory_path, handle_v1_trajectories_save,
-    handle_v1_trajectories_delete, handle_v1_trajectories_subscribe,
+    handle_v1_chats_subscribe_many, handle_v1_chat_subscribe, handle_v1_chat_command,
+    handle_v1_chat_cancel_queued, handle_v1_chat_reprioritize_queued, handle_v1_trajectories_list,
+    handle_v1_trajectories_all, handle_v1_trajectories_get, handle_v1_trajectory_path,
+    handle_v1_trajectories_save, handle_v1_trajectories_delete, handle_v1_trajectories_subscribe,
 };
 use crate::http::routers::v1::voice::{
     handle_v1_voice_transcribe, handle_v1_voice_download, handle_v1_voice_status,
@@ -166,8 +166,8 @@ pub mod buddy_supervision;
 pub mod bug_report;
 pub mod caps;
 mod causal;
-pub mod chat_based_handlers;
 mod chat_activity;
+pub mod chat_based_handlers;
 mod chat_modes;
 pub mod code_completion;
 mod code_edit;
@@ -812,8 +812,12 @@ fn trajectories_routes() -> Router<AppState> {
 
 fn chats_routes() -> Router<AppState> {
     Router::new()
-        .route("/chats/activity", get(chat_activity::handle_v1_chats_activity))
+        .route(
+            "/chats/activity",
+            get(chat_activity::handle_v1_chats_activity),
+        )
         .route("/chats/subscribe", get(handle_v1_chat_subscribe))
+        .route("/chats/subscribe-many", get(handle_v1_chats_subscribe_many))
         .route("/chats/:chat_id/commands", post(handle_v1_chat_command))
         .route(
             "/chats/:chat_id/skills-status",
