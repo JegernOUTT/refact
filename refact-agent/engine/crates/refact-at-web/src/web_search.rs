@@ -248,7 +248,10 @@ where
         BackendAttemptLease::Run(attempt) => attempt,
         BackendAttemptLease::Skip(detail) => return Err(SearchBackendError::new(backend, detail)),
     };
-    let _attempt_guard = BackendAttemptGuard { backend, attempt };
+    let _attempt_guard = BackendAttemptGuard {
+        backend,
+        attempt,
+    };
     let result = search.await;
     record_backend_result(backend, attempt, &result);
     result
@@ -694,7 +697,9 @@ fn node_text(node: &Handle) -> String {
     let mut pending = vec![node.clone()];
     while let Some(node) = pending.pop() {
         match &node.data {
-            NodeData::Text { contents } => text.push_str(contents.borrow().as_ref()),
+            NodeData::Text {
+                contents,
+            } => text.push_str(contents.borrow().as_ref()),
             _ => pending.extend(node.children.borrow().iter().rev().cloned()),
         }
     }

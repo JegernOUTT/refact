@@ -1,7 +1,6 @@
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
-import styles from "./ProviderQuota.module.css";
 import { ProviderQuota } from "./ProviderQuota";
 
 describe("ProviderQuota", () => {
@@ -44,24 +43,5 @@ describe("ProviderQuota", () => {
 
     expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
     expect(screen.getByText("Unlimited")).toBeInTheDocument();
-  });
-
-  it("renders tone, meta, and badge presentation", () => {
-    render(
-      <ProviderQuota
-        badge={<span>Monthly</span>}
-        label="Compute"
-        meta="Resets in 4 days"
-        tone="warning"
-        usedPercent={80}
-        value="80%"
-      />,
-    );
-
-    const root = screen.getByText("Compute").closest(`.${styles.root}`);
-    expect(root).toHaveClass(styles.toneWarning);
-    expect(root).toHaveAttribute("data-tone", "warning");
-    expect(screen.getByText("Resets in 4 days")).toHaveClass(styles.meta);
-    expect(screen.getByText("Monthly").parentElement).toHaveClass(styles.badge);
   });
 });

@@ -45,20 +45,22 @@ test("rebuilt disclosures, archive, legacy gate, cap reset and navigation", asyn
     contentType: "text/plain",
   });
   await page.getByRole("tab", { name: "Idle Legacy archive fixture" }).click();
-  await expect(page.getByRole("alert")).toContainText(
-    "compressed with an older format",
-  );
+  const legacyGate = page.getByRole("status").filter({
+    hasText: "compressed with an older format",
+  });
+  await expect(legacyGate).toBeVisible();
   await expect(
     page.getByText("Legacy original sentinel", { exact: true }),
   ).toBeVisible();
-  await page
+  await legacyGate
     .getByRole("button", { name: "Rebuild context", exact: true })
     .click();
-  await expect(
-    page.getByRole("tab", { name: "LLM compression" }),
-  ).toHaveAttribute("aria-selected", "true");
+  await expect(page.getByRole("tab", { name: "LLM summary" })).toHaveAttribute(
+    "aria-selected",
+    "true",
+  );
   await expect(page.getByRole("tab", { name: "Handoff" })).toHaveCount(0);
-  await page.getByRole("tab", { name: "Compress in-place" }).click();
+  await page.getByRole("tab", { name: "In place" }).click();
   await expect(
     page.getByText("Drop all context files", { exact: true }),
   ).toBeVisible();
@@ -86,11 +88,11 @@ test("rebuilt disclosures, archive, legacy gate, cap reset and navigation", asyn
   await page.keyboard.press("Escape");
   await page.getByRole("tab", { name: "Idle Legacy archive fixture" }).click();
   await expect(
-    page.getByRole("button", { name: "New chat", exact: true }),
+    page.getByRole("button", { name: "New Chat", exact: true }),
   ).toBeEnabled();
   await page.reload();
   await expect(reports).toHaveCount(2);
-  await page.getByRole("button", { name: "New chat", exact: true }).click();
+  await page.getByRole("button", { name: "New Chat", exact: true }).click();
   await expect(
     page.getByRole("tab", { name: "Idle Rebuilt archive fixture" }),
   ).toBeVisible();
@@ -98,7 +100,7 @@ test("rebuilt disclosures, archive, legacy gate, cap reset and navigation", asyn
     page.getByRole("tab", { name: "Idle Legacy archive fixture" }),
   ).toBeVisible();
   const chatTabs = page
-    .getByRole("tablist", { name: "Open workspace tabs" })
+    .getByRole("tablist", { name: "Workspace tabs", exact: true })
     .getByRole("tab");
   await expect(chatTabs).toHaveCount(3);
   await expect(chatTabs.last()).toHaveAttribute("aria-selected", "true");

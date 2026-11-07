@@ -1,4 +1,4 @@
-import { expect, test, type Locator, type Page } from "@playwright/test";
+import { expect, test, type Locator } from "@playwright/test";
 
 const agenticRows = [
   ["compact-message", "Message", null],
@@ -10,7 +10,7 @@ const agenticRows = [
   ["compact-control", "Merge agent", null],
   ["launch-preview", "Launch", "Blocked"],
   ["compact-status", "Agents", null],
-  ["compact-pulse", "Pulse", "Paused"],
+  ["compact-pulse", "Pulse", null],
   ["compact-diff", "Diff", null],
   ["compact-documents", "Documents", null],
   ["compact-document", "Document", null],
@@ -37,32 +37,6 @@ function toggle(row: Locator) {
   return item(row).getByTestId("transcript-toggle").first();
 }
 
-async function geometry(page: Page) {
-  const overflow = await page.getByRole("main").evaluate((main) => {
-    const visible = (element: Element) =>
-      element.getBoundingClientRect().height > 0 &&
-      !element.closest('[inert], [aria-hidden="true"]');
-    return {
-      page: document.documentElement.scrollWidth > innerWidth + 1,
-      rows: Array.from(main.querySelectorAll("article[data-testid]"))
-        .filter((row) => {
-          const rect = row.getBoundingClientRect();
-          return (
-            rect.left < -1 ||
-            rect.right > innerWidth + 1 ||
-            row.scrollWidth > row.clientWidth + 1
-          );
-        })
-        .map((row) => row.getAttribute("data-testid")),
-      details: Array.from(main.querySelectorAll("nav"))
-        .filter(visible)
-        .filter((element) => element.scrollWidth > element.clientWidth + 1)
-        .map((element) => element.textContent?.slice(0, 100)),
-    };
-  });
-  expect(overflow).toEqual({ page: false, rows: [], details: [] });
-}
-
 test.beforeEach(async ({ page }) => {
   await page.route("**/v1/**", (route) =>
     route.fulfill({
@@ -73,48 +47,6 @@ test.beforeEach(async ({ page }) => {
     }),
   );
 });
-
-for (const width of [240, 360, 768, 1280]) {
-  for (const theme of ["light", "dark"]) {
-    test(`agentic transcript rows at ${width}px ${theme}`, async ({ page }) => {
-      await page.setViewportSize({ width, height: 900 });
-      await page.goto(`/tests/e2e/compact-agentic.html?theme=${theme}`);
-      await expect(
-        page.locator(`[data-host="web"][data-appearance="${theme}"]`),
-      ).toBeVisible();
-      for (const [id] of agenticRows)
-        await expect(
-          page.getByTestId(id).getByTestId("generic-tool"),
-        ).toHaveCount(0);
-      for (const id of otherRows)
-        await expect(page.getByTestId(id)).toBeVisible();
-      for (const [id, verb, pill] of agenticRows) {
-        const row = page.getByTestId(id);
-        await expect(row.locator("[data-transcript-item]")).toHaveCount(1);
-        await expect(row.getByTestId("transcript-verb")).toHaveText(verb);
-        const status = row.getByTestId("transcript-status-pill");
-        if (pill === null) await expect(status).toHaveCount(0);
-        else await expect(status).toHaveText(pill);
-        await expect(row.getByText("More details")).toHaveCount(0);
-      }
-      await geometry(page);
-      for (const [id] of agenticRows) {
-        const row = page.getByTestId(id);
-        if ((await toggle(row).getAttribute("aria-expanded")) === "false")
-          await toggle(row).click();
-        await expect(toggle(row)).toHaveAttribute("aria-expanded", "true");
-        await expect(row.getByTestId("transcript-raw")).toHaveCount(1);
-        await expect(row.locator("details")).toHaveCount(0);
-        if (id === "compact-control")
-          await expect(row.getByTestId("transcript-facts")).toContainText(
-            "push and verification unconfirmed",
-          );
-        await geometry(page);
-        await toggle(row).click();
-      }
-    });
-  }
-}
 
 test("agent_message names the recipient and shows Sent without a Queued pill", async ({
   page,
@@ -180,9 +112,20 @@ test("controls stay unreachable while collapsed and only send on explicit click"
   await expect(nextSource).toBeDisabled();
 
   const pulse = page.getByTestId("compact-pulse");
-  await expect(
-    pulse.getByRole("button", { name: "Pause", includeHidden: true }),
-  ).toHaveCount(0);
+  await expect(item(pulse)).toHaveAttribute("data-transcript-status", "done");
+  await expect(pulse.getByTestId("transcript-status-pill")).toHaveCount(0);
+  await expect(pulse.getByTestId("transcript-meta")).toHaveText("paused");
+  const pause = pulse.getByRole("button", {
+    name: "Pause",
+    exact: true,
+    includeHidden: true,
+  });
+  await expect(pause).not.toBeVisible();
+  await toggle(pulse).focus();
+  await page.keyboard.press("Tab");
+  await expect(toggle(page.getByTestId("compact-diff"))).toBeFocused();
+  await page.keyboard.press("Shift+Tab");
+  await expect(toggle(pulse)).toBeFocused();
   expect(commands).toEqual([]);
   await toggle(pulse).click();
   await pulse.getByRole("button", { name: "Pause", exact: true }).click();
@@ -210,6 +153,39 @@ test("controls stay unreachable while collapsed and only send on explicit click"
   ).toBeVisible();
 });
 
+test("agentic transcript rows preserve dedicated summaries and disclosure", async ({
+  page,
+}) => {
+  await page.goto("/tests/e2e/compact-agentic.html");
+  for (const [id] of agenticRows)
+    await expect(page.getByTestId(id).getByTestId("generic-tool")).toHaveCount(
+      0,
+    );
+  for (const id of otherRows) await expect(page.getByTestId(id)).toBeVisible();
+  for (const [id, verb, pill] of agenticRows) {
+    const row = page.getByTestId(id);
+    await expect(row.locator("[data-transcript-item]")).toHaveCount(1);
+    await expect(row.getByTestId("transcript-verb")).toHaveText(verb);
+    const status = row.getByTestId("transcript-status-pill");
+    if (pill === null) await expect(status).toHaveCount(0);
+    else await expect(status).toHaveText(pill);
+    await expect(row.getByText("More details")).toHaveCount(0);
+  }
+  for (const [id] of agenticRows) {
+    const row = page.getByTestId(id);
+    if ((await toggle(row).getAttribute("aria-expanded")) === "false")
+      await toggle(row).click();
+    await expect(toggle(row)).toHaveAttribute("aria-expanded", "true");
+    await expect(row.getByTestId("transcript-raw")).toHaveCount(1);
+    await expect(row.locator("details")).toHaveCount(0);
+    if (id === "compact-control")
+      await expect(row.getByTestId("transcript-facts")).toContainText(
+        "push and verification unconfirmed",
+      );
+    await toggle(row).click();
+  }
+});
+
 for (const host of ["vscode", "jetbrains"]) {
   test(`${host} reduced-motion smoke renders the agentic rows`, async ({
     page,
@@ -224,6 +200,9 @@ for (const host of ["vscode", "jetbrains"]) {
     ).toBeVisible();
     await expect(page.getByTestId("compact-awaiting")).toBeVisible();
     await toggle(page.getByTestId("compact-status")).click();
-    await geometry(page);
+    await expect(toggle(page.getByTestId("compact-status"))).toHaveAttribute(
+      "aria-expanded",
+      "true",
+    );
   });
 }

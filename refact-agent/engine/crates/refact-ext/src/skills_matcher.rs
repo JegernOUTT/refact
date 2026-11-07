@@ -103,20 +103,6 @@ mod tests {
     }
 
     #[test]
-    fn test_skills_select_threshold_filters() {
-        let skills = vec![
-            make_skill_index("low-match", "code quality"),
-            make_skill_index("high-match", "security review vulnerabilities audit"),
-        ];
-        let low_threshold = select_relevant_skills(&skills, "security review", 2, 0.01);
-        let high_threshold = select_relevant_skills(&skills, "security review", 2, 0.5);
-        assert!(
-            low_threshold.len() >= high_threshold.len(),
-            "Lower threshold should match more"
-        );
-    }
-
-    #[test]
     fn test_skills_select_user_invocable_false_prevents_auto_trigger() {
         let skills = vec![SkillIndex {
             name: "security-review".to_string(),

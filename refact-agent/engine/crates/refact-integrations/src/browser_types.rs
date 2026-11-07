@@ -68,14 +68,30 @@ pub enum RecorderEvent {
 impl RecorderEvent {
     pub fn timestamp(&self) -> f64 {
         match self {
-            RecorderEvent::Navigation { timestamp, .. } => *timestamp,
-            RecorderEvent::Click { timestamp, .. } => *timestamp,
-            RecorderEvent::Input { timestamp, .. } => *timestamp,
-            RecorderEvent::Keypress { timestamp, .. } => *timestamp,
-            RecorderEvent::Submit { timestamp, .. } => *timestamp,
-            RecorderEvent::Scroll { timestamp, .. } => *timestamp,
-            RecorderEvent::MutationSummary { timestamp, .. } => *timestamp,
-            RecorderEvent::ToolbarAction { timestamp, .. } => *timestamp,
+            RecorderEvent::Navigation {
+                timestamp, ..
+            } => *timestamp,
+            RecorderEvent::Click {
+                timestamp, ..
+            } => *timestamp,
+            RecorderEvent::Input {
+                timestamp, ..
+            } => *timestamp,
+            RecorderEvent::Keypress {
+                timestamp, ..
+            } => *timestamp,
+            RecorderEvent::Submit {
+                timestamp, ..
+            } => *timestamp,
+            RecorderEvent::Scroll {
+                timestamp, ..
+            } => *timestamp,
+            RecorderEvent::MutationSummary {
+                timestamp, ..
+            } => *timestamp,
+            RecorderEvent::ToolbarAction {
+                timestamp, ..
+            } => *timestamp,
         }
     }
 
@@ -225,7 +241,11 @@ mod tests {
         };
         let masked = apply_password_masking(&event);
         match masked {
-            RecorderEvent::Input { value, masked, .. } => {
+            RecorderEvent::Input {
+                value,
+                masked,
+                ..
+            } => {
                 assert_eq!(value, "********");
                 assert!(masked);
             }
@@ -249,7 +269,11 @@ mod tests {
         };
         let result = apply_password_masking(&event);
         match result {
-            RecorderEvent::Input { value, masked, .. } => {
+            RecorderEvent::Input {
+                value,
+                masked,
+                ..
+            } => {
                 assert_eq!(value, "user@test.com");
                 assert!(!masked);
             }

@@ -13,14 +13,18 @@ pub(super) enum ImportTriage {
 
 pub(super) fn severity_for_import(triage: ImportTriage) -> Option<WorkItemSeverity> {
     match triage {
-        ImportTriage::Opportunity { priority, .. } => Some(severity_for_priority(priority)),
+        ImportTriage::Opportunity {
+            priority, ..
+        } => Some(severity_for_priority(priority)),
         ImportTriage::Draft(_) => Some(WorkItemSeverity::Unknown),
     }
 }
 
 pub(super) fn scope_for_import(triage: ImportTriage) -> Option<&'static str> {
     match triage {
-        ImportTriage::Opportunity { kind, .. } => Some(scope_for_kind(kind)),
+        ImportTriage::Opportunity {
+            kind, ..
+        } => Some(scope_for_kind(kind)),
         ImportTriage::Draft(kind) => scope_for_draft(kind),
     }
 }

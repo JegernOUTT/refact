@@ -44,13 +44,19 @@ pub fn extract_midpoint(remote_obj: RemoteObject) -> Result<Point> {
 
     match points {
         Some(v) => Ok(v),
-        None => Ok(Point { x: 0.0, y: 0.0 }),
+        None => Ok(Point {
+            x: 0.0,
+            y: 0.0,
+        }),
     }
 }
 
 impl Wait {
     pub fn new(timeout: Duration, sleep: Duration) -> Self {
-        Self { timeout, sleep }
+        Self {
+            timeout,
+            sleep,
+        }
     }
 
     pub fn with_timeout(timeout: Duration) -> Self {

@@ -31,6 +31,8 @@ import {
   filesApi,
   useGetFilesTreeQuery,
   type FilesTreeEntry,
+  type FilesSort,
+  type FilesDirection,
 } from "../../../services/refact/files";
 import {
   type PrivacyDestination,
@@ -241,7 +243,17 @@ const TreeRow = ({
   );
 };
 
-export function FileTree({ browsePath }: { browsePath?: string } = {}) {
+export function FileTree({
+  browsePath,
+  sort = "name",
+  direction = "asc",
+  projectBrowse = false,
+}: {
+  browsePath?: string;
+  sort?: FilesSort;
+  direction?: FilesDirection;
+  projectBrowse?: boolean;
+} = {}) {
   const dispatch = useAppDispatch();
   const treeId = useId();
   const treeRef = useRef<HTMLDivElement>(null);
@@ -256,12 +268,14 @@ export function FileTree({ browsePath }: { browsePath?: string } = {}) {
   const [loadedContextRoot, setLoadedContextRoot] = useState(contextRoot);
   const [childrenByPath, setChildrenByPath] = useState<TreeChildrenByPath>({});
   const {
-    data: root,
+    currentData: root,
     error,
     isFetching,
     refetch,
   } = useGetFilesTreeQuery(
-    browsePath ? { path: browsePath, manual: true } : contextRoot,
+    browsePath && !projectBrowse
+      ? { path: browsePath, manual: true }
+      : contextRoot,
   );
   const contextExpandedDirectories = useMemo(
     () =>
@@ -284,6 +298,8 @@ export function FileTree({ browsePath }: { browsePath?: string } = {}) {
             expandedSet,
             childrenByPath,
             showIgnored,
+            sort,
+            direction,
           )
         : [],
     [
@@ -293,6 +309,8 @@ export function FileTree({ browsePath }: { browsePath?: string } = {}) {
       loadedContextRoot,
       root?.entries,
       showIgnored,
+      sort,
+      direction,
     ],
   );
 
@@ -318,12 +336,12 @@ export function FileTree({ browsePath }: { browsePath?: string } = {}) {
         dispatch(
           openFileInFilesPanel({
             path: entry.path,
-            manual: browsePath ? true : undefined,
+            manual: browsePath && !projectBrowse ? true : undefined,
           }),
         );
       treeRef.current?.focus();
     },
-    [browsePath, dispatch],
+    [browsePath, projectBrowse, dispatch],
   );
 
   const moveEntryToZone = useCallback(
@@ -453,7 +471,7 @@ export function FileTree({ browsePath }: { browsePath?: string } = {}) {
         <DirectoryLoader
           key={path}
           path={path}
-          manual={Boolean(browsePath)}
+          manual={Boolean(browsePath) && !projectBrowse}
           onLoaded={handleDirectoryLoaded}
         />
       ))}

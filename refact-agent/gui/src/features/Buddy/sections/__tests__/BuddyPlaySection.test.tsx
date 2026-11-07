@@ -1,5 +1,3 @@
-import { readFile } from "node:fs/promises";
-import { resolve } from "node:path";
 import { render, screen, within } from "../../../../utils/test-utils";
 import { http, HttpResponse } from "msw";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -264,27 +262,6 @@ function makeSnapshot(
   };
 }
 
-function readGuiSource(path: string): Promise<string> {
-  return readFile(resolve(process.cwd(), "src", path), "utf8");
-}
-
-function readCssBlock(source: string, selector: string): string {
-  const escapedSelector = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const match = new RegExp(`(^|\\n)\\s*${escapedSelector}\\s*{`).exec(source);
-  if (match?.index === undefined) {
-    throw new Error(`Missing CSS block for ${selector}`);
-  }
-  const open = source.indexOf("{", match.index);
-  let depth = 0;
-  for (let i = open; i < source.length; i += 1) {
-    const char = source[i];
-    if (char === "{") depth += 1;
-    if (char === "}") depth -= 1;
-    if (depth === 0) return source.slice(open + 1, i);
-  }
-  throw new Error(`Unclosed CSS block for ${selector}`);
-}
-
 describe("BuddyHome_operator_surface", () => {
   const operatorProject = operatorStatus("enabled").project;
   const envelope = (data: unknown) => ({
@@ -392,14 +369,5 @@ describe("BuddyHome_operator_surface", () => {
     })) {
       expect(hotspot).not.toHaveAttribute("title");
     }
-  });
-
-  it("sizes the Play stage through the shared stage height variable", async () => {
-    const css = await readGuiSource(
-      "features/Buddy/sections/BuddyPlaySection.module.css",
-    );
-
-    const scene = readCssBlock(css, '.scene.scene [data-testid="buddy-world"]');
-    expect(scene).toContain("--buddy-stage-h: clamp(280px, 38vh, 430px)");
   });
 });

@@ -80,7 +80,9 @@ impl EnvGuard {
         std::env::remove_var("FAKE_WORKER_SKIP_LSP");
         std::env::remove_var("FAKE_WORKER_DELAY_READY");
         std::env::remove_var("FAKE_WORKER_GRACEFUL_DELAY");
-        Some(Self { keys: previous })
+        Some(Self {
+            keys: previous,
+        })
     }
 }
 
@@ -802,7 +804,10 @@ async fn spawn_worker_skips_busy_workspace_without_restarting() {
     let entry = project_entry(root.clone(), "busy-project");
     let supervisor = supervisor(&dir);
     let info = supervisor.ensure_worker(&entry).await.unwrap();
-    let WorkerState::Failed { ref reason } = info.state else {
+    let WorkerState::Failed {
+        ref reason,
+    } = info.state
+    else {
         panic!("expected a failed worker, got {:?}", info.state);
     };
     assert!(reason.contains("workspace busy"), "reason was {reason}");

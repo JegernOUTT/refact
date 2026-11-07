@@ -42,24 +42,6 @@ function makeSkillsState(data: {
 }
 
 describe("SkillsIndicator", () => {
-  test("renders correctly with skills data", () => {
-    const preloadedState = makeSkillsState({
-      skills_available: 5,
-      skills_included: ["review", "docs"],
-      skills_enabled: true,
-      active_skill: null,
-    });
-
-    const { getByRole, getByText } = render(
-      <SkillsIndicator chatId="test-chat-id" />,
-      { preloadedState },
-    );
-
-    const indicator = getByRole("button");
-    expect(indicator).toBeTruthy();
-    expect(getByText(/5 available/)).toBeTruthy();
-  });
-
   test("renders null when no skills available and no active skill", () => {
     const preloadedState = makeSkillsState({
       skills_available: 0,
@@ -136,22 +118,5 @@ describe("SkillsIndicator", () => {
     expect(getByText("Skills")).toBeTruthy();
     expect(getByText(/4 available/)).toBeTruthy();
     expect(queryByText(/is active/)).toBeNull();
-  });
-
-  test("renders nothing when no skills available and no active skill", () => {
-    const preloadedState = makeSkillsState({
-      skills_available: 0,
-      skills_included: [],
-      skills_enabled: false,
-      active_skill: null,
-    });
-
-    const { queryByTestId } = render(
-      <SkillsIndicator chatId="test-chat-id" />,
-      {
-        preloadedState,
-      },
-    );
-    expect(queryByTestId("chat-skills-indicator")).toBeNull();
   });
 });

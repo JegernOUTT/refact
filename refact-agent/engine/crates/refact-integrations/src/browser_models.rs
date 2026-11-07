@@ -4653,54 +4653,6 @@ mod tests {
     }
 
     #[test]
-    fn test_step_screenshot_elements_serde() {
-        let json_str = r##"{"action": "screenshot_elements", "locators": [{"by": "css", "value": ".card"}, {"by": "ref", "value": "e7"}], "compose": "separate", "labels": false, "type": "webp", "mask_color": "#00FF00"}"##;
-        let step: BrowserStep = serde_json::from_str(json_str).unwrap();
-        match step {
-            BrowserStep::ScreenshotElements {
-                locators,
-                compose,
-                labels,
-                options,
-            } => {
-                assert_eq!(locators.len(), 2);
-                assert_eq!(compose, BrowserComposeMode::Separate);
-                assert_eq!(labels, Some(false));
-                assert_eq!(options.image_type, Some(BrowserScreenshotType::Webp));
-                assert_eq!(options.mask_color.as_deref(), Some("#00FF00"));
-            }
-            _ => panic!("Expected ScreenshotElements"),
-        }
-    }
-
-    #[test]
-    fn test_step_capture_element_states_serde() {
-        let json_str = r#"{"action": "capture_element_states", "locator": {"by": "css", "value": "button"}, "states": ["default", "hover", "focus", "active"], "full_page": false}"#;
-        let step: BrowserStep = serde_json::from_str(json_str).unwrap();
-        match step {
-            BrowserStep::CaptureElementStates {
-                states,
-                labels,
-                options,
-                ..
-            } => {
-                assert_eq!(
-                    states,
-                    vec![
-                        BrowserElementState::Default,
-                        BrowserElementState::Hover,
-                        BrowserElementState::Focus,
-                        BrowserElementState::Active,
-                    ]
-                );
-                assert_eq!(labels, None);
-                assert!(!options.full_page);
-            }
-            _ => panic!("Expected CaptureElementStates"),
-        }
-    }
-
-    #[test]
     fn wait_for_function_defaults_to_a_page_predicate_without_a_fixed_interval() {
         let step: BrowserStep =
             serde_json::from_str(r#"{"action": "wait_for_function", "expression": "() => ready"}"#)

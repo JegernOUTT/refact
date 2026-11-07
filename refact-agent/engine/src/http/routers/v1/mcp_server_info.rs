@@ -292,7 +292,9 @@ pub async fn handle_v1_mcp_server_reconnect(
             ))?;
 
         let busy = match &mcp_session.connection_status {
-            MCPConnectionStatus::Reconnecting { .. } => true,
+            MCPConnectionStatus::Reconnecting {
+                ..
+            } => true,
             MCPConnectionStatus::Connecting => {
                 crate::integrations::mcp::integr_mcp_common::startup_task_in_flight(mcp_session)
             }

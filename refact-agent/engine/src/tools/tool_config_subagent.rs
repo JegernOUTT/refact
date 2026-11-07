@@ -21,7 +21,9 @@ pub struct ToolConfigSubagent {
 
 impl ToolConfigSubagent {
     pub fn new(config: SubagentConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+        }
     }
 
     fn build_input_schema(&self) -> serde_json::Value {

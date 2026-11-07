@@ -799,7 +799,9 @@ mod tests {
             .unwrap()
             .into_iter()
             .find_map(|delta| match delta {
-                LlmStreamDelta::FinalizeToolCalls { tool_calls } => Some(
+                LlmStreamDelta::FinalizeToolCalls {
+                    tool_calls,
+                } => Some(
                     tool_calls
                         .into_iter()
                         .map(|tool_call| tool_call["id"].as_str().unwrap().to_string())
@@ -881,7 +883,9 @@ mod tests {
             matches!(&deltas[1], LlmStreamDelta::AppendReasoning { text, .. } if text == "Reasoning")
         );
         match &deltas[2] {
-            LlmStreamDelta::FinalizeToolCalls { tool_calls } => {
+            LlmStreamDelta::FinalizeToolCalls {
+                tool_calls,
+            } => {
                 let id = tool_calls[0]["id"].as_str().unwrap();
                 assert!(id.starts_with("ollama-tool-0-"));
                 assert_ne!(id, "ollama-tool-0");
@@ -891,7 +895,9 @@ mod tests {
             _ => panic!("expected tool calls"),
         }
         match &deltas[3] {
-            LlmStreamDelta::SetUsage { usage } => {
+            LlmStreamDelta::SetUsage {
+                usage,
+            } => {
                 assert_eq!(usage.prompt_tokens, 12);
                 assert_eq!(usage.completion_tokens, 5);
                 assert_eq!(usage.total_tokens, 17);

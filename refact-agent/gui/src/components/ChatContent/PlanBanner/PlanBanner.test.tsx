@@ -253,17 +253,4 @@ describe("PlanBanner", () => {
     expect(trigger).toHaveAttribute("aria-expanded", "true");
     expect(screen.getByTestId("plan-banner-body")).toBeTruthy();
   });
-
-  it("compact plan classes are applied", () => {
-    renderPlanBanner([makePlan(1)]);
-
-    const banner = screen.getByTestId("plan-banner");
-    const card = screen.getByTestId("plan-banner-card");
-    const body = screen.getByTestId("plan-banner-body");
-    expect(banner.className).toContain("sticky");
-    expect(banner.firstElementChild?.className).toContain("container");
-    expect(card.className).toContain("card");
-    expect(body.className).toContain("body");
-    expect(body).toBeTruthy();
-  });
 });

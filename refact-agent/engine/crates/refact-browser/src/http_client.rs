@@ -566,14 +566,12 @@ mod tests {
             save_response_body(b"next", &store, "text/plain").unwrap();
         }
         assert!(!first.exists(), "consumer bypassed the shared file quota");
-        assert!(
-            save_response_body(
-                &vec![0; 8 * 1024 * 1024 + 1],
-                &store,
-                "application/octet-stream"
-            )
-            .is_err()
-        );
+        assert!(save_response_body(
+            &vec![0; 8 * 1024 * 1024 + 1],
+            &store,
+            "application/octet-stream"
+        )
+        .is_err());
     }
 
     #[test]
@@ -787,14 +785,12 @@ mod tests {
         ]);
         let origin = Url::parse("https://api.example.test/v1").unwrap();
 
-        assert!(
-            headers_for_hop(
-                &headers,
-                &origin,
-                &Url::parse("https://evil.test/").unwrap()
-            )
-            .is_empty()
-        );
+        assert!(headers_for_hop(
+            &headers,
+            &origin,
+            &Url::parse("https://evil.test/").unwrap()
+        )
+        .is_empty());
         assert_eq!(
             headers_for_hop(
                 &headers,

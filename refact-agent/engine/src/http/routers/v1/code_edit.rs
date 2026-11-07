@@ -45,7 +45,10 @@ pub async fn handle_v1_code_edit(
         .status(StatusCode::OK)
         .header("Content-Type", "application/json")
         .body(Body::from(
-            serde_json::to_string(&CodeEditResponse { edited_code }).unwrap(),
+            serde_json::to_string(&CodeEditResponse {
+                edited_code,
+            })
+            .unwrap(),
         ))
         .unwrap())
 }

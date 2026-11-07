@@ -148,7 +148,10 @@ impl TestProcessRuntime {
     }
 
     pub async fn acknowledge_kill(&mut self) {
-        let Some(ExecProcessCommand::Kill { response }) = self.control_rx.recv().await else {
+        let Some(ExecProcessCommand::Kill {
+            response,
+        }) = self.control_rx.recv().await
+        else {
             panic!("expected process kill command");
         };
         let result = self.publish_terminal().await;
@@ -156,7 +159,10 @@ impl TestProcessRuntime {
     }
 
     pub async fn lose_kill_acknowledgement(&mut self) {
-        let Some(ExecProcessCommand::Kill { response }) = self.control_rx.recv().await else {
+        let Some(ExecProcessCommand::Kill {
+            response,
+        }) = self.control_rx.recv().await
+        else {
             panic!("expected process kill command");
         };
         drop(response);
@@ -344,11 +350,17 @@ fn process_spawn_event(snapshot: &ExecProcessSnapshot) -> Option<ProcessSpawnEve
 
 fn status_exit_code(status: &ExecStatus) -> Option<i32> {
     match status {
-        ExecStatus::Exited { exit_code } => *exit_code,
-        ExecStatus::SandboxLauncherFailed { exit_code } => Some(*exit_code),
+        ExecStatus::Exited {
+            exit_code,
+        } => *exit_code,
+        ExecStatus::SandboxLauncherFailed {
+            exit_code,
+        } => Some(*exit_code),
         ExecStatus::Starting
         | ExecStatus::Running
-        | ExecStatus::Failed { .. }
+        | ExecStatus::Failed {
+            ..
+        }
         | ExecStatus::Killed
         | ExecStatus::TimedOut => None,
     }
@@ -1248,8 +1260,13 @@ impl ExecRegistry {
         process_id: &ExecProcessId,
         exit_code: Option<i32>,
     ) -> Result<ExecProcessSnapshot, String> {
-        self.set_status(process_id, ExecStatus::Exited { exit_code })
-            .await
+        self.set_status(
+            process_id,
+            ExecStatus::Exited {
+                exit_code,
+            },
+        )
+        .await
     }
 
     pub async fn mark_failed(
@@ -1257,8 +1274,13 @@ impl ExecRegistry {
         process_id: &ExecProcessId,
         message: String,
     ) -> Result<ExecProcessSnapshot, String> {
-        self.set_status(process_id, ExecStatus::Failed { message })
-            .await
+        self.set_status(
+            process_id,
+            ExecStatus::Failed {
+                message,
+            },
+        )
+        .await
     }
 
     pub async fn mark_killed(
@@ -1350,7 +1372,9 @@ impl ExecRegistry {
                 ));
             }
             record.cleanup_requested = true;
-            permit.send(ExecProcessCommand::Kill { response });
+            permit.send(ExecProcessCommand::Kill {
+                response,
+            });
         }
         rx.await
             .map_err(|_| format!("cleanup acknowledgement lost; outcome unknown: {process_id}"))?
@@ -1392,8 +1416,13 @@ impl ExecRegistry {
         let (response, rx) = oneshot::channel();
         let terminal_status = status.clone().unwrap_or(ExecStatus::Killed);
         let command = match status {
-            Some(status) => ExecProcessCommand::Finish { status, response },
-            None => ExecProcessCommand::Kill { response },
+            Some(status) => ExecProcessCommand::Finish {
+                status,
+                response,
+            },
+            None => ExecProcessCommand::Kill {
+                response,
+            },
         };
         if control_tx.send(command).await.is_err() {
             return self.set_status(process_id, terminal_status).await;
@@ -1740,7 +1769,10 @@ impl ExecRegistry {
                         summary.removed_count += 1;
                     }
                 }
-                ExecCleanupOutcome::Failed { message, child } => {
+                ExecCleanupOutcome::Failed {
+                    message,
+                    child,
+                } => {
                     match kind {
                         ExecCleanupTargetKind::Runtime => {
                             summary.runtime_stop_attempts += 1;
@@ -1761,7 +1793,10 @@ impl ExecRegistry {
                         message
                     );
                 }
-                ExecCleanupOutcome::TimedOut { message, child } => {
+                ExecCleanupOutcome::TimedOut {
+                    message,
+                    child,
+                } => {
                     match kind {
                         ExecCleanupTargetKind::Runtime => {
                             summary.runtime_stop_attempts += 1;
@@ -1827,7 +1862,9 @@ impl ExecRegistry {
             if record.snapshot.meta.ended_at_ms.is_none() {
                 record.snapshot.meta.ended_at_ms = Some(current_timestamp_ms());
             }
-            record.snapshot.status = ExecStatus::Failed { message };
+            record.snapshot.status = ExecStatus::Failed {
+                message,
+            };
             record
                 .runtime
                 .as_ref()
@@ -1855,7 +1892,9 @@ impl ExecRegistry {
             if record.snapshot.meta.ended_at_ms.is_none() {
                 record.snapshot.meta.ended_at_ms = Some(current_timestamp_ms());
             }
-            record.snapshot.status = ExecStatus::Failed { message };
+            record.snapshot.status = ExecStatus::Failed {
+                message,
+            };
             record
                 .runtime
                 .as_ref()
@@ -2027,17 +2066,33 @@ async fn cleanup_target(
         ),
     };
     let outcome = match (outcome, kill_error) {
-        (ExecCleanupOutcome::Stopped, Some(message)) => {
-            ExecCleanupOutcome::Failed { message, child }
-        }
+        (ExecCleanupOutcome::Stopped, Some(message)) => ExecCleanupOutcome::Failed {
+            message,
+            child,
+        },
         (ExecCleanupOutcome::Stopped, None) => ExecCleanupOutcome::Stopped,
-        (_, Some(message)) => ExecCleanupOutcome::Failed { message, child },
-        (ExecCleanupOutcome::Failed { message, .. }, None) => {
-            ExecCleanupOutcome::Failed { message, child }
-        }
-        (ExecCleanupOutcome::TimedOut { message, .. }, None) => {
-            ExecCleanupOutcome::TimedOut { message, child }
-        }
+        (_, Some(message)) => ExecCleanupOutcome::Failed {
+            message,
+            child,
+        },
+        (
+            ExecCleanupOutcome::Failed {
+                message, ..
+            },
+            None,
+        ) => ExecCleanupOutcome::Failed {
+            message,
+            child,
+        },
+        (
+            ExecCleanupOutcome::TimedOut {
+                message, ..
+            },
+            None,
+        ) => ExecCleanupOutcome::TimedOut {
+            message,
+            child,
+        },
         (ExecCleanupOutcome::NoChild, None) => ExecCleanupOutcome::NoChild,
     };
     (
@@ -2289,7 +2344,12 @@ mod tests {
         let event = rx.recv().await.unwrap();
         assert_eq!(event.process_id, process_id);
         assert_eq!(event.chat_id, "chat-notify");
-        assert_eq!(event.status, ExecStatus::Exited { exit_code: Some(7) });
+        assert_eq!(
+            event.status,
+            ExecStatus::Exited {
+                exit_code: Some(7)
+            }
+        );
         assert_eq!(event.exit_code, Some(7));
         assert!(event.duration_ms.is_some());
         assert_eq!(event.short_description, "notify background");
@@ -2377,8 +2437,18 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(killed.status, ExecStatus::Exited { exit_code: Some(0) });
-        assert_eq!(failed.status, ExecStatus::Exited { exit_code: Some(0) });
+        assert_eq!(
+            killed.status,
+            ExecStatus::Exited {
+                exit_code: Some(0)
+            }
+        );
+        assert_eq!(
+            failed.status,
+            ExecStatus::Exited {
+                exit_code: Some(0)
+            }
+        );
         assert_eq!(failed.meta.ended_at_ms, ended_at);
     }
 
@@ -3266,7 +3336,9 @@ mod tests {
 
         let responder = tokio::spawn(async move {
             match control_rx.recv().await {
-                Some(ExecProcessCommand::Kill { response }) => {
+                Some(ExecProcessCommand::Kill {
+                    response,
+                }) => {
                     let _ = response.send(Err("already stopped".to_string()));
                     true
                 }

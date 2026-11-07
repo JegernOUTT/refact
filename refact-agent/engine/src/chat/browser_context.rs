@@ -99,7 +99,11 @@ fn format_timestamp(ts: f64) -> String {
 
 fn format_action(action: &RecorderEvent) -> String {
     match action {
-        RecorderEvent::Navigation { url, timestamp, .. } => {
+        RecorderEvent::Navigation {
+            url,
+            timestamp,
+            ..
+        } => {
             format!("[{}] navigate → {}", format_timestamp(*timestamp), url)
         }
         RecorderEvent::Click {
@@ -207,7 +211,10 @@ fn format_action(action: &RecorderEvent) -> String {
                 changed
             )
         }
-        RecorderEvent::ToolbarAction { action, timestamp } => {
+        RecorderEvent::ToolbarAction {
+            action,
+            timestamp,
+        } => {
             format!("[{}] toolbar → {}", format_timestamp(*timestamp), action)
         }
     }

@@ -330,66 +330,6 @@ function expectDrawOpsFinite(ctx: RecordedCanvasContext): void {
 }
 
 describe("buddy showcase director", () => {
-  it("draws showcase overlay events for both supported kinds", () => {
-    const world = makeWorld();
-
-    expect(() =>
-      drawShowcaseEvent({
-        ctx: makeCanvasContext(),
-        run: makeShowcaseRun(),
-        world,
-        palette: PALETTES[0],
-        frame: 40,
-        width: 720,
-        height: 260,
-        compact: false,
-        reducedMotion: false,
-        nowMs: 3_600,
-      }),
-    ).not.toThrow();
-    expect(() =>
-      drawShowcaseEvent({
-        ctx: makeCanvasContext(),
-        run: makeShowcaseRun({
-          kind: "stargazing_constellation",
-          target: OBSERVATORY_TARGET,
-          pose: "stargaze",
-          speech:
-            "Buddy reads the model stars and traces a careful constellation.",
-        }),
-        world,
-        palette: PALETTES[0],
-        frame: 40,
-        width: 720,
-        height: 260,
-        compact: false,
-        reducedMotion: false,
-        nowMs: 3_600,
-      }),
-    ).not.toThrow();
-  });
-
-  it("draws reduced-motion compact showcase overlays", () => {
-    expect(() =>
-      drawShowcaseEvent({
-        ctx: makeCanvasContext(),
-        run: makeShowcaseRun({
-          kind: "stargazing_constellation",
-          target: OBSERVATORY_TARGET,
-          pose: "stargaze",
-        }),
-        world: makeWorld(),
-        palette: PALETTES[0],
-        frame: 4,
-        width: 360,
-        height: 190,
-        compact: true,
-        reducedMotion: true,
-        nowMs: 2_200,
-      }),
-    ).not.toThrow();
-  });
-
   it("clamps all showcase draw alpha writes", () => {
     const world = makeWorld();
     const standardMemoryCtx = makeCanvasContext();

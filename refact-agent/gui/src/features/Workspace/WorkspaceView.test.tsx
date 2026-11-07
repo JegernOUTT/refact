@@ -1,5 +1,3 @@
-import { readFileSync } from "node:fs";
-
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { waitFor } from "@testing-library/react";
 
@@ -27,21 +25,6 @@ import { WorkspaceView } from "./WorkspaceView";
 import { Toolbar } from "../../components/Toolbar/Toolbar";
 import { WorkspaceShell } from "./WorkspaceShell";
 import { panePanelId, paneTabId } from "./paneTabIds";
-
-const groupSplitViewCss = readFileSync(
-  "src/features/Workspace/GroupSplitView.module.css",
-  "utf8",
-);
-const workspaceViewCss = readFileSync(
-  "src/features/Workspace/WorkspaceView.module.css",
-  "utf8",
-);
-const tokensCss = readFileSync("src/styles/tokens.css", "utf8");
-
-function tokenNumber(name: string): number {
-  return Number(new RegExp(`${name}:\\s*(\\d+)`).exec(tokensCss)?.[1]);
-}
-
 function getChatGroup(store: AppStore) {
   const group =
     store.getState().workspace.groups[makeSurfaceKey("chat", "chat-a")];
@@ -220,17 +203,6 @@ describe("WorkspaceView", () => {
     });
   });
 
-  it("always renders the activity rail with every section entry", () => {
-    renderWorkspaceView(createWorkspaceStore());
-
-    expect(
-      screen.getByRole("navigation", { name: "Workspace sections" }),
-    ).toBeVisible();
-    for (const label of ["Files", "Git", "Agents", "Active chats"]) {
-      expect(screen.getByRole("button", { name: label })).toBeInTheDocument();
-    }
-  });
-
   it("keeps the activity rail mounted for IDE hosts without forced panels", () => {
     const store = createWorkspaceStore();
     store.dispatch(updateConfig({ host: "vscode" }));
@@ -392,42 +364,26 @@ describe("WorkspaceView", () => {
     expect(screen.queryByRole("button", { name: "Close Pane" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Split Right" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Split Down" })).toBeNull();
-    expect(screen.getByRole("button", { name: "Pane actions" })).toBeVisible();
-    expect(workspaceViewCss).toMatch(
-      /\.unsplitSplitAffordance\s*\{[^}]*opacity: var\(--rf-motion-opacity-visible\)/u,
-    );
-    expect(workspaceViewCss).toMatch(
-      /@media \(hover: hover\) and \(pointer: fine\)[\s\S]*:focus-within \.unsplitSplitAffordance[\s\S]*opacity: var\(--rf-motion-opacity-visible\)/u,
-    );
+    expect(screen.queryByRole("button", { name: "Pane actions" })).toBeNull();
   });
 
-  it("keeps the split affordance out of the mobile dock layout", () => {
-    mockNarrow(true);
-    renderWorkspaceView(createWorkspaceStore());
+  it.each([true, false])(
+    "omits floating split controls at narrow=%s",
+    (narrow) => {
+      mockNarrow(narrow);
+      renderWorkspaceView(createWorkspaceStore());
+      expectSurface(chat("chat-a"));
+      expect(
+        screen.queryByRole("button", { name: "Split active tab" }),
+      ).toBeNull();
+      expect(screen.queryByRole("button", { name: "Pane actions" })).toBeNull();
+      expect(
+        screen.getByRole("button", { name: "Close Chat Alpha" }),
+      ).toBeInTheDocument();
+    },
+  );
 
-    expectSurface(chat("chat-a"));
-    expect(
-      screen.queryByRole("button", { name: "Split active tab" }),
-    ).toBeNull();
-    expect(workspaceViewCss).toMatch(
-      /@media \(max-width: 767px\)\s*\{\s*\.unsplitSplitAffordance\s*\{[^}]*display: none/u,
-    );
-    expect(workspaceViewCss).toMatch(
-      /\.unsplitSplitAffordance\s*\{[^}]*z-index: var\(--rf-z-dropdown\)/u,
-    );
-    expect(tokenNumber("--rf-z-dropdown")).toBeLessThan(
-      tokenNumber("--rf-z-overlay"),
-    );
-  });
-
-  it("keeps the split affordance on the desktop layout", () => {
-    mockNarrow(false);
-    renderWorkspaceView(createWorkspaceStore());
-
-    expect(screen.getByRole("button", { name: "Pane actions" })).toBeVisible();
-  });
-
-  it("renders an actual task pane with split controls", () => {
+  it("renders an actual task pane without floating split controls", () => {
     const store = setUpStore({
       workspace: {
         tabs: [task("task-a")],
@@ -443,7 +399,7 @@ describe("WorkspaceView", () => {
     expect(
       screen.getByLabelText("Workspace pane controls"),
     ).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Pane actions" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Pane actions" })).toBeNull();
   });
 
   it("leaves the rail and dock to the shared workspace shell", () => {
@@ -503,15 +459,13 @@ describe("WorkspaceView", () => {
     ]);
   });
 
-  it("renders split panes with distinct surfaces and pane close controls", () => {
+  it("renders split panes with distinct surfaces and normal tab close controls", () => {
     renderWorkspaceView(createSplitWorkspaceStore());
 
     expectSurface(chat("chat-a"));
     expectSurface(chat("chat-b"));
     expect(screen.getAllByLabelText("Workspace pane controls")).toHaveLength(2);
-    expect(
-      screen.getAllByRole("button", { name: "Pane actions" }),
-    ).toHaveLength(2);
+    expect(screen.queryByRole("button", { name: "Pane actions" })).toBeNull();
     expect(
       screen.getAllByRole("tablist", { name: "Workspace tabs" }),
     ).toHaveLength(1);
@@ -575,9 +529,6 @@ describe("WorkspaceView", () => {
       expectSurface(chat("chat-a"));
       expectSurface(chat("chat-b"));
       expect(screen.queryByTestId("workspace-vertical-divider")).toBeNull();
-      expect(groupSplitViewCss).toMatch(
-        /\.stackedLayout\s*\{[^}]*overflow:\s*hidden auto;/u,
-      );
     } finally {
       clientWidthSpy.mockRestore();
     }
@@ -604,7 +555,7 @@ describe("WorkspaceView", () => {
     expect(screen.getAllByLabelText("Workspace pane controls")).toHaveLength(2);
   });
 
-  it("offers file splits and accepts native file drops on files and pane edges", async () => {
+  it("accepts native file splits and preserves normal file tab closing", async () => {
     const store = createWorkspaceStore();
     store.dispatch(setPanelsForced(true));
     const fileA = "file:/project/a.ts";
@@ -614,7 +565,7 @@ describe("WorkspaceView", () => {
     store.dispatch(setActiveTab(fileA));
     const view = renderWorkspaceView(store);
     await view.user.click(screen.getByRole("tab", { name: "a.ts" }));
-    expect(screen.getByRole("button", { name: "Pane actions" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Pane actions" })).toBeNull();
     const dataTransfer = createDataTransferStub();
     setTabDragData(dataTransfer, "file", "/project/b.ts", fileB);
     const dropTarget = document.querySelector(
@@ -660,33 +611,21 @@ describe("WorkspaceView", () => {
       chat("chat-b"),
       fileB,
     ]);
-    const filePane = document
-      .querySelector(`[data-surface-key="${fileB}"]`)
-      ?.closest("section");
-    if (!filePane) throw new Error("missing file pane");
-    await view.user.click(
-      within(filePane).getByRole("button", { name: "Pane actions" }),
-    );
-    await view.user.click(screen.getByRole("menuitem", { name: "Close Pane" }));
+    await view.user.click(screen.getByRole("button", { name: "Close b.ts" }));
     const remainingGroup = store.getState().workspace.groups[chat("chat-a")];
     if (!remainingGroup) throw new Error("missing remaining group");
     expect(collectTabIds(remainingGroup.root)).not.toContain(fileB);
   });
 
-  it("clicking a pane close retains the canonical singleton and closes the removed chat", async () => {
+  it("closing a normal tab retains the canonical singleton and closes the removed chat", async () => {
     const store = createSplitWorkspaceStore();
     const view = renderWorkspaceView(store);
-    const siblingPane = screen.getByLabelText(
-      "Workspace pane root:sibling:chat:chat-a",
-    );
-
     expect(store.getState().chat.open_thread_ids).toEqual(["chat-a", "chat-b"]);
     expect(store.getState().chat.threads["chat-b"]).toBeDefined();
 
     await view.user.click(
-      within(siblingPane).getByRole("button", { name: "Pane actions" }),
+      screen.getByRole("button", { name: "Close Chat Beta" }),
     );
-    await view.user.click(screen.getByRole("menuitem", { name: "Close Pane" }));
 
     expect(store.getState().workspace.groups[chat("chat-a")]?.root).toEqual({
       kind: "leaf",

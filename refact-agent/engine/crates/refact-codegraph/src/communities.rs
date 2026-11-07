@@ -255,7 +255,10 @@ fn aggregate_graph(graph: &LouvainGraph, partition: &[usize]) -> LouvainGraph {
         }
     }
 
-    LouvainGraph { members, adj }
+    LouvainGraph {
+        members,
+        adj,
+    }
 }
 
 fn modularity(graph: &LouvainGraph, partition: &[usize]) -> f64 {

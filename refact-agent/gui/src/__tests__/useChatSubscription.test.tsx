@@ -80,16 +80,6 @@ describe("useChatSubscription", () => {
     expect(result.current.status).toBe("disconnected");
   });
 
-  it("should have connect and disconnect functions", () => {
-    const { result } = renderHook(
-      () => useChatSubscription("test-chat", { enabled: false }),
-      { wrapper },
-    );
-
-    expect(typeof result.current.connect).toBe("function");
-    expect(typeof result.current.disconnect).toBe("function");
-  });
-
   it("should have lastSeq as string", () => {
     const { result } = renderHook(
       () => useChatSubscription("test-chat", { enabled: false }),

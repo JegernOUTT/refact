@@ -289,7 +289,10 @@ pub(crate) async fn read_bounded_log_tail_with_notice(
     } else {
         None
     };
-    Ok(BoundedLogTail { text, notice })
+    Ok(BoundedLogTail {
+        text,
+        notice,
+    })
 }
 
 pub(crate) async fn read_bounded_log_tail(log_path: &std::path::Path) -> Result<String, String> {

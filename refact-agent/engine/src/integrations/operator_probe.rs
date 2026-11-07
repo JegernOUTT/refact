@@ -140,7 +140,9 @@ impl CandidateAdmission {
         }
         state.candidates += 1;
         drop(state);
-        Ok(Self { cleanup })
+        Ok(Self {
+            cleanup,
+        })
     }
 }
 impl Drop for CandidateAdmission {
@@ -161,7 +163,9 @@ impl<'a> AdmissionClosed<'a> {
     fn close(cleanup: &'a CleanupOwner) -> Self {
         cleanup.locked().draining = true;
         cleanup.changed.notify_waiters();
-        Self { cleanup }
+        Self {
+            cleanup,
+        }
     }
 }
 impl Drop for AdmissionClosed<'_> {

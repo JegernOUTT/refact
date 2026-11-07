@@ -225,7 +225,10 @@ fn parse_schedule_update(input: &CronUpdateInput, now_ms: u64) -> Result<Trigger
 }
 
 fn set_prompt(job: &mut Job, prompt: String) -> Result<(), String> {
-    if let crate::scheduler::Action::AgentTurn { prompt: target, .. } = &mut job.action {
+    if let crate::scheduler::Action::AgentTurn {
+        prompt: target, ..
+    } = &mut job.action
+    {
         *target = prompt;
         Ok(())
     } else {

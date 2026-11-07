@@ -97,18 +97,21 @@ describe("activeChatsModel", () => {
   });
 
   it("keeps one row per chat, attention first, then most recent", () => {
-    const entries = buildActiveChatEntries([
-      activity({ id: "a", session_state: "generating", updated_at_ms: 5 }),
-      activity({ id: "b", schedule_count: 1, updated_at_ms: 9 }),
-      activity({ id: "c", recovery_state: "needs_action", updated_at_ms: 1 }),
-      activity({
-        id: "a",
-        session_state: "generating",
-        schedule_count: 1,
-        updated_at_ms: 7,
-      }),
-      activity({ id: "idle", session_state: "idle", updated_at_ms: 99 }),
-    ]);
+    const entries = buildActiveChatEntries(
+      [
+        activity({ id: "a", session_state: "generating", updated_at_ms: 5 }),
+        activity({ id: "b", schedule_count: 1, updated_at_ms: 9 }),
+        activity({ id: "c", recovery_state: "needs_action", updated_at_ms: 1 }),
+        activity({
+          id: "a",
+          session_state: "generating",
+          schedule_count: 1,
+          updated_at_ms: 7,
+        }),
+        activity({ id: "idle", session_state: "idle", updated_at_ms: 99 }),
+      ],
+      100,
+    );
     expect(entries.map((entry) => entry.id)).toEqual(["c", "a", "b"]);
     expect(entries[1].reasons).toEqual(["streaming", "scheduled"]);
   });

@@ -828,7 +828,10 @@ fn project_open_error(error: DaemonClientError) -> RunFailure {
                 .strip_prefix("failed to contact daemon: ")
                 .unwrap_or(&message)
         ),
-        DaemonClientError::Status { status, body } => {
+        DaemonClientError::Status {
+            status,
+            body,
+        } => {
             format!("daemon project open failed with status {status}: {body}")
         }
         DaemonClientError::Json(message) => {
@@ -1078,7 +1081,9 @@ mod tests {
             std::env::set_var("REFACT_DAEMON_SUPERVISOR_BACKOFF_MS", "1");
             std::env::set_var("FAKE_WORKER_CHAT_SCRIPT", script);
             std::env::remove_var("FAKE_WORKER_CRASH");
-            Some(Self { keys })
+            Some(Self {
+                keys,
+            })
         }
     }
 

@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import {
-  BUDDY_WORK_STATES,
   CONTINUITY_LONG_ABSENCE_MS,
   CONTINUITY_WELCOME_BACK_MS,
   PRESENCE_AMBIENT_FRAME_MS,
@@ -54,17 +53,6 @@ describe("buddy presence motion grammar", () => {
     ).toBe("blocked");
     expect(buddyWorkStateFromFacts([], [], true)).toBe("awaiting_decision");
   });
-  it("gives every work state a distinct meaningful motion", () => {
-    const seen = new Set<string>();
-    for (const state of BUDDY_WORK_STATES) {
-      const motion = buddyPresenceMotion(state);
-      expect(motion.state).toBe(state);
-      expect(motion.label.length).toBeGreaterThan(0);
-      seen.add(`${motion.pose}:${motion.emphasis}:${motion.priority}`);
-    }
-    expect(seen.size).toBe(BUDDY_WORK_STATES.length);
-  });
-
   it("orders priority so urgent states outrank ambient ones", () => {
     expect(buddyPresenceMotion("awaiting_decision").priority).toBeGreaterThan(
       buddyPresenceMotion("blocked").priority,

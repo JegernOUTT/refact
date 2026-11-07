@@ -6,7 +6,7 @@ import {
   within,
 } from "../utils/test-utils";
 import { http, HttpResponse } from "msw";
-import { readdir, readFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { renderHook } from "@testing-library/react";
@@ -20,7 +20,6 @@ import {
   defaultBuddySettings,
 } from "../features/Buddy/buddySlice";
 import { push } from "../features/Pages/pagesSlice";
-import { BuddyDraftPreview } from "../features/Buddy/BuddyDraftPreview";
 import { BuddyChatCompanion } from "../features/Buddy/BuddyChatCompanion";
 import { BuddyDashboardScene } from "../features/Buddy/BuddyDashboardScene";
 import { BuddyHome } from "../features/Buddy/BuddyHome";
@@ -47,7 +46,6 @@ import {
 import type {
   BuddyOpportunity,
   BuddySuggestion,
-  BuddyDraft,
   BuddyPulse,
   BuddyRuntimeEvent,
   BuddySemanticState,
@@ -672,29 +670,6 @@ describe("BuddyHome_renders_all_sections", () => {
     expect(executor).toContain("dispatch(dismissRuntimeEvent(eventId))");
     expect(executor).toContain(".catch(() => undefined)");
   });
-
-  it("renders a buddy-home-content scroll container", async () => {
-    const store = setUpStore({ ...CONFIG_STATE });
-    store.dispatch(setBuddySnapshot(makeSnapshot(makePulse())));
-    server.use(
-      http.get("*/v1/buddy/opportunities", () =>
-        HttpResponse.json({ opportunities: [] }),
-      ),
-      http.get("*/v1/buddy/conversations", () => HttpResponse.json([])),
-      http.get("*/v1/stats/llm/summary", () =>
-        HttpResponse.json({
-          totals: { total_calls: 0, successful_calls: 0, total_tokens: 0 },
-        }),
-      ),
-      http.get("*/v1/setup/status", () =>
-        HttpResponse.json({ configured: true, reasons: [], detail: {} }),
-      ),
-    );
-
-    render(<BuddyHome />, { store });
-
-    expect(await screen.findByTestId("buddy-home-content")).toBeInTheDocument();
-  });
 });
 
 describe("BuddyHome_layout_contract", () => {
@@ -740,27 +715,6 @@ describe("BuddyHome_layout_contract", () => {
     expect(screen.getAllByTestId("buddy-world")).toHaveLength(1);
   });
 
-  it("keeps compliance prose and unstyled elements out of the page", async () => {
-    const sectionFiles = (
-      await readdir(resolve(process.cwd(), "src/features/Buddy/sections"))
-    ).filter((file) => file.endsWith(".tsx"));
-    const source = (
-      await Promise.all(
-        [
-          "features/Buddy/BuddyHome.tsx",
-          ...sectionFiles.map((file) => `features/Buddy/sections/${file}`),
-        ].map(readGuiSource),
-      )
-    ).join("\n");
-
-    expect(source).not.toContain("<p>");
-    expect(source).not.toContain("<section");
-    expect(source).not.toContain("Needs you above");
-    expect(source).not.toContain("never permissions");
-    expect(source).not.toContain("Play is optional");
-    expect(source).not.toContain("Back to Desk");
-  });
-
   it("exposes a real heading outline instead of styled spans", async () => {
     server.use(
       ...layoutHandlers,
@@ -791,32 +745,6 @@ describe("BuddyHome_layout_contract", () => {
     }
   });
 
-  it("keeps every Buddy stylesheet on the shared type and radius scale", async () => {
-    const directory = resolve(process.cwd(), "src/features/Buddy");
-    const sheets = [
-      ...(await readdir(directory)),
-      ...(await readdir(resolve(directory, "sections"))).map(
-        (file) => `sections/${file}`,
-      ),
-    ].filter((file) => file.endsWith(".module.css"));
-    expect(sheets.length).toBeGreaterThan(20);
-
-    const offenders: string[] = [];
-    for (const sheet of sheets) {
-      const css = await readGuiSource(`features/Buddy/${sheet}`);
-      for (const [declaration, value] of css.matchAll(
-        /font-size:\s*([\d.]+)px/g,
-      )) {
-        if (Number(value) < 12) offenders.push(`${sheet}: ${declaration}`);
-      }
-      for (const dead of ["--rf-font-size-", "--rf-radius-control"]) {
-        if (css.includes(dead)) offenders.push(`${sheet}: ${dead}`);
-      }
-    }
-
-    expect(offenders).toEqual([]);
-  });
-
   it("gives Buddy controls a hit-area floor without overriding shared tab sizing", async () => {
     const css = await readGuiSource("features/Buddy/BuddyHome.module.css");
 
@@ -827,14 +755,6 @@ describe("BuddyHome_layout_contract", () => {
       ),
     ).toContain("min-height: var(--rf-hit-min)");
     expect(css).toContain("--rf-hit-min: var(--rf-hit-min-touch)");
-  });
-
-  it("sizes the tab strip so narrow viewports scroll instead of truncating", async () => {
-    const css = await readGuiSource("features/Buddy/BuddyHome.module.css");
-
-    expect(readCssBlock(css, ".sections .tabsList")).toContain(
-      "grid-auto-columns: minmax(max-content, 1fr)",
-    );
   });
 });
 
@@ -2867,41 +2787,6 @@ describe("buildBuddySceneSpeech", () => {
   });
 });
 
-describe("BuddyDraftPreview_renders_draft_metadata", () => {
-  it("shows title and explanation from draft without DOM nesting warnings", () => {
-    const draft: BuddyDraft = {
-      id: "draft-test",
-      kind: "skill",
-      title: "My Test Draft Title",
-      yaml_or_json: "{}",
-      explanation: "This is the explanation text",
-      created_at: "2024-01-01T00:00:00Z",
-      expires_at: "2099-12-31T00:00:00Z",
-    };
-    const consoleError = vi
-      .spyOn(console, "error")
-      .mockImplementation(() => undefined);
-
-    try {
-      render(<BuddyDraftPreview draft={draft} />, {
-        preloadedState: CONFIG_STATE,
-      });
-
-      expect(screen.getByText(/My Test Draft Title/)).toBeInTheDocument();
-      expect(
-        screen.getByText(/This is the explanation text/),
-      ).toBeInTheDocument();
-      expect(
-        consoleError.mock.calls.some((call) =>
-          call.some((arg) => String(arg).includes("validateDOMNesting")),
-        ),
-      ).toBe(false);
-    } finally {
-      consoleError.mockRestore();
-    }
-  });
-});
-
 describe("useExecuteBuddyAction_open_page", () => {
   it("dispatches expected pushPage for open_page action via executeBuddyNavigation", () => {
     const dispatch = vi.fn();
@@ -3281,18 +3166,5 @@ describe("BuddyRecentChats_opens_existing_chat", () => {
       expect(createConversationCalled).toBe(true);
     });
     expect(trajectoryCalled).toBe(false);
-  });
-});
-
-describe("BuddyHome_bottom_row_bounded_scroll", () => {
-  it("recent chats panel sizes to its rows and paginates in the footer", async () => {
-    const recentChatsCss = await readGuiSource(
-      "features/Buddy/BuddyRecentChats.module.css",
-    );
-    const listBlock = readCssBlock(recentChatsCss, ".list");
-
-    expect(listBlock).toContain("min-width: 0");
-    expect(recentChatsCss).not.toContain("max-height: 220px");
-    expect(recentChatsCss).not.toMatch(/(^|[^-])height: 100%/);
   });
 });

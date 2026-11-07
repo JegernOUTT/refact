@@ -262,7 +262,12 @@ async fn broadcast_to_target(
         .err();
 
     let status = match (&report, record_error) {
-        (DeliveryReport::Delivered { .. }, None) if reached => BroadcastStatus::Notified,
+        (
+            DeliveryReport::Delivered {
+                ..
+            },
+            None,
+        ) if reached => BroadcastStatus::Notified,
         (
             DeliveryReport::Delivered {
                 outcome: DeliveryOutcome::Duplicate,
@@ -270,10 +275,21 @@ async fn broadcast_to_target(
             },
             None,
         ) => BroadcastStatus::Duplicate,
-        (DeliveryReport::Delivered { .. }, Some(error)) if reached => BroadcastStatus::Failed(
-            format!("delivered, but delivery status update failed: {}", error),
-        ),
-        (DeliveryReport::Skipped { reason }, _) => BroadcastStatus::Skipped(reason.clone()),
+        (
+            DeliveryReport::Delivered {
+                ..
+            },
+            Some(error),
+        ) if reached => BroadcastStatus::Failed(format!(
+            "delivered, but delivery status update failed: {}",
+            error
+        )),
+        (
+            DeliveryReport::Skipped {
+                reason,
+            },
+            _,
+        ) => BroadcastStatus::Skipped(reason.clone()),
         (report, Some(error)) => BroadcastStatus::Failed(format!(
             "{}; status update failed: {}",
             report.short_status(),

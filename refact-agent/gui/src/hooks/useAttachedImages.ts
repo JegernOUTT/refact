@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useContext, useEffect, useRef } from "react";
 import { useAppSelector } from "./useAppSelector";
 import { useAppDispatch } from "./useAppDispatch";
 import {
@@ -23,7 +23,23 @@ import {
   MAX_ATTACHED_IMAGES,
 } from "../utils/attachmentFiles";
 
+import { ImageAttachmentEditorContext } from "../components/ImageAttachmentEditor/context";
+import { useImageAttachmentScope } from "../components/ImageAttachmentEditor/useImageAttachmentScope";
+
 export function useAttachedImages() {
+  const enqueue = useContext(ImageAttachmentEditorContext);
+  const scope = useImageAttachmentScope();
+  const scopeRef = useRef(scope);
+  const generation = useRef(0);
+  if (scopeRef.current.key !== scope.key) generation.current++;
+  scopeRef.current = scope;
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
   const chatId = useThreadId();
   const images = useAppSelector((state) =>
     selectThreadImagesById(state, chatId),
@@ -87,17 +103,69 @@ export function useAttachedImages() {
     [dispatch],
   );
 
-  const processAndInsertImages = useCallback(
-    (files: File[]) => {
+  const processEditedImages = useCallback(
+    (files: File[], recipient?: (image: ImageFile) => void) => {
+      const capturedScope = scopeRef.current.key;
+      const capturedGeneration = generation.current;
+      const valid = () =>
+        mounted.current &&
+        generation.current === capturedGeneration &&
+        scopeRef.current.key === capturedScope &&
+        !multimodalityBlockedRef.current;
       if (files.length > MAX_ATTACHED_IMAGES) {
         handleError(
           `You can only upload ${MAX_ATTACHED_IMAGES} images at a time`,
         );
         return;
       }
-      void processImages(files, insertImage, handleError, handleWarning);
+      void processImages(
+        files,
+        (image) => {
+          if (valid()) (recipient ?? insertImage)(image);
+        },
+        (error) => {
+          if (valid()) handleError(error);
+        },
+        (warning) => {
+          if (valid()) handleWarning(warning);
+        },
+        valid,
+      );
     },
     [handleError, handleWarning, insertImage],
+  );
+
+  const processAndInsertImages = useCallback(
+    (files: File[], recipient?: (image: ImageFile) => void) => {
+      if (!scopeRef.current.allowed) {
+        handleError(
+          scopeRef.current.companion
+            ? "Buddy accepts text messages only"
+            : "Current model does not support images",
+        );
+        return;
+      }
+      if (!enqueue) {
+        handleError("Image editor is not available");
+        return;
+      }
+      const validFiles = files.filter((file) => {
+        const error =
+          attachmentFileError(file) ??
+          (!isSupportedImageFile(file)
+            ? `Could not attach ${file.name}: unsupported image type`
+            : null);
+        if (error) handleError(error);
+        return !error;
+      });
+      enqueue(
+        validFiles.map((file) => ({
+          file,
+          accept: (edited) => processEditedImages([edited], recipient),
+        })),
+      );
+    },
+    [enqueue, handleError, processEditedImages],
   );
 
   const processAndInsertTextFiles = useCallback(
@@ -130,6 +198,7 @@ export function useAttachedImages() {
     insertImage,
     removeImage,
     processAndInsertImages,
+    processEditedImages,
     removeTextFile,
     processAndInsertTextFiles,
     resetAllTextFiles,
@@ -141,8 +210,10 @@ async function processImages(
   onSuccess: (image: ImageFile) => void,
   onError: (reason: string) => void,
   onAbort: (reason: string) => void,
+  valid: () => boolean,
 ) {
   for (const file of files) {
+    if (!valid()) return;
     const validationError =
       attachmentFileError(file) ??
       (!isSupportedImageFile(file)

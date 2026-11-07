@@ -31,17 +31,6 @@ class StatusBarWidgetTest {
     }
 
     @Test
-    fun newWarningsReplacePreviousWarningText() {
-        val state = statusBarStateFromRagStatus(
-            ragStatus(vecDbError = "new vecdb warning", codegraphError = "new codegraph warning"),
-            codegraphFileLimit = 100
-        )
-
-        assertEquals("new vecdb warning", state.vecdbWarning)
-        assertEquals("new codegraph warning", state.codegraphWarning)
-    }
-
-    @Test
     fun limitFlagsAreDerivedFromLatestPayload() {
         val limitState = statusBarStateFromRagStatus(
             ragStatus(

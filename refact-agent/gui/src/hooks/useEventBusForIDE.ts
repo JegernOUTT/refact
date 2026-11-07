@@ -144,7 +144,7 @@ export const ideAskQuestions =
  * A native decision that was announced to the host is no longer waiting.
  *
  * Emitted when the authoritative native question leaves `pending` — including
- * when it was answered from a different client (other IDE, browser, TUI) or
+ * when it was answered from a different client (other IDE, browser) or
  * cancelled natively. Hosts use it to retire their own notification state; it
  * grants nothing and answers nothing.
  */

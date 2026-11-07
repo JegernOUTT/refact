@@ -38,6 +38,8 @@ describe("explicit folder browsing", () => {
         current_project: { name: "worktree", workspaceRoots: ["/worktree"] },
       },
     });
+    await user.click(screen.getByRole("button", { name: "More options" }));
+    await user.click(screen.getByRole("menuitem", { name: "Browse folder…" }));
     const input = screen.getByRole("textbox", { name: "Absolute file path" });
     const browse = screen.getByRole("button", { name: "Browse folder" });
     expect(screen.queryByRole("button", { name: "Parent folder" })).toBeNull();
@@ -93,6 +95,8 @@ describe("explicit folder browsing", () => {
     expect(
       await screen.findByRole("treeitem", { name: "current.txt" }),
     ).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "More options" }));
+    await user.click(screen.getByRole("menuitem", { name: "Browse folder…" }));
     await user.type(
       screen.getByRole("textbox", { name: "Absolute file path" }),
       "/",

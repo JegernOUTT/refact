@@ -425,7 +425,10 @@ async fn depth_limit_and_disabled_scheduler_reject_reservations() {
         .unwrap_err();
     assert!(matches!(
         err,
-        AdmissionError::DepthExceeded { depth: 3, .. }
+        AdmissionError::DepthExceeded {
+            depth: 3,
+            ..
+        }
     ));
     sched
         .reserve(request(RuntimeKind::Trajectory, "ok", "p", "r").with_depth(2))

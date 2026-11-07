@@ -142,7 +142,13 @@ pub fn plan_correction(
     }
     let attempt = status.corrections_used + 1;
     let prompt = contract.correction_prompt(&status, attempt, policy.max_attempts);
-    (status, Some(CorrectionRequest { attempt, prompt }))
+    (
+        status,
+        Some(CorrectionRequest {
+            attempt,
+            prompt,
+        }),
+    )
 }
 
 impl DeliverableContract {

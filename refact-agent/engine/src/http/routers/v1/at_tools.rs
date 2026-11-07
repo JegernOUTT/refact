@@ -164,7 +164,9 @@ pub async fn handle_v1_post_tools(
     }
     app.gcx.tool_catalog_generations.advance_integrations();
 
-    Ok(Json(ToolPostResponse { success: true }))
+    Ok(Json(ToolPostResponse {
+        success: true,
+    }))
 }
 
 pub async fn handle_v1_tools_check_if_confirmation_needed(

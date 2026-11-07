@@ -76,7 +76,9 @@ pub struct CdpKeyboardDispatcher<'a> {
 
 impl<'a> CdpKeyboardDispatcher<'a> {
     pub fn new(tab: &'a Tab) -> Self {
-        Self { tab }
+        Self {
+            tab,
+        }
     }
 }
 
@@ -111,7 +113,9 @@ impl KeyboardDispatcher for CdpKeyboardDispatcher<'_> {
             }
             KeyboardDispatch::InsertText(text) => {
                 self.tab
-                    .call_method(Input::InsertText { text })
+                    .call_method(Input::InsertText {
+                        text,
+                    })
                     .map_err(|error| format!("Failed to insert browser text: {error}"))?;
             }
         }

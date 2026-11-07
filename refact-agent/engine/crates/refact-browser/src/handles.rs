@@ -63,7 +63,9 @@ pub enum HandleError {
 impl Display for HandleError {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Invalidated { object_id } => {
+            Self::Invalidated {
+                object_id,
+            } => {
                 write!(formatter, "Element handle {object_id} is no longer valid")
             }
             Self::Protocol(message) | Self::Resolution(message) => formatter.write_str(message),

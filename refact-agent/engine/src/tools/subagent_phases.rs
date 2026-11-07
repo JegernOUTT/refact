@@ -423,7 +423,9 @@ pub async fn gather_files_phase_with_plan(
     } = plan;
 
     let subchat_config = match &runner {
-        GatherRunner::Registry { subagent_id } => {
+        GatherRunner::Registry {
+            subagent_id,
+        } => {
             resolve_subchat_config_with_parent(
                 gcx.clone(),
                 subagent_id,
@@ -447,7 +449,9 @@ pub async fn gather_files_phase_with_plan(
             )
             .await?
         }
-        GatherRunner::Explicit { spec } => {
+        GatherRunner::Explicit {
+            spec,
+        } => {
             crate::subchat::resolve_subchat_config_with_explicit_params(
                 gcx.clone(),
                 &attribution_id,
@@ -524,7 +528,9 @@ pub async fn gather_files_phase_with_plan(
         ));
 
         let retry_result = match &runner {
-            GatherRunner::Registry { subagent_id } => {
+            GatherRunner::Registry {
+                subagent_id,
+            } => {
                 run_subchat_once_with_parent(
                     gcx.clone(),
                     subagent_id,
@@ -539,7 +545,9 @@ pub async fn gather_files_phase_with_plan(
                 )
                 .await?
             }
-            GatherRunner::Explicit { spec } => {
+            GatherRunner::Explicit {
+                spec,
+            } => {
                 crate::subchat::run_subchat_once_with_explicit_params(
                     gcx.clone(),
                     &attribution_id,

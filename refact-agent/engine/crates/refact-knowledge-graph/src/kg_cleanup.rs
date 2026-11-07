@@ -67,7 +67,9 @@ pub async fn knowledge_cleanup_background_task(
                 }
             }
 
-            let new_state = CleanupState { last_run: now };
+            let new_state = CleanupState {
+                last_run: now,
+            };
             save_cleanup_state(&cache_dir, &new_state).await;
         }
 

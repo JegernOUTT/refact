@@ -72,21 +72,23 @@ impl ActivityClass {
             }
             ActivityClass::IntentionallyWaiting(WaitingKind::GoalWait) => "waiting_goal_subject",
             ActivityClass::ProviderFailure(_) => "provider_failure",
-            ActivityClass::NoMaterialProgress(NoProgressSignal::RepeatedToolCall { .. }) => {
-                "no_progress_repeated_tool_call"
-            }
-            ActivityClass::NoMaterialProgress(NoProgressSignal::RepeatedOutput { .. }) => {
-                "no_progress_repeated_output"
-            }
-            ActivityClass::NoMaterialProgress(NoProgressSignal::UnchangedEvidence { .. }) => {
-                "no_progress_unchanged_evidence"
-            }
+            ActivityClass::NoMaterialProgress(NoProgressSignal::RepeatedToolCall {
+                ..
+            }) => "no_progress_repeated_tool_call",
+            ActivityClass::NoMaterialProgress(NoProgressSignal::RepeatedOutput {
+                ..
+            }) => "no_progress_repeated_output",
+            ActivityClass::NoMaterialProgress(NoProgressSignal::UnchangedEvidence {
+                ..
+            }) => "no_progress_unchanged_evidence",
             ActivityClass::Working(WorkingSignal::ToolCallInFlight) => {
                 "working_tool_call_in_flight"
             }
             ActivityClass::Working(WorkingSignal::Streaming) => "working_streaming",
             ActivityClass::Working(WorkingSignal::RecentActivity) => "working_recent_activity",
-            ActivityClass::NoObservedActivity { .. } => "no_observed_activity",
+            ActivityClass::NoObservedActivity {
+                ..
+            } => "no_observed_activity",
         }
     }
 
@@ -220,13 +222,19 @@ fn record_classification(class: ActivityClass, thresholds: ProgressThresholds) {
         return;
     };
     let evidence = match signal {
-        NoProgressSignal::RepeatedToolCall { repeats } => {
+        NoProgressSignal::RepeatedToolCall {
+            repeats,
+        } => {
             format!("the same tool call and result repeated {repeats} times")
         }
-        NoProgressSignal::RepeatedOutput { repeats } => {
+        NoProgressSignal::RepeatedOutput {
+            repeats,
+        } => {
             format!("the same reply repeated {repeats} times")
         }
-        NoProgressSignal::UnchangedEvidence { turns } => {
+        NoProgressSignal::UnchangedEvidence {
+            turns,
+        } => {
             format!("material output unchanged across {turns} turns")
         }
     };
@@ -328,10 +336,14 @@ fn no_material_progress(
     let start = activity.turns.len().saturating_sub(thresholds.window_turns);
     let turns = &activity.turns[start..];
     if let Some(repeats) = repeated_tool_call(turns, thresholds.repeat_threshold) {
-        return Some(NoProgressSignal::RepeatedToolCall { repeats });
+        return Some(NoProgressSignal::RepeatedToolCall {
+            repeats,
+        });
     }
     if let Some(repeats) = repeated_output(turns, thresholds.repeat_threshold) {
-        return Some(NoProgressSignal::RepeatedOutput { repeats });
+        return Some(NoProgressSignal::RepeatedOutput {
+            repeats,
+        });
     }
     let turns_unchanged = activity.turns_since_evidence_changed?;
     (generating(activity.session_state) && turns_unchanged >= thresholds.unchanged_turns).then_some(
@@ -522,7 +534,9 @@ mod tests {
         };
         assert_eq!(
             classify(&activity, thresholds()),
-            ActivityClass::NoMaterialProgress(NoProgressSignal::UnchangedEvidence { turns: 4 })
+            ActivityClass::NoMaterialProgress(NoProgressSignal::UnchangedEvidence {
+                turns: 4
+            })
         );
     }
 
@@ -605,7 +619,9 @@ mod tests {
         activity.turns = turns_from_messages(&messages, 24);
         assert_eq!(
             classify(&activity, thresholds()),
-            ActivityClass::NoMaterialProgress(NoProgressSignal::RepeatedToolCall { repeats: 3 })
+            ActivityClass::NoMaterialProgress(NoProgressSignal::RepeatedToolCall {
+                repeats: 3
+            })
         );
     }
 

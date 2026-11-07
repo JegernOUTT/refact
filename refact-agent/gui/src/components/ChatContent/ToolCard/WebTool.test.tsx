@@ -7,6 +7,7 @@ import { Theme } from "@radix-ui/themes";
 
 import { WebTool } from "./WebTool";
 import { reducer as configReducer } from "../../../features/Config/configSlice";
+import { currentProjectInfoReducer } from "../../../features/Chat/currentProject";
 import type { ToolCall } from "../../../services/refact/types";
 
 function makeStore(toolMessage: {
@@ -18,6 +19,7 @@ function makeStore(toolMessage: {
   return configureStore({
     reducer: {
       config: configReducer,
+      current_project: currentProjectInfoReducer,
       chat: (
         state = {
           current_thread_id: "chat-1",

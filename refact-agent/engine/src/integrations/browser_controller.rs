@@ -726,11 +726,9 @@ fn resolve_locator_handles(
             let reference = value
                 .parse::<Ref>()
                 .map_err(|error| format!("Invalid browser ref {value}: {error}"))?;
-            Ok(vec![
-                world
-                    .resolve_ref(tab, &reference)
-                    .map_err(|error| error.to_string())?,
-            ])
+            Ok(vec![world
+                .resolve_ref(tab, &reference)
+                .map_err(|error| error.to_string())?])
         }
         _ => {
             let locator_value = locator_without_frames(locator)?;

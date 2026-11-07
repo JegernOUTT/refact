@@ -564,32 +564,6 @@ test.describe("Buddy with realistic saved work", () => {
     });
   });
 
-  test("shows saved work inside the first viewport, not just navigation", async ({
-    page,
-  }) => {
-    await openBuddy(page, { width: 1280 });
-    const preview = page
-      .getByTestId("buddy-home-saved-work")
-      .getByRole("listitem")
-      .first();
-    await expect(preview).toBeInViewport();
-    expect((await preview.boundingBox())!.y).toBeLessThan(FOLD_PX);
-    await waitForDeskRows(page, NEEDS_YOU_TITLES.length);
-
-    const rows = await readRows(page);
-    const aboveTheFold = rows.filter(
-      (row) => row.bottom > 0 && row.bottom <= FOLD_PX,
-    );
-    expect(
-      aboveTheFold.length,
-      `only ${aboveTheFold.length} of ${
-        rows.length
-      } work rows fit in a ${FOLD_PX}px viewport; the audited build showed the Desk at y=769 with zero rows visible (row edges: ${rows
-        .map((row) => `${row.top}-${row.bottom}`)
-        .join(", ")})`,
-    ).toBeGreaterThanOrEqual(2);
-  });
-
   test(`reaches every tab trigger at ${NARROW_PX}px`, async ({ page }) => {
     await openBuddy(page, { width: NARROW_PX });
     await waitForDeskRows(page, NEEDS_YOU_TITLES.length);

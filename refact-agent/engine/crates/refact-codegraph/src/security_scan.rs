@@ -839,7 +839,10 @@ fn mask_source(lang: &str, source: &str, mask_strings: bool) -> String {
                     index += 1;
                     continue;
                 }
-                state = MaskState::Quote { delimiter, escaped };
+                state = MaskState::Quote {
+                    delimiter,
+                    escaped,
+                };
                 index += 1;
             }
             MaskState::TripleQuote {
@@ -857,11 +860,16 @@ fn mask_source(lang: &str, source: &str, mask_strings: bool) -> String {
                         masked[index] = b' ';
                     }
                     escaped = !escaped && bytes[index] == b'\\';
-                    state = MaskState::TripleQuote { delimiter, escaped };
+                    state = MaskState::TripleQuote {
+                        delimiter,
+                        escaped,
+                    };
                     index += 1;
                 }
             }
-            MaskState::RustRaw { hashes } => {
+            MaskState::RustRaw {
+                hashes,
+            } => {
                 if bytes[index] == b'"'
                     && bytes
                         .get(index + 1..index + 1 + hashes)
@@ -879,7 +887,9 @@ fn mask_source(lang: &str, source: &str, mask_strings: bool) -> String {
                     index += 1;
                 }
             }
-            MaskState::ExecutableBacktick { mut escaped } => {
+            MaskState::ExecutableBacktick {
+                mut escaped,
+            } => {
                 if escaped {
                     escaped = false;
                 } else if bytes[index] == b'\\' {
@@ -889,7 +899,9 @@ fn mask_source(lang: &str, source: &str, mask_strings: bool) -> String {
                     index += 1;
                     continue;
                 }
-                state = MaskState::ExecutableBacktick { escaped };
+                state = MaskState::ExecutableBacktick {
+                    escaped,
+                };
                 index += 1;
             }
             MaskState::Code => {
@@ -915,14 +927,18 @@ fn mask_source(lang: &str, source: &str, mask_strings: bool) -> String {
                     state = MaskState::LineComment;
                 } else if shell_like && bytes[index] == b'`' {
                     index += 1;
-                    state = MaskState::ExecutableBacktick { escaped: false };
+                    state = MaskState::ExecutableBacktick {
+                        escaped: false,
+                    };
                 } else if rust {
                     if let Some((quote, hashes)) = rust_raw_string_start(bytes, index) {
                         if mask_strings {
                             masked[index..quote + 1].fill(b' ');
                         }
                         index = quote + 1;
-                        state = MaskState::RustRaw { hashes };
+                        state = MaskState::RustRaw {
+                            hashes,
+                        };
                     } else if bytes[index] == b'"' {
                         if mask_strings {
                             masked[index] = b' ';

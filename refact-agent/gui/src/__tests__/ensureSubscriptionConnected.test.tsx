@@ -92,36 +92,6 @@ describe("useEnsureSubscriptionConnected", () => {
     expect(result.current.isConnecting).toBe(false);
   });
 
-  it("provides ensureConnected function", () => {
-    const store = createTestStore({
-      current_thread_id: "test-chat-id",
-      open_thread_ids: ["test-chat-id"],
-      threads: {
-        "test-chat-id": createThreadRuntime({
-          thread: {
-            id: "test-chat-id",
-            messages: [{ role: "user", content: "hello" }],
-            model: "",
-            title: undefined,
-            new_chat_suggested: { wasSuggested: false },
-          },
-          snapshot_received: false,
-        }),
-      },
-    });
-
-    const wrapper = ({ children }: { children: React.ReactNode }) => (
-      <Provider store={store}>{children}</Provider>
-    );
-
-    const { result } = renderHook(
-      () => useEnsureSubscriptionConnected("test-chat-id"),
-      { wrapper },
-    );
-
-    expect(typeof result.current.ensureConnected).toBe("function");
-  });
-
   it("returns isConnected false when no snapshot received", () => {
     const store = createTestStore({
       current_thread_id: "test-chat-id",

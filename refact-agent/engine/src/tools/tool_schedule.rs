@@ -15,7 +15,9 @@ pub struct ToolSchedule {
 
 impl ToolSchedule {
     pub fn new(config_path: String) -> Self {
-        Self { config_path }
+        Self {
+            config_path,
+        }
     }
 }
 

@@ -869,7 +869,9 @@ pub async fn handle_v1_buddy_conversations_create(
     let chat_id = uuid::Uuid::new_v4().to_string();
     let created_at = chrono::Utc::now().to_rfc3339();
     let body = if body_bytes.is_empty() {
-        BuddyConversationCreateRequest { title: None }
+        BuddyConversationCreateRequest {
+            title: None,
+        }
     } else {
         serde_json::from_slice::<BuddyConversationCreateRequest>(&body_bytes).map_err(|e| {
             ScratchError::new(

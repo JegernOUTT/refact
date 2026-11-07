@@ -18,7 +18,9 @@ pub struct ToolGetGoal {
 
 impl ToolGetGoal {
     pub fn new(config_path: String) -> Self {
-        Self { config_path }
+        Self {
+            config_path,
+        }
     }
 }
 

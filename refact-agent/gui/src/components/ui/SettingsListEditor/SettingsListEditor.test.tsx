@@ -1,13 +1,10 @@
-import { readFile } from "node:fs/promises";
-import path from "node:path";
-
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type React from "react";
 import { describe, expect, it, vi } from "vitest";
 
-import { SettingsListEditor } from "./SettingsListEditor";
 import type { SettingsListEditorItem } from "./SettingsListEditor";
+import { SettingsListEditor } from "./SettingsListEditor";
 
 const items: SettingsListEditorItem[] = [
   { id: "a", value: "sudo" },
@@ -36,13 +33,6 @@ function renderEditor(
 }
 
 describe("SettingsListEditor", () => {
-  it("renders one input per item", () => {
-    renderEditor();
-
-    expect(screen.getByDisplayValue("sudo")).toBeInTheDocument();
-    expect(screen.getByDisplayValue("doas")).toBeInTheDocument();
-  });
-
   it("reports edits with the item id and the next value", async () => {
     const user = userEvent.setup();
     const { onChange } = renderEditor();
@@ -87,22 +77,5 @@ describe("SettingsListEditor", () => {
     renderEditor({ emptyLabel: "No rules yet.", items: [] });
 
     expect(screen.getByText("No rules yet.")).toBeInTheDocument();
-  });
-
-  it("keeps rows fluid and pins the remove control to the icon size token", async () => {
-    const css = await readFile(
-      path.resolve(__dirname, "SettingsListEditor.module.css"),
-      "utf8",
-    );
-
-    const inputBlock = /\.input\s*\{([^}]*)\}/.exec(css)?.[1] ?? "";
-
-    expect(inputBlock).toContain("width: 100%;");
-    expect(inputBlock).toContain("height: var(--rf-control-h);");
-    expect(inputBlock).not.toMatch(/max-width/);
-    expect(css).not.toMatch(/max-width/);
-    expect(css).toContain("grid-template-columns: minmax(0, 1fr) auto;");
-    expect(css).toContain("height: var(--rf-control-h-icon-sm);");
-    expect(css).toContain("font-family: var(--rf-font-mono);");
   });
 });

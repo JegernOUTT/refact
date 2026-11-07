@@ -1667,7 +1667,9 @@ async fn memories_search_inner(
                         m.best_score = score;
                     }
                 })
-                .or_insert(KnowledgeMatch { best_score: score });
+                .or_insert(KnowledgeMatch {
+                    best_score: score,
+                });
         } else if is_trajectory {
             let traj_id = rec
                 .file_path

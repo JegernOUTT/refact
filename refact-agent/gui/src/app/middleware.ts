@@ -3026,5 +3026,12 @@ startListening({
       if (key.startsWith("task:") && !after.has(key))
         api.dispatch(closeTask(key.slice("task:".length)));
     }
+    if (
+      before.size > 0 &&
+      after.size === 0 &&
+      selectCurrentPage(api.getState())?.name === "chat"
+    ) {
+      api.dispatch(popBackTo({ name: "history" }));
+    }
   },
 });

@@ -118,11 +118,17 @@ impl fmt::Display for StoreError {
             StoreError::Io(detail) => write!(f, "coordination store io: {detail}"),
             StoreError::Sqlite(detail) => write!(f, "coordination store sqlite: {detail}"),
             StoreError::Decode(detail) => write!(f, "coordination store decode: {detail}"),
-            StoreError::Corrupt { path, detail } => write!(
+            StoreError::Corrupt {
+                path,
+                detail,
+            } => write!(
                 f,
                 "coordination store at {path} is unreadable and was left untouched: {detail}"
             ),
-            StoreError::SchemaTooNew { found, supported } => write!(
+            StoreError::SchemaTooNew {
+                found,
+                supported,
+            } => write!(
                 f,
                 "coordination store schema version {found} is newer than this binary supports \
                  ({supported}); refusing to read it"
@@ -149,11 +155,19 @@ impl fmt::Display for StoreError {
                     "access token was issued by a different coordination store"
                 )
             }
-            StoreError::NotFound { kind, id } => write!(f, "{kind} `{id}` not found"),
-            StoreError::GenerationConflict { expected, found } => {
+            StoreError::NotFound {
+                kind,
+                id,
+            } => write!(f, "{kind} `{id}` not found"),
+            StoreError::GenerationConflict {
+                expected,
+                found,
+            } => {
                 write!(f, "generation conflict: expected {expected}, found {found}")
             }
-            StoreError::LeaseNotHeld { lease_key } => write!(
+            StoreError::LeaseNotHeld {
+                lease_key,
+            } => write!(
                 f,
                 "lease `{lease_key}` is not held by this owner token; it carries no authority"
             ),
@@ -206,7 +220,10 @@ impl fmt::Display for StoreWarning {
                 "coordination store path {path} lives on `{fs_type}` mounted at {mount_point}; \
                  opened anyway because store_allow_non_local_filesystem is set"
             ),
-            StoreWarning::DurabilityUnavailable { path, reason } => write!(
+            StoreWarning::DurabilityUnavailable {
+                path,
+                reason,
+            } => write!(
                 f,
                 "coordination store {path} is unavailable ({reason}); work continues \
                  without durability and will not survive a restart"
@@ -1225,7 +1242,9 @@ impl CoordinationStore {
             .map_err(|err| from_tokio(&self.path, err))?;
         match outcome {
             LeaseWrite::Wrote(record) => Ok(*record),
-            LeaseWrite::NotHeld => Err(StoreError::LeaseNotHeld { lease_key }),
+            LeaseWrite::NotHeld => Err(StoreError::LeaseNotHeld {
+                lease_key,
+            }),
             LeaseWrite::Expired(expires_at_ms) => Err(StoreError::LeaseExpired {
                 lease_key,
                 expires_at_ms,
@@ -2601,7 +2620,9 @@ fn lease_refused(
     now_ms: i64,
 ) -> StoreError {
     match refusal {
-        LeaseRefusal::NotHeld => StoreError::LeaseNotHeld { lease_key },
+        LeaseRefusal::NotHeld => StoreError::LeaseNotHeld {
+            lease_key,
+        },
         LeaseRefusal::Expired(expires_at_ms) => StoreError::LeaseExpired {
             lease_key,
             expires_at_ms,

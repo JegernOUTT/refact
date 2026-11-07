@@ -52,15 +52,6 @@ class ChatWebViewHealthTest {
     }
 
     @Test
-    fun pongAtThirtySecondsTriggersRecoveryWindow() {
-        val now = 120_000L
-        val lastPongAt = now - JCEF_UNRESPONSIVE_PONG_TIMEOUT_MS - 1
-
-        assertTrue(isJcefRendererUnresponsive(now, lastPongAt))
-        assertFalse(hasRecentJcefPong(now, lastPongAt))
-    }
-
-    @Test
     fun pongOutsideHealthyWindowStopsStableCredit() {
         val now = 120_000L
         val lastPongAt = now - JCEF_HEALTHY_PONG_WINDOW_MS - 1

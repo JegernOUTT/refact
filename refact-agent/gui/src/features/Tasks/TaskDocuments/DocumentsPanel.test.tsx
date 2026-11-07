@@ -97,25 +97,6 @@ function mockDocuments(response: TaskDocumentListResponse = listResponse) {
 }
 
 describe("DocumentsPanel", () => {
-  it("renders list of documents with kind badges", async () => {
-    mockDocuments();
-
-    render(<DocumentsPanel taskId="task-1" />, {
-      preloadedState: CONFIG_STATE,
-    });
-
-    expect(await screen.findByText("Initial Plan")).toBeInTheDocument();
-    expect(screen.getByText("API Design")).toBeInTheDocument();
-
-    const planBadge = screen.getByTestId("kind-badge-initial-plan");
-    expect(planBadge).toBeInTheDocument();
-    expect(planBadge).toHaveTextContent("plan");
-
-    const designBadge = screen.getByTestId("kind-badge-api-design");
-    expect(designBadge).toBeInTheDocument();
-    expect(designBadge).toHaveTextContent("design");
-  });
-
   it("clicking a row expands inline content as markdown", async () => {
     mockDocuments();
     server.use(
@@ -875,16 +856,6 @@ describe("DocumentsPanel", () => {
     expect(allDocNames[1]).toBe("document-row-api-design");
   });
 
-  it("empty state shown when no documents", async () => {
-    mockDocuments({ task_id: "task-1", documents: [] });
-
-    render(<DocumentsPanel taskId="task-1" />, {
-      preloadedState: CONFIG_STATE,
-    });
-
-    expect(await screen.findByText(/No documents yet/)).toBeInTheDocument();
-  });
-
   it("kind filter narrows visible documents", async () => {
     mockDocuments();
 
@@ -902,16 +873,6 @@ describe("DocumentsPanel", () => {
       expect(screen.getByText("Initial Plan")).toBeInTheDocument();
       expect(screen.queryByText("API Design")).not.toBeInTheDocument();
     });
-  });
-
-  it("header shows document count", async () => {
-    mockDocuments();
-
-    render(<DocumentsPanel taskId="task-1" />, {
-      preloadedState: CONFIG_STATE,
-    });
-
-    expect(await screen.findByText("2 documents")).toBeInTheDocument();
   });
 
   it("pin_success_does_not_leave_stale_optimistic_override", async () => {

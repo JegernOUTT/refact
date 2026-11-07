@@ -840,9 +840,15 @@ fn exec_status_label(status: &ExecStatus) -> &'static str {
     match status {
         ExecStatus::Starting => "starting",
         ExecStatus::Running => "running",
-        ExecStatus::Exited { .. } => "exited",
-        ExecStatus::SandboxLauncherFailed { .. } => "sandbox_launcher_failed",
-        ExecStatus::Failed { .. } => "failed",
+        ExecStatus::Exited {
+            ..
+        } => "exited",
+        ExecStatus::SandboxLauncherFailed {
+            ..
+        } => "sandbox_launcher_failed",
+        ExecStatus::Failed {
+            ..
+        } => "failed",
         ExecStatus::Killed => "killed",
         ExecStatus::TimedOut => "timed_out",
     }
@@ -850,11 +856,17 @@ fn exec_status_label(status: &ExecStatus) -> &'static str {
 
 fn exec_exit_code(status: &ExecStatus) -> Option<i32> {
     match status {
-        ExecStatus::Exited { exit_code } => *exit_code,
-        ExecStatus::SandboxLauncherFailed { exit_code } => Some(*exit_code),
+        ExecStatus::Exited {
+            exit_code,
+        } => *exit_code,
+        ExecStatus::SandboxLauncherFailed {
+            exit_code,
+        } => Some(*exit_code),
         ExecStatus::Starting
         | ExecStatus::Running
-        | ExecStatus::Failed { .. }
+        | ExecStatus::Failed {
+            ..
+        }
         | ExecStatus::Killed
         | ExecStatus::TimedOut => None,
     }
@@ -927,11 +939,17 @@ fn background_started_output(snapshot: &ExecProcessSnapshot) -> String {
 
 fn tool_failed_for_status(status: &ExecStatus) -> Option<bool> {
     match status {
-        ExecStatus::SandboxLauncherFailed { .. }
-        | ExecStatus::Failed { .. }
+        ExecStatus::SandboxLauncherFailed {
+            ..
+        }
+        | ExecStatus::Failed {
+            ..
+        }
         | ExecStatus::Killed
         | ExecStatus::TimedOut => Some(true),
-        ExecStatus::Exited { exit_code } => Some(*exit_code != Some(0)),
+        ExecStatus::Exited {
+            exit_code,
+        } => Some(*exit_code != Some(0)),
         ExecStatus::Starting | ExecStatus::Running => None,
     }
 }
@@ -1461,7 +1479,9 @@ mod tests {
 
         append_sandbox_denial_hint(
             &mut output,
-            &ExecStatus::Exited { exit_code: Some(1) },
+            &ExecStatus::Exited {
+                exit_code: Some(1),
+            },
             true,
         );
 
@@ -1474,7 +1494,9 @@ mod tests {
 
         append_sandbox_denial_hint(
             &mut output,
-            &ExecStatus::Exited { exit_code: Some(1) },
+            &ExecStatus::Exited {
+                exit_code: Some(1),
+            },
             false,
         );
 
@@ -1483,7 +1505,9 @@ mod tests {
 
     #[test]
     fn unknown_exit_is_failed_without_claiming_exit_zero() {
-        let status = ExecStatus::Exited { exit_code: None };
+        let status = ExecStatus::Exited {
+            exit_code: None,
+        };
         let mut output = "retained output\n".to_string();
         append_status_line(&mut output, &status, Duration::from_secs(1), 10);
         assert_eq!(tool_failed_for_status(&status), Some(true));
@@ -1500,7 +1524,9 @@ mod tests {
 
         append_sandbox_denial_hint(
             &mut output,
-            &ExecStatus::SandboxLauncherFailed { exit_code: 125 },
+            &ExecStatus::SandboxLauncherFailed {
+                exit_code: 125,
+            },
             true,
         );
 

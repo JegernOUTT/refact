@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { setUpStore } from "./store";
 import { createChatWithId } from "../features/Chat/Thread/actions";
 import { setCurrentProjectInfo } from "../features/Chat/currentProject";
+import { push, selectCurrentPage } from "../features/Pages/pagesSlice";
 import {
   workspaceSlice,
   selectFocusedWorkspaceChatId,
@@ -121,6 +122,117 @@ describe("pane-tab listener integration", () => {
       ),
     ).not.toContain("chat:pane-b");
   });
+});
+
+describe("closing the last workspace surface", () => {
+  function setupSingleSurface(surfaceKey: string) {
+    const store = setUpStore();
+    store.dispatch(push({ name: "history" }));
+    store.dispatch(push({ name: "chat" }));
+    if (surfaceKey.startsWith("chat:")) {
+      store.dispatch(
+        createChatWithId({ id: surfaceKey.slice("chat:".length) }),
+      );
+    } else {
+      store.dispatch(actions.openTab(surfaceKey));
+    }
+    const group = store.getState().workspace.groups[surfaceKey];
+    if (!group) throw new Error("Expected workspace group");
+    return { store, leafId: group.focusedLeafId };
+  }
+
+  it.each(["chat:last-chat", "file:/last.ts"])(
+    "returns to Home when the final pane tab %s closes",
+    (surfaceKey) => {
+      const { store, leafId } = setupSingleSurface(surfaceKey);
+      store.dispatch(
+        actions.closePaneTab({ tabId: surfaceKey, leafId, surfaceKey }),
+      );
+      expect(store.getState().workspace.tabs).toEqual([]);
+      expect(selectCurrentPage(store.getState())).toEqual({ name: "history" });
+    },
+  );
+
+  it.each(["closeTab", "closePane"] as const)(
+    "returns to Home when %s removes the final surface",
+    (closeAction) => {
+      const surfaceKey = "file:/last.ts";
+      const { store, leafId } = setupSingleSurface(surfaceKey);
+      store.dispatch(
+        closeAction === "closeTab"
+          ? actions.closeTab(surfaceKey)
+          : actions.closePane({ tabId: surfaceKey, leafId }),
+      );
+      expect(store.getState().workspace.tabs).toEqual([]);
+      expect(selectCurrentPage(store.getState())).toEqual({ name: "history" });
+    },
+  );
+
+  it("stays in chat when a split leaf empties but a file remains in another leaf", () => {
+    const tabId = "file:/first.ts";
+    const { store, leafId } = setupSingleSurface(tabId);
+    store.dispatch(actions.splitTab({ tabId, dir: "row" }));
+    store.dispatch(actions.openTab("file:/remaining.ts"));
+    store.dispatch(actions.closePaneTab({ tabId, leafId, surfaceKey: tabId }));
+    const remainingTabId = store.getState().workspace.tabs[0];
+    const group = store.getState().workspace.groups[remainingTabId];
+    expect(group && collectTabIds(group.root)).toEqual(["file:/remaining.ts"]);
+    expect(selectCurrentPage(store.getState())).toEqual({ name: "chat" });
+    if (!group) throw new Error("Expected remaining file pane");
+    store.dispatch(
+      actions.closePaneTab({
+        tabId: remainingTabId,
+        leafId: group.focusedLeafId,
+        surfaceKey: "file:/remaining.ts",
+      }),
+    );
+    expect(store.getState().workspace.tabs).toEqual([]);
+    expect(selectCurrentPage(store.getState())).toEqual({ name: "history" });
+  });
+
+  it("does not navigate for no-op closes in populated or empty workspaces", () => {
+    const { store, leafId } = setupSingleSurface("file:/last.ts");
+    store.dispatch(
+      actions.closePaneTab({
+        tabId: "file:/last.ts",
+        leafId,
+        surfaceKey: "file:/missing.ts",
+      }),
+    );
+    expect(store.getState().workspace.tabs).toEqual(["file:/last.ts"]);
+    expect(selectCurrentPage(store.getState())).toEqual({ name: "chat" });
+    const emptyStore = setUpStore();
+    emptyStore.dispatch(push({ name: "chat" }));
+    emptyStore.dispatch(actions.closeTab("file:/missing.ts"));
+    emptyStore.dispatch(
+      actions.closePane({ tabId: "file:/missing.ts", leafId: "root" }),
+    );
+    emptyStore.dispatch(
+      actions.closePaneTab({
+        tabId: "file:/missing.ts",
+        leafId: "root",
+        surfaceKey: "file:/missing.ts",
+      }),
+    );
+    expect(selectCurrentPage(emptyStore.getState())).toEqual({ name: "chat" });
+  });
+
+  it.each([
+    { name: "general settings" } as const,
+    { name: "task workspace", taskId: "owned-task" } as const,
+  ])(
+    "preserves the current $name page when the last workspace surface closes",
+    (page) => {
+      const surfaceKey = "file:/last.ts";
+      const { store, leafId } = setupSingleSurface(surfaceKey);
+      store.dispatch(push(page));
+      store.dispatch(
+        actions.closePaneTab({ tabId: surfaceKey, leafId, surfaceKey }),
+      );
+      expect(store.getState().workspace.tabs).toEqual([]);
+      expect(selectCurrentPage(store.getState())).toEqual(page);
+    },
+  );
 });
 
 describe("single-layer workspace migration", () => {

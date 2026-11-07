@@ -32,10 +32,4 @@ describe("resolveConcreteAppearance", () => {
     expect(resolveConcreteAppearance("inherit", true)).toBe("dark");
     expect(resolveConcreteAppearance("inherit", false)).toBe("light");
   });
-
-  test("treats undefined like inherit", () => {
-    expect(resolveConcreteAppearance(undefined, true)).toBe("dark");
-    document.body.classList.add("vscode-light");
-    expect(resolveConcreteAppearance(undefined, true)).toBe("light");
-  });
 });

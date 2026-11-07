@@ -15,7 +15,9 @@ pub struct AtLoadKnowledge {
 
 impl AtLoadKnowledge {
     pub fn new() -> Self {
-        AtLoadKnowledge { params: vec![] }
+        AtLoadKnowledge {
+            params: vec![],
+        }
     }
 }
 

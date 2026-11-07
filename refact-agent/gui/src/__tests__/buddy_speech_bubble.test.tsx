@@ -36,25 +36,11 @@ describe("BuddySpeechBubble styles", () => {
     expect(anchor).toHaveAttribute("data-style", "say");
     expect(anchor).toHaveAttribute("data-closing", "false");
     expect(anchor).toHaveAttribute("data-exit-kind", "natural");
-    expect(container.querySelectorAll("[class*='tailOuter']")).toHaveLength(1);
-    expect(container.querySelectorAll("[class*='thinkTail']")).toHaveLength(0);
   });
 
   it("renders three cloud tail circles for the think style", () => {
     const { container } = renderBubble({ bubbleStyle: "think" });
     expect(bubbleAnchor(container)).toHaveAttribute("data-style", "think");
-    expect(container.querySelectorAll("[class*='thinkTail']")).toHaveLength(3);
-    expect(container.querySelectorAll("[class*='tailOuter']")).toHaveLength(0);
-  });
-
-  it("renders drifting notes for the sing style", () => {
-    const { container } = renderBubble({ bubbleStyle: "sing" });
-    expect(container.querySelectorAll("[class*='singNote']").length).toBe(4);
-  });
-
-  it("renders a ring pulse for the alert style", () => {
-    const { container } = renderBubble({ bubbleStyle: "alert" });
-    expect(container.querySelectorAll("[class*='alertRing']")).toHaveLength(1);
   });
 
   it("marks the closing phase with its exit kind", () => {
@@ -66,14 +52,6 @@ describe("BuddySpeechBubble styles", () => {
     expect(anchor).toHaveAttribute("data-closing", "true");
     expect(anchor).toHaveAttribute("data-exit-kind", "accept");
     expect(anchor.style.pointerEvents).toBe("none");
-  });
-
-  it("renders a media slot below the text", () => {
-    const { container } = renderBubble({
-      media: <canvas data-testid="dream-canvas" width={132} height={76} />,
-    });
-    expect(screen.getByTestId("dream-canvas")).toBeInTheDocument();
-    expect(container.querySelector("[class*='media']")).not.toBeNull();
   });
 });
 

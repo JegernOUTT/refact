@@ -119,7 +119,9 @@ pub struct OperatorStoreRecoveryRepository {
 
 impl OperatorStoreRecoveryRepository {
     pub fn new(store: OperatorStore) -> Self {
-        Self { store }
+        Self {
+            store,
+        }
     }
 
     pub fn into_store(self) -> OperatorStore {
@@ -295,14 +297,22 @@ impl<R: RecoveryRepository> RecoveryService<R> {
             .material_provider
             .material_for(&original.execution, recovery)
         {
-            RecoveryMaterial::Available { reference } if !reference.trim().is_empty() => reference,
-            RecoveryMaterial::Available { .. } => {
+            RecoveryMaterial::Available {
+                reference,
+            } if !reference.trim().is_empty() => reference,
+            RecoveryMaterial::Available {
+                ..
+            } => {
                 return RecoveryResult::Rejected(RecoveryRejection::RecoveryUnavailable {
                     reason: "recovery material reference is empty".into(),
                 })
             }
-            RecoveryMaterial::Unavailable { reason } => {
-                return RecoveryResult::Rejected(RecoveryRejection::RecoveryUnavailable { reason })
+            RecoveryMaterial::Unavailable {
+                reason,
+            } => {
+                return RecoveryResult::Rejected(RecoveryRejection::RecoveryUnavailable {
+                    reason,
+                })
             }
         };
         match adapter.inspect_current_version(&request.original_spec) {
@@ -729,7 +739,9 @@ mod tests {
         let mut records = HashMap::new();
         records.insert(original.execution.idempotency_key.clone(), original);
         let mut service = RecoveryService::new(
-            MemoryRepository { records },
+            MemoryRepository {
+                records,
+            },
             Arc::new(Allow(true)),
             Arc::new(Material(material)),
         );

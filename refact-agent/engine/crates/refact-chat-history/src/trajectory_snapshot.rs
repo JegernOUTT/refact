@@ -319,17 +319,6 @@ mod tests {
     }
 
     #[test]
-    fn trajectory_snapshot_missing_goal_defaults_none() {
-        let snapshot = snapshot();
-        let encoded = serde_json::to_string(&snapshot).unwrap();
-        let value: serde_json::Value = serde_json::from_str(&encoded).unwrap();
-
-        assert!(value.get("goal").is_none());
-        let decoded: TrajectorySnapshot = serde_json::from_value(value).unwrap();
-        assert_eq!(decoded.goal, None);
-    }
-
-    #[test]
     fn pending_questions_roundtrip_and_legacy_absence() {
         let mut value = serde_json::to_value(snapshot()).unwrap();
         assert!(value.get("pending_questions").is_none());

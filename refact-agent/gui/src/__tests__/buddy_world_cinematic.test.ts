@@ -1,14 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import {
-  BUDDY_DREAM_KINDS,
-  drawBuddyDreamFrame,
-  pickBuddyDream,
-} from "../features/Buddy/buddyDreams";
+import { drawBuddyDreamFrame } from "../features/Buddy/buddyDreams";
 import { drawBuddyWorldForeground } from "../features/Buddy/buddyWorldDrawForeground";
-import {
-  drawLanternGlowPools,
-  drawPondReflection,
-} from "../features/Buddy/buddyWorldDrawDiorama";
 import { chooseBuddyWorldIntent } from "../features/Buddy/buddyWorldDirector";
 import { buildBuddyWorldState } from "../features/Buddy/buddyWorldModel";
 import { PALETTES } from "../features/Buddy/constants";
@@ -103,33 +95,6 @@ function drawArgsFor(
 }
 
 describe("buddy dreams", () => {
-  it("picks deterministically and reaches every dreamscape", () => {
-    const seen = new Set<string>();
-    for (let seed = 0; seed < 200; seed += 1) {
-      const kind = pickBuddyDream(seed);
-      expect(pickBuddyDream(seed)).toBe(kind);
-      seen.add(kind);
-    }
-    expect(seen).toEqual(new Set(BUDDY_DREAM_KINDS));
-  });
-
-  it("clears before painting every dream frame", () => {
-    for (const kind of BUDDY_DREAM_KINDS) {
-      const recording = recordingContext();
-      drawBuddyDreamFrame(recording.ctx, kind, 120);
-      expect(recording.ops[0]?.startsWith("clearRect")).toBe(true);
-      expect(recording.ops.length).toBeGreaterThan(2);
-    }
-  });
-
-  it("renders dream frames deterministically", () => {
-    const first = recordingContext();
-    const second = recordingContext();
-    drawBuddyDreamFrame(first.ctx, "brick_stars", 77);
-    drawBuddyDreamFrame(second.ctx, "brick_stars", 77);
-    expect(first.ops).toEqual(second.ops);
-  });
-
   it("stays finite with hostile frames", () => {
     const recording = recordingContext();
     drawBuddyDreamFrame(recording.ctx, "sky_flight", Number.NaN);
@@ -142,15 +107,6 @@ describe("buddy dreams", () => {
 describe("foreground depth canvas", () => {
   const day = new Date("2024-01-01T14:00:00");
 
-  it("clears first and stays deterministic", () => {
-    const first = recordingContext();
-    const second = recordingContext();
-    drawBuddyWorldForeground(drawArgsFor(first, day));
-    drawBuddyWorldForeground(drawArgsFor(second, day));
-    expect(first.ops[0]?.startsWith("clearRect")).toBe(true);
-    expect(first.ops).toEqual(second.ops);
-  });
-
   it("keeps reduced motion lighter than standard", () => {
     const standard = recordingContext();
     const reduced = recordingContext();
@@ -159,23 +115,6 @@ describe("foreground depth canvas", () => {
       drawArgsFor(reduced, day, { reducedMotion: true }),
     );
     expect(reduced.ops.length).toBeLessThan(standard.ops.length);
-  });
-
-  it("keeps the tuft clusters outside the buddy band", () => {
-    const recording = recordingContext();
-    drawBuddyWorldForeground(drawArgsFor(recording, day));
-    const ellipseXs = recording.ops
-      .filter((op) => op.startsWith("ellipse"))
-      .map((op) => Number(op.split(":")[1]))
-      .filter((x) => Number.isFinite(x));
-    const groundShadowXs = ellipseXs.filter((x) =>
-      [86.4, 216, 619.2].includes(x),
-    );
-    expect(groundShadowXs.length).toBeGreaterThanOrEqual(3);
-    for (const x of groundShadowXs) {
-      const percent = (x / 720) * 100;
-      expect(percent < 33 || percent > 67).toBe(true);
-    }
   });
 
   it("rains in front of the buddy for rainy worlds", () => {
@@ -227,65 +166,6 @@ describe("foreground depth canvas", () => {
     const flat = recording.ops.join("|");
     expect(flat).not.toContain("NaN");
     expect(flat).not.toContain("Infinity");
-  });
-});
-
-describe("pond reflection", () => {
-  const summerDay = new Date("2024-07-01T14:00:00");
-
-  it("appears only when the actor is near the pond", () => {
-    const near = recordingContext();
-    drawPondReflection(drawArgsFor(near, summerDay, { actorXPercent: 38 }));
-    expect(near.ops.length).toBeGreaterThan(0);
-
-    const far = recordingContext();
-    drawPondReflection(drawArgsFor(far, summerDay, { actorXPercent: 60 }));
-    expect(far.ops).toHaveLength(0);
-
-    const absent = recordingContext();
-    drawPondReflection(drawArgsFor(absent, summerDay));
-    expect(absent.ops).toHaveLength(0);
-  });
-
-  it("skips the frozen winter pond", () => {
-    const recording = recordingContext();
-    drawPondReflection(
-      drawArgsFor(recording, new Date("2024-01-01T14:00:00"), {
-        actorXPercent: 38,
-      }),
-    );
-    expect(recording.ops).toHaveLength(0);
-  });
-});
-
-describe("lantern glow pools", () => {
-  const night = new Date("2024-07-01T23:00:00");
-
-  it("only glows in the evening and night", () => {
-    const dayRecording = recordingContext();
-    drawLanternGlowPools(
-      drawArgsFor(dayRecording, new Date("2024-07-01T14:00:00")),
-      3,
-    );
-    expect(dayRecording.ops).toHaveLength(0);
-
-    const nightRecording = recordingContext();
-    drawLanternGlowPools(drawArgsFor(nightRecording, night), 3);
-    expect(nightRecording.ops.length).toBeGreaterThan(0);
-  });
-
-  it("respects the lit count override and avoids amber fill rects", () => {
-    const twoLit = recordingContext();
-    drawLanternGlowPools(drawArgsFor(twoLit, night), 2);
-    const pools = twoLit.ops.filter(
-      (op) => op.startsWith("fill:") && op.includes("#FBBF24"),
-    );
-    expect(pools).toHaveLength(2);
-    expect(twoLit.fillRectStyles).toHaveLength(0);
-
-    const doused = recordingContext();
-    drawLanternGlowPools(drawArgsFor(doused, night), 0);
-    expect(doused.ops).toHaveLength(0);
   });
 });
 

@@ -78,16 +78,29 @@ pub(crate) fn intersect(policy: &ToolsPolicy, ceiling: &ToolsPolicy) -> ToolsPol
         // authority-guarded spawn path. It is never "all tools": intersecting
         // it can only remove names, never add any.
         (
-            ToolsPolicy::Supervised { tools, budget },
+            ToolsPolicy::Supervised {
+                tools,
+                budget,
+            },
             ToolsPolicy::Supervised {
                 tools: allowed,
                 budget: ceiling_budget,
             },
         ) => supervised_narrowed(tools, allowed, tightest_budget(budget, ceiling_budget)),
-        (ToolsPolicy::Supervised { tools, budget }, ToolsPolicy::Only(allowed))
-        | (ToolsPolicy::Only(allowed), ToolsPolicy::Supervised { tools, budget }) => {
-            supervised_narrowed(tools, allowed, budget.clone())
-        }
+        (
+            ToolsPolicy::Supervised {
+                tools,
+                budget,
+            },
+            ToolsPolicy::Only(allowed),
+        )
+        | (
+            ToolsPolicy::Only(allowed),
+            ToolsPolicy::Supervised {
+                tools,
+                budget,
+            },
+        ) => supervised_narrowed(tools, allowed, budget.clone()),
     }
 }
 

@@ -82,7 +82,10 @@ fn draft_validation_error(err: DraftValidationError) -> ScratchError {
         DraftValidationError::NotFound => {
             ScratchError::new(StatusCode::NOT_FOUND, "draft_not_found".to_string())
         }
-        DraftValidationError::KindMismatch { expected, actual } => ScratchError::new(
+        DraftValidationError::KindMismatch {
+            expected,
+            actual,
+        } => ScratchError::new(
             StatusCode::CONFLICT,
             format!(
                 "draft_kind_mismatch: expected {}, got {}",
@@ -90,7 +93,10 @@ fn draft_validation_error(err: DraftValidationError) -> ScratchError {
                 draft_kind_str(&actual)
             ),
         ),
-        DraftValidationError::TargetMismatch { expected, actual } => ScratchError::new(
+        DraftValidationError::TargetMismatch {
+            expected,
+            actual,
+        } => ScratchError::new(
             StatusCode::CONFLICT,
             format!(
                 "draft_target_mismatch: expected {}, got {}",
@@ -419,7 +425,9 @@ pub(crate) async fn dispatch_action(
         }
     }
     match action {
-        BuddyAction::OpenPage { page } => {
+        BuddyAction::OpenPage {
+            page,
+        } => {
             let nav_page = serde_json::to_value(page)
                 .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
             Ok(ActionOutcome {
@@ -430,7 +438,9 @@ pub(crate) async fn dispatch_action(
                 status: OpportunityStatus::Accepted,
             })
         }
-        BuddyAction::LaunchInvestigationChat { preload } => {
+        BuddyAction::LaunchInvestigationChat {
+            preload,
+        } => {
             let mut enriched_ctx = preload.clone();
             enrich_investigation_context(&app, &mut enriched_ctx).await;
             let chat_id = create_investigation_chat(app.gcx.clone(), &enriched_ctx).await?;
@@ -442,14 +452,32 @@ pub(crate) async fn dispatch_action(
                 status: OpportunityStatus::Accepted,
             })
         }
-        BuddyAction::DraftSkill { draft_id, label }
-        | BuddyAction::DraftCommand { draft_id, label }
-        | BuddyAction::DraftDelegate { draft_id, label }
-        | BuddyAction::DraftMode { draft_id, label } => {
+        BuddyAction::DraftSkill {
+            draft_id,
+            label,
+        }
+        | BuddyAction::DraftCommand {
+            draft_id,
+            label,
+        }
+        | BuddyAction::DraftDelegate {
+            draft_id,
+            label,
+        }
+        | BuddyAction::DraftMode {
+            draft_id,
+            label,
+        } => {
             let dk = match action {
-                BuddyAction::DraftSkill { .. } => DraftKind::Skill,
-                BuddyAction::DraftCommand { .. } => DraftKind::Command,
-                BuddyAction::DraftDelegate { .. } => DraftKind::Delegate,
+                BuddyAction::DraftSkill {
+                    ..
+                } => DraftKind::Skill,
+                BuddyAction::DraftCommand {
+                    ..
+                } => DraftKind::Command,
+                BuddyAction::DraftDelegate {
+                    ..
+                } => DraftKind::Delegate,
                 _ => DraftKind::Mode,
             };
             let final_id = if draft_id.is_empty() {
@@ -489,7 +517,9 @@ pub(crate) async fn dispatch_action(
                 status: OpportunityStatus::Accepted,
             })
         }
-        BuddyAction::DraftAgentsMdPatch { content } => {
+        BuddyAction::DraftAgentsMdPatch {
+            content,
+        } => {
             let draft_content = if content.is_empty() {
                 "# AGENTS.md\n\nThis file provides guidance to AI agents when working with this repository.\n\n## Development Commands\n\n- **Build**: `make build`\n- **Test**: `make test`\n\n## Architecture\n\nDescribe the project architecture here.\n"
             } else {
@@ -572,7 +602,9 @@ pub(crate) async fn dispatch_action(
                 status: OpportunityStatus::Accepted,
             })
         }
-        BuddyAction::CreatePulseReport { scope } => {
+        BuddyAction::CreatePulseReport {
+            scope,
+        } => {
             let pulse = {
                 let buddy_arc = app.buddy.buddy.clone();
                 let lock = buddy_arc.lock().await;
@@ -620,7 +652,9 @@ pub(crate) async fn dispatch_action(
                 status: OpportunityStatus::Accepted,
             })
         }
-        BuddyAction::ApplyMemoryBatch { batch_key, .. } => {
+        BuddyAction::ApplyMemoryBatch {
+            batch_key, ..
+        } => {
             let (autonomy, project_root) = {
                 let buddy_arc = app.gcx.buddy.clone();
                 let lock = buddy_arc.lock().await;
@@ -723,7 +757,9 @@ pub(crate) async fn dispatch_action(
                 )),
             }
         }
-        BuddyAction::AcceptQuest { suggestion_id } => {
+        BuddyAction::AcceptQuest {
+            suggestion_id,
+        } => {
             let (quest, persona, identity_name, pulse) = {
                 let buddy_arc = app.gcx.buddy.clone();
                 let mut lock = buddy_arc.lock().await;
@@ -778,7 +814,9 @@ pub(crate) async fn dispatch_action(
                 status: OpportunityStatus::Completed,
             })
         }
-        BuddyAction::OpenBuddyConversation { chat_id } => Ok(ActionOutcome {
+        BuddyAction::OpenBuddyConversation {
+            chat_id,
+        } => Ok(ActionOutcome {
             result: serde_json::json!({
                 "kind": "open_chat",
                 "chat_id": chat_id

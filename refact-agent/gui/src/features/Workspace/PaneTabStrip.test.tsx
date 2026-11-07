@@ -106,6 +106,109 @@ describe("compact pane tabs", () => {
     });
   });
 
+  it.each(["alpha.ts", "beta.ts"])(
+    "middle-click closes %s without activating it and focuses the surviving tab",
+    (title) => {
+      const store = setup();
+      render(
+        <>
+          <WorkspaceToolbarTabs />
+          <GroupSplitView tabId={a} />
+        </>,
+        { store },
+      );
+      const tab = screen.getByRole("tab", { name: title });
+      const survivor = title === "alpha.ts" ? "beta.ts" : "alpha.ts";
+      expect(fireEvent.pointerDown(tab, { button: 1 })).toBe(false);
+      expect(fireEvent.mouseDown(tab, { button: 1 })).toBe(false);
+      expect(screen.getByRole("tab", { name: "beta.ts" })).toHaveAttribute(
+        "aria-selected",
+        "true",
+      );
+      expect(
+        fireEvent(
+          tab,
+          new MouseEvent("auxclick", {
+            button: 1,
+            bubbles: true,
+            cancelable: true,
+          }),
+        ),
+      ).toBe(false);
+      expect(screen.queryByRole("tab", { name: title })).toBeNull();
+      expect(screen.getByRole("tab", { name: survivor })).toHaveAttribute(
+        "aria-selected",
+        "true",
+      );
+      expect(screen.getByRole("tab", { name: survivor })).toHaveFocus();
+      expect(store.getState().workspace.tabs).toEqual([
+        title === "alpha.ts" ? b : a,
+      ]);
+    },
+  );
+
+  it("handles middle-click on the close icon once through the normal navigation close path", () => {
+    const onClose = vi.fn();
+    const onActivate = vi.fn();
+    render(
+      <PaneTabStrip
+        leaf={{ kind: "leaf", id: "root", tabIds: [a], activeTabId: a }}
+        tabId={a}
+        navigationEntries={[
+          { key: "buddy", surfaceKey: "buddy:home", onActivate, onClose },
+        ]}
+      />,
+    );
+    const close = screen.getByRole("button", { name: "Close Buddy" });
+    const icon = close.querySelector("svg");
+    expect(icon).not.toBeNull();
+    const target = icon ?? close;
+    expect(fireEvent.pointerDown(target, { button: 1 })).toBe(false);
+    expect(fireEvent.mouseDown(target, { button: 1 })).toBe(false);
+    fireEvent(target, new MouseEvent("auxclick", { button: 1, bubbles: true }));
+    expect(onClose).toHaveBeenCalledOnce();
+    expect(onActivate).not.toHaveBeenCalled();
+    expect(screen.getByRole("tab", { name: "alpha.ts" })).toHaveFocus();
+  });
+
+  it("preserves non-middle events and does not close non-closable navigation tabs", () => {
+    const onActivate = vi.fn();
+    const onClose = vi.fn();
+    render(
+      <PaneTabStrip
+        leaf={{ kind: "leaf", id: "root", tabIds: [a], activeTabId: a }}
+        tabId={a}
+        navigationEntries={[
+          { key: "buddy", surfaceKey: "buddy:home", onActivate, onClose },
+          { key: "git", surfaceKey: "git:main", onActivate },
+        ]}
+      />,
+    );
+    const buddy = screen.getByRole("tab", { name: "Idle Buddy" });
+    for (const button of [0, 2]) {
+      expect(fireEvent.pointerDown(buddy, { button })).toBe(true);
+      expect(fireEvent.mouseDown(buddy, { button })).toBe(true);
+      expect(
+        fireEvent(
+          buddy,
+          new MouseEvent("auxclick", {
+            button,
+            bubbles: true,
+            cancelable: true,
+          }),
+        ),
+      ).toBe(true);
+    }
+    fireEvent.click(buddy);
+    expect(onActivate).toHaveBeenCalledOnce();
+    fireEvent(
+      screen.getByRole("tab", { name: "Git" }),
+      new MouseEvent("auxclick", { button: 1, bubbles: true }),
+    );
+    expect(onClose).not.toHaveBeenCalled();
+    expect(onActivate).toHaveBeenCalledOnce();
+  });
+
   it("uses native payloads for tab reordering rather than pane splitting", () => {
     const store = setup();
     render(

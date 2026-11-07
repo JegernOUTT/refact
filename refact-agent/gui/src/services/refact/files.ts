@@ -21,6 +21,28 @@ export type FilesTreeResponse = {
   truncated: boolean;
 };
 
+export type FilesSort = "name" | "type" | "size";
+export type FilesDirection = "asc" | "desc";
+export type FilesSearchEntry = FilesTreeEntry & {
+  root: string;
+  relative_path: string;
+};
+export type FilesSearchResponse = {
+  entries: FilesSearchEntry[];
+  truncated: boolean;
+  index_state: "cold" | "building" | "ready" | "degraded";
+  complete: boolean;
+};
+export type FilesSearchRequest = {
+  q: string;
+  root?: string;
+  limit: number;
+  sort: FilesSort;
+  direction: FilesDirection;
+  show_ignored: boolean;
+  projectIdentity: string;
+};
+
 export type ReadFileRequest = {
   path: string;
   chatId?: string;
@@ -93,6 +115,25 @@ export const filesApi = createApi({
     },
   }),
   endpoints: (builder) => ({
+    searchFiles: builder.query<FilesSearchResponse, FilesSearchRequest>({
+      queryFn: async (
+        { projectIdentity: _identity, ...params },
+        api,
+        _options,
+        baseQuery,
+      ) => {
+        const result = await baseQuery({
+          url: buildApiUrlFromState(
+            api.getState() as RootState,
+            "/v1/files/search",
+            params,
+          ),
+          credentials: "same-origin",
+        });
+        if (result.error) return { error: result.error };
+        return { data: result.data as FilesSearchResponse };
+      },
+    }),
     getFilesTree: builder.query<
       FilesTreeResponse,
       string | { path: string; manual: true }

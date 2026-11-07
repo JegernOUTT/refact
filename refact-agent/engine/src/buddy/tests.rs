@@ -181,7 +181,10 @@ async fn test_settings_update_hot_applies_and_emits_event() {
 
     let mut saw_settings_changed = false;
     while let Ok(event) = rx.try_recv() {
-        if let super::events::BuddyEvent::SettingsChanged { settings } = event {
+        if let super::events::BuddyEvent::SettingsChanged {
+            settings,
+        } = event
+        {
             assert!(!settings.chat_reactions_enabled);
             assert!(settings.quiet_mode);
             saw_settings_changed = true;
@@ -401,15 +404,25 @@ async fn test_runtime_queue_dismissal_survives_restart() {
         Some("high"),
     );
     let id = ev.id.clone();
-    append_runtime_record(root, &RuntimeQueueRecord::Event { event: ev.clone() })
-        .await
-        .unwrap();
+    append_runtime_record(
+        root,
+        &RuntimeQueueRecord::Event {
+            event: ev.clone(),
+        },
+    )
+    .await
+    .unwrap();
 
     // Dismissal is recorded as a fresh Event with dismissed=true.
     ev.dismissed = true;
-    append_runtime_record(root, &RuntimeQueueRecord::Event { event: ev.clone() })
-        .await
-        .unwrap();
+    append_runtime_record(
+        root,
+        &RuntimeQueueRecord::Event {
+            event: ev.clone(),
+        },
+    )
+    .await
+    .unwrap();
 
     let queue = load_runtime_queue(root).await;
     let restored = queue
@@ -508,15 +521,25 @@ async fn test_runtime_queue_replay_uses_latest_event() {
         Some("normal"),
     );
     let id = ev.id.clone();
-    append_runtime_record(root, &RuntimeQueueRecord::Event { event: ev.clone() })
-        .await
-        .unwrap();
+    append_runtime_record(
+        root,
+        &RuntimeQueueRecord::Event {
+            event: ev.clone(),
+        },
+    )
+    .await
+    .unwrap();
 
     ev.title = "second title".to_string();
     ev.status = "completed".to_string();
-    append_runtime_record(root, &RuntimeQueueRecord::Event { event: ev.clone() })
-        .await
-        .unwrap();
+    append_runtime_record(
+        root,
+        &RuntimeQueueRecord::Event {
+            event: ev.clone(),
+        },
+    )
+    .await
+    .unwrap();
 
     let queue = load_runtime_queue(root).await;
     let restored = queue.items.iter().find(|e| e.id == id).expect("missing");
@@ -559,9 +582,14 @@ async fn test_runtime_queue_now_playing_persists() {
         "now_playing must round-trip"
     );
 
-    append_runtime_record(root, &RuntimeQueueRecord::NowPlaying { event: None })
-        .await
-        .unwrap();
+    append_runtime_record(
+        root,
+        &RuntimeQueueRecord::NowPlaying {
+            event: None,
+        },
+    )
+    .await
+    .unwrap();
     let queue = load_runtime_queue(root).await;
     assert!(
         queue.now_playing.is_none(),
@@ -607,7 +635,10 @@ fn buddy_service_expire_runtime_events_persists_removed_tombstones() {
     assert!(svc.runtime_queue.items.is_empty());
     let mut saw_tombstone = false;
     while let Ok(op) = queue_rx.try_recv() {
-        if let RuntimeQueueWriteOp::Append(RuntimeQueueRecord::Removed { id }) = op {
+        if let RuntimeQueueWriteOp::Append(RuntimeQueueRecord::Removed {
+            id,
+        }) = op
+        {
             if id == "expired-runtime-event" {
                 saw_tombstone = true;
             }
@@ -656,12 +687,16 @@ fn buddy_service_stale_runtime_prune_persists_removed_tombstones() {
     let mut saw_tombstone = false;
     while let Ok(op) = queue_rx.try_recv() {
         match op {
-            RuntimeQueueWriteOp::Append(RuntimeQueueRecord::Event { event }) => {
+            RuntimeQueueWriteOp::Append(RuntimeQueueRecord::Event {
+                event,
+            }) => {
                 if event.id == "stale-runtime-event" {
                     saw_event_append = true;
                 }
             }
-            RuntimeQueueWriteOp::Append(RuntimeQueueRecord::Removed { id }) => {
+            RuntimeQueueWriteOp::Append(RuntimeQueueRecord::Removed {
+                id,
+            }) => {
                 if id == "stale-runtime-event" {
                     saw_tombstone = true;
                 }
@@ -723,9 +758,14 @@ async fn test_stale_runtime_load_pruning_compacts_removed_records() {
     stale.id = "stale-load-event".to_string();
     stale.created_at = (chrono::Utc::now() - Duration::hours(2)).to_rfc3339();
     stale.ttl_ms = None;
-    append_runtime_record(root, &RuntimeQueueRecord::Event { event: stale })
-        .await
-        .unwrap();
+    append_runtime_record(
+        root,
+        &RuntimeQueueRecord::Event {
+            event: stale,
+        },
+    )
+    .await
+    .unwrap();
 
     let queue = load_runtime_queue(root).await;
 
@@ -1185,7 +1225,9 @@ fn policy_cooldown_drops() {
     let result = evaluate(&new_opp, &settings, &queue);
     assert!(matches!(
         result,
-        PolicyDecision::Drop { reason: "cooldown" }
+        PolicyDecision::Drop {
+            reason: "cooldown"
+        }
     ));
 }
 
@@ -1757,7 +1799,9 @@ async fn accept_after_dismiss_returns_409() {
     let accept_err = handle_v1_buddy_opportunity_accept(
         axum::extract::State(app.clone()),
         Path("opp-dismiss-then-accept".to_string()),
-        Some(axum::extract::Json(AcceptRequest { action_index: 0 })),
+        Some(axum::extract::Json(AcceptRequest {
+            action_index: 0,
+        })),
     )
     .await
     .unwrap_err();
@@ -1796,7 +1840,9 @@ async fn concurrent_accepts_only_one_succeeds() {
         match handle_v1_buddy_opportunity_accept(
             axum::extract::State(app1.clone()),
             Path("opp-concurrent-accept".to_string()),
-            Some(axum::extract::Json(AcceptRequest { action_index: 0 })),
+            Some(axum::extract::Json(AcceptRequest {
+                action_index: 0,
+            })),
         )
         .await
         {
@@ -1808,7 +1854,9 @@ async fn concurrent_accepts_only_one_succeeds() {
         match handle_v1_buddy_opportunity_accept(
             axum::extract::State(app2.clone()),
             Path("opp-concurrent-accept".to_string()),
-            Some(axum::extract::Json(AcceptRequest { action_index: 0 })),
+            Some(axum::extract::Json(AcceptRequest {
+                action_index: 0,
+            })),
         )
         .await
         {
@@ -1845,7 +1893,9 @@ async fn failed_dispatch_leaves_opportunity_retryable_and_clears_claim() {
     let err = handle_v1_buddy_opportunity_accept(
         axum::extract::State(app.clone()),
         Path("opp-dispatch-fails".to_string()),
-        Some(axum::extract::Json(AcceptRequest { action_index: 0 })),
+        Some(axum::extract::Json(AcceptRequest {
+            action_index: 0,
+        })),
     )
     .await
     .unwrap_err();
@@ -1863,7 +1913,9 @@ async fn failed_dispatch_leaves_opportunity_retryable_and_clears_claim() {
     let err = handle_v1_buddy_opportunity_accept(
         axum::extract::State(app.clone()),
         Path("opp-dispatch-fails".to_string()),
-        Some(axum::extract::Json(AcceptRequest { action_index: 0 })),
+        Some(axum::extract::Json(AcceptRequest {
+            action_index: 0,
+        })),
     )
     .await
     .unwrap_err();
@@ -2572,7 +2624,9 @@ fn runtime_event_coalesce_broadcasts_stored_id() {
 
     let broadcast_a = rx.try_recv().unwrap();
     match broadcast_a {
-        super::events::BuddyEvent::RuntimeEvent { event } => {
+        super::events::BuddyEvent::RuntimeEvent {
+            event,
+        } => {
             assert_eq!(event.id, "id-A");
         }
         other => panic!("expected RuntimeEvent, got {:?}", other),
@@ -2584,7 +2638,9 @@ fn runtime_event_coalesce_broadcasts_stored_id() {
 
     let broadcast_b = rx.try_recv().unwrap();
     match broadcast_b {
-        super::events::BuddyEvent::RuntimeEvent { event } => {
+        super::events::BuddyEvent::RuntimeEvent {
+            event,
+        } => {
             assert_eq!(
                 event.id, "id-A",
                 "coalesced broadcast must carry the stored id"

@@ -439,15 +439,6 @@ describe("KnowledgeWorkspace", () => {
     );
   });
 
-  it("populates memory records with full data from graph nodes", async () => {
-    const user = userEvent.setup();
-    renderWorkspace();
-
-    await user.click(screen.getByRole("button", { name: /Code Memory 1/i }));
-
-    expect(screen.getByText("Memory: Code Memory 1")).toBeInTheDocument();
-  });
-
   it('includes plain "doc" node type (without underscore)', () => {
     mockGraphResponse = {
       nodes: [

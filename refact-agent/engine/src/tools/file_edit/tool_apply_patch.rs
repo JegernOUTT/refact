@@ -205,8 +205,17 @@ async fn plan_patch(
     if let Some(ccx) = scope_guard_context {
         for operation in &parsed.operations {
             let (path, destination) = match operation {
-                FileOperation::Add { path, .. } | FileOperation::Delete { path } => (path, None),
-                FileOperation::Update { path, move_to, .. } => (path, move_to.as_ref()),
+                FileOperation::Add {
+                    path, ..
+                }
+                | FileOperation::Delete {
+                    path,
+                } => (path, None),
+                FileOperation::Update {
+                    path,
+                    move_to,
+                    ..
+                } => (path, move_to.as_ref()),
             };
             for path in std::iter::once(path).chain(destination) {
                 let resolved =
@@ -223,7 +232,10 @@ async fn plan_patch(
 
     for op in parsed.operations {
         match op {
-            FileOperation::Add { path, contents } => {
+            FileOperation::Add {
+                path,
+                contents,
+            } => {
                 let resolved_path =
                     resolve_patch_path(gcx.clone(), &path, false, execution_scope).await?;
                 warnings.extend(resolved_path.warnings);
@@ -255,7 +267,9 @@ async fn plan_patch(
                 });
             }
 
-            FileOperation::Delete { path } => {
+            FileOperation::Delete {
+                path,
+            } => {
                 let resolved_path =
                     resolve_patch_path(gcx.clone(), &path, false, execution_scope).await?;
                 warnings.extend(resolved_path.warnings);

@@ -378,7 +378,9 @@ impl crate::tools::tools_description::Tool for ToolDisagreementAdjudicate {
                     .or(reason)
                     .ok_or_else(|| "a decision needs a rationale".to_string())?,
             },
-            (None, None, Some(reason)) => AdjudicationVerdict::Unresolvable { reason },
+            (None, None, Some(reason)) => AdjudicationVerdict::Unresolvable {
+                reason,
+            },
             _ => {
                 return Err(
                     "pass resolved_position with decisive_evidence and rationale, or \

@@ -258,6 +258,39 @@ describe("ImageFilePreview", () => {
     expect(zoomText()).toBe("800%");
   });
 
+  it("compensates existing scroll for the off-center wheel point and removes its listener", async () => {
+    const { user, unmount } = render(
+      <ImageFilePreview alt="photo.png" src={pngSrc} />,
+    );
+    const image = loadImage(400, 200);
+    await user.click(screen.getByRole("button", { name: "Actual size" }));
+    const viewport = screen.getByTestId("image-preview-viewport");
+    const stage = image.parentElement;
+    if (!stage) throw new Error("Missing image stage");
+    viewport.scrollLeft = 90;
+    viewport.scrollTop = 30;
+    vi.spyOn(stage, "getBoundingClientRect").mockImplementation(() =>
+      DOMRect.fromRect({
+        x: 40 - viewport.scrollLeft,
+        y: 20 - viewport.scrollTop,
+        width: Number.parseFloat(stage.style.width),
+        height: Number.parseFloat(stage.style.height),
+      }),
+    );
+    const wheel = new MouseEvent("wheel", {
+      clientX: 170,
+      clientY: 80,
+      cancelable: true,
+    });
+    Object.defineProperty(wheel, "deltaY", { value: -100 });
+    fireEvent(viewport, wheel);
+    expect(viewport.scrollLeft).toBe(145);
+    expect(viewport.scrollTop).toBe(52.5);
+    const removeListener = vi.spyOn(viewport, "removeEventListener");
+    unmount();
+    expect(removeListener).toHaveBeenCalledWith("wheel", expect.any(Function));
+  });
+
   it("shows a decode failure and resets state when the source changes", async () => {
     const { rerender, user } = render(
       <ImageFilePreview alt="broken.png" src={pngSrc} />,

@@ -307,10 +307,16 @@ pub enum AdmissionRefusal {
 impl fmt::Display for AdmissionRefusal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            AdmissionRefusal::CoolingDown { reason, until_ms } => {
+            AdmissionRefusal::CoolingDown {
+                reason,
+                until_ms,
+            } => {
                 write!(f, "cooling down because {reason} until {until_ms}")
             }
-            AdmissionRefusal::AtCapacity { limit, in_flight } => {
+            AdmissionRefusal::AtCapacity {
+                limit,
+                in_flight,
+            } => {
                 write!(f, "at capacity: {in_flight} in flight of {limit}")
             }
             AdmissionRefusal::BackgroundReserved {
@@ -831,7 +837,10 @@ mod tests {
 
     impl FakeProvider {
         fn new(script: Vec<(Option<u16>, Option<String>, String)>) -> Self {
-            FakeProvider { script, served: 0 }
+            FakeProvider {
+                script,
+                served: 0,
+            }
         }
 
         fn http(status: u16, body: &str) -> Self {
@@ -1011,10 +1020,14 @@ mod tests {
         let mut provider = FakeProvider::http_with_retry_after(429, "900", "rate limit reached");
         drive(&registry, "openai/long", &mut provider);
         env.advance(899_999);
-        assert!(matches!(registry.try_admit("openai/long", RequestPriority::Interactive),
-            Err(AdmissionRefusal::CoolingDown { until_ms, .. }) if until_ms == NOW + 900_000));
+        assert!(
+            matches!(registry.try_admit("openai/long", RequestPriority::Interactive),
+            Err(AdmissionRefusal::CoolingDown { until_ms, .. }) if until_ms == NOW + 900_000)
+        );
         env.advance(1);
-        assert!(registry.try_admit("openai/long", RequestPriority::Interactive).is_ok());
+        assert!(registry
+            .try_admit("openai/long", RequestPriority::Interactive)
+            .is_ok());
     }
 
     #[test]
@@ -1026,8 +1039,10 @@ mod tests {
         config.max_retry_after_ms = 1_000;
         registry.reconfigure(config).unwrap();
         env.advance(300_000);
-        assert!(matches!(registry.try_admit("openai/reconfigure", RequestPriority::Interactive),
-            Err(AdmissionRefusal::CoolingDown { until_ms, .. }) if until_ms == NOW + 900_000));
+        assert!(
+            matches!(registry.try_admit("openai/reconfigure", RequestPriority::Interactive),
+            Err(AdmissionRefusal::CoolingDown { until_ms, .. }) if until_ms == NOW + 900_000)
+        );
     }
 
     #[test]
@@ -1087,7 +1102,9 @@ mod tests {
 
         assert_eq!(report.class, PressureClass::ClientError);
         match registry.retry_decision(&report, 0) {
-            RetryDecision::GiveUp { cause, .. } => {
+            RetryDecision::GiveUp {
+                cause, ..
+            } => {
                 assert!(cause.contains("unknown field 'tolls'"), "{cause}");
                 assert!(cause.contains("HTTP 400"), "{cause}");
             }

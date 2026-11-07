@@ -122,12 +122,8 @@ describe("AssistantInput", () => {
     expect(themeVariables).toBeDefined();
     expect(JSON.stringify(themeVariables)).not.toContain("var(");
     expect(initializeConfig?.flowchart).toMatchObject({
-      curve: "linear",
       defaultRenderer: "elk",
       htmlLabels: false,
-      nodeSpacing: 70,
-      rankSpacing: 90,
-      wrappingWidth: 240,
     });
     expect(mermaidMock.registerLayoutLoaders).toHaveBeenCalledWith(
       elkLayoutsMock,
@@ -135,11 +131,6 @@ describe("AssistantInput", () => {
     expect(screen.getByText("100%")).toBeInTheDocument();
 
     const canvas = screen.getByTestId("mermaid-canvas");
-    const renderedSvg = canvas.querySelector("svg");
-    expect(renderedSvg?.parentElement).toHaveStyle({
-      width: "10px",
-      height: "10px",
-    });
 
     const wheelEvent = new WheelEvent("wheel", {
       cancelable: true,

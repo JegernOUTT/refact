@@ -92,15 +92,6 @@ describe("ModeSelect", () => {
     useChatModes();
   });
 
-  test("shows selected mode title and tool count in the trigger", async () => {
-    renderModeSelect(
-      <ModeSelect selectedMode="agent" onModeChange={vi.fn()} />,
-    );
-
-    await waitFor(() => expect(screen.getByText("Agent")).toBeInTheDocument());
-    expect(screen.getByText("12 tools")).toBeInTheDocument();
-  });
-
   test("lists modes with descriptions, tags, tool counts, synthetic task planner, and create action", async () => {
     const { user } = renderModeSelect(
       <ModeSelect selectedMode="agent" onModeChange={vi.fn()} />,

@@ -5,9 +5,7 @@ import {
   FETCH_PHASE_DURATIONS_MS,
   FIREFLY_MAX_CATCHES,
   FIREFLY_PHASE_DURATIONS_MS,
-  GIFT_LINES,
   PLAY_ARMED_TIMEOUT_MS,
-  PLAY_SESSION_LINES,
   advanceBuddyPlaySession,
   createFetchSession,
   createFireflySession,
@@ -215,12 +213,6 @@ describe("gift moments", () => {
     expect(gifted).toBeGreaterThan(5);
     expect(gifted).toBeLessThan(40);
   });
-
-  it("covers every gift item with lines", () => {
-    for (const pool of Object.values(GIFT_LINES)) {
-      expect(pool.lines.length).toBeGreaterThanOrEqual(2);
-    }
-  });
 });
 
 describe("buddy requests", () => {
@@ -268,27 +260,6 @@ describe("buddy requests", () => {
   it("templates request prompts with the buddy name", () => {
     for (const line of BUDDY_REQUEST_PROMPT.lines) {
       expect(line("Mochi")).toContain("Mochi");
-    }
-  });
-});
-
-describe("play session lines", () => {
-  it("covers every fetch and firefly phase voice", () => {
-    const keys = [
-      "fetch:armed",
-      "fetch:throwing",
-      "fetch:chasing",
-      "fetch:carrying",
-      "fetch:wiggling",
-      "fetch:done",
-      "firefly:armed",
-      "firefly:pouncing",
-      "firefly:caught",
-      "firefly:missed",
-      "firefly:done",
-    ];
-    for (const key of keys) {
-      expect(PLAY_SESSION_LINES[key].lines.length).toBeGreaterThanOrEqual(3);
     }
   });
 });

@@ -106,7 +106,9 @@ pub struct Fetcher {
 
 impl Fetcher {
     pub fn new(options: FetcherOptions) -> Self {
-        Self { options }
+        Self {
+            options,
+        }
     }
 
     // look for good existing installation, if none exists then download and install

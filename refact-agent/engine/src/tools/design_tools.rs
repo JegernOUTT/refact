@@ -187,9 +187,9 @@ impl TargetInput {
                 reference: None,
                 selector: Some(selector),
             } if !selector.trim().is_empty() => Ok(BrowserLocator::css(selector)),
-            Self::Structured { .. } => {
-                Err("target must provide exactly one of ref or selector".to_string())
-            }
+            Self::Structured {
+                ..
+            } => Err("target must provide exactly one of ref or selector".to_string()),
         }
     }
 
@@ -204,7 +204,9 @@ impl TargetInput {
                 selector: Some(selector),
                 ..
             } => selector.clone(),
-            Self::Structured { .. } => "invalid-target".to_string(),
+            Self::Structured {
+                ..
+            } => "invalid-target".to_string(),
         }
     }
 }
@@ -2873,7 +2875,9 @@ impl Tool for ToolVisualDiff {
                 actor.as_deref(),
                 &baseline,
                 if existed {
-                    crate::file_activity::WriteIntent::Overwrite { authorized: true }
+                    crate::file_activity::WriteIntent::Overwrite {
+                        authorized: true,
+                    }
                 } else {
                     crate::file_activity::WriteIntent::Create
                 },
@@ -3135,7 +3139,10 @@ mod tests {
     fn meta(width: u32, height: u32) -> BaselineMeta {
         BaselineMeta {
             schema: BASELINE_META_SCHEMA,
-            viewport: CaptureViewport { width, height },
+            viewport: CaptureViewport {
+                width,
+                height,
+            },
             device_scale_factor: 1.0,
             color_scheme: Some("dark".to_string()),
             url: "http://localhost:5173/".to_string(),

@@ -50,7 +50,10 @@ impl MdnsAdvertisement {
             "daemon mDNS advertising as http://{}:{port}/ ({fullname})",
             crate::http::local_mdns_browser_host(),
         );
-        Some(MdnsAdvertisement { daemon, fullname })
+        Some(MdnsAdvertisement {
+            daemon,
+            fullname,
+        })
     }
 
     pub(crate) fn stop(self) {

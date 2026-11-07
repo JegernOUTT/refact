@@ -168,7 +168,9 @@ impl std::fmt::Display for LeaseError {
                 holder.fencing_generation,
                 holder.held_for_ms
             ),
-            LeaseError::NotHeld { lease_key } => {
+            LeaseError::NotHeld {
+                lease_key,
+            } => {
                 write!(f, "lease `{lease_key}` is not held by this owner token")
             }
             LeaseError::Expired {
@@ -189,7 +191,10 @@ impl std::fmt::Display for LeaseError {
                 "lease `{lease_key}` is at generation {held}; this write carried generation \
                  {presented} and was rejected"
             ),
-            LeaseError::TakeoverRefused { refusal, holder } => write!(
+            LeaseError::TakeoverRefused {
+                refusal,
+                holder,
+            } => write!(
                 f,
                 "refusing to take lease `{}` from engine `{}`: {}",
                 holder.lease_key,
@@ -206,7 +211,11 @@ impl std::error::Error for LeaseError {}
 impl From<StoreError> for LeaseError {
     fn from(error: StoreError) -> LeaseError {
         let rejected = match error {
-            StoreError::LeaseNotHeld { lease_key } => LeaseError::NotHeld { lease_key },
+            StoreError::LeaseNotHeld {
+                lease_key,
+            } => LeaseError::NotHeld {
+                lease_key,
+            },
             StoreError::LeaseExpired {
                 lease_key,
                 expires_at_ms,
@@ -239,7 +248,9 @@ fn record_rejection(error: &LeaseError) {
     use super::metrics::{explain, record_stale_write_rejection, Decision, Explanation};
     let (reason, rule, detail) = match error {
         LeaseError::Fenced {
-            presented, held, ..
+            presented,
+            held,
+            ..
         } => (
             "fencing_generation",
             "leases.fencing_generation_behind_holder",
@@ -254,7 +265,9 @@ fn record_rejection(error: &LeaseError) {
             "leases.authority_expired",
             format!("lease expired at {expires_at_ms}, now {at_ms}"),
         ),
-        LeaseError::NotHeld { .. } => (
+        LeaseError::NotHeld {
+            ..
+        } => (
             "not_held",
             "leases.owner_token_does_not_hold_lease",
             "the presented owner token does not hold this lease".to_string(),
@@ -941,7 +954,10 @@ mod tests {
             (too_early, TakeoverRefusal::LeaseStillHeld),
         ] {
             match outcome.unwrap_err() {
-                LeaseError::TakeoverRefused { refusal, holder } => {
+                LeaseError::TakeoverRefused {
+                    refusal,
+                    holder,
+                } => {
                     assert_eq!(refusal, expected);
                     assert_eq!(holder.holder_instance, "engine-1");
                 }

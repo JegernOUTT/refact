@@ -907,7 +907,10 @@ impl AsyncActionAdapter for ResourceActionAdapter {
             .await
         {
             Ok(receipt) => (receipt, None),
-            Err(ResourceError::KnownPartial { receipt, reason }) => (receipt, Some(reason)),
+            Err(ResourceError::KnownPartial {
+                receipt,
+                reason,
+            }) => (receipt, Some(reason)),
             Err(ResourceError::NotApplied(_)) => {
                 return Err(ApplyFailure {
                     effects_may_have_occurred: false,
@@ -1306,7 +1309,10 @@ pub struct BoundDraft<D> {
 }
 impl<D> BoundDraft<D> {
     pub fn new(reference: String, draft: D) -> Self {
-        Self { reference, draft }
+        Self {
+            reference,
+            draft,
+        }
     }
 }
 impl<D: Clone + Send + Sync> super::resources::DraftRegistry<D> for BoundDraft<D> {
@@ -1355,7 +1361,9 @@ impl PrivateRecoveryMaterials {
                 Err(error) => return Err(error.into()),
             }
         }
-        Ok(Self { root })
+        Ok(Self {
+            root,
+        })
     }
     fn path(&self, reference: &str) -> Result<std::path::PathBuf, ResourceError> {
         if reference.len() != 64 || !reference.chars().all(|c| c.is_ascii_hexdigit()) {

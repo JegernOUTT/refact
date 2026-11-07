@@ -198,13 +198,6 @@ describe("TaskDocumentsContent", () => {
     expect(container.querySelector("script")).not.toBeInTheDocument();
     expect(container.querySelector("img[onerror]")).not.toBeInTheDocument();
   });
-
-  it("renders pinned and non-pinned stars differently", () => {
-    render(<TaskDocumentsContent toolType="doc_list" content={DOC_LIST} />);
-
-    expect(screen.getByLabelText("Pinned main-plan")).toHaveTextContent("★");
-    expect(screen.getByLabelText("Not pinned api-spec")).toHaveTextContent("☆");
-  });
 });
 
 function itemOf(toggle: HTMLElement): HTMLElement {

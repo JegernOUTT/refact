@@ -407,7 +407,9 @@ mod tests {
             );
             std::env::set_var("REFACT_DAEMON_SUPERVISOR_BACKOFF_MS", "1");
             std::env::remove_var("FAKE_WORKER_CRASH");
-            Some(Self { keys })
+            Some(Self {
+                keys,
+            })
         }
     }
 

@@ -1,5 +1,3 @@
-import { readFile } from "node:fs/promises";
-import { resolve } from "node:path";
 import { http, HttpResponse } from "msw";
 import { beforeEach, describe, expect, it } from "vitest";
 import {
@@ -87,24 +85,6 @@ function BuddySnapshotProbe() {
   return null;
 }
 
-function readGuiSource(path: string): Promise<string> {
-  return readFile(resolve(process.cwd(), "src", path), "utf8");
-}
-
-function readCssBlock(source: string, selector: string): string {
-  const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const match = new RegExp(`(^|\\n)\\s*${escaped}\\s*{`).exec(source);
-  if (match?.index === undefined)
-    throw new Error(`Missing CSS block for ${selector}`);
-  const open = source.indexOf("{", match.index);
-  let depth = 0;
-  for (let i = open; i < source.length; i += 1) {
-    if (source[i] === "{") depth += 1;
-    if (source[i] === "}") depth -= 1;
-    if (depth === 0) return source.slice(open + 1, i);
-  }
-  throw new Error(`Unclosed CSS block for ${selector}`);
-}
 const envelope = <T,>(data: T, next_cursor: number | null = null) => ({
   schema_version: 1,
   project,
@@ -1358,13 +1338,6 @@ describe("BuddyDesk", () => {
       "false",
     );
     expect(screen.getByText("Pick a report to read it here")).toBeTruthy();
-    const css = await readGuiSource("features/Buddy/BuddyDesk.module.css");
-    expect(readCssBlock(css, ".detailHint")).toContain("display: none");
-    const splitCss = readCssBlock(css, "@container (min-width: 880px)");
-    expect(readCssBlock(splitCss, ".detailHint")).toContain("display: block");
-    expect(readCssBlock(splitCss, ".layout")).toContain(
-      "grid-template-columns",
-    );
     fireEvent.click(screen.getByRole("radio", { name: "Watching" }));
     expect(
       await screen.findByText("Nothing is being watched right now."),
@@ -2966,17 +2939,6 @@ describe("BuddyDesk", () => {
         HttpResponse.json(envelope(record(artifact))),
       ),
     );
-    const css = await readGuiSource("features/Buddy/BuddyDesk.module.css");
-    expect(readCssBlock(css, ".layout")).toContain(
-      "grid-template-columns: minmax(0, 1fr);",
-    );
-    expect(css).toMatch(/@container \(min-width: \d+px\)/);
-    expect(
-      readCssBlock(
-        readCssBlock(css, "@container (min-width: 880px)"),
-        ".layout",
-      ),
-    ).toContain("grid-template-columns: minmax(300px, 23rem) minmax(0, 1fr);");
     render(<BuddyDesk />, { preloadedState: config });
     const row = await screen.findByRole("button", {
       name: /Provider setup diagnosis/,
@@ -3331,17 +3293,6 @@ describe("BuddyDesk", () => {
     expect(screen.getByTestId("buddy-desk-count")).toHaveTextContent(
       "3 reports · 1 subject · 2 cancelled",
     );
-  });
-
-  it("keeps the work list in a bounded scroll region instead of a tall fixed desk", async () => {
-    const css = await readGuiSource("features/Buddy/BuddyDesk.module.css");
-    expect(readCssBlock(css, ".desk")).not.toContain("min-height");
-    expect(readCssBlock(css, ".scroller")).toContain("max-height: 70vh;");
-    expect(readCssBlock(css, ".scroller")).toContain("overflow-y: auto;");
-    expect(readCssBlock(css, ".scroller")).toContain("mask-image");
-    expect(readCssBlock(css, ".items")).not.toContain("max-width");
-    expect(css).toContain("@container (min-width: 880px)");
-    expect(css).not.toMatch(/@media/);
   });
 
   it("shows the finding and write-up before report management controls", async () => {

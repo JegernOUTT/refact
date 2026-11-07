@@ -183,7 +183,10 @@ async fn list_files_under_dir_limited(
     } else {
         files
     };
-    Ok(ScopedListingLimited { files, truncated })
+    Ok(ScopedListingLimited {
+        files,
+        truncated,
+    })
 }
 
 async fn list_files_under_dir_limited_for_model_context(
@@ -1209,7 +1212,9 @@ mod worktree_scope_read_tools {
                 },
             )
             .collect();
-        *gcx.vec_db.lock().await = Some(Arc::new(MockVecdb { records }));
+        *gcx.vec_db.lock().await = Some(Arc::new(MockVecdb {
+            records,
+        }));
     }
 
     async fn make_ccx(

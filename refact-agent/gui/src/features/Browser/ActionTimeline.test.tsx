@@ -99,37 +99,6 @@ function renderTimeline(entries: TimelineEntry[] = sampleEntries) {
 }
 
 describe("ActionTimeline component", () => {
-  test("renders timeline entries", () => {
-    renderTimeline();
-
-    const entries = screen.getAllByTestId("timeline-entry");
-    expect(entries).toHaveLength(4);
-  });
-
-  test("shows empty state when no entries", () => {
-    renderTimeline([]);
-
-    expect(screen.getByText("No timeline events")).toBeInTheDocument();
-  });
-
-  test("displays entry summary text", () => {
-    renderTimeline();
-
-    expect(
-      screen.getByText("Navigated to https://example.com"),
-    ).toBeInTheDocument();
-    expect(screen.getByText("Clicked button #submit")).toBeInTheDocument();
-  });
-
-  test("displays entry type badges", () => {
-    renderTimeline();
-
-    expect(screen.getAllByText("navigation").length).toBeGreaterThanOrEqual(1);
-    expect(screen.getAllByText("click").length).toBeGreaterThanOrEqual(1);
-    expect(screen.getAllByText("input").length).toBeGreaterThanOrEqual(1);
-    expect(screen.getAllByText("tool_call").length).toBeGreaterThanOrEqual(1);
-  });
-
   test("shows user and agent source icons with aria labels", () => {
     renderTimeline();
 

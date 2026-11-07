@@ -95,7 +95,10 @@ fn browse_at(path: &Path, limit: usize) -> Result<BrowseResponse, String> {
         let has_git = fs::symlink_metadata(child.join(".git"))
             .map(|metadata| !metadata.file_type().is_symlink())
             .unwrap_or(false);
-        dirs.push(BrowseDir { name, has_git });
+        dirs.push(BrowseDir {
+            name,
+            has_git,
+        });
     }
 
     dirs.sort_by(|left, right| {

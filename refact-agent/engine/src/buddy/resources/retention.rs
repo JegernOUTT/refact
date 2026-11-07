@@ -60,7 +60,10 @@ pub struct PolicyAdapter {
 
 impl PolicyAdapter {
     pub fn new(runtime: OutcomeRuntime, drafts: Arc<dyn DraftRegistry<PolicyDraft>>) -> Self {
-        Self { runtime, drafts }
+        Self {
+            runtime,
+            drafts,
+        }
     }
 
     fn draft(&self, spec: &ActionSpec) -> Result<PolicyDraft, ResourceError> {

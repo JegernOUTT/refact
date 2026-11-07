@@ -84,7 +84,10 @@ fn split_line_if_needed(
                         Err(_) => dropped += 1,
                     }
                 }
-                SplitLines { lines, dropped }
+                SplitLines {
+                    lines,
+                    dropped,
+                }
             },
         )
     } else {

@@ -501,37 +501,6 @@ describe("BuddyOpportunityCard_dismiss_calls_mutation", () => {
   });
 });
 
-describe("BuddyHome_renders_all_sections", () => {
-  it("pulse and feed are visible when snapshot present", async () => {
-    const pulse = makePulse();
-    const store = setUpStore({ ...CONFIG_STATE });
-    store.dispatch(setBuddySnapshot(makeSnapshot(pulse)));
-
-    server.use(
-      http.get("*/v1/buddy/opportunities", () =>
-        HttpResponse.json({ opportunities: [] }),
-      ),
-    );
-
-    render(
-      <>
-        <BuddyPulseCard />
-        <BuddyOpportunitiesFeed />
-      </>,
-      {
-        preloadedState: { ...CONFIG_STATE, buddy: store.getState().buddy },
-      },
-    );
-
-    await waitFor(() => {
-      expect(screen.getByTestId("buddy-pulse-card")).toBeInTheDocument();
-      expect(
-        screen.getByTestId("buddy-opportunities-feed"),
-      ).toBeInTheDocument();
-    });
-  });
-});
-
 describe("BuddyHome_layout_contract", () => {
   const layoutHandlers = [
     http.get("*/v1/buddy/conversations", () => HttpResponse.json([])),

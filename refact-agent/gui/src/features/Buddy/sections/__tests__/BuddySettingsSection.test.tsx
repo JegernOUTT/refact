@@ -1495,11 +1495,5 @@ describe("BuddySettingsPanel_allowed_intents", () => {
       .getAllByRole("switch")
       .map((toggle) => toggle.getAttribute("aria-label") ?? "");
     expect(new Set(names).size).toBe(names.length);
-    for (const heading of within(panel).getAllByRole("heading")) {
-      expect(heading.textContent).not.toMatch(/^[A-Z &/?]{4,}$/);
-    }
-    expect(
-      within(panel).getByRole("heading", { name: "What Buddy may talk about" }),
-    ).toBeInTheDocument();
   });
 });

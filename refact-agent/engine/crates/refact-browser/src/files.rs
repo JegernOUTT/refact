@@ -733,12 +733,10 @@ mod tests {
         release.send(()).unwrap();
         monitor.configure_context(None).unwrap();
         let started = Instant::now();
-        assert!(
-            monitor
-                .wait_for_download(0, Duration::from_millis(100), None)
-                .unwrap_err()
-                .contains("Timed out waiting")
-        );
+        assert!(monitor
+            .wait_for_download(0, Duration::from_millis(100), None)
+            .unwrap_err()
+            .contains("Timed out waiting"));
         assert!(started.elapsed() < Duration::from_secs(1));
         drop(monitor);
         peer.join().unwrap();
@@ -808,11 +806,9 @@ mod tests {
     fn rejects_non_file_input() {
         let mut value = metadata(false);
         value.input_type = "text".to_string();
-        assert!(
-            validate_input_paths(&value, &[])
-                .unwrap_err()
-                .contains("requires <input type=\"file\">")
-        );
+        assert!(validate_input_paths(&value, &[])
+            .unwrap_err()
+            .contains("requires <input type=\"file\">"));
     }
 
     #[test]

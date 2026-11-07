@@ -201,7 +201,10 @@ async fn newer_schema_fails_closed_without_touching_the_file() {
         .await
         .unwrap_err();
     match err {
-        StoreError::SchemaTooNew { found, supported } => {
+        StoreError::SchemaTooNew {
+            found,
+            supported,
+        } => {
             assert_eq!(found, schema::SCHEMA_VERSION + 5);
             assert_eq!(supported, schema::SCHEMA_VERSION);
         }
@@ -727,7 +730,9 @@ async fn non_local_filesystem_is_refused_unless_explicitly_allowed() {
         .await
         .unwrap_err();
     match err {
-        StoreError::NonLocalFilesystem { fs_type, .. } => assert_eq!(fs_type, "nfs4"),
+        StoreError::NonLocalFilesystem {
+            fs_type, ..
+        } => assert_eq!(fs_type, "nfs4"),
         other => panic!("expected NonLocalFilesystem, got {other}"),
     }
     assert!(!path.exists());

@@ -1016,12 +1016,10 @@ mod tests {
         assert_eq!(capture.frames.len(), 0);
         assert_eq!(capture.dropped_frames, 5);
         assert!(capture.budget_exhausted);
-        assert!(
-            capture
-                .warning()
-                .unwrap()
-                .contains("insufficient evidence of motion")
-        );
+        assert!(capture
+            .warning()
+            .unwrap()
+            .contains("insufficient evidence of motion"));
     }
 
     #[test]
@@ -1064,11 +1062,9 @@ mod tests {
         assert_eq!(capture.frames.len(), 2);
         assert_eq!(capture.elapsed_ms, 300);
         assert!(capture.budget_exhausted);
-        assert!(
-            capture
-                .warning()
-                .unwrap()
-                .contains("synchronous captures may overrun")
-        );
+        assert!(capture
+            .warning()
+            .unwrap()
+            .contains("synchronous captures may overrun"));
     }
 }

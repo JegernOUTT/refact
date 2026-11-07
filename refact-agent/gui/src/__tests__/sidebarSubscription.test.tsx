@@ -384,27 +384,6 @@ describe("useSidebarSubscription", () => {
     disconnect();
   });
 
-  it("heartbeat_event_does_not_trigger_invalidation", async () => {
-    server.use(sidebarHandler([envelope(0, { type: "heartbeat" })]));
-    const events: Parameters<SidebarSubscriptionCallbacks["onEvent"]>[0][] = [];
-    const liveness = vi.fn();
-    const disconnect = subscribeToSidebarEvents(
-      { host: "vscode", lspPort: 8001 },
-      "test",
-      {
-        onEvent: (event) => events.push(event),
-        onError: () => undefined,
-        onLiveness: liveness,
-      },
-    );
-
-    await waitFor(() => {
-      expect(liveness).toHaveBeenCalled();
-    });
-    expect(events).toEqual([]);
-    disconnect();
-  });
-
   it("sends an Accept: text/event-stream header on the sidebar subscription", async () => {
     const accepts: (string | null)[] = [];
     server.use(

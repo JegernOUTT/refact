@@ -4,13 +4,14 @@ import {
   Bot,
   Files,
   GitBranch,
-  Home,
+  type LucideProps,
   type LucideIcon,
 } from "lucide-react";
 import { skipToken } from "@reduxjs/toolkit/query";
-import { useCallback, useId } from "react";
+import { forwardRef, useCallback, useId } from "react";
 
 import { Badge, IconButton, Tooltip } from "../../../components/ui";
+import { RefactIcon } from "../../../images/RefactIcon";
 import { BuddyRailButton } from "../../Buddy/Companion/BuddyRailButton";
 import { useAppDispatch, useAppSelector } from "../../../hooks";
 import { useGetGitStatusQuery } from "../../../services/refact/gitRead";
@@ -55,6 +56,19 @@ const isMac =
   /Mac|iPod|iPhone|iPad/.test(navigator.platform);
 
 const modifierLabel = isMac ? "⌘" : "Ctrl+";
+
+const HomeLogo = forwardRef<SVGSVGElement, LucideProps>(function HomeLogo(
+  { className, ...props },
+  _ref,
+) {
+  return (
+    <RefactIcon
+      {...props}
+      className={classNames(className, styles.homeLogo, "rf-status-pulse")}
+      stroke="none"
+    />
+  );
+});
 
 type RailItem = {
   id: WorkspaceDockSection;
@@ -181,7 +195,7 @@ export function ActivityRail() {
             aria-label="Home"
             aria-pressed={page?.name === "history"}
             className={styles.button}
-            icon={Home}
+            icon={HomeLogo}
             onClick={goHome}
             size="sm"
             variant="ghost"

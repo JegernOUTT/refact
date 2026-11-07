@@ -674,7 +674,9 @@ mod evaluation_tests {
         let prepared = api::handle_resource_prepare(
             State(app.clone()),
             headers.clone(),
-            axum::Json(api::PrepareResourceRequest { spec: spec.clone() }),
+            axum::Json(api::PrepareResourceRequest {
+                spec: spec.clone(),
+            }),
         )
         .await
         .unwrap();

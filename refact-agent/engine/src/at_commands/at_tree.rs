@@ -91,7 +91,9 @@ pub struct AtTree {
 
 impl AtTree {
     pub fn new() -> Self {
-        AtTree { params: vec![] }
+        AtTree {
+            params: vec![],
+        }
     }
 }
 

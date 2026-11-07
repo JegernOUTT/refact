@@ -1600,9 +1600,9 @@ fn recorder_events_to_timeline(
     for event in actions {
         let ts = format_ts(event.timestamp());
         let (entry_type, summary) = match event {
-            RecorderEvent::Navigation { url, .. } => {
-                ("navigation".to_string(), format!("navigate → {}", url))
-            }
+            RecorderEvent::Navigation {
+                url, ..
+            } => ("navigation".to_string(), format!("navigate → {}", url)),
             RecorderEvent::Click {
                 selector,
                 text,
@@ -1620,10 +1620,14 @@ fn recorder_events_to_timeline(
                     format!("click → {} (x:{}, y:{})", label, *x as i32, *y as i32),
                 )
             }
-            RecorderEvent::Input { selector, .. } => {
-                ("input".to_string(), format!("input → {}", selector))
-            }
-            RecorderEvent::Keypress { key, modifiers, .. } => {
+            RecorderEvent::Input {
+                selector, ..
+            } => ("input".to_string(), format!("input → {}", selector)),
+            RecorderEvent::Keypress {
+                key,
+                modifiers,
+                ..
+            } => {
                 let mods = if modifiers.is_empty() {
                     String::new()
                 } else {
@@ -1644,7 +1648,9 @@ fn recorder_events_to_timeline(
                 format!("submit → {} {} {}", selector, method, action),
             ),
             RecorderEvent::Scroll {
-                scroll_x, scroll_y, ..
+                scroll_x,
+                scroll_y,
+                ..
             } => (
                 "scroll".to_string(),
                 format!("scroll → ({}, {})", *scroll_x as i32, *scroll_y as i32),
@@ -1658,9 +1664,9 @@ fn recorder_events_to_timeline(
                 "mutation".to_string(),
                 format!("dom-change → +{} -{} ~{}", added, removed, changed),
             ),
-            RecorderEvent::ToolbarAction { action, .. } => {
-                ("toolbar".to_string(), format!("toolbar → {}", action))
-            }
+            RecorderEvent::ToolbarAction {
+                action, ..
+            } => ("toolbar".to_string(), format!("toolbar → {}", action)),
         };
         entries.push(TimelineEntry {
             timestamp: ts,
@@ -1815,7 +1821,9 @@ pub async fn browser_frame_emission_task(
             if let Some(session_arc) = session_arc {
                 let mut session = session_arc.lock().await;
                 for action in toolbar_actions {
-                    session.emit(ChatEvent::BrowserToolbarAction { action });
+                    session.emit(ChatEvent::BrowserToolbarAction {
+                        action,
+                    });
                 }
                 if !timeline_entries.is_empty() {
                     session.emit(ChatEvent::BrowserTimeline {

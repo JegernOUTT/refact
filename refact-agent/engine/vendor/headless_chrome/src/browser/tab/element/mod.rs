@@ -90,30 +90,6 @@ impl<'a> Element<'a> {
     /// document.querySelector(selector)
     /// ```
     ///
-    /// ```rust
-    /// # use anyhow::Result;
-    /// # // Awful hack to get access to testing utils common between integration, doctest, and unit tests
-    /// # mod server {
-    /// #     include!("../../../testing_utils/server.rs");
-    /// # }
-    /// # fn main() -> Result<()> {
-    /// #
-    /// use headless_chrome::Browser;
-    ///
-    /// let browser = Browser::default()?;
-    /// let initial_tab = browser.new_tab()?;
-    ///
-    /// let file_server = server::Server::with_dumb_html(include_str!("../../../../tests/simple.html"));
-    /// let containing_element = initial_tab.navigate_to(&file_server.url())?
-    ///     .wait_until_navigated()?
-    ///     .find_element("div#position-test")?;
-    /// let inner_element = containing_element.find_element("#strictly-above")?;
-    /// let attrs = inner_element.get_attributes()?.unwrap();
-    /// assert_eq!(attrs["id"], "strictly-above");
-    /// #
-    /// # Ok(())
-    /// # }
-    /// ```
     pub fn find_element(&self, selector: &str) -> Result<Self> {
         self.parent
             .run_query_selector_on_node(self.node_id, selector)
@@ -154,29 +130,6 @@ impl<'a> Element<'a> {
     /// document.querySelector(selector)
     /// ```
     ///
-    /// ```rust
-    /// # use anyhow::Result;
-    /// # // Awful hack to get access to testing utils common between integration, doctest, and unit tests
-    /// # mod server {
-    /// #     include!("../../../testing_utils/server.rs");
-    /// # }
-    /// # fn main() -> Result<()> {
-    /// #
-    /// use headless_chrome::Browser;
-    ///
-    /// let browser = Browser::default()?;
-    /// let initial_tab = browser.new_tab()?;
-    ///
-    /// let file_server = server::Server::with_dumb_html(include_str!("../../../../tests/simple.html"));
-    /// let containing_element = initial_tab.navigate_to(&file_server.url())?
-    ///     .wait_until_navigated()?
-    ///     .find_element("div#position-test")?;
-    /// let inner_divs = containing_element.find_elements("div")?;
-    /// assert_eq!(inner_divs.len(), 5);
-    /// #
-    /// # Ok(())
-    /// # }
-    /// ```
     pub fn find_elements(&self, selector: &str) -> Result<Vec<Self>> {
         self.parent
             .run_query_selector_all_on_node(self.node_id, selector)
@@ -336,23 +289,6 @@ impl<'a> Element<'a> {
     ///
     /// Note: if you somehow call this on a node that's not an HTML Element (e.g. `document`), this
     /// will fail.
-    /// ```rust
-    /// # use anyhow::Result;
-    /// # fn main() -> Result<()> {
-    /// #
-    /// use headless_chrome::Browser;
-    /// use std::time::Duration;
-    /// let browser = Browser::default()?;
-    /// let url = "https://web.archive.org/web/20190403224553/https://en.wikipedia.org/wiki/JavaScript";
-    /// let inner_text_content = browser.new_tab()?
-    ///     .navigate_to(url)?
-    ///     .wait_for_element_with_custom_timeout("#Misplaced_trust_in_developers", Duration::from_secs(10))?
-    ///     .get_inner_text()?;
-    /// assert_eq!(inner_text_content, "Misplaced trust in developers");
-    /// #
-    /// # Ok(())
-    /// # }
-    /// ```
     pub fn get_inner_text(&self) -> Result<String> {
         let text: String = serde_json::from_value(
             self.call_js_fn("function() { return this.innerText }", vec![], false)?
@@ -403,20 +339,6 @@ impl<'a> Element<'a> {
     ///
     /// The screenshot is taken from the surface using this element's content-box.
     ///
-    /// ```rust,no_run
-    /// # use anyhow::Result;
-    /// # fn main() -> Result<()> {
-    /// #
-    /// use headless_chrome::{protocol::page::ScreenshotFormat, Browser};
-    /// let browser = Browser::default()?;
-    /// let png_data = browser.new_tab()?
-    ///     .navigate_to("https://en.wikipedia.org/wiki/WebKit")?
-    ///     .wait_for_element("#mw-content-text > div > table.infobox.vevent")?
-    ///     .capture_screenshot(ScreenshotFormat::PNG)?;
-    /// #
-    /// # Ok(())
-    /// # }
-    /// ```
     pub fn capture_screenshot(
         &self,
         format: Page::CaptureScreenshotFormatOption,
@@ -477,7 +399,10 @@ impl<'a> Element<'a> {
 
         if result.Type == Runtime::RemoteObjectType::String {
             let error_text = result.value.unwrap().as_str().unwrap().to_string();
-            return Err(ScrollFailed { error_text }.into());
+            return Err(ScrollFailed {
+                error_text,
+            }
+            .into());
         }
 
         Ok(self)

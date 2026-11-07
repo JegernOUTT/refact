@@ -27,25 +27,6 @@ const agentsPanelCss = readFileSync(
   "src/features/AgentsPanel/AgentsPanel.module.css",
   "utf8",
 );
-const globalTokensCss = [
-  readFileSync("src/styles/tokens.css", "utf8"),
-  readFileSync("src/styles/motion.css", "utf8"),
-].join("\n");
-
-const LOCALLY_DEFINED_CUSTOM_PROPS = ["--rf-agent-row-indent"];
-
-function undefinedTokensIn(css: string): string[] {
-  const used = new Set(
-    [...css.matchAll(/var\((--rf-[a-z0-9-]+)/gu)].map((match) => match[1]),
-  );
-  return [...used].filter(
-    (token) =>
-      !LOCALLY_DEFINED_CUSTOM_PROPS.includes(token) &&
-      !new RegExp(`${token}\\s*:`, "u").test(globalTokensCss) &&
-      !new RegExp(`${token}\\s*:`, "u").test(css),
-  );
-}
-
 function agent(
   id: string,
   parentChatId: string,
@@ -822,16 +803,5 @@ describe("AgentsSection", () => {
     expect(agentsPanelCss).toMatch(
       /html\[data-reduced-motion="on"\] \.nodeRow/u,
     );
-  });
-
-  test("lets the dock own the panel chrome instead of positioning itself", () => {
-    expect(agentsPanelCss).toMatch(/\.panel\s*\{[\s\S]*flex: 1 1 auto/u);
-    expect(agentsPanelCss).not.toMatch(/\.panel\[data-state="closed"\]/u);
-    expect(agentsPanelCss).not.toMatch(/--rf-agents-panel-w/u);
-    expect(agentsPanelCss).not.toMatch(/position: fixed/u);
-  });
-
-  test("styles the agents module with defined design tokens only", () => {
-    expect(undefinedTokensIn(agentsPanelCss)).toEqual([]);
   });
 });

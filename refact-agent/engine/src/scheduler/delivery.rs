@@ -25,9 +25,10 @@ struct WebhookPayload<'a> {
 pub async fn deliver(app: &AppState, job: &Job, output: &str) -> Result<(), String> {
     match &job.delivery {
         Delivery::Chat => deliver_chat(app, job, output).await,
-        Delivery::Webhook { url, token } => {
-            deliver_webhook(app, job, output, url, token.as_deref()).await
-        }
+        Delivery::Webhook {
+            url,
+            token,
+        } => deliver_webhook(app, job, output, url, token.as_deref()).await,
         Delivery::Notifier {
             integration_id,
             target,
@@ -43,7 +44,9 @@ async fn deliver_chat(app: &AppState, job: &Job, output: &str) -> Result<(), Str
         return Ok(());
     }
     let chat_id = match job_target(job)? {
-        AgentTarget::ExistingChat { chat_id } => {
+        AgentTarget::ExistingChat {
+            chat_id,
+        } => {
             if !app.gcx.chat_sessions.read().await.contains_key(chat_id) {
                 return Err(format!("Chat session {chat_id} not found"));
             }
@@ -198,7 +201,12 @@ async fn deliver_notifier(
 
 fn job_target(job: &Job) -> Result<&AgentTarget, String> {
     match &job.action {
-        Action::AgentTurn { target, .. } | Action::Command { target, .. } => Ok(target),
+        Action::AgentTurn {
+            target, ..
+        }
+        | Action::Command {
+            target, ..
+        } => Ok(target),
     }
 }
 

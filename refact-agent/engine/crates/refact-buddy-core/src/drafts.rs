@@ -19,13 +19,22 @@ pub enum DraftCreateError {
 impl fmt::Display for DraftCreateError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            DraftCreateError::TitleTooLong { max, actual } => {
+            DraftCreateError::TitleTooLong {
+                max,
+                actual,
+            } => {
                 write!(f, "draft title too large: {} chars > {}", actual, max)
             }
-            DraftCreateError::ExplanationTooLong { max, actual } => {
+            DraftCreateError::ExplanationTooLong {
+                max,
+                actual,
+            } => {
                 write!(f, "draft explanation too large: {} chars > {}", actual, max)
             }
-            DraftCreateError::ContentTooLarge { max, actual } => {
+            DraftCreateError::ContentTooLarge {
+                max,
+                actual,
+            } => {
                 write!(f, "draft content too large: {} bytes > {}", actual, max)
             }
         }

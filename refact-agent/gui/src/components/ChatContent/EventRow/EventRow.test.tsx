@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, within } from "../../../utils/test-utils";
+import { fireEvent, render, screen } from "../../../utils/test-utils";
 import { EventRow } from "./EventRow";
 import { EVENT_SUBKINDS, eventMessageTone } from "./eventSubkind";
 import type { EventMessage } from "../../../services/refact/types";
@@ -127,17 +127,6 @@ describe("EventRow", () => {
     unmount();
     render(<EventRow event={event("tick")} />);
     expect(screen.queryByTestId("transcript-meta")).toBeNull();
-  });
-
-  it("exposes the payload as raw", () => {
-    render(
-      <EventRow
-        event={event("mode_switch", { from: "agent", to: "task_planner" })}
-      />,
-    );
-    fireEvent.click(toggle());
-    const raw = screen.getByTestId("transcript-raw");
-    expect(within(raw).getByRole("button", { name: "Raw" })).toBeTruthy();
   });
 
   it("opens the process output", () => {

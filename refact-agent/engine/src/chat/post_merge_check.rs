@@ -99,7 +99,11 @@ impl PostMergeCommandRunner for SystemPostMergeCommandRunner {
             }
         }
         match command {
-            PostMergeCommand::Verify { cwd, env, argv } => {
+            PostMergeCommand::Verify {
+                cwd,
+                env,
+                argv,
+            } => {
                 let label = argv.join(" ");
                 if argv.is_empty() {
                     return PostMergeCommandOutput {

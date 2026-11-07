@@ -1,27 +1,27 @@
+use axum::extract::Path;
+use axum::extract::State;
+use axum::http::{Response, StatusCode};
+use hyper::Body;
+use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
-use serde::Serialize;
-use axum::extract::Path;
-use axum::http::{Response, StatusCode};
-use axum::extract::State;
-use hyper::Body;
-use tokio::sync::broadcast;
 use std::time::Instant;
+use tokio::sync::broadcast;
 
 use crate::app_state::AppState;
 use crate::custom_error::ScratchError;
 
+use super::content::{validate_content_with_attachments, validate_context_files};
 use super::perf_diagnostics::{self, PerfComponent, PerfOutcome};
-use super::types::*;
+use super::queue::process_command_queue;
 use super::queue::{
     add_mode_switch_event_and_plan_if_changed, resolve_worktree_setparams_update,
     worktree_activation_message, worktree_disabled_message,
 };
 use super::session::{get_or_create_session_with_trajectory, snapshot_with_agents_mode};
-use super::content::{validate_content_with_attachments, validate_context_files};
-use super::queue::process_command_queue;
-use super::trajectory_ops::sanitize_messages_for_model_switch;
 use super::trajectories::validate_trajectory_id;
+use super::trajectory_ops::sanitize_messages_for_model_switch;
+use super::types::*;
 use crate::yaml_configs::customization_registry::{get_mode_config, map_legacy_mode_to_id};
 
 #[derive(serde::Deserialize)]
@@ -214,6 +214,67 @@ fn record_sse_serialize(
         None,
         None,
     );
+}
+
+pub async fn handle_v1_chats_subscribe_many(
+    State(app): State<AppState>,
+    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+) -> Result<Response<Body>, ScratchError> {
+    use futures::StreamExt;
+    type ChatBodyStream = std::pin::Pin<
+        Box<
+            dyn futures::Stream<
+                    Item = Result<hyper::body::Bytes, Box<dyn std::error::Error + Send + Sync>>,
+                > + Send,
+        >,
+    >;
+
+    let chat_ids: Vec<String> = params
+        .get("chat_ids")
+        .and_then(|value| serde_json::from_str(value).ok())
+        .ok_or_else(|| {
+            ScratchError::new(
+                StatusCode::BAD_REQUEST,
+                "chat_ids must be a JSON array".into(),
+            )
+        })?;
+    if chat_ids.is_empty() || chat_ids.len() > 128 {
+        return Err(ScratchError::new(
+            StatusCode::BAD_REQUEST,
+            "chat_ids must contain 1 to 128 IDs".into(),
+        ));
+    }
+    for id in &chat_ids {
+        validate_trajectory_id(id)?;
+    }
+    let mut seen = std::collections::HashSet::new();
+    let streams = chat_ids.into_iter().filter(|id| seen.insert(id.clone())).map(|id| {
+        let app = app.clone();
+        let mut params = params.clone();
+        params.insert("chat_id".into(), id);
+        Box::pin(async_stream::stream! {
+            match handle_v1_chat_subscribe(State(app), axum::extract::Query(params)).await {
+                Ok(response) => {
+                    let mut body = response.into_body();
+                    while let Some(chunk) = body.next().await {
+                        yield chunk.map_err(|error| Box::new(error) as Box<dyn std::error::Error + Send + Sync>);
+                    }
+                    yield Err(Box::new(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "chat subscription ended")) as Box<dyn std::error::Error + Send + Sync>);
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "multiplex chat subscription preparation failed");
+                    yield Err(Box::new(std::io::Error::other("chat subscription preparation failed")) as Box<dyn std::error::Error + Send + Sync>);
+                }
+            }
+        }) as ChatBodyStream
+    });
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Type", "text/event-stream")
+        .header("Cache-Control", "no-cache")
+        .header("Connection", "keep-alive")
+        .body(Body::wrap_stream(futures::stream::select_all(streams)))
+        .unwrap())
 }
 
 pub async fn handle_v1_chat_subscribe(
@@ -1256,8 +1317,8 @@ pub async fn handle_v1_chat_reprioritize_queued(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chat::perf_diagnostics::{self, MemoryPerfSink, PerfClock, PerfRecorder};
     use crate::call_validation::{ChatContent, ChatMessage, ChatToolCall, ChatToolFunction};
+    use crate::chat::perf_diagnostics::{self, MemoryPerfSink, PerfClock, PerfRecorder};
     use crate::chat::types::SessionState;
     use serde_json::json;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -1335,6 +1396,96 @@ mod tests {
             .lock()
             .unwrap() = vec![root.to_path_buf()];
         app
+    }
+
+    #[tokio::test]
+    async fn multiplex_validates_all_ids_before_loading_sessions() {
+        let workspace = tempfile::tempdir().unwrap();
+        let app = test_app_with_workspace(workspace.path()).await;
+        let params = HashMap::from([(
+            "chat_ids".into(),
+            r#"["would-create-session","../invalid"]"#.into(),
+        )]);
+        assert!(
+            handle_v1_chats_subscribe_many(State(app.clone()), axum::extract::Query(params))
+                .await
+                .is_err()
+        );
+        assert!(app.chat.sessions.read().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn multiplex_bootstrap_is_concurrent_ordered_and_dropped_with_body() {
+        use hyper::body::HttpBody;
+        let workspace = tempfile::tempdir().unwrap();
+        let app = test_app_with_workspace(workspace.path()).await;
+        let first = Arc::new(tokio::sync::Mutex::new(ChatSession::new(
+            "mux-first".into(),
+        )));
+        let second = Arc::new(tokio::sync::Mutex::new(ChatSession::new(
+            "mux-second".into(),
+        )));
+        {
+            let mut sessions = app.chat.sessions.write().await;
+            sessions.insert("mux-first".into(), first.clone());
+            sessions.insert("mux-second".into(), second.clone());
+        }
+        let blocked = first.lock().await;
+        let params = HashMap::from([
+            (
+                "chat_ids".into(),
+                r#"["mux-first","mux-second","mux-second"]"#.into(),
+            ),
+            ("snapshot_chunks".into(), "1".into()),
+        ]);
+        let mut body =
+            handle_v1_chats_subscribe_many(State(app.clone()), axum::extract::Query(params))
+                .await
+                .unwrap()
+                .into_body();
+        async fn next(body: &mut Body) -> serde_json::Value {
+            tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                loop {
+                    let bytes = body.data().await.unwrap().unwrap();
+                    let text = std::str::from_utf8(&bytes).unwrap();
+                    if let Some(json) = text.strip_prefix("data: ") {
+                        return serde_json::from_str(json.trim()).unwrap();
+                    }
+                }
+            })
+            .await
+            .expect("ready chat must not wait for blocked chat")
+        }
+        let snapshot = next(&mut body).await;
+        assert_eq!(snapshot["chat_id"], "mux-second");
+        assert_eq!(snapshot["type"], "snapshot");
+        assert_eq!(next(&mut body).await["type"], "snapshot_end");
+        assert_eq!(second.lock().await.event_tx.receiver_count(), 1);
+        drop(blocked);
+        let first_snapshot = next(&mut body).await;
+        assert_eq!(first_snapshot["chat_id"], "mux-first");
+        assert_eq!(first_snapshot["type"], "snapshot");
+        assert_eq!(next(&mut body).await["type"], "snapshot_end");
+        let sender = second.lock().await.event_tx.clone();
+        sender.send(Arc::new(r#"{"chat_id":"mux-second","seq":"1","type":"stream_started","message_id":"ordered"}"#.into())).unwrap();
+        let event = next(&mut body).await;
+        assert_eq!(event["type"], "stream_started");
+        assert_eq!(event["seq"], "1");
+        first.lock().await.close_event_channel();
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                match body.data().await {
+                    Some(Ok(_)) => continue,
+                    Some(Err(_)) => break,
+                    None => panic!("constituent EOF must terminate the group with an error"),
+                }
+            }
+        })
+        .await
+        .expect("closed chat must not be hidden by sibling heartbeats");
+        drop(body);
+        assert_eq!(sender.receiver_count(), 0);
+        assert_eq!(first.lock().await.event_tx.receiver_count(), 0);
     }
 
     #[tokio::test]

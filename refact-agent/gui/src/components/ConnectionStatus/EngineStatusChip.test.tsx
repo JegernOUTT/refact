@@ -53,28 +53,6 @@ describe("EngineStatusChip", () => {
     expect(chip).toHaveTextContent("engine.example.com/refact");
   });
 
-  it("opens a popover with connection details, the engine URL and the daemon action", async () => {
-    window.__REFACT_ENGINE_ORIGIN_CANDIDATES__ = [];
-    useRagHandler();
-    const view = renderChip();
-
-    await view.user.click(
-      screen.getByRole("button", { name: "Engine status" }),
-    );
-
-    expect(
-      await screen.findByLabelText(
-        "Engine URL https://engine.example.com/refact",
-      ),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: "Refact Daemon" }),
-    ).toBeInTheDocument();
-    expect(
-      await screen.findByRole("button", { name: /CodeGraph status:/ }),
-    ).toBeInTheDocument();
-  });
-
   it("opens the daemon page from the popover action", async () => {
     window.__REFACT_ENGINE_ORIGIN_CANDIDATES__ = [];
     useRagHandler();

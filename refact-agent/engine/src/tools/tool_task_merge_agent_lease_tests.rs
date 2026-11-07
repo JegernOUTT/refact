@@ -213,7 +213,9 @@ impl PostMergeCommandRunner for RevertingRunner {
     ) -> PostMergeCommandOutput {
         self.calls.push(command.clone());
         match command {
-            PostMergeCommand::Verify { .. } => PostMergeCommandOutput {
+            PostMergeCommand::Verify {
+                ..
+            } => PostMergeCommandOutput {
                 exit_code: Some(1),
                 success: false,
                 output: "error: regression".to_string(),

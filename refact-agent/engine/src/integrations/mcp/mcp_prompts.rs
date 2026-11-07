@@ -254,15 +254,25 @@ fn format_prompt_result(result: rmcp::model::GetPromptResult) -> String {
     let mut parts = Vec::new();
     for msg in result.messages {
         let text = match &msg.content {
-            rmcp::model::PromptMessageContent::Text { text } => text.clone(),
-            rmcp::model::PromptMessageContent::Image { .. } => "[image]".to_string(),
-            rmcp::model::PromptMessageContent::Resource { resource } => match &resource.resource {
-                rmcp::model::ResourceContents::TextResourceContents { text, .. } => text.clone(),
-                rmcp::model::ResourceContents::BlobResourceContents { .. } => {
-                    "[blob resource]".to_string()
-                }
+            rmcp::model::PromptMessageContent::Text {
+                text,
+            } => text.clone(),
+            rmcp::model::PromptMessageContent::Image {
+                ..
+            } => "[image]".to_string(),
+            rmcp::model::PromptMessageContent::Resource {
+                resource,
+            } => match &resource.resource {
+                rmcp::model::ResourceContents::TextResourceContents {
+                    text, ..
+                } => text.clone(),
+                rmcp::model::ResourceContents::BlobResourceContents {
+                    ..
+                } => "[blob resource]".to_string(),
             },
-            rmcp::model::PromptMessageContent::ResourceLink { .. } => "[resource link]".to_string(),
+            rmcp::model::PromptMessageContent::ResourceLink {
+                ..
+            } => "[resource link]".to_string(),
         };
         match msg.role {
             rmcp::model::PromptMessageRole::User => parts.push(text),

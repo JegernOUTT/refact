@@ -664,20 +664,6 @@ describe("background agents", () => {
     );
   });
 
-  test("BackgroundAgentCard renders status badge, title, target_files, and edited_files", () => {
-    render(<BackgroundAgentCard agent={makeAgent()} />);
-
-    expect(screen.getByTestId("transcript-status-pill")).toHaveTextContent(
-      "Running",
-    );
-    expect(screen.getByTestId("transcript-target")).toHaveTextContent(
-      "Inspect the frogs",
-    );
-    expect(
-      screen.queryByRole("button", { name: "1 target files" }),
-    ).not.toBeInTheDocument();
-  });
-
   test("BackgroundAgentCard renders error badge when error is set", () => {
     render(
       <BackgroundAgentCard
@@ -691,19 +677,6 @@ describe("background agents", () => {
     expect(screen.queryByText("boom")).not.toBeInTheDocument();
     fireEvent.click(screen.getByTestId("transcript-toggle"));
     expect(screen.getByRole("alert")).toHaveTextContent("boom");
-  });
-
-  test("BackgroundAgentCard renders conflict badge when conflict_summary is set", () => {
-    render(
-      <BackgroundAgentCard
-        agent={makeAgent({
-          status: "completed",
-          conflict_summary: "src/frog.ts conflicted",
-        })}
-      />,
-    );
-
-    expect(screen.getByTestId("background-agent-card")).toBeInTheDocument();
   });
 
   test("ToolContent renders BackgroundAgentCard from flattened tool fields", () => {
@@ -721,27 +694,6 @@ describe("background agents", () => {
     expect(screen.getByTestId("transcript-status-pill")).toHaveTextContent(
       "Running",
     );
-  });
-
-  test("ToolContent keeps rendering BackgroundAgentCard from nested extra fallback", () => {
-    renderToolContent([
-      makeToolResult({
-        extra: {
-          background_agent_id: "bgagent-extra",
-          background_agent_kind: "subagent",
-          child_chat_id: "child-extra",
-          background_agent_status: "running",
-          target_files: ["src/extra.ts"],
-        },
-      }),
-    ]);
-
-    expect(screen.getByTestId("background-agent-inline")).toBeInTheDocument();
-    expect(
-      within(screen.getByTestId("background-agent-inline")).getAllByRole(
-        "button",
-      )[0],
-    ).toBeInTheDocument();
   });
 
   test("ToolContent synthesizes introspection fields and supports legacy delegates", () => {

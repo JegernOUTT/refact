@@ -52,7 +52,9 @@ impl Tool for ToolWorkInspect {
             .await
             .map_err(|e| e.to_string())?;
         let worktree_id = match &request.selector {
-            service::InspectSelector::Worktree { worktree_id } => Some(worktree_id.clone()),
+            service::InspectSelector::Worktree {
+                worktree_id,
+            } => Some(worktree_id.clone()),
             _ => None,
         };
         let inspection = service::inspect(&app, &caller, request)

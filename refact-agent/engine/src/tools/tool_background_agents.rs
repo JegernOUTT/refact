@@ -1289,10 +1289,18 @@ pub(crate) async fn agent_lifecycle_match_against_confirm_deny(
     Ok(MatchConfirmDeny {
         result: match action {
             AgentLifecycleAction::Inspect => MatchConfirmDenyResult::PASS,
-            AgentLifecycleAction::Close { .. }
-            | AgentLifecycleAction::RaiseAndResume { .. }
-            | AgentLifecycleAction::Resume { .. }
-            | AgentLifecycleAction::ContinueTurn { .. } => MatchConfirmDenyResult::CONFIRMATION,
+            AgentLifecycleAction::Close {
+                ..
+            }
+            | AgentLifecycleAction::RaiseAndResume {
+                ..
+            }
+            | AgentLifecycleAction::Resume {
+                ..
+            }
+            | AgentLifecycleAction::ContinueTurn {
+                ..
+            } => MatchConfirmDenyResult::CONFIRMATION,
         },
         command: format!(
             "agent_lifecycle {agent_id} {}",

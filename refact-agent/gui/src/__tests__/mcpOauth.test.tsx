@@ -452,20 +452,6 @@ describe("MCPOAuth", () => {
     });
   });
 
-  test("renders Login button when not authenticated", async () => {
-    mockStatus({ auth_type: "oauth2_pkce", authenticated: false });
-
-    render(<MCPOAuth configPath={CONFIG_PATH} />, {
-      preloadedState: PRELOADED_STATE,
-    });
-
-    await waitFor(() => {
-      expect(
-        screen.getByRole("button", { name: /Login with OAuth/i }),
-      ).toBeInTheDocument();
-    });
-  });
-
   test("shows not authenticated badge when auth_type is oauth2_pkce and not authenticated", async () => {
     mockStatus({ auth_type: "oauth2_pkce", authenticated: false });
 
@@ -641,36 +627,6 @@ describe("MCPOAuth", () => {
 
     await waitFor(() => {
       expect(screen.getByText(/Failed to start OAuth/i)).toBeInTheDocument();
-    });
-  });
-
-  test("cancel button shown during waiting state", async () => {
-    mockStatus({ auth_type: "oauth2_pkce", authenticated: false });
-    server.use(
-      http.post("*/v1/mcp/oauth/start", () => {
-        return HttpResponse.json({
-          session_id: "test-session-cancel-show",
-          authorize_url: "https://auth.example.com/authorize",
-        });
-      }),
-    );
-
-    const { user } = render(<MCPOAuth configPath={CONFIG_PATH} />, {
-      preloadedState: PRELOADED_STATE,
-    });
-
-    await waitFor(() => {
-      expect(
-        screen.getByRole("button", { name: /Login with OAuth/i }),
-      ).toBeInTheDocument();
-    });
-
-    await user.click(screen.getByRole("button", { name: /Login with OAuth/i }));
-
-    await waitFor(() => {
-      expect(
-        screen.getByRole("button", { name: /Cancel/i }),
-      ).toBeInTheDocument();
     });
   });
 

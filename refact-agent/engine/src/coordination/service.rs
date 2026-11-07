@@ -618,7 +618,9 @@ pub async fn inspect(
     request: InspectRequest,
 ) -> Result<Inspection, WorkError> {
     let paths = match &request.selector {
-        InspectSelector::Files { paths } => {
+        InspectSelector::Files {
+            paths,
+        } => {
             if paths.is_empty() || paths.len() > crate::file_activity::settings().inspect_max_paths
             {
                 return Err(WorkError::invalid(
@@ -637,7 +639,9 @@ pub async fn inspect(
     let mut roots = Vec::new();
     let mut advisory = HashSet::new();
     let rows = match &request.selector {
-        InspectSelector::Work { work_id } => {
+        InspectSelector::Work {
+            work_id,
+        } => {
             let found = catalog
                 .find(work_id)
                 .cloned()
@@ -650,7 +654,9 @@ pub async fn inspect(
             row = Some(found);
             children
         }
-        InspectSelector::Files { .. } => {
+        InspectSelector::Files {
+            ..
+        } => {
             let relative = caller_relative_paths(caller, &paths);
             catalog
                 .all_rows()
@@ -667,7 +673,9 @@ pub async fn inspect(
                 })
                 .collect()
         }
-        InspectSelector::Worktree { worktree_id } => {
+        InspectSelector::Worktree {
+            worktree_id,
+        } => {
             let root = catalog
                 .roots
                 .by_id

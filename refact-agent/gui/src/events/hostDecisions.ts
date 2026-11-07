@@ -2,7 +2,7 @@
  * Host-native decision bridge contract (B21 / plan §16.3).
  *
  * The native engine owns every pending decision. A host (VS Code, JetBrains,
- * browser shell, TUI) may only *announce* that a native decision is waiting and
+ * browser shell) may only *announce* that a native decision is waiting and
  * offer to open the owning chat. Hosts never grant, deny, or otherwise resolve a
  * decision, and this module deliberately exposes no vocabulary that would let
  * them: see `HOST_DECISION_INTENTS`.

@@ -1,34 +1,34 @@
-use std::path::{Component, Path, PathBuf};
-use std::sync::{Arc, Mutex as StdMutex, OnceLock, Weak};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use axum::extract::Path as AxumPath;
-use axum::http::{Response, StatusCode};
 use axum::extract::State;
+use axum::http::{Response, StatusCode};
+use futures::FutureExt;
 use hyper::Body;
+use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
+use refact_chat_api::FrozenRequestPrefix;
 use serde::de::{Deserializer as _, IgnoredAny, MapAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use futures::FutureExt;
-use tokio::sync::{Mutex as AMutex, Notify, broadcast, mpsc};
+use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex as StdMutex, OnceLock, Weak};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::fs;
-use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
+use tokio::sync::{broadcast, mpsc, Mutex as AMutex, Notify};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
-use refact_chat_api::FrozenRequestPrefix;
 
-use crate::call_validation::{ChatMessage, ChatContent};
 use crate::app_state::AppState;
+use crate::call_validation::{ChatContent, ChatMessage};
 use crate::custom_error::ScratchError;
-use crate::global_context::GlobalContext;
 use crate::files_correction::get_project_dirs;
+use crate::global_context::GlobalContext;
 use crate::subchat::run_subchat_once;
-use crate::yaml_configs::customization_registry::get_subagent_config;
 use crate::worktrees::service::WorktreeService;
 use crate::worktrees::types::WorktreeMeta;
+use crate::yaml_configs::customization_registry::get_subagent_config;
 
-use refact_chat_api::{GoalLedgerEntry, GoalSnapshot, GoalStatus, PendingQuestionSet};
 use super::perf_diagnostics::{self, PerfComponent, PerfOutcome};
+use refact_chat_api::{GoalLedgerEntry, GoalSnapshot, GoalStatus, PendingQuestionSet};
 
 pub async fn atomic_write_file(tmp_path: &Path, dest_path: &Path) -> Result<(), String> {
     super::trajectory_archive::with_trajectory_mutation_lock(atomic_write_file_coordinated(
@@ -192,15 +192,15 @@ async fn atomic_finish_trajectory_write(
     result
 }
 
+use super::config::timeouts;
+use super::session::has_displayable_assistant_content;
+use super::trajectory_index;
 use super::types::{
     ChatSession, ExternalReloadPending, GoalSnapshotBudgetExt, SessionState, TaskMeta,
     ThreadParams, TrajectoryCommitIntent, TrajectorySourceIdentity,
     TrajectorySourceIdentitySessionExt,
 };
-use super::session::has_displayable_assistant_content;
-use super::config::timeouts;
 use super::SessionsMap;
-use super::trajectory_index;
 
 const TITLE_GENERATION_SUBAGENT_ID: &str = "title_generation";
 pub const TRAJECTORY_WRITER_ENV: &str = "REFACT_TRAJECTORY_WRITER";
@@ -9737,16 +9737,16 @@ mod tests {
     };
     use crate::vecdb::vdb_structs::{EmbeddingModelConfig, SearchResult, VecDbStatus, VecdbRecord};
     use async_trait::async_trait;
-    use refact_core::vecdb_types::VecdbSearch;
     use refact_chat_api::{
         BuddyThreadMeta, ClaudeCodeIdentity, FrozenRequestPrefix, GoalBudget, GoalProgress,
         GoalStatus,
     };
+    use refact_core::vecdb_types::VecdbSearch;
     use serial_test::serial;
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicU64, Ordering};
     use std::path::{Path, PathBuf};
     use std::process::Command;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
     use std::sync::Mutex as StdMutex;
 
     struct BlockingRecordingVecdb {
@@ -17861,10 +17861,10 @@ mod tests {
 
     #[test]
     fn test_trajectory_snapshot_from_session_captures_fields() {
-        use std::sync::Arc;
-        use std::sync::atomic::AtomicBool;
-        use tokio::sync::{broadcast, Mutex as AMutex, Notify};
         use std::collections::VecDeque;
+        use std::sync::atomic::AtomicBool;
+        use std::sync::Arc;
+        use tokio::sync::{broadcast, Mutex as AMutex, Notify};
 
         let (tx, _rx) = broadcast::channel(16);
         let session = ChatSession {
@@ -18040,13 +18040,13 @@ mod tests {
 
     #[test]
     fn test_trajectory_roundtrip_active_skill() {
-        use super::super::types::*;
         use super::super::types::ActiveCommandContext;
-        use std::sync::Arc;
-        use std::sync::atomic::AtomicBool;
-        use tokio::sync::{broadcast, Mutex as AMutex, Notify};
+        use super::super::types::*;
         use std::collections::VecDeque;
+        use std::sync::atomic::AtomicBool;
+        use std::sync::Arc;
         use std::time::Instant;
+        use tokio::sync::{broadcast, Mutex as AMutex, Notify};
 
         let (tx, _rx) = broadcast::channel(16);
         let mut session = ChatSession {

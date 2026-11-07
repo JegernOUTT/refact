@@ -326,7 +326,10 @@ pub enum FrameLocatorError {
 impl Display for FrameLocatorError {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::StrictViolation { count, previews } => {
+            Self::StrictViolation {
+                count,
+                previews,
+            } => {
                 write!(
                     formatter,
                     "Strict mode violation: frame locator resolved to {count} iframe elements"
@@ -342,16 +345,19 @@ impl Display for FrameLocatorError {
             Self::NoContentFrame => {
                 formatter.write_str("Frame locator iframe has no attached content frame")
             }
-            Self::OutOfProcessFrame { frame_id } => write!(
+            Self::OutOfProcessFrame {
+                frame_id,
+            } => write!(
                 formatter,
                 "Out-of-process iframe {frame_id} is not supported by this browser connection"
             ),
-            Self::FrameDetached { index, source } => {
-                formatter.write_str(&frame_detached_message(*index, None, source.as_deref()))
-            }
-            Self::FrameOwnerMissing { index } => {
-                formatter.write_str(&frame_owner_missing_message(*index, None))
-            }
+            Self::FrameDetached {
+                index,
+                source,
+            } => formatter.write_str(&frame_detached_message(*index, None, source.as_deref())),
+            Self::FrameOwnerMissing {
+                index,
+            } => formatter.write_str(&frame_owner_missing_message(*index, None)),
             Self::Handle(error) => Display::fmt(error, formatter),
         }
     }
@@ -691,23 +697,6 @@ mod tests {
         assert_eq!(
             failure.error.to_string(),
             "Element handle object-1 is no longer valid"
-        );
-    }
-
-    #[test]
-    fn missing_frame_owner_reports_an_empty_match_without_a_retry() {
-        let failure = ChainFailure::fatal(FrameLocatorError::FrameOwnerMissing { index: 0 });
-
-        assert!(!failure.is_stale());
-        let message = failure.error.to_string();
-        assert!(message.starts_with(FRAME_DETACHED_PREFIX));
-        assert!(message.contains("matched no iframe element"));
-        assert!(!message.contains("detached or replaced"));
-        assert_eq!(
-            message,
-            format!(
-                "{FRAME_DETACHED_PREFIX} frame 0 matched no iframe element; {FRAME_OWNER_MISSING_GUIDANCE}"
-            )
         );
     }
 

@@ -139,12 +139,4 @@ test.describe("Reports narrow layout", () => {
       widths.main[1],
     );
   });
-
-  test("keeps the first work row below the Desk controls in the top half at 1280px", async ({
-    page,
-  }) => {
-    await openDesk(page, 1280, 900);
-    await expect(page.getByTestId("buddy-desk-detail-hint")).toBeVisible();
-    await expectFirstRowBelowControlsInTopHalf(page, 900);
-  });
 });

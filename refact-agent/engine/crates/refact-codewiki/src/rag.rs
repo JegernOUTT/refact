@@ -58,7 +58,11 @@ fn build_corpus_stats(docs: &[Vec<String>]) -> CorpusStats {
         }
     }
 
-    CorpusStats { avgdl, df, n }
+    CorpusStats {
+        avgdl,
+        df,
+        n,
+    }
 }
 
 fn term_counts(tokens: &[String]) -> HashMap<&str, usize> {

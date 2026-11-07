@@ -39,7 +39,9 @@ impl PhysicalGuard {
         loop {
             match lock.try_write().map(std::mem::forget) {
                 Ok(()) => {
-                    return Ok(Self { _file: lock });
+                    return Ok(Self {
+                        _file: lock,
+                    });
                 }
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
                     #[cfg(test)]

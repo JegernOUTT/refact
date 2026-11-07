@@ -265,7 +265,9 @@ async fn ready_worker_with_timeout(
 
 fn proxy_worker_timeout_reason(info: &WorkerInfo) -> String {
     match &info.state {
-        WorkerState::Failed { reason } => reason.clone(),
+        WorkerState::Failed {
+            reason,
+        } => reason.clone(),
         WorkerState::Crashed => info
             .last_error
             .clone()
@@ -430,7 +432,9 @@ fn is_sse_request(headers: &HeaderMap, path: &str) -> bool {
 
 fn path_is_streaming(path: &str) -> bool {
     let path = path.split('?').next().unwrap_or(path);
-    path.ends_with("/subscribe") || path.contains("/voice/stream/")
+    path.ends_with("/subscribe")
+        || path.ends_with("/chats/subscribe-many")
+        || path.contains("/voice/stream/")
 }
 
 fn request_headers(headers: &HeaderMap, project_id: &str) -> reqwest::header::HeaderMap {
@@ -550,7 +554,10 @@ struct ProxyStreamGuard {
 
 impl ProxyStreamGuard {
     fn new(state: Arc<DaemonState>, project_id: String) -> Self {
-        Self { state, project_id }
+        Self {
+            state,
+            project_id,
+        }
     }
 }
 
@@ -625,7 +632,9 @@ mod tests {
             std::env::remove_var("FAKE_WORKER_DELAY_READY");
             std::env::remove_var("FAKE_WORKER_PORT_BUSY_EXIT");
             std::env::remove_var("FAKE_WORKER_SKIP_LSP");
-            Some(Self { keys })
+            Some(Self {
+                keys,
+            })
         }
     }
 
@@ -829,6 +838,10 @@ mod tests {
         assert!(is_sse_request(
             &headers,
             "/v1/voice/stream/abc123/subscribe"
+        ));
+        assert!(is_sse_request(
+            &headers,
+            "/v1/chats/subscribe-many?chat_ids=%5B%22chat%22%5D"
         ));
     }
 

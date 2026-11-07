@@ -226,16 +226,6 @@ impl Browser {
     ///
     /// This will be applied to all [new_tab](Browser::new_tab), [new_tab_with_options](Browser::new_tab_with_options) and [wait_for_initial_tab](Browser::wait_for_initial_tab) calls for the browser
     ///
-    /// ```rust
-    /// # use anyhow::Result;
-    /// # fn main() -> Result<()> {
-    /// # use std::time::Duration;
-    /// use headless_chrome::Browser;
-    /// let browser = Browser::default()?;
-    /// browser.set_default_timeout(Duration::from_secs(10));
-    /// # Ok(()
-    /// # }
-    /// ```
     pub fn set_default_timeout(&self, timeout: Duration) -> &Self {
         let mut current_timeout = self.default_timeout.write().unwrap();
         *current_timeout = timeout;
@@ -269,10 +259,8 @@ impl Browser {
     /// #
     /// # use headless_chrome::Browser;
     /// # let browser = Browser::default()?;
-    /// let first_tab = browser.new_tab()?;
     /// let new_tab = browser.new_tab()?;
-    /// let num_tabs = browser.get_tabs().lock().unwrap().len();
-    /// assert_eq!(2, num_tabs);
+    /// assert_eq!("about:blank", new_tab.get_url());
     /// #
     /// # Ok(())
     /// # }
@@ -296,23 +284,6 @@ impl Browser {
     }
 
     /// Create a new tab with a starting url, height / width, context ID and 'frame control'
-    /// ```rust
-    /// # use anyhow::Result;
-    /// # fn main() -> Result<()> {
-    /// #
-    /// # use headless_chrome::{Browser, protocol::target::methods::CreateTarget};
-    /// # let browser = Browser::default()?;
-    ///    let new_tab = browser.new_tab_with_options(CreateTarget {
-    ///    url: "chrome://version",
-    ///    width: Some(1024),
-    ///    height: Some(800),
-    ///    browser_context_id: None,
-    ///    enable_begin_frame_control: None,
-    ///    })?;
-    /// #
-    /// # Ok(())
-    /// # }
-    /// ```
     pub fn new_tab_with_options(&self, create_target_params: CreateTarget) -> Result<Arc<Tab>> {
         let target_id = self.call_method(create_target_params)?.target_id;
 

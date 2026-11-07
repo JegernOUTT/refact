@@ -1112,7 +1112,10 @@ async fn extract_memos_and_meta(
         }
     }
 
-    Ok(ExtractionResult { meta, memos })
+    Ok(ExtractionResult {
+        meta,
+        memos,
+    })
 }
 
 fn memory_candidates_from_extraction(

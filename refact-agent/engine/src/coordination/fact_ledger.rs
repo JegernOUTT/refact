@@ -109,9 +109,12 @@ impl ClaimLanding {
     /// It is still readable — that is the point.
     pub fn contradicted(&self) -> Option<&ClaimRecord> {
         match self {
-            ClaimLanding::Contested { standing, .. } | ClaimLanding::Divergent { standing, .. } => {
-                Some(standing)
+            ClaimLanding::Contested {
+                standing, ..
             }
+            | ClaimLanding::Divergent {
+                standing, ..
+            } => Some(standing),
             _ => None,
         }
     }
@@ -127,10 +130,18 @@ impl ClaimLanding {
 
     pub fn staled(&self) -> &[String] {
         match self {
-            ClaimLanding::Recorded { staled, .. }
-            | ClaimLanding::Corroborated { staled, .. }
-            | ClaimLanding::Contested { staled, .. }
-            | ClaimLanding::Divergent { staled, .. } => staled,
+            ClaimLanding::Recorded {
+                staled, ..
+            }
+            | ClaimLanding::Corroborated {
+                staled, ..
+            }
+            | ClaimLanding::Contested {
+                staled, ..
+            }
+            | ClaimLanding::Divergent {
+                staled, ..
+            } => staled,
             _ => &[],
         }
     }
@@ -233,22 +244,38 @@ impl FactLedger {
 
         match assessment.verdict {
             ClaimVerdict::New => match self.insert(incoming).await? {
-                Inserted::Claim(claim) => Ok(ClaimLanding::Recorded { claim, staled }),
-                Inserted::Existing(claim) => Ok(ClaimLanding::AlreadyRecorded { claim }),
-                Inserted::Limit(max) => Ok(ClaimLanding::SubjectLimit { max }),
+                Inserted::Claim(claim) => Ok(ClaimLanding::Recorded {
+                    claim,
+                    staled,
+                }),
+                Inserted::Existing(claim) => Ok(ClaimLanding::AlreadyRecorded {
+                    claim,
+                }),
+                Inserted::Limit(max) => Ok(ClaimLanding::SubjectLimit {
+                    max,
+                }),
             },
-            ClaimVerdict::Repeats { claim_id } => {
+            ClaimVerdict::Repeats {
+                claim_id,
+            } => {
                 let claim = self.expect_topic(&on_topic, &claim_id)?;
-                Ok(ClaimLanding::Repeated { claim })
+                Ok(ClaimLanding::Repeated {
+                    claim,
+                })
             }
-            ClaimVerdict::Corroborates { claim_id } => {
+            ClaimVerdict::Corroborates {
+                claim_id,
+            } => {
                 let mut claim = self.expect_topic(&on_topic, &claim_id)?;
                 match claim.corroborate(
                     &incoming.provenance,
                     policy.corroboration_step_per_mille,
                     at_ms,
                 ) {
-                    ClaimCorroboration::Raised { from, to } => {
+                    ClaimCorroboration::Raised {
+                        from,
+                        to,
+                    } => {
                         self.store
                             .put_claim_confidence(&self.access, &claim)
                             .await?;
@@ -259,7 +286,9 @@ impl FactLedger {
                             staled,
                         })
                     }
-                    ClaimCorroboration::AlreadyRecorded => Ok(ClaimLanding::Repeated { claim }),
+                    ClaimCorroboration::AlreadyRecorded => Ok(ClaimLanding::Repeated {
+                        claim,
+                    }),
                 }
             }
             ClaimVerdict::ContradictsBelowThreshold {
@@ -268,7 +297,9 @@ impl FactLedger {
             } => {
                 let standing = self.expect_topic(&on_topic, &claim_id)?;
                 match self.insert(incoming).await? {
-                    Inserted::Limit(max) => Ok(ClaimLanding::SubjectLimit { max }),
+                    Inserted::Limit(max) => Ok(ClaimLanding::SubjectLimit {
+                        max,
+                    }),
                     Inserted::Claim(claim) | Inserted::Existing(claim) => {
                         Ok(ClaimLanding::Divergent {
                             incoming: claim,
@@ -279,10 +310,16 @@ impl FactLedger {
                     }
                 }
             }
-            ClaimVerdict::Contradicts { claim_id } => {
+            ClaimVerdict::Contradicts {
+                claim_id,
+            } => {
                 let standing = self.expect_topic(&on_topic, &claim_id)?;
                 let kept = match self.insert(incoming).await? {
-                    Inserted::Limit(max) => return Ok(ClaimLanding::SubjectLimit { max }),
+                    Inserted::Limit(max) => {
+                        return Ok(ClaimLanding::SubjectLimit {
+                            max,
+                        })
+                    }
                     Inserted::Claim(claim) | Inserted::Existing(claim) => claim,
                 };
                 let (standing, kept, disagreement_id) =
@@ -492,17 +529,24 @@ pub fn render_all(claims: &[ClaimRecord]) -> String {
 /// Model-facing text for what recording a claim did.
 pub fn render_landing(landing: &ClaimLanding) -> String {
     let body = match landing {
-        ClaimLanding::Recorded { claim, .. } => {
+        ClaimLanding::Recorded {
+            claim, ..
+        } => {
             format!("Claim recorded.\n\n{}", render(claim))
         }
         ClaimLanding::Corroborated {
-            claim, from, to, ..
+            claim,
+            from,
+            to,
+            ..
         } => format!(
             "An independent run already reached this. Confidence raised {from}/1000 -> {to}/1000 \
              on the claim already on record; no duplicate entry was made.\n\n{}",
             render(claim)
         ),
-        ClaimLanding::Repeated { claim } => format!(
+        ClaimLanding::Repeated {
+            claim,
+        } => format!(
             "This run already recorded that. Nothing changed — a run agreeing with itself is not \
              corroboration.\n\n{}",
             render(claim)
@@ -538,12 +582,16 @@ pub fn render_landing(landing: &ClaimLanding) -> String {
             render(standing),
             render(incoming)
         ),
-        ClaimLanding::AlreadyRecorded { claim } => format!(
+        ClaimLanding::AlreadyRecorded {
+            claim,
+        } => format!(
             "A claim is already on record under `{}` and was left untouched.\n\n{}",
             claim.claim_id,
             render(claim)
         ),
-        ClaimLanding::SubjectLimit { max } => format!(
+        ClaimLanding::SubjectLimit {
+            max,
+        } => format!(
             "Refused: this subject already carries {max} claim(s), the configured maximum. \
              Retract one before recording another."
         ),

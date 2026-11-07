@@ -102,7 +102,11 @@ pub fn pressure_retry(
                 .config()
                 .max_retry_attempts,
         }),
-        RetryDecision::GiveUp { cause, .. } => Some(PressureRetry::GiveUp { cause }),
+        RetryDecision::GiveUp {
+            cause, ..
+        } => Some(PressureRetry::GiveUp {
+            cause,
+        }),
     }
 }
 
@@ -213,11 +217,17 @@ pub fn admit(bucket: &str, priority: RequestPriority) -> Option<Result<Permit, A
         ),
         Err(refusal) => {
             let (rule, reason) = match refusal {
-                AdmissionRefusal::CoolingDown { reason, until_ms } => (
+                AdmissionRefusal::CoolingDown {
+                    reason,
+                    until_ms,
+                } => (
                     "provider_pressure.breaker_cooling_down",
                     format!("{reason} until {until_ms}"),
                 ),
-                AdmissionRefusal::AtCapacity { limit, in_flight } => (
+                AdmissionRefusal::AtCapacity {
+                    limit,
+                    in_flight,
+                } => (
                     "provider_pressure.bucket_at_capacity",
                     format!("{in_flight} in flight of {limit}"),
                 ),
@@ -326,7 +336,10 @@ async fn acquire_inner(
             return Err(AcquireError::Refused(refusal));
         }
         match refusal {
-            AdmissionRefusal::CoolingDown { reason, until_ms } => {
+            AdmissionRefusal::CoolingDown {
+                reason,
+                until_ms,
+            } => {
                 let registry = pressure_registry().ok_or_else(|| {
                     AcquireError::Aborted(
                         "provider pressure registry was removed while waiting".into(),
@@ -356,7 +369,12 @@ async fn acquire_inner(
                 .map_err(AcquireError::Aborted)?;
                 backoff_ms = (backoff_ms * 2).min(500);
             }
-            AdmissionRefusal::AtCapacity { .. } | AdmissionRefusal::BackgroundReserved { .. } => {
+            AdmissionRefusal::AtCapacity {
+                ..
+            }
+            | AdmissionRefusal::BackgroundReserved {
+                ..
+            } => {
                 wait_abortable(
                     Duration::from_millis(backoff_ms),
                     abort_flag.clone(),

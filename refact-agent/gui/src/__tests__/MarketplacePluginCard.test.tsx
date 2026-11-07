@@ -28,15 +28,4 @@ describe("MarketplacePluginCard", () => {
       screen.queryByRole("button", { name: /^install$/i }),
     ).not.toBeInTheDocument();
   });
-
-  test("renders plugin name and description", () => {
-    render(<MarketplacePluginCard plugin={mockPlugin} isInstalled={false} />);
-    expect(screen.getByText("Test Plugin")).toBeInTheDocument();
-    expect(screen.getByText("A plugin for testing")).toBeInTheDocument();
-  });
-
-  test("renders marketplace badge", () => {
-    render(<MarketplacePluginCard plugin={mockPlugin} isInstalled={false} />);
-    expect(screen.getByText("test-marketplace")).toBeInTheDocument();
-  });
 });

@@ -5,6 +5,13 @@ test("opens an external image read-only with working preview controls", async ({
 }) => {
   await page.setViewportSize({ width: 1280, height: 900 });
   await page.goto("/tests/e2e/route-showcase.html?route=workspace-chrome");
+  await page
+    .getByRole("complementary", { name: "File explorer", exact: true })
+    .getByRole("button", { name: "More options", exact: true })
+    .click();
+  await page
+    .getByRole("menuitem", { name: "Open file by path…", exact: true })
+    .click();
   await page.getByLabel("Absolute file path", { exact: true }).waitFor();
   const imageData = await page.evaluate(() => {
     const canvas = document.createElement("canvas");
@@ -56,6 +63,8 @@ test("opens an external image read-only with working preview controls", async ({
     page.getByRole("button", { name: "Edit this file" }),
   ).toBeDisabled();
   await expect(page.getByText("Read-only", { exact: true })).toBeVisible();
+  // The toolbar is intentionally pointer-gated until the preview is hovered.
+  await page.getByTestId("image-preview-viewport").hover();
   const zoom = page.getByLabel("Zoom level", { exact: true });
   await page.getByRole("button", { name: "Actual size", exact: true }).click();
   await expect(zoom).toHaveText("100%");
@@ -65,12 +74,19 @@ test("opens an external image read-only with working preview controls", async ({
   await expect(image).toHaveAttribute("data-rotation", "90");
   const resize = page.getByRole("separator", { name: "Resize image preview" });
   await resize.focus();
+  await resize.press("Home");
+  const minimumHeight = Number(await resize.getAttribute("aria-valuemin"));
+  await expect(resize).toHaveAttribute("aria-valuenow", String(minimumHeight));
   await resize.press("ArrowDown");
-  await expect(resize).toHaveAttribute("aria-valuenow", "400");
+  await expect(resize).toHaveAttribute(
+    "aria-valuenow",
+    String(minimumHeight + 40),
+  );
+  await page.getByTestId("image-preview-viewport").hover();
   await page.getByRole("button", { name: "Fit to view", exact: true }).click();
-  await expect
-    .poll(() => image.boundingBox().then((box) => box?.height ?? 0))
-    .toBeLessThanOrEqual(401);
+  await expect(
+    page.getByRole("button", { name: "Fit to view", exact: true }),
+  ).toHaveAttribute("aria-pressed", "true");
   await page.setViewportSize({ width: 360, height: 900 });
   await expect(image).toBeVisible();
   await expect

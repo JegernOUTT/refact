@@ -252,7 +252,9 @@ impl Tab {
         tab.call_method(Page::Enable {
             enable_file_chooser_opened_event: None,
         })?;
-        tab.call_method(Page::SetLifecycleEventsEnabled { enabled: true })?;
+        tab.call_method(Page::SetLifecycleEventsEnabled {
+            enabled: true,
+        })?;
 
         tab.start_event_handler_thread();
 
@@ -555,7 +557,10 @@ impl Tab {
             referrer_policy: None,
         })?;
         if let Some(error_text) = return_object.error_text {
-            return Err(NavigationFailed { error_text }.into());
+            return Err(NavigationFailed {
+                error_text,
+            }
+            .into());
         }
 
         let navigating = Arc::clone(&self.navigating);
@@ -698,29 +703,6 @@ impl Tab {
     /// document.querySelector(selector)
     /// ```
     ///
-    /// ```rust
-    /// # use anyhow::Result;
-    /// # // Awful hack to get access to testing utils common between integration, doctest, and unit tests
-    /// # mod server {
-    /// #     include!("../../testing_utils/server.rs");
-    /// # }
-    /// # fn main() -> Result<()> {
-    /// #
-    /// use headless_chrome::Browser;
-    ///
-    /// let browser = Browser::default()?;
-    /// let initial_tab = browser.new_tab()?;
-    ///
-    /// let file_server = server::Server::with_dumb_html(include_str!("../../../tests/simple.html"));
-    /// let element = initial_tab.navigate_to(&file_server.url())?
-    ///     .wait_until_navigated()?
-    ///     .find_element("div#foobar")?;
-    /// let attrs = element.get_attributes()?.unwrap();
-    /// assert_eq!(attrs["id"], "foobar");
-    /// #
-    /// # Ok(())
-    /// # }
-    /// ```
     pub fn find_element(&self, selector: &str) -> Result<Element<'_>> {
         let root_node_id = self.get_document()?.node_id;
         trace!("Looking up element via selector: {selector}");
@@ -1078,22 +1060,6 @@ impl Tab {
     /// If `from_surface` is true, the screenshot is taken from the surface rather than
     /// the view.
     ///
-    /// ```rust,no_run
-    /// # use anyhow::Result;
-    /// # fn main() -> Result<()> {
-    /// #
-    /// use headless_chrome::{protocol::page::ScreenshotFormat, Browser, LaunchOptions};
-    /// let browser = Browser::new(LaunchOptions::default_builder().build().unwrap())?;
-    /// let tab = browser.new_tab()?;
-    /// let viewport = tab.navigate_to("https://en.wikipedia.org/wiki/WebKit")?
-    ///     .wait_for_element("#mw-content-text > div > table.infobox.vevent")?
-    ///     .get_box_model()?
-    ///     .margin_viewport();
-    ///  let png_data = tab.capture_screenshot(ScreenshotFormat::PNG, Some(viewport), true)?;
-    /// #
-    /// # Ok(())
-    /// # }
-    /// ```
     pub fn capture_screenshot(
         &self,
         format: Page::CaptureScreenshotFormatOption,
@@ -1181,19 +1147,6 @@ impl Tab {
     ///
     /// Useful when you want capture a .png
     ///
-    /// ```rust,no_run
-    /// # use anyhow::Result;
-    /// # fn main() -> Result<()> {
-    /// #
-    /// use headless_chrome::{protocol::page::ScreenshotFormat, Browser, LaunchOptions};
-    /// let browser = Browser::new(LaunchOptions::default_builder().build().unwrap())?;
-    /// let tab = browser.new_tab()?;
-    /// tab.set_transparent_background_color()?;
-    ///
-    /// #
-    /// # Ok(())
-    /// # }
-    /// ```
     pub fn set_transparent_background_color(&self) -> Result<&Self> {
         self.call_method(Emulation::SetDefaultBackgroundColorOverride {
             color: Some(DOM::RGBA {
@@ -1210,21 +1163,10 @@ impl Tab {
     ///
     /// Pass a RGBA to override the background color of the dom.
     ///
-    /// ```rust,no_run
-    /// # use anyhow::Result;
-    /// # fn main() -> Result<()> {
-    /// #
-    /// use headless_chrome::{protocol::page::ScreenshotFormat, Browser, LaunchOptions};
-    /// let browser = Browser::new(LaunchOptions::default_builder().build().unwrap())?;
-    /// let tab = browser.new_tab()?;
-    /// tab.set_background_color( color: RGBA { r: 255, g: 0, b: 0, a: 1.,})?;
-    ///
-    /// #
-    /// # Ok(())
-    /// # }
-    /// ```
     pub fn set_background_color(&self, color: DOM::RGBA) -> Result<&Self> {
-        self.call_method(Emulation::SetDefaultBackgroundColorOverride { color: Some(color) })?;
+        self.call_method(Emulation::SetDefaultBackgroundColorOverride {
+            color: Some(color),
+        })?;
         Ok(self)
     }
 
@@ -1461,7 +1403,9 @@ impl Tab {
     ///
     /// See <https://chromedevtools.github.io/devtools-protocol/tot/Log#method-startViolationsReport>
     pub fn start_violations_report(&self, config: Vec<ViolationSetting>) -> Result<&Self> {
-        self.call_method(Log::StartViolationsReport { config })?;
+        self.call_method(Log::StartViolationsReport {
+            config,
+        })?;
         Ok(self)
     }
 
@@ -1510,7 +1454,7 @@ impl Tab {
     /// # fn main() -> Result<()> {
     /// #
     /// # use headless_chrome::Browser;
-    /// # use headless_chrome::protocol::Event;
+    /// # use headless_chrome::protocol::cdp::types::Event;
     /// # let browser = Browser::default()?;
     /// # let tab = browser.new_tab()?;
     /// tab.enable_log()?;
@@ -1605,7 +1549,10 @@ impl Tab {
             .window_id;
         // If we set Normal window state, we *have* to make two API calls
         // to set the state before setting the coordinates; despite what the docs say...
-        if let Bounds::Normal { .. } = &bounds {
+        if let Bounds::Normal {
+            ..
+        } = &bounds
+        {
             self.transport
                 .call_method_on_browser(Browser::SetWindowBounds {
                     window_id,
@@ -1629,7 +1576,9 @@ impl Tab {
     /// Returns all cookies that match the tab's current URL.
     pub fn get_cookies(&self) -> Result<Vec<Cookie>> {
         Ok(self
-            .call_method(Network::GetCookies { urls: None })?
+            .call_method(Network::GetCookies {
+                urls: None,
+            })?
             .cookies)
     }
 
@@ -1659,7 +1608,9 @@ impl Tab {
                 .map(std::convert::Into::into)
                 .collect(),
         )?;
-        self.call_method(SetCookies { cookies })?;
+        self.call_method(SetCookies {
+            cookies,
+        })?;
         Ok(())
     }
 
@@ -1689,21 +1640,6 @@ impl Tab {
 
     /// Returns the title of the document.
     ///
-    /// ```rust
-    /// # use anyhow::Result;
-    /// # use headless_chrome::Browser;
-    /// # fn main() -> Result<()> {
-    /// #
-    /// # let browser = Browser::default()?;
-    /// # let tab = browser.new_tab()?;
-    /// tab.navigate_to("https://google.com")?;
-    /// tab.wait_until_navigated()?;
-    /// let title = tab.get_title()?;
-    /// assert_eq!(title, "Google");
-    /// #
-    /// # Ok(())
-    /// # }
-    /// ```
     pub fn get_title(&self) -> Result<String> {
         let remote_object = self.evaluate("document.title", false)?;
         Ok(serde_json::from_value(remote_object.value.unwrap())?)
@@ -1717,7 +1653,10 @@ impl Tab {
         enabled: bool,
         cancel: Option<bool>,
     ) -> Result<()> {
-        self.call_method(SetInterceptFileChooserDialog { enabled, cancel })?;
+        self.call_method(SetInterceptFileChooserDialog {
+            enabled,
+            cancel,
+        })?;
         Ok(())
     }
 
@@ -1928,7 +1867,9 @@ impl Tab {
     }
 
     pub fn ack_screencast(&self, session_id: u32) -> Result<()> {
-        self.call_method(Page::ScreencastFrameAck { session_id })?;
+        self.call_method(Page::ScreencastFrameAck {
+            session_id,
+        })?;
         Ok(())
     }
 

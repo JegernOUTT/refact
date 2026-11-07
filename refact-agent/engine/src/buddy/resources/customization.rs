@@ -68,7 +68,11 @@ where
         crate::yaml_configs::customization_service::validate_id(&id)
             .map_err(ResourceError::ValidationFailed)?;
         let path = self.checked_target(&kind, &id)?;
-        Ok(Binding { kind, id, path })
+        Ok(Binding {
+            kind,
+            id,
+            path,
+        })
     }
 
     fn checked_target(&self, kind: &str, id: &str) -> Result<PathBuf, ResourceError> {

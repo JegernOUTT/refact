@@ -149,17 +149,39 @@ pub struct CliOptions {
 impl CliOptions {
     fn json_output(&self) -> bool {
         match &self.command {
-            CliCommand::Ui { json, .. }
-            | CliCommand::Ps { json }
-            | CliCommand::Cron { json, .. }
-            | CliCommand::Projects { json, .. }
-            | CliCommand::Restart { json, .. }
-            | CliCommand::Stop { json, .. }
-            | CliCommand::Logs { json, .. }
-            | CliCommand::Events { json, .. }
-            | CliCommand::Status { json }
-            | CliCommand::Doctor { json }
-            | CliCommand::Version { json } => *json,
+            CliCommand::Ui {
+                json, ..
+            }
+            | CliCommand::Ps {
+                json,
+            }
+            | CliCommand::Cron {
+                json, ..
+            }
+            | CliCommand::Projects {
+                json, ..
+            }
+            | CliCommand::Restart {
+                json, ..
+            }
+            | CliCommand::Stop {
+                json, ..
+            }
+            | CliCommand::Logs {
+                json, ..
+            }
+            | CliCommand::Events {
+                json, ..
+            }
+            | CliCommand::Status {
+                json,
+            }
+            | CliCommand::Doctor {
+                json,
+            }
+            | CliCommand::Version {
+                json,
+            } => *json,
         }
     }
 }
@@ -335,7 +357,10 @@ fn parse_cron(args: &mut Vec<String>) -> Result<CliOptions, String> {
         }
     };
     Ok(CliOptions {
-        command: CliCommand::Cron { command, json },
+        command: CliCommand::Cron {
+            command,
+            json,
+        },
     })
 }
 
@@ -479,7 +504,10 @@ fn parse_projects(args: &mut Vec<String>) -> Result<CliOptions, String> {
         }
     };
     Ok(CliOptions {
-        command: CliCommand::Projects { command, json },
+        command: CliCommand::Projects {
+            command,
+            json,
+        },
     })
 }
 
@@ -504,7 +532,9 @@ fn parse_restart_stop(args: &mut Vec<String>, restart: bool) -> Result<CliOption
             json,
         }
     };
-    Ok(CliOptions { command })
+    Ok(CliOptions {
+        command,
+    })
 }
 
 fn parse_logs(args: &mut Vec<String>) -> Result<CliOptions, String> {
@@ -544,7 +574,11 @@ fn parse_events(args: &mut Vec<String>) -> Result<CliOptions, String> {
         return Err("events --json is incompatible with -f/--follow".to_string());
     }
     Ok(CliOptions {
-        command: CliCommand::Events { kind, follow, json },
+        command: CliCommand::Events {
+            kind,
+            follow,
+            json,
+        },
     })
 }
 
@@ -615,7 +649,9 @@ async fn run_inner(options: CliOptions, out: &mut dyn Write) -> Result<i32, CliE
             json,
             no_open,
         } => run_ui(path, json, no_open, out).await,
-        CliCommand::Doctor { json } => {
+        CliCommand::Doctor {
+            json,
+        } => {
             let report = doctor_report().await;
             if json {
                 print_json(out, &report)?;
@@ -624,14 +660,22 @@ async fn run_inner(options: CliOptions, out: &mut dyn Write) -> Result<i32, CliE
             }
             Ok(report.exit_code())
         }
-        CliCommand::Version { json } => run_version(json, out).await,
+        CliCommand::Version {
+            json,
+        } => run_version(json, out).await,
         CliCommand::Restart {
-            daemon: true, json, ..
+            daemon: true,
+            json,
+            ..
         } => restart_daemon(json, out).await,
         CliCommand::Stop {
-            daemon: true, json, ..
+            daemon: true,
+            json,
+            ..
         } => stop_daemon(json, out).await,
-        CliCommand::Ps { json } => {
+        CliCommand::Ps {
+            json,
+        } => {
             let daemon = ensure_daemon().await?;
             let status: DaemonStatus = client_get(&daemon, "/daemon/v1/status").await?;
             let workers: Vec<WorkerRow> = client_get(&daemon, "/daemon/v1/workers").await?;
@@ -648,9 +692,19 @@ async fn run_inner(options: CliOptions, out: &mut dyn Write) -> Result<i32, CliE
             }
             Ok(0)
         }
-        CliCommand::Projects { command, json } => run_projects(command, json, out).await,
-        CliCommand::Cron { command, json } => run_cron(command, json, out).await,
-        CliCommand::Restart { target, json, .. } => {
+        CliCommand::Projects {
+            command,
+            json,
+        } => run_projects(command, json, out).await,
+        CliCommand::Cron {
+            command,
+            json,
+        } => run_cron(command, json, out).await,
+        CliCommand::Restart {
+            target,
+            json,
+            ..
+        } => {
             let daemon = existing_daemon().await?;
             let projects = list_projects(&daemon).await?;
             let id = resolve_target(&projects, target.as_deref().unwrap_or_default())?;
@@ -659,7 +713,11 @@ async fn run_inner(options: CliOptions, out: &mut dyn Write) -> Result<i32, CliE
             print_value(out, json, &worker, "restarted")?;
             Ok(0)
         }
-        CliCommand::Stop { target, json, .. } => {
+        CliCommand::Stop {
+            target,
+            json,
+            ..
+        } => {
             let daemon = existing_daemon().await?;
             let projects = list_projects(&daemon).await?;
             let id = resolve_target(&projects, target.as_deref().unwrap_or_default())?;
@@ -674,8 +732,14 @@ async fn run_inner(options: CliOptions, out: &mut dyn Write) -> Result<i32, CliE
             follow,
             json,
         } => run_logs(target, daemon_logs, follow, json, out).await,
-        CliCommand::Events { kind, follow, json } => run_events(kind, follow, json, out).await,
-        CliCommand::Status { json } => run_status(json, out).await,
+        CliCommand::Events {
+            kind,
+            follow,
+            json,
+        } => run_events(kind, follow, json, out).await,
+        CliCommand::Status {
+            json,
+        } => run_status(json, out).await,
     }
 }
 
@@ -689,22 +753,35 @@ async fn run_projects(
         ProjectsCommand::List => {
             let projects = list_projects(&daemon).await?;
             if json_output {
-                print_json(out, &ProjectsOutput { projects })?;
+                print_json(
+                    out,
+                    &ProjectsOutput {
+                        projects,
+                    },
+                )?;
             } else {
                 write_projects(out, &projects)?;
             }
         }
-        ProjectsCommand::Open { path } => {
+        ProjectsCommand::Open {
+            path,
+        } => {
             let value = open_project(&daemon, &path).await?;
             print_value(out, json_output, &value, "opened")?;
         }
-        ProjectsCommand::Pin { target } => {
+        ProjectsCommand::Pin {
+            target,
+        } => {
             set_project_pin(&daemon, &target, true, json_output, out).await?;
         }
-        ProjectsCommand::Unpin { target } => {
+        ProjectsCommand::Unpin {
+            target,
+        } => {
             set_project_pin(&daemon, &target, false, json_output, out).await?;
         }
-        ProjectsCommand::Forget { target } => {
+        ProjectsCommand::Forget {
+            target,
+        } => {
             let projects = list_projects(&daemon).await?;
             let id = resolve_target(&projects, &target)?;
             let value: Value = client::delete_json(&daemon, &format!("/daemon/v1/projects/{id}"))
@@ -825,7 +902,9 @@ async fn run_cron(
 ) -> Result<i32, CliError> {
     let daemon = ensure_daemon().await?;
     match command {
-        CronCommand::List { project } => {
+        CronCommand::List {
+            project,
+        } => {
             let project_id = resolve_or_open_project(&daemon, project.as_deref()).await?;
             let tasks: Value = client_get(
                 &daemon,
@@ -850,7 +929,10 @@ async fn run_cron(
             .map_err(client_error)?;
             print_value(out, json_output, &value, "created")?;
         }
-        CronCommand::Run { project, id } => {
+        CronCommand::Run {
+            project,
+            id,
+        } => {
             let project_id = resolve_or_open_project(&daemon, project.as_deref()).await?;
             let value: Value = client_post_empty(
                 &daemon,
@@ -862,7 +944,10 @@ async fn run_cron(
             .await?;
             print_value(out, json_output, &value, "triggered")?;
         }
-        CronCommand::Remove { project, id } => {
+        CronCommand::Remove {
+            project,
+            id,
+        } => {
             let project_id = resolve_or_open_project(&daemon, project.as_deref()).await?;
             let value: Value = client::delete_json(
                 &daemon,
@@ -875,10 +960,16 @@ async fn run_cron(
             .map_err(client_error)?;
             print_value(out, json_output, &value, "removed")?;
         }
-        CronCommand::Pause { project, id } => {
+        CronCommand::Pause {
+            project,
+            id,
+        } => {
             patch_cron_enabled(&daemon, project.as_deref(), &id, false, json_output, out).await?;
         }
-        CronCommand::Resume { project, id } => {
+        CronCommand::Resume {
+            project,
+            id,
+        } => {
             patch_cron_enabled(&daemon, project.as_deref(), &id, true, json_output, out).await?;
         }
     }
@@ -984,7 +1075,10 @@ fn cron_delivery_value(delivery: CronDeliveryArg) -> Value {
     match delivery {
         CronDeliveryArg::Chat => json!("chat"),
         CronDeliveryArg::None => json!("none"),
-        CronDeliveryArg::Webhook { url, token } => {
+        CronDeliveryArg::Webhook {
+            url,
+            token,
+        } => {
             let mut value = json!({"kind": "webhook", "url": url});
             if let Some(token) = token {
                 value["token"] = json!(token);
@@ -1426,8 +1520,12 @@ async fn restart_daemon(json_output: bool, out: &mut dyn Write) -> Result<i32, C
                     .await
                     .map_err(CliError::runtime)?;
             }
-            DaemonPingStatus::NotRunning { .. } => {}
-            DaemonPingStatus::Error { message } => {
+            DaemonPingStatus::NotRunning {
+                ..
+            } => {}
+            DaemonPingStatus::Error {
+                message,
+            } => {
                 return Err(CliError::runtime(format!(
                     "daemon reachable but unhealthy: {message}"
                 )));
@@ -1457,10 +1555,14 @@ async fn stop_daemon(json_output: bool, out: &mut dyn Write) -> Result<i32, CliE
     };
     match client::ping_daemon(&info).await {
         DaemonPingStatus::Alive => {}
-        DaemonPingStatus::NotRunning { .. } => {
+        DaemonPingStatus::NotRunning {
+            ..
+        } => {
             return print_daemon_not_running(json_output, out, "stale");
         }
-        DaemonPingStatus::Error { message } => {
+        DaemonPingStatus::Error {
+            message,
+        } => {
             return Err(CliError::runtime(format!(
                 "daemon reachable but unhealthy: {message}"
             )));
@@ -1612,7 +1714,9 @@ async fn doctor_report() -> DoctorReport {
         crate::daemon::paths::lock_path().exists(),
         crate::daemon::paths::lock_path().display().to_string(),
     ));
-    DoctorReport { checks }
+    DoctorReport {
+        checks,
+    }
 }
 
 fn binary_path_check() -> DoctorCheck {
@@ -1685,10 +1789,12 @@ async fn existing_daemon() -> Result<DaemonInfo, CliError> {
     };
     match client::ping_daemon(&info).await {
         DaemonPingStatus::Alive => Ok(info),
-        DaemonPingStatus::NotRunning { .. } => {
-            Err(CliError::runtime("daemon not running: stale daemon.json"))
-        }
-        DaemonPingStatus::Error { message } => Err(CliError::runtime(format!(
+        DaemonPingStatus::NotRunning {
+            ..
+        } => Err(CliError::runtime("daemon not running: stale daemon.json")),
+        DaemonPingStatus::Error {
+            message,
+        } => Err(CliError::runtime(format!(
             "daemon reachable but unhealthy: {message}"
         ))),
     }
@@ -2451,7 +2557,14 @@ mod tests {
         ] {
             let mut stdout = Vec::new();
             let mut stderr = Vec::new();
-            let code = run_with_io(CliOptions { command }, &mut stdout, &mut stderr).await;
+            let code = run_with_io(
+                CliOptions {
+                    command,
+                },
+                &mut stdout,
+                &mut stderr,
+            )
+            .await;
 
             assert_eq!(code, 1);
             assert!(stderr.is_empty());
@@ -2482,7 +2595,9 @@ mod tests {
         let mut stderr = Vec::new();
         let code = run_with_io(
             CliOptions {
-                command: CliCommand::Status { json: true },
+                command: CliCommand::Status {
+                    json: true,
+                },
             },
             &mut stdout,
             &mut stderr,
@@ -2621,7 +2736,9 @@ mod tests {
         assert_eq!(
             run_inner(
                 CliOptions {
-                    command: CliCommand::Ps { json: false }
+                    command: CliCommand::Ps {
+                        json: false
+                    }
                 },
                 &mut out
             )
@@ -2701,7 +2818,9 @@ mod tests {
         assert_eq!(
             run_inner(
                 CliOptions {
-                    command: CliCommand::Status { json: false }
+                    command: CliCommand::Status {
+                        json: false
+                    }
                 },
                 &mut out
             )

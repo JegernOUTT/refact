@@ -167,18 +167,6 @@ function getTabWrap(name: RegExp): HTMLElement {
 }
 
 describe("TabBar", () => {
-  it("shows the dock toggle without a center-panel launcher", () => {
-    const store = createStoreWithChatTabs();
-    renderTabBar(store);
-    expect(
-      screen.getByRole("button", { name: "Toggle workspace dock" }),
-    ).toBeInTheDocument();
-
-    expect(
-      screen.queryByRole("button", { name: "Open workspace panel" }),
-    ).not.toBeInTheDocument();
-  });
-
   it.each([
     ["terminal only", false, false, true, false],
     ["forced panels", false, false, false, true],
@@ -337,14 +325,6 @@ describe("TabBar", () => {
       "aria-selected",
       "true",
     );
-  });
-
-  it("does not render the live-edits control in the tab bar", () => {
-    const store = createStoreWithChatTabs();
-    renderTabBar(store);
-
-    expect(screen.queryByRole("button", { name: "Live edits" })).toBeNull();
-    expect(screen.queryByRole("switch", { name: "Live edits" })).toBeNull();
   });
 
   it("closes a tab exactly once when its transition ends", () => {

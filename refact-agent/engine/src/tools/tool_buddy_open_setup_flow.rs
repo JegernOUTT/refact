@@ -78,7 +78,9 @@ impl Tool for ToolBuddyOpenSetupFlow {
         let svc = lock
             .as_ref()
             .ok_or_else(|| "buddy service not initialized".to_string())?;
-        svc.send_navigation(BuddyPage::SetupMode { mode: flow.clone() });
+        svc.send_navigation(BuddyPage::SetupMode {
+            mode: flow.clone(),
+        });
 
         Ok((
             false,

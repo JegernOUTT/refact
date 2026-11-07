@@ -881,7 +881,9 @@ pub async fn resolve_goal_evidence(
             scope,
         },
     );
-    let mut runner = SystemEvidenceRunner { gcx };
+    let mut runner = SystemEvidenceRunner {
+        gcx,
+    };
     let records = service
         .accept_and_execute_all(specs.clone(), &mut runner)
         .await;
@@ -1368,7 +1370,10 @@ mod tests {
         let mut states = Vec::new();
         while let Ok(raw) = rx.try_recv() {
             let envelope: EventEnvelope = serde_json::from_str(&raw).unwrap();
-            if let ChatEvent::RuntimeUpdated { state, .. } = envelope.event {
+            if let ChatEvent::RuntimeUpdated {
+                state, ..
+            } = envelope.event
+            {
                 states.push(state);
             }
         }

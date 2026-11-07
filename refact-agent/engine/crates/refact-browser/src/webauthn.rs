@@ -46,7 +46,10 @@ pub struct WebAuthnManager {
 
 impl WebAuthnManager {
     pub fn has_active_session(&self) -> bool {
-        self.sessions.lock().map(|sessions| sessions.values().any(|session| session.enabled)).unwrap_or(true)
+        self.sessions
+            .lock()
+            .map(|sessions| sessions.values().any(|session| session.enabled))
+            .unwrap_or(true)
     }
 
     pub fn add_virtual_authenticator(
@@ -158,7 +161,9 @@ impl WebAuthnManager {
                 continue;
             };
             for authenticator_id in session.authenticator_ids {
-                let _ = tab.call_method(WebAuthn::RemoveVirtualAuthenticator { authenticator_id });
+                let _ = tab.call_method(WebAuthn::RemoveVirtualAuthenticator {
+                    authenticator_id,
+                });
                 removed += 1;
             }
             if session.enabled {

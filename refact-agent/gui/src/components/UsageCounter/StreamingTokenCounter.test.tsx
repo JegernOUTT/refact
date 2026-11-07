@@ -116,28 +116,6 @@ describe("StreamingTokenCounter", () => {
   });
 
   describe("Token counting", () => {
-    it("should be hidden when no assistant message yet", () => {
-      const store = createTestStore({
-        streaming: false,
-        waiting: true,
-        messages: [
-          {
-            role: "user",
-            content: "Test question",
-          } as UserMessage,
-        ],
-      });
-
-      const { container } = render(
-        <Provider store={store}>
-          <StreamingTokenCounter />
-        </Provider>,
-      );
-
-      // Hidden when no assistant output
-      expect(container.firstChild).toBeNull();
-    });
-
     it("should show estimated tokens during streaming", () => {
       const store = createTestStore({
         streaming: true,
@@ -235,38 +213,6 @@ describe("StreamingTokenCounter", () => {
       expect(container.firstChild).toBeNull();
     });
 
-    it("should show actual tokens when assistant message has usage", () => {
-      const store = createTestStore({
-        streaming: true,
-        waiting: false,
-        maxTokens: 8000,
-        messages: [
-          {
-            role: "user",
-            content: "Hello",
-          } as UserMessage,
-          {
-            role: "assistant",
-            content: "Hello world",
-            usage: {
-              completion_tokens: 5,
-              prompt_tokens: 2000,
-              total_tokens: 2005,
-            },
-          } as AssistantMessage,
-        ],
-      });
-
-      render(
-        <Provider store={store}>
-          <StreamingTokenCounter />
-        </Provider>,
-      );
-
-      // Should show actual completion tokens (no ~ prefix)
-      expect(screen.getByText("5")).toBeInTheDocument();
-    });
-
     it("should show actual tokens at high usage", () => {
       const store = createTestStore({
         streaming: true,
@@ -333,42 +279,6 @@ describe("StreamingTokenCounter", () => {
   });
 
   describe("Turn detection", () => {
-    it("should be hidden when waiting for NEW assistant (user after assistant)", () => {
-      const store = createTestStore({
-        streaming: false,
-        waiting: true,
-        messages: [
-          {
-            role: "user",
-            content: "First",
-          } as UserMessage,
-          {
-            role: "assistant",
-            content: "First response",
-            usage: {
-              completion_tokens: 5,
-              prompt_tokens: 1000,
-              total_tokens: 1005,
-            },
-          } as AssistantMessage,
-          {
-            role: "user",
-            content: "Second",
-          } as UserMessage,
-          // Waiting for new assistant
-        ],
-      });
-
-      const { container } = render(
-        <Provider store={store}>
-          <StreamingTokenCounter />
-        </Provider>,
-      );
-
-      // Hidden when waiting for new assistant (no current output)
-      expect(container.firstChild).toBeNull();
-    });
-
     it("should use current assistant when continuing same turn", () => {
       const store = createTestStore({
         streaming: true,

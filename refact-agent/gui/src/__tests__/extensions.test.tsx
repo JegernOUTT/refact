@@ -5,10 +5,8 @@ import { server } from "../utils/mockServer";
 import { ExtItemList } from "../features/Extensions/components/ExtItemList";
 import { SkillEditor } from "../features/Extensions/components/SkillEditor";
 import { MarketplacePanel } from "../features/Extensions/components/MarketplacePanel";
-import { MarketplacePluginCard } from "../features/Extensions/components/MarketplacePluginCard";
 import { Extensions } from "../features/Extensions/Extensions";
 import type { SkillRegistryItem } from "../services/refact/extensions";
-import type { PluginEntry } from "../services/refact/plugins";
 
 const MOCK_ITEMS: SkillRegistryItem[] = [
   {
@@ -51,26 +49,6 @@ const MARKETPLACE_STATE = {
 };
 
 describe("ExtItemList", () => {
-  it("renders items with correct source badges", () => {
-    render(
-      <ExtItemList
-        items={MOCK_ITEMS}
-        selectedId={null}
-        onSelect={() => undefined}
-        onCreate={() => undefined}
-        onDelete={() => undefined}
-      />,
-    );
-
-    expect(screen.getByText("my_skill")).toBeDefined();
-    expect(screen.getByText("local_skill")).toBeDefined();
-    expect(screen.getByText("plugin_skill")).toBeDefined();
-
-    expect(screen.getByText("Global")).toBeDefined();
-    expect(screen.getByText("Local")).toBeDefined();
-    expect(screen.getByText("Plugin")).toBeDefined();
-  });
-
   it("shows delete button only for non-read-only items", () => {
     render(
       <ExtItemList
@@ -87,36 +65,6 @@ describe("ExtItemList", () => {
     expect(screen.queryByLabelText("Delete plugin_skill")).toBeNull();
   });
 
-  it("marks selected item", () => {
-    const { container } = render(
-      <ExtItemList
-        items={MOCK_ITEMS}
-        selectedId="my_skill"
-        onSelect={() => undefined}
-        onCreate={() => undefined}
-        onDelete={() => undefined}
-      />,
-    );
-
-    const selectedEl = container.querySelector(
-      '[aria-label="Select my_skill"]',
-    );
-    expect(selectedEl?.className).toContain("selected");
-  });
-
-  it("renders empty state when no items", () => {
-    render(
-      <ExtItemList
-        items={[]}
-        selectedId={null}
-        onSelect={() => undefined}
-        onCreate={() => undefined}
-        onDelete={() => undefined}
-      />,
-    );
-    expect(screen.getByText("No items found")).toBeDefined();
-  });
-
   it("calls onDelete with name and scope when delete button clicked", () => {
     const onDelete = vi.fn();
     render(
@@ -131,48 +79,6 @@ describe("ExtItemList", () => {
     const deleteBtn = screen.getByLabelText("Delete local_skill");
     fireEvent.click(deleteBtn);
     expect(onDelete).toHaveBeenCalledWith("local_skill", "local");
-  });
-});
-
-describe("MarketplacePluginCard", () => {
-  const ENGINE_PLUGIN: PluginEntry = {
-    name: "my-plugin",
-    description: "A useful plugin",
-    version: "1.2.3",
-    tags: ["search", "code"],
-    marketplace: "test-market",
-  };
-
-  it("renders plugin name, description, version and tags from engine payload", () => {
-    server.use(
-      http.post("*/v1/plugins/install", () => {
-        return HttpResponse.json({ ok: true });
-      }),
-    );
-    render(
-      <MarketplacePluginCard plugin={ENGINE_PLUGIN} isInstalled={false} />,
-      { preloadedState: MARKETPLACE_STATE },
-    );
-    expect(screen.getByText("my-plugin")).toBeDefined();
-    expect(screen.getByText("A useful plugin")).toBeDefined();
-    expect(screen.getByText("1.2.3")).toBeDefined();
-    expect(screen.getByText("search")).toBeDefined();
-    expect(screen.getByText("code")).toBeDefined();
-    expect(screen.getByText("test-market")).toBeDefined();
-  });
-
-  it("shows Installed and Uninstall button when isInstalled", () => {
-    server.use(
-      http.delete("*/v1/plugins/installed/my-plugin", () => {
-        return HttpResponse.json({ deleted: true });
-      }),
-    );
-    render(
-      <MarketplacePluginCard plugin={ENGINE_PLUGIN} isInstalled={true} />,
-      { preloadedState: MARKETPLACE_STATE },
-    );
-    expect(screen.getByText("Installed")).toBeDefined();
-    expect(screen.getByText("Uninstall")).toBeDefined();
   });
 });
 

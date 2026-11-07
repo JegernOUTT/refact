@@ -185,10 +185,18 @@ pub enum BoardRuleViolation {
 impl BoardRuleViolation {
     pub fn code(&self) -> &'static str {
         match self {
-            BoardRuleViolation::CardNotFound { .. } => "not_found_or_not_visible",
-            BoardRuleViolation::AlreadyClaimed { .. } => "already_claimed",
-            BoardRuleViolation::DependenciesUnsatisfied { .. } => "dependency_unsatisfied",
-            BoardRuleViolation::RoleDenied { .. } => "scope_denied",
+            BoardRuleViolation::CardNotFound {
+                ..
+            } => "not_found_or_not_visible",
+            BoardRuleViolation::AlreadyClaimed {
+                ..
+            } => "already_claimed",
+            BoardRuleViolation::DependenciesUnsatisfied {
+                ..
+            } => "dependency_unsatisfied",
+            BoardRuleViolation::RoleDenied {
+                ..
+            } => "scope_denied",
         }
     }
 
@@ -198,10 +206,15 @@ impl BoardRuleViolation {
 
     pub fn message(&self) -> String {
         match self {
-            BoardRuleViolation::CardNotFound { card_id } => {
+            BoardRuleViolation::CardNotFound {
+                card_id,
+            } => {
                 format!("card {card_id} not found on this board")
             }
-            BoardRuleViolation::AlreadyClaimed { card_id, holder } => {
+            BoardRuleViolation::AlreadyClaimed {
+                card_id,
+                holder,
+            } => {
                 format!("card {card_id} is already claimed by {holder}")
             }
             BoardRuleViolation::DependenciesUnsatisfied {
@@ -211,7 +224,10 @@ impl BoardRuleViolation {
                 "card {card_id} is blocked by unsatisfied dependencies: {}",
                 unsatisfied.join(", ")
             ),
-            BoardRuleViolation::RoleDenied { card_id, reason } => {
+            BoardRuleViolation::RoleDenied {
+                card_id,
+                reason,
+            } => {
                 format!("card {card_id}: {reason}")
             }
         }
@@ -582,35 +598,56 @@ pub enum FinalizeBlock {
 impl FinalizeBlock {
     pub fn message(&self) -> String {
         match self {
-            FinalizeBlock::CardNotFound { card_id } => {
+            FinalizeBlock::CardNotFound {
+                card_id,
+            } => {
                 format!("card {card_id} not found on this board")
             }
-            FinalizeBlock::NotCompleted { card_id, column } => {
+            FinalizeBlock::NotCompleted {
+                card_id,
+                column,
+            } => {
                 format!("card {card_id} is in '{column}'; finalising requires a completed card")
             }
             FinalizeBlock::AlreadyFinalized {
                 card_id,
                 finalized_by,
             } => format!("card {card_id} was already finalized by {finalized_by}"),
-            FinalizeBlock::ReviewDenied { reason } => reason.clone(),
-            FinalizeBlock::MissingFragment { fragment } => {
+            FinalizeBlock::ReviewDenied {
+                reason,
+            } => reason.clone(),
+            FinalizeBlock::MissingFragment {
+                fragment,
+            } => {
                 format!("required outcome fragment '{fragment}' is missing")
             }
-            FinalizeBlock::EmptyFragment { fragment } => {
+            FinalizeBlock::EmptyFragment {
+                fragment,
+            } => {
                 format!("required outcome fragment '{fragment}' is empty or a placeholder")
             }
-            FinalizeBlock::RejectedFragment { fragment, reason } => {
+            FinalizeBlock::RejectedFragment {
+                fragment,
+                reason,
+            } => {
                 format!("required outcome fragment '{fragment}' was rejected in review: {reason}")
             }
-            FinalizeBlock::ContradictedFragment { fragment, reason } => {
+            FinalizeBlock::ContradictedFragment {
+                fragment,
+                reason,
+            } => {
                 format!(
                     "required outcome fragment '{fragment}' is contradicted and unresolved: {reason}"
                 )
             }
-            FinalizeBlock::MissingSourceRun { fragment } => format!(
+            FinalizeBlock::MissingSourceRun {
+                fragment,
+            } => format!(
                 "required outcome fragment '{fragment}' does not record the run that produced it"
             ),
-            FinalizeBlock::MissingEvidence { fragment } => {
+            FinalizeBlock::MissingEvidence {
+                fragment,
+            } => {
                 format!("required outcome fragment '{fragment}' references no evidence record")
             }
         }
@@ -1745,7 +1782,9 @@ impl TaskBoard {
                     if let Err(reason) =
                         self.review_policy_allows_report(card_id, report, allow_self_review)
                     {
-                        blocks.push(FinalizeBlock::ReviewDenied { reason });
+                        blocks.push(FinalizeBlock::ReviewDenied {
+                            reason,
+                        });
                     }
                 }
                 None => blocks.push(FinalizeBlock::ReviewDenied {
@@ -1803,7 +1842,9 @@ impl TaskBoard {
                 }
             }
         }
-        FinalizeDecision { blocks }
+        FinalizeDecision {
+            blocks,
+        }
     }
 
     pub fn finalize_card(

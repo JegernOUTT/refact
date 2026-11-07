@@ -9,28 +9,6 @@ use anyhow::Result;
 /// A handle to an instance of a dialog opened in a tab.
 ///
 /// You can handle any dialog opened by `alert`, `confirm`, or `prompt`.
-/// ```rust
-/// # fn example(tab: headless_chrome::browser::tag::Tab) -> anyhow::Result<()> {
-/// #
-/// use headless_chrome::protocol::cdp::types::Event;
-/// tab.add_event_listener(Arc::new({
-///   let tab = tab.clone();
-///   move |event: &Event| match event {
-///     Event::PageJavascriptDialogOpening(event) => {
-///         let dialog = tab.get_dialog();
-///         let _ = if event.params.message == "Please accept me" {
-///             dialog.accept(None)
-///         } else {
-///             dialog.dismiss()
-///         };
-///     }
-///     _ => {}
-///   }
-/// }))?;
-/// #
-/// # Ok(())
-/// # }
-/// ```
 pub struct Dialog {
     session_id: SessionId,
     transport: Arc<Transport>,

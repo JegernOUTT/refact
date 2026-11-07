@@ -13,10 +13,18 @@ pub enum RetryDecision {
 impl RetryDecision {
     pub fn reason(self) -> &'static str {
         match self {
-            RetryDecision::Retry { reason }
-            | RetryDecision::ContextLimit { reason }
-            | RetryDecision::DoNotRetry { reason }
-            | RetryDecision::UserCancelled { reason } => reason,
+            RetryDecision::Retry {
+                reason,
+            }
+            | RetryDecision::ContextLimit {
+                reason,
+            }
+            | RetryDecision::DoNotRetry {
+                reason,
+            }
+            | RetryDecision::UserCancelled {
+                reason,
+            } => reason,
         }
     }
 

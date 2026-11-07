@@ -194,7 +194,9 @@ impl VoiceService {
                     Err(e) => {
                         if is_final {
                             let session = session_arc.lock().await;
-                            session.emit(VoiceStreamEvent::Error { message: e });
+                            session.emit(VoiceStreamEvent::Error {
+                                message: e,
+                            });
                         }
                     }
                 }

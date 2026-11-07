@@ -167,15 +167,23 @@ impl DeliveryReport {
                 None,
                 prior_state.map(|state| state.to_string()),
             ),
-            DeliveryReport::QueuedWhileInterrupted { condition, .. } => (
+            DeliveryReport::QueuedWhileInterrupted {
+                condition, ..
+            } => (
                 "queued_interrupted",
                 Some(format!("Interrupted: {condition}; restart_agent required")),
                 Some("interrupted".into()),
             ),
             DeliveryReport::NoLiveSession => ("no_live_session", None, None),
-            DeliveryReport::Skipped { reason } => ("skipped", Some(reason.clone()), None),
-            DeliveryReport::Failed { error } => ("failed", Some(error.clone()), None),
-            DeliveryReport::Unknown { error } => ("unknown", Some(error.clone()), None),
+            DeliveryReport::Skipped {
+                reason,
+            } => ("skipped", Some(reason.clone()), None),
+            DeliveryReport::Failed {
+                error,
+            } => ("failed", Some(error.clone()), None),
+            DeliveryReport::Unknown {
+                error,
+            } => ("unknown", Some(error.clone()), None),
         };
         serde_json::json!({
             "outcome": outcome,
@@ -187,7 +195,9 @@ impl DeliveryReport {
 
     pub fn short_status(&self) -> String {
         match self {
-            DeliveryReport::Delivered { outcome, .. } => match outcome {
+            DeliveryReport::Delivered {
+                outcome, ..
+            } => match outcome {
                 DeliveryOutcome::Queued => "queued".to_string(),
                 DeliveryOutcome::Delivered => "delivered".to_string(),
                 DeliveryOutcome::Duplicate => {
@@ -201,13 +211,19 @@ impl DeliveryReport {
                 }
                 DeliveryOutcome::Sealed => "not delivered (the chat is sealed)".to_string(),
             },
-            DeliveryReport::QueuedWhileInterrupted { .. } => {
-                "queued while interrupted — restart_agent required".into()
-            }
+            DeliveryReport::QueuedWhileInterrupted {
+                ..
+            } => "queued while interrupted — restart_agent required".into(),
             DeliveryReport::NoLiveSession => "not delivered (no live agent session)".to_string(),
-            DeliveryReport::Skipped { reason } => format!("not delivered ({})", reason),
-            DeliveryReport::Failed { error } => format!("not delivered (failed: {})", error),
-            DeliveryReport::Unknown { error } => format!("acceptance unknown: {}", error),
+            DeliveryReport::Skipped {
+                reason,
+            } => format!("not delivered ({})", reason),
+            DeliveryReport::Failed {
+                error,
+            } => format!("not delivered (failed: {})", error),
+            DeliveryReport::Unknown {
+                error,
+            } => format!("acceptance unknown: {}", error),
         }
     }
 
@@ -330,7 +346,11 @@ pub(crate) async fn deliver_to_card_checked(
     before_send: impl std::future::Future<Output = Result<(), String>>,
 ) -> DeliveryReport {
     match card_is_stale(gcx.clone(), task_id, target, guard.require_doing).await {
-        Ok(Some(reason)) => return DeliveryReport::Skipped { reason },
+        Ok(Some(reason)) => {
+            return DeliveryReport::Skipped {
+                reason,
+            }
+        }
         Ok(None) => {}
         Err(error) => {
             return DeliveryReport::Failed {
@@ -352,7 +372,11 @@ pub(crate) async fn deliver_to_card_checked(
         }
 
         match card_is_stale(gcx.clone(), task_id, target, guard.require_doing).await {
-            Ok(Some(reason)) => return DeliveryReport::Skipped { reason },
+            Ok(Some(reason)) => {
+                return DeliveryReport::Skipped {
+                    reason,
+                }
+            }
             Ok(None) => {}
             Err(error) => {
                 return DeliveryReport::Failed {
@@ -365,7 +389,9 @@ pub(crate) async fn deliver_to_card_checked(
     }
 
     if let Err(reason) = before_send.await {
-        return DeliveryReport::Skipped { reason };
+        return DeliveryReport::Skipped {
+            reason,
+        };
     }
     let mut interruption_condition = "restart required".to_string();
     let app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
@@ -377,7 +403,11 @@ pub(crate) async fn deliver_to_card_checked(
         }
     }
     match card_is_stale(gcx, task_id, target, guard.require_doing).await {
-        Ok(Some(reason)) => return DeliveryReport::Skipped { reason },
+        Ok(Some(reason)) => {
+            return DeliveryReport::Skipped {
+                reason,
+            }
+        }
         Ok(None) => {}
         Err(error) => {
             return DeliveryReport::Failed {
@@ -405,8 +435,12 @@ pub(crate) async fn deliver_to_card_checked(
             prior_state,
         },
         Err(error) => match crate::tools::tool_agent_planner_qna::reply_dispatch_refusal() {
-            Some(reason) => DeliveryReport::Skipped { reason },
-            None => DeliveryReport::Unknown { error },
+            Some(reason) => DeliveryReport::Skipped {
+                reason,
+            },
+            None => DeliveryReport::Unknown {
+                error,
+            },
         },
     }
 }
@@ -525,8 +559,13 @@ mod tests {
             chat_id: &str,
             delivery: PendingDelivery,
         ) -> Result<DeliveryOutcome, String> {
-            self.push_command(chat_id, ChatCommand::DeliverMessages { delivery })
-                .await?;
+            self.push_command(
+                chat_id,
+                ChatCommand::DeliverMessages {
+                    delivery,
+                },
+            )
+            .await?;
             if self.transport_error {
                 Err("transport failed after handoff".into())
             } else {

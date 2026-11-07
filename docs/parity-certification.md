@@ -185,6 +185,10 @@ or renders metrics or automatic-decision explanations. O-1 recorded the TUI's na
 single-chat surface as a deliberate omission, but it does not satisfy this row's diagnostic
 reader scope. The TUI metrics/explanation reader is **not carded** and remains a gap.
 
+> **Later update:** the TUI client (`refact-tui`) has since been removed; bare `refact`
+> now opens the GUI via `refact ui`. 21b is therefore no longer an open target. The
+> finding above and the totals below are preserved as recorded at certification time.
+
 IDE clients are **not** a separate gap: VS Code and JetBrains host the same React GUI in a
 webview, so the GUI surfaces certified in C6 are the IDE surfaces.
 
@@ -246,7 +250,7 @@ backlog/task-board briefs. The final row is explicitly not carded.
 | U-5c | Make goal-review escalation typed and escalate after the repair cap. |
 | U-7b | Run PostCompact hooks after releasing the trajectory-save mutex. |
 | U-7d | Run Pre/PostCompact hooks on HTTP transform-apply compaction. |
-| Not carded | Add a TUI metrics/explanation reader to close row 21b. |
+| Withdrawn | ~~Add a TUI metrics/explanation reader to close row 21b.~~ The TUI client was later removed. |
 
 ## Verdict
 

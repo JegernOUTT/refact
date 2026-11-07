@@ -232,7 +232,9 @@ pub async fn inspect(
             &app,
             &caller,
             service::InspectRequest {
-                selector: service::InspectSelector::Work { work_id: id },
+                selector: service::InspectSelector::Work {
+                    work_id: id,
+                },
                 cursor: query.cursor,
                 limit: query.limit,
             },

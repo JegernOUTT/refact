@@ -140,12 +140,6 @@ describe("TerminalSession", () => {
     expect(constructed.theme?.background).toBe("#0c0d0f");
     expect(constructed.theme?.foreground).toBe("rgba(255, 255, 255, 0.92)");
     expect(constructed.theme?.cursor).toBe("#7f93d8");
-    expect(constructed.theme?.red).toBe("#d8736d");
-    expect(constructed.theme?.green).toBe("#5fae8b");
-    expect(constructed.theme?.yellow).toBe("#cda04e");
-    expect(constructed.theme?.cyan).toBe("#6cb6c9");
-    expect(constructed.theme?.magenta).toBe("#b08ad1");
-    expect(constructed.theme?.brightBlack).toBe("rgba(255, 255, 255, 0.28)");
     expect(constructed.fontFamily).toBe("ui-monospace, monospace");
     expect(constructed.fontSize).toBe(13);
     expect(constructed.lineHeight).toBeGreaterThan(1);

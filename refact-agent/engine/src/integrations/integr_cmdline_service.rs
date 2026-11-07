@@ -378,9 +378,15 @@ fn status_label(status: &ExecStatus) -> &'static str {
     match status {
         ExecStatus::Starting => "starting",
         ExecStatus::Running => "running",
-        ExecStatus::Exited { .. } => "exited",
-        ExecStatus::SandboxLauncherFailed { .. } => "sandbox_launcher_failed",
-        ExecStatus::Failed { .. } => "failed",
+        ExecStatus::Exited {
+            ..
+        } => "exited",
+        ExecStatus::SandboxLauncherFailed {
+            ..
+        } => "sandbox_launcher_failed",
+        ExecStatus::Failed {
+            ..
+        } => "failed",
         ExecStatus::Killed => "killed",
         ExecStatus::TimedOut => "timed_out",
     }
@@ -388,11 +394,17 @@ fn status_label(status: &ExecStatus) -> &'static str {
 
 fn exit_code(status: &ExecStatus) -> Option<i32> {
     match status {
-        ExecStatus::Exited { exit_code } => *exit_code,
-        ExecStatus::SandboxLauncherFailed { exit_code } => Some(*exit_code),
+        ExecStatus::Exited {
+            exit_code,
+        } => *exit_code,
+        ExecStatus::SandboxLauncherFailed {
+            exit_code,
+        } => Some(*exit_code),
         ExecStatus::Starting
         | ExecStatus::Running
-        | ExecStatus::Failed { .. }
+        | ExecStatus::Failed {
+            ..
+        }
         | ExecStatus::Killed
         | ExecStatus::TimedOut => None,
     }

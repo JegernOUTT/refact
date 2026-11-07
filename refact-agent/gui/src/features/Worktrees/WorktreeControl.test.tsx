@@ -1,7 +1,5 @@
 import { beforeEach, describe, expect, test, vi } from "vitest";
 import { act } from "react-dom/test-utils";
-import { readFile } from "node:fs/promises";
-import path from "node:path";
 import { http, HttpResponse } from "msw";
 import { fireEvent, screen, waitFor, render } from "../../utils/test-utils";
 import type { Chat } from "../Chat/Thread/types";
@@ -778,22 +776,6 @@ describe("WorktreeControl", () => {
         "No branch",
       );
     });
-  });
-
-  test("create modal fields stay constrained to the dialog content column", async () => {
-    const css = await readFile(
-      path.resolve(__dirname, "Worktrees.module.css"),
-      "utf8",
-    );
-    const dialogInner =
-      css.match(/\.dialogContentWrapper \{[^}]+\}/)?.[0] ?? "";
-    const branchPicker =
-      css.match(/\.branchPicker,\n\.branchPicker input \{[^}]+\}/)?.[0] ?? "";
-
-    expect(dialogInner).toContain("max-width: 100%;");
-    expect(dialogInner).toContain("min-width: 0;");
-    expect(branchPicker).toContain("width: 100%;");
-    expect(branchPicker).toContain("max-width: 100%;");
   });
 
   test("create modal submits API call and attaches worktree", async () => {

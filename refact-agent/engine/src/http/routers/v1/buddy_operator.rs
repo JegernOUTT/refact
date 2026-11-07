@@ -574,9 +574,10 @@ fn operator_error(error: OperatorStoreError) -> ScratchError {
             StatusCode::UNPROCESSABLE_ENTITY
         }
         OperatorStoreError::AlreadyOwned(_) => StatusCode::SERVICE_UNAVAILABLE,
-        OperatorStoreError::Conflict(_) | OperatorStoreError::StaleRevision { .. } => {
-            StatusCode::CONFLICT
-        }
+        OperatorStoreError::Conflict(_)
+        | OperatorStoreError::StaleRevision {
+            ..
+        } => StatusCode::CONFLICT,
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     };
     ScratchError::new(status, error.to_string())
@@ -1237,7 +1238,9 @@ mod resource_http_tests {
         let prepared = handle_resource_prepare(
             State(app.clone()),
             headers.clone(),
-            axum::Json(PrepareResourceRequest { spec: spec.clone() }),
+            axum::Json(PrepareResourceRequest {
+                spec: spec.clone(),
+            }),
         )
         .await
         .unwrap()
@@ -1246,7 +1249,9 @@ mod resource_http_tests {
         let rights = handle_resource_rights(
             State(app.clone()),
             headers.clone(),
-            axum::Json(PrepareResourceRequest { spec }),
+            axum::Json(PrepareResourceRequest {
+                spec,
+            }),
         )
         .await
         .unwrap()

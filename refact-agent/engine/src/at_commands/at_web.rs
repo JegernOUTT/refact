@@ -24,7 +24,9 @@ pub struct AtWeb {
 
 impl AtWeb {
     pub fn new() -> Self {
-        AtWeb { params: vec![] }
+        AtWeb {
+            params: vec![],
+        }
     }
 }
 

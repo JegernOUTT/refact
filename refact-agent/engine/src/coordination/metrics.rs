@@ -153,7 +153,10 @@ pub struct SeriesKey {
 
 impl SeriesKey {
     pub fn new(name: &'static str, labels: Vec<(&'static str, String)>) -> Self {
-        SeriesKey { name, labels }
+        SeriesKey {
+            name,
+            labels,
+        }
     }
 
     pub fn label(&self, name: &str) -> Option<&str> {
@@ -184,9 +187,15 @@ pub enum Sample {
 impl Sample {
     pub fn counter(self) -> u64 {
         match self {
-            Sample::Counter { value } => value,
-            Sample::Gauge { value } => value.max(0) as u64,
-            Sample::Observation { count, .. } => count,
+            Sample::Counter {
+                value,
+            } => value,
+            Sample::Gauge {
+                value,
+            } => value.max(0) as u64,
+            Sample::Observation {
+                count, ..
+            } => count,
         }
     }
 }
@@ -365,7 +374,9 @@ fn seeded_series() -> BTreeMap<SeriesKey, Sample> {
         .map(|name| {
             (
                 SeriesKey::new(name, Vec::new()),
-                Sample::Counter { value: 0 },
+                Sample::Counter {
+                    value: 0,
+                },
             )
         })
         .collect()
@@ -422,10 +433,14 @@ impl MetricsRecorder {
         by: u64,
     ) {
         self.write_series(caps, name, labels, |existing| match existing {
-            Some(Sample::Counter { value }) => Sample::Counter {
+            Some(Sample::Counter {
+                value,
+            }) => Sample::Counter {
                 value: value.saturating_add(by),
             },
-            _ => Sample::Counter { value: by },
+            _ => Sample::Counter {
+                value: by,
+            },
         });
     }
 
@@ -434,7 +449,9 @@ impl MetricsRecorder {
     }
 
     pub fn gauge(&self, name: &'static str, labels: Vec<(&'static str, String)>, value: i64) {
-        self.write_series(caps(), name, labels, |_| Sample::Gauge { value });
+        self.write_series(caps(), name, labels, |_| Sample::Gauge {
+            value,
+        });
     }
 
     pub fn observe(&self, name: &'static str, labels: Vec<(&'static str, String)>, value: i64) {
@@ -548,10 +565,17 @@ impl MetricsRecorder {
 
 fn bump(series: &mut BTreeMap<SeriesKey, Sample>, key: SeriesKey, by: u64) {
     let updated = match series.get(&key).copied() {
-        Some(Sample::Counter { value }) => value.saturating_add(by),
+        Some(Sample::Counter {
+            value,
+        }) => value.saturating_add(by),
         _ => by,
     };
-    series.insert(key, Sample::Counter { value: updated });
+    series.insert(
+        key,
+        Sample::Counter {
+            value: updated,
+        },
+    );
 }
 
 #[derive(Clone, Copy, Debug)]

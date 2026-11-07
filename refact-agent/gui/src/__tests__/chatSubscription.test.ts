@@ -10,6 +10,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   subscribeToChatEvents,
+  createChatEventMultiplexer,
   applyDeltaOps,
   type ChatEventEnvelope,
   type DeltaOp,
@@ -855,5 +856,260 @@ describe("chatSubscription", () => {
       unsubscribe();
       vi.useRealTimers();
     });
+  });
+});
+
+describe("multiplex chat transport", () => {
+  let cleanups: (() => void)[] = [];
+  afterEach(() => {
+    cleanups.forEach((cleanup) => cleanup());
+    cleanups = [];
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  it.each(["absent", "incomplete chunked"])(
+    "times out a %s child despite healthy sibling snapshots and heartbeats",
+    async (missing) => {
+      vi.useFakeTimers();
+      let stream!: ReadableStreamDefaultController<Uint8Array>;
+      let signal!: AbortSignal;
+      vi.stubGlobal(
+        "fetch",
+        vi.fn((_url: string, init: RequestInit) => {
+          if (!init.signal) throw new Error("Missing abort signal");
+          signal = init.signal;
+          return Promise.resolve(
+            new Response(
+              new ReadableStream<Uint8Array>({
+                start(controller) {
+                  stream = controller;
+                },
+              }),
+            ),
+          );
+        }),
+      );
+      const mux = createChatEventMultiplexer({ lspPort: 8001 }, undefined, {
+        connectTimeoutMs: 100,
+        idleTimeoutMs: 200,
+      });
+      const healthy = {
+        onEvent: vi.fn(),
+        onError: vi.fn(),
+        onConnected: vi.fn(),
+      };
+      const child = {
+        onEvent: vi.fn(),
+        onError: vi.fn(),
+        onConnected: vi.fn(),
+      };
+      cleanups.push(
+        mux.subscribe("healthy", healthy),
+        mux.subscribe("child", child),
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      expect(healthy.onConnected).not.toHaveBeenCalled();
+      const send = (event: object) =>
+        stream.enqueue(
+          new TextEncoder().encode(`data: ${JSON.stringify(event)}\n\n`),
+        );
+      if (missing === "incomplete chunked")
+        send({
+          type: "snapshot",
+          chat_id: "child",
+          seq: "1",
+          snapshot_chunked: true,
+          chunk_count: 1,
+          message_count: 1,
+          messages: [],
+          background_agents: [],
+        });
+      send({
+        type: "snapshot",
+        chat_id: "healthy",
+        seq: "1",
+        messages: [],
+        background_agents: [],
+      });
+      await vi.advanceTimersByTimeAsync(50);
+      expect(healthy.onConnected).toHaveBeenCalledOnce();
+      expect(child.onConnected).not.toHaveBeenCalled();
+      stream.enqueue(new TextEncoder().encode(": heartbeat\n\n"));
+      await vi.advanceTimersByTimeAsync(49);
+      expect(child.onError).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(child.onError).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({
+          message: "SSE chat snapshot timeout",
+        }),
+      );
+      expect(child.onConnected).not.toHaveBeenCalled();
+      expect(child.onEvent).not.toHaveBeenCalled();
+      expect(signal.aborted).toBe(true);
+      cleanups.forEach((cleanup) => cleanup());
+      expect(vi.getTimerCount()).toBe(0);
+    },
+  );
+
+  it("reports overflow asynchronously without throwing or opening another transport", async () => {
+    vi.useFakeTimers();
+    const fetcher = vi.fn(() => new Promise<Response>(() => undefined));
+    vi.stubGlobal("fetch", fetcher);
+    const mux = createChatEventMultiplexer({ lspPort: 8001 });
+    for (let id = 0; id < 128; id++) {
+      cleanups.push(
+        mux.subscribe(String(id), { onEvent: vi.fn(), onError: vi.fn() }),
+      );
+    }
+    const onError = vi.fn();
+    expect(() =>
+      cleanups.push(mux.subscribe("overflow", { onEvent: vi.fn(), onError })),
+    ).not.toThrow();
+    expect(onError).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(onError).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({
+        message: "Too many visible chat subscriptions",
+      }),
+    );
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    cleanups.forEach((cleanup) => cleanup());
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("shares one fetch, isolates interleaved snapshots, and fences retired pending reads", async () => {
+    vi.useFakeTimers();
+    const streams: ReadableStreamDefaultController<Uint8Array>[] = [];
+    const signals: AbortSignal[] = [];
+    const fetcher = vi.fn((_url: string, init: RequestInit) => {
+      if (!init.signal) throw new Error("Missing abort signal");
+      signals.push(init.signal);
+      return Promise.resolve(
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              streams.push(controller);
+            },
+          }),
+        ),
+      );
+    });
+    vi.stubGlobal("fetch", fetcher);
+    const mux = createChatEventMultiplexer({ lspPort: 8001 });
+    const a = vi.fn<(event: ChatEventEnvelope) => void>();
+    const b = vi.fn<(event: ChatEventEnvelope) => void>();
+    const duplicate = vi.fn<(event: ChatEventEnvelope) => void>();
+    const errors = vi.fn();
+    const removeA = mux.subscribe("a", { onEvent: a, onError: errors });
+    const removeB = mux.subscribe("b", { onEvent: b, onError: errors });
+    const removeDuplicate = mux.subscribe("a", {
+      onEvent: duplicate,
+      onError: errors,
+    });
+    cleanups.push(removeA, removeB, removeDuplicate);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    const url = new URL(fetcher.mock.calls[0][0], "http://localhost");
+    expect(url.pathname).toBe("/v1/chats/subscribe-many");
+    expect(JSON.parse(url.searchParams.get("chat_ids") ?? "null")).toEqual([
+      "a",
+      "b",
+    ]);
+    const send = (index: number, event: unknown) =>
+      streams[index].enqueue(
+        new TextEncoder().encode(`data: ${JSON.stringify(event)}\n\n`),
+      );
+    const snapshot = (chat_id: string, seq: string) => ({
+      type: "snapshot",
+      chat_id,
+      seq,
+      snapshot_chunked: true,
+      chunk_count: 1,
+      message_count: 1,
+      background_agents: [],
+    });
+    send(0, snapshot("a", "10"));
+    send(0, snapshot("b", "90"));
+    send(0, {
+      type: "snapshot_chunk",
+      chat_id: "b",
+      seq: "90",
+      chunk_index: 0,
+      chunk_count: 1,
+      messages: [{ role: "user", content: "B" }],
+    });
+    send(0, {
+      type: "snapshot_chunk",
+      chat_id: "a",
+      seq: "10",
+      chunk_index: 0,
+      chunk_count: 1,
+      messages: [{ role: "user", content: "A" }],
+    });
+    send(0, {
+      type: "snapshot_end",
+      chat_id: "b",
+      seq: "90",
+      chunk_count: 1,
+      message_count: 1,
+    });
+    send(0, {
+      type: "snapshot_end",
+      chat_id: "a",
+      seq: "10",
+      chunk_count: 1,
+      message_count: 1,
+    });
+    send(0, {
+      type: "stream_started",
+      chat_id: "unknown",
+      seq: "11",
+      message_id: "wrong",
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(a.mock.calls.map(([event]) => event)).toEqual([
+      expect.objectContaining({
+        chat_id: "a",
+        seq: "10",
+        messages: [{ role: "user", content: "A" }],
+      }),
+    ]);
+    expect(b).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({
+        chat_id: "b",
+        seq: "90",
+        messages: [{ role: "user", content: "B" }],
+      }),
+    );
+    expect(duplicate.mock.calls).toEqual(a.mock.calls);
+    removeA();
+    expect(signals[0].aborted).toBe(false);
+    removeDuplicate();
+    expect(signals[0].aborted).toBe(true);
+    send(0, {
+      type: "stream_started",
+      chat_id: "b",
+      seq: "91",
+      message_id: "retired",
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(b).toHaveBeenCalledTimes(1);
+    send(1, {
+      type: "snapshot",
+      chat_id: "b",
+      seq: "100",
+      messages: [],
+      background_agents: [],
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(b).toHaveBeenLastCalledWith(expect.objectContaining({ seq: "100" }));
+    removeB();
+    expect(signals[1].aborted).toBe(true);
+    streams[1].close();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(errors).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
   });
 });

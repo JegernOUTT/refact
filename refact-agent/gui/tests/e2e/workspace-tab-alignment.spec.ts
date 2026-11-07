@@ -198,6 +198,14 @@ test("shipping toolbar keeps keyboard activation, close and overflow reachable w
   await expect(
     page.locator('[data-workspace-leaf-id="alignment-left"]'),
   ).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
+  await filePane.hover();
+  await expect(
+    filePane.getByRole("button", { name: "File information", exact: true }),
+  ).toBeVisible();
+  await expect(filePane.locator("[data-pane-controls]")).toBeVisible();
+  await expect(
+    filePane.getByRole("button", { name: "Pane actions", exact: true }),
+  ).toHaveCount(0);
   await expectPaneLayout(page);
   await page.setViewportSize({ width: 360, height: 800 });
   await expectPaneLayout(page);
@@ -209,4 +217,35 @@ test("shipping toolbar keeps keyboard activation, close and overflow reachable w
   await expect(page.getByRole("menuitem").first()).toBeVisible();
   await page.keyboard.press("Escape");
   await expect(overflow).toBeFocused();
+});
+
+test("floating pane menus stay absent while tab drag splitting and closing work", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.goto(`${fixture}&unsplit`);
+  const panes = page.locator("[data-workspace-leaf-id]");
+  await expect(panes).toHaveCount(1);
+  await panes.first().hover();
+  await expect(
+    page.getByRole("button", { name: "Pane actions", exact: true }),
+  ).toHaveCount(0);
+  await expect(
+    page.getByRole("button", { name: "Split active tab", exact: true }),
+  ).toHaveCount(0);
+  await expect(panes.first().locator("[data-pane-controls]")).toBeHidden();
+  const paneBounds = await panes.first().boundingBox();
+  if (!paneBounds) throw new Error("Missing pane bounds");
+  await page.getByRole("tab", { name: /Middle chat$/ }).dragTo(panes.first(), {
+    targetPosition: { x: paneBounds.width - 16, y: paneBounds.height / 2 },
+  });
+  await expectAlignedSections(page);
+  await expect(
+    page.getByRole("button", { name: "Pane actions", exact: true }),
+  ).toHaveCount(0);
+  await page
+    .getByRole("button", { name: "Close Middle chat", exact: true })
+    .click();
+  await expect(page.getByRole("tab", { name: /Middle chat$/ })).toHaveCount(0);
+  await expect(panes).toHaveCount(1);
 });

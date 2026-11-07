@@ -1,6 +1,7 @@
-import React, { useCallback, useEffect, useRef, useState } from "react";
-import { Image, RotateCcw, ZoomIn, ZoomOut } from "lucide-react";
-import { Dialog, Icon, IconButton, Tooltip } from "../ui";
+import React, { useState } from "react";
+import { Image } from "lucide-react";
+import { Dialog, Icon } from "../ui";
+import { ImageViewport } from "./ImageViewport";
 import styles from "./DialogImage.module.css";
 
 const SIZE_MAP = {
@@ -16,10 +17,6 @@ const SIZE_MAP = {
   auto: "auto",
 } as const;
 
-const MIN_SCALE = 1;
-const MAX_SCALE = 4;
-const ZOOM_FACTOR = 1.25;
-
 export const DialogImage: React.FC<{
   src: string;
   size?: keyof typeof SIZE_MAP;
@@ -32,67 +29,13 @@ export const DialogImage: React.FC<{
   alt = "",
 }) => {
   const [open, setOpen] = useState(false);
-  const [scale, setScale] = useState(MIN_SCALE);
-  const [pan, setPan] = useState({ x: 0, y: 0 });
-  const [dragging, setDragging] = useState(false);
-  const dragStart = useRef({ x: 0, y: 0, panX: 0, panY: 0 });
+  const [dimensions, setDimensions] = useState({ width: 1, height: 1 });
   const thumbnailStyle = {
     "--dialog-image-size": SIZE_MAP[size],
   } as React.CSSProperties;
 
-  const resetView = useCallback(() => {
-    setScale(MIN_SCALE);
-    setPan({ x: 0, y: 0 });
-  }, []);
-
-  const handleOpenChange = useCallback(
-    (nextOpen: boolean) => {
-      setOpen(nextOpen);
-      if (!nextOpen) resetView();
-    },
-    [resetView],
-  );
-
-  const zoomBy = useCallback((factor: number) => {
-    setScale((current) =>
-      Math.min(MAX_SCALE, Math.max(MIN_SCALE, current * factor)),
-    );
-  }, []);
-
-  const handleMouseDown = useCallback(
-    (event: React.MouseEvent) => {
-      if (event.button !== 0 || scale === MIN_SCALE) return;
-      event.preventDefault();
-      dragStart.current = {
-        x: event.clientX,
-        y: event.clientY,
-        panX: pan.x,
-        panY: pan.y,
-      };
-      setDragging(true);
-    },
-    [pan.x, pan.y, scale],
-  );
-
-  useEffect(() => {
-    if (!dragging) return;
-    const handleMove = (event: MouseEvent) => {
-      setPan({
-        x: dragStart.current.panX + event.clientX - dragStart.current.x,
-        y: dragStart.current.panY + event.clientY - dragStart.current.y,
-      });
-    };
-    const handleUp = () => setDragging(false);
-    window.addEventListener("mousemove", handleMove);
-    window.addEventListener("mouseup", handleUp);
-    return () => {
-      window.removeEventListener("mousemove", handleMove);
-      window.removeEventListener("mouseup", handleUp);
-    };
-  }, [dragging]);
-
   return (
-    <Dialog open={open} onOpenChange={handleOpenChange}>
+    <Dialog open={open} onOpenChange={setOpen}>
       <Dialog.Trigger asChild>
         <button
           type="button"
@@ -112,63 +55,23 @@ export const DialogImage: React.FC<{
         <Dialog.Title className={styles.srOnly}>
           {alt || "Image viewer"}
         </Dialog.Title>
-        <div className={styles.toolbar}>
-          <Tooltip>
-            <Tooltip.Trigger asChild>
-              <IconButton
-                aria-label="Zoom in"
-                icon={ZoomIn}
-                size="sm"
-                variant="ghost"
-                onClick={() => zoomBy(ZOOM_FACTOR)}
-              />
-            </Tooltip.Trigger>
-            <Tooltip.Content>Zoom in</Tooltip.Content>
-          </Tooltip>
-          <span className={styles.zoomInfo}>{Math.round(scale * 100)}%</span>
-          <Tooltip>
-            <Tooltip.Trigger asChild>
-              <IconButton
-                aria-label="Zoom out"
-                disabled={scale === MIN_SCALE}
-                icon={ZoomOut}
-                size="sm"
-                variant="ghost"
-                onClick={() => zoomBy(1 / ZOOM_FACTOR)}
-              />
-            </Tooltip.Trigger>
-            <Tooltip.Content>Zoom out</Tooltip.Content>
-          </Tooltip>
-          <Tooltip>
-            <Tooltip.Trigger asChild>
-              <IconButton
-                aria-label="Reset image view"
-                icon={RotateCcw}
-                size="sm"
-                variant="ghost"
-                onClick={resetView}
-              />
-            </Tooltip.Trigger>
-            <Tooltip.Content>Reset view</Tooltip.Content>
-          </Tooltip>
-        </div>
-        <div
-          aria-label="Image pan and zoom"
-          className={styles.viewport}
-          data-dragging={dragging || undefined}
-          role="application"
-          onMouseDown={handleMouseDown}
-        >
-          <img
-            className={styles.image}
-            src={src}
-            alt={alt}
-            draggable={false}
-            style={{
-              transform: `translate(${pan.x}px, ${pan.y}px) scale(${scale})`,
-            }}
-          />
-        </div>
+        {open && (
+          <ImageViewport width={dimensions.width} height={dimensions.height}>
+            <img
+              src={src}
+              alt={alt}
+              draggable={false}
+              width={dimensions.width}
+              height={dimensions.height}
+              onLoad={(event) =>
+                setDimensions({
+                  width: event.currentTarget.naturalWidth || 1,
+                  height: event.currentTarget.naturalHeight || 1,
+                })
+              }
+            />
+          </ImageViewport>
+        )}
       </Dialog.Content>
     </Dialog>
   );

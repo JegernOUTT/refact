@@ -48,7 +48,9 @@ fn status_from_exit(exit_code: Option<i32>, sandboxed: bool) -> ExecStatus {
             exit_code: refact_sandbox::SANDBOX_LAUNCHER_FAILURE_EXIT_CODE,
         }
     } else {
-        ExecStatus::Exited { exit_code }
+        ExecStatus::Exited {
+            exit_code,
+        }
     }
 }
 
@@ -662,7 +664,9 @@ async fn status_or_killed(
     match try_wait_child(child, observation).await {
         Ok(Some(exit_code)) => status_from_exit(exit_code, sandboxed),
         Ok(None) => ExecStatus::Killed,
-        Err(message) => ExecStatus::Failed { message },
+        Err(message) => ExecStatus::Failed {
+            message,
+        },
     }
 }
 
@@ -675,7 +679,9 @@ async fn status_or_timed_out(
     match try_wait_child(child, observation).await {
         Ok(Some(exit_code)) => status_from_exit(exit_code, sandboxed),
         Ok(None) => ExecStatus::TimedOut,
-        Err(message) => ExecStatus::Failed { message },
+        Err(message) => ExecStatus::Failed {
+            message,
+        },
     }
 }
 
@@ -801,14 +807,20 @@ async fn monitor_process(
     release_pty_master(&child).await;
 
     let terminal_status = match terminal_status {
-        ExecStatus::SandboxLauncherFailed { .. }
-        | ExecStatus::Failed { .. }
+        ExecStatus::SandboxLauncherFailed {
+            ..
+        }
+        | ExecStatus::Failed {
+            ..
+        }
         | ExecStatus::TimedOut
         | ExecStatus::Killed => {
             finish_pumps_with_timeout(stdout_task, stderr_task, KILL_PUMP_DRAIN_TIMEOUT).await;
             terminal_status
         }
-        ExecStatus::Exited { .. } => {
+        ExecStatus::Exited {
+            ..
+        } => {
             #[cfg(target_os = "linux")]
             let observation_ended_early = observation.as_ref().is_some_and(|observation| {
                 matches!(observation.status(), ObservationStatus::Incomplete(_))
@@ -1255,7 +1267,10 @@ mod tests {
         fn set(key: &'static str, value: &str) -> Self {
             let previous = std::env::var_os(key);
             std::env::set_var(key, value);
-            Self { key, previous }
+            Self {
+                key,
+                previous,
+            }
         }
     }
 
@@ -1421,7 +1436,12 @@ mod tests {
                 .await
                 .unwrap()
         };
-        assert_eq!(snapshot.status, ExecStatus::Exited { exit_code: Some(0) });
+        assert_eq!(
+            snapshot.status,
+            ExecStatus::Exited {
+                exit_code: Some(0)
+            }
+        );
         let read = registry.read(&snapshot.meta.process_id, 0, None).await;
         read.chunks
             .iter()
@@ -1626,7 +1646,9 @@ mod tests {
 
         assert_eq!(
             result.snapshot.status,
-            ExecStatus::Exited { exit_code: Some(0) }
+            ExecStatus::Exited {
+                exit_code: Some(0)
+            }
         );
         let read = registry
             .read(&result.snapshot.meta.process_id, 0, None)
@@ -1801,7 +1823,9 @@ mod tests {
 
         assert_eq!(
             result.snapshot.status,
-            ExecStatus::Exited { exit_code: Some(0) }
+            ExecStatus::Exited {
+                exit_code: Some(0)
+            }
         );
         let read = registry
             .read(&result.snapshot.meta.process_id, 0, None)
@@ -1822,7 +1846,9 @@ mod tests {
 
         assert_eq!(
             result.snapshot.status,
-            ExecStatus::Exited { exit_code: Some(7) }
+            ExecStatus::Exited {
+                exit_code: Some(7)
+            }
         );
     }
 
@@ -1910,7 +1936,9 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(3));
         kill_and_wait_inherited_child(pid_file).await;
         match &result.snapshot.status {
-            ExecStatus::Failed { message } => {
+            ExecStatus::Failed {
+                message,
+            } => {
                 assert!(message.contains("output drain timed out"));
                 assert!(message.contains("stdout/stderr"));
             }
@@ -1952,7 +1980,9 @@ mod tests {
 
         kill_and_wait_inherited_child(pid_file).await;
         match &snapshot.status {
-            ExecStatus::Failed { message } => {
+            ExecStatus::Failed {
+                message,
+            } => {
                 assert!(message.contains("output drain timed out"));
                 assert!(message.contains("stdout/stderr"));
             }
@@ -2015,7 +2045,9 @@ mod tests {
 
         assert_eq!(
             result.snapshot.status,
-            ExecStatus::Exited { exit_code: Some(0) }
+            ExecStatus::Exited {
+                exit_code: Some(0)
+            }
         );
         let read = registry
             .read(&result.snapshot.meta.process_id, 0, None)

@@ -132,21 +132,23 @@ pub(crate) enum ProposedPreference {
 impl ProposedPreference {
     fn change(self) -> (String, serde_json::Value) {
         match self {
-            ProposedPreference::QuietMode { enabled } => {
-                ("quiet_mode".to_string(), serde_json::json!(enabled))
-            }
-            ProposedPreference::HumorEnabled { enabled } => {
-                ("humor_enabled".to_string(), serde_json::json!(enabled))
-            }
-            ProposedPreference::DailyDigestHour { hour } => {
-                ("daily_digest_hour".to_string(), serde_json::json!(hour))
-            }
+            ProposedPreference::QuietMode {
+                enabled,
+            } => ("quiet_mode".to_string(), serde_json::json!(enabled)),
+            ProposedPreference::HumorEnabled {
+                enabled,
+            } => ("humor_enabled".to_string(), serde_json::json!(enabled)),
+            ProposedPreference::DailyDigestHour {
+                hour,
+            } => ("daily_digest_hour".to_string(), serde_json::json!(hour)),
         }
     }
 
     fn is_wellformed(&self) -> bool {
         match self {
-            ProposedPreference::DailyDigestHour { hour } => *hour <= 23,
+            ProposedPreference::DailyDigestHour {
+                hour,
+            } => *hour <= 23,
             _ => true,
         }
     }
@@ -293,20 +295,28 @@ pub(crate) fn parse_local_proposal(workflow_id: &str, report: &str) -> Option<Wo
         ) if valid_identifier(worktree_id, 128) && valid_identifier(chat_id, 128) => Some(proposal),
         (
             WorkflowActionFamily::MemoryLifecycle,
-            WorkflowProposal::MemoryLifecycleSelection { op_id },
+            WorkflowProposal::MemoryLifecycleSelection {
+                op_id,
+            },
         ) if valid_operation_identifier(op_id) => Some(proposal),
         (
             WorkflowActionFamily::DefaultModelSelect,
-            WorkflowProposal::DefaultModelSelection { model, .. },
+            WorkflowProposal::DefaultModelSelection {
+                model, ..
+            },
         ) if valid_model_identifier(model) => Some(proposal),
         (
             WorkflowActionFamily::BuddySettingsPatch,
-            WorkflowProposal::BuddyPreference { preference },
+            WorkflowProposal::BuddyPreference {
+                preference,
+            },
         ) if preference.is_wellformed() => Some(proposal),
         (
             WorkflowActionFamily::CustomizationFileApply,
             WorkflowProposal::CustomizationDescription {
-                id, description, ..
+                id,
+                description,
+                ..
             },
         ) if valid_customization_id(id)
             && !description.trim().is_empty()
@@ -588,7 +598,9 @@ pub(crate) async fn attach_local_proposal(
             )
             .await
         }
-        WorkflowProposal::MemoryLifecycleSelection { op_id } => {
+        WorkflowProposal::MemoryLifecycleSelection {
+            op_id,
+        } => {
             // The operation itself is engine-produced: the model may only point at one that is
             // already stored and still awaiting review. Nothing here authors memory content.
             let operation = engine_produced_memory_operation(app.clone(), &project, &op_id).await?;
@@ -650,7 +662,10 @@ pub(crate) async fn attach_local_proposal(
             )
             .await
         }
-        WorkflowProposal::DefaultModelSelection { slot, model } => {
+        WorkflowProposal::DefaultModelSelection {
+            slot,
+            model,
+        } => {
             use crate::providers::operator_defaults as owner;
             use refact_core::provider_types::DefaultsScope;
             let scope = DefaultsScope::Project;
@@ -716,7 +731,9 @@ pub(crate) async fn attach_local_proposal(
             )
             .await
         }
-        WorkflowProposal::BuddyPreference { preference } => {
+        WorkflowProposal::BuddyPreference {
+            preference,
+        } => {
             if !preference.is_wellformed() {
                 return Err("proposed preference is out of range".into());
             }
@@ -1139,9 +1156,15 @@ pub(crate) enum SourceCompletion {
 impl SourceCompletion {
     pub(crate) fn failure_detail(&self) -> Option<&str> {
         match self {
-            SourceCompletion::Failed { error } => Some(error.as_str()),
-            SourceCompletion::NotApplicable { reason } => Some(reason.as_str()),
-            SourceCompletion::Partial { uncovered } => Some(uncovered.as_str()),
+            SourceCompletion::Failed {
+                error,
+            } => Some(error.as_str()),
+            SourceCompletion::NotApplicable {
+                reason,
+            } => Some(reason.as_str()),
+            SourceCompletion::Partial {
+                uncovered,
+            } => Some(uncovered.as_str()),
             SourceCompletion::Complete => None,
         }
     }
@@ -1188,15 +1211,21 @@ impl SourceCheck {
     pub(crate) fn completion_summary(&self) -> String {
         match &self.completion {
             SourceCompletion::Complete => "complete; the whole stated scope was read".to_string(),
-            SourceCompletion::NotApplicable { reason } => format!(
+            SourceCompletion::NotApplicable {
+                reason,
+            } => format!(
                 "not applicable; nothing was checked ({})",
                 redact_and_cap_text(reason, 500)
             ),
-            SourceCompletion::Failed { error } => format!(
+            SourceCompletion::Failed {
+                error,
+            } => format!(
                 "failed; coverage unknown ({})",
                 redact_and_cap_text(error, 500)
             ),
-            SourceCompletion::Partial { uncovered } => format!(
+            SourceCompletion::Partial {
+                uncovered,
+            } => format!(
                 "partial; not covered: {}",
                 redact_and_cap_text(uncovered, 500)
             ),
@@ -1245,13 +1274,19 @@ impl SourceCheck {
             return WorkflowTerminal::Inconclusive;
         }
         match &self.completion {
-            SourceCompletion::Failed { .. } => WorkflowTerminal::Failed {
+            SourceCompletion::Failed {
+                ..
+            } => WorkflowTerminal::Failed {
                 failure_class: Some("source_read_failed".to_string()),
             },
-            SourceCompletion::NotApplicable { .. } => WorkflowTerminal::Blocked {
+            SourceCompletion::NotApplicable {
+                ..
+            } => WorkflowTerminal::Blocked {
                 failure_class: Some("source_absent".to_string()),
             },
-            SourceCompletion::Partial { .. } => WorkflowTerminal::Partial {
+            SourceCompletion::Partial {
+                ..
+            } => WorkflowTerminal::Partial {
                 failure_class: Some("partial_source_coverage".to_string()),
             },
             SourceCompletion::Complete if self.findings.is_empty() => WorkflowTerminal::NoChange,

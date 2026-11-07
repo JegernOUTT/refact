@@ -1,6 +1,4 @@
 import classNames from "classnames";
-import { Columns3, Ellipsis, Rows3 } from "lucide-react";
-import { Icon, IconButton, Menu } from "../../components/ui";
 import {
   type CSSProperties,
   type DragEvent,
@@ -24,13 +22,11 @@ import {
 } from "../ChatPanes/panesTree";
 import {
   addSurfaceToPane,
-  closePane,
   focusPane,
   MAX_GROUP_LEAVES,
   resizeGroupSplit,
   selectGroupForTab,
   splitPaneWithSurface,
-  splitTab,
 } from "./workspaceSlice";
 import {
   isChatSurface,
@@ -418,53 +414,6 @@ function LeafView({
           aria-label="Workspace pane controls"
         >
           <PaneHeaderActions className={styles.fileActions} />
-          <Menu>
-            <Menu.Trigger asChild>
-              <IconButton
-                icon={Ellipsis}
-                size="sm"
-                variant="plain"
-                aria-label="Pane actions"
-              />
-            </Menu.Trigger>
-            <Menu.Content align="end">
-              <Menu.Item
-                disabled={!surfaceKey || !canSplit}
-                onSelect={() => {
-                  handleFocusPane();
-                  dispatch(splitTab({ tabId, dir: "row" }));
-                }}
-              >
-                <Icon icon={Columns3} size="sm" />
-                Split Right
-              </Menu.Item>
-              <Menu.Item
-                disabled={!surfaceKey || !canSplit}
-                onSelect={() => {
-                  handleFocusPane();
-                  dispatch(splitTab({ tabId, dir: "col" }));
-                }}
-              >
-                <Icon icon={Rows3} size="sm" />
-                Split Down
-              </Menu.Item>
-              <Menu.Separator />
-              <Menu.Item
-                onSelect={() => {
-                  dispatch(closePane({ tabId, leafId: leaf.id }));
-                  requestAnimationFrame(() => {
-                    document
-                      .querySelector<HTMLElement>(
-                        '[aria-label="Workspace tabs"] [role="tab"][aria-selected="true"]',
-                      )
-                      ?.focus();
-                  });
-                }}
-              >
-                Close Pane
-              </Menu.Item>
-            </Menu.Content>
-          </Menu>
         </div>
         {previewTarget ? (
           <div className={styles.previewBody} aria-hidden="true">

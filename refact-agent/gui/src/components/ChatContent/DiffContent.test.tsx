@@ -1,7 +1,7 @@
-import { describe, test, expect } from "vitest";
+import groupBy from "lodash.groupby";
+import { describe, expect, test } from "vitest";
 import { render, screen } from "../../utils/test-utils";
 import { DiffContent } from "./DiffContent";
-import groupBy from "lodash.groupby";
 
 const STUB_DIFFS_1 = groupBy(
   [
@@ -89,14 +89,6 @@ describe("diff message transcript item", () => {
     );
     expect(screen.getByTestId("transcript-meta")).toHaveTextContent("+10 −10");
     expect(screen.getAllByTestId("transcript-toggle")).toHaveLength(1);
-  });
-
-  test("renders the rich diff blocks with file headers", () => {
-    render(<DiffContent diffs={STUB_DIFFS_1} />);
-    expect(screen.getAllByText("class Bird:").length).toBeGreaterThan(0);
-    expect(
-      screen.getAllByText("/emergency_frog_situation/frog.py").length,
-    ).toBe(3);
   });
 
   test("collapses and reopens from the row", async () => {

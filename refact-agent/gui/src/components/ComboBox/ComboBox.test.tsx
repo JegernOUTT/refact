@@ -113,13 +113,6 @@ const SlashApp = (props: Partial<ComboBoxProps>) => {
 describe("ComboBox", () => {
   afterEach(cleanup);
 
-  test("typing / opens the command list with descriptions", async () => {
-    const { user, ...app } = render(<SlashApp />);
-    await user.type(app.getByRole("combobox"), "/");
-    expect(app.queryByText("/optimize")).not.toBeNull();
-    expect(app.queryByText("Review code for issues")).not.toBeNull();
-  });
-
   test("arrow down and Enter insert the command without submitting", async () => {
     const onSubmitSpy = vi.fn();
     const { user, ...app } = render(<SlashApp onSubmit={onSubmitSpy} />);

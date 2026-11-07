@@ -18,6 +18,7 @@ import {
   setPanelsForced,
   setActiveTab,
   openTab,
+  splitTab,
 } from "../features/Workspace";
 import {
   setProjectStorageNamespace,
@@ -219,8 +220,8 @@ describe("App unified tab regression", () => {
         .filter((node) => !node.closest('[aria-hidden="true"]')),
     ).toHaveLength(1);
     expect(
-      await screen.findByRole("button", { name: "Pane actions" }),
-    ).toBeInTheDocument();
+      screen.queryByRole("button", { name: "Pane actions" }),
+    ).not.toBeInTheDocument();
     expect(screen.queryByText("No surface selected")).not.toBeInTheDocument();
     expect(store.getState().workspace.tabs).toEqual([chat("chat-a")]);
   });
@@ -362,8 +363,8 @@ describe("App unified tab regression", () => {
       screen.getByRole("tablist", { name: "Workspace tabs" }),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "Pane actions" }),
-    ).toBeInTheDocument();
+      screen.queryByRole("button", { name: "Pane actions" }),
+    ).not.toBeInTheDocument();
     expect(screen.queryByText("No surface selected")).not.toBeInTheDocument();
     expect(store.getState().workspace.tabs).toEqual([chat("chat-a")]);
     expect(collectTabIds(getChatGroup(store).root)).toEqual(paneOrder);
@@ -386,20 +387,23 @@ describe("App unified tab regression", () => {
       screen.getByRole("tablist", { name: "Workspace tabs" }),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "Pane actions" }),
-    ).toBeInTheDocument();
+      screen.queryByRole("button", { name: "Pane actions" }),
+    ).not.toBeInTheDocument();
     expect(screen.queryByText("No surface selected")).not.toBeInTheDocument();
     expect(store.getState().workspace.tabs).toEqual([chat("chat-a")]);
   });
 
   it("keeps one global toolbar row when splitting a chat", async () => {
-    const { store, user } = renderApp((appStore) => {
+    const { store } = renderApp((appStore) => {
       createChat(appStore, "chat-a", "Chat Alpha");
+      appStore.dispatch(splitTab({ tabId: chat("chat-a"), dir: "row" }));
     });
 
     await screen.findByRole("tab", { name: /Chat Alpha/ });
-    await user.click(screen.getByRole("button", { name: "Pane actions" }));
-    await user.click(screen.getByRole("menuitem", { name: "Split Right" }));
+    expect(screen.queryByRole("button", { name: "Pane actions" })).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: "Split active tab" }),
+    ).toBeNull();
 
     await waitFor(() => {
       expect(store.getState().workspace.groups[chat("chat-a")]).toBeDefined();

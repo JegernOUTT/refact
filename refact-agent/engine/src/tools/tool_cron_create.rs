@@ -179,7 +179,10 @@ pub(crate) async fn execute_create(
 fn delivery_output(delivery: &Delivery) -> Value {
     match delivery {
         Delivery::Chat => json!({"kind": "chat"}),
-        Delivery::Webhook { url, token } => json!({
+        Delivery::Webhook {
+            url,
+            token,
+        } => json!({
             "kind": "webhook",
             "url": url,
             "has_token": token.as_ref().is_some_and(|token| !token.trim().is_empty()),
@@ -262,9 +265,13 @@ fn trigger_arg(args: &HashMap<String, Value>) -> Result<Option<Trigger>, String>
             let hook_id = shortcut
                 .clone()
                 .ok_or_else(|| "trigger webhook requires `hook_id`".to_string())?;
-            Some(Trigger::Webhook { hook_id })
+            Some(Trigger::Webhook {
+                hook_id,
+            })
         }
-        Some(Value::Null) | None => shortcut.map(|hook_id| Trigger::Webhook { hook_id }),
+        Some(Value::Null) | None => shortcut.map(|hook_id| Trigger::Webhook {
+            hook_id,
+        }),
         Some(other) => return Err(format!("argument `trigger` is invalid: {other:?}")),
     };
     Ok(trigger)
@@ -549,7 +556,9 @@ fn command_argv_from_input(input: &CronCreateInput) -> Result<Vec<String>, Strin
 #[cfg(test)]
 fn job_model(task: &Job) -> Option<&str> {
     match &task.action {
-        Action::AgentTurn { model, .. } => model.as_deref().filter(|model| !model.is_empty()),
+        Action::AgentTurn {
+            model, ..
+        } => model.as_deref().filter(|model| !model.is_empty()),
         _ => None,
     }
 }
@@ -603,19 +612,29 @@ fn no_match_in_year_error() -> String {
 
 pub(crate) fn human_schedule_for_trigger(trigger: &Trigger) -> String {
     match trigger {
-        Trigger::Cron { expr, .. } => scheduler_human_schedule_for_trigger(&Trigger::Cron {
+        Trigger::Cron {
+            expr, ..
+        } => scheduler_human_schedule_for_trigger(&Trigger::Cron {
             expr: expr.clone(),
             tz: None,
         }),
-        Trigger::Interval { every_ms } => format!("every {}", tool_human_duration(*every_ms)),
-        Trigger::Once { at_ms } => Utc
+        Trigger::Interval {
+            every_ms,
+        } => format!("every {}", tool_human_duration(*every_ms)),
+        Trigger::Once {
+            at_ms,
+        } => Utc
             .timestamp_millis_opt(*at_ms as i64)
             .single()
             .map(|datetime| format!("once at {}", datetime.to_rfc3339()))
             .unwrap_or_else(|| format!("once at {at_ms}")),
         Trigger::Manual => "manual".to_string(),
-        Trigger::Webhook { hook_id } => format!("webhook {hook_id}"),
-        Trigger::OnProcessExit { match_kind } => format!("on process exit {match_kind}"),
+        Trigger::Webhook {
+            hook_id,
+        } => format!("webhook {hook_id}"),
+        Trigger::OnProcessExit {
+            match_kind,
+        } => format!("on process exit {match_kind}"),
     }
 }
 

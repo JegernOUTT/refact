@@ -2024,7 +2024,9 @@ async fn run_verification_argv_scoped(
             Ok(cleared) => output = cleared,
             Err(error) => {
                 let exit_code = match &result.snapshot.status {
-                    ExecStatus::Exited { exit_code } => *exit_code,
+                    ExecStatus::Exited {
+                        exit_code,
+                    } => *exit_code,
                     _ => None,
                 };
                 return VerificationResult {
@@ -2040,12 +2042,16 @@ async fn run_verification_argv_scoped(
         }
     }
     let (exit_code, passed, outcome) = match &result.snapshot.status {
-        ExecStatus::Exited { exit_code } => (
+        ExecStatus::Exited {
+            exit_code,
+        } => (
             *exit_code,
             exit_code == &Some(0),
             verification_outcome_for_exit(*exit_code, &output),
         ),
-        ExecStatus::SandboxLauncherFailed { exit_code } => {
+        ExecStatus::SandboxLauncherFailed {
+            exit_code,
+        } => {
             output.push_str(&format!(
                 "sandbox launcher failed before command execution with exit code {exit_code}"
             ));
@@ -2062,7 +2068,9 @@ async fn run_verification_argv_scoped(
             ));
             (None, false, VerificationOutcome::InfrastructureFailed)
         }
-        ExecStatus::Failed { message } => {
+        ExecStatus::Failed {
+            message,
+        } => {
             if !output.is_empty() {
                 output.push('\n');
             }

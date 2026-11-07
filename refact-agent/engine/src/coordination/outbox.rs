@@ -78,7 +78,10 @@ impl DeliveryOutbox {
 
     pub fn with_store(store: Arc<CoordinationStore>, project: ProjectKey) -> Self {
         let access = store.authorize(project);
-        DeliveryOutbox { store, access }
+        DeliveryOutbox {
+            store,
+            access,
+        }
     }
 
     /// Persist an accepted delivery as `Pending`. An existing row is left
@@ -469,7 +472,9 @@ mod tests {
     }
 
     async fn reopen(outbox: DeliveryOutbox, path: &Path, project: &str) -> DeliveryOutbox {
-        let DeliveryOutbox { store, .. } = outbox;
+        let DeliveryOutbox {
+            store, ..
+        } = outbox;
         let store = Arc::into_inner(store).expect("test holds the only store handle");
         store.close().await.unwrap();
         open(path, project).await

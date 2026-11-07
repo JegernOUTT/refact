@@ -276,9 +276,14 @@ pub async fn append_workflow_entry_with_failure(
     };
 
     let mut transcript = match tokio::fs::read_to_string(path).await {
-        Ok(content) => serde_json::from_str::<WorkflowTranscript>(&content)
-            .unwrap_or(WorkflowTranscript { entries: vec![] }),
-        Err(_) => WorkflowTranscript { entries: vec![] },
+        Ok(content) => {
+            serde_json::from_str::<WorkflowTranscript>(&content).unwrap_or(WorkflowTranscript {
+                entries: vec![],
+            })
+        }
+        Err(_) => WorkflowTranscript {
+            entries: vec![],
+        },
     };
 
     transcript.entries.push(entry);

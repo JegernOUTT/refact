@@ -77,7 +77,9 @@ impl TeamSpec {
         }
         let limit = refact_work_core::coordination_settings().team_role_max_count;
         if roles.len() > limit {
-            return Err(TeamRefusal::TooManyRoles { limit });
+            return Err(TeamRefusal::TooManyRoles {
+                limit,
+            });
         }
         let mut seen = BTreeSet::new();
         for role in &roles {
@@ -90,7 +92,10 @@ impl TeamSpec {
                 });
             }
         }
-        Ok(TeamSpec { name, roles })
+        Ok(TeamSpec {
+            name,
+            roles,
+        })
     }
 
     pub fn roles(&self) -> &[RoleSpec] {
@@ -112,7 +117,9 @@ impl TeamCatalog {
     pub fn register(&mut self, team: TeamSpec) -> Result<(), TeamRefusal> {
         let limit = refact_work_core::coordination_settings().team_max_count;
         if !self.teams.contains_key(&team.name) && self.teams.len() >= limit {
-            return Err(TeamRefusal::TooManyTeams { limit });
+            return Err(TeamRefusal::TooManyTeams {
+                limit,
+            });
         }
         self.teams.insert(team.name.clone(), team);
         Ok(())
@@ -142,14 +149,22 @@ impl fmt::Display for TeamRefusal {
         match self {
             TeamRefusal::UnnamedTeam => write!(f, "a team needs a name"),
             TeamRefusal::UnnamedRole => write!(f, "a role needs a name"),
-            TeamRefusal::DuplicateRole { role } => write!(f, "role `{role}` is defined twice"),
-            TeamRefusal::TooManyRoles { limit } => {
+            TeamRefusal::DuplicateRole {
+                role,
+            } => write!(f, "role `{role}` is defined twice"),
+            TeamRefusal::TooManyRoles {
+                limit,
+            } => {
                 write!(f, "a team may define at most {limit} roles")
             }
-            TeamRefusal::TooManyTeams { limit } => {
+            TeamRefusal::TooManyTeams {
+                limit,
+            } => {
                 write!(f, "at most {limit} teams may be registered")
             }
-            TeamRefusal::UnknownTeam { team } => write!(f, "team `{team}` is not registered"),
+            TeamRefusal::UnknownTeam {
+                team,
+            } => write!(f, "team `{team}` is not registered"),
         }
     }
 }
@@ -382,17 +397,29 @@ pub enum RosterRefusal {
 impl fmt::Display for RosterRefusal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            RosterRefusal::UnknownRole { role } => {
+            RosterRefusal::UnknownRole {
+                role,
+            } => {
                 write!(f, "this team defines no role `{role}`")
             }
-            RosterRefusal::RosterFull { limit } => {
+            RosterRefusal::RosterFull {
+                limit,
+            } => {
                 write!(f, "a roster holds at most {limit} members")
             }
-            RosterRefusal::AlreadyClaimed { role, holder } => {
+            RosterRefusal::AlreadyClaimed {
+                role,
+                holder,
+            } => {
                 write!(f, "role `{role}` is held by `{holder}`")
             }
-            RosterRefusal::NotClaimed { role } => write!(f, "role `{role}` is unclaimed"),
-            RosterRefusal::NotTheHolder { role, holder } => {
+            RosterRefusal::NotClaimed {
+                role,
+            } => write!(f, "role `{role}` is unclaimed"),
+            RosterRefusal::NotTheHolder {
+                role,
+                holder,
+            } => {
                 write!(f, "role `{role}` is held by `{holder}`, not by the caller")
             }
             RosterRefusal::StillAlive {
@@ -466,7 +493,11 @@ impl MissionLog {
     pub fn append(&mut self, at_ms: u64, event: MissionEvent) -> u64 {
         let seq = self.next_seq;
         self.next_seq += 1;
-        self.entries.push_back(MissionEntry { seq, at_ms, event });
+        self.entries.push_back(MissionEntry {
+            seq,
+            at_ms,
+            event,
+        });
         while self.entries.len() > self.capacity {
             self.entries.pop_front();
             self.dropped += 1;

@@ -738,7 +738,10 @@ async fn cache_result_from_memories(
             .saturating_add(memo.tags.iter().map(String::len).sum::<usize>())
             .saturating_add(path.as_os_str().len());
         memo.content.clear();
-        cached.push(CachedMemo { memo, source });
+        cached.push(CachedMemo {
+            memo,
+            source,
+        });
     }
     let result_fingerprint = fingerprint_strings(cached.iter().map(|cached| {
         format!(

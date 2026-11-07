@@ -9,7 +9,10 @@ use refact_tasks::types::TaskMeta;
 pub async fn emit_task_event(gcx: Arc<GlobalContext>, event: TaskEvent) {
     if let (Some(tx), Some(seq_counter)) = (&gcx.task_events_tx, &gcx.task_events_seq) {
         let seq = seq_counter.fetch_add(1, Ordering::SeqCst);
-        let envelope = TaskEventEnvelope { seq, event };
+        let envelope = TaskEventEnvelope {
+            seq,
+            event,
+        };
         let _ = tx.send(envelope);
     }
 }
@@ -74,7 +77,14 @@ pub async fn enrich_task_with_session_state(gcx: Arc<GlobalContext>, task: &mut 
 
 pub async fn emit_task_updated(gcx: Arc<GlobalContext>, task_id: String, mut meta: TaskMeta) {
     enrich_task_meta_with_session_state(gcx.clone(), &mut meta).await;
-    emit_task_event(gcx, TaskEvent::TaskUpdated { task_id, meta }).await;
+    emit_task_event(
+        gcx,
+        TaskEvent::TaskUpdated {
+            task_id,
+            meta,
+        },
+    )
+    .await;
 }
 
 pub async fn emit_task_comments_changed(gcx: Arc<GlobalContext>, task_id: &str, card_id: &str) {

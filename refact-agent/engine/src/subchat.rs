@@ -534,7 +534,9 @@ impl ToolsPolicy {
             ToolsPolicy::All => None,
             ToolsPolicy::None => Some(vec![]),
             ToolsPolicy::Only(v) => Some(v.clone()),
-            ToolsPolicy::Supervised { tools, .. } => Some(tools.clone()),
+            ToolsPolicy::Supervised {
+                tools, ..
+            } => Some(tools.clone()),
         }
     }
 
@@ -543,7 +545,9 @@ impl ToolsPolicy {
             ToolsPolicy::All => true,
             ToolsPolicy::None => false,
             ToolsPolicy::Only(v) => v.iter().any(|t| t == tool_name),
-            ToolsPolicy::Supervised { tools, .. } => tools.iter().any(|t| t == tool_name),
+            ToolsPolicy::Supervised {
+                tools, ..
+            } => tools.iter().any(|t| t == tool_name),
         }
     }
 }
@@ -779,24 +783,32 @@ impl StreamCollector for SubchatProgressCollector {
         stamp_activity(&self.activity_stamp);
         for op in ops {
             match op {
-                crate::chat::types::DeltaOp::AppendReasoning { text } => {
+                crate::chat::types::DeltaOp::AppendReasoning {
+                    text,
+                } => {
                     if self.thinking_tail.trim().is_empty() {
                         Self::append_tail(&mut self.reasoning_tail, &text, 50_000);
                     }
                 }
-                crate::chat::types::DeltaOp::SetReasoning { text } => {
+                crate::chat::types::DeltaOp::SetReasoning {
+                    text,
+                } => {
                     if self.thinking_tail.trim().is_empty() {
                         self.reasoning_tail.clear();
                         Self::append_tail(&mut self.reasoning_tail, &text, 50_000);
                     }
                 }
-                crate::chat::types::DeltaOp::AppendContent { text } => {
+                crate::chat::types::DeltaOp::AppendContent {
+                    text,
+                } => {
                     if self.thinking_tail.trim().is_empty() && self.reasoning_tail.trim().is_empty()
                     {
                         Self::append_tail(&mut self.content_tail, &text, 50_000);
                     }
                 }
-                crate::chat::types::DeltaOp::SetThinkingBlocks { blocks } => {
+                crate::chat::types::DeltaOp::SetThinkingBlocks {
+                    blocks,
+                } => {
                     if let Some(preview) = Self::extract_thinking_preview(&blocks) {
                         self.thinking_tail = preview;
                     }
@@ -1687,7 +1699,9 @@ fn stateful_thread_from_config(chat_id: &str, config: &SubchatConfig) -> ThreadP
         ToolsPolicy::All => "agent".to_string(),
         ToolsPolicy::None => "none".to_string(),
         ToolsPolicy::Only(v) => v.join(","),
-        ToolsPolicy::Supervised { tools, .. } => {
+        ToolsPolicy::Supervised {
+            tools, ..
+        } => {
             if tools.is_empty() {
                 "none".into()
             } else {
@@ -3259,7 +3273,10 @@ async fn run_subchat_loop(
         // call. Unknown pricing/usage fails closed; retries and wrap-up calls
         // are disabled for supervision, and budgets are never increased.
         let mut supervised_pricing = None;
-        if let ToolsPolicy::Supervised { budget, .. } = tools_policy {
+        if let ToolsPolicy::Supervised {
+            budget, ..
+        } = tools_policy
+        {
             let envelope = config.n_ctx.saturating_add(config.max_new_tokens) as u64;
             if budget.max_turns.is_none_or(|limit| step >= limit as usize)
                 || budget.max_tokens.is_none_or(|limit| {
@@ -3335,7 +3352,10 @@ async fn run_subchat_loop(
             }
         };
 
-        if let ToolsPolicy::Supervised { budget, .. } = tools_policy {
+        if let ToolsPolicy::Supervised {
+            budget, ..
+        } = tools_policy
+        {
             let actual = results
                 .first()
                 .and_then(|messages| messages.last())
@@ -5950,7 +5970,10 @@ mod subchat_tests {
         let mut message = ChatMessage::new(role.to_string(), content.to_string());
         message.extra.insert(
             "privacy".to_string(),
-            serde_json::to_value(PrivacyRecord { files: records }).unwrap(),
+            serde_json::to_value(PrivacyRecord {
+                files: records,
+            })
+            .unwrap(),
         );
         message
     }

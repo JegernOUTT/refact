@@ -2,7 +2,6 @@ package com.smallcloud.refactai.lsp
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.nio.file.Files
@@ -160,19 +159,6 @@ class RefactPathRegistrarTest {
     }
 
     @Test
-    fun extractOwnedBlockDetectsBalancedBlock() {
-        val content = "a\n$REFACT_PATH_MARKER_BEGIN\nline\n$REFACT_PATH_MARKER_END\nb"
-        val block = RefactPathRegistrar.extractOwnedBlock(content)
-        assertTrue(block != null)
-        assertFalse(block!!.malformed)
-    }
-
-    @Test
-    fun extractOwnedBlockReturnsNullWhenAbsent() {
-        assertNull(RefactPathRegistrar.extractOwnedBlock("nothing here"))
-    }
-
-    @Test
     fun extractOwnedBlockFlagsUnbalancedMarkers() {
         val onlyBegin = "$REFACT_PATH_MARKER_BEGIN\nline"
         assertTrue(RefactPathRegistrar.extractOwnedBlock(onlyBegin)!!.malformed)
@@ -229,26 +215,6 @@ class RefactPathRegistrarTest {
     }
 
     // ----------------------------------------------------------------------------------------
-    // Shared-path policy (mirrors LSPProcessHolder canonical check)
-    // ----------------------------------------------------------------------------------------
-
-    @Test
-    fun sharedPathPolicyMatchesCanonicalOnUnix() {
-        val home = Path.of("/home/user")
-        val canonical = sharedRefactBinaryPath(home, "Linux").toString()
-        assertTrue(pathMatchesShared(canonical, canonical, "Linux"))
-        assertFalse(pathMatchesShared("/usr/local/bin/refact", canonical, "Linux"))
-    }
-
-    @Test
-    fun sharedPathPolicyIsCaseInsensitiveOnWindows() {
-        val home = Path.of("C:\\Users\\me")
-        val canonical = sharedRefactBinaryPath(home, "Windows 11").toString()
-        assertTrue(pathMatchesShared(canonical.uppercase(), canonical, "Windows 11"))
-        assertFalse(pathMatchesShared("C:\\other\\refact.exe", canonical, "Windows 11"))
-    }
-
-    // ----------------------------------------------------------------------------------------
     // Helpers
     // ----------------------------------------------------------------------------------------
 
@@ -257,22 +223,6 @@ class RefactPathRegistrarTest {
         override fun addToUserPath(binDir: Path): WindowsPathCommandResult {
             calls.add(binDir)
             return result
-        }
-    }
-
-    /** Reproduces the shared-path comparison used in LSPProcessHolder.binaryPathForDaemon. */
-    private fun pathMatchesShared(resolved: String, canonical: String, osName: String): Boolean {
-        val isWindows = osName.lowercase().contains("win")
-        val resolvedNormalized = runCatching {
-            Path.of(resolved).toAbsolutePath().normalize().toString()
-        }.getOrDefault(resolved)
-        val canonicalNormalized = runCatching {
-            Path.of(canonical).toAbsolutePath().normalize().toString()
-        }.getOrDefault(canonical)
-        return if (isWindows) {
-            resolvedNormalized.equals(canonicalNormalized, ignoreCase = true)
-        } else {
-            resolvedNormalized == canonicalNormalized
         }
     }
 

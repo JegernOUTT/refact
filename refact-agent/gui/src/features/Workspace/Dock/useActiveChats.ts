@@ -1,5 +1,5 @@
 import { skipToken } from "@reduxjs/toolkit/query";
-import { useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import { useAppSelector } from "../../../hooks";
 import {
@@ -11,6 +11,7 @@ import {
   selectBrowserOnline,
 } from "../../Connection/connectionSlice";
 import {
+  activeChatsNeedAttention,
   buildActiveChatEntries,
   type ActiveChatEntry,
 } from "./activeChatsModel";
@@ -32,6 +33,7 @@ export type ActiveChatsState = {
 };
 
 export function useActiveChats(enabled = true): ActiveChatsState {
+  const [clock, setClock] = useState(Date.now);
   const browserOnline = useAppSelector(selectBrowserOnline);
   const backendStatus = useAppSelector(selectBackendStatus);
   const identity = useAppSelector(chatActivityIdentity);
@@ -48,9 +50,23 @@ export function useActiveChats(enabled = true): ActiveChatsState {
     skipPollingIfUnfocused: true,
   });
   const entries = useMemo(
-    () => buildActiveChatEntries(currentData ?? []),
-    [currentData],
+    () =>
+      buildActiveChatEntries(currentData ?? [], Math.max(clock, Date.now())),
+    [currentData, clock],
   );
+  const hasAttention = activeChatsNeedAttention(entries);
+  useEffect(() => {
+    if (!enabled || !hasAttention) return;
+    const refreshClock = () => {
+      if (!document.hidden) setClock(Date.now());
+    };
+    const timer = window.setInterval(refreshClock, ACTIVE_CHATS_POLL_MS);
+    document.addEventListener("visibilitychange", refreshClock);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", refreshClock);
+    };
+  }, [enabled, hasAttention]);
   const hasData = currentData !== undefined;
   const isOfflineWithoutData = !hasData && paused;
   const staleReason: ActiveChatsStaleReason = !hasData

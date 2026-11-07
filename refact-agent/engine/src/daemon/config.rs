@@ -90,7 +90,9 @@ pub struct MdnsConfig {
 
 impl Default for MdnsConfig {
     fn default() -> Self {
-        Self { enabled: None }
+        Self {
+            enabled: None,
+        }
     }
 }
 

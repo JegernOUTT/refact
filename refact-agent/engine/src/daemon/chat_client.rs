@@ -41,7 +41,10 @@ impl std::fmt::Display for ChatClientError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ChatClientError::Http(message) => write!(f, "{message}"),
-            ChatClientError::Status { status, body } => {
+            ChatClientError::Status {
+                status,
+                body,
+            } => {
                 write!(f, "request failed with status {status}: {body}")
             }
             ChatClientError::Event(message) => write!(f, "{message}"),
@@ -56,7 +59,9 @@ impl ChatClientError {
     pub fn is_unreachable(&self) -> bool {
         match self {
             ChatClientError::Http(_) => true,
-            ChatClientError::Status { status, .. } => matches!(*status, 502 | 503 | 504),
+            ChatClientError::Status {
+                status, ..
+            } => matches!(*status, 502 | 503 | 504),
             ChatClientError::Event(_) | ChatClientError::Json(_) => false,
         }
     }
@@ -272,7 +277,10 @@ async fn status_error(response: reqwest::Response) -> ChatClientError {
             CHAT_REQUEST_TIMEOUT.as_secs()
         ),
     };
-    ChatClientError::Status { status, body }
+    ChatClientError::Status {
+        status,
+        body,
+    }
 }
 
 async fn send_with_timeout(

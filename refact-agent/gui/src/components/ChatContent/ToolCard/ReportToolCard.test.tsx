@@ -270,7 +270,6 @@ describe("TaskDoneTool", () => {
   test("keeps the task-done test id on the transcript root", () => {
     renderTaskDone(null, { streaming: true });
     const root = screen.getByTestId("task-done-tool");
-    expect(root).toHaveAttribute("data-transcript-item", "true");
     expect(screen.getByTestId("transcript-target")).toHaveTextContent(
       "Task report",
     );

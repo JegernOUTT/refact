@@ -55,7 +55,10 @@ impl Display for HitTargetError {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Protocol(message) | Self::InvalidResult(message) => formatter.write_str(message),
-            Self::UnsupportedFrameTransform { frame_id, reason } => write!(
+            Self::UnsupportedFrameTransform {
+                frame_id,
+                reason,
+            } => write!(
                 formatter,
                 "Cannot translate pointer coordinates into frame {frame_id}: {reason}"
             ),
@@ -235,7 +238,9 @@ impl FrameHitTargetDriver for CdpFrameHitTargetDriver<'_> {
     ) -> Result<HitTargetResult, HitTargetError> {
         let object_id = match self.resolve_owner_object(child_frame_id) {
             Ok(object_id) => object_id,
-            Err(FramePointTranslationGeometry::Unsupported { reason }) => {
+            Err(FramePointTranslationGeometry::Unsupported {
+                reason,
+            }) => {
                 return Ok(HitTargetResult::Intercepted {
                     description: reason,
                 });
@@ -429,12 +434,12 @@ fn translated_handle_point(
 ) -> Result<HitTargetPoint, HitTargetError> {
     match translate_point_to_frame_cdp(tab, worlds, &handle.frame_id, point)? {
         FramePointTranslation::Supported(point) => Ok(point),
-        FramePointTranslation::Unsupported { reason } => {
-            Err(HitTargetError::UnsupportedFrameTransform {
-                frame_id: handle.frame_id.clone(),
-                reason,
-            })
-        }
+        FramePointTranslation::Unsupported {
+            reason,
+        } => Err(HitTargetError::UnsupportedFrameTransform {
+            frame_id: handle.frame_id.clone(),
+            reason,
+        }),
     }
 }
 
@@ -475,8 +480,12 @@ pub fn translate_point_to_frame(
     for child_frame_id in child_frames {
         let geometry = match driver.owner_geometry(&child_frame_id)? {
             FramePointTranslationGeometry::Supported(geometry) => geometry,
-            FramePointTranslationGeometry::Unsupported { reason } => {
-                return Ok(FramePointTranslation::Unsupported { reason });
+            FramePointTranslationGeometry::Unsupported {
+                reason,
+            } => {
+                return Ok(FramePointTranslation::Unsupported {
+                    reason,
+                });
             }
         };
         if geometry.transformed {
@@ -486,7 +495,9 @@ pub fn translate_point_to_frame(
         }
         match driver.expect_owner_hit(&child_frame_id, point)? {
             HitTargetResult::Done => {}
-            HitTargetResult::Intercepted { description } => {
+            HitTargetResult::Intercepted {
+                description,
+            } => {
                 return Ok(FramePointTranslation::Unsupported {
                     reason: description,
                 });
@@ -625,15 +636,37 @@ mod tests {
             }),
         );
         assert_eq!(
-            translate_point_to_frame(&mut driver, "inner", HitTargetPoint { x: 100.0, y: 90.0 })
-                .unwrap(),
-            FramePointTranslation::Supported(HitTargetPoint { x: 72.0, y: 49.0 })
+            translate_point_to_frame(
+                &mut driver,
+                "inner",
+                HitTargetPoint {
+                    x: 100.0,
+                    y: 90.0
+                }
+            )
+            .unwrap(),
+            FramePointTranslation::Supported(HitTargetPoint {
+                x: 72.0,
+                y: 49.0
+            })
         );
         assert_eq!(
             driver.hits,
             vec![
-                ("outer".to_string(), HitTargetPoint { x: 100.0, y: 90.0 }),
-                ("inner".to_string(), HitTargetPoint { x: 78.0, y: 57.0 }),
+                (
+                    "outer".to_string(),
+                    HitTargetPoint {
+                        x: 100.0,
+                        y: 90.0
+                    }
+                ),
+                (
+                    "inner".to_string(),
+                    HitTargetPoint {
+                        x: 78.0,
+                        y: 57.0
+                    }
+                ),
             ]
         );
     }
@@ -654,7 +687,10 @@ mod tests {
             translate_point_to_frame(
                 &mut unavailable,
                 "child",
-                HitTargetPoint { x: 10.0, y: 20.0 }
+                HitTargetPoint {
+                    x: 10.0,
+                    y: 20.0
+                }
             )
             .unwrap(),
             FramePointTranslation::Unsupported {
@@ -680,7 +716,10 @@ mod tests {
             translate_point_to_frame(
                 &mut transformed,
                 "child",
-                HitTargetPoint { x: 10.0, y: 20.0 }
+                HitTargetPoint {
+                    x: 10.0,
+                    y: 20.0
+                }
             )
             .unwrap(),
             FramePointTranslation::Unsupported { .. }

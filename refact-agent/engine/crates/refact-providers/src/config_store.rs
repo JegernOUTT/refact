@@ -96,7 +96,11 @@ async fn lock_provider_file(
             + std::time::Duration::from_secs(PROVIDER_FILE_LOCK_TIMEOUT_SECS);
         loop {
             match fs2::FileExt::try_lock_exclusive(&file) {
-                Ok(()) => return Ok(ProviderFileLock { file }),
+                Ok(()) => {
+                    return Ok(ProviderFileLock {
+                        file,
+                    })
+                }
                 Err(error) if provider_lock_is_contended(&error) => {
                     if std::time::Instant::now() >= deadline {
                         return Err(format!(

@@ -244,7 +244,10 @@ pub fn parse_line_ranges(ranges_str: &str, total_lines: usize) -> Result<Vec<Lin
                 })?
             };
 
-            LineRange { start, end }
+            LineRange {
+                start,
+                end,
+            }
         } else {
             let line = part.parse::<usize>().map_err(|_| {
                 format!(

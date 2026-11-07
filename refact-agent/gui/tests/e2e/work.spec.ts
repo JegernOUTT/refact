@@ -92,9 +92,18 @@ for (const manualRetry of [false, true]) {
         },
       }),
     );
-    await page.route("**/v1/work", (route) =>
-      route.fulfill({ json: workFixture }),
-    );
+    let releaseRefresh!: () => void;
+    const refreshReady = new Promise<void>((resolve) => {
+      releaseRefresh = resolve;
+    });
+    let requests = 0;
+    await page.route("**/v1/work", async (route) => {
+      requests += 1;
+      // Refresh also refetches REST. Hold its older snapshot so this assertion
+      // exercises stream recovery, then verify it cannot replace the fresh SSE.
+      if (requests > 1) await refreshReady;
+      await route.fulfill({ json: workFixture });
+    });
     await page.goto("/tests/e2e/route-showcase.html?route=work&theme=light");
     await expect(page.getByText("Board work")).toBeVisible();
     await page.waitForFunction(
@@ -126,6 +135,7 @@ for (const manualRetry of [false, true]) {
         (window as unknown as { workStreams: { controllers: unknown[] } })
           .workStreams.controllers.length === 2,
     );
+    if (manualRetry) await expect.poll(() => requests).toBe(2);
     await expect(page.getByText("Board work")).toHaveCount(0);
     await page.evaluate((fixture) => {
       const controller = (
@@ -147,5 +157,15 @@ for (const manualRetry of [false, true]) {
     }, workFixture);
     await expect(page.getByText("Fresh work")).toBeVisible();
     await expect(page.getByRole("alert")).toHaveCount(0);
+    if (manualRetry) {
+      const refreshed = page.waitForResponse("**/v1/work");
+      releaseRefresh();
+      await (await refreshed).finished();
+      await expect(
+        page.getByRole("button", { name: "Refresh project work", exact: true }),
+      ).toBeEnabled();
+      await expect(page.getByText("Fresh work")).toBeVisible();
+      await expect(page.getByText("Board work")).toHaveCount(0);
+    }
   });
 }

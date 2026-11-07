@@ -356,8 +356,14 @@ mod tests {
             &mut mouse,
             &mut observer,
             "main",
-            MainFrameCssPoint { x: 10.0, y: 20.0 },
-            MainFrameCssPoint { x: 30.0, y: 40.0 },
+            MainFrameCssPoint {
+                x: 10.0,
+                y: 20.0,
+            },
+            MainFrameCssPoint {
+                x: 30.0,
+                y: 40.0,
+            },
             1,
         );
 
@@ -411,7 +417,13 @@ mod tests {
         assert!(watch < trigger);
         assert!(trigger < released);
         assert!(released < read);
-        assert_eq!(position, MainFrameCssPoint { x: 30.0, y: 40.0 });
+        assert_eq!(
+            position,
+            MainFrameCssPoint {
+                x: 30.0,
+                y: 40.0
+            }
+        );
     }
 
     #[test]

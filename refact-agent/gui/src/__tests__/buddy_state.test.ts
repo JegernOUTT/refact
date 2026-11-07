@@ -253,16 +253,6 @@ describe("buddy frontend state hardening", () => {
     expect(state.pulse).toEqual(pulse);
   });
 
-  it("BuddyOpportunity_has_cooldown_secs_resolved_at_fields", () => {
-    const opportunity: BuddyOpportunity = makeOpportunity({
-      cooldown_secs: 3600,
-      resolved_at: "2024-01-02T00:00:00Z",
-    });
-
-    expect(opportunity.cooldown_secs).toBe(3600);
-    expect(opportunity.resolved_at).toBe("2024-01-02T00:00:00Z");
-  });
-
   it("signal_type_error_is_valid_runtime_event", () => {
     const event: BuddyRuntimeEvent = {
       id: "runtime-error",

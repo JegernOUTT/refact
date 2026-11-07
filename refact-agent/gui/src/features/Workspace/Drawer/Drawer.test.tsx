@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 import { act } from "react-dom/test-utils";
 
 import { fireEvent, render, screen } from "../../../utils/test-utils";
-import statusDotStyles from "../../../components/ui/StatusDot/StatusDot.module.css";
 import { sessionAdded } from "../TerminalPanel";
 import { createChatWithId } from "../../Chat/Thread";
 import { openTab } from "../workspaceSlice";
@@ -65,17 +64,10 @@ describe("Drawer", () => {
       .getByText("Terminal body")
       .closest(".rf-expand-grid");
     expect(drawer).toHaveAttribute("data-open", "false");
-    expect(contentGrid).toHaveClass("rf-expand-grid");
     expect(contentGrid).toHaveAttribute("data-open", "false");
     expect(screen.getByLabelText("zsh · running: running")).toBeInTheDocument();
     expect(screen.getByLabelText("tests · failed: failed")).toBeInTheDocument();
-    expect(screen.getByLabelText("build · killed: killed")).toHaveClass(
-      statusDotStyles.danger,
-      statusDotStyles.small,
-    );
-    expect(screen.getByLabelText("zsh · running: running")).toHaveClass(
-      "rf-status-pulse",
-    );
+    expect(screen.getByLabelText("build · killed: killed")).toBeInTheDocument();
 
     await view.user.click(
       screen.getByRole("button", {

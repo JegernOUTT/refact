@@ -1415,7 +1415,9 @@ mod tests {
 
     fn file_content(candidate: &ImportCandidate) -> &str {
         match &candidate.artifact {
-            super::super::super::types::ImportArtifact::FileContent { content } => content,
+            super::super::super::types::ImportArtifact::FileContent {
+                content,
+            } => content,
             _ => panic!("expected file content"),
         }
     }

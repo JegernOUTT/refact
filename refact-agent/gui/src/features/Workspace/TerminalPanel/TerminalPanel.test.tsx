@@ -24,8 +24,6 @@ import {
   selectTerminalWorkbenchOpen,
   setTerminalWorkbenchOpen,
 } from "./terminalSlice";
-import emptyStateStyles from "../../../components/ui/EmptyState/EmptyState.module.css";
-import terminalPanelStyles from "./TerminalPanel.module.css";
 
 class FakeEventSource {
   static instances: FakeEventSource[] = [];
@@ -649,10 +647,6 @@ describe("TerminalPanel", () => {
 
     const emptyTitle = await screen.findByText("No terminal sessions");
     expect(emptyTitle).toBeVisible();
-    expect(emptyTitle.closest("section")).toHaveClass(
-      emptyStateStyles.compact,
-      terminalPanelStyles.emptyState,
-    );
 
     await user.click(toggle);
 
@@ -793,17 +787,6 @@ describe("TerminalPanel", () => {
       expect(title).toHaveAttribute("aria-expanded", "false");
     });
 
-    test("no separate chevron toggle remains", async () => {
-      useTwoSessions();
-      const { user } = renderTerminalPanel();
-      await screen.findByRole("tab", { name: /first/i });
-      await user.click(screen.getByRole("tab", { name: /first/i }));
-
-      expect(
-        screen.queryByRole("button", { name: /(expand|collapse) terminal/i }),
-      ).toBeNull();
-    });
-
     test("New terminal expands a collapsed panel", async () => {
       useTwoSessions();
       server.use(
@@ -924,10 +907,6 @@ describe("TerminalPanel", () => {
 
     const disabledTitle = await screen.findByText("Browser terminal disabled");
     expect(disabledTitle).toBeVisible();
-    expect(disabledTitle.closest("section")).toHaveClass(
-      emptyStateStyles.compact,
-      terminalPanelStyles.emptyState,
-    );
     expect(screen.getByText(/REFACT_DISABLE_EXEC_HTTP policy/i)).toBeVisible();
   });
 

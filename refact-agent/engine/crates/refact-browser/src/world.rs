@@ -107,7 +107,13 @@ impl WorldManager {
     }
 
     pub fn wrap_scoped<'a>(&'a self, tab: &'a Tab, handle: ElementHandle) -> TabScopedHandle<'a> {
-        ScopedHandle::new(TabHandleReleaser { world: self, tab }, handle)
+        ScopedHandle::new(
+            TabHandleReleaser {
+                world: self,
+                tab,
+            },
+            handle,
+        )
     }
 
     pub fn wrap_scoped_all<'a>(

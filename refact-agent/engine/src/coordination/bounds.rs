@@ -19,7 +19,10 @@ pub(crate) fn serialized_size(value: &impl Serialize, cap: usize) -> Option<usiz
             Ok(())
         }
     }
-    let mut writer = BudgetWriter { used: 0, cap };
+    let mut writer = BudgetWriter {
+        used: 0,
+        cap,
+    };
     serde_json::to_writer(&mut writer, value).ok()?;
     Some(writer.used)
 }

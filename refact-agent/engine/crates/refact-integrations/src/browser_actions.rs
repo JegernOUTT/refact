@@ -227,38 +227,54 @@ pub fn parse_command(line: &str) -> Result<BrowserAction, String> {
         "navigate_to" => {
             let tab_id = tab_id.ok_or("navigate_to: missing <tab_id>")?;
             let url = rest_after_tokens(trimmed, 2).ok_or("navigate_to: missing <url>")?;
-            Ok(BrowserAction::NavigateTo { tab_id, url })
+            Ok(BrowserAction::NavigateTo {
+                tab_id,
+                url,
+            })
         }
 
         "scroll_to" => {
             let tab_id = tab_id.ok_or("scroll_to: missing <tab_id>")?;
             let selector = rest_after_tokens(trimmed, 2).ok_or("scroll_to: missing <selector>")?;
-            Ok(BrowserAction::ScrollTo { tab_id, selector })
+            Ok(BrowserAction::ScrollTo {
+                tab_id,
+                selector,
+            })
         }
 
         "screenshot" => {
             reject_extra_tokens(trimmed, 2, "screenshot")?;
             let tab_id = tab_id.ok_or("screenshot: missing <tab_id>")?;
-            Ok(BrowserAction::Screenshot { tab_id })
+            Ok(BrowserAction::Screenshot {
+                tab_id,
+            })
         }
 
         "html" => {
             let tab_id = tab_id.ok_or("html: missing <tab_id>")?;
             let selector = rest_after_tokens(trimmed, 2).ok_or("html: missing <selector>")?;
-            Ok(BrowserAction::Html { tab_id, selector })
+            Ok(BrowserAction::Html {
+                tab_id,
+                selector,
+            })
         }
 
         "reload" => {
             reject_extra_tokens(trimmed, 2, "reload")?;
             let tab_id = tab_id.ok_or("reload: missing <tab_id>")?;
-            Ok(BrowserAction::Reload { tab_id })
+            Ok(BrowserAction::Reload {
+                tab_id,
+            })
         }
 
         "click_at_element" => {
             let tab_id = tab_id.ok_or("click_at_element: missing <tab_id>")?;
             let selector =
                 rest_after_tokens(trimmed, 2).ok_or("click_at_element: missing <selector>")?;
-            Ok(BrowserAction::ClickAtElement { tab_id, selector })
+            Ok(BrowserAction::ClickAtElement {
+                tab_id,
+                selector,
+            })
         }
 
         "click_at_point" => {
@@ -272,13 +288,20 @@ pub fn parse_command(line: &str) -> Result<BrowserAction, String> {
             let y = y_str
                 .parse::<f64>()
                 .map_err(|e| format!("click_at_point: invalid y: {}", e))?;
-            Ok(BrowserAction::ClickAtPoint { tab_id, x, y })
+            Ok(BrowserAction::ClickAtPoint {
+                tab_id,
+                x,
+                y,
+            })
         }
 
         "type_text_at" => {
             let tab_id = tab_id.ok_or("type_text_at: missing <tab_id>")?;
             let text = rest_after_tokens(trimmed, 2).ok_or("type_text_at: missing <text>")?;
-            Ok(BrowserAction::TypeText { tab_id, text })
+            Ok(BrowserAction::TypeText {
+                tab_id,
+                text,
+            })
         }
 
         "fill_field" => {
@@ -349,13 +372,18 @@ pub fn parse_command(line: &str) -> Result<BrowserAction, String> {
         "tab_log" => {
             reject_extra_tokens(trimmed, 2, "tab_log")?;
             let tab_id = tab_id.ok_or("tab_log: missing <tab_id>")?;
-            Ok(BrowserAction::TabLog { tab_id })
+            Ok(BrowserAction::TabLog {
+                tab_id,
+            })
         }
 
         "eval" => {
             let tab_id = tab_id.ok_or("eval: missing <tab_id>")?;
             let expression = rest_after_tokens(trimmed, 2).ok_or("eval: missing <expression>")?;
-            Ok(BrowserAction::Eval { tab_id, expression })
+            Ok(BrowserAction::Eval {
+                tab_id,
+                expression,
+            })
         }
 
         "styles" => {
@@ -389,20 +417,28 @@ pub fn parse_command(line: &str) -> Result<BrowserAction, String> {
                     seconds
                 ));
             }
-            Ok(BrowserAction::WaitFor { tab_id, seconds })
+            Ok(BrowserAction::WaitFor {
+                tab_id,
+                seconds,
+            })
         }
 
         "wait_for_selector" => {
             let tab_id = tab_id.ok_or("wait_for_selector: missing <tab_id>")?;
             let selector = rest_after_tokens(trimmed, 2)
                 .ok_or("wait_for_selector: missing <element_selector>")?;
-            Ok(BrowserAction::WaitForSelector { tab_id, selector })
+            Ok(BrowserAction::WaitForSelector {
+                tab_id,
+                selector,
+            })
         }
 
         "wait_for_navigation" => {
             reject_extra_tokens(trimmed, 2, "wait_for_navigation")?;
             let tab_id = tab_id.ok_or("wait_for_navigation: missing <tab_id>")?;
-            Ok(BrowserAction::WaitForNavigation { tab_id })
+            Ok(BrowserAction::WaitForNavigation {
+                tab_id,
+            })
         }
 
         "list_tabs" => {
@@ -413,7 +449,9 @@ pub fn parse_command(line: &str) -> Result<BrowserAction, String> {
         "close_tab" => {
             reject_extra_tokens(trimmed, 2, "close_tab")?;
             let tab_id = tab_id.ok_or("close_tab: missing <tab_id>")?;
-            Ok(BrowserAction::CloseTab { tab_id })
+            Ok(BrowserAction::CloseTab {
+                tab_id,
+            })
         }
 
         other => Err(format!(
@@ -473,51 +511,105 @@ pub fn parse_commands(commands_str: &str) -> Vec<Result<BrowserAction, String>> 
 
 pub fn get_tab_id(action: &BrowserAction) -> Option<&str> {
     match action {
-        BrowserAction::OpenTab { tab_id, .. }
-        | BrowserAction::NavigateTo { tab_id, .. }
-        | BrowserAction::ScrollTo { tab_id, .. }
-        | BrowserAction::Screenshot { tab_id, .. }
-        | BrowserAction::Html { tab_id, .. }
-        | BrowserAction::Reload { tab_id, .. }
-        | BrowserAction::ClickAtElement { tab_id, .. }
-        | BrowserAction::ClickAtPoint { tab_id, .. }
-        | BrowserAction::TypeText { tab_id, .. }
-        | BrowserAction::FillField { tab_id, .. }
-        | BrowserAction::PressKey { tab_id, .. }
-        | BrowserAction::TabLog { tab_id, .. }
-        | BrowserAction::Eval { tab_id, .. }
-        | BrowserAction::Styles { tab_id, .. }
-        | BrowserAction::WaitFor { tab_id, .. }
-        | BrowserAction::WaitForSelector { tab_id, .. }
-        | BrowserAction::WaitForNavigation { tab_id, .. }
-        | BrowserAction::CloseTab { tab_id, .. } => Some(tab_id.as_str()),
+        BrowserAction::OpenTab {
+            tab_id, ..
+        }
+        | BrowserAction::NavigateTo {
+            tab_id, ..
+        }
+        | BrowserAction::ScrollTo {
+            tab_id, ..
+        }
+        | BrowserAction::Screenshot {
+            tab_id, ..
+        }
+        | BrowserAction::Html {
+            tab_id, ..
+        }
+        | BrowserAction::Reload {
+            tab_id, ..
+        }
+        | BrowserAction::ClickAtElement {
+            tab_id, ..
+        }
+        | BrowserAction::ClickAtPoint {
+            tab_id, ..
+        }
+        | BrowserAction::TypeText {
+            tab_id, ..
+        }
+        | BrowserAction::FillField {
+            tab_id, ..
+        }
+        | BrowserAction::PressKey {
+            tab_id, ..
+        }
+        | BrowserAction::TabLog {
+            tab_id, ..
+        }
+        | BrowserAction::Eval {
+            tab_id, ..
+        }
+        | BrowserAction::Styles {
+            tab_id, ..
+        }
+        | BrowserAction::WaitFor {
+            tab_id, ..
+        }
+        | BrowserAction::WaitForSelector {
+            tab_id, ..
+        }
+        | BrowserAction::WaitForNavigation {
+            tab_id, ..
+        }
+        | BrowserAction::CloseTab {
+            tab_id, ..
+        } => Some(tab_id.as_str()),
         BrowserAction::ListTabs => None,
     }
 }
 
 pub fn to_browser_steps(action: &BrowserAction) -> Option<Vec<BrowserStep>> {
     match action {
-        BrowserAction::NavigateTo { url, .. } => Some(vec![BrowserStep::Navigate {
+        BrowserAction::NavigateTo {
+            url, ..
+        } => Some(vec![BrowserStep::Navigate {
             url: url.clone(),
             timeout_ms: None,
         }]),
-        BrowserAction::ScrollTo { selector, .. } => Some(vec![BrowserStep::ScrollTo {
+        BrowserAction::ScrollTo {
+            selector, ..
+        } => Some(vec![BrowserStep::ScrollTo {
             locator: BrowserLocator::css(selector),
         }]),
-        BrowserAction::Screenshot { .. } => Some(vec![BrowserStep::Screenshot {
+        BrowserAction::Screenshot {
+            ..
+        } => Some(vec![BrowserStep::Screenshot {
             options: BrowserScreenshotOptions::default(),
         }]),
-        BrowserAction::Reload { .. } => Some(vec![BrowserStep::Reload]),
-        BrowserAction::ClickAtElement { selector, .. } => Some(vec![BrowserStep::Click {
+        BrowserAction::Reload {
+            ..
+        } => Some(vec![BrowserStep::Reload]),
+        BrowserAction::ClickAtElement {
+            selector, ..
+        } => Some(vec![BrowserStep::Click {
             locator: BrowserLocator::css(selector),
             timeout_ms: None,
         }]),
-        BrowserAction::PressKey { key, modifiers, .. } => Some(vec![BrowserStep::PressKey {
+        BrowserAction::PressKey {
+            key,
+            modifiers,
+            ..
+        } => Some(vec![BrowserStep::PressKey {
             key: key.clone(),
             modifiers: modifiers.clone(),
         }]),
-        BrowserAction::TabLog { .. } => Some(vec![BrowserStep::TabLog]),
-        BrowserAction::Eval { expression, .. } => Some(vec![BrowserStep::Eval {
+        BrowserAction::TabLog {
+            ..
+        } => Some(vec![BrowserStep::TabLog]),
+        BrowserAction::Eval {
+            expression, ..
+        } => Some(vec![BrowserStep::Eval {
             expression: expression.clone(),
             timeout_ms: None,
         }]),
@@ -533,35 +625,53 @@ pub fn to_browser_steps(action: &BrowserAction) -> Option<Vec<BrowserStep>> {
                 Some(property_filter.clone())
             },
         }]),
-        BrowserAction::WaitFor { seconds, .. } => {
-            Some(vec![BrowserStep::WaitSeconds { seconds: *seconds }])
-        }
-        BrowserAction::WaitForSelector { selector, .. } => {
-            Some(vec![BrowserStep::WaitForSelector {
-                locator: BrowserLocator::css(selector),
-                state: None,
-                timeout_ms: None,
-            }])
-        }
-        BrowserAction::WaitForNavigation { .. } => {
-            Some(vec![BrowserStep::WaitForNavigation { timeout_ms: None }])
-        }
-        BrowserAction::Html { selector, .. } => Some(vec![BrowserStep::DomSnapshot {
+        BrowserAction::WaitFor {
+            seconds, ..
+        } => Some(vec![BrowserStep::WaitSeconds {
+            seconds: *seconds,
+        }]),
+        BrowserAction::WaitForSelector {
+            selector, ..
+        } => Some(vec![BrowserStep::WaitForSelector {
+            locator: BrowserLocator::css(selector),
+            state: None,
+            timeout_ms: None,
+        }]),
+        BrowserAction::WaitForNavigation {
+            ..
+        } => Some(vec![BrowserStep::WaitForNavigation {
+            timeout_ms: None,
+        }]),
+        BrowserAction::Html {
+            selector, ..
+        } => Some(vec![BrowserStep::DomSnapshot {
             selector: selector.clone(),
             max_chars: Some(3000),
         }]),
-        BrowserAction::FillField { selector, text, .. } => Some(vec![BrowserStep::Fill {
+        BrowserAction::FillField {
+            selector,
+            text,
+            ..
+        } => Some(vec![BrowserStep::Fill {
             locator: BrowserLocator::css(selector),
             text: text.clone(),
             clear_first: true,
             verify: true,
         }]),
 
-        BrowserAction::OpenTab { .. }
-        | BrowserAction::CloseTab { .. }
+        BrowserAction::OpenTab {
+            ..
+        }
+        | BrowserAction::CloseTab {
+            ..
+        }
         | BrowserAction::ListTabs
-        | BrowserAction::ClickAtPoint { .. }
-        | BrowserAction::TypeText { .. } => None,
+        | BrowserAction::ClickAtPoint {
+            ..
+        }
+        | BrowserAction::TypeText {
+            ..
+        } => None,
     }
 }
 
@@ -574,7 +684,9 @@ mod tests {
         let action =
             parse_command(r#"eval 1 "document.querySelectorAll('button').length""#).unwrap();
         match action {
-            BrowserAction::Eval { expression, .. } => {
+            BrowserAction::Eval {
+                expression, ..
+            } => {
                 assert_eq!(
                     expression,
                     r#""document.querySelectorAll('button').length""#
@@ -590,7 +702,9 @@ mod tests {
         let results = parse_commands(input);
         assert_eq!(results.len(), 1);
         match results[0].as_ref().unwrap() {
-            BrowserAction::TypeText { text, .. } => {
+            BrowserAction::TypeText {
+                text, ..
+            } => {
                 assert_eq!(text, "Line one\nLine two");
             }
             _ => panic!("Expected TypeText"),
@@ -611,7 +725,9 @@ mod tests {
         let action = parse_command("wait_for_selector 1 tr:nth-child(1) td:nth-child(3)").unwrap();
         let steps = to_browser_steps(&action).unwrap();
         match &steps[0] {
-            BrowserStep::WaitForSelector { locator, .. } => {
+            BrowserStep::WaitForSelector {
+                locator, ..
+            } => {
                 let json = serde_json::to_value(locator).unwrap();
                 assert_eq!(
                     json["value"].as_str().unwrap(),

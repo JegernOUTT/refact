@@ -98,10 +98,10 @@ use crate::http::routers::v1::files::{
 use crate::http::routers::v1::code_edit::handle_v1_code_edit;
 use crate::http::routers::v1::workspace::handle_v1_get_app_searchable_id;
 use crate::chat::{
-    handle_v1_chat_subscribe, handle_v1_chat_command, handle_v1_chat_cancel_queued,
-    handle_v1_chat_reprioritize_queued, handle_v1_trajectories_list, handle_v1_trajectories_all,
-    handle_v1_trajectories_get, handle_v1_trajectory_path, handle_v1_trajectories_save,
-    handle_v1_trajectories_delete, handle_v1_trajectories_subscribe,
+    handle_v1_chats_subscribe_many, handle_v1_chat_subscribe, handle_v1_chat_command,
+    handle_v1_chat_cancel_queued, handle_v1_chat_reprioritize_queued, handle_v1_trajectories_list,
+    handle_v1_trajectories_all, handle_v1_trajectories_get, handle_v1_trajectory_path,
+    handle_v1_trajectories_save, handle_v1_trajectories_delete, handle_v1_trajectories_subscribe,
 };
 use crate::http::routers::v1::voice::{
     handle_v1_voice_transcribe, handle_v1_voice_download, handle_v1_voice_status,
@@ -166,8 +166,8 @@ pub mod buddy_supervision;
 pub mod bug_report;
 pub mod caps;
 mod causal;
-pub mod chat_based_handlers;
 mod chat_activity;
+pub mod chat_based_handlers;
 mod chat_modes;
 pub mod code_completion;
 mod code_edit;
@@ -181,6 +181,7 @@ pub mod ext_management;
 mod ext_marketplace_sources;
 mod file_edit_tools;
 mod files;
+mod files_search;
 mod git;
 mod git_branches;
 mod git_read;
@@ -605,6 +606,7 @@ fn files_routes() -> Router<AppState> {
             "/file_edit_tool_dry_run",
             post(handle_v1_file_edit_tool_dry_run),
         )
+        .route("/files/search", get(files_search::handle_v1_files_search))
         .route("/files/tree", get(handle_v1_files_tree))
         .route("/files/read", get(handle_v1_files_read))
         .route("/files/open", post(handle_v1_files_open))
@@ -810,8 +812,12 @@ fn trajectories_routes() -> Router<AppState> {
 
 fn chats_routes() -> Router<AppState> {
     Router::new()
-        .route("/chats/activity", get(chat_activity::handle_v1_chats_activity))
+        .route(
+            "/chats/activity",
+            get(chat_activity::handle_v1_chats_activity),
+        )
         .route("/chats/subscribe", get(handle_v1_chat_subscribe))
+        .route("/chats/subscribe-many", get(handle_v1_chats_subscribe_many))
         .route("/chats/:chat_id/commands", post(handle_v1_chat_command))
         .route(
             "/chats/:chat_id/skills-status",
@@ -1750,6 +1756,36 @@ mod router_tests {
     #[tokio::test]
     async fn v1_router_routes_each_domain_and_keeps_shared_layers() {
         let app = AppState::from_gcx(crate::global_context::tests::make_test_gcx().await).await;
+        let mut sources =
+            crate::ext::extensions_marketplace::load_all_sources(&app.paths.config_dir)
+                .await
+                .unwrap();
+        for source in &mut sources {
+            source.enabled = matches!(
+                source.source_kind,
+                crate::ext::extensions_marketplace::MarketplaceSourceKind::BuiltinEmbedded
+            );
+        }
+        crate::ext::extensions_marketplace::save_sources_db(
+            &app.paths.config_dir,
+            &crate::ext::extensions_marketplace::ExtensionsMarketplaceSourcesDb {
+                sources,
+            },
+        )
+        .await
+        .unwrap();
+        for source in super::mcp_marketplace_sources::load_sources(&app.paths.config_dir)
+            .await
+            .sources
+        {
+            super::mcp_marketplace_sources::handle_v1_mcp_marketplace_sources_configure(
+                axum::extract::State(app.clone()),
+                axum::extract::Path(source.id),
+                hyper::body::Bytes::from_static(br#"{"enabled":false}"#),
+            )
+            .await
+            .unwrap();
+        }
         let router = make_v1_router(app.clone()).with_state(app);
         let routes = [
             ("GET", "/ping"),

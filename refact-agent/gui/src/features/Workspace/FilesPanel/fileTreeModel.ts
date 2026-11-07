@@ -1,4 +1,8 @@
-import type { FilesTreeEntry } from "../../../services/refact/files";
+import type {
+  FilesTreeEntry,
+  FilesSort,
+  FilesDirection,
+} from "../../../services/refact/files";
 import type { PrivacyPolicy } from "../../../services/refact/privacy";
 
 export type VisibleTreeEntry = FilesTreeEntry & {
@@ -12,11 +16,13 @@ export const flattenVisibleTree = (
   expandedDirectories: ReadonlySet<string>,
   childrenByPath: TreeChildrenByPath,
   showIgnored = false,
+  sort: FilesSort = "name",
+  direction: FilesDirection = "asc",
 ): VisibleTreeEntry[] => {
   const visible: VisibleTreeEntry[] = [];
 
   const visit = (entries: FilesTreeEntry[], depth: number) => {
-    for (const entry of entries) {
+    for (const entry of sortTreeEntries(entries, sort, direction)) {
       if (entry.ignored && !showIgnored) continue;
       visible.push({ ...entry, depth });
       if (entry.kind === "dir" && expandedDirectories.has(entry.path)) {
@@ -75,4 +81,38 @@ export const movePathToPrivacyZone = (
       return { ...zone, patterns: [path, ...patterns] };
     }),
   };
+};
+
+export const sortTreeEntries = (
+  entries: FilesTreeEntry[],
+  sort: FilesSort,
+  direction: FilesDirection,
+): FilesTreeEntry[] => {
+  const compare = (a: string, b: string) =>
+    a.toLowerCase() < b.toLowerCase()
+      ? -1
+      : a.toLowerCase() > b.toLowerCase()
+        ? 1
+        : 0;
+  const extension = (name: string) =>
+    name.lastIndexOf(".") > 0 ? name.slice(name.lastIndexOf(".") + 1) : "";
+  return [...entries].sort((a, b) => {
+    if (a.kind !== b.kind) return a.kind === "dir" ? -1 : 1;
+    if (
+      sort === "size" &&
+      (a.size === null || b.size === null) &&
+      a.size !== b.size
+    )
+      return a.size === null ? 1 : -1;
+    const primary =
+      sort === "size"
+        ? (a.size ?? 0) - (b.size ?? 0)
+        : sort === "type"
+          ? compare(extension(a.name), extension(b.name))
+          : compare(a.name, b.name);
+    return (
+      (direction === "asc" ? primary : -primary) ||
+      (a.path < b.path ? -1 : a.path > b.path ? 1 : 0)
+    );
+  });
 };

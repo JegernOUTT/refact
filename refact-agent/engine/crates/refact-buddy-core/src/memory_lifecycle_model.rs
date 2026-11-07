@@ -335,7 +335,9 @@ pub enum MemoryOpsRecord {
 impl MemoryOpsRecord {
     pub fn into_op(self) -> MemoryLifecycleOp {
         match self {
-            Self::Op { op } => op,
+            Self::Op {
+                op,
+            } => op,
         }
     }
 }

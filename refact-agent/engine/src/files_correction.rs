@@ -137,7 +137,10 @@ fn registered_worktree_path_mappings_uncached(
                 continue;
             }
             if seen.insert((root.clone(), source_root.clone())) {
-                mappings.push(RegisteredWorktreePathMapping { root, source_root });
+                mappings.push(RegisteredWorktreePathMapping {
+                    root,
+                    source_root,
+                });
             }
         }
     }

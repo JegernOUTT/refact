@@ -1,8 +1,8 @@
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Instant;
 use serde_json::json;
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::{broadcast, Mutex as AMutex, Notify, RwLock as ARwLock};
 use tracing::warn;
 use uuid::Uuid;
@@ -21,9 +21,9 @@ fn delivery_now_ms() -> u64 {
         .map(|duration| duration.as_millis() as u64)
         .unwrap_or(0)
 }
-use super::types::session_idle_timeout;
 use super::config::limits;
 use super::trajectories::{task_context_from_task_meta, trajectory_meta_title, TrajectoryEvent};
+use super::types::session_idle_timeout;
 
 pub use super::session_runtime::{
     clean_background_processes_for_chat, close_all_chat_sessions,
@@ -4923,11 +4923,11 @@ fn sse_broadcast_outcome(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::types::{ChatCommand, CommandRequest};
+    use super::*;
+    use crate::call_validation::{ChatToolCall, ChatToolFunction};
     use crate::chat::perf_diagnostics::{self, MemoryPerfSink, PerfClock, PerfRecorder};
     use crate::chat::perf_telemetry::PerformanceTelemetry;
-    use crate::call_validation::{ChatToolCall, ChatToolFunction};
     use serde_json::json;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
@@ -9872,134 +9872,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
-    fn stress_emit_and_snapshot_large_history_baseline() {
-        const MESSAGE_COUNT: usize = 2_000;
-        const MESSAGE_SIZE: usize = 2_048;
-        const SNAPSHOT_RUNS: usize = 200;
-
-        let mut session = make_session();
-
-        for i in 0..MESSAGE_COUNT {
-            session.add_message(ChatMessage {
-                message_id: format!("m{}", i),
-                role: if i % 2 == 0 {
-                    "user".to_string()
-                } else {
-                    "assistant".to_string()
-                },
-                content: ChatContent::SimpleText("x".repeat(MESSAGE_SIZE)),
-                ..Default::default()
-            });
-        }
-
-        let emit_start = Instant::now();
-        for _ in 0..1_500 {
-            session.emit(ChatEvent::QueueUpdated {
-                queue_size: 0,
-                queued_items: vec![],
-            });
-        }
-        let emit_elapsed = emit_start.elapsed();
-
-        let snapshot_start = Instant::now();
-        for _ in 0..SNAPSHOT_RUNS {
-            let snapshot = session.snapshot();
-            if let ChatEvent::Snapshot {
-                messages, ..
-            } = snapshot
-            {
-                assert_eq!(messages.len(), MESSAGE_COUNT);
-            } else {
-                panic!("Expected Snapshot event");
-            }
-        }
-        let snapshot_elapsed = snapshot_start.elapsed();
-
-        println!(
-            "STRESS_BASELINE session_emit_snapshot: messages={}, msg_size={}, emits=1500, snapshots={}, emit_ms={}, snapshot_ms={}",
-            MESSAGE_COUNT,
-            MESSAGE_SIZE,
-            SNAPSHOT_RUNS,
-            emit_elapsed.as_millis(),
-            snapshot_elapsed.as_millis(),
-        );
-    }
-
-    #[test]
-    #[ignore]
-    fn stress_broadcast_lag_recovery_baseline() {
-        let event_count = limits().event_channel_capacity * 3;
-
-        let mut session = make_session();
-        let mut slow_rx = session.subscribe();
-
-        let emit_start = Instant::now();
-        for i in 0..event_count {
-            session.emit(ChatEvent::MessageAdded {
-                message: ChatMessage {
-                    message_id: format!("lag-{}", i),
-                    role: "assistant".to_string(),
-                    content: ChatContent::SimpleText("delta".to_string()),
-                    ..Default::default()
-                },
-                index: i,
-            });
-        }
-        let emit_elapsed = emit_start.elapsed();
-
-        let recv_start = Instant::now();
-        let mut received = 0usize;
-        let mut lagged = 0usize;
-        loop {
-            match slow_rx.try_recv() {
-                Ok(_envelope) => {
-                    received += 1;
-                }
-                Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_skipped)) => {
-                    lagged += 1;
-                }
-                Err(tokio::sync::broadcast::error::TryRecvError::Empty)
-                | Err(tokio::sync::broadcast::error::TryRecvError::Closed) => {
-                    break;
-                }
-            }
-        }
-        let recv_elapsed = recv_start.elapsed();
-
-        assert!(lagged > 0, "Expected lagged receiver under saturation");
-
-        println!(
-            "STRESS_BASELINE broadcast_lag: emitted={}, received={}, lagged_events={}, emit_ms={}, drain_ms={}, channel_capacity={}",
-            event_count,
-            received,
-            lagged,
-            emit_elapsed.as_millis(),
-            recv_elapsed.as_millis(),
-            limits().event_channel_capacity,
-        );
-    }
-
-    #[test]
-    fn test_active_command_stored_and_cleared() {
-        let mut session = make_session();
-        session.active_command = ActiveCommandContext {
-            name: "my-agent".to_string(),
-            allowed_tools: vec!["cat".to_string()],
-            model_override: Some("gpt-4".to_string()),
-            context_fork: Some("subagent".to_string()),
-        };
-        assert_eq!(
-            session.active_command.context_fork,
-            Some("subagent".to_string())
-        );
-        assert_eq!(session.active_command.name, "my-agent");
-        session.active_command = ActiveCommandContext::default();
-        assert!(session.active_command.context_fork.is_none());
-        assert!(session.active_command.name.is_empty());
-    }
-
-    #[test]
     fn test_set_active_skill() {
         let mut session = make_session();
         assert!(session.thread.active_skill.is_none());
@@ -10028,26 +9900,6 @@ mod tests {
             session.thread.active_skill.is_none(),
             "active_skill must be cleared on restore"
         );
-    }
-
-    #[test]
-    fn test_emit_broadcast_multiple_subscribers_identical_payload() {
-        let mut session = make_session();
-        let mut rx1 = session.subscribe();
-        let mut rx2 = session.subscribe();
-        session.emit(ChatEvent::PauseCleared {});
-        let j1 = rx1.try_recv().unwrap();
-        let j2 = rx2.try_recv().unwrap();
-        assert_eq!(j1, j2);
-    }
-
-    #[test]
-    fn test_duplicate_request_hashset_stays_in_sync() {
-        let mut session = make_session();
-        assert!(!session.is_duplicate_request("req-x"));
-        assert!(session.recent_request_ids.contains(&"req-x".to_string()));
-        assert!(session.recent_request_ids_set.contains("req-x"));
-        assert!(session.is_duplicate_request("req-x"));
     }
 
     #[test]

@@ -93,6 +93,10 @@
   pointer-events: auto;
 }
 
+.paneControls:has(> .fileActions:empty) {
+  display: none;
+}
+
 .fileActions {
   min-width: 0;
 }

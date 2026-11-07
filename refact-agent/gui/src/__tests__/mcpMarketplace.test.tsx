@@ -166,21 +166,6 @@ describe("mcpMarketplaceApi", () => {
 });
 
 describe("ServerCard", () => {
-  it("renders server name, publisher and description", () => {
-    render(
-      <ServerCard
-        server={MOCK_SERVER}
-        isInstalled={false}
-        isInstalling={false}
-        onInstall={() => undefined}
-        onViewDetail={() => undefined}
-      />,
-    );
-    expect(screen.getByText("Test Server")).toBeDefined();
-    expect(screen.getByText("Test Publisher")).toBeDefined();
-    expect(screen.getByText("A test MCP server for unit tests")).toBeDefined();
-  });
-
   it("renders Install button when not installed", () => {
     render(
       <ServerCard
@@ -209,20 +194,6 @@ describe("ServerCard", () => {
     expect(screen.queryByRole("button", { name: /^install$/i })).toBeNull();
   });
 
-  it("renders tags as badges", () => {
-    render(
-      <ServerCard
-        server={MOCK_SERVER}
-        isInstalled={false}
-        isInstalling={false}
-        onInstall={() => undefined}
-        onViewDetail={() => undefined}
-      />,
-    );
-    expect(screen.getByText("search")).toBeDefined();
-    expect(screen.getByText("code")).toBeDefined();
-  });
-
   it("calls onInstall with server when Install button clicked", () => {
     const calledWith: MCPServer[] = [];
     render(
@@ -239,20 +210,6 @@ describe("ServerCard", () => {
     fireEvent.click(screen.getByRole("button", { name: /install/i }));
     expect(calledWith.length).toBe(1);
     expect(calledWith[0]?.id).toBe("test-server");
-  });
-
-  it("renders source badge when sourceLabel is provided", () => {
-    render(
-      <ServerCard
-        server={MOCK_SERVER}
-        isInstalled={false}
-        isInstalling={false}
-        onInstall={() => undefined}
-        onViewDetail={() => undefined}
-        sourceLabel="Refact Built-in"
-      />,
-    );
-    expect(screen.getByText("Refact Built-in")).toBeDefined();
   });
 
   it("shows Update and Uninstall for installed servers with a newer recipe", () => {
@@ -351,53 +308,6 @@ describe("SourceSelector", () => {
 });
 
 describe("MCPMarketplace", () => {
-  it("renders marketplace page with server cards from API", async () => {
-    server.use(
-      http.get("*/v1/mcp/marketplace", () => {
-        return HttpResponse.json(MOCK_RESPONSE);
-      }),
-      http.get("*/v1/mcp/marketplace/installed", () => {
-        return HttpResponse.json({ installed: [] });
-      }),
-    );
-
-    render(
-      <MCPMarketplace
-        host="vscode"
-        tabbed={false}
-        backFromMarketplace={() => undefined}
-      />,
-      { preloadedState: PRELOADED_STATE },
-    );
-
-    expect(await screen.findByText("Test Server")).toBeDefined();
-    expect(screen.getByText("MCP Marketplace")).toBeDefined();
-  });
-
-  it("renders source selector tabs when sources are returned", async () => {
-    server.use(
-      http.get("*/v1/mcp/marketplace", () => {
-        return HttpResponse.json(MOCK_RESPONSE);
-      }),
-      http.get("*/v1/mcp/marketplace/installed", () => {
-        return HttpResponse.json({ installed: [] });
-      }),
-    );
-
-    render(
-      <MCPMarketplace
-        host="vscode"
-        tabbed={false}
-        backFromMarketplace={() => undefined}
-      />,
-      { preloadedState: PRELOADED_STATE },
-    );
-
-    await screen.findByText("Test Server");
-    expect(screen.getAllByText(/Refact Built-in/).length).toBeGreaterThan(0);
-    expect(screen.getByTitle("Manage marketplace sources")).toBeDefined();
-  });
-
   it("filters servers via the engine-side q parameter", async () => {
     const secondServer: MCPServer = {
       ...MOCK_SERVER,

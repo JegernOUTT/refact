@@ -115,7 +115,10 @@ pub async fn handle_v1_hooks_fire(
         },
     };
     let inline = fire_inline(&app, &request, now_ms).await?;
-    Ok(Json(HookFireResponse { inline, hook_jobs }))
+    Ok(Json(HookFireResponse {
+        inline,
+        hook_jobs,
+    }))
 }
 
 fn authorize_worker_hook(app: &AppState, headers: &HeaderMap) -> Result<(), ScratchError> {
@@ -151,7 +154,9 @@ async fn fire_inline(
             let chat_id = inject_wake(app, &text, push)
                 .await
                 .map_err(|error| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, error))?;
-            Ok(Some(InlineFireResponse::Wake { chat_id }))
+            Ok(Some(InlineFireResponse::Wake {
+                chat_id,
+            }))
         }
         HookFireKind::Agent => {
             let Some(message) = request_message(request) else {
@@ -190,7 +195,10 @@ async fn fire_inline(
             let fired = CronRunner::fire_manual_job(app.gcx.clone(), job, now_ms)
                 .await
                 .map_err(|error| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, error))?;
-            Ok(Some(InlineFireResponse::Agent { job_id, fired }))
+            Ok(Some(InlineFireResponse::Agent {
+                job_id,
+                fired,
+            }))
         }
     }
 }
@@ -291,7 +299,10 @@ async fn fire_hook_jobs(
         let fired = CronRunner::fire_store_job_now(store, app.gcx.clone(), &job.id, now_ms)
             .await
             .map_err(|error| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, error))?;
-        jobs.push(HookJobFireResult { id: job.id, fired });
+        jobs.push(HookJobFireResult {
+            id: job.id,
+            fired,
+        });
     }
     let fired = jobs.iter().filter(|job| job.fired).count();
     Ok(HookJobsFireResponse {

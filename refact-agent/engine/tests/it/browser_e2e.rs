@@ -1130,17 +1130,31 @@ async fn expect_retries_matchers_report_received_and_soft_failure_continues() {
             false,
         )
         .unwrap();
-    case.tab
-        .evaluate(
-            "const delayed = document.querySelector('#delayed'); delayed.style.display = 'none'; setTimeout(() => delayed.style.display = 'inline-block', 1500)",
-            false,
-        )
-        .unwrap();
+    let initial_observations = case.runtime.world_manager.eval_in_utility(
+        &case.tab,
+        r#"(() => {
+            const target = document.createElement('button');
+            target.id = 'retry-visibility';
+            target.textContent = 'Retry visibility';
+            document.body.append(target);
+            const nativeCheckVisibility = target.checkVisibility.bind(target);
+            const observations = [];
+            sessionStorage.setItem('retry-visibility-observations', '[]');
+            target.checkVisibility = () => {
+                const visible = observations.length > 0 && nativeCheckVisibility();
+                observations.push(visible);
+                sessionStorage.setItem('retry-visibility-observations', JSON.stringify(observations));
+                return visible;
+            };
+            return observations;
+        })()"#,
+    ).unwrap();
+    assert_eq!(initial_observations, json!([]));
     let report = execute_steps_with_runtime(
         &mut case.runtime,
         &[
             BrowserStep::Expect {
-                locator: Some(BrowserLocator::css("#delayed")),
+                locator: Some(BrowserLocator::css("#retry-visibility")),
                 matcher: BrowserExpectation::ToBeVisible,
                 timeout_ms: Some(3_000),
                 soft: false,
@@ -1239,7 +1253,27 @@ async fn expect_retries_matchers_report_received_and_soft_failure_continues() {
         "soft assertion should not fail the batch: {report:?}"
     );
     assert_eq!(report.steps.len(), 9);
-    assert!(report.steps[0].retries > 0);
+    assert!(report.steps[0].retries > 0, "{report:?}");
+    let observations = case
+        .tab
+        .evaluate(
+            "sessionStorage.getItem('retry-visibility-observations')",
+            false,
+        )
+        .unwrap()
+        .value
+        .expect("visibility observations must return a primitive JSON string");
+    let observations: Vec<bool> = serde_json::from_str(
+        observations
+            .as_str()
+            .expect("visibility observations must be a JSON string"),
+    )
+    .expect("visibility observations must be a boolean array");
+    assert_eq!(observations.first(), Some(&false));
+    assert!(observations.iter().skip(1).any(|value| *value));
+    let retried = report.steps[0].assertion.as_ref().unwrap();
+    assert!(retried.passed);
+    assert_eq!(retried.received, json!(true));
     let failed = report.steps[7].assertion.as_ref().unwrap();
     assert!(!failed.passed);
     assert!(failed.soft);

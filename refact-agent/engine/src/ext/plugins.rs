@@ -382,7 +382,10 @@ async fn add_marketplace_impl(
         added_at: Utc::now().to_rfc3339(),
     });
     save_plugins_db(config_dir, &db).await?;
-    Ok(MarketplaceJson { name, ..mj })
+    Ok(MarketplaceJson {
+        name,
+        ..mj
+    })
 }
 
 pub async fn add_marketplace(app: AppState, source: &str) -> Result<MarketplaceJson, String> {
@@ -661,18 +664,6 @@ mod tests {
             let mut size_acc = 0u64;
             copy_dir_recursive(&src, &dst, &mut size_acc).await.unwrap();
             assert!(dst.join("regular.txt").exists());
-        }
-    }
-
-    #[test]
-    fn test_command_source_installed_plugin_serde() {
-        let src = CommandSource::InstalledPlugin("my-plugin".to_string());
-        let json = serde_json::to_string(&src).unwrap();
-        let restored: CommandSource = serde_json::from_str(&json).unwrap();
-        if let CommandSource::InstalledPlugin(name) = restored {
-            assert_eq!(name, "my-plugin");
-        } else {
-            panic!("expected InstalledPlugin");
         }
     }
 

@@ -18,6 +18,7 @@ import { setProjectStorageNamespace } from "../../../utils/chatUiPersistence";
 import { filesApi, type FilesTreeEntry } from "../../../services/refact/files";
 import type { PrivacyPolicyResponse } from "../../../services/refact/privacy";
 import { applyChatEvent } from "../../Chat/Thread";
+import { setCurrentProjectInfo } from "../../Chat/currentProject";
 import { FilesPanel } from "./FilesPanel";
 import { FileViewer } from "./FileViewer";
 import {
@@ -287,26 +288,350 @@ describe("FilesPanel", () => {
     ).toBeVisible();
   });
 
-  it("renders one file icon with an empty chevron slot", async () => {
-    server.use(rootHandler());
-    const { user } = render(<FilesPanel />);
-    const workspace = await screen.findByRole("treeitem", {
-      name: /workspace/i,
+  it("debounces project-wide metadata search outside expanded folders and requires explicit activation", async () => {
+    const searches: URLSearchParams[] = [];
+    server.use(
+      rootHandler(),
+      http.get("*/v1/files/search", ({ request }) => {
+        searches.push(new URL(request.url).searchParams);
+        return HttpResponse.json({
+          entries: [
+            {
+              name: "hidden.ts",
+              path: "/workspace/unexpanded/hidden.ts",
+              relative_path: "unexpanded/hidden.ts",
+              root: "/workspace",
+              kind: "file",
+              size: 12,
+              ignored: false,
+              privacy_zone: {
+                name: "normal",
+                send_to: ["*"],
+                on_shell_read: "withhold",
+              },
+            },
+          ],
+          truncated: true,
+          complete: false,
+          index_state: "building",
+        });
+      }),
+    );
+    const { user, store } = render(<FilesPanel />, {
+      preloadedState: {
+        current_project: { name: "workspace", workspaceRoots: [rootPath] },
+      },
     });
-
-    expect(workspace.querySelectorAll("svg")).toHaveLength(2);
+    const input = screen.getByRole("combobox", {
+      name: "Search project files and folders",
+    });
+    await user.type(input, "hidden");
+    expect(searches).toHaveLength(0);
     expect(
-      within(workspace).getByTestId("tree-chevron-slot").querySelector("svg"),
-    ).not.toBeNull();
+      await screen.findByRole("option", { name: /hidden.ts/ }),
+    ).toHaveTextContent("unexpanded/hidden.ts");
+    expect(searches).toHaveLength(1);
+    expect(searches[0].get("q")).toBe("hidden");
+    expect(searches[0].get("root")).toBeNull();
+    expect(searches[0].get("show_ignored")).toBe("false");
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Index building; results may be incomplete",
+    );
+    expect(screen.getByRole("status")).toHaveTextContent("Results truncated");
+    expect(store.getState().workspace.tabs).toEqual([]);
+    await user.keyboard("{Enter}");
+    expect(store.getState().workspace.tabs).toEqual([]);
+    await user.keyboard("{ArrowDown}{Enter}");
+    expect(store.getState().workspace.activeTabId).toBe(
+      "file:/workspace/unexpanded/hidden.ts",
+    );
+    await user.keyboard("{Escape}");
+    expect(input).toHaveValue("");
+    expect(screen.queryByRole("option")).toBeNull();
+  });
 
-    await user.click(workspace);
-    const file = await screen.findByRole("treeitem", { name: /README\.md/i });
+  it("refreshes the same search from building to ready with bounded visible polling and stops on clear or unmount", async () => {
+    const searches: string[] = [];
+    let indexReady = false;
+    let filename = "pending.ts";
+    server.use(
+      rootHandler(),
+      http.get("*/v1/files/search", ({ request }) => {
+        searches.push(request.url);
+        return HttpResponse.json({
+          entries: [
+            {
+              name: filename,
+              path: `${sourcePath}/${filename}`,
+              relative_path: `src/${filename}`,
+              root: rootPath,
+              kind: "file",
+              size: 12,
+              ignored: false,
+              privacy_zone: privacyResponse.policy.zones[0],
+            },
+          ],
+          truncated: false,
+          complete: indexReady,
+          index_state: indexReady ? "ready" : "building",
+        });
+      }),
+    );
+    vi.useFakeTimers();
+    const view = render(<FilesPanel />, {
+      preloadedState: {
+        current_project: { name: "workspace", workspaceRoots: [rootPath] },
+      },
+    });
+    const advance = async (milliseconds: number) => {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(milliseconds);
+      });
+    };
+    const visibilityDescriptor = Object.getOwnPropertyDescriptor(
+      document,
+      "visibilityState",
+    );
+    const setVisibility = (value: DocumentVisibilityState) =>
+      Object.defineProperty(document, "visibilityState", {
+        configurable: true,
+        value,
+      });
+    try {
+      const input = screen.getByRole("combobox", {
+        name: "Search project files and folders",
+      });
+      fireEvent.change(input, { target: { value: "pend" } });
+      await advance(200);
+      expect(searches).toHaveLength(0);
+      fireEvent.change(input, { target: { value: "pending" } });
+      await advance(200);
+      expect(searches).toHaveLength(0);
+      await advance(100);
+      expect(searches).toHaveLength(1);
+      expect(screen.getByRole("status")).toHaveTextContent("Index building");
+      indexReady = true;
+      await advance(4_000);
+      expect(searches).toHaveLength(1);
+      await advance(1_100);
+      expect(searches).toHaveLength(2);
+      expect(screen.getByRole("status")).not.toHaveTextContent("incomplete");
+      filename = "pending-new.ts";
+      await advance(5_100);
+      expect(searches).toHaveLength(3);
+      expect(screen.getByRole("option")).toHaveTextContent(filename);
+      setVisibility("hidden");
+      fireEvent(document, new Event("visibilitychange"));
+      await advance(15_000);
+      expect(searches).toHaveLength(3);
+      setVisibility("visible");
+      fireEvent(document, new Event("visibilitychange"));
+      await advance(100);
+      expect(searches).toHaveLength(4);
+      fireEvent.click(screen.getByRole("button", { name: "Clear search" }));
+      await advance(15_000);
+      expect(searches).toHaveLength(4);
+      fireEvent.change(input, { target: { value: "pending" } });
+      await advance(300);
+      expect(searches).toHaveLength(5);
+      view.unmount();
+      await advance(15_000);
+      expect(searches).toHaveLength(5);
+      expect(new Set(searches).size).toBe(1);
+    } finally {
+      view.unmount();
+      if (visibilityDescriptor)
+        Object.defineProperty(
+          document,
+          "visibilityState",
+          visibilityDescriptor,
+        );
+      else Reflect.deleteProperty(document, "visibilityState");
+      vi.useRealTimers();
+    }
+  });
 
-    expect(file.querySelectorAll("svg")).toHaveLength(1);
+  it("manually refreshes degraded success and retains results with an honest retry after failure", async () => {
+    let requests = 0;
+    let resolve:
+      | ((response: ReturnType<typeof HttpResponse.json>) => void)
+      | undefined;
+    server.use(
+      rootHandler(),
+      http.get("*/v1/files/search", () => {
+        requests += 1;
+        if (requests === 2)
+          return new Promise<ReturnType<typeof HttpResponse.json>>((done) => {
+            resolve = done;
+          });
+        return HttpResponse.json({
+          entries: [
+            {
+              name: "partial.ts",
+              path: `${sourcePath}/partial.ts`,
+              relative_path: "src/partial.ts",
+              root: rootPath,
+              kind: "file",
+              size: 12,
+              ignored: false,
+              privacy_zone: privacyResponse.policy.zones[0],
+            },
+          ],
+          truncated: false,
+          complete: requests > 2,
+          index_state: requests > 2 ? "ready" : "degraded",
+        });
+      }),
+    );
+    const { user } = render(<FilesPanel />);
+    await user.type(
+      screen.getByRole("combobox", {
+        name: "Search project files and folders",
+      }),
+      "partial",
+    );
+    expect(await screen.findByRole("option")).toHaveTextContent("partial.ts");
+    expect(screen.getByRole("status")).toHaveTextContent("Index degraded");
+    await user.click(screen.getByRole("button", { name: "Refresh search" }));
+    await waitFor(() => expect(resolve).toBeDefined());
+    expect(screen.getByRole("option")).toHaveTextContent("partial.ts");
     expect(
-      within(file).getByTestId("tree-chevron-slot").querySelector("svg"),
-    ).toBeNull();
-    expect(file.querySelector(".lucide-file-text")).not.toBeNull();
+      screen.getByRole("button", { name: "Refresh search" }),
+    ).toBeDisabled();
+    resolve?.(HttpResponse.json({ detail: "unavailable" }, { status: 503 }));
+    expect(
+      await screen.findByRole("button", { name: "Retry search" }),
+    ).toBeEnabled();
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Refresh failed; showing previous results",
+    );
+    expect(screen.getByRole("option")).toHaveTextContent("partial.ts");
+    await user.click(screen.getByRole("button", { name: "Retry search" }));
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("button", { name: "Refresh search" }),
+      ).toBeNull(),
+    );
+    expect(screen.getByRole("status")).not.toHaveTextContent("incomplete");
+    expect(requests).toBe(3);
+  });
+
+  it("sends sort and explicit project scope to search and browses folder results without reading contents", async () => {
+    const searches: URLSearchParams[] = [];
+    const reads: string[] = [];
+    server.use(
+      rootHandler(),
+      http.get("*/v1/files/read", ({ request }) => {
+        reads.push(request.url);
+        return HttpResponse.json(readResponse());
+      }),
+      http.get("*/v1/files/search", ({ request }) => {
+        searches.push(new URL(request.url).searchParams);
+        return HttpResponse.json({
+          entries: [
+            {
+              name: "empty",
+              path: "/workspace/empty",
+              relative_path: "empty",
+              root: "/workspace",
+              kind: "dir",
+              size: null,
+              ignored: false,
+              privacy_zone: {
+                name: "normal",
+                send_to: ["*"],
+                on_shell_read: "withhold",
+              },
+            },
+          ],
+          truncated: false,
+          complete: true,
+          index_state: "ready",
+        });
+      }),
+    );
+    const { user, store } = render(<FilesPanel />, {
+      preloadedState: {
+        current_project: {
+          name: "workspace",
+          workspaceRoots: [rootPath, "/second"],
+        },
+      },
+    });
+    await user.selectOptions(
+      screen.getByRole("combobox", { name: "Search scope" }),
+      rootPath,
+    );
+    await user.click(screen.getByRole("button", { name: "More options" }));
+    await user.click(
+      screen.getByRole("menuitemradio", { name: "Sort by size" }),
+    );
+    await user.click(screen.getByRole("button", { name: "More options" }));
+    await user.click(screen.getByRole("menuitem", { name: "Ascending" }));
+    await user.type(
+      screen.getByRole("combobox", {
+        name: "Search project files and folders",
+      }),
+      "empty",
+    );
+    const folder = await screen.findByRole("option", { name: /empty/ });
+    expect(searches.at(-1)?.get("sort")).toBe("size");
+    expect(searches.at(-1)?.get("direction")).toBe("desc");
+    expect(searches.at(-1)?.get("root")).toBe(rootPath);
+    await user.click(folder);
+    expect(
+      screen.getByRole("combobox", {
+        name: "Search project files and folders",
+      }),
+    ).toHaveValue("");
+    expect(
+      await screen.findByRole("button", { name: "Current worktree" }),
+    ).toBeVisible();
+    expect(reads).toEqual([]);
+    expect(store.getState().workspace.tabs).toEqual([]);
+    expect(store.getState().current_project.workspaceRoots).toEqual([
+      rootPath,
+      "/second",
+    ]);
+  });
+
+  it("clears search on project switches and ignores a late previous-project response", async () => {
+    let resolve: ((response: Response) => void) | undefined;
+    server.use(
+      rootHandler(),
+      http.get(
+        "*/v1/files/search",
+        () =>
+          new Promise<Response>((done) => {
+            resolve = done;
+          }),
+      ),
+    );
+    const { user, store } = render(<FilesPanel />, {
+      preloadedState: {
+        current_project: { name: "workspace", workspaceRoots: [rootPath] },
+      },
+    });
+    const input = screen.getByRole("combobox", {
+      name: "Search project files and folders",
+    });
+    await user.type(input, "old");
+    await waitFor(() => expect(resolve).toBeDefined());
+    act(() => {
+      store.dispatch(
+        setCurrentProjectInfo({ name: "other", workspaceRoots: ["/other"] }),
+      );
+    });
+    expect(input).toHaveValue("");
+    resolve?.(
+      HttpResponse.json({
+        entries: [{ name: "old", path: "/workspace/old" }],
+        complete: true,
+        truncated: false,
+        index_state: "ready",
+      }),
+    );
+    await waitFor(() => expect(screen.queryByRole("option")).toBeNull());
   });
 
   it("hides ignored entries by default and reveals them muted", async () => {
@@ -1522,6 +1847,10 @@ describe("FilesPanel", () => {
   it("validates the absolute path input with an accessible error", async () => {
     server.use(rootHandler());
     const { user, store } = render(<FilesPanel />);
+    await user.click(screen.getByRole("button", { name: "More options" }));
+    await user.click(
+      screen.getByRole("menuitem", { name: "Open file by path…" }),
+    );
     const input = screen.getByLabelText("Absolute file path");
 
     await user.click(screen.getByRole("button", { name: "Open" }));
@@ -1579,6 +1908,10 @@ describe("FilesPanel", () => {
       },
     );
 
+    await user.click(screen.getByRole("button", { name: "More options" }));
+    await user.click(
+      screen.getByRole("menuitem", { name: "Open file by path…" }),
+    );
     await user.type(
       screen.getByLabelText("Absolute file path"),
       `  ${externalPath}  {Enter}`,
@@ -1814,10 +2147,18 @@ describe("FilesPanel", () => {
         <ActiveFileViewer />
       </>,
     );
+    await user.click(screen.getByRole("button", { name: "More options" }));
+    await user.click(
+      screen.getByRole("menuitem", { name: "Open file by path…" }),
+    );
     const input = screen.getByLabelText("Absolute file path");
 
     await user.type(input, `${externalPath}{Enter}`);
     await expectEditorText("version 1");
+    await user.click(screen.getByRole("button", { name: "More options" }));
+    await user.click(
+      screen.getByRole("menuitem", { name: "Open file by path…" }),
+    );
     await user.click(screen.getByRole("button", { name: "Open" }));
     await expectEditorText("version 2");
     expect(openCalls).toBe(2);

@@ -829,12 +829,10 @@ mod tests {
                 None,
             )
             .unwrap();
-        assert!(
-            recorder
-                .stop()
-                .unwrap_err()
-                .contains("requires the runtime artifact store")
-        );
+        assert!(recorder
+            .stop()
+            .unwrap_err()
+            .contains("requires the runtime artifact store"));
     }
 
     #[test]
@@ -988,16 +986,12 @@ mod tests {
                 "{body} should replay {status}"
             );
         }
-        assert!(
-            replay
-                .match_request("POST", "https://x.test/rpc", Some(r#"{"op":"three"}"#))
-                .is_none()
-        );
-        assert!(
-            replay
-                .match_request("POST", "https://x.test/rpc", None)
-                .is_none()
-        );
+        assert!(replay
+            .match_request("POST", "https://x.test/rpc", Some(r#"{"op":"three"}"#))
+            .is_none());
+        assert!(replay
+            .match_request("POST", "https://x.test/rpc", None)
+            .is_none());
     }
 
     #[test]
@@ -1157,10 +1151,8 @@ mod tests {
             not_found: HarNotFound::Fallback,
             ..replay
         };
-        assert!(
-            fallback
-                .match_request("GET", "https://example.test/missing", None)
-                .is_none()
-        );
+        assert!(fallback
+            .match_request("GET", "https://example.test/missing", None)
+            .is_none());
     }
 }

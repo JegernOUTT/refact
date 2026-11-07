@@ -392,17 +392,29 @@ pub enum HandoffFinding {
 impl HandoffFinding {
     pub fn key(&self) -> &str {
         match self {
-            Self::InsufficientData { key, .. }
-            | Self::NoRecurringGap { key, .. }
-            | Self::BriefImprovement { key, .. } => key,
+            Self::InsufficientData {
+                key, ..
+            }
+            | Self::NoRecurringGap {
+                key, ..
+            }
+            | Self::BriefImprovement {
+                key, ..
+            } => key,
         }
     }
 
     pub fn samples(&self) -> u32 {
         match self {
-            Self::InsufficientData { samples, .. }
-            | Self::NoRecurringGap { samples, .. }
-            | Self::BriefImprovement { samples, .. } => *samples,
+            Self::InsufficientData {
+                samples, ..
+            }
+            | Self::NoRecurringGap {
+                samples, ..
+            }
+            | Self::BriefImprovement {
+                samples, ..
+            } => *samples,
         }
     }
 

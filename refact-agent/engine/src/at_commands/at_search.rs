@@ -24,7 +24,9 @@ pub struct AtSearch {
 
 impl AtSearch {
     pub fn new() -> Self {
-        AtSearch { params: vec![] }
+        AtSearch {
+            params: vec![],
+        }
     }
 }
 

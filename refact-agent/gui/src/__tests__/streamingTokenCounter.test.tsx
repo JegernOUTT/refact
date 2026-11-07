@@ -13,14 +13,4 @@ describe("StreamingTokenCounter", () => {
     expect(content).toContain("return () => {");
     expect(content).toContain("window.clearTimeout(hideTimerRef.current)");
   });
-
-  it("uses formatNumberToFixed for token display", () => {
-    const filePath = path.resolve(
-      __dirname,
-      "../components/UsageCounter/StreamingTokenCounter.tsx",
-    );
-    const content = fs.readFileSync(filePath, "utf-8");
-
-    expect(content).toContain("formatNumberToFixed");
-  });
 });

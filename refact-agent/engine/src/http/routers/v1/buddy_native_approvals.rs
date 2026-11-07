@@ -373,11 +373,12 @@ pub async fn handle_approval_response(
         let command = response_command(&session, request.response)
             .map_err(|e| ScratchError::new(StatusCode::CONFLICT, e))?;
         let target = match &command {
-            refact_chat_api::ChatCommand::ToolDecision { tool_call_id, .. } => {
-                tool_call_id.as_str()
-            }
+            refact_chat_api::ChatCommand::ToolDecision {
+                tool_call_id, ..
+            } => tool_call_id.as_str(),
             refact_chat_api::ChatCommand::BrowserContextDecision {
-                pending_message_id, ..
+                pending_message_id,
+                ..
             } => pending_message_id.as_str(),
             _ => "",
         };
@@ -398,7 +399,9 @@ pub async fn handle_approval_response(
                 client_request_id: request.client_request_id.clone(),
                 target_id: target.to_string(),
                 accepted: match &command {
-                    refact_chat_api::ChatCommand::ToolDecision { accepted, .. } => Some(*accepted),
+                    refact_chat_api::ChatCommand::ToolDecision {
+                        accepted, ..
+                    } => Some(*accepted),
                     _ => None,
                 },
                 request_identity,

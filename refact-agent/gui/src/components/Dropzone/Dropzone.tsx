@@ -16,6 +16,7 @@ import {
 } from "../../utils/attachmentFiles";
 import { ComposerTrigger, KitTooltip } from "../ComposerKit";
 import styles from "./Dropzone.module.css";
+import { ImageAttachmentEditorProvider } from "../ImageAttachmentEditor/ImageAttachmentEditorProvider";
 
 export const FileUploadContext = createContext<{
   open: () => void;
@@ -27,6 +28,14 @@ export const FileUploadContext = createContext<{
 });
 
 export const DropzoneProvider: React.FC<
+  React.PropsWithChildren<{ asChild?: boolean }>
+> = (props) => (
+  <ImageAttachmentEditorProvider>
+    <DropzoneRoot {...props} />
+  </ImageAttachmentEditorProvider>
+);
+
+const DropzoneRoot: React.FC<
   React.PropsWithChildren<{ asChild?: boolean }>
 > = ({ asChild, ...props }) => {
   const { setError, processAndInsertImages, processAndInsertTextFiles } =

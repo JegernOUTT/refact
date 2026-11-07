@@ -132,7 +132,9 @@ pub fn build_child_env(
             }
             child_env
         }
-        ExecEnvPolicy::Scrubbed { .. } => {
+        ExecEnvPolicy::Scrubbed {
+            ..
+        } => {
             let mut child_env = BTreeMap::new();
             for name in BASE_ENV_ALLOWLIST {
                 if let Ok(value) = std::env::var(name) {
@@ -154,7 +156,10 @@ pub fn build_child_env(
     for (name, value) in EXEC_ENV_DEFAULTS {
         insert_env(&mut child_env, (*name).to_string(), (*value).to_string());
     }
-    if let ExecEnvPolicy::Scrubbed { passthrough } = policy {
+    if let ExecEnvPolicy::Scrubbed {
+        passthrough,
+    } = policy
+    {
         for (name, value) in utf8_parent_env() {
             if passthrough
                 .iter()
@@ -185,7 +190,10 @@ pub(crate) fn apply_tokio_child_env(
                 command.env(name, value);
             }
         }
-        ExecEnvPolicy::Scrubbed { .. } | ExecEnvPolicy::Exact => {
+        ExecEnvPolicy::Scrubbed {
+            ..
+        }
+        | ExecEnvPolicy::Exact => {
             command.env_clear();
             for (name, value) in build_child_env(policy, request_env) {
                 command.env(name, value);
@@ -208,7 +216,10 @@ pub(crate) fn apply_pty_child_env(
                 command.env(name, value);
             }
         }
-        ExecEnvPolicy::Scrubbed { .. } | ExecEnvPolicy::Exact => {
+        ExecEnvPolicy::Scrubbed {
+            ..
+        }
+        | ExecEnvPolicy::Exact => {
             command.env_clear();
             for (name, value) in build_child_env(policy, request_env) {
                 command.env(name, value);

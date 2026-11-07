@@ -86,7 +86,7 @@ Reuse the existing project/worktree resolver and extend it with alias tests; do 
 | **M4 — Resource governance and adaptive scheduling** | Capacity limits, provider fairness/AIMD, bounded retries, residency control | M1; M3 durable accounting |
 | **M5 — Evidence-backed goals and plans** | Executable verification contracts, independent review, wait barriers, goal decomposition and bounded durable plans | M1; M2; M3 for crash recovery |
 | **M6 — Teams, DAGs and convergence** | Shared task DAGs, reusable teams, wave scheduling, structured outcomes, governed workflow scripts | M2–M5 |
-| **M10 — Full observability and rollout qualification** | Consistent GUI/TUI/IDE controls, inspectable provenance, interoperable recovery, end-to-end parity certification | Incremental throughout; final gate after M6 |
+| **M10 — Full observability and rollout qualification** | Consistent GUI/IDE controls, inspectable provenance, interoperable recovery, end-to-end parity certification | Incremental throughout; final gate after M6 |
 
 Do not run multiple implementation agents against shared scheduler/session/board files simultaneously. M1 is itself several reviewable changes, not a single large commit.
 
@@ -434,7 +434,7 @@ Each row becomes an executable parity scenario during its milestone; this is the
 | Plan approval, files/task state, bounded compaction-safe current plan + full audit | Refact hidden roles; Roo/Claude/OpenCode plan artifacts; DeepSeek event plan state | M5 |
 | Hook control events/types and safe extensions | Codex and Claude; Refact existing hooks | M2 control; M10 visibility |
 | Governed code-mode orchestration, tool catalog search, bounded intermediate data | Kilo CodeMode; DeepSeek workflow engine; Refact lazy catalog | M6 |
-| Human surfaces and diagnostic visibility | All applicable runtimes; Refact GUI/TUI/IDE clients | M1 minimal, M10 complete |
+| Human surfaces and diagnostic visibility | All applicable runtimes; Refact GUI/IDE clients | M1 minimal, M10 complete |
 | Wait-graph deadlock detection with authorized break actions | Adopted addition A | M2 graph; M4 detector |
 | Handoff sufficiency feedback into later decomposition | Adopted addition B | M2, M5 |
 | Human attention budget for approvals, questions and notifications | Adopted addition C | M2, M10 |
@@ -455,7 +455,7 @@ Continue/Repowise are not assumed to be agent orchestrators. Antigravity interna
 
 ## 12. M10: qualification, observability and completion definition
 
-Throughout the program, expose the same concepts in tools, HTTP, GUI, TUI and IDE clients: queued/running/parked/stale, waiting questions, capacity-limit reasons, controlled peer actions, workspace/file attribution, merge state, evidence verdicts, hook activity, attention-budget consumers, causal trace and recovery actions. Prefer extending existing panels/routes over a parallel dashboard. Metadata is cheap and bounded; transcript/artifact bodies load on demand.
+Throughout the program, expose the same concepts in tools, HTTP, GUI and IDE clients: queued/running/parked/stale, waiting questions, capacity-limit reasons, controlled peer actions, workspace/file attribution, merge state, evidence verdicts, hook activity, attention-budget consumers, causal trace and recovery actions. Prefer extending existing panels/routes over a parallel dashboard. Metadata is cheap and bounded; transcript/artifact bodies load on demand.
 
 Add structured metrics and traces for queue latency, permit counts, provider pressure, unknown attribution, stale-write rejections, delivery lag/duplicates/expiry, abandoned claims, recovery decisions, evidence cache validity, generation progress and context payload size. Metrics omit secrets. Log an auditable explanation for automatic pause, denial, retry, merge refusal and goal completion.
 

@@ -1085,7 +1085,9 @@ impl AutoEnrichmentVecdb {
                 Err(current) => observed = current,
             }
         }
-        AutoEnrichmentSearchGuard { vecdb: self }
+        AutoEnrichmentSearchGuard {
+            vecdb: self,
+        }
     }
 }
 
@@ -1910,7 +1912,10 @@ fn capture_fanout_snapshot_from_parts(
 }
 
 fn snapshot_message_bytes(snapshot: &ChatEvent) -> Result<u64, String> {
-    let ChatEvent::Snapshot { messages, .. } = snapshot else {
+    let ChatEvent::Snapshot {
+        messages, ..
+    } = snapshot
+    else {
         return Err("fanout fixture expected snapshot event".to_string());
     };
     messages.iter().try_fold(0u64, |total, message| {
@@ -2524,7 +2529,9 @@ impl FullSoakEnvGuard {
         for (key, _) in &values {
             std::env::set_var(key, value);
         }
-        Self { values }
+        Self {
+            values,
+        }
     }
 }
 
@@ -3696,7 +3703,9 @@ impl ToolCatalogSnapshotEnvGuard {
             "REFACT_TOOL_CATALOG_SNAPSHOTS",
             if enabled { "1" } else { "0" },
         );
-        Self { previous }
+        Self {
+            previous,
+        }
     }
 }
 
@@ -3813,7 +3822,9 @@ impl TrajectoryWriterEnvGuard {
             crate::chat::trajectories::TRAJECTORY_WRITER_ENV,
             if enabled { "1" } else { "0" },
         );
-        Self { previous }
+        Self {
+            previous,
+        }
     }
 }
 

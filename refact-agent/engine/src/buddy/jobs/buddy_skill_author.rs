@@ -195,7 +195,9 @@ fn scan_skill_author(project_root: &Path) -> SkillScanResult {
                 count,
             })
         });
-    SkillScanResult { candidate }
+    SkillScanResult {
+        candidate,
+    }
 }
 
 fn build_skill_author_spec(
@@ -228,7 +230,9 @@ async fn current_scan(ctx: &BuddyJobContext) -> SkillScanResult {
     let project_root = ctx.project_root.clone();
     tokio::task::spawn_blocking(move || scan_skill_author(&project_root))
         .await
-        .unwrap_or(SkillScanResult { candidate: None })
+        .unwrap_or(SkillScanResult {
+            candidate: None,
+        })
 }
 
 #[async_trait::async_trait]

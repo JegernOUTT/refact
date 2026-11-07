@@ -179,11 +179,18 @@ fn activity_path(project_root: &Path) -> PathBuf {
 
 fn redact_action(action: UserAction) -> UserAction {
     match action {
-        UserAction::FileOpened { path, ts } => UserAction::FileOpened {
+        UserAction::FileOpened {
+            path,
+            ts,
+        } => UserAction::FileOpened {
             path: redact_text(&path),
             ts,
         },
-        UserAction::SnippetSelected { path, lines, ts } => UserAction::SnippetSelected {
+        UserAction::SnippetSelected {
+            path,
+            lines,
+            ts,
+        } => UserAction::SnippetSelected {
             path: redact_text(&path),
             lines,
             ts,
@@ -331,7 +338,9 @@ mod tests {
         let actions = ring.snapshot();
         assert_eq!(actions.len(), 200);
         match actions.first().unwrap() {
-            UserAction::ChatStarted { chat_id, .. } => assert_eq!(chat_id, "chat-1"),
+            UserAction::ChatStarted {
+                chat_id, ..
+            } => assert_eq!(chat_id, "chat-1"),
             _ => panic!("unexpected action"),
         }
     }
@@ -345,7 +354,9 @@ mod tests {
         });
         let actions = ring.snapshot();
         match &actions[0] {
-            UserAction::FileOpened { path, .. } => {
+            UserAction::FileOpened {
+                path, ..
+            } => {
                 assert!(!path.contains("AKIA1234567890ABCDEF"));
                 assert!(path.contains("[REDACTED_AWS_KEY]"));
             }

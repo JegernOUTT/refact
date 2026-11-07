@@ -28,17 +28,11 @@ Sub-project `AGENTS.md` files contain detailed architecture, patterns, and check
 
 **Always verify your changes compile and pass tests before finishing.** Both engine and GUI builds are heavy — plan accordingly.
 
-### Rust test admission
+### Rust testing
 
-Follow `docs/rust-test-policy.md` for new tests, materially changed tests and test-support changes.
-Require distinct important failure detection, actual shipping logic, a discriminating oracle,
-non-vacuous deterministic setup and the cheapest sufficient layer. Critical security, privacy,
-persistence, concurrency and lifecycle contracts require an executed before-fix/mutant failure
-and restored passing evidence. Independent semantic review is mandatory; count/schema checks
-cannot authenticate evidence or reviewer independence. Record fingerprint-bound admissions and
-support impacts in `tools/dev/test_admissions.json`. Run `python3 tools/dev/test_budget.py check
---base <trusted-base-ref>` and its focused Python self-tests. The ceiling is 6,500 physical/meaningful cases,
-including ignored, gated, orphan and doc cases. Do not game it with tables, generators or gating.
+Follow `docs/rust-test-policy.md` for behavioral test quality, deterministic fixtures
+and critical-contract review. Preserve independent code review and run the affected
+tests, build and formatting checks; report execution limits honestly.
 
 ### Engine (`refact-agent/engine/`)
 
@@ -130,7 +124,6 @@ slash commands (local, in `.refact/commands/`) orchestrate reusable scripts
 | `release.sh <ver> <build\|plugins\|engine> [--push]` | Bump all manifests, commit, tag, optionally push |
 | `perf.sh [filter]` | Run the engine performance benchmarks (see Performance tests below) |
 | `setup-cache.sh [--status]` | Enable/inspect the shared sccache build cache |
-| `tui.sh start\|type\|keys\|screen\|resize\|stop` | Drive the real `refact tui` in a detached tmux pane against an isolated daemon + `tests/tui_fake_worker.py`; `screen --history` dumps pane + scrollback |
 
 ### Slash commands (`.refact/commands/`, local/personal)
 
@@ -160,10 +153,10 @@ slash commands (local, in `.refact/commands/`) orchestrate reusable scripts
 | `release/v<ver>` | VS Code + JetBrains **publish** |
 | `engine/v<ver>` | Engine release |
 
-`tools/bump_release_version.py <ver>` bumps all 8 manifests (intellij, vscode×2,
-gui×2, engine `Cargo.toml`, `refact-tui/Cargo.toml`, `Cargo.lock`) in one shot;
-`release.sh` wraps it with tagging. `refact-lsp` and `refact-tui` are the only
-crates carrying the release version — every other crate stays at `0.1.0`, and
+`tools/bump_release_version.py <ver>` bumps all 7 manifests (intellij, vscode×2,
+gui×2, engine `Cargo.toml`, `Cargo.lock`) in one shot;
+`release.sh` wraps it with tagging. `refact-lsp` is the only
+crate carrying the release version — every other crate stays at `0.1.0`, and
 the script aborts if a crate drifts off that without being registered in
 `RELEASE_CRATES`.
 

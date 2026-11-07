@@ -842,10 +842,15 @@ pub fn validate_chat_command(
     command: &refact_chat_api::ChatCommand,
 ) -> Result<(), String> {
     match command {
-        refact_chat_api::ChatCommand::SetGoal { .. }
-        | refact_chat_api::ChatCommand::AnswerQuestions { .. } => {}
-        refact_chat_api::ChatCommand::GoalControl { action }
-            if action == "pause" || action == "stop" => {}
+        refact_chat_api::ChatCommand::SetGoal {
+            ..
+        }
+        | refact_chat_api::ChatCommand::AnswerQuestions {
+            ..
+        } => {}
+        refact_chat_api::ChatCommand::GoalControl {
+            action,
+        } if action == "pause" || action == "stop" => {}
         _ => return Err("command is not supported by supervision".into()),
     }
     with_command_guard(Some(candidate), chat_id, || Ok(()))

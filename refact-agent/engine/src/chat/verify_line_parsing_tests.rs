@@ -32,7 +32,9 @@ fn card_with_report(report: VerifierReport) -> BoardCard {
 async fn two_backticked_commands_on_one_verify_line_both_run() {
     let temp = tempfile::tempdir().unwrap();
     let gcx = crate::global_context::tests::make_test_gcx().await;
-    let mut runner = SystemEvidenceRunner { gcx };
+    let mut runner = SystemEvidenceRunner {
+        gcx,
+    };
     let service = EvidenceService::new(
         VerifyCommandPolicy::permissive(),
         EvidenceContext {
@@ -146,7 +148,9 @@ fn all_commands_passed_plus_judge_concerns_is_needs_review_and_force_mergeable()
 async fn ran_and_failed_command_is_still_a_genuine_failure_force_cannot_bypass() {
     let temp = tempfile::tempdir().unwrap();
     let gcx = crate::global_context::tests::make_test_gcx().await;
-    let mut runner = SystemEvidenceRunner { gcx };
+    let mut runner = SystemEvidenceRunner {
+        gcx,
+    };
     let service = EvidenceService::new(
         VerifyCommandPolicy::permissive(),
         EvidenceContext {

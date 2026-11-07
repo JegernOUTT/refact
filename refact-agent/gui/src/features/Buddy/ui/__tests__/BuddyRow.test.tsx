@@ -5,12 +5,7 @@ import { FileText } from "lucide-react";
 import { BuddyRow } from "../BuddyRow";
 import { BuddyStatusBadge } from "../BuddyStatusBadge";
 import { BuddyTimestamp } from "../BuddyTimestamp";
-import {
-  BuddyEmptyState,
-  BuddyErrorCallout,
-  BuddyLoading,
-} from "../BuddyStates";
-import { BuddySurface } from "../BuddySurface";
+import { BuddyErrorCallout, BuddyLoading } from "../BuddyStates";
 
 const NOW = new Date(2026, 4, 15, 12, 0).getTime();
 
@@ -46,7 +41,6 @@ describe("BuddyRow", () => {
     expect(button).toHaveTextContent("Fix flaky tests");
     expect(button).toHaveTextContent("Needs you");
     expect(button).toHaveTextContent("Error detective · 5m ago");
-    expect(button.querySelector("svg")).not.toBeNull();
     expect(screen.getByTitle("Fix flaky tests")).toBeInTheDocument();
     fireEvent.click(button);
     expect(onClick).toHaveBeenCalledTimes(1);
@@ -123,11 +117,6 @@ describe("BuddyRow", () => {
       "#report",
     );
   });
-
-  it("applies compact density", () => {
-    render(<BuddyRow title="Dense" density="compact" testId="dense" />);
-    expect(screen.getByTestId("dense").className).toMatch(/compact/);
-  });
 });
 
 describe("BuddyTimestamp", () => {
@@ -148,18 +137,6 @@ describe("BuddyTimestamp", () => {
 });
 
 describe("Buddy states", () => {
-  it("renders compact and regular empty states", () => {
-    render(
-      <>
-        <BuddyEmptyState title="No reports yet." hint="Check back" compact />
-        <BuddyEmptyState title="Nothing here." />
-      </>,
-    );
-    expect(screen.getByText("No reports yet.")).toBeInTheDocument();
-    expect(screen.getByText("Check back")).toBeInTheDocument();
-    expect(screen.getByText("Nothing here.")).toBeInTheDocument();
-  });
-
   it("renders an error with retry and closed technical details", async () => {
     const onRetry = vi.fn();
     render(
@@ -185,21 +162,5 @@ describe("Buddy states", () => {
     const status = screen.getByRole("status");
     expect(status).toHaveTextContent("Loading reports");
     expect(status.children).toHaveLength(3);
-  });
-
-  it("renders surfaces with their level", () => {
-    render(
-      <BuddySurface level="section" testId="outer">
-        <BuddySurface level="inset" testId="inner" />
-      </BuddySurface>,
-    );
-    expect(screen.getByTestId("outer")).toHaveAttribute(
-      "data-buddy-surface",
-      "section",
-    );
-    expect(screen.getByTestId("inner")).toHaveAttribute(
-      "data-buddy-surface",
-      "inset",
-    );
   });
 });

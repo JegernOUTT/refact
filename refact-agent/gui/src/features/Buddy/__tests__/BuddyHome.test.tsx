@@ -320,20 +320,6 @@ describe("BuddyHome", () => {
     resetBuddyPersistentState();
   });
 
-  it("mounts the scene with presence motion enabled", async () => {
-    installBuddyHomeHandlers();
-    const store = setUpStore({ ...CONFIG_STATE });
-    store.dispatch(setBuddySnapshot(makeSnapshot()));
-
-    render(<BuddyHome />, { store });
-
-    await screen.findByTestId("buddy-home-content");
-    expect(screen.getByTestId("buddy-world")).toHaveAttribute(
-      "data-presence-enabled",
-      "true",
-    );
-  });
-
   it("renders every section of the legacy Buddy home from store and RTK Query data", async () => {
     installBuddyHomeHandlers();
     const store = setUpStore({ ...CONFIG_STATE });

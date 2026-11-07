@@ -675,7 +675,9 @@ pub async fn handle_v1_providers_list(
     }
     providers.sort_by(|a, b| a.name.cmp(&b.name));
 
-    let response = ProviderListResponse { providers };
+    let response = ProviderListResponse {
+        providers,
+    };
     json_response(StatusCode::OK, &response)
 }
 
@@ -1131,7 +1133,9 @@ pub async fn handle_v1_provider_models(
         models.push(emb);
     }
 
-    let response = ProviderModelsResponse { models };
+    let response = ProviderModelsResponse {
+        models,
+    };
 
     json_response(StatusCode::OK, &response)
 }
@@ -1161,7 +1165,10 @@ fn defaults_draft_validation_error(err: DraftValidationError) -> ScratchError {
         DraftValidationError::NotFound => {
             ScratchError::new(StatusCode::NOT_FOUND, "draft_not_found".to_string())
         }
-        DraftValidationError::KindMismatch { expected, actual } => ScratchError::new(
+        DraftValidationError::KindMismatch {
+            expected,
+            actual,
+        } => ScratchError::new(
             StatusCode::CONFLICT,
             format!(
                 "draft_kind_mismatch: expected {}, got {}",
@@ -1169,7 +1176,10 @@ fn defaults_draft_validation_error(err: DraftValidationError) -> ScratchError {
                 draft_kind_str(&actual)
             ),
         ),
-        DraftValidationError::TargetMismatch { expected, actual } => ScratchError::new(
+        DraftValidationError::TargetMismatch {
+            expected,
+            actual,
+        } => ScratchError::new(
             StatusCode::CONFLICT,
             format!(
                 "draft_target_mismatch: expected {}, got {}",
@@ -4217,7 +4227,12 @@ pub async fn handle_v1_provider_quota(
         query.refresh,
     )
     .await;
-    json_response(StatusCode::OK, &ProviderQuotaResponse { quota: snapshot })
+    json_response(
+        StatusCode::OK,
+        &ProviderQuotaResponse {
+            quota: snapshot,
+        },
+    )
 }
 
 pub async fn handle_v1_provider_quotas(

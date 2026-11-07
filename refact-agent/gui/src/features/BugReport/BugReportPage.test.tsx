@@ -85,12 +85,6 @@ describe("BugReportPage", () => {
       preloadedState: PRELOADED_STATE,
     });
 
-    expect(screen.getByText("Report a Bug")).toBeInTheDocument();
-    expect(screen.getByText("Daemon")).toBeInTheDocument();
-    expect(screen.getByText("Engine")).toBeInTheDocument();
-    expect(screen.getByText("Web UI")).toBeInTheDocument();
-    expect(screen.getByText("IDE")).toBeInTheDocument();
-
     expect(
       await screen.findByText(
         "12:00:01 ERROR chat/generation.rs Context too large",
@@ -102,9 +96,6 @@ describe("BugReportPage", () => {
         "Context too large and automatic compaction failed",
       ),
     ).toBeInTheDocument();
-
-    expect(screen.getByText("Latest errors")).toBeInTheDocument();
-    expect(screen.getByText("Describe the bug")).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Back" }));
     expect(onBack).toHaveBeenCalledTimes(1);

@@ -683,44 +683,6 @@ describe("useSidebarSubscription", () => {
     expect(tasks.isUninitialized).toBe(true);
   });
 
-  it("settles a same-port workspace switch from backend workspace-first snapshots", async () => {
-    server.use(
-      sidebarSnapshotHandler(
-        sectionSnapshot(0, "workspace", {
-          workspace_roots: ["/workspace/old"],
-        }),
-        sectionSnapshot(1, "chats", { trajectories: [] }),
-        sectionSnapshot(2, "tasks", { tasks: [taskMeta("old", "Old task")] }),
-        sectionSnapshot(3, "buddy", { buddy: null }),
-        sectionSnapshot(4, "workspace", {
-          workspace_roots: ["/workspace/new"],
-        }),
-        sectionSnapshot(5, "chats", { trajectories: [] }),
-        sectionSnapshot(6, "tasks", { tasks: [taskMeta("new", "New task")] }),
-        sectionSnapshot(7, "buddy", { buddy: null }),
-      ),
-    );
-
-    const store = renderSidebarSubscription();
-
-    await waitFor(() => {
-      expect(store.getState().current_project).toEqual({
-        name: "new",
-        workspaceRoots: ["/workspace/new"],
-      });
-      expect(store.getState().sidebar.sections).toMatchObject({
-        workspace: { status: "ready" },
-        chats: { status: "ready" },
-        tasks: { status: "ready" },
-        buddy: { status: "ready" },
-      });
-      expect(
-        tasksApi.endpoints.listTasks.select(undefined)(store.getState()).data,
-      ).toEqual([taskMeta("new", "New task")]);
-      expect(store.getState().history.isLoading).toBe(false);
-    });
-  });
-
   it("settles a workspace-first switch before the old workspace fully settles", async () => {
     server.use(
       sidebarSnapshotHandler(

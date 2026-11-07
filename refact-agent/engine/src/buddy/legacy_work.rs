@@ -228,35 +228,65 @@ fn plain_text(value: &str) -> String {
 /// language; the machine payload stays in the legacy file it came from.
 fn describe_action(action: &BuddyAction) -> Option<String> {
     let described = match action {
-        BuddyAction::OpenPage { page } => {
+        BuddyAction::OpenPage {
+            page,
+        } => {
             return super::opportunity_copy::page_action(page).map(str::to_owned);
         }
-        BuddyAction::LaunchInvestigationChat { .. } => "Start an investigation chat".to_string(),
-        BuddyAction::DraftSkill { label, .. } => format!("Draft a skill: {}", plain_line(label)),
-        BuddyAction::DraftCommand { label, .. } => {
+        BuddyAction::LaunchInvestigationChat {
+            ..
+        } => "Start an investigation chat".to_string(),
+        BuddyAction::DraftSkill {
+            label, ..
+        } => format!("Draft a skill: {}", plain_line(label)),
+        BuddyAction::DraftCommand {
+            label, ..
+        } => {
             format!("Draft a command: {}", plain_line(label))
         }
-        BuddyAction::DraftDelegate { label, .. } => {
+        BuddyAction::DraftDelegate {
+            label, ..
+        } => {
             format!("Draft a subagent: {}", plain_line(label))
         }
-        BuddyAction::DraftMode { label, .. } => format!("Draft a mode: {}", plain_line(label)),
-        BuddyAction::DraftAgentsMdPatch { .. } => "Draft a change to AGENTS.md".to_string(),
-        BuddyAction::DraftDefaultsChange { .. } => "Draft a change to the defaults".to_string(),
-        BuddyAction::DraftCustomizationChange { id, .. } => {
+        BuddyAction::DraftMode {
+            label, ..
+        } => format!("Draft a mode: {}", plain_line(label)),
+        BuddyAction::DraftAgentsMdPatch {
+            ..
+        } => "Draft a change to AGENTS.md".to_string(),
+        BuddyAction::DraftDefaultsChange {
+            ..
+        } => "Draft a change to the defaults".to_string(),
+        BuddyAction::DraftCustomizationChange {
+            id, ..
+        } => {
             format!("Draft a customization change: {}", plain_line(id))
         }
-        BuddyAction::OfferMarketplaceInstall { item_id, .. } => {
+        BuddyAction::OfferMarketplaceInstall {
+            item_id, ..
+        } => {
             format!("Offer to install {}", plain_line(item_id))
         }
-        BuddyAction::CreatePulseReport { .. } => "Write a pulse report".to_string(),
-        BuddyAction::ApplyMemoryBatch { count_hint, .. } => {
+        BuddyAction::CreatePulseReport {
+            ..
+        } => "Write a pulse report".to_string(),
+        BuddyAction::ApplyMemoryBatch {
+            count_hint, ..
+        } => {
             format!("Tidy {count_hint} memory entries")
         }
-        BuddyAction::ApplyConfigPatch { target_path, .. } => {
+        BuddyAction::ApplyConfigPatch {
+            target_path, ..
+        } => {
             format!("Patch {}", plain_line(target_path))
         }
-        BuddyAction::AcceptQuest { .. } => "Accept a quest".to_string(),
-        BuddyAction::OpenBuddyConversation { .. } => "Open a Buddy conversation".to_string(),
+        BuddyAction::AcceptQuest {
+            ..
+        } => "Accept a quest".to_string(),
+        BuddyAction::OpenBuddyConversation {
+            ..
+        } => "Open a Buddy conversation".to_string(),
         BuddyAction::Dismiss => return None,
     };
     (!described.trim().is_empty()).then_some(described)
@@ -806,13 +836,21 @@ pub fn activity_history_page(
 
 fn action_draft_id(action: &BuddyAction) -> Option<&str> {
     match action {
-        BuddyAction::DraftSkill { draft_id, .. }
-        | BuddyAction::DraftCommand { draft_id, .. }
-        | BuddyAction::DraftDelegate { draft_id, .. }
-        | BuddyAction::DraftMode { draft_id, .. }
-        | BuddyAction::ApplyConfigPatch { draft_id, .. } => {
-            (!draft_id.trim().is_empty()).then_some(draft_id.as_str())
+        BuddyAction::DraftSkill {
+            draft_id, ..
         }
+        | BuddyAction::DraftCommand {
+            draft_id, ..
+        }
+        | BuddyAction::DraftDelegate {
+            draft_id, ..
+        }
+        | BuddyAction::DraftMode {
+            draft_id, ..
+        }
+        | BuddyAction::ApplyConfigPatch {
+            draft_id, ..
+        } => (!draft_id.trim().is_empty()).then_some(draft_id.as_str()),
         _ => None,
     }
 }

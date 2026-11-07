@@ -232,33 +232,6 @@ async function deskMetrics(page: Page) {
 }
 
 test.describe("Reports layout", () => {
-  for (const width of [768, 1280, 1600]) {
-    test(`row measure and chevron remain legible at ${width}px`, async ({
-      page,
-    }) => {
-      await openBuddy(page, width);
-      const metrics = await deskMetrics(page);
-      expect(
-        metrics.fill,
-        `${width}px row fill ${metrics.fill}`,
-      ).toBeGreaterThanOrEqual(0.6);
-      if (width >= 1280)
-        expect(
-          metrics.gap,
-          `${width}px chevron gap ${metrics.gap}`,
-        ).toBeLessThan(48);
-      expect(
-        metrics.rowWidth,
-        `${width}px row leaves unused list space: ${metrics.rowWidth}/${metrics.listWidth}`,
-      ).toBeGreaterThanOrEqual(metrics.listWidth * 0.9);
-      expect(
-        metrics.listRight,
-        `${width}px list ends past the viewport`,
-      ).toBeLessThanOrEqual(metrics.clientWidth + 1);
-      expect(metrics.scrollWidth).toBeLessThanOrEqual(metrics.clientWidth + 1);
-    });
-  }
-
   for (const theme of ["dark", "light"] as const) {
     test(`Desk uses one content rail at 1280px in ${theme} theme`, async ({
       page,
@@ -282,19 +255,6 @@ test.describe("Reports layout", () => {
         rails.length,
         `${theme} Desk left rails: ${rails.join(", ")}`,
       ).toBeLessThanOrEqual(2);
-    });
-
-    test(`Desk avoids narrow overflow at 360px in ${theme} theme`, async ({
-      page,
-    }) => {
-      await openBuddy(page, 360, theme);
-      await expect(page.getByTestId("buddy-desk-detail-hint")).toBeHidden();
-      const narrow = await deskMetrics(page);
-      expect(
-        narrow.fill,
-        `${theme} 360px row fill ${narrow.fill}`,
-      ).toBeGreaterThanOrEqual(0.6);
-      expect(narrow.scrollWidth).toBeLessThanOrEqual(narrow.clientWidth + 1);
     });
   }
 

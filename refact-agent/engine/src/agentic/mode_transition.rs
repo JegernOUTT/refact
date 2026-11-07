@@ -1185,7 +1185,9 @@ mod tests {
 
     impl TestPaths {
         fn new(workspace_folders: Vec<PathBuf>) -> Self {
-            Self { workspace_folders }
+            Self {
+                workspace_folders,
+            }
         }
     }
 

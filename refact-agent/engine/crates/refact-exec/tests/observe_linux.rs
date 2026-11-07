@@ -36,7 +36,9 @@ async fn captures_open_reads_and_writes() {
 
     assert_eq!(
         result.snapshot.status,
-        ExecStatus::Exited { exit_code: Some(0) }
+        ExecStatus::Exited {
+            exit_code: Some(0)
+        }
     );
     let ObservationStatus::Observed(access) = result.observation else {
         panic!("Linux observer was unavailable: {:?}", result.observation);
@@ -113,7 +115,9 @@ async fn root_exit_does_not_wait_for_background_descendant() {
     assert!(started.elapsed() < Duration::from_secs(3));
     assert_eq!(
         result.snapshot.status,
-        ExecStatus::Exited { exit_code: Some(0) }
+        ExecStatus::Exited {
+            exit_code: Some(0)
+        }
     );
     assert!(matches!(
         result.observation,

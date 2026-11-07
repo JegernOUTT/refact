@@ -180,7 +180,7 @@ filesystems lacking no-replace publication fail closed. No network/npm/scripts r
 ## Central qualification (NOT_RUN in this source lane)
 
 Cargo.lock must first add existing workspace `libc` to refact-worktrees dependencies
-without updating versions. No lockfile or admission ledger was edited in this lane.
+without updating versions. No lockfile was edited in this lane.
 
 Run centrally, offline, against the composed candidate:
 
@@ -203,9 +203,9 @@ unprotected-root allowance skips OS provenance enforcement, so **OS-trust positi
 control is not established**. The public production create path remains fixed to
 protected host locations. Root-protected ingress qualification requires a separately
 controlled administrator fixture/namespace and independent semantic review.
-Critical failure/restored-pass witnesses, exact nonzero discovery, test admissions,
-budget checker and compiler/runtime qualification remain NOT_RUN, not implied by
-formatting or source review. The existing create fixture is extended to assert
+Critical behavioral failure/restored-pass checks, exact nonzero discovery and
+compiler/runtime qualification remain NOT_RUN, not implied by formatting or source
+review. The existing create fixture is extended to assert
 create/get/list report coherence without removing its branch/HEAD checks.
 
 The existing `cache_reuse_changed_producer_pin_and_revoked_checkout_refuse` fixture
@@ -218,6 +218,5 @@ resource-accounting scenario, not a cache-authentication qualification. Removing
 metadata charging from the actual reader makes the exact byte and refusal oracles
 fail; that is a source counterfactual only, not an executed witness. Independent
 semantic classification/review and restored/mutant runs remain central NOT_RUN.
-The shared fixture now passes one budget from load into materialization; support
-impact review must cover all seven cache tests centrally. No admission ledger was
-updated here.
+The shared fixture now passes one budget from load into materialization; review
+must cover its effect on all seven cache tests.

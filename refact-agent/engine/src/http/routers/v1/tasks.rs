@@ -454,7 +454,9 @@ pub async fn handle_patch_board(
     let expected_rev = req.rev;
     let patch = req.patch;
     let comment_card_id = match &patch {
-        BoardPatch::AddComment { card_id, .. } => Some(card_id.clone()),
+        BoardPatch::AddComment {
+            card_id, ..
+        } => Some(card_id.clone()),
         _ => None,
     };
     let now = Utc::now().to_rfc3339();
@@ -541,7 +543,10 @@ pub async fn handle_patch_board(
                     card.target_files = files;
                 }
             }
-            BoardPatch::MoveCard { id, column } => {
+            BoardPatch::MoveCard {
+                id,
+                column,
+            } => {
                 let valid_columns = ["planned", "doing", "done", "failed", "regressed"];
                 if !valid_columns.contains(&column.as_str()) {
                     return Err(format!("Invalid column: {}", column));
@@ -576,7 +581,10 @@ pub async fn handle_patch_board(
                     card.started_at = Some(now.clone());
                 }
             }
-            BoardPatch::AddStatusUpdate { card_id, message } => {
+            BoardPatch::AddStatusUpdate {
+                card_id,
+                message,
+            } => {
                 let card = board
                     .get_card_mut(&card_id)
                     .ok_or_else(|| format!("Card {} not found", card_id))?;
@@ -603,14 +611,20 @@ pub async fn handle_patch_board(
                     },
                 )?;
             }
-            BoardPatch::SetFinalReport { card_id, report } => {
+            BoardPatch::SetFinalReport {
+                card_id,
+                report,
+            } => {
                 let card = board
                     .get_card_mut(&card_id)
                     .ok_or_else(|| format!("Card {} not found", card_id))?;
                 card.final_report = Some(report);
                 card.final_report_structured = None;
             }
-            BoardPatch::DeleteCard { card_id, force } => {
+            BoardPatch::DeleteCard {
+                card_id,
+                force,
+            } => {
                 let card = board
                     .get_card(&card_id)
                     .ok_or_else(|| "card not found".to_string())?;
@@ -1755,11 +1769,15 @@ mod tests {
     }
 
     fn no_force() -> Query<DeletePlannerChatQuery> {
-        Query(DeletePlannerChatQuery { force: false })
+        Query(DeletePlannerChatQuery {
+            force: false,
+        })
     }
 
     fn force() -> Query<DeletePlannerChatQuery> {
-        Query(DeletePlannerChatQuery { force: true })
+        Query(DeletePlannerChatQuery {
+            force: true,
+        })
     }
 
     fn create_card_request(rev: u64, id: &str) -> UpdateBoardRequest {
@@ -2354,7 +2372,9 @@ mod tests {
         let result = handle_delete_task(
             State(app(gcx.clone())),
             Path("task-del-wt".to_string()),
-            Query(DeleteTaskQuery { force: false }),
+            Query(DeleteTaskQuery {
+                force: false,
+            }),
         )
         .await;
 
@@ -2599,7 +2619,9 @@ mod tests {
         let result = handle_pin_task_document(
             State(app(gcx.clone())),
             Path(("task-doc-pin".to_string(), "pin-plan".to_string())),
-            Json(PinTaskDocumentRequest { pinned: true }),
+            Json(PinTaskDocumentRequest {
+                pinned: true,
+            }),
         )
         .await
         .unwrap();

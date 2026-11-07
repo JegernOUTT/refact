@@ -27,7 +27,9 @@ pub async fn move_file(
     let destination_intent = if prior_destination.is_none() {
         WriteIntent::Create
     } else if actor.is_some() {
-        WriteIntent::Overwrite { authorized: false }
+        WriteIntent::Overwrite {
+            authorized: false,
+        }
     } else {
         WriteIntent::Contextual
     };

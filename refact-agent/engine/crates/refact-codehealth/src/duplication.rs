@@ -296,10 +296,10 @@ fn detect_cross_file_clone_matches(tokenized: &[(&str, Vec<Token>)]) -> Vec<Cros
             .into_iter()
             .enumerate()
         {
-            buckets
-                .entry(hash)
-                .or_default()
-                .push(WindowOccurrence { file_idx, start });
+            buckets.entry(hash).or_default().push(WindowOccurrence {
+                file_idx,
+                start,
+            });
         }
     }
 

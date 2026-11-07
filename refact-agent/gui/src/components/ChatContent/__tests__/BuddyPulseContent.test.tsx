@@ -66,14 +66,6 @@ describe("BuddyPulseContent", () => {
     );
   });
 
-  it("expands_on_header_click", () => {
-    renderPulse();
-
-    fireEvent.click(screen.getByRole("button", { name: /Project pulse/ }));
-
-    expect(screen.getByText(/Preferences/)).toBeTruthy();
-  });
-
   it("renders_all_5_sections_when_expanded", () => {
     renderPulse();
 

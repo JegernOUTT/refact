@@ -42,6 +42,13 @@ function ImageFilePreviewContent({
   const previewRef = useRef<HTMLDivElement | null>(null);
   const handleRef = useRef<HTMLDivElement | null>(null);
   const viewportRef = useRef<HTMLDivElement | null>(null);
+  const stageRef = useRef<HTMLDivElement | null>(null);
+  const wheelAnchorRef = useRef<{
+    x: number;
+    y: number;
+    clientX: number;
+    clientY: number;
+  } | null>(null);
   const dragRef = useRef<{ startY: number; startHeight: number } | null>(null);
   const [natural, setNatural] = useState<Size | null>(null);
   const [viewport, setViewport] = useState<Size | null>(null);
@@ -110,6 +117,17 @@ function ImageFilePreviewContent({
       : clamp(height, minHeight, availableHeight);
   const percent = Math.max(1, Math.round(scale * 100));
 
+  useLayoutEffect(() => {
+    const anchor = wheelAnchorRef.current;
+    const element = viewportRef.current;
+    const stage = stageRef.current;
+    wheelAnchorRef.current = null;
+    if (!anchor || !element || !stage) return;
+    const rect = stage.getBoundingClientRect();
+    element.scrollLeft += rect.left + anchor.x * rect.width - anchor.clientX;
+    element.scrollTop += rect.top + anchor.y * rect.height - anchor.clientY;
+  }, [scale]);
+
   const zoomBy = useCallback(
     (factor: number) =>
       setZoom((current) =>
@@ -128,11 +146,22 @@ function ImageFilePreviewContent({
     const onWheel = (event: WheelEvent) => {
       if (event.deltaY === 0) return;
       event.preventDefault();
-      zoomBy(event.deltaY < 0 ? ZOOM_STEP : 1 / ZOOM_STEP);
+      const factor = event.deltaY < 0 ? ZOOM_STEP : 1 / ZOOM_STEP;
+      if (clamp(scale * factor, minZoom, MAX_ZOOM) === scale) return;
+      const rect = stageRef.current?.getBoundingClientRect();
+      if (rect && rect.width > 0 && rect.height > 0) {
+        wheelAnchorRef.current = {
+          x: clamp((event.clientX - rect.left) / rect.width, 0, 1),
+          y: clamp((event.clientY - rect.top) / rect.height, 0, 1),
+          clientX: event.clientX,
+          clientY: event.clientY,
+        };
+      }
+      zoomBy(factor);
     };
     element.addEventListener("wheel", onWheel, { passive: false });
     return () => element.removeEventListener("wheel", onWheel);
-  }, [failed, zoomBy]);
+  }, [failed, minZoom, scale, zoomBy]);
 
   const onResizeKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     const delta =
@@ -283,7 +312,7 @@ function ImageFilePreviewContent({
           style={height === null ? undefined : { height: effectiveHeight }}
           tabIndex={0}
         >
-          <div className={styles.stage} style={stageSize}>
+          <div className={styles.stage} ref={stageRef} style={stageSize}>
             <img
               alt={alt}
               className={styles.image}

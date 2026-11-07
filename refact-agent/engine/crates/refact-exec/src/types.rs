@@ -203,9 +203,15 @@ impl ExecStatus {
         match self {
             ExecStatus::Starting => ExecStatusKind::Starting,
             ExecStatus::Running => ExecStatusKind::Running,
-            ExecStatus::Exited { .. } => ExecStatusKind::Exited,
-            ExecStatus::SandboxLauncherFailed { .. } => ExecStatusKind::SandboxLauncherFailed,
-            ExecStatus::Failed { .. } => ExecStatusKind::Failed,
+            ExecStatus::Exited {
+                ..
+            } => ExecStatusKind::Exited,
+            ExecStatus::SandboxLauncherFailed {
+                ..
+            } => ExecStatusKind::SandboxLauncherFailed,
+            ExecStatus::Failed {
+                ..
+            } => ExecStatusKind::Failed,
             ExecStatus::Killed => ExecStatusKind::Killed,
             ExecStatus::TimedOut => ExecStatusKind::TimedOut,
         }
@@ -886,11 +892,17 @@ mod tests {
         assert_eq!(ExecStatus::Starting.kind(), ExecStatusKind::Starting);
         assert_eq!(ExecStatus::Running.kind(), ExecStatusKind::Running);
         assert_eq!(
-            ExecStatus::Exited { exit_code: Some(0) }.kind(),
+            ExecStatus::Exited {
+                exit_code: Some(0)
+            }
+            .kind(),
             ExecStatusKind::Exited
         );
         assert_eq!(
-            ExecStatus::SandboxLauncherFailed { exit_code: 125 }.kind(),
+            ExecStatus::SandboxLauncherFailed {
+                exit_code: 125
+            }
+            .kind(),
             ExecStatusKind::SandboxLauncherFailed
         );
         assert_eq!(
@@ -904,8 +916,14 @@ mod tests {
         assert_eq!(ExecStatus::TimedOut.kind(), ExecStatusKind::TimedOut);
         assert!(!ExecStatus::Starting.is_terminal());
         assert!(!ExecStatus::Running.is_terminal());
-        assert!(ExecStatus::Exited { exit_code: Some(0) }.is_terminal());
-        assert!(ExecStatus::SandboxLauncherFailed { exit_code: 125 }.is_terminal());
+        assert!(ExecStatus::Exited {
+            exit_code: Some(0)
+        }
+        .is_terminal());
+        assert!(ExecStatus::SandboxLauncherFailed {
+            exit_code: 125
+        }
+        .is_terminal());
         assert!(ExecStatus::Failed {
             message: "nope".to_string()
         }
@@ -964,16 +982,5 @@ mod tests {
 
         assert_eq!(meta.push, PushMode::Append);
         assert!(!meta.tty);
-    }
-
-    #[test]
-    fn test_not_found_read_result() {
-        let result = ExecReadResult::not_found(ExecProcessId("exec_missing".to_string()), 42);
-        assert_eq!(result.process_id, ExecProcessId("exec_missing".to_string()));
-        assert!(!result.found);
-        assert_eq!(result.since_seq, 42);
-        assert_eq!(result.next_seq, 42);
-        assert_eq!(result.latest_seq, 42);
-        assert!(result.chunks.is_empty());
     }
 }

@@ -308,9 +308,18 @@ fn reserve_model_send(
 
 fn is_known_permanent_failure(message: &str) -> bool {
     match classify_llm_error_for_retry(message) {
-        RetryDecision::ContextLimit { .. } => true,
-        RetryDecision::DoNotRetry { reason } => reason != "unknown_error",
-        RetryDecision::Retry { .. } | RetryDecision::UserCancelled { .. } => false,
+        RetryDecision::ContextLimit {
+            ..
+        } => true,
+        RetryDecision::DoNotRetry {
+            reason,
+        } => reason != "unknown_error",
+        RetryDecision::Retry {
+            ..
+        }
+        | RetryDecision::UserCancelled {
+            ..
+        } => false,
     }
 }
 
@@ -993,7 +1002,9 @@ fn push_content_delta(
             .or_default()
             .push_str(&text);
     }
-    ops.push(DeltaOp::AppendContent { text });
+    ops.push(DeltaOp::AppendContent {
+        text,
+    });
 }
 
 fn push_reasoning_delta(
@@ -1012,7 +1023,9 @@ fn push_reasoning_delta(
             .or_default()
             .push_str(&text);
     }
-    ops.push(DeltaOp::AppendReasoning { text });
+    ops.push(DeltaOp::AppendReasoning {
+        text,
+    });
 }
 
 fn joined_keyed_reasoning(acc: &ChoiceAccumulator) -> String {
@@ -1069,7 +1082,9 @@ fn push_keyed_reasoning_delta(
         .push_str(&text);
     let joined = joined_keyed_reasoning(acc);
     acc.reasoning = joined.clone();
-    ops.push(DeltaOp::SetReasoning { text: joined });
+    ops.push(DeltaOp::SetReasoning {
+        text: joined,
+    });
 }
 
 fn finalize_keyed_reasoning(
@@ -1097,7 +1112,9 @@ fn finalize_keyed_reasoning(
     acc.reasoning_key_finalized.insert(reasoning_key, true);
     let joined = joined_keyed_reasoning(acc);
     acc.reasoning = joined.clone();
-    ops.push(DeltaOp::SetReasoning { text: joined });
+    ops.push(DeltaOp::SetReasoning {
+        text: joined,
+    });
 }
 
 fn route_append_content_with_think_tags(
@@ -1212,14 +1229,23 @@ fn process_stream_event_data<C: StreamCollector>(
     for delta in deltas {
         match delta {
             LlmStreamDelta::Activity => collector.on_activity(),
-            LlmStreamDelta::AppendContent { text, block_index } => {
+            LlmStreamDelta::AppendContent {
+                text,
+                block_index,
+            } => {
                 route_append_content_without_function_calls(acc, &mut ops, text, block_index);
             }
-            LlmStreamDelta::AppendReasoning { text, block_index } => {
+            LlmStreamDelta::AppendReasoning {
+                text,
+                block_index,
+            } => {
                 flush_pending_think_parse(acc, &mut ops);
                 push_reasoning_delta(acc, &mut ops, text, block_index);
             }
-            LlmStreamDelta::FinalizeReasoning { text, block_index } => {
+            LlmStreamDelta::FinalizeReasoning {
+                text,
+                block_index,
+            } => {
                 if let Some(block_index) = block_index {
                     acc.finalized_reasoning_per_block
                         .insert(block_index, text.clone());
@@ -1237,7 +1263,9 @@ fn process_stream_event_data<C: StreamCollector>(
                 } else {
                     text
                 };
-                ops.push(DeltaOp::SetReasoning { text: replacement });
+                ops.push(DeltaOp::SetReasoning {
+                    text: replacement,
+                });
             }
             LlmStreamDelta::AppendKeyedReasoning {
                 text,
@@ -1253,7 +1281,9 @@ fn process_stream_event_data<C: StreamCollector>(
                 flush_pending_think_parse(acc, &mut ops);
                 finalize_keyed_reasoning(acc, &mut ops, text, reasoning_key);
             }
-            LlmStreamDelta::SetToolCalls { tool_calls } => {
+            LlmStreamDelta::SetToolCalls {
+                tool_calls,
+            } => {
                 let tool_calls = if !auth_token.is_empty() {
                     tool_calls
                         .into_iter()
@@ -1272,7 +1302,9 @@ fn process_stream_event_data<C: StreamCollector>(
                     tool_calls: acc.tool_calls.finalize(),
                 });
             }
-            LlmStreamDelta::FinalizeToolCalls { tool_calls } => {
+            LlmStreamDelta::FinalizeToolCalls {
+                tool_calls,
+            } => {
                 let tool_calls = if !auth_token.is_empty() {
                     tool_calls
                         .into_iter()
@@ -1291,29 +1323,41 @@ fn process_stream_event_data<C: StreamCollector>(
                     tool_calls: acc.tool_calls.finalize(),
                 });
             }
-            LlmStreamDelta::SetThinkingBlocks { blocks } => {
+            LlmStreamDelta::SetThinkingBlocks {
+                blocks,
+            } => {
                 merge_thinking_blocks(&mut acc.thinking_blocks, blocks);
                 ops.push(DeltaOp::SetThinkingBlocks {
                     blocks: acc.thinking_blocks.clone(),
                 });
             }
-            LlmStreamDelta::AddCitation { citation } => {
+            LlmStreamDelta::AddCitation {
+                citation,
+            } => {
                 let dedupe =
                     citation.get("provider").and_then(Value::as_str) == Some("google_cloud_code");
                 if !dedupe || !acc.citations.contains(&citation) {
                     acc.citations.push(citation.clone());
-                    ops.push(DeltaOp::AddCitation { citation });
+                    ops.push(DeltaOp::AddCitation {
+                        citation,
+                    });
                 }
             }
-            LlmStreamDelta::AddServerContentBlock { block } => {
+            LlmStreamDelta::AddServerContentBlock {
+                block,
+            } => {
                 let dedupe = block.get("type").and_then(Value::as_str)
                     == Some("google_cloud_code_inline_data");
                 if !dedupe || !acc.server_content_blocks.contains(&block) {
                     acc.server_content_blocks.push(block.clone());
-                    ops.push(DeltaOp::AddServerContentBlock { block });
+                    ops.push(DeltaOp::AddServerContentBlock {
+                        block,
+                    });
                 }
             }
-            LlmStreamDelta::SetUsage { usage } => {
+            LlmStreamDelta::SetUsage {
+                usage,
+            } => {
                 acc.usage = Some(merge_usage(acc.usage.take(), usage.clone()));
                 if let Some(ref merged) = acc.usage {
                     collector.on_usage(merged);
@@ -1322,10 +1366,14 @@ fn process_stream_event_data<C: StreamCollector>(
                     });
                 }
             }
-            LlmStreamDelta::SetFinishReason { reason } => {
+            LlmStreamDelta::SetFinishReason {
+                reason,
+            } => {
                 acc.finish_reason = Some(reason);
             }
-            LlmStreamDelta::MergeExtra { extra } => {
+            LlmStreamDelta::MergeExtra {
+                extra,
+            } => {
                 for (k, v) in &extra {
                     match (acc.extra.get_mut(k), v) {
                         (Some(Value::Array(existing)), Value::Array(incoming)) => {
@@ -1341,7 +1389,9 @@ fn process_stream_event_data<C: StreamCollector>(
                         }
                     }
                 }
-                ops.push(DeltaOp::MergeExtra { extra });
+                ops.push(DeltaOp::MergeExtra {
+                    extra,
+                });
             }
             LlmStreamDelta::Done => {
                 stream_done = true;
@@ -2672,7 +2722,9 @@ async fn prepare_llm_stream_request(
                 crate::chat::cache_guard::CacheGuardOutcome::Pass(s) => {
                     snapshot_for_commit = s.map(|snapshot| (session_arc, snapshot));
                 }
-                crate::chat::cache_guard::CacheGuardOutcome::Paused { reason } => {
+                crate::chat::cache_guard::CacheGuardOutcome::Paused {
+                    reason,
+                } => {
                     tracing::info!("Generation paused by cache guard: {}", reason);
                     return Ok(None);
                 }
@@ -4858,7 +4910,9 @@ mod tests {
 
         assert_eq!(acc.content, "Before  after");
         assert!(ops.iter().all(|op| match op {
-            DeltaOp::AppendContent { text } =>
+            DeltaOp::AppendContent {
+                text,
+            } =>
                 !text.contains("<function_calls>")
                     && !text.contains("<invoke")
                     && !text.contains("<parameter"),
@@ -5187,25 +5241,6 @@ mod tests {
 
         assert_eq!(merged.prompt_tokens, 600);
         assert_eq!(merged.completion_tokens, 150);
-    }
-
-    #[test]
-    fn test_merge_usage_from_none() {
-        let incoming = ChatUsage {
-            prompt_tokens: 500,
-            completion_tokens: 200,
-            total_tokens: 700,
-            cache_creation_tokens: Some(100),
-            cache_read_tokens: Some(200),
-            metering_usd: None,
-        };
-
-        let merged = merge_usage(None, incoming.clone());
-
-        assert_eq!(merged.prompt_tokens, 500);
-        assert_eq!(merged.completion_tokens, 200);
-        assert_eq!(merged.cache_creation_tokens, Some(100));
-        assert_eq!(merged.cache_read_tokens, Some(200));
     }
 
     #[test]

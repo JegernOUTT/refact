@@ -124,8 +124,8 @@ pub use trajectories::{
     list_trajectories_page_for,
 };
 pub use handlers::{
-    handle_v1_chat_subscribe, handle_v1_chat_command, handle_v1_chat_cancel_queued,
-    handle_v1_chat_reprioritize_queued,
+    handle_v1_chats_subscribe_many, handle_v1_chat_subscribe, handle_v1_chat_command,
+    handle_v1_chat_cancel_queued, handle_v1_chat_reprioritize_queued,
 };
 pub use goal_monitor::start_goal_monitor;
 pub use task_agent_monitor::start_agent_monitor;

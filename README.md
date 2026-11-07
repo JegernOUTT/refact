@@ -7,7 +7,7 @@
 
   <h1>Refact</h1>
 
-  <p><strong>Refact — the open-source, local-first agentic coding engine.</strong> A standalone <code>refact</code> binary runs the resident daemon, warm project workers, TUI, browser GUI, LSP, IDE clients, autonomous agents, task planning, and memory — all on your machine.</p>
+  <p><strong>Refact — the open-source, local-first agentic coding engine.</strong> A standalone <code>refact</code> binary runs the resident daemon, warm project workers, browser GUI, LSP, IDE clients, autonomous agents, task planning, and memory — all on your machine.</p>
 
   <img src="media/hero.png#gh-light-mode-only" alt="Refact agent planning, editing, and running checks" width="900">
   <img src="media/hero-dark.png#gh-dark-mode-only" alt="Refact agent planning, editing, and running checks" width="900">
@@ -59,9 +59,9 @@ refact ui
 The installer updates both your user `PATH` and the current PowerShell session.
 
 > [!WARNING]
-> The resident **daemon** and **TUI** are an early preview and may be buggy or change without notice. The IDE plugins (VS Code/JetBrains) and core engine are the stable surfaces. Please report issues.
+> The resident **daemon** is an early preview and may be buggy or change without notice. The IDE plugins (VS Code/JetBrains) and core engine are the stable surfaces. Please report issues.
 
-Refact is a local-first agentic coding engine shipped as a standalone `refact` binary. Start it once and a resident daemon keeps the control plane warm: one daemon supervises project workers, serves the in-browser GUI, brokers the full-screen TUI, exposes LSP/HTTP for editor clients, and gives autonomous tool-using agents the same concrete surfaces you use every day — files, shells, browser automation, AST search, patches, checkpoints, integrations, and verification loops. It is not just an IDE sidebar: the task planner can break big work into cards, launch fleets of task agents in isolated git worktrees, and let Buddy keep a nosy little watch over project memory, diagnostics, docs, dependencies, and opportunities without handing your repo to a hosted control plane.
+Refact is a local-first agentic coding engine shipped as a standalone `refact` binary. Start it once and a resident daemon keeps the control plane warm: one daemon supervises project workers, serves the in-browser GUI, exposes LSP/HTTP for editor clients, and gives autonomous tool-using agents the same concrete surfaces you use every day — files, shells, browser automation, AST search, patches, checkpoints, integrations, and verification loops. It is not just an IDE sidebar: the task planner can break big work into cards, launch fleets of task agents in isolated git worktrees, and let Buddy keep a nosy little watch over project memory, diagnostics, docs, dependencies, and opportunities without handing your repo to a hosted control plane.
 
 What makes Refact different is ownership. You bring the models and keys, choose hosted or local providers, wire MCP, skills, hooks, and subagents into your own workflows, and keep every byte of project state under `<project>/.refact/` where it can be inspected, backed up, deleted, or versioned on your terms. The same daemon-backed stack is steerable and hackable from any client: modes are YAML, plans are durable, memory is project-scoped, and the Rust engine serves a browser-reachable UI from your machine — powerful enough for multi-agent coding runs, transparent enough to debug when the gremlin gets spicy.
 
@@ -201,13 +201,13 @@ Refact is BYOK all the way down: hosted frontier APIs, local runtimes, self-host
 
 ## Architecture: resident daemon + thin clients
 
-One `refact` binary becomes the whole control room. Running `refact` opens the full-screen TUI and starts or reuses a resident local daemon; the daemon supervises a warm worker per opened project, serves the in-browser GUI, and gives IDE plugins a shared backend instead of asking every client to boot its own engine.
+One `refact` binary becomes the whole control room. Running `refact` (the same as `refact ui`) opens the in-browser GUI and starts or reuses a resident local daemon; the daemon supervises a warm worker per opened project, serves the in-browser GUI, and gives IDE plugins a shared backend instead of asking every client to boot its own engine.
 
 - The daemon owns the control plane: `/daemon/v1/*` handles status, workers, projects, logs, events, shutdown, and health checks, while `/p/{id}/v1/*` proxies each registered project's worker API.
 - Project workers run the Rust engine surfaces you already expect — Axum HTTP, tower-lsp, chat commands, caps, tools, checkpoints, SSE snapshots, background indexers, provider routing, and exec runtime.
-- TUI, browser GUI, VS Code, and JetBrains are all thin clients to the same resident daemon. The UI you choose changes the shell around the agent, not the sessions, tools, memory, or project state underneath.
+- Browser GUI, VS Code, and JetBrains are all thin clients to the same resident daemon. The UI you choose changes the shell around the agent, not the sessions, tools, memory, or project state underneath.
 - `refact projects open .` registers the current workspace and starts its worker; `refact ps`, `refact status`, `refact logs`, `refact events`, and `refact doctor` inspect the same local runtime.
-- `refact daemon --foreground` is available for debugging or service supervision, while normal `refact`/`refact tui` usage auto-starts the daemon when needed.
+- `refact daemon --foreground` is available for debugging or service supervision, while normal `refact`/`refact ui` usage auto-starts the daemon when needed.
 - IDE plugins provide file context and editor actions through LSP, HTTP, and a postMessage bridge; they attach to the daemon-backed project instead of being the only way to run Refact.
 - Local intelligence stays local: tree-sitter AST indexing, SQLite+vec0 semantic search, project memory, Buddy, scheduler, and task-agent worktrees live on your machine and feed the same agent/tool pipeline.
 
@@ -217,11 +217,11 @@ One `refact` binary becomes the whole control room. Running `refact` opens the f
 
 ## Quickstart & install
 
-Use the one-line installer at the top of this README, or download a binary manually from [GitHub Releases](https://github.com/JegernOUTT/refact/releases). The standalone binary gives you the daemon, TUI, in-browser GUI, worker supervisor, and CLI controls in one local package.
+Use the one-line installer at the top of this README, or download a binary manually from [GitHub Releases](https://github.com/JegernOUTT/refact/releases). The standalone binary gives you the daemon, in-browser GUI, worker supervisor, and CLI controls in one local package.
 
 
 
-Alternatively, use Refact entirely from the terminal — no editor or plugin required. See [Refact without an IDE](docs/refact-without-ide.md) for the full headless, TUI, browser, and LAN-access guide.
+Alternatively, use Refact entirely from the terminal — no editor or plugin required. See [Refact without an IDE](docs/refact-without-ide.md) for the full headless, browser, and LAN-access guide.
 
 After installation, open the Refact dashboard:
 
@@ -244,14 +244,14 @@ VS Code and JetBrains install downloaded engines at `~/.refact/bin/refact` (or `
 
 After installation, configure a provider or local runtime with [BYOK](https://github.com/JegernOUTT/refact/wiki/BYOK), then start with the [Quickstart](https://github.com/JegernOUTT/refact/wiki/Quickstart) or the full [Installation](https://github.com/JegernOUTT/refact/wiki/Installation) guide.
 
-## Daily use: daemon, TUI, and worker
+## Daily use: daemon, GUI, and worker
 
 Refact now has one user-facing binary with a resident daemon behind it:
 
-- `refact` and `refact tui` are the primary interactive entrypoints. They open the full-screen TUI and start or reuse the local daemon.
+- `refact` and `refact ui` are the primary interactive entrypoints. They open the in-browser GUI and start or reuse the local daemon.
 - `refact daemon` is the resident control plane. It supervises project workers, logs, events, project registration, health checks, and browser/IDE attachment.
 - The project worker, also called the engine, is the per-project backend. It runs chat, tools, LSP/HTTP, indexing, checkpoints, scheduler work, and SSE streams; normal users usually do not start it directly.
-- The TUI, browser GUI, VS Code, and JetBrains all attach to the same daemon-managed project, so they share the same sessions, tools, memory, and project state.
+- The browser GUI, VS Code, and JetBrains all attach to the same daemon-managed project, so they share the same sessions, tools, memory, and project state.
 
 Fastest start from a repo:
 
@@ -264,8 +264,8 @@ Most useful day-to-day commands:
 
 | Command | Use it for |
 | --- | --- |
-| `refact` | Open the TUI for the current project |
-| `refact tui --project .` | Open the TUI for an explicit project path |
+| `refact` | Open the dashboard in your browser (same as `refact ui`) |
+| `refact ui .` | Open the GUI workspace for an explicit project path |
 | `refact run --project . "…"` | Run one headless agent turn through the daemon |
 | `refact projects open .` | Register or wake the current project worker |
 | `refact ps` | List daemon-managed workers |
@@ -277,9 +277,7 @@ Most useful day-to-day commands:
 | `refact restart --daemon` | Restart the daemon after config or binary changes |
 | `refact self-update` | Update the installed binary from GitHub Releases |
 
-Use daemon-backed `refact`, `refact tui`, and `refact run` for normal work. Use direct `refact worker` only when you are debugging the low-level engine process itself.
-
-Gotcha: `--tui` is not a top-level flag; use `refact` or `refact tui`.
+Use daemon-backed `refact`, `refact ui`, and `refact run` for normal work. Use direct `refact worker` only when you are debugging the low-level engine process itself.
 
 Full guide: [CLI and daemon installation guide](https://github.com/JegernOUTT/refact/wiki/Installation-CLI).
 

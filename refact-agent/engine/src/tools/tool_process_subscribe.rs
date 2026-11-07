@@ -1135,7 +1135,10 @@ mod tests {
         assert_eq!(state.events.len(), RATE_LIMIT_PER_SECOND + 1);
         assert!(matches!(
             state.events.back().unwrap(),
-            SubscribeEvent::Summary { line_count: 2, .. }
+            SubscribeEvent::Summary {
+                line_count: 2,
+                ..
+            }
         ));
     }
 

@@ -535,7 +535,12 @@ pub(crate) async fn recover_run_config(
         validate_unscoped_project(app, &root).await?;
     }
     let isolated_worktree = match (&seed.worktree_mode, &config.worktree) {
-        (SpawnWorktreeMode::Isolated { auto_merge }, Some(meta)) => Some(SpawnedWorktree {
+        (
+            SpawnWorktreeMode::Isolated {
+                auto_merge,
+            },
+            Some(meta),
+        ) => Some(SpawnedWorktree {
             meta: meta.clone(),
             base_branch: meta.base_branch.clone(),
             source_workspace_root: root.clone(),
@@ -900,7 +905,9 @@ pub async fn preview_launch(app: &AppState, req: &SpawnRequest) -> Result<Launch
         auto_approve_dangerous_commands: config.auto_approve_dangerous_commands,
         worktree_mode: match &prepared.worktree_mode {
             SpawnWorktreeMode::Inherit => "inherit".to_string(),
-            SpawnWorktreeMode::Isolated { auto_merge } => {
+            SpawnWorktreeMode::Isolated {
+                auto_merge,
+            } => {
                 format!("isolated(auto_merge={auto_merge})")
             }
         },
@@ -1210,7 +1217,9 @@ async fn accept_prepared_launch(
         launch_digest,
         worktree_branch: None,
         auto_merge: match req.worktree_mode {
-            SpawnWorktreeMode::Isolated { auto_merge } => Some(auto_merge),
+            SpawnWorktreeMode::Isolated {
+                auto_merge,
+            } => Some(auto_merge),
             _ => None,
         },
         completion_rx,
@@ -1993,7 +2002,9 @@ mod accepted_launch_tests {
         let mut req = super::super::tests::subagent_spawn_request("cancel-launcher", "src/a.rs");
         req.parent_root_chat_id = Some("root-owner".into());
         req.subchat_depth = 1;
-        req.worktree_mode = SpawnWorktreeMode::Isolated { auto_merge: false };
+        req.worktree_mode = SpawnWorktreeMode::Isolated {
+            auto_merge: false,
+        };
         let root = workspace.path().canonicalize().unwrap();
         let child_uuid = Uuid::new_v4();
         let child = format!("subchat-{child_uuid}");
@@ -3782,7 +3793,10 @@ fn install_agent_progress(
                         )
                         .await
                 }
-                SubchatProgress::ToolStarted { name, arg_preview } => {
+                SubchatProgress::ToolStarted {
+                    name,
+                    arg_preview,
+                } => {
                     app.agents
                         .update_activity(
                             &agent_id,
@@ -4170,7 +4184,10 @@ async fn create_spawn_worktree(
     child_uuid: &Uuid,
     supervised: bool,
 ) -> Result<Option<SpawnedWorktree>, String> {
-    let SpawnWorktreeMode::Isolated { auto_merge } = mode else {
+    let SpawnWorktreeMode::Isolated {
+        auto_merge,
+    } = mode
+    else {
         return Ok(None);
     };
     // Supervised children get a runtime-owned, persisted worktree kind. The

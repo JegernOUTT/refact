@@ -422,7 +422,9 @@ pub fn detect(graph: &WaitGraph) -> Detection {
 /// invalidates the finding and detection re-runs.
 pub fn detect_stable(mut capture: impl FnMut() -> WaitGraph, attempts: usize) -> Detection {
     let attempts = attempts.max(1);
-    let mut outcome = Detection::Inconsistent { attempts: 0 };
+    let mut outcome = Detection::Inconsistent {
+        attempts: 0,
+    };
     for attempt in 1..=attempts {
         let graph = capture();
         match detect(&graph) {
@@ -439,7 +441,9 @@ pub fn detect_stable(mut capture: impl FnMut() -> WaitGraph, attempts: usize) ->
                     report.attempts = attempt;
                     return Detection::Deadlock(report);
                 }
-                outcome = Detection::Inconsistent { attempts: attempt };
+                outcome = Detection::Inconsistent {
+                    attempts: attempt,
+                };
             }
             other => return other,
         }
@@ -871,7 +875,12 @@ mod tests {
             },
             3,
         );
-        assert_eq!(outcome, Detection::Inconsistent { attempts: 3 });
+        assert_eq!(
+            outcome,
+            Detection::Inconsistent {
+                attempts: 3
+            }
+        );
         assert_eq!(captures, 6);
 
         let mut captures = 0;

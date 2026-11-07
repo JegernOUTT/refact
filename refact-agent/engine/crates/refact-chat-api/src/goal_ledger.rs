@@ -239,8 +239,14 @@ pub fn reduce_goal_ledger(entries: &[GoalLedgerEntry]) -> Option<GoalLedgerState
 
 fn apply_op(state: &mut GoalLedgerState, op: &GoalLedgerOp, at_ms: u64) {
     match op {
-        GoalLedgerOp::Installed { .. } => {}
-        GoalLedgerOp::StatusChanged { to, reason, .. } => {
+        GoalLedgerOp::Installed {
+            ..
+        } => {}
+        GoalLedgerOp::StatusChanged {
+            to,
+            reason,
+            ..
+        } => {
             state.status = *to;
             if *to == GoalStatus::Stopped {
                 state.stop_reason = (!reason.is_empty()).then(|| reason.clone());
@@ -268,7 +274,9 @@ fn apply_op(state: &mut GoalLedgerState, op: &GoalLedgerOp, at_ms: u64) {
             }
             transition_after_accounting(state, at_ms);
         }
-        GoalLedgerOp::VerifierAttemptRecorded { tokens } => {
+        GoalLedgerOp::VerifierAttemptRecorded {
+            tokens,
+        } => {
             if state.progress.started_at_ms == 0 {
                 state.progress.started_at_ms = at_ms;
             }
@@ -286,7 +294,9 @@ fn apply_op(state: &mut GoalLedgerState, op: &GoalLedgerOp, at_ms: u64) {
         GoalLedgerOp::NudgeRecorded => {
             state.progress.last_nudge_at_ms = at_ms;
         }
-        GoalLedgerOp::ProgressReset { .. } => {
+        GoalLedgerOp::ProgressReset {
+            ..
+        } => {
             state.progress.no_progress_turns = 0;
             state.snoozed_until_ms = None;
             state.wait = None;
@@ -298,25 +308,39 @@ fn apply_op(state: &mut GoalLedgerState, op: &GoalLedgerOp, at_ms: u64) {
                     .unwrap_or(GoalStatus::Active);
             }
         }
-        GoalLedgerOp::AttemptPushed { attempt } => {
+        GoalLedgerOp::AttemptPushed {
+            attempt,
+        } => {
             state.attempts.push(attempt.clone());
         }
-        GoalLedgerOp::EventPushed { event } => {
+        GoalLedgerOp::EventPushed {
+            event,
+        } => {
             state.events.push(event.clone());
         }
-        GoalLedgerOp::BudgetSet { budget } => {
+        GoalLedgerOp::BudgetSet {
+            budget,
+        } => {
             state.budget = budget.clone();
         }
-        GoalLedgerOp::CriteriaSet { criteria } => {
+        GoalLedgerOp::CriteriaSet {
+            criteria,
+        } => {
             state.criteria = criteria.clone();
         }
-        GoalLedgerOp::SnoozeSet { until_ms } => {
+        GoalLedgerOp::SnoozeSet {
+            until_ms,
+        } => {
             state.snoozed_until_ms = *until_ms;
         }
-        GoalLedgerOp::WaitSet { wait } => {
+        GoalLedgerOp::WaitSet {
+            wait,
+        } => {
             state.wait = wait.clone();
         }
-        GoalLedgerOp::TransferredOut { target_chat_id } => {
+        GoalLedgerOp::TransferredOut {
+            target_chat_id,
+        } => {
             state.active = false;
             state.status = GoalStatus::Transferred;
             state.transferred_to = Some(target_chat_id.clone());
@@ -331,16 +355,27 @@ fn apply_op(state: &mut GoalLedgerState, op: &GoalLedgerOp, at_ms: u64) {
             state.transferred_from = Some(source_chat_id.clone());
             state.transferred_to = None;
         }
-        GoalLedgerOp::SubGoalsDeclared { declaration } => {
+        GoalLedgerOp::SubGoalsDeclared {
+            declaration,
+        } => {
             state.sub_goals.apply_declaration(declaration);
         }
-        GoalLedgerOp::SubGoalDispatched { node_id, owner } => {
+        GoalLedgerOp::SubGoalDispatched {
+            node_id,
+            owner,
+        } => {
             state.sub_goals.mark_dispatched(node_id, owner.clone());
         }
-        GoalLedgerOp::SubGoalReported { node_id, report } => {
+        GoalLedgerOp::SubGoalReported {
+            node_id,
+            report,
+        } => {
             state.sub_goals.record_report(node_id, report.clone());
         }
-        GoalLedgerOp::SubGoalSuperseded { node_id, reason } => {
+        GoalLedgerOp::SubGoalSuperseded {
+            node_id,
+            reason,
+        } => {
             state.sub_goals.supersede(node_id, reason);
         }
     }
@@ -401,7 +436,11 @@ mod tests {
     use super::*;
 
     fn entry(seq: u64, at_ms: u64, op: GoalLedgerOp) -> GoalLedgerEntry {
-        GoalLedgerEntry { seq, at_ms, op }
+        GoalLedgerEntry {
+            seq,
+            at_ms,
+            op,
+        }
     }
 
     fn installed(seq: u64) -> GoalLedgerEntry {

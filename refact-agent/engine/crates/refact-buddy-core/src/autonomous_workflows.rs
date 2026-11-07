@@ -253,7 +253,9 @@ impl WorkflowActionFamily {
             WorkflowActionFamily::IsolatedCandidateCheckpoint => {
                 Some(("project_code", "checkpoint_isolated_candidate", "worktree"))
             }
-            WorkflowActionFamily::SavedEvidenceOnly { .. } => None,
+            WorkflowActionFamily::SavedEvidenceOnly {
+                ..
+            } => None,
         }
     }
 
@@ -269,7 +271,9 @@ impl WorkflowActionFamily {
             WorkflowActionFamily::IsolatedCandidateCheckpoint => {
                 Some("project_code:checkpoint_isolated_candidate")
             }
-            WorkflowActionFamily::SavedEvidenceOnly { .. } => None,
+            WorkflowActionFamily::SavedEvidenceOnly {
+                ..
+            } => None,
         }
     }
 
@@ -352,7 +356,9 @@ const fn contract_action_ids(family: WorkflowActionFamily) -> &'static [&'static
             CHECK_SAVED_EVIDENCE_ACTION_ID,
             "project_code:checkpoint_isolated_candidate",
         ],
-        WorkflowActionFamily::SavedEvidenceOnly { .. } => &[CHECK_SAVED_EVIDENCE_ACTION_ID],
+        WorkflowActionFamily::SavedEvidenceOnly {
+            ..
+        } => &[CHECK_SAVED_EVIDENCE_ACTION_ID],
     }
 }
 

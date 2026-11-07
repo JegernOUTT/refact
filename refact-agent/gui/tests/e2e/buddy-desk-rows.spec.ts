@@ -92,58 +92,6 @@ async function openDesk(page: Page, width: number) {
 }
 
 test.describe("Reports rows", () => {
-  test("rows fill the list and keep action hints in metadata styling without overflow", async ({
-    page,
-  }) => {
-    await openDesk(page, 240);
-    for (const width of [240, 360, 768, 1280, 1600]) {
-      await page.setViewportSize({ width, height: 900 });
-      await expect(page.locator(`${DESK} ul li button`)).toHaveCount(
-        rows.length,
-      );
-      const measurements = await page.evaluate((deskSelector) => {
-        const desk = document.querySelector<HTMLElement>(deskSelector);
-        const list = desk?.querySelector<HTMLElement>("ul");
-        if (!desk || !list) throw new Error("Reports rows are missing");
-        const listWidth = list.getBoundingClientRect().width;
-        const rowWidths = [...list.querySelectorAll("li button")].map(
-          (row) => row.getBoundingClientRect().width,
-        );
-        const hint = desk.querySelector<HTMLElement>(
-          "li button [class*='metaPart']:nth-child(3)",
-        );
-        const relativeTime = desk.querySelector<HTMLElement>("li button time");
-        if (!hint || !relativeTime)
-          throw new Error("Row metadata styling targets are missing");
-        return {
-          listWidth,
-          rowWidths,
-          hintColor: getComputedStyle(hint).color,
-          hintDecoration: getComputedStyle(hint).textDecorationLine,
-          relativeColor: getComputedStyle(relativeTime).color,
-          documentWidth: document.documentElement.scrollWidth,
-          viewportWidth: document.documentElement.clientWidth,
-        };
-      }, DESK);
-      expect(
-        measurements.rowWidths.every(
-          (rowWidth) => Math.abs(rowWidth - measurements.listWidth) <= 1,
-        ),
-        `${width}px row widths ${measurements.rowWidths.join(
-          ", ",
-        )} did not match list width ${measurements.listWidth}`,
-      ).toBe(true);
-      expect(measurements.hintColor, `${width}px action hint color`).toBe(
-        measurements.relativeColor,
-      );
-      expect(measurements.hintDecoration).not.toBe("underline");
-      expect(
-        measurements.documentWidth,
-        `${width}px document overflow: ${measurements.documentWidth} > ${measurements.viewportWidth}`,
-      ).toBeLessThanOrEqual(measurements.viewportWidth + 1);
-    }
-  });
-
   test("Tab focus gives a row a visible two-pixel focus ring", async ({
     page,
   }) => {

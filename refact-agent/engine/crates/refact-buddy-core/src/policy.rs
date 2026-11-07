@@ -52,14 +52,18 @@ pub fn evaluate_with_mutes(
         };
     }
     if queue.cooldown_active(&opp.cooldown_key) {
-        return PolicyDecision::Drop { reason: "cooldown" };
+        return PolicyDecision::Drop {
+            reason: "cooldown",
+        };
     }
 
     let humor_allowed = settings.humor_enabled
         && !matches!(settings.humor_level, HumorLevel::Off)
         && opp.priority <= BuddyPriority::Normal
         && !humor_blocked_by_topic(opp);
-    PolicyDecision::Surface { humor_allowed }
+    PolicyDecision::Surface {
+        humor_allowed,
+    }
 }
 
 /// Return `true` when the opportunity's topic is too sensitive or severe for humor.

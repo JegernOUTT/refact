@@ -63,7 +63,10 @@ pub(crate) mod tests {
         pub(crate) fn set(key: &'static str, value: &str) -> Self {
             let previous = std::env::var_os(key);
             std::env::set_var(key, value);
-            Self { key, previous }
+            Self {
+                key,
+                previous,
+            }
         }
     }
 

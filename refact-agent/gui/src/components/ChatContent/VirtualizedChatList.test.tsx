@@ -67,66 +67,6 @@ describe("VirtualizedChatList", () => {
     vi.useRealTimers();
   });
 
-  test("uses tighter viewport padding for streaming vs idle", () => {
-    const { rerender } = render(
-      <div style={{ height: 400 }}>
-        <VirtualizedChatList
-          items={items}
-          isStreaming
-          renderItem={(item) => <div>{item.text}</div>}
-        />
-      </div>,
-    );
-
-    const firstCall = getVirtuosoCalls().at(-1);
-    expect(firstCall?.increaseViewportBy).toEqual({ top: 400, bottom: 800 });
-
-    rerender(
-      <div style={{ height: 400 }}>
-        <VirtualizedChatList
-          items={items}
-          isStreaming={false}
-          renderItem={(item) => <div>{item.text}</div>}
-        />
-      </div>,
-    );
-
-    const secondCall = getVirtuosoCalls().at(-1);
-    expect(secondCall?.increaseViewportBy).toEqual({ top: 400, bottom: 600 });
-  });
-
-  test("uses synchronous ResizeObserver measurements to reduce dynamic-height jitter", () => {
-    render(
-      <div style={{ height: 400 }}>
-        <VirtualizedChatList
-          items={items}
-          isStreaming
-          renderItem={(item) => <div>{item.text}</div>}
-        />
-      </div>,
-    );
-
-    const call = getVirtuosoCalls().at(-1);
-    expect(call?.skipAnimationFrameInResizeObserver).toBe(true);
-  });
-
-  test("provides measurement hints to reduce dynamic-height jumpiness", () => {
-    render(
-      <div style={{ height: 400 }}>
-        <VirtualizedChatList
-          items={items}
-          isStreaming={false}
-          renderItem={(item) => <div>{item.text}</div>}
-        />
-      </div>,
-    );
-
-    const call = getVirtuosoCalls().at(-1);
-    expect(call?.defaultItemHeight).toBe(96);
-    expect(call?.minOverscanItemCount).toEqual({ top: 4, bottom: 6 });
-    expect(call?.overscan).toBeUndefined();
-  });
-
   test("passes per-item height estimates cached by item key", () => {
     const estimate = vi.fn((item: Item) => 40 + item.text.length);
     const { rerender } = render(

@@ -3014,9 +3014,10 @@ fn now_ms() -> u64 {
 
 fn record_dropped_delivery(record: &mut BackgroundAgent, id: String, status: DeliveryStatus) {
     record.dropped_deliveries.retain(|dropped| dropped.id != id);
-    record
-        .dropped_deliveries
-        .push(DeliveryStatusRecord { id, status });
+    record.dropped_deliveries.push(DeliveryStatusRecord {
+        id,
+        status,
+    });
     let retention = refact_work_core::coordination_settings().delivery_status_retention;
     while record.dropped_deliveries.len() > retention {
         record.dropped_deliveries.remove(0);

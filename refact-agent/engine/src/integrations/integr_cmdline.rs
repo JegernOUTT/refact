@@ -249,9 +249,15 @@ fn exec_status_label(status: &ExecStatus) -> &'static str {
     match status {
         ExecStatus::Starting => "starting",
         ExecStatus::Running => "running",
-        ExecStatus::Exited { .. } => "exited",
-        ExecStatus::SandboxLauncherFailed { .. } => "sandbox_launcher_failed",
-        ExecStatus::Failed { .. } => "failed",
+        ExecStatus::Exited {
+            ..
+        } => "exited",
+        ExecStatus::SandboxLauncherFailed {
+            ..
+        } => "sandbox_launcher_failed",
+        ExecStatus::Failed {
+            ..
+        } => "failed",
         ExecStatus::Killed => "killed",
         ExecStatus::TimedOut => "timed_out",
     }
@@ -259,11 +265,17 @@ fn exec_status_label(status: &ExecStatus) -> &'static str {
 
 fn exec_exit_code(status: &ExecStatus) -> Option<i32> {
     match status {
-        ExecStatus::Exited { exit_code } => *exit_code,
-        ExecStatus::SandboxLauncherFailed { exit_code } => Some(*exit_code),
+        ExecStatus::Exited {
+            exit_code,
+        } => *exit_code,
+        ExecStatus::SandboxLauncherFailed {
+            exit_code,
+        } => Some(*exit_code),
         ExecStatus::Starting
         | ExecStatus::Running
-        | ExecStatus::Failed { .. }
+        | ExecStatus::Failed {
+            ..
+        }
         | ExecStatus::Killed
         | ExecStatus::TimedOut => None,
     }
@@ -312,11 +324,21 @@ fn append_status_line(
 
 fn tool_failed_for_status(status: &ExecStatus) -> Option<bool> {
     match status {
-        ExecStatus::Exited { exit_code: Some(0) } => Some(false),
-        ExecStatus::Exited { exit_code: None }
-        | ExecStatus::Exited { exit_code: Some(_) }
-        | ExecStatus::SandboxLauncherFailed { .. }
-        | ExecStatus::Failed { .. }
+        ExecStatus::Exited {
+            exit_code: Some(0),
+        } => Some(false),
+        ExecStatus::Exited {
+            exit_code: None,
+        }
+        | ExecStatus::Exited {
+            exit_code: Some(_),
+        }
+        | ExecStatus::SandboxLauncherFailed {
+            ..
+        }
+        | ExecStatus::Failed {
+            ..
+        }
         | ExecStatus::Killed
         | ExecStatus::TimedOut => Some(true),
         ExecStatus::Starting | ExecStatus::Running => None,
@@ -897,7 +919,9 @@ mod tests {
     #[test]
     fn cmdline_terminal_failure_statuses_remain_failed() {
         for status in [
-            ExecStatus::SandboxLauncherFailed { exit_code: 1 },
+            ExecStatus::SandboxLauncherFailed {
+                exit_code: 1,
+            },
             ExecStatus::Killed,
             ExecStatus::TimedOut,
         ] {

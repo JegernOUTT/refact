@@ -629,16 +629,35 @@ export function subscribeToChatEvents(
   apiKey?: string,
   options: SubscriptionOptions = {},
 ): () => void {
-  const url = buildApiUrl(config, "/v1/chats/subscribe", {
-    chat_id: chatId,
-    snapshot_chunks: 1,
-  });
+  return subscribeToEvents([chatId], config, callbacks, apiKey, options, false);
+}
+
+function subscribeToEvents(
+  chatIds: string[],
+  config: EngineApiConfig,
+  callbacks: ChatSubscriptionCallbacks,
+  apiKey: string | undefined,
+  options: SubscriptionOptions,
+  multiplex: boolean,
+): () => void {
+  const url = multiplex
+    ? buildApiUrl(config, "/v1/chats/subscribe-many", {
+        chat_ids: JSON.stringify(chatIds),
+        snapshot_chunks: 1,
+      })
+    : buildApiUrl(config, "/v1/chats/subscribe", {
+        chat_id: chatIds[0],
+        snapshot_chunks: 1,
+      });
+  const acceptedIds = new Set(chatIds);
+  const pendingBootstrap = new Set(multiplex ? chatIds : []);
 
   const connectTimeoutMs =
     options.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS;
   const idleTimeoutMs = options.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS;
 
   const abortController = new AbortController();
+  const isAborted = () => abortController.signal.aborted;
   const state = { connected: false };
   let abortReason: string | null = null;
   let terminalErrorEmitted = false;
@@ -653,6 +672,7 @@ export function subscribeToChatEvents(
         receivedMessageCount: number;
       }
     | undefined;
+  const snapshots = new Map<string, NonNullable<typeof chunkedSnapshot>>();
 
   const headers: Record<string, string> = {};
   if (apiKey) {
@@ -700,8 +720,10 @@ export function subscribeToChatEvents(
   };
 
   connectTimer = setTimeout(() => {
-    if (!state.connected) {
-      abortReason = abortReason ?? "SSE connect timeout";
+    if (!state.connected || pendingBootstrap.size > 0) {
+      abortReason =
+        abortReason ??
+        (state.connected ? "SSE chat snapshot timeout" : "SSE connect timeout");
       emitTerminalError(abortReason);
       abortController.abort();
     }
@@ -713,6 +735,7 @@ export function subscribeToChatEvents(
     signal: abortController.signal,
   })
     .then(async (response) => {
+      if (isAborted()) return;
       if (!response.ok) {
         throw new Error(`SSE connection failed: ${response.status}`);
       }
@@ -721,9 +744,9 @@ export function subscribeToChatEvents(
         throw new Error("Response body is null");
       }
 
-      clearTimers();
+      if (!multiplex) clearTimers();
       state.connected = true;
-      callbacks.onConnected?.();
+      if (!multiplex) callbacks.onConnected?.();
       armIdleTimer();
 
       const reader = response.body.getReader();
@@ -732,6 +755,7 @@ export function subscribeToChatEvents(
 
       for (;;) {
         const { done, value } = await reader.read();
+        if (isAborted()) return;
         if (done) break;
 
         armIdleTimer();
@@ -746,6 +770,7 @@ export function subscribeToChatEvents(
         buffer = blocks.pop() ?? "";
 
         for (const block of blocks) {
+          if (isAborted()) return;
           const trimmed = block.trim();
           if (!trimmed) continue;
           if (trimmed.startsWith(":")) continue;
@@ -788,83 +813,104 @@ export function subscribeToChatEvents(
             )
               continue;
             normalizeSeq(parsed);
-            if (parsed.chat_id !== chatId) {
+            if (!acceptedIds.has(parsed.chat_id)) {
               continue;
             }
-            if (parsed.type === "snapshot" && parsed.snapshot_chunked) {
-              const chunkCount = parsed.chunk_count;
-              const messageCount = parsed.message_count;
-              if (
-                chunkedSnapshot !== undefined ||
-                typeof chunkCount !== "number" ||
-                !Number.isSafeInteger(chunkCount) ||
-                chunkCount < 0 ||
-                typeof messageCount !== "number" ||
-                !Number.isSafeInteger(messageCount) ||
-                messageCount < 0
-              ) {
-                throw new Error("Invalid chunked snapshot metadata");
+            chunkedSnapshot = snapshots.get(parsed.chat_id);
+            try {
+              if (parsed.type === "snapshot" && parsed.snapshot_chunked) {
+                const chunkCount = parsed.chunk_count;
+                const messageCount = parsed.message_count;
+                if (
+                  chunkedSnapshot !== undefined ||
+                  typeof chunkCount !== "number" ||
+                  !Number.isSafeInteger(chunkCount) ||
+                  chunkCount < 0 ||
+                  typeof messageCount !== "number" ||
+                  !Number.isSafeInteger(messageCount) ||
+                  messageCount < 0
+                ) {
+                  throw new Error("Invalid chunked snapshot metadata");
+                }
+                if (!normalizeBackgroundAgentFields(parsed))
+                  callbacks.onAgentRosterDenied?.(parsed);
+                chunkedSnapshot = {
+                  snapshot: { ...parsed, messages: [] },
+                  chunks: [],
+                  chunkCount,
+                  messageCount,
+                  receivedMessageCount: 0,
+                };
+                continue;
               }
-              if (!normalizeBackgroundAgentFields(parsed))
+              if (parsed.type === "snapshot_chunk") {
+                if (
+                  !chunkedSnapshot ||
+                  parsed.seq !== chunkedSnapshot.snapshot.seq ||
+                  parsed.chunk_count !== chunkedSnapshot.chunkCount ||
+                  parsed.chunk_index !== chunkedSnapshot.chunks.length ||
+                  !Array.isArray(parsed.messages) ||
+                  chunkedSnapshot.receivedMessageCount +
+                    parsed.messages.length >
+                    chunkedSnapshot.messageCount
+                ) {
+                  throw new Error("Invalid snapshot chunk sequence");
+                }
+                chunkedSnapshot.chunks.push(parsed.messages);
+                chunkedSnapshot.receivedMessageCount += parsed.messages.length;
+                continue;
+              }
+              if (parsed.type === "snapshot_end") {
+                if (
+                  !chunkedSnapshot ||
+                  parsed.seq !== chunkedSnapshot.snapshot.seq ||
+                  parsed.chunk_count !== chunkedSnapshot.chunkCount ||
+                  parsed.message_count !== chunkedSnapshot.messageCount ||
+                  chunkedSnapshot.chunks.length !==
+                    chunkedSnapshot.chunkCount ||
+                  chunkedSnapshot.receivedMessageCount !==
+                    chunkedSnapshot.messageCount
+                ) {
+                  throw new Error("Invalid snapshot end marker");
+                }
+                const messages = chunkedSnapshot.chunks.flat();
+                if (messages.length !== chunkedSnapshot.messageCount) {
+                  throw new Error("Chunked snapshot message count mismatch");
+                }
+                const snapshot = {
+                  ...chunkedSnapshot.snapshot,
+                  messages,
+                };
+                chunkedSnapshot = undefined;
+                pendingBootstrap.delete(parsed.chat_id);
+                if (pendingBootstrap.size === 0 && connectTimer !== null) {
+                  clearTimeout(connectTimer);
+                  connectTimer = null;
+                }
+                callbacks.onEvent(snapshot);
+                continue;
+              }
+              if (chunkedSnapshot !== undefined) {
+                throw new Error("Unexpected event during chunked snapshot");
+              }
+              if (!normalizeBackgroundAgentFields(parsed)) {
                 callbacks.onAgentRosterDenied?.(parsed);
-              chunkedSnapshot = {
-                snapshot: { ...parsed, messages: [] },
-                chunks: [],
-                chunkCount,
-                messageCount,
-                receivedMessageCount: 0,
-              };
-              continue;
-            }
-            if (parsed.type === "snapshot_chunk") {
-              if (
-                !chunkedSnapshot ||
-                parsed.seq !== chunkedSnapshot.snapshot.seq ||
-                parsed.chunk_count !== chunkedSnapshot.chunkCount ||
-                parsed.chunk_index !== chunkedSnapshot.chunks.length ||
-                !Array.isArray(parsed.messages) ||
-                chunkedSnapshot.receivedMessageCount + parsed.messages.length >
-                  chunkedSnapshot.messageCount
-              ) {
-                throw new Error("Invalid snapshot chunk sequence");
+                if (parsed.type === "background_agent_updated") continue;
               }
-              chunkedSnapshot.chunks.push(parsed.messages);
-              chunkedSnapshot.receivedMessageCount += parsed.messages.length;
-              continue;
-            }
-            if (parsed.type === "snapshot_end") {
-              if (
-                !chunkedSnapshot ||
-                parsed.seq !== chunkedSnapshot.snapshot.seq ||
-                parsed.chunk_count !== chunkedSnapshot.chunkCount ||
-                parsed.message_count !== chunkedSnapshot.messageCount ||
-                chunkedSnapshot.chunks.length !== chunkedSnapshot.chunkCount ||
-                chunkedSnapshot.receivedMessageCount !==
-                  chunkedSnapshot.messageCount
-              ) {
-                throw new Error("Invalid snapshot end marker");
+              normalizeExecProcessSpawnedFields(parsed);
+              if (parsed.type === "snapshot") {
+                pendingBootstrap.delete(parsed.chat_id);
+                if (pendingBootstrap.size === 0 && connectTimer !== null) {
+                  clearTimeout(connectTimer);
+                  connectTimer = null;
+                }
               }
-              const messages = chunkedSnapshot.chunks.flat();
-              if (messages.length !== chunkedSnapshot.messageCount) {
-                throw new Error("Chunked snapshot message count mismatch");
-              }
-              const snapshot = {
-                ...chunkedSnapshot.snapshot,
-                messages,
-              };
-              chunkedSnapshot = undefined;
-              callbacks.onEvent(snapshot);
-              continue;
+              callbacks.onEvent(parsed);
+            } finally {
+              if (chunkedSnapshot)
+                snapshots.set(parsed.chat_id, chunkedSnapshot);
+              else snapshots.delete(parsed.chat_id);
             }
-            if (chunkedSnapshot !== undefined) {
-              throw new Error("Unexpected event during chunked snapshot");
-            }
-            if (!normalizeBackgroundAgentFields(parsed)) {
-              callbacks.onAgentRosterDenied?.(parsed);
-              if (parsed.type === "background_agent_updated") continue;
-            }
-            normalizeExecProcessSpawnedFields(parsed);
-            callbacks.onEvent(parsed);
           } catch (e) {
             if (
               chunkedSnapshot !== undefined ||
@@ -882,13 +928,13 @@ export function subscribeToChatEvents(
         }
       }
 
-      if (chunkedSnapshot !== undefined) {
+      if (snapshots.size > 0) {
         abortWithTerminalError(
           "SSE stream ended before chunked snapshot completed; reconnecting",
         );
       }
       clearTimers();
-      if (abortController.signal.aborted) {
+      if (isAborted()) {
         if (abortReason) {
           emitTerminalError(abortReason);
         }
@@ -900,6 +946,7 @@ export function subscribeToChatEvents(
     })
     .catch((err: unknown) => {
       clearTimers();
+      if (abortController.signal.aborted && !abortReason) return;
       const error = err as Error;
 
       if (error.name === "AbortError") {
@@ -930,6 +977,105 @@ export function subscribeToChatEvents(
     clearTimers();
     abortController.abort();
     disconnect(false);
+  };
+}
+
+/** One transport per owner; logical consumers retain independent lifecycle state. */
+export function createChatEventMultiplexer(
+  config: EngineApiConfig,
+  apiKey?: string,
+  options: SubscriptionOptions = {},
+) {
+  const consumers = new Map<string, Set<ChatSubscriptionCallbacks>>();
+  let stop: (() => void) | undefined;
+  let scheduled: ReturnType<typeof setTimeout> | undefined;
+  let generation = 0;
+  const all = () => Array.from(consumers.values()).flatMap((set) => [...set]);
+  const rebuild = () => {
+    scheduled = undefined;
+    stop?.();
+    stop = undefined;
+    const current = ++generation;
+    const ids = [...consumers.keys()];
+    if (!ids.length) return;
+    const active = () => current === generation;
+    stop = subscribeToEvents(
+      ids,
+      config,
+      {
+        onEvent: (event) => {
+          if (!active()) return;
+          for (const consumer of [...(consumers.get(event.chat_id) ?? [])]) {
+            if (event.type === "snapshot") consumer.onConnected?.();
+            consumer.onEvent(event);
+          }
+        },
+        onAgentRosterDenied: (event) => {
+          if (!active()) return;
+          for (const consumer of [...(consumers.get(event.chat_id) ?? [])])
+            consumer.onAgentRosterDenied?.(event);
+        },
+        onActivity: () => {
+          if (active()) for (const consumer of all()) consumer.onActivity?.();
+        },
+        onError: (error) => {
+          if (!active()) return;
+          const retired = all();
+          consumers.clear();
+          generation++;
+          stop?.();
+          stop = undefined;
+          for (const consumer of retired) consumer.onError(error);
+        },
+        onDisconnected: () => {
+          if (!active()) return;
+          const retired = all();
+          consumers.clear();
+          generation++;
+          stop = undefined;
+          for (const consumer of retired) consumer.onDisconnected?.();
+        },
+      },
+      apiKey,
+      options,
+      true,
+    );
+  };
+  const schedule = () => {
+    generation++;
+    stop?.();
+    stop = undefined;
+    if (scheduled !== undefined) clearTimeout(scheduled);
+    if (consumers.size) scheduled = setTimeout(rebuild, 0);
+    else scheduled = undefined;
+  };
+  return {
+    subscribe(
+      chatId: string,
+      callbacks: ChatSubscriptionCallbacks,
+    ): () => void {
+      let set = consumers.get(chatId);
+      if (!set) {
+        if (consumers.size >= 128) {
+          const timeout = setTimeout(() => {
+            callbacks.onError(new Error("Too many visible chat subscriptions"));
+          }, 0);
+          return () => clearTimeout(timeout);
+        }
+        set = new Set();
+        consumers.set(chatId, set);
+      }
+      set.add(callbacks);
+      schedule();
+      return () => {
+        const current = consumers.get(chatId);
+        if (!current?.delete(callbacks)) return;
+        if (current.size === 0) {
+          consumers.delete(chatId);
+          schedule();
+        }
+      };
+    },
   };
 }
 

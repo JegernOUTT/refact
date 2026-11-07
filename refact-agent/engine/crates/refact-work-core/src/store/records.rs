@@ -635,7 +635,9 @@ impl DisagreementRecord {
             });
         }
         match verdict {
-            AdjudicationVerdict::Unresolvable { reason } => {
+            AdjudicationVerdict::Unresolvable {
+                reason,
+            } => {
                 let reason = reason.trim().to_string();
                 if reason.is_empty() {
                     return Err(AdjudicationRefusal::MissingReason);
@@ -870,10 +872,18 @@ impl ClaimVerdict {
     pub fn claim_id(&self) -> Option<&str> {
         match self {
             ClaimVerdict::New => None,
-            ClaimVerdict::Corroborates { claim_id }
-            | ClaimVerdict::Repeats { claim_id }
-            | ClaimVerdict::Contradicts { claim_id }
-            | ClaimVerdict::ContradictsBelowThreshold { claim_id, .. } => Some(claim_id.as_str()),
+            ClaimVerdict::Corroborates {
+                claim_id,
+            }
+            | ClaimVerdict::Repeats {
+                claim_id,
+            }
+            | ClaimVerdict::Contradicts {
+                claim_id,
+            }
+            | ClaimVerdict::ContradictsBelowThreshold {
+                claim_id, ..
+            } => Some(claim_id.as_str()),
         }
     }
 
@@ -1086,11 +1096,18 @@ impl ClaimRecord {
         if let Some(agreeing) = live.iter().find(|existing| self.same_conclusion(existing)) {
             let claim_id = agreeing.claim_id.clone();
             let verdict = if agreeing.novel_provenance(&self.provenance).is_empty() {
-                ClaimVerdict::Repeats { claim_id }
+                ClaimVerdict::Repeats {
+                    claim_id,
+                }
             } else {
-                ClaimVerdict::Corroborates { claim_id }
+                ClaimVerdict::Corroborates {
+                    claim_id,
+                }
             };
-            return ClaimAssessment { verdict, staled };
+            return ClaimAssessment {
+                verdict,
+                staled,
+            };
         }
         if let Some(opposing) = live.first() {
             let threshold = policy.contradiction_min_confidence_per_mille;
@@ -1098,14 +1115,19 @@ impl ClaimRecord {
             let verdict = if self.confidence_per_mille >= threshold
                 && opposing.confidence_per_mille >= threshold
             {
-                ClaimVerdict::Contradicts { claim_id }
+                ClaimVerdict::Contradicts {
+                    claim_id,
+                }
             } else {
                 ClaimVerdict::ContradictsBelowThreshold {
                     claim_id,
                     required_per_mille: threshold,
                 }
             };
-            return ClaimAssessment { verdict, staled };
+            return ClaimAssessment {
+                verdict,
+                staled,
+            };
         }
         ClaimAssessment {
             verdict: ClaimVerdict::New,

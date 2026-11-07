@@ -1013,7 +1013,10 @@ mod tests {
                         scope: "T-1".to_string(),
                     },
                 );
-                let mut red = FixedRunner { exit_code: 1, seen };
+                let mut red = FixedRunner {
+                    exit_code: 1,
+                    seen,
+                };
                 let cache = test_cache();
                 match revalidate_merged_tree(&service, vec![contract()], &cache, &mut red).await {
                     MergedTreeRevalidation::Ran(records) => {

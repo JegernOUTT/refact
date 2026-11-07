@@ -90,12 +90,16 @@ pub(crate) enum IssueProvider {
 impl std::fmt::Debug for IssueProvider {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            IssueProvider::GitHub { binary, .. } => f
+            IssueProvider::GitHub {
+                binary, ..
+            } => f
                 .debug_struct("GitHub")
                 .field("binary", binary)
                 .field("token", &"[REDACTED]")
                 .finish(),
-            IssueProvider::GitLab { binary, .. } => f
+            IssueProvider::GitLab {
+                binary, ..
+            } => f
                 .debug_struct("GitLab")
                 .field("binary", binary)
                 .field("token", &"[REDACTED]")
@@ -165,7 +169,10 @@ async fn try_read_github(config_dir: &PathBuf) -> Result<Option<IssueProvider>, 
         .filter(|s| !s.is_empty())
         .unwrap_or("gh");
     let binary = validate_issue_binary(configured)?.to_string();
-    Ok(Some(IssueProvider::GitHub { binary, token }))
+    Ok(Some(IssueProvider::GitHub {
+        binary,
+        token,
+    }))
 }
 
 async fn try_read_gitlab(config_dir: &PathBuf) -> Result<Option<IssueProvider>, String> {
@@ -188,7 +195,10 @@ async fn try_read_gitlab(config_dir: &PathBuf) -> Result<Option<IssueProvider>, 
         .filter(|s| !s.is_empty())
         .unwrap_or("glab");
     let binary = validate_issue_binary(configured)?.to_string();
-    Ok(Some(IssueProvider::GitLab { binary, token }))
+    Ok(Some(IssueProvider::GitLab {
+        binary,
+        token,
+    }))
 }
 
 pub(crate) fn parse_remote_url(url: &str) -> Option<RepoInfo> {
@@ -238,7 +248,11 @@ fn parse_remote_path(host: &str, path: &str) -> Option<RepoInfo> {
     if owner.is_empty() || repo.is_empty() {
         return None;
     }
-    Some(RepoInfo { owner, repo, host })
+    Some(RepoInfo {
+        owner,
+        repo,
+        host,
+    })
 }
 
 fn repo_host_provider(repo: &RepoInfo) -> Result<&'static str, String> {
@@ -990,7 +1004,10 @@ async fn run_issue_create(
 ) -> Result<String, String> {
     let repo_name = repo.full_name();
     match provider {
-        IssueProvider::GitHub { binary, token } => {
+        IssueProvider::GitHub {
+            binary,
+            token,
+        } => {
             let args = native_issue_args(&repo_name, title, body, labels, true);
             let out = Command::new(trusted_issue_binary(&binary))
                 .args(&args)
@@ -1008,7 +1025,10 @@ async fn run_issue_create(
                 Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
             }
         }
-        IssueProvider::GitLab { binary, token } => {
+        IssueProvider::GitLab {
+            binary,
+            token,
+        } => {
             let args = native_issue_args(&repo_name, title, body, labels, false);
             let out = Command::new(trusted_issue_binary(&binary))
                 .args(&args)

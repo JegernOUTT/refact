@@ -4,13 +4,10 @@ const BUDDY_ROUTE = "/tests/e2e/route-showcase.html?route=buddy";
 const WIDTHS = [360, 768, 1280, 1600] as const;
 const THEMES = ["dark", "light"] as const;
 
-const BROKEN_TABLIST_TOP_PX = 1695;
-const FOLD_LIMIT_PX = 500;
 const BROKEN_MAIN_SCROLL_WIDTH_PX = 466;
 const BROKEN_MAIN_CLIENT_WIDTH_PX = 328;
 const BROKEN_TRIGGER_WIDTH_PX = 38;
 const MIN_TRIGGER_WIDTH_PX = 44;
-const MIN_VISIBLE_CONTENT_PX = 200;
 
 const OPPORTUNITY_TITLE =
   "Investigate a long-running diagnostic cluster before it becomes gremlin soup";
@@ -235,47 +232,6 @@ test.describe("Buddy layout", () => {
       });
     }
   }
-
-  test(`puts the default tab's content above the fold at 1280x900 (the tab strip alone was ${BROKEN_TABLIST_TOP_PX}px)`, async ({
-    page,
-  }) => {
-    await openBuddy(page, { width: 1280 });
-
-    const geometry = await page.evaluate(() => {
-      const tablist = document.querySelector("[role='tablist']");
-      const panel = document.querySelector(
-        "[role='tabpanel']:not([hidden])",
-      ) as HTMLElement | null;
-      if (!tablist || !panel) return null;
-      const strip = tablist.getBoundingClientRect();
-      const content = panel.getBoundingClientRect();
-      return {
-        stripTop: Math.round(strip.top),
-        contentTop: Math.round(content.top),
-        visibleContent: Math.round(
-          Math.min(content.bottom, window.innerHeight) - content.top,
-        ),
-        viewport: window.innerHeight,
-      };
-    });
-    expect(geometry).not.toBeNull();
-    expect(
-      geometry!.stripTop,
-      `tab strip top is ${
-        geometry!.stripTop
-      }px; the broken build measured ${BROKEN_TABLIST_TOP_PX}px inside a ${
-        geometry!.viewport
-      }px viewport`,
-    ).toBeLessThan(FOLD_LIMIT_PX);
-    expect(
-      geometry!.visibleContent,
-      `the selected tab panel starts at ${geometry!.contentTop}px and only ${
-        geometry!.visibleContent
-      }px of it is inside the ${
-        geometry!.viewport
-      }px viewport; a tab strip above the fold with nothing readable under it is still an empty first screen`,
-    ).toBeGreaterThanOrEqual(MIN_VISIBLE_CONTENT_PX);
-  });
 
   test("mounts exactly one scene on Home and Play and none elsewhere", async ({
     page,

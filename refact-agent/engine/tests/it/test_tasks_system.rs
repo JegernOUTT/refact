@@ -8,7 +8,9 @@ mod background_tasks_tests {
 
     impl BackgroundTasksHolder {
         fn new(tasks: Vec<JoinHandle<()>>) -> Self {
-            BackgroundTasksHolder { tasks }
+            BackgroundTasksHolder {
+                tasks,
+            }
         }
 
         async fn abort(&mut self) {

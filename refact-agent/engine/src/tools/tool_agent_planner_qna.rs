@@ -1507,20 +1507,28 @@ impl Tool for ToolPlannerReply {
             };
             delivery_note = report.describe("Reply");
             receipt.state = match &report {
-                planner_delivery::DeliveryReport::Delivered { outcome, .. } => match outcome {
+                planner_delivery::DeliveryReport::Delivered {
+                    outcome, ..
+                } => match outcome {
                     DeliveryOutcome::Queued | DeliveryOutcome::Duplicate => {
                         ReplyDeliveryState::Accepted
                     }
                     DeliveryOutcome::Delivered => ReplyDeliveryState::Delivered,
                     _ => ReplyDeliveryState::Failed,
                 },
-                planner_delivery::DeliveryReport::QueuedWhileInterrupted { .. } => {
-                    ReplyDeliveryState::Accepted
-                }
-                planner_delivery::DeliveryReport::Unknown { .. } => ReplyDeliveryState::Unknown,
+                planner_delivery::DeliveryReport::QueuedWhileInterrupted {
+                    ..
+                } => ReplyDeliveryState::Accepted,
+                planner_delivery::DeliveryReport::Unknown {
+                    ..
+                } => ReplyDeliveryState::Unknown,
                 planner_delivery::DeliveryReport::NoLiveSession
-                | planner_delivery::DeliveryReport::Skipped { .. }
-                | planner_delivery::DeliveryReport::Failed { .. } => ReplyDeliveryState::Failed,
+                | planner_delivery::DeliveryReport::Skipped {
+                    ..
+                }
+                | planner_delivery::DeliveryReport::Failed {
+                    ..
+                } => ReplyDeliveryState::Failed,
             };
             receipt.outcome = report.receipt()["outcome"]
                 .as_str()

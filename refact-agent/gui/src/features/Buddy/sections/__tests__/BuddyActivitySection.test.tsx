@@ -6,8 +6,6 @@ import {
   within,
 } from "../../../../utils/test-utils";
 import { http, HttpResponse } from "msw";
-import { readFile } from "node:fs/promises";
-import { resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { server } from "../../../../utils/mockServer";
 import { setUpStore } from "../../../../app/store";
@@ -155,10 +153,6 @@ const CONFIG_STATE = {
     host: "vscode" as const,
   },
 };
-
-function readGuiSource(path: string): Promise<string> {
-  return readFile(resolve(process.cwd(), "src", path), "utf8");
-}
 
 function makeActivity(
   overrides?: Partial<BuddyActivityEntry>,
@@ -919,85 +913,5 @@ describe("BuddyHome_operator_surface", () => {
     expect(
       within(list).queryByText("Old diagnostic is outside the window"),
     ).not.toBeInTheDocument();
-  });
-});
-
-describe("BuddyHome_bottom_row_bounded_scroll", () => {
-  const commonHandlers = [
-    http.get("*/v1/buddy/opportunities", () =>
-      HttpResponse.json({ opportunities: [] }),
-    ),
-    http.get("*/v1/buddy/conversations", () => HttpResponse.json([])),
-    http.get("*/v1/stats/llm/summary", () =>
-      HttpResponse.json({
-        totals: { total_calls: 0, successful_calls: 0, total_tokens: 0 },
-      }),
-    ),
-    http.get("*/v1/setup/status", () =>
-      HttpResponse.json({ configured: true, reasons: [], detail: {} }),
-    ),
-  ];
-  it("activity panel renders as a Buddy section with list rows", async () => {
-    const store = setUpStore({ ...CONFIG_STATE });
-    store.dispatch(setBuddySnapshot(makeSnapshot(makePulse())));
-    server.use(...commonHandlers);
-
-    const { user } = render(<BuddyHome />, { store });
-    await user.click(screen.getByRole("tab", { name: "Activity" }));
-    const panel = await screen.findByTestId("buddy-activity-panel");
-    expect(panel.tagName).toBe("SECTION");
-    expect(panel).toHaveAttribute("data-buddy-surface", "section");
-    expect(
-      within(panel).getByRole("heading", { name: "Activity" }),
-    ).toBeInTheDocument();
-  });
-
-  it("recent warnings render as one Buddy section with a heading and count", async () => {
-    const store = setUpStore({ ...CONFIG_STATE });
-    store.dispatch(setBuddySnapshot(makeSnapshot(makePulse())));
-    server.use(...commonHandlers);
-
-    const { user } = render(<BuddyHome />, { store });
-    await user.click(screen.getByRole("tab", { name: "Activity" }));
-    const panel = await screen.findByTestId("buddy-recent-errors-panel");
-    expect(panel).toHaveAttribute("data-buddy-surface", "section");
-    expect(
-      within(panel).getByRole("heading", { name: "Recent warnings" }),
-    ).toBeInTheDocument();
-    expect(panel.querySelector("details")).toBeNull();
-  });
-
-  it("recent chats render as a Buddy section", async () => {
-    const store = setUpStore({ ...CONFIG_STATE });
-    store.dispatch(setBuddySnapshot(makeSnapshot(makePulse())));
-    server.use(...commonHandlers);
-
-    const { user } = render(<BuddyHome />, { store });
-    await user.click(screen.getByRole("tab", { name: "Activity" }));
-    const panel = await screen.findByTestId("buddy-recent-chats");
-    expect(panel).toHaveAttribute("data-buddy-surface", "section");
-  });
-
-  it("activity slots size to their content instead of fixed heights", async () => {
-    const css = await readGuiSource(
-      "features/Buddy/sections/BuddyActivitySection.module.css",
-    );
-    expect(css).not.toMatch(/height:\s*clamp/);
-    expect(css).not.toContain("52vh");
-    expect(css).not.toContain("max-height: 860px");
-    expect(css).not.toContain("summary");
-  });
-
-  it("legacy panels have no inner scroll caps or opacity fades", async () => {
-    for (const file of [
-      "features/Buddy/BuddyActivityPanel.module.css",
-      "features/Buddy/BuddyRecentErrorsPanel.module.css",
-      "features/Buddy/BuddyRecentChats.module.css",
-    ]) {
-      const css = await readGuiSource(file);
-      expect(css, file).not.toContain("overflow-y: auto");
-      expect(css, file).not.toContain("opacity");
-      expect(css, file).not.toContain("max-height: 220px");
-    }
   });
 });

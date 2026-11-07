@@ -196,7 +196,10 @@ fn json_response<T: Serialize>(
 fn draft_error_response(err: DraftValidationError) -> Result<Response<Body>, ScratchError> {
     match err {
         DraftValidationError::NotFound => json_error(StatusCode::NOT_FOUND, "draft_not_found"),
-        DraftValidationError::KindMismatch { expected, actual } => json_error(
+        DraftValidationError::KindMismatch {
+            expected,
+            actual,
+        } => json_error(
             StatusCode::CONFLICT,
             &format!(
                 "draft_kind_mismatch: expected {}, got {}",
@@ -204,7 +207,10 @@ fn draft_error_response(err: DraftValidationError) -> Result<Response<Body>, Scr
                 draft_kind_str(&actual)
             ),
         ),
-        DraftValidationError::TargetMismatch { expected, actual } => json_error(
+        DraftValidationError::TargetMismatch {
+            expected,
+            actual,
+        } => json_error(
             StatusCode::CONFLICT,
             &format!(
                 "draft_target_mismatch: expected {}, got {}",
@@ -246,7 +252,9 @@ async fn consume_draft_for_target(
         return Err(DraftValidationError::NotFound);
     };
     svc.consume_validated_draft(draft_id, expected_kind, target)
-        .map(|d| ConsumedDraft { draft_id: d.id })
+        .map(|d| ConsumedDraft {
+            draft_id: d.id,
+        })
 }
 
 fn source_str(source: &CommandSource) -> String {

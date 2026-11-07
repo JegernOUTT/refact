@@ -114,6 +114,60 @@ describe("pickDesiredChatSubscriptions", () => {
     expect(result).toEqual(["chat-b"]);
   });
 
+  it("retries a failed group in one fetch despite varied per-chat jitter and cancels hidden retries", async () => {
+    vi.useFakeTimers();
+    const fetcher = vi.fn().mockRejectedValue(new Error("group failed"));
+    vi.stubGlobal("fetch", fetcher);
+    const store = createSubscriptionStore();
+    const ids = ["chat-a", "chat-b", "chat-c"];
+    ids.forEach((chatId) =>
+      store.dispatch(registerVisibleChatMount({ chatId })),
+    );
+    const { unmount } = renderAllChatsSubscription(store);
+    const visibility = Object.getOwnPropertyDescriptor(
+      document,
+      "visibilityState",
+    );
+    try {
+      let jitter = 0;
+      vi.spyOn(Math, "random").mockImplementation(
+        () => [0, 0.5, 0.999][jitter++ % 3],
+      );
+      await asyncAct(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(fetcher).toHaveBeenCalledTimes(1);
+      await asyncAct(async () => {
+        await vi.advanceTimersByTimeAsync(2500);
+      });
+      expect(fetcher).toHaveBeenCalledTimes(2);
+      for (const [url] of fetcher.mock.calls as [string][]) {
+        const parsed = new URL(url, "http://localhost");
+        expect(parsed.pathname).toBe("/v1/chats/subscribe-many");
+        expect(
+          JSON.parse(parsed.searchParams.get("chat_ids") ?? "null"),
+        ).toEqual(ids);
+      }
+      expect(vi.getTimerCount()).toBe(1);
+      Object.defineProperty(document, "visibilityState", {
+        configurable: true,
+        value: "hidden",
+      });
+      syncAct(() => document.dispatchEvent(new Event("visibilitychange")));
+      expect(vi.getTimerCount()).toBe(0);
+      await asyncAct(async () => {
+        await vi.advanceTimersByTimeAsync(60_000);
+      });
+      expect(fetcher).toHaveBeenCalledTimes(2);
+    } finally {
+      unmount();
+      if (visibility)
+        Object.defineProperty(document, "visibilityState", visibility);
+      else Reflect.deleteProperty(document, "visibilityState");
+    }
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it("clears a pending retry timer when a chat leaves the visible desired set", async () => {
     vi.useFakeTimers();
     const mockFetch = vi.fn().mockRejectedValue(new Error("network drop"));
@@ -124,6 +178,9 @@ describe("pickDesiredChatSubscriptions", () => {
       store.dispatch(registerVisibleChatMount({ chatId: "chat-a" }));
     });
     const { unmount } = renderAllChatsSubscription(store);
+    await asyncAct(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
 
     expect(mockFetch).toHaveBeenCalledTimes(1);
 
@@ -194,6 +251,9 @@ describe("pickDesiredChatSubscriptions", () => {
     store.dispatch(applyChatEvent(snapshot));
     store.dispatch(registerVisibleChatMount({ chatId: "chat-a" }));
     const { unmount } = renderAllChatsSubscription(store);
+    await asyncAct(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
     const send = async (index: number, event: object) => {
       await asyncAct(async () => {
         streams[index].enqueue(
@@ -252,7 +312,7 @@ describe("pickDesiredChatSubscriptions", () => {
     ).toEqual({});
     await send(1, queue("5"));
     await asyncAct(async () => {
-      await vi.advanceTimersByTimeAsync(100);
+      await vi.advanceTimersByTimeAsync(101);
     });
     expect(mockFetch).toHaveBeenCalledTimes(3);
     await send(2, { ...snapshot, background_agents: [privateEvent.agent] });
@@ -293,10 +353,48 @@ describe("pickDesiredChatSubscriptions", () => {
     store.dispatch(registerVisibleChatMount({ chatId: "chat-a" }));
     const { unmount } = renderAllChatsSubscription(store);
     await asyncAct(async () => {
-      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(0);
     });
     expect(mockFetch).toHaveBeenCalledTimes(1);
     expect(store.getState().agentsPanel.denied).toBe(true);
+    expect(store.getState().connection.sseConnections["chat-a"]?.status).toBe(
+      "connecting",
+    );
+    await asyncAct(async () => {
+      if (!stream) throw new Error("Chat stream did not connect");
+      stream.enqueue(
+        new TextEncoder().encode(
+          `data: ${JSON.stringify({
+            type: "snapshot",
+            chat_id: "chat-a",
+            seq: "0",
+            thread: {
+              id: "chat-a",
+              title: "Live",
+              model: "",
+              mode: "agent",
+              tool_use: "agent",
+              boost_reasoning: false,
+              context_tokens_cap: null,
+              include_project_info: true,
+              checkpoints_enabled: true,
+              is_title_generated: false,
+            },
+            runtime: {
+              state: "idle",
+              paused: false,
+              error: null,
+              queue_size: 0,
+              pause_reasons: [],
+              queued_items: [],
+            },
+            messages: [],
+            background_agents: [],
+          })}\n\n`,
+        ),
+      );
+      await Promise.resolve();
+    });
     expect(store.getState().connection.sseConnections["chat-a"]?.status).toBe(
       "connected",
     );
@@ -318,12 +416,12 @@ it("hands hidden status to sidebar and ignores callbacks from retired attempts",
   const callbacks: Parameters<
     typeof chatSubscription.subscribeToChatEvents
   >[2][] = [];
-  vi.spyOn(chatSubscription, "subscribeToChatEvents").mockImplementation(
-    (_id, _config, handlers) => {
+  vi.spyOn(chatSubscription, "createChatEventMultiplexer").mockReturnValue({
+    subscribe: (_id, handlers) => {
       callbacks.push(handlers);
       return () => undefined;
     },
-  );
+  });
   const store = createSubscriptionStore();
   store.dispatch(newChatAction(undefined));
   const chatId = store.getState().chat.current_thread_id;

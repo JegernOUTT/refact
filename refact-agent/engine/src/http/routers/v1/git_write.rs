@@ -701,7 +701,10 @@ pub async fn handle_v1_git_commit_v2(
             if plan.paths.is_empty() {
                 return Err(bad_request("None of the selected paths can be committed"));
             }
-            return Ok(CommitRoute::InProgress { plan, hooks });
+            return Ok(CommitRoute::InProgress {
+                plan,
+                hooks,
+            });
         }
         require_signature(&repository)?;
         if amend && head_commit(&repository)?.is_none() {
@@ -716,21 +719,28 @@ pub async fn handle_v1_git_commit_v2(
             if prepared.unchanged && !amend {
                 return Err(nothing_to_commit());
             }
-            return Ok(CommitRoute::Cli { plan, hooks });
+            return Ok(CommitRoute::Cli {
+                plan,
+                hooks,
+            });
         }
         commit_with_git2(&repository, &root, &blocking_message, plan, amend).map(CommitRoute::Done)
     })
     .await?;
     match route {
         CommitRoute::Done(response) => Ok(Json(response)),
-        CommitRoute::Cli { plan, hooks } => commit_with_cli(&root, message, plan, amend, hooks)
+        CommitRoute::Cli {
+            plan,
+            hooks,
+        } => commit_with_cli(&root, message, plan, amend, hooks)
             .await
             .map(Json),
-        CommitRoute::InProgress { plan, hooks } => {
-            commit_in_progress_state(&root, message, plan, hooks)
-                .await
-                .map(Json)
-        }
+        CommitRoute::InProgress {
+            plan,
+            hooks,
+        } => commit_in_progress_state(&root, message, plan, hooks)
+            .await
+            .map(Json),
     }
 }
 

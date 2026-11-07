@@ -85,10 +85,14 @@
   min-width: 0;
 }
 
+.rowDot {
+  margin-top: calc((var(--rf-line-2) - var(--rf-space-2)) / 2);
+}
+
 .title {
   overflow: hidden;
   color: var(--rf-color-fg);
-  font: var(--rf-weight-medium) var(--rf-text-2) / var(--rf-line)
+  font: var(--rf-weight-medium) var(--rf-text-2) / var(--rf-line-2)
     var(--rf-font-ui);
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -97,6 +101,7 @@
 .badges {
   display: flex;
   flex-wrap: wrap;
+  align-items: center;
   gap: var(--rf-space-1);
   min-width: 0;
 }

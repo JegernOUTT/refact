@@ -808,6 +808,24 @@ fn make_watcher_event_callback(
     }
 }
 
+pub(crate) async fn recover_file_index_watcher_drops(gcx: Arc<GlobalContext>) {
+    let dropped = gcx
+        .documents_state
+        .file_watcher_dropped_events
+        .load(Ordering::Relaxed);
+    if !gcx.file_index.observe_watcher_drops(dropped) || gcx.shutdown_flag.load(Ordering::Relaxed) {
+        return;
+    }
+    let roots = crate::files_correction::get_unscoped_project_dirs(gcx.clone()).await;
+    if let Some(task) =
+        crate::file_index::spawn_build(gcx.file_index.clone(), roots, gcx.shutdown_flag.clone())
+    {
+        let mut tasks = gcx.documents_state.watch_registration_tasks.lock().unwrap();
+        tasks.retain(|task| !task.is_finished());
+        tasks.push(task);
+    }
+}
+
 async fn run_file_watcher_event_queue(
     gcx_weak: Weak<GlobalContext>,
     mut receiver: mpsc::Receiver<Event>,
@@ -816,8 +834,14 @@ async fn run_file_watcher_event_queue(
         Some(gcx) => gcx.shutdown_flag.clone(),
         None => return,
     };
+    let mut recovery_tick = tokio::time::interval(Duration::from_millis(250));
     loop {
         let event = tokio::select! {
+            _ = recovery_tick.tick() => {
+                let Some(gcx) = gcx_weak.upgrade() else { return; };
+                recover_file_index_watcher_drops(gcx).await;
+                continue;
+            }
             event = receiver.recv() => event,
             _ = wait_for_shutdown_flag(shutdown_flag.clone()) => return,
         };
@@ -1846,11 +1870,15 @@ pub async fn enqueue_all_files_from_workspace_folders(
 ) -> i32 {
     let folders = crate::files_correction::get_unscoped_project_dirs(gcx.clone()).await;
 
-    crate::file_index::spawn_build(
+    if let Some(task) = crate::file_index::spawn_build(
         gcx.file_index.clone(),
         folders.clone(),
         gcx.shutdown_flag.clone(),
-    );
+    ) {
+        let mut tasks = gcx.documents_state.watch_registration_tasks.lock().unwrap();
+        tasks.retain(|task| !task.is_finished());
+        tasks.push(task);
+    }
 
     info!(
         "enqueue_all_files_from_workspace_folders started files search with {} folders",
@@ -2054,7 +2082,7 @@ pub async fn on_did_delete(gcx: Arc<GlobalContext>, path: &PathBuf) {
     if path_is_refact_internal(path) {
         return;
     }
-    gcx.file_index.remove(path);
+    gcx.file_index.refresh(path);
     info!(
         "on_did_delete {}",
         crate::nicer_logs::last_n_chars(&path.to_string_lossy().to_string(), 30)
@@ -2858,6 +2886,32 @@ pub async fn file_watcher_event(event: Event, gcx_weak: Weak<GlobalContext>) {
             Some(gcx) => gcx,
             None => return,
         };
+        // Inventory receives all names, including extensionless files and empty folders,
+        // before the source-code indexing filters. A directory move may contain unseen
+        // descendants: report uncertainty until the next bounded inventory rebuild.
+        for path in &event.paths {
+            gcx.file_index.refresh(path);
+        }
+        if gcx.file_index.state() == crate::file_index::FileIndexState::Degraded
+            || matches!(
+                event.kind,
+                EventKind::Create(_)
+                    | EventKind::Remove(_)
+                    | EventKind::Modify(ModifyKind::Name(_))
+            )
+        {
+            gcx.file_index.mark_degraded();
+            let roots = crate::files_correction::get_unscoped_project_dirs(gcx.clone()).await;
+            if let Some(task) = crate::file_index::spawn_build(
+                gcx.file_index.clone(),
+                roots,
+                gcx.shutdown_flag.clone(),
+            ) {
+                let mut tasks = gcx.documents_state.watch_registration_tasks.lock().unwrap();
+                tasks.retain(|task| !task.is_finished());
+                tasks.push(task);
+            }
+        }
         let maybe_created_dir = match &event.kind {
             EventKind::Create(CreateKind::Folder | CreateKind::Any) => event.paths.first().cloned(),
             EventKind::Modify(ModifyKind::Name(_)) => event.paths.last().cloned(),

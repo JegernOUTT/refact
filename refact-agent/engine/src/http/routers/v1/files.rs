@@ -47,7 +47,7 @@ pub struct TreeEntry {
 
 #[derive(Debug, Serialize)]
 pub struct ResolvedPrivacyZone {
-    name: String,
+    pub(super) name: String,
     send_to: Vec<String>,
     on_shell_read: refact_privacy::ShellBehavior,
 }
@@ -167,11 +167,11 @@ fn clamped_tree_limit(max_entries: Option<usize>) -> usize {
     max_entries.unwrap_or(DEFAULT_MAX_ENTRIES).min(MAX_ENTRIES)
 }
 
-fn hidden_or_heavy_directory(name: &str, is_dir: bool) -> bool {
+pub(super) fn hidden_or_heavy_directory(name: &str, is_dir: bool) -> bool {
     is_dir && (name.starts_with('.') || matches!(name, "node_modules" | "target"))
 }
 
-fn blocklisted_entry(
+pub(super) fn blocklisted_entry(
     indexing: &IndexingEverywhere,
     directory: &Path,
     path: &Path,
@@ -202,16 +202,25 @@ fn sort_entries(entries: &mut [TreeEntry]) {
     });
 }
 
-struct TreePrivacyResolver {
+pub(super) struct TreePrivacyResolver {
     policy: refact_privacy::CompiledPolicy,
     workspace_roots: Vec<PathBuf>,
     worktree_mappings: WorktreePathMappings,
 }
 
 impl TreePrivacyResolver {
-    async fn new(gcx: Arc<GlobalContext>) -> Result<Self, ScratchError> {
+    pub(super) async fn new(gcx: Arc<GlobalContext>) -> Result<Self, ScratchError> {
         crate::privacy::load_privacy_if_needed(gcx.clone()).await;
-        let policy = gcx.privacy_policy_load.read().unwrap().policy.clone();
+        let policy = {
+            let loaded = gcx.privacy_policy_load.read().unwrap();
+            if loaded.error.is_some() {
+                return Err(ScratchError::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Privacy policy unavailable".into(),
+                ));
+            }
+            loaded.policy.clone()
+        };
         let compiled = policy.compile().map_err(|error| {
             ScratchError::new(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -225,7 +234,7 @@ impl TreePrivacyResolver {
         })
     }
 
-    fn zone_for_path(&self, path: &Path) -> ResolvedPrivacyZone {
+    pub(super) fn zone_for_path(&self, path: &Path) -> ResolvedPrivacyZone {
         strictest_zone_for_path(
             &self.policy,
             path,

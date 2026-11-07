@@ -191,7 +191,7 @@ export const trajectoryDelete: HttpHandler = http.delete(
 
 // Chat Session (Stateless Trajectory UI) handlers
 export const chatSessionSubscribe: HttpHandler = http.get(
-  "*/v1/chats/subscribe",
+  /\/v1\/chats\/subscribe(?:-many)?$/,
   () => {
     // Return an SSE stream that immediately closes (no events)
     const encoder = new TextEncoder();

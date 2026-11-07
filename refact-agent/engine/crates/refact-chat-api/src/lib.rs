@@ -442,16 +442,26 @@ pub enum GoalWaitSubject {
 impl GoalWaitSubject {
     pub fn label(&self) -> String {
         match self {
-            GoalWaitSubject::Process { process_id } => format!("process {process_id}"),
-            GoalWaitSubject::Child { agent_id } => format!("child run {agent_id}"),
-            GoalWaitSubject::Event { name } => format!("event {name}"),
-            GoalWaitSubject::Deadline { until_ms } => format!("deadline {until_ms}"),
+            GoalWaitSubject::Process {
+                process_id,
+            } => format!("process {process_id}"),
+            GoalWaitSubject::Child {
+                agent_id,
+            } => format!("child run {agent_id}"),
+            GoalWaitSubject::Event {
+                name,
+            } => format!("event {name}"),
+            GoalWaitSubject::Deadline {
+                until_ms,
+            } => format!("deadline {until_ms}"),
         }
     }
 
     pub fn own_deadline_ms(&self) -> Option<u64> {
         match self {
-            GoalWaitSubject::Deadline { until_ms } => Some(*until_ms),
+            GoalWaitSubject::Deadline {
+                until_ms,
+            } => Some(*until_ms),
             _ => None,
         }
     }
@@ -1457,10 +1467,12 @@ impl QuestionResponse {
             .map(|item| QuestionAnswer {
                 id: item.id.clone(),
                 answer: match &item.value {
-                    QuestionResponseValue::Answered { answer } => answer.clone(),
-                    QuestionResponseValue::Custom { answer } => {
-                        format!("[Custom answer] {answer}").into()
-                    }
+                    QuestionResponseValue::Answered {
+                        answer,
+                    } => answer.clone(),
+                    QuestionResponseValue::Custom {
+                        answer,
+                    } => format!("[Custom answer] {answer}").into(),
                     QuestionResponseValue::Skipped => "[Skipped]".into(),
                 },
             })
@@ -1577,12 +1589,12 @@ pub struct CommandRequest {
 impl CommandRequest {
     pub fn to_queued_item(&self) -> QueuedItem {
         let (command_type, preview, content) = match &self.command {
-            ChatCommand::RecoveryRetry { .. } => {
-                ("recovery_retry".into(), String::new(), String::new())
-            }
-            ChatCommand::RecoveryRetryNow { .. } => {
-                ("recovery_retry_now".into(), String::new(), String::new())
-            }
+            ChatCommand::RecoveryRetry {
+                ..
+            } => ("recovery_retry".into(), String::new(), String::new()),
+            ChatCommand::RecoveryRetryNow {
+                ..
+            } => ("recovery_retry_now".into(), String::new(), String::new()),
             ChatCommand::UserMessage {
                 content,
                 context_files,
@@ -1595,12 +1607,18 @@ impl CommandRequest {
                 }
                 ("user_message".to_string(), preview, full)
             }
-            ChatCommand::RetryFromIndex { content, index, .. } => (
+            ChatCommand::RetryFromIndex {
+                content,
+                index,
+                ..
+            } => (
                 "retry_from_index".to_string(),
                 format!("@{}: {}", index, extract_preview(content)),
                 String::new(),
             ),
-            ChatCommand::SetParams { patch } => {
+            ChatCommand::SetParams {
+                patch,
+            } => {
                 let model = patch.get("model").and_then(|v| v.as_str()).unwrap_or("");
                 (
                     "set_params".to_string(),
@@ -1608,23 +1626,28 @@ impl CommandRequest {
                     String::new(),
                 )
             }
-            ChatCommand::SetGoal { content, .. } => {
-                ("set_goal".to_string(), content.clone(), content.clone())
-            }
-            ChatCommand::SetGoalBudget { .. } => {
-                ("set_goal_budget".to_string(), String::new(), String::new())
-            }
-            ChatCommand::UpdateGoal { note, plan } => {
+            ChatCommand::SetGoal {
+                content, ..
+            } => ("set_goal".to_string(), content.clone(), content.clone()),
+            ChatCommand::SetGoalBudget {
+                ..
+            } => ("set_goal_budget".to_string(), String::new(), String::new()),
+            ChatCommand::UpdateGoal {
+                note,
+                plan,
+            } => {
                 let text = note
                     .clone()
                     .unwrap_or_else(|| serde_json::to_string(plan).unwrap_or_default());
                 ("update_goal".to_string(), text.clone(), text)
             }
-            ChatCommand::GoalControl { action } => {
-                ("goal_control".to_string(), action.clone(), String::new())
-            }
+            ChatCommand::GoalControl {
+                action,
+            } => ("goal_control".to_string(), action.clone(), String::new()),
             ChatCommand::Abort {} => ("abort".to_string(), String::new(), String::new()),
-            ChatCommand::SubmitQuestionResponse { tool_call_id, .. } => (
+            ChatCommand::SubmitQuestionResponse {
+                tool_call_id, ..
+            } => (
                 "submit_question_response".into(),
                 format!("Response to {tool_call_id}"),
                 String::new(),
@@ -1638,7 +1661,9 @@ impl CommandRequest {
                 format!("{} answers", answers.len()),
                 tool_call_id.clone(),
             ),
-            ChatCommand::CleanBackgroundProcesses { include_services } => (
+            ChatCommand::CleanBackgroundProcesses {
+                include_services,
+            } => (
                 "clean_background_processes".to_string(),
                 format!("include_services={include_services}"),
                 String::new(),
@@ -1651,45 +1676,60 @@ impl CommandRequest {
                 format!("{}: {}", tool_call_id, accepted),
                 String::new(),
             ),
-            ChatCommand::ToolDecisions { decisions } => (
+            ChatCommand::ToolDecisions {
+                decisions,
+            } => (
                 "tool_decisions".to_string(),
                 format!("{} decisions", decisions.len()),
                 String::new(),
             ),
-            ChatCommand::IdeToolResult { tool_call_id, .. } => (
+            ChatCommand::IdeToolResult {
+                tool_call_id, ..
+            } => (
                 "ide_tool_result".to_string(),
                 tool_call_id.clone(),
                 String::new(),
             ),
-            ChatCommand::UpdateMessage { message_id, .. } => (
+            ChatCommand::UpdateMessage {
+                message_id, ..
+            } => (
                 "update_message".to_string(),
                 message_id.clone(),
                 String::new(),
             ),
-            ChatCommand::RemoveMessage { message_id, .. } => (
+            ChatCommand::RemoveMessage {
+                message_id, ..
+            } => (
                 "remove_message".to_string(),
                 message_id.clone(),
                 String::new(),
             ),
             ChatCommand::Regenerate {} => ("regenerate".to_string(), String::new(), String::new()),
-            ChatCommand::RestoreMessages { messages } => (
+            ChatCommand::RestoreMessages {
+                messages,
+            } => (
                 "restore_messages".to_string(),
                 format!("{} messages", messages.len()),
                 String::new(),
             ),
-            ChatCommand::BranchFromChat { source_chat_id, .. } => (
+            ChatCommand::BranchFromChat {
+                source_chat_id, ..
+            } => (
                 "branch_from_chat".to_string(),
                 source_chat_id.clone(),
                 String::new(),
             ),
             ChatCommand::BrowserContextDecision {
-                pending_message_id, ..
+                pending_message_id,
+                ..
             } => (
                 "browser_context_decision".to_string(),
                 pending_message_id.clone(),
                 String::new(),
             ),
-            ChatCommand::DeliverMessages { delivery } => {
+            ChatCommand::DeliverMessages {
+                delivery,
+            } => {
                 return QueuedItem::from_pending_delivery(delivery);
             }
             ChatCommand::UpdatePendingDelivery {
@@ -1971,7 +2011,12 @@ mod tests {
             assert_eq!(restored, goal);
         }
 
-        let deadline_only = GoalWait::new(GoalWaitSubject::Deadline { until_ms: 5_000 }, None);
+        let deadline_only = GoalWait::new(
+            GoalWaitSubject::Deadline {
+                until_ms: 5_000,
+            },
+            None,
+        );
         assert_eq!(deadline_only.deadline_ms, Some(5_000));
         assert!(!deadline_only.expired_at(4_999));
         assert!(deadline_only.expired_at(5_000));
@@ -2400,7 +2445,9 @@ mod tests {
             serde_json::from_str(r#"{"type":"set_goal","content":"ship"}"#).unwrap();
         match cmd {
             ChatCommand::SetGoal {
-                content, budget, ..
+                content,
+                budget,
+                ..
             } => {
                 assert_eq!(content, "ship");
                 assert_eq!(budget, None);
@@ -2447,7 +2494,9 @@ mod tests {
 
         let roundtrip: CommandRequest = serde_json::from_value(json).unwrap();
         match roundtrip.command {
-            ChatCommand::SetGoalBudget { budget: parsed } => assert_eq!(parsed, budget),
+            ChatCommand::SetGoalBudget {
+                budget: parsed,
+            } => assert_eq!(parsed, budget),
             other => panic!("expected SetGoalBudget, got {other:?}"),
         }
 
