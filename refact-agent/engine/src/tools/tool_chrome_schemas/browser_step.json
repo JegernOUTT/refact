@@ -964,6 +964,45 @@
     "prompt_text": {
       "type": "string"
     },
-    "handler": {}
+    "handler": {},
+    "include_frames": {
+      "type": "boolean"
+    },
+    "max_frame_depth": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 8
+    },
+    "regex": {
+      "type": "boolean"
+    },
+    "case_sensitive": {
+      "type": "boolean"
+    },
+    "subtree": {
+      "type": "string",
+      "description": "Live snapshot ref to scope search"
+    },
+    "max_results": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 200
+    },
+    "url_contains": {
+      "type": "string",
+      "maxLength": 4096
+    },
+    "request_id": {
+      "type": "string",
+      "maxLength": 256
+    },
+    "include_body": {
+      "type": "boolean",
+      "description": "JSON-only redacted response, maximum 64 KiB; unsupported or unbounded bodies fail closed"
+    },
+    "expected_session_id": {
+      "type": "string",
+      "maxLength": 128
+    }
   }
 }

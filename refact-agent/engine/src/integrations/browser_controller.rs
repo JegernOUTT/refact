@@ -2852,6 +2852,16 @@ pub async fn execute_request_with_runtime_validated(
     )
     .await
     .map_err(|_| "Browser deadline exceeded during upload validation".to_string())??;
+    // Named sessions never enter chat-default reconnect or replacement lookup.
+    if matches!(request.session, SessionPolicy::Named(_)) {
+        return execute_request_with_runtime_before_deadline(
+            runtime_arc,
+            request,
+            image_policy,
+            deadline,
+        )
+        .await;
+    }
     let plan = {
         let rt = lock_browser_before(&runtime_arc, deadline).await?;
         rt.attached_chat_id()
@@ -3104,9 +3114,18 @@ async fn lock_browser_before<'a>(
     if Instant::now() >= deadline {
         return Err("Browser execution deadline exceeded; no further action was dispatched".into());
     }
-    tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), runtime.lock())
+    let runtime = tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), runtime.lock())
         .await
-        .map_err(|_| "Browser execution deadline exceeded while waiting for runtime; no further action was dispatched".to_string())
+        .map_err(|_| "Browser execution deadline exceeded while waiting for runtime; no further action was dispatched".to_string())?;
+    // Close invalidates ownership before waiting for this mutex. A request that queued
+    // behind another operation must not dispatch using its earlier successful resolve.
+    if !runtime.ownership.is_current_generation() {
+        return Err(
+            "Browser session closed or generation replaced; no further action was dispatched"
+                .into(),
+        );
+    }
+    Ok(runtime)
 }
 
 fn browser_block_in_place<T>(deadline: Instant, execute: impl FnOnce() -> T) -> T {
@@ -3144,12 +3163,6 @@ async fn execute_request_with_runtime_before_deadline(
         )
     };
     let settings = browser_settings::current();
-    if request.session != SessionPolicy::SharedDefault {
-        return Err(format!(
-            "Unsupported browser session policy: {:?}",
-            request.session
-        ));
-    }
     {
         let mut rt = lock_browser_before(&runtime_arc, deadline).await?;
         rt.touch();
@@ -3326,7 +3339,15 @@ async fn execute_request_with_runtime_before_deadline(
             .as_deref()
             .filter(|_| step_needs_live_document(step))
             .map(crate::integrations::browser_runtime::recovery_fence_error);
-        let mut result = if let Some(error) = fenced {
+        let touch_error = if matches!(step, BrowserStep::Tap { .. }) {
+            let rt = runtime_before!();
+            tap_context_error(&rt.context_state, rt.context_state_dirty)
+        } else {
+            None
+        };
+        let mut result = if let Some(error) = touch_error {
+            StepResult::failure(idx, "Tap configuration incompatible", error)
+        } else if let Some(error) = fenced {
             StepResult::failure(idx, "Browser page was lost", error)
         } else if let BrowserStep::WaitForPopup {
             timeout_ms,
@@ -3564,6 +3585,12 @@ async fn execute_request_with_runtime_before_deadline(
                 }
                 Err(error) => StepResult::failure(idx, "HTTP request", error),
             }
+        } else if matches!(
+            step,
+            BrowserStep::NetworkRequests { .. } | BrowserStep::NetworkRequest { .. }
+        ) {
+            let rt = runtime_before!();
+            browser_block_in_place(deadline, || execute_network_inspection(&rt, step, idx))
         } else if is_instrumentation_step(step) {
             let mut rt = runtime_before!();
             browser_block_in_place(deadline, || {
@@ -4183,392 +4210,416 @@ pub fn execute_steps_with_runtime(
 
     for (idx, step) in steps.iter().enumerate() {
         let step_tab_ids = runtime.known_tab_ids();
-        let mut result = match step {
-            BrowserStep::OpenTab {
-                device,
-                url,
-            } => match open_tab_for_device(runtime, device) {
-                Ok((descriptor, new_tab)) => {
-                    let device_label = descriptor.name.clone();
-                    let target_id = new_tab.get_target_id().to_string();
-                    let mut candidate = runtime.context_state.clone();
-                    candidate.viewport = Some(descriptor.viewport.clone());
-                    candidate.user_agent = Some((descriptor.user_agent.clone(), None));
-                    if let Err(error) = apply_context_to_tabs(runtime, &candidate) {
-                        runtime.context_state_dirty = true;
-                        let _ = new_tab.close(false);
-                        all_ok = false;
-                        results.push(StepResult::failure(
-                            idx,
-                            "OpenTab configuration partially applied",
-                            error,
-                        ));
-                        break;
-                    }
-                    runtime.context_state = candidate;
-                    if let Err(error) =
-                        crate::integrations::browser_runtime::setup_recording_for_tab(
-                            runtime,
-                            new_tab.clone(),
-                        )
-                    {
-                        let _ = new_tab.close(false);
-                        all_ok = false;
-                        results.push(StepResult::failure(idx, "OpenTab", error));
-                        break;
-                    }
-                    let navigation = url.as_ref().map(|url| {
-                        run_and_wait_for_navigation(
-                            &new_tab,
-                            settings.timing.default_wait_timeout_ms,
-                            || trigger_page_navigation(&new_tab, url),
-                        )
-                    });
-                    let _ = new_tab.evaluate(INSPECT_ELEMENT_JS, false);
-                    current_tab = Some(new_tab);
-                    runtime.set_active_tab_target_id(target_id.clone());
-                    match navigation.transpose() {
-                        Err(error) => StepResult::failure(idx, "OpenTab", error),
-                        Ok(warning) => merge_step_data(
-                            navigation_step_success(
+        let mut result = if matches!(step, BrowserStep::Tap { .. })
+            && tap_context_error(&runtime.context_state, runtime.context_state_dirty).is_some()
+        {
+            StepResult::failure(
+                idx,
+                "Tap configuration incompatible",
+                tap_context_error(&runtime.context_state, runtime.context_state_dirty).unwrap(),
+            )
+        } else {
+            match step {
+                BrowserStep::OpenTab {
+                    device,
+                    url,
+                } => match open_tab_for_device(runtime, device) {
+                    Ok((descriptor, new_tab)) => {
+                        let device_label = descriptor.name.clone();
+                        let target_id = new_tab.get_target_id().to_string();
+                        let mut candidate = runtime.context_state.clone();
+                        candidate.viewport = Some(descriptor.viewport.clone());
+                        candidate.user_agent = Some((descriptor.user_agent.clone(), None));
+                        if let Err(error) = apply_context_to_tabs(runtime, &candidate) {
+                            runtime.context_state_dirty = true;
+                            let _ = new_tab.close(false);
+                            all_ok = false;
+                            results.push(StepResult::failure(
                                 idx,
-                                format!(
-                                    "Opened new {} tab ({})",
-                                    device_label,
-                                    &target_id[..8.min(target_id.len())]
+                                "OpenTab configuration partially applied",
+                                error,
+                            ));
+                            break;
+                        }
+                        runtime.context_state = candidate;
+                        if let Err(error) =
+                            crate::integrations::browser_runtime::setup_recording_for_tab(
+                                runtime,
+                                new_tab.clone(),
+                            )
+                        {
+                            let _ = new_tab.close(false);
+                            all_ok = false;
+                            results.push(StepResult::failure(idx, "OpenTab", error));
+                            break;
+                        }
+                        let navigation = url.as_ref().map(|url| {
+                            run_and_wait_for_navigation(
+                                &new_tab,
+                                settings.timing.default_wait_timeout_ms,
+                                || trigger_page_navigation(&new_tab, url),
+                            )
+                        });
+                        let _ = new_tab.evaluate(INSPECT_ELEMENT_JS, false);
+                        current_tab = Some(new_tab);
+                        runtime.set_active_tab_target_id(target_id.clone());
+                        match navigation.transpose() {
+                            Err(error) => StepResult::failure(idx, "OpenTab", error),
+                            Ok(warning) => merge_step_data(
+                                navigation_step_success(
+                                    idx,
+                                    format!(
+                                        "Opened new {} tab ({})",
+                                        device_label,
+                                        &target_id[..8.min(target_id.len())]
+                                    ),
+                                    warning.flatten(),
                                 ),
-                                warning.flatten(),
+                                serde_json::json!({"tab_id": target_id}),
                             ),
-                            serde_json::json!({"tab_id": target_id}),
+                        }
+                    }
+                    Err(error) => StepResult::failure(idx, "OpenTab", error),
+                },
+                BrowserStep::CloseTab {
+                    tab: target,
+                } => {
+                    let tab = match target {
+                        Some(target) => match resolve_tab(runtime, target) {
+                            Ok(tab) => tab,
+                            Err(error) => {
+                                all_ok = false;
+                                results.push(StepResult::failure(idx, "CloseTab", error));
+                                break;
+                            }
+                        },
+                        None => match &current_tab {
+                            Some(tab) => tab.clone(),
+                            None => {
+                                all_ok = false;
+                                results.push(StepResult::failure(idx, "CloseTab", "No active tab"));
+                                break;
+                            }
+                        },
+                    };
+                    let target_id = tab.get_target_id().to_string();
+                    match tab.close(false) {
+                        Ok(_) => {
+                            runtime.world_manager.tab_closed(&target_id);
+                            runtime.mouse_states.remove(&target_id);
+                            runtime.select_tab_after_close(&target_id);
+                            current_tab = runtime.get_active_tab();
+                            StepResult::success(
+                                idx,
+                                format!("Closed tab {}", &target_id[..8.min(target_id.len())]),
+                            )
+                        }
+                        Err(e) => StepResult::failure(idx, "CloseTab", &format!("Failed: {}", e)),
+                    }
+                }
+                BrowserStep::SwitchTab {
+                    tab: tab_target,
+                } => {
+                    let tabs = runtime
+                        .browser
+                        .get_tabs()
+                        .lock()
+                        .map(|t| t.clone())
+                        .unwrap_or_default();
+                    let target_str = match tab_target {
+                        TabTarget::Active => String::from("active"),
+                        TabTarget::Id {
+                            id,
+                        } => id.clone(),
+                    };
+                    let found = match tab_target {
+                        TabTarget::Active => {
+                            runtime.get_active_tab().or_else(|| tabs.first().cloned())
+                        }
+                        TabTarget::Id {
+                            id,
+                        } => tabs
+                            .iter()
+                            .find(|t| t.get_target_id() == id.as_str())
+                            .cloned(),
+                    };
+                    match found {
+                        Some(found_tab) => {
+                            runtime.set_active_tab_target_id(found_tab.get_target_id().to_string());
+                            let _ = found_tab.evaluate(INSPECT_ELEMENT_JS, false);
+                            current_tab = Some(found_tab.clone());
+                            StepResult::success(
+                                idx,
+                                format!("Switched to tab {} ({})", target_str, found_tab.get_url()),
+                            )
+                        }
+                        None => StepResult::failure(
+                            idx,
+                            "SwitchTab",
+                            format!("No tab matching '{}'", target_str),
                         ),
                     }
                 }
-                Err(error) => StepResult::failure(idx, "OpenTab", error),
-            },
-            BrowserStep::CloseTab {
-                tab: target,
-            } => {
-                let tab = match target {
-                    Some(target) => match resolve_tab(runtime, target) {
-                        Ok(tab) => tab,
-                        Err(error) => {
-                            all_ok = false;
-                            results.push(StepResult::failure(idx, "CloseTab", error));
-                            break;
-                        }
-                    },
-                    None => match &current_tab {
-                        Some(tab) => tab.clone(),
-                        None => {
-                            all_ok = false;
-                            results.push(StepResult::failure(idx, "CloseTab", "No active tab"));
-                            break;
-                        }
-                    },
-                };
-                let target_id = tab.get_target_id().to_string();
-                match tab.close(false) {
-                    Ok(_) => {
-                        runtime.world_manager.tab_closed(&target_id);
-                        runtime.mouse_states.remove(&target_id);
-                        runtime.select_tab_after_close(&target_id);
-                        current_tab = runtime.get_active_tab();
-                        StepResult::success(
-                            idx,
-                            format!("Closed tab {}", &target_id[..8.min(target_id.len())]),
-                        )
-                    }
-                    Err(e) => StepResult::failure(idx, "CloseTab", &format!("Failed: {}", e)),
+                BrowserStep::ListTabs => {
+                    let tab_list = runtime
+                        .list_tab_infos()
+                        .into_iter()
+                        .map(|tab| serde_json::to_value(tab).unwrap_or_default())
+                        .collect::<Vec<_>>();
+                    StepResult::success(idx, format!("Listed {} tabs", tab_list.len()))
+                        .with_data(serde_json::json!({"tabs": tab_list}))
                 }
-            }
-            BrowserStep::SwitchTab {
-                tab: tab_target,
-            } => {
-                let tabs = runtime
-                    .browser
-                    .get_tabs()
-                    .lock()
-                    .map(|t| t.clone())
-                    .unwrap_or_default();
-                let target_str = match tab_target {
-                    TabTarget::Active => String::from("active"),
-                    TabTarget::Id {
-                        id,
-                    } => id.clone(),
-                };
-                let found = match tab_target {
-                    TabTarget::Active => runtime.get_active_tab().or_else(|| tabs.first().cloned()),
-                    TabTarget::Id {
-                        id,
-                    } => tabs
-                        .iter()
-                        .find(|t| t.get_target_id() == id.as_str())
-                        .cloned(),
-                };
-                match found {
-                    Some(found_tab) => {
-                        runtime.set_active_tab_target_id(found_tab.get_target_id().to_string());
-                        let _ = found_tab.evaluate(INSPECT_ELEMENT_JS, false);
-                        current_tab = Some(found_tab.clone());
-                        StepResult::success(
+                step @ (BrowserStep::Route {
+                    ..
+                }
+                | BrowserStep::Unroute {
+                    ..
+                }
+                | BrowserStep::ListRoutes
+                | BrowserStep::RouteWebSocket {
+                    ..
+                }
+                | BrowserStep::UnrouteWebSocket {
+                    ..
+                }
+                | BrowserStep::SendWebSocketMessage {
+                    ..
+                }
+                | BrowserStep::CloseWebSocket {
+                    ..
+                }
+                | BrowserStep::StartHarRecording {
+                    ..
+                }
+                | BrowserStep::StopHarRecording
+                | BrowserStep::RouteFromHar {
+                    ..
+                }) => execute_route_management_step(runtime, step, idx).unwrap(),
+                BrowserStep::Reset => execute_reset_step(runtime, idx),
+                BrowserStep::CdpSend {
+                    method,
+                    params,
+                    target,
+                } => execute_cdp_send_step(runtime, method, params.as_ref(), *target, idx),
+                step if is_screencast_step(step) => {
+                    execute_screencast_step(runtime, step, idx, image_policy)
+                }
+                BrowserStep::SetWindowBounds {
+                    x,
+                    y,
+                    width,
+                    height,
+                } => execute_set_window_bounds_step(runtime, *x, *y, *width, *height, idx),
+                BrowserStep::HttpRequest {
+                    options,
+                } => tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current()
+                        .block_on(execute_http_request_step(runtime, options, idx))
+                }),
+                step @ (BrowserStep::NetworkRequests {
+                    ..
+                }
+                | BrowserStep::NetworkRequest {
+                    ..
+                }) => execute_network_inspection(runtime, step, idx),
+                step if is_instrumentation_step(step) => {
+                    execute_instrumentation_step(runtime, step, idx)
+                }
+                step if is_context_management_step(step) => {
+                    execute_context_management_step(runtime, step, idx)
+                }
+                BrowserStep::WaitForPopup {
+                    timeout_ms,
+                } => {
+                    match popup_wait_conflict(
+                        pending_popup_wait.as_ref().map(|wait| wait.step_index),
+                    ) {
+                        Some(error) => StepResult::failure(idx, "Wait for popup", error),
+                        None => {
+                            pending_popup_wait = Some(PendingPopupWait::arm(
+                                idx,
+                                results.len(),
+                                *timeout_ms,
+                                runtime.known_tab_ids(),
+                            ));
+                            StepResult::success(idx, "Armed popup wait")
+                        }
+                    }
+                }
+                BrowserStep::WaitForNetworkIdle {
+                    timeout_ms,
+                } => wait_for_network_idle_step(
+                    &runtime.network_monitor,
+                    idx,
+                    clamp_timeout_ms(*timeout_ms),
+                ),
+                BrowserStep::HandleDialog {
+                    accept,
+                    prompt_text,
+                } => match runtime.dialog_manager.arm(*accept, prompt_text.clone()) {
+                    Ok(()) => StepResult::success(
+                        idx,
+                        if *accept {
+                            "Armed acceptance for the next dialog"
+                        } else {
+                            "Armed dismissal for the next dialog"
+                        },
+                    ),
+                    Err(error) => StepResult::failure(idx, "HandleDialog", error),
+                },
+                BrowserStep::ExpectFileChooser {
+                    paths,
+                } => {
+                    let Some(tab) = &current_tab else {
+                        all_ok = false;
+                        results.push(StepResult::failure(
                             idx,
-                            format!("Switched to tab {} ({})", target_str, found_tab.get_url()),
-                        )
+                            "Expect file chooser",
+                            "No active tab",
+                        ));
+                        break;
+                    };
+                    match runtime.file_chooser_manager.arm(paths).and_then(|_| {
+                        tab.set_file_chooser_dialog_interception(true, None)
+                            .map_err(|error| error.to_string())
+                    }) {
+                        Ok(()) => StepResult::success(idx, "Armed the next file chooser"),
+                        Err(error) => {
+                            runtime.file_chooser_manager.disarm();
+                            StepResult::failure(idx, "Expect file chooser", error)
+                        }
+                    }
+                }
+                BrowserStep::WaitForDownload {
+                    timeout_ms,
+                    save_as,
+                } => download_step_result(
+                    idx,
+                    runtime.download_monitor.wait_for_download(
+                        armed_download_waits
+                            .get(&idx)
+                            .copied()
+                            .unwrap_or_else(|| runtime.download_monitor.cursor()),
+                        Duration::from_millis(clamp_timeout_ms(*timeout_ms)),
+                        save_as.as_deref(),
+                    ),
+                ),
+                BrowserStep::CancelDownload {
+                    id,
+                } => cancel_download_step_result(
+                    idx,
+                    runtime.download_monitor.cancel_download(id.as_deref()),
+                ),
+                BrowserStep::Pdf {
+                    options,
+                } => match &current_tab {
+                    Some(tab) => runtime.get_store().map_or_else(
+                        |error| StepResult::failure(idx, "PDF artifact store", error),
+                        |store| step_pdf(tab, idx, options, &store),
+                    ),
+                    None => StepResult::failure(idx, "PDF", "No active tab"),
+                },
+                BrowserStep::PageContent => match &current_tab {
+                    Some(tab) => runtime.get_store().map_or_else(
+                        |error| StepResult::failure(idx, "Page artifact store", error),
+                        |store| step_page_content(tab, idx, &store),
+                    ),
+                    None => StepResult::failure(idx, "Page content", "No active tab"),
+                },
+                BrowserStep::ReadArtifact {
+                    id,
+                    offset,
+                    limit,
+                } => read_artifact_step(runtime, idx, id, *offset, *limit),
+                BrowserStep::TabLog => {
+                    runtime.drain_raw_events();
+                    tab_log_from_buffer(idx, &runtime.console_buffer)
+                }
+                BrowserStep::AddInitScript {
+                    ..
+                }
+                | BrowserStep::RemoveInitScript {
+                    ..
+                } => execute_init_script_step(runtime, step, idx),
+                BrowserStep::Help {
+                    topic,
+                } => StepResult::success(idx, "chrome help").with_data(serde_json::json!({
+                    "text": crate::tools::tool_chrome::chrome_help_text(topic.as_deref()),
+                })),
+                other => match &current_tab {
+                    Some(tab) => {
+                        let chooser_was_armed = runtime.file_chooser_manager.is_armed();
+                        let world = runtime.world_manager.clone();
+                        let mut result = execute_single_step(
+                            tab,
+                            &world,
+                            other,
+                            idx,
+                            pre_step_url.as_deref(),
+                            image_policy,
+                            Some(&handlers),
+                            &mut locator_handlers,
+                            runtime
+                                .mouse_states
+                                .entry(tab.get_target_id().to_string())
+                                .or_default(),
+                        );
+                        if chooser_was_armed && matches!(other, BrowserStep::Click { .. }) {
+                            if result.ok {
+                                let completed = runtime.file_chooser_manager.complete(
+                                    tab,
+                                    Duration::from_millis(settings.timing.default_wait_timeout_ms),
+                                );
+                                let _ = tab.set_file_chooser_dialog_interception(false, None);
+                                result = match completed {
+                                    Ok(upload) => {
+                                        let mut completed = StepResult::success(
+                                            idx,
+                                            format!(
+                                                "Selected {} file(s) from file chooser",
+                                                upload.paths.len()
+                                            ),
+                                        )
+                                        .with_data(
+                                            serde_json::to_value(upload).unwrap_or_default(),
+                                        );
+                                        completed.retries = result.retries;
+                                        completed.actionability = result.actionability;
+                                        completed
+                                    }
+                                    Err(error) => {
+                                        StepResult::failure(idx, "File chooser failed", error)
+                                    }
+                                };
+                            } else {
+                                runtime.file_chooser_manager.disarm();
+                                let _ = tab.set_file_chooser_dialog_interception(false, None);
+                            }
+                        }
+                        if result.ok && matches!(other, BrowserStep::SetInputFiles { .. }) {
+                            if let Some(data) = result.data.clone() {
+                                if let Ok(upload) = serde_json::from_value(data) {
+                                    runtime.file_chooser_manager.record(upload);
+                                }
+                            }
+                        }
+                        if result.ok && is_image_capture_step(other) {
+                            result = match runtime.get_store() {
+                                Ok(store) => persist_image_artifact(result, &store),
+                                Err(error) => {
+                                    StepResult::failure(idx, "Image artifact store", error)
+                                }
+                            };
+                        }
+                        result
                     }
                     None => StepResult::failure(
                         idx,
-                        "SwitchTab",
-                        format!("No tab matching '{}'", target_str),
-                    ),
-                }
-            }
-            BrowserStep::ListTabs => {
-                let tab_list = runtime
-                    .list_tab_infos()
-                    .into_iter()
-                    .map(|tab| serde_json::to_value(tab).unwrap_or_default())
-                    .collect::<Vec<_>>();
-                StepResult::success(idx, format!("Listed {} tabs", tab_list.len()))
-                    .with_data(serde_json::json!({"tabs": tab_list}))
-            }
-            step @ (BrowserStep::Route {
-                ..
-            }
-            | BrowserStep::Unroute {
-                ..
-            }
-            | BrowserStep::ListRoutes
-            | BrowserStep::RouteWebSocket {
-                ..
-            }
-            | BrowserStep::UnrouteWebSocket {
-                ..
-            }
-            | BrowserStep::SendWebSocketMessage {
-                ..
-            }
-            | BrowserStep::CloseWebSocket {
-                ..
-            }
-            | BrowserStep::StartHarRecording {
-                ..
-            }
-            | BrowserStep::StopHarRecording
-            | BrowserStep::RouteFromHar {
-                ..
-            }) => execute_route_management_step(runtime, step, idx).unwrap(),
-            BrowserStep::Reset => execute_reset_step(runtime, idx),
-            BrowserStep::CdpSend {
-                method,
-                params,
-                target,
-            } => execute_cdp_send_step(runtime, method, params.as_ref(), *target, idx),
-            step if is_screencast_step(step) => {
-                execute_screencast_step(runtime, step, idx, image_policy)
-            }
-            BrowserStep::SetWindowBounds {
-                x,
-                y,
-                width,
-                height,
-            } => execute_set_window_bounds_step(runtime, *x, *y, *width, *height, idx),
-            BrowserStep::HttpRequest {
-                options,
-            } => tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current()
-                    .block_on(execute_http_request_step(runtime, options, idx))
-            }),
-            step if is_instrumentation_step(step) => {
-                execute_instrumentation_step(runtime, step, idx)
-            }
-            step if is_context_management_step(step) => {
-                execute_context_management_step(runtime, step, idx)
-            }
-            BrowserStep::WaitForPopup {
-                timeout_ms,
-            } => {
-                match popup_wait_conflict(pending_popup_wait.as_ref().map(|wait| wait.step_index)) {
-                    Some(error) => StepResult::failure(idx, "Wait for popup", error),
-                    None => {
-                        pending_popup_wait = Some(PendingPopupWait::arm(
-                            idx,
-                            results.len(),
-                            *timeout_ms,
-                            runtime.known_tab_ids(),
-                        ));
-                        StepResult::success(idx, "Armed popup wait")
-                    }
-                }
-            }
-            BrowserStep::WaitForNetworkIdle {
-                timeout_ms,
-            } => wait_for_network_idle_step(
-                &runtime.network_monitor,
-                idx,
-                clamp_timeout_ms(*timeout_ms),
-            ),
-            BrowserStep::HandleDialog {
-                accept,
-                prompt_text,
-            } => match runtime.dialog_manager.arm(*accept, prompt_text.clone()) {
-                Ok(()) => StepResult::success(
-                    idx,
-                    if *accept {
-                        "Armed acceptance for the next dialog"
-                    } else {
-                        "Armed dismissal for the next dialog"
-                    },
-                ),
-                Err(error) => StepResult::failure(idx, "HandleDialog", error),
-            },
-            BrowserStep::ExpectFileChooser {
-                paths,
-            } => {
-                let Some(tab) = &current_tab else {
-                    all_ok = false;
-                    results.push(StepResult::failure(
-                        idx,
-                        "Expect file chooser",
                         "No active tab",
-                    ));
-                    break;
-                };
-                match runtime.file_chooser_manager.arm(paths).and_then(|_| {
-                    tab.set_file_chooser_dialog_interception(true, None)
-                        .map_err(|error| error.to_string())
-                }) {
-                    Ok(()) => StepResult::success(idx, "Armed the next file chooser"),
-                    Err(error) => {
-                        runtime.file_chooser_manager.disarm();
-                        StepResult::failure(idx, "Expect file chooser", error)
-                    }
-                }
+                        "No tab available. Use OpenTab first.",
+                    ),
+                },
             }
-            BrowserStep::WaitForDownload {
-                timeout_ms,
-                save_as,
-            } => download_step_result(
-                idx,
-                runtime.download_monitor.wait_for_download(
-                    armed_download_waits
-                        .get(&idx)
-                        .copied()
-                        .unwrap_or_else(|| runtime.download_monitor.cursor()),
-                    Duration::from_millis(clamp_timeout_ms(*timeout_ms)),
-                    save_as.as_deref(),
-                ),
-            ),
-            BrowserStep::CancelDownload {
-                id,
-            } => cancel_download_step_result(
-                idx,
-                runtime.download_monitor.cancel_download(id.as_deref()),
-            ),
-            BrowserStep::Pdf {
-                options,
-            } => match &current_tab {
-                Some(tab) => runtime.get_store().map_or_else(
-                    |error| StepResult::failure(idx, "PDF artifact store", error),
-                    |store| step_pdf(tab, idx, options, &store),
-                ),
-                None => StepResult::failure(idx, "PDF", "No active tab"),
-            },
-            BrowserStep::PageContent => match &current_tab {
-                Some(tab) => runtime.get_store().map_or_else(
-                    |error| StepResult::failure(idx, "Page artifact store", error),
-                    |store| step_page_content(tab, idx, &store),
-                ),
-                None => StepResult::failure(idx, "Page content", "No active tab"),
-            },
-            BrowserStep::ReadArtifact {
-                id,
-                offset,
-                limit,
-            } => read_artifact_step(runtime, idx, id, *offset, *limit),
-            BrowserStep::TabLog => {
-                runtime.drain_raw_events();
-                tab_log_from_buffer(idx, &runtime.console_buffer)
-            }
-            BrowserStep::AddInitScript {
-                ..
-            }
-            | BrowserStep::RemoveInitScript {
-                ..
-            } => execute_init_script_step(runtime, step, idx),
-            BrowserStep::Help {
-                topic,
-            } => StepResult::success(idx, "chrome help").with_data(serde_json::json!({
-                "text": crate::tools::tool_chrome::chrome_help_text(topic.as_deref()),
-            })),
-            other => match &current_tab {
-                Some(tab) => {
-                    let chooser_was_armed = runtime.file_chooser_manager.is_armed();
-                    let world = runtime.world_manager.clone();
-                    let mut result = execute_single_step(
-                        tab,
-                        &world,
-                        other,
-                        idx,
-                        pre_step_url.as_deref(),
-                        image_policy,
-                        Some(&handlers),
-                        &mut locator_handlers,
-                        runtime
-                            .mouse_states
-                            .entry(tab.get_target_id().to_string())
-                            .or_default(),
-                    );
-                    if chooser_was_armed && matches!(other, BrowserStep::Click { .. }) {
-                        if result.ok {
-                            let completed = runtime.file_chooser_manager.complete(
-                                tab,
-                                Duration::from_millis(settings.timing.default_wait_timeout_ms),
-                            );
-                            let _ = tab.set_file_chooser_dialog_interception(false, None);
-                            result = match completed {
-                                Ok(upload) => {
-                                    let mut completed = StepResult::success(
-                                        idx,
-                                        format!(
-                                            "Selected {} file(s) from file chooser",
-                                            upload.paths.len()
-                                        ),
-                                    )
-                                    .with_data(serde_json::to_value(upload).unwrap_or_default());
-                                    completed.retries = result.retries;
-                                    completed.actionability = result.actionability;
-                                    completed
-                                }
-                                Err(error) => {
-                                    StepResult::failure(idx, "File chooser failed", error)
-                                }
-                            };
-                        } else {
-                            runtime.file_chooser_manager.disarm();
-                            let _ = tab.set_file_chooser_dialog_interception(false, None);
-                        }
-                    }
-                    if result.ok && matches!(other, BrowserStep::SetInputFiles { .. }) {
-                        if let Some(data) = result.data.clone() {
-                            if let Ok(upload) = serde_json::from_value(data) {
-                                runtime.file_chooser_manager.record(upload);
-                            }
-                        }
-                    }
-                    if result.ok && is_image_capture_step(other) {
-                        result = match runtime.get_store() {
-                            Ok(store) => persist_image_artifact(result, &store),
-                            Err(error) => StepResult::failure(idx, "Image artifact store", error),
-                        };
-                    }
-                    result
-                }
-                None => StepResult::failure(
-                    idx,
-                    "No active tab",
-                    "No tab available. Use OpenTab first.",
-                ),
-            },
         };
 
         let resolves_popup_wait = pending_popup_wait.is_some()
@@ -5367,6 +5418,7 @@ fn execute_single_step(
     locator_handler_firings: &mut Vec<LocatorHandlerFiring>,
     mouse_state: &mut MouseState,
 ) -> StepResult {
+    let _step_span = refact_browser::profiling::Span::new(refact_browser::profiling::Stage::Step);
     let settings = browser_settings::current();
     if needs_locator_handler_checkpoint(step) && !uses_actionability_engine(step) {
         if let Some(handlers) = handlers {
@@ -5965,6 +6017,53 @@ fn execute_single_step(
             selector,
             max_chars,
         } => step_dom_snapshot(tab, idx, selector, *max_chars),
+        BrowserStep::CreateSession {
+            ..
+        }
+        | BrowserStep::ListSessions
+        | BrowserStep::CloseSession {
+            ..
+        } => StepResult::failure(
+            idx,
+            "Session lifecycle",
+            "Session lifecycle requires a standalone tool request",
+        ),
+        BrowserStep::SearchSnapshot {
+            pattern,
+            regex,
+            case_sensitive,
+            subtree,
+            max_results,
+            include_frames,
+            max_frame_depth,
+        } => {
+            match world.search_snapshot(
+                tab,
+                refact_browser::SnapshotSearchOptions {
+                    pattern: pattern.clone(),
+                    regex: *regex,
+                    case_sensitive: *case_sensitive,
+                    subtree: subtree.clone(),
+                    max_results: max_results.unwrap_or(50),
+                },
+                *include_frames,
+                max_frame_depth.unwrap_or(2),
+            ) {
+                Ok(result) => StepResult::success(idx, "Snapshot search")
+                    .with_data(serde_json::to_value(result).unwrap_or_default()),
+                Err(error) => StepResult::failure(idx, "Snapshot search failed", error.to_string()),
+            }
+        }
+        BrowserStep::NetworkRequests {
+            ..
+        }
+        | BrowserStep::NetworkRequest {
+            ..
+        } => StepResult::failure(
+            idx,
+            "Network inspection",
+            "Network inspection requires a browser runtime",
+        ),
         BrowserStep::AccessibilitySnapshot {
             options,
         } => step_accessibility_snapshot(tab, world, idx, options),
@@ -8074,6 +8173,41 @@ fn tap_target(
     }
 }
 
+fn tap_context_error(state: &refact_browser::ContextState, dirty: bool) -> Option<&'static str> {
+    if dirty {
+        return Some("Managed context state is unverified after a partial apply; reset before tap");
+    }
+    if !state
+        .viewport
+        .as_ref()
+        .is_some_and(|viewport| viewport.has_touch && viewport.is_mobile)
+    {
+        return Some("tap requires committed mobile touch emulation: set_viewport with has_touch=true and is_mobile=true, or emulate_device; no input was dispatched");
+    }
+    None
+}
+
+#[cfg(test)]
+mod tap_context_tests {
+    use super::*;
+    #[test]
+    fn committed_mobile_touch_is_required_and_partial_state_is_refused() {
+        let mut state = refact_browser::ContextState::default();
+        assert!(tap_context_error(&state, false).is_some());
+        state.viewport = Some(refact_browser::ViewportState {
+            has_touch: true,
+            is_mobile: false,
+            ..Default::default()
+        });
+        assert!(tap_context_error(&state, false).is_some());
+        state.viewport.as_mut().unwrap().is_mobile = true;
+        assert_eq!(tap_context_error(&state, false), None);
+        assert!(tap_context_error(&state, true).is_some());
+        state.viewport.as_mut().unwrap().has_touch = false;
+        assert!(tap_context_error(&state, false).is_some());
+    }
+}
+
 fn touch_emulation_enabled(tab: &Tab) -> bool {
     eval_js_value(
         tab,
@@ -9281,6 +9415,59 @@ fn step_dom_snapshot(
     }
 }
 
+fn execute_network_inspection(
+    runtime: &BrowserRuntime,
+    step: &BrowserStep,
+    idx: usize,
+) -> StepResult {
+    let Some(tab) = runtime.get_active_tab() else {
+        return StepResult::failure(idx, "Network inspection", "No active tab");
+    };
+    let monitor = &runtime.network_monitor;
+    let result: Result<Value, String> = match step {
+        BrowserStep::NetworkRequests {
+            limit,
+            url_contains,
+            method,
+            status,
+        } => {
+            let limit = limit.unwrap_or(50).min(200);
+            let mut entries = monitor.network_requests_for_tab(tab.get_target_id(), 200);
+            entries.retain(|entry| {
+                url_contains
+                    .as_ref()
+                    .is_none_or(|value| entry.url.contains(value))
+                    && method
+                        .as_ref()
+                        .is_none_or(|value| entry.method.eq_ignore_ascii_case(value))
+                    && status.is_none_or(|value| entry.status == Some(value))
+            });
+            let truncated = entries.len() > limit;
+            entries.truncate(limit);
+            Ok(
+                serde_json::json!({"requests": entries, "truncated": truncated, "scope": "current_tab", "retained_window_limit": 200}),
+            )
+        }
+        BrowserStep::NetworkRequest {
+            request_id,
+            include_body,
+        } => monitor
+            .network_request_for_tab(tab.get_target_id(), request_id)
+            .and_then(|entry| {
+                let mut value = serde_json::json!({"request": entry});
+                if *include_body {
+                    value["body"] = Value::String(monitor.network_response_body(&tab, request_id)?);
+                }
+                Ok(value)
+            }),
+        _ => Err("Not a network inspection action".into()),
+    };
+    match result {
+        Ok(data) => StepResult::success(idx, "Network inspection").with_data(data),
+        Err(error) => StepResult::failure(idx, "Network inspection failed", error),
+    }
+}
+
 fn step_accessibility_snapshot(
     tab: &Tab,
     world: &WorldManager,
@@ -9306,6 +9493,8 @@ fn step_accessibility_snapshot(
             AccessibilitySnapshotMode::Ai => SnapshotMode::Ai,
             AccessibilitySnapshotMode::Default => SnapshotMode::Default,
         },
+        include_frames: options.include_frames,
+        max_frame_depth: options.max_frame_depth.unwrap_or(2),
         refs: options.refs_enabled(),
         boxes: options.boxes,
         depth: options.depth,
@@ -9322,13 +9511,21 @@ fn step_accessibility_snapshot(
                 .unwrap_or(settings.capture.default_aria_snapshot_chars)
                 .min(settings.capture.max_aria_snapshot_chars);
             let frames = frames_for_snapshot(tab, &snapshot.yaml);
+            let child_frames = snapshot.frames.clone();
+            let snapshot_warnings = snapshot.warnings.clone();
+            let root_frame_id = snapshot.root_frame_id.clone();
             snapshot.yaml = truncate_chars(snapshot.yaml, limit);
             let generation = snapshot
                 .generation
                 .as_ref()
                 .map(|generation| (generation.document_generation, generation.frame_generation));
             let mut data = accessibility_snapshot_data(snapshot.yaml, generation);
-            if !frames.is_empty() {
+            data["root_frame_id"] = serde_json::to_value(root_frame_id).unwrap_or_default();
+            data["warnings"] = serde_json::to_value(snapshot_warnings).unwrap_or_default();
+            if options.include_frames {
+                data["frames"] = serde_json::to_value(child_frames).unwrap_or_default();
+            }
+            if !options.include_frames && !frames.is_empty() {
                 if let Some(object) = data.as_object_mut() {
                     object.insert(
                         "frames".to_string(),

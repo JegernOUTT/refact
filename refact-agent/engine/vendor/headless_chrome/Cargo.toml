@@ -71,6 +71,10 @@ optional = true
 [dependencies.log]
 version = "0.4.32"
 
+[dependencies.mio]
+version = "1.2.4"
+features = ["os-poll", "net"]
+
 [dependencies.rand]
 version = "0.10.1"
 

@@ -25,13 +25,17 @@ mod locator_handlers;
 mod locators;
 mod mouse;
 mod network;
+pub mod profiling;
 mod refs;
 mod routing;
 pub mod screencast;
+pub mod sessions;
 mod snapshot;
 mod us_keyboard_layout;
 pub mod webauthn;
 pub mod websocket;
+#[cfg(windows)]
+pub mod windows_profiles;
 mod world;
 
 pub use actionability::{
@@ -99,7 +103,10 @@ pub use network::{
 pub use websocket::{WebSocketRegistry, install_websocket_router};
 pub use refs::{ElementHandleInfo, Ref, RefError, RefParseError, RefRegistry, SnapshotGeneration};
 pub use routing::{RouteRegistry, resolve_contained_path};
-pub use snapshot::{AriaSnapshot, SnapshotBox, SnapshotMode, SnapshotNode, SnapshotOptions};
+pub use snapshot::{
+    AriaSnapshot, SnapshotBox, SnapshotFrame, SnapshotMode, SnapshotNode, SnapshotOptions,
+    SnapshotSearchMatch, SnapshotSearchOptions, SnapshotSearchResult,
+};
 pub use us_keyboard_layout::{
     KEYPAD_LOCATION, KeyDefinition, KeyDescription, ShiftedKeyDefinition, US_KEYBOARD_LAYOUT,
 };
@@ -2171,12 +2178,14 @@ pub fn setup_network_capture(
     }
 
     let event_tab = tab.clone();
+    let network_target = event_tab.get_target_id().to_string();
+    let request_key = move |id: &str| format!("{}\0{}", network_target, id);
     tab.add_event_listener(Arc::new(move |event: &Event| {
         match event {
             Event::NetworkRequestWillBeSent(event) => {
                 let params = &event.params;
                 monitor.request_started(RequestStarted {
-                    request_id: params.request_id.clone(),
+                    request_id: request_key(&params.request_id),
                     loader_id: params.loader_id.clone(),
                     frame_id: params.frame_id.clone(),
                     method: params.request.method.clone(),
@@ -2190,7 +2199,7 @@ pub fn setup_network_capture(
                     timestamp: normalize_timestamp_ms(params.timestamp),
                     redirect_response: params.redirect_response.as_ref().map(|response| {
                         response_received(
-                            params.request_id.clone(),
+                            request_key(&params.request_id),
                             normalize_timestamp_ms(params.timestamp),
                             response,
                         )
@@ -2198,21 +2207,21 @@ pub fn setup_network_capture(
                 });
             }
             Event::NetworkRequestWillBeSentExtraInfo(event) => monitor.request_extra(
-                event.params.request_id.clone(),
+                request_key(&event.params.request_id),
                 cdp_headers(&event.params.headers),
             ),
             Event::NetworkResponseReceived(event) => monitor.response_received(response_received(
-                event.params.request_id.clone(),
+                request_key(&event.params.request_id),
                 normalize_timestamp_ms(event.params.timestamp),
                 &event.params.response,
             )),
             Event::NetworkResponseReceivedExtraInfo(event) => monitor.response_extra(
-                event.params.request_id.clone(),
+                request_key(&event.params.request_id),
                 cdp_headers(&event.params.headers),
             ),
             Event::NetworkLoadingFinished(event) => {
                 if let Some(entry) = monitor.loading_finished(
-                    &event.params.request_id,
+                    &request_key(&event.params.request_id),
                     normalize_timestamp_ms(event.params.timestamp),
                     Some(event.params.encoded_data_length.max(0.0) as u64),
                 ) {
@@ -2239,7 +2248,7 @@ pub fn setup_network_capture(
             }
             Event::NetworkLoadingFailed(event) => {
                 if let Some(entry) = monitor.loading_failed(
-                    &event.params.request_id,
+                    &request_key(&event.params.request_id),
                     normalize_timestamp_ms(event.params.timestamp),
                     event.params.error_text.clone(),
                 ) {

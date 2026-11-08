@@ -8,7 +8,7 @@ use anyhow::{Result, anyhow};
 use log::{debug, error, info, trace};
 
 use process::Process;
-pub use process::{DEFAULT_ARGS, LaunchOptions, LaunchOptionsBuilder};
+pub use process::{DEFAULT_ARGS, LaunchOptions, LaunchOptionsBuilder, OwnedLaunchTracker, OwnedProcess};
 pub use tab::Tab;
 pub use transport::ConnectionClosed;
 use transport::Transport;
@@ -210,6 +210,13 @@ impl Browser {
 
     pub fn get_process_id(&self) -> Option<u32> {
         self.inner.process.as_ref().map(process::Process::get_id)
+    }
+
+    pub fn owned_process(&self) -> Option<OwnedProcess> {
+        self.inner
+            .process
+            .as_ref()
+            .map(process::Process::owned_process)
     }
 
     pub fn get_ws_url(&self) -> String {

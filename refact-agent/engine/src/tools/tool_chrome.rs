@@ -154,7 +154,7 @@ const MAX_CACHED_LOG_LINES: usize = 1000;
 
 const CHROME_HELP: &str = include_str!("chrome_help.md");
 
-const CHROME_HELP_TOPICS: &str = "overview, locators, navigation, input, forms, waits, network, routes, websockets, har, tabs, frames, dialogs, uploads, downloads, emulation, devices, clock, screenshots, artifacts, screencast, assertions, readouts, handlers, cdp, authenticators, reset, troubleshooting";
+const CHROME_HELP_TOPICS: &str = "overview, locators, navigation, input, forms, waits, network, routes, websockets, har, tabs, frames, dialogs, uploads, downloads, emulation, devices, clock, screenshots, artifacts, screencast, assertions, readouts, handlers, cdp, authenticators, reset, sessions, discovery, troubleshooting";
 
 const CHROME_DESCRIPTION: &str = concat!(
     "Text-first batched browser automation. You read pages as text, not as pictures. Prefer the typed `request`: ONE call can carry many steps, unlike one-action-per-call servers. ",
@@ -162,7 +162,7 @@ const CHROME_DESCRIPTION: &str = concat!(
     "Each `[ref=eN]` handle in that snapshot is an element address: act with `locator.by=ref`; refs come from the most recent snapshot. Use an explicit `accessibility_snapshot` step only to re-read a page that did NOT change, or to scope to a subtree with `locator`/`depth`.\n",
     "Canonical batch: {\"steps\":[{\"action\":\"navigate\",\"url\":\"https://example.com\"},{\"action\":\"click\",\"locator\":{\"by\":\"ref\",\"value\":\"e5\"}},{\"action\":\"fill\",\"locator\":{\"by\":\"ref\",\"value\":\"e7\"},\"text\":\"hi\"}]} Pass this object as `request`; e5/e7 stand for handles minted by the snapshot the previous batch returned.\n",
     "TUTORIAL: run {\"steps\":[{\"action\":\"help\"}]} for the full tutorial covering every action, parameter, and gotcha, or {\"action\":\"help\",\"topic\":\"<name>\"} for one section. Topics: ",
-    "overview, locators, navigation, input, forms, waits, network, routes, websockets, har, tabs, frames, dialogs, uploads, downloads, emulation, devices, clock, screenshots, artifacts, screencast, assertions, readouts, handlers, cdp, authenticators, reset, troubleshooting",
+    "overview, locators, navigation, input, forms, waits, network, routes, websockets, har, tabs, frames, dialogs, uploads, downloads, emulation, devices, clock, screenshots, artifacts, screencast, assertions, readouts, handlers, cdp, authenticators, reset, sessions, discovery, troubleshooting",
     ". help answers from documentation and never launches the browser, so it is free to consult before a run.\n",
     "Capability groups, each with a help topic: navigation and tabs; locator-driven input plus a mouse_*/tap coordinate escape hatch; forms; waits; assertions (expect, expect_poll); readouts (bounding_box, count, input_value, all_texts, element_state); inspection and snapshots; screenshots, pdf, and filmstrip capture; network interception (route, HAR, WebSocket) and http_request; emulation, devices, storage, and cookies; the fake clock; locator handlers and dialogs; coverage and virtual authenticators; cdp_send and reset. The `action` enum below is the authoritative action list.\n",
     "Locators are ref-first with a fallback vocabulary (role, test_id, text, label, placeholder, alt_text, title, css, xpath, id, name, autocomplete) composable with nth/first/last, filter, and/or, and an outermost-first `frames` chain. Non-selecting actions are strict: ambiguous locators fail loudly with the match count.\n",
@@ -416,7 +416,8 @@ fn browser_request_schema() -> serde_json::Value {
         "description": "Typed batched browser request",
         "required": ["steps"],
         "properties": {
-            "session": {"type": "string", "enum": ["shared_default"]},
+            "session": {"type": "string", "maxLength":64,"description":"shared_default (default), or an explicitly created named session"},
+            "expected_session_id": {"type":"string","maxLength":128,"description":"Required opaque session UUID for every named request; prevents stale name reuse"},
             "acknowledge_session_generation": {"type": "string", "description": "Recovery handshake: after a report says browser state was lost, resend with the `session_generation` value it returned. Then navigate again; old refs/tab ids are invalid and interrupted actions were NOT retried"},
             "page_context": {"type": "string", "enum": ["snapshot", "screenshot", "both", "none"], "description": "snapshot (default) attaches the aria snapshot and no image; screenshot attaches a PNG; both; none = page header only"},
             "attach_screenshot": {"type": "boolean", "description": "Screenshot override: true = always, false = never, omitted = follow page_context"},
@@ -524,6 +525,11 @@ impl Tool for ToolChrome {
         tool_call_id: &String,
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
+        // Strict validation must precede even the documentation-only fast path.
+        let preflight_request = match args.get("request") {
+            Some(request_value) => Some(preflight_browser_request(request_value)?),
+            None => None,
+        };
         if let Some(request_value) = args.get("request") {
             if help_only_request(request_value) {
                 let msg = ContextEnum::ChatMessage(ChatMessage {
@@ -537,12 +543,114 @@ impl Tool for ToolChrome {
             }
         }
 
-        // Validate the typed request before any browser setup so an invalid or oversized
-        // batch never launches Chrome or touches a session.
-        let preflight_request = match args.get("request") {
-            Some(request_value) => Some(preflight_browser_request(request_value)?),
-            None => None,
-        };
+        if let Some(request) = preflight_request.as_ref() {
+            use crate::integrations::browser_models::{BrowserStep, SessionPolicy};
+            use crate::integrations::browser_runtime::named_sessions;
+            let lifecycle = request.steps.first().is_some_and(|step| {
+                matches!(
+                    step,
+                    BrowserStep::CreateSession { .. }
+                        | BrowserStep::ListSessions
+                        | BrowserStep::CloseSession { .. }
+                )
+            });
+            if lifecycle || matches!(request.session, SessionPolicy::Named(_)) {
+                let (owner, gcx, model) = {
+                    let context = ccx.lock().await;
+                    (
+                        named_sessions::NamedSessionOwner::from_context(&context)?,
+                        context.app.gcx.clone(),
+                        context.current_model.clone(),
+                    )
+                };
+                let deadline = Instant::now() + Duration::from_secs(120);
+                if lifecycle {
+                    let lifecycle_result = match &request.steps[0] {
+                        BrowserStep::CreateSession {
+                            name,
+                        } => named_sessions::create_named_session(
+                            owner,
+                            name,
+                            self.settings_chrome.launch_options(),
+                            deadline,
+                        )
+                        .await
+                        .map(|created| (serde_json::json!(created), true)),
+                        BrowserStep::ListSessions => named_sessions::list_named_sessions(&owner)
+                            .map(|sessions| (serde_json::json!({"sessions": sessions}), true))
+                            .map_err(named_sessions::NamedLifecycleError::from),
+                        BrowserStep::CloseSession {
+                            name,
+                            expected_session_id,
+                        } => named_sessions::close_named_session(
+                            &owner,
+                            name,
+                            expected_session_id,
+                            deadline,
+                        )
+                        .await
+                        .map(|closed| {
+                            let ok = closed.process_exited
+                                && closed.targets_complete
+                                && closed.profile_disposition == "removed";
+                            (serde_json::json!(closed), ok)
+                        }),
+                        _ => unreachable!(),
+                    };
+                    let report = named_lifecycle_report(lifecycle_result);
+                    let content = execution_report_to_multimodal_with_request(
+                        &report,
+                        &ImagePolicy::default(),
+                        Some(1),
+                    )?;
+                    let message = ContextEnum::ChatMessage(ChatMessage {
+                        role: "tool".into(),
+                        tool_call_id: tool_call_id.clone(),
+                        content: ChatContent::Multimodal(content),
+                        ..Default::default()
+                    });
+                    return Ok((!report.ok, vec![message]));
+                }
+                if let SessionPolicy::Named(name) = &request.session {
+                    let expected = request
+                        .expected_session_id
+                        .as_deref()
+                        .ok_or("Named request requires expected_session_id")?;
+                    let named = named_sessions::resolve_named_session(&owner, name, expected)?;
+                    let image_policy = image_policy_for_model(gcx.clone(), &model).await;
+                    let report_result = browser_controller::execute_request_with_runtime_validated(
+                        named.runtime.clone(),
+                        request.clone(),
+                        &image_policy,
+                        gcx,
+                    )
+                    .await;
+                    let report = report_result?;
+                    let mut content = execution_report_to_multimodal_with_request(
+                        &report,
+                        &image_policy,
+                        Some(request.steps.len()),
+                    )?;
+                    retain_full_browser_report(
+                        &named.runtime,
+                        &mut content,
+                        request
+                            .steps
+                            .iter()
+                            .all(|step| matches!(step, BrowserStep::ReadArtifact { .. })),
+                    )
+                    .await?;
+                    drop(named);
+                    let message = ContextEnum::ChatMessage(ChatMessage {
+                        role: "tool".into(),
+                        tool_call_id: tool_call_id.clone(),
+                        content: ChatContent::Multimodal(content),
+                        ..Default::default()
+                    });
+                    return Ok((!report.ok, vec![message]));
+                }
+            }
+        }
 
         let (gcx, chat_id, current_model) = {
             let ccx_lock = ccx.lock().await;
@@ -646,42 +754,7 @@ impl Tool for ToolChrome {
                         &image_policy,
                         Some(steps_requested),
                     )?;
-                    if let Some(text) = content.iter_mut().find(|element| element.is_text()) {
-                        if !retrieval_only && text.m_content.len() > 16 * 1024 {
-                            let store = runtime_arc.lock().await.get_store();
-                            match store.and_then(|store| {
-                                store.write(text.m_content.as_bytes(), "application/json")
-                            }) {
-                                Ok(artifact) => {
-                                    let mut value: Value = serde_json::from_str(&text.m_content)
-                                        .map_err(|error| {
-                                            format!("Invalid browser report: {error}")
-                                        })?;
-                                    value["full_report"] = serde_json::json!({
-                                        "id": artifact.id,
-                                        "mime": artifact.mime,
-                                        "bytes": artifact.bytes,
-                                        "retrieval": "read_artifact",
-                                    });
-                                    text.m_content =
-                                        serde_json::to_string(&value).map_err(|error| {
-                                            format!("Invalid browser report: {error}")
-                                        })?;
-                                }
-                                Err(error) => {
-                                    let mut value: Value = serde_json::from_str(&text.m_content)
-                                        .map_err(|error| {
-                                            format!("Invalid browser report: {error}")
-                                        })?;
-                                    value["artifact_error"] = Value::String(error);
-                                    text.m_content =
-                                        serde_json::to_string(&value).map_err(|error| {
-                                            format!("Invalid browser report: {error}")
-                                        })?;
-                                }
-                            }
-                        }
-                    }
+                    retain_full_browser_report(&runtime_arc, &mut content, retrieval_only).await?;
                     typed_content = Some(content);
                     let (execute_log, command_multimodal_els) =
                         format_controller_report(&report, "", &image_policy);
@@ -812,6 +885,71 @@ mod tests {
 
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn retained_browser_reports_keep_redacted_bytes_in_the_selected_runtime_store() {
+        let first_root = tempfile::tempdir().unwrap();
+        let second_root = tempfile::tempdir().unwrap();
+        let first = Arc::new(
+            refact_browser::artifact_store::ArtifactStore::new(first_root.path()).unwrap(),
+        );
+        let second = Arc::new(
+            refact_browser::artifact_store::ArtifactStore::new(second_root.path()).unwrap(),
+        );
+        let report: ExecutionReport = serde_json::from_value(json!({
+            "ok": true,
+            "steps": [{"step_index": 0, "ok": true, "summary": "Large result",
+                "data": {"text": "x".repeat(20_000), "password": "known-fixture-secret"}}],
+            "dialogs": [], "new_tabs": []
+        }))
+        .unwrap();
+        let original = browser_report_text(&report, Some(1)).unwrap();
+        assert!(!original.contains("known-fixture-secret"));
+        let mut text = MultimodalElement::new("text".into(), original.clone()).unwrap();
+        retain_full_browser_report_text(&mut text, Ok(first.clone())).unwrap();
+        let envelope: Value = serde_json::from_str(&text.m_content).unwrap();
+        let id = envelope["full_report"]["id"].as_str().unwrap();
+        assert_eq!(envelope["full_report"]["bytes"], original.len());
+        assert_eq!(first.read_report(id, 0, 32768).unwrap().content, original);
+        assert!(second.read_report(id, 0, 32768).is_err());
+        let mut failed = MultimodalElement::new("text".into(), original).unwrap();
+        retain_full_browser_report_text(&mut failed, Err("store unavailable".into())).unwrap();
+        let envelope: Value = serde_json::from_str(&failed.m_content).unwrap();
+        assert_eq!(envelope["artifact_error"], "store unavailable");
+        assert!(envelope.get("full_report").is_none());
+    }
+
+    #[test]
+    fn named_lifecycle_errors_preserve_dispatch_stage_and_disjoint_completion() {
+        use crate::integrations::browser_runtime::named_sessions::{
+            NamedLifecycleError, NamedLifecycleStage,
+        };
+        for (stage, failed, unknown, incomplete) in [
+            (NamedLifecycleStage::BeforeDispatch, 1, 0, false),
+            (NamedLifecycleStage::AfterDispatchUnknown, 0, 1, true),
+            (NamedLifecycleStage::AfterDispatchCleanupKnown, 1, 0, false),
+        ] {
+            let report = named_lifecycle_report(Err(NamedLifecycleError {
+                stage,
+                session_id: Some("session-id".into()),
+                message: "lifecycle fixture".into(),
+            }));
+            let text = browser_report_text(&report, Some(1)).unwrap();
+            let envelope: Value = serde_json::from_str(&text).unwrap();
+            assert_eq!(envelope["ok"], false);
+            assert_eq!(envelope["completion"]["steps_reported"], 1);
+            assert_eq!(envelope["completion"]["failed"], failed);
+            assert_eq!(envelope["completion"]["unknown"], unknown);
+            assert_eq!(envelope["completion"]["incomplete"], incomplete);
+            assert_eq!(envelope["steps"][0]["data"]["session_id"], "session-id");
+            if stage != NamedLifecycleStage::BeforeDispatch {
+                assert_eq!(envelope["recovery"]["retry_safe"], false);
+                assert_eq!(envelope["recovery"]["state_lost"], false);
+            } else {
+                assert!(envelope.get("recovery").is_none());
+            }
+        }
+    }
 
     fn step_variant_admits(variants: &[Value], step: &Value) -> bool {
         let object = step.as_object().unwrap();
@@ -1027,6 +1165,139 @@ mod tests {
                 "{field} lost in fallback"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn invalid_help_tool_execution_never_creates_runtime_or_session() {
+        let cache = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let command = crate::global_context::CommandLine::from_iter_safe([
+            "strict-help-test",
+            "--http-port",
+            "0",
+            "--lsp-port",
+            "0",
+            "--no-scheduler",
+        ])
+        .unwrap();
+        let (gcx, _) = crate::global_context::create_global_context(
+            cache.path().into(),
+            config.path().into(),
+            command,
+        )
+        .await;
+        let context = AtCommandsContext::new(
+            gcx.clone(),
+            4096,
+            10,
+            false,
+            vec![],
+            "strict-help-owner".into(),
+            None,
+            String::new(),
+            None,
+            None,
+        )
+        .await;
+        let context = Arc::new(AMutex::new(context));
+        let mut tool = ToolChrome::default();
+        for request in [
+            json!({"steps":[{"action":"help","unknown":true}]}),
+            json!({"unknown":true,"steps":[{"action":"help"}]}),
+            json!({"steps":vec![json!({"action":"help"});65]}),
+        ] {
+            let args = HashMap::from([("request".into(), request)]);
+            assert!(tool
+                .tool_execute(context.clone(), &"help-test".into(), &args)
+                .await
+                .is_err());
+        }
+        let args = HashMap::from([("request".into(), json!({"steps":[{"action":"help"}]}))]);
+        assert!(
+            !tool
+                .tool_execute(context, &"valid-help".into(), &args)
+                .await
+                .unwrap()
+                .0
+        );
+        assert!(gcx.browser_runtimes.lock().await.is_empty());
+        assert!(gcx.integration_sessions.lock().await.is_empty());
+    }
+
+    #[test]
+    fn incomplete_cleanup_receipt_is_not_double_counted_as_unknown() {
+        let report = ExecutionReport {
+            ok: false,
+            steps: vec![crate::integrations::browser_models::StepResult::failure(
+                0,
+                "Session cleanup incomplete",
+                "Target inventory incomplete",
+            )
+            .with_data(json!({"process_exited":true,"targets_complete":false}))],
+            ..Default::default()
+        };
+        let content =
+            execution_report_to_multimodal_with_request(&report, &ImagePolicy::default(), Some(1))
+                .unwrap();
+        let value: Value = serde_json::from_str(&content[0].m_content).unwrap();
+        assert_eq!(value["completion"]["failed"], 1);
+        assert_eq!(value["completion"]["unknown"], 0);
+        assert_eq!(value["steps"][0]["data"]["targets_complete"], false);
+    }
+
+    #[test]
+    fn named_and_discovery_preflight_refuses_unsafe_contracts() {
+        for invalid in [
+            json!({"session":"named","steps":[{"action":"tab_log"}]}),
+            json!({"session":"../escape","expected_session_id":"id","steps":[{"action":"tab_log"}]}),
+            json!({"steps":[{"action":"create_session","name":"x"},{"action":"tab_log"}]}),
+            json!({"session":"x","expected_session_id":"id","steps":[{"action":"list_sessions"}]}),
+            json!({"steps":[{"action":"close_session","name":"x","expected_session_id":""}]}),
+            json!({"steps":[{"action":"search_snapshot","pattern":"x","max_results":201}]}),
+            json!({"steps":[{"action":"network_requests","limit":0}]}),
+            json!({"steps":[{"action":"network_request","request_id":""}]}),
+        ] {
+            assert!(preflight_browser_request(&invalid).is_err(), "{invalid}");
+        }
+        for valid in [
+            json!({"steps":[{"action":"create_session","name":"isolated-1"}]}),
+            json!({"session":"isolated-1","expected_session_id":"opaque","steps":[{"action":"tab_log"}]}),
+            json!({"steps":[{"action":"search_snapshot","pattern":"Save","include_frames":true,"max_frame_depth":2}]}),
+            json!({"steps":[{"action":"network_request","request_id":"opaque","include_body":true}]}),
+        ] {
+            assert!(preflight_browser_request(&valid).is_ok(), "{valid}");
+        }
+        let schema = browser_request_schema();
+        let variants = schema["properties"]["steps"]["items"]["anyOf"]
+            .as_array()
+            .unwrap();
+        for step in [
+            json!({"action":"create_session","name":"x"}),
+            json!({"action":"search_snapshot","pattern":"x","include_frames":true}),
+            json!({"action":"network_request","request_id":"id","include_body":true}),
+        ] {
+            assert!(step_variant_admits(variants, &step), "{step}");
+        }
+        assert_eq!(
+            schema["properties"]["expected_session_id"]["type"],
+            "string"
+        );
+    }
+
+    #[test]
+    fn help_fast_path_requires_strict_bounded_preflight() {
+        for invalid in [
+            json!({"steps": [{"action": "help", "unknown": true}]}),
+            json!({"unknown": true, "steps": [{"action": "help"}]}),
+            json!({"steps": [{"action": "help", "topic": 1}]}),
+            json!({"steps": vec![json!({"action": "help"}); MAX_CHROME_BATCH_STEPS + 1]}),
+        ] {
+            assert!(help_only_request(&invalid));
+            assert!(preflight_browser_request(&invalid).is_err(), "{invalid}");
+        }
+        let valid = json!({"steps": [{"action": "help", "topic": "waits"}]});
+        assert!(preflight_browser_request(&valid).is_ok());
+        assert!(help_only_response(&valid).starts_with("## waits\n"));
     }
 
     #[test]
@@ -1736,6 +2007,97 @@ fn step_inline_image(data: &Value) -> Option<(&str, &str)> {
     inline_image_fields(data).or_else(|| data.get("artifact").and_then(inline_image_fields))
 }
 
+async fn retain_full_browser_report(
+    runtime: &Arc<AMutex<BrowserRuntime>>,
+    content: &mut [MultimodalElement],
+    retrieval_only: bool,
+) -> Result<(), String> {
+    let Some(text) = content.iter_mut().find(|element| element.is_text()) else {
+        return Ok(());
+    };
+    if retrieval_only || text.m_content.len() <= 16 * 1024 {
+        return Ok(());
+    }
+    let store = runtime.lock().await.get_store();
+    retain_full_browser_report_text(text, store)
+}
+
+fn retain_full_browser_report_text(
+    text: &mut MultimodalElement,
+    store: Result<Arc<refact_browser::artifact_store::ArtifactStore>, String>,
+) -> Result<(), String> {
+    let mut value: Value = serde_json::from_str(&text.m_content)
+        .map_err(|error| format!("Invalid browser report: {error}"))?;
+    match store.and_then(|store| store.write(text.m_content.as_bytes(), "application/json")) {
+        Ok(artifact) => {
+            value["full_report"] = serde_json::json!({
+                "id": artifact.id,
+                "mime": artifact.mime,
+                "bytes": artifact.bytes,
+                "retrieval": "read_artifact",
+            });
+        }
+        Err(error) => value["artifact_error"] = Value::String(error),
+    }
+    text.m_content = serde_json::to_string(&value)
+        .map_err(|error| format!("Invalid browser report: {error}"))?;
+    Ok(())
+}
+
+fn named_lifecycle_report(
+    result: Result<
+        (Value, bool),
+        crate::integrations::browser_runtime::named_sessions::NamedLifecycleError,
+    >,
+) -> ExecutionReport {
+    use crate::integrations::browser_models::{BrowserRecovery, StepResult};
+    use crate::integrations::browser_runtime::named_sessions::NamedLifecycleStage;
+
+    let (step, recovery) = match result {
+        Ok((value, true)) => (
+            StepResult::success(0, "Session lifecycle completed").with_data(value),
+            None,
+        ),
+        Ok((value, false)) => (
+            StepResult::failure(
+                0,
+                "Session cleanup incomplete",
+                "See cleanup receipt: incomplete target inventory or process exit verification; no action was replayed",
+            )
+            .with_data(value),
+            None,
+        ),
+        Err(error) => {
+            let unknown = error.stage == NamedLifecycleStage::AfterDispatchUnknown;
+            let data = serde_json::json!({
+                "stage": error.stage,
+                "session_id": error.session_id,
+                "retry_safe": error.stage == NamedLifecycleStage::BeforeDispatch,
+            });
+            let mut step = StepResult::failure(0, "Session lifecycle did not complete", error.message)
+                .with_data(data);
+            if unknown {
+                step.outcome = Some("effect_unknown".into());
+            }
+            let recovery = (error.stage != NamedLifecycleStage::BeforeDispatch).then_some(
+                BrowserRecovery {
+                    incomplete: unknown,
+                    state_lost: false,
+                    effect_unknown: unknown,
+                    retry_safe: false,
+                },
+            );
+            (step, recovery)
+        }
+    };
+    ExecutionReport {
+        ok: step.ok,
+        steps: vec![step],
+        recovery,
+        ..Default::default()
+    }
+}
+
 /// `success` when nothing failed, `partial` when only non-fatal steps (soft assertions,
 /// `click_if_exists`) failed and the batch still reports `ok`, `failure` otherwise.
 fn browser_outcome(report: &ExecutionReport) -> &'static str {
@@ -1904,9 +2266,119 @@ fn preflight_browser_request(
             ));
         }
     }
-    parse_browser_action_request(request_value.clone()).map_err(|e| {
+    let parsed = parse_browser_action_request(request_value.clone()).map_err(|e| {
         format!("argument `request` is invalid: {e}. No browser action was run; see {{\"steps\":[{{\"action\":\"help\"}}]}} for per-action fields.")
-    })
+    })?;
+    use crate::integrations::browser_models::{BrowserStep, SessionPolicy, valid_browser_session_name};
+    let lifecycle_count = parsed
+        .steps
+        .iter()
+        .filter(|step| {
+            matches!(
+                step,
+                BrowserStep::CreateSession { .. }
+                    | BrowserStep::ListSessions
+                    | BrowserStep::CloseSession { .. }
+            )
+        })
+        .count();
+    if lifecycle_count > 0
+        && request_value
+            .as_object()
+            .is_some_and(|object| object.keys().any(|key| key != "steps"))
+    {
+        return Err("Session lifecycle accepts only steps at the request boundary".into());
+    }
+    if lifecycle_count > 0
+        && (parsed.steps.len() != 1
+            || parsed.session != SessionPolicy::SharedDefault
+            || parsed.expected_session_id.is_some()
+            || parsed.acknowledge_session_generation.is_some()
+            || parsed.block_service_workers.is_some()
+            || !matches!(
+                parsed.target,
+                crate::integrations::browser_models::TabTarget::Active
+            ))
+    {
+        return Err("Session lifecycle requires a standalone request without page/session options; no browser action was run".into());
+    }
+    match &parsed.session {
+        SessionPolicy::Named(_)
+            if parsed
+                .expected_session_id
+                .as_ref()
+                .is_none_or(|id| id.is_empty() || id.len() > 128) =>
+        {
+            return Err(
+                "Named request requires bounded expected_session_id; no browser action was run"
+                    .into(),
+            )
+        }
+        SessionPolicy::SharedDefault if parsed.expected_session_id.is_some() => {
+            return Err("expected_session_id is only valid for named sessions".into())
+        }
+        _ => {}
+    }
+    for step in &parsed.steps {
+        use crate::integrations::browser_models::BrowserStep;
+        match step {
+            BrowserStep::CreateSession {
+                name,
+            }
+            | BrowserStep::CloseSession {
+                name, ..
+            } if !valid_browser_session_name(name) => {
+                return Err("Invalid named session name".into())
+            }
+            BrowserStep::CloseSession {
+                expected_session_id,
+                ..
+            } if expected_session_id.is_empty() || expected_session_id.len() > 128 => {
+                return Err("Invalid expected_session_id".into())
+            }
+            BrowserStep::SearchSnapshot {
+                pattern,
+                max_results,
+                max_frame_depth,
+                subtree,
+                ..
+            } => {
+                if pattern.is_empty()
+                    || pattern.len() > 4096
+                    || max_results.is_some_and(|n| !(1..=200).contains(&n))
+                    || max_frame_depth.is_some_and(|n| n > 8)
+                    || subtree.as_ref().is_some_and(|s| s.len() > 256)
+                {
+                    return Err(
+                        "Invalid bounded snapshot search options; no browser action was run".into(),
+                    );
+                }
+            }
+            BrowserStep::AccessibilitySnapshot {
+                options,
+            } if options.max_frame_depth.is_some_and(|n| n > 8) => {
+                return Err("max_frame_depth exceeds 8".into())
+            }
+            BrowserStep::NetworkRequests {
+                limit,
+                url_contains,
+                method,
+                ..
+            } if limit.is_some_and(|n| !(1..=200).contains(&n))
+                || url_contains.as_ref().is_some_and(|s| s.len() > 4096)
+                || method.as_ref().is_some_and(|s| s.len() > 32) =>
+            {
+                return Err("Invalid bounded network filters".into())
+            }
+            BrowserStep::NetworkRequest {
+                request_id, ..
+            } if request_id.is_empty() || request_id.len() > 256 => {
+                return Err("Invalid opaque network request ID".into())
+            }
+            _ => {}
+        }
+    }
+    Ok(parsed)
 }
 
 /// Completion accounting for the compact report envelope. `unknown` counts steps whose
@@ -2018,6 +2490,8 @@ fn execution_report_to_multimodal_with_request(
     image_policy: &ImagePolicy,
     steps_requested: Option<usize>,
 ) -> Result<Vec<MultimodalElement>, String> {
+    let report_span =
+        refact_browser::profiling::Span::new(refact_browser::profiling::Stage::Report);
     let mut content = Vec::new();
     content.push(MultimodalElement::new(
         "text".to_string(),
@@ -2050,6 +2524,18 @@ fn execution_report_to_multimodal_with_request(
         if let Ok(element) = MultimodalElement::new(resized_mime, resized) {
             content.push(element);
         }
+    }
+    drop(report_span);
+    // Process-wide diagnostics are opt-in and intended for serialized benchmark workers.
+    // Never drain or serialize profiling data on the ordinary tool path.
+    if headless_chrome::browser::transport::profiling_enabled() {
+        let profile = refact_browser::profiling::take();
+        let mut envelope: Value = serde_json::from_str(&content[0].m_content)
+            .map_err(|error| format!("Invalid browser report: {error}"))?;
+        envelope["browser_profile"] = serde_json::to_value(profile)
+            .map_err(|error| format!("Invalid browser profile: {error}"))?;
+        content[0].m_content = serde_json::to_string(&envelope)
+            .map_err(|error| format!("Invalid browser report: {error}"))?;
     }
     Ok(content)
 }
@@ -2179,7 +2665,7 @@ fn browser_secret_token_patterns() -> &'static [(regex::Regex, &'static str)] {
             ),
             (
                 regex::Regex::new(
-                    r#"(?i)\b(api[_-]?key|apikey|access[_-]?token|auth[_-]?token|token|secret|password|passwd)\b\s*["']?\s*[:=]\s*["']?[^\s"',;)}\]]{6,}"#,
+                    r#"(?i)\b(api[_-]?key|apikey|access[_-]?token|auth[_-]?token|token|secret|password|passwd)\b\s*["']?\s*[:=]\s*["']?[^\s"',;)}]{6,}"#,
                 )
                 .unwrap(),
                 "$1=[REDACTED]",
@@ -2218,6 +2704,18 @@ fn redact_browser_payload_strings(value: &mut serde_json::Value, free_form: bool
         }
         serde_json::Value::Object(map) => {
             for (key, child) in map.iter_mut() {
+                if key == "body" {
+                    if let Some(mut json) = child
+                        .as_str()
+                        .and_then(|text| serde_json::from_str::<Value>(text).ok())
+                    {
+                        redact_browser_report(&mut json);
+                        if let Ok(text) = serde_json::to_string(&json) {
+                            *child = Value::String(text);
+                            continue;
+                        }
+                    }
+                }
                 let child_free_form = if BROWSER_OPAQUE_PATH_KEYS.contains(&key.as_str()) {
                     false
                 } else {
@@ -2401,6 +2899,48 @@ mod browser_credential_redaction_tests {
             text.contains("Forgot your password?"),
             "over-redacted: {text}"
         );
+    }
+
+    #[test]
+    fn nested_json_response_bodies_remain_parseable_after_report_redaction() {
+        let mut report = serde_json::json!({"steps": [{"data": {"body":
+            r#"{"safe":"visible","nested":{"password":"[REDACTED]","token":"[REDACTED]","private_key":"fixture-private-key"}}"#
+        }}]});
+        redact_browser_report(&mut report);
+        let first = report["steps"][0]["data"]["body"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let parsed: serde_json::Value = serde_json::from_str(&first).unwrap();
+        assert_eq!(parsed["safe"], "visible");
+        assert_eq!(parsed["nested"]["password"], "[REDACTED]");
+        assert_eq!(parsed["nested"]["token"], "[REDACTED]");
+        assert_eq!(parsed["nested"]["private_key"], "[REDACTED]");
+        redact_browser_report(&mut report);
+        assert_eq!(report["steps"][0]["data"]["body"], first);
+    }
+
+    #[test]
+    fn json_body_scalars_and_credential_strings_are_redacted_idempotently() {
+        for json in [
+            serde_json::json!({"safe": "token=[REDACTED]"}),
+            serde_json::json!({"safe": "token=[REDACTED]fixture-long-secret"}),
+            serde_json::json!({"safe": "token=fixture-long-secret"}),
+            serde_json::json!("token=fixture-long-secret"),
+            serde_json::json!(["token=fixture-long-secret", "ordinary"]),
+            serde_json::json!(true),
+            serde_json::json!(123),
+            serde_json::Value::Null,
+        ] {
+            let mut report = serde_json::json!({"body": serde_json::to_string(&json).unwrap()});
+            redact_browser_report(&mut report);
+            let once = report["body"].as_str().unwrap().to_owned();
+            let parsed: serde_json::Value = serde_json::from_str(&once).unwrap();
+            assert!(!once.contains("fixture-long-secret"));
+            assert!(!once.contains("[REDACTED]]"));
+            redact_browser_report(&mut report);
+            assert_eq!(report["body"], once, "changed parsed body {parsed}");
+        }
     }
 
     #[test]

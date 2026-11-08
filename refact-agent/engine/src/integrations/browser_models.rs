@@ -15,6 +15,8 @@ struct BrowserActionRequestEnvelope {
     #[serde(default)]
     session: SessionPolicy,
     #[serde(default)]
+    expected_session_id: Option<String>,
+    #[serde(default)]
     target: TabTarget,
     #[serde(default)]
     attach_screenshot: Option<bool>,
@@ -39,6 +41,7 @@ pub fn parse_browser_action_request(value: Value) -> Result<BrowserActionRequest
     Ok(BrowserActionRequest {
         acknowledge_session_generation: envelope.acknowledge_session_generation,
         session: envelope.session,
+        expected_session_id: envelope.expected_session_id,
         target: envelope.target,
         attach_screenshot: envelope.attach_screenshot,
         page_context: envelope.page_context,

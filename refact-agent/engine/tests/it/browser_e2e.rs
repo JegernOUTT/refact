@@ -251,6 +251,7 @@ async fn a_default_navigate_batch_returns_a_snapshot_context_and_zero_images() {
         runtime,
         BrowserActionRequest {
             acknowledge_session_generation: None,
+            expected_session_id: None,
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
             attach_screenshot: None,
@@ -312,6 +313,7 @@ async fn transactional_report_settles_fetch_and_returns_console_once() {
     let runtime = Arc::new(tokio::sync::Mutex::new(case.runtime));
     let request = BrowserActionRequest {
         acknowledge_session_generation: None,
+        expected_session_id: None,
         session: SessionPolicy::SharedDefault,
         target: TabTarget::Active,
         attach_screenshot: None,
@@ -349,6 +351,7 @@ async fn transactional_report_settles_fetch_and_returns_console_once() {
             runtime,
             BrowserActionRequest {
                 acknowledge_session_generation: None,
+                expected_session_id: None,
                 session: SessionPolicy::SharedDefault,
                 target: TabTarget::Active,
                 attach_screenshot: None,
@@ -382,6 +385,7 @@ async fn status_filtered_response_wait_skips_the_first_failure_and_matches_the_r
         runtime,
         BrowserActionRequest {
             acknowledge_session_generation: None,
+            expected_session_id: None,
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
             attach_screenshot: None,
@@ -441,6 +445,7 @@ async fn console_wait_catches_a_delayed_error_and_ignores_quieter_levels() {
         runtime,
         BrowserActionRequest {
             acknowledge_session_generation: None,
+            expected_session_id: None,
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
             attach_screenshot: None,
@@ -492,6 +497,7 @@ async fn network_waits_coexist_with_locator_handlers_and_dialogs_in_one_batch() 
         runtime,
         BrowserActionRequest {
             acknowledge_session_generation: None,
+            expected_session_id: None,
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
             attach_screenshot: None,
@@ -698,6 +704,7 @@ async fn an_idle_session_outlives_its_own_idle_eviction_window() {
         runtime,
         BrowserActionRequest {
             acknowledge_session_generation: None,
+            expected_session_id: None,
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
             attach_screenshot: None,
@@ -880,6 +887,7 @@ async fn dead_cdp_preflight_requires_current_generation_acknowledgement() {
             runtime_arc,
             BrowserActionRequest {
                 acknowledge_session_generation: None,
+                expected_session_id: None,
                 session: SessionPolicy::SharedDefault,
                 target: TabTarget::Active,
                 attach_screenshot: None,
@@ -982,6 +990,7 @@ async fn artifacts_capture_page_clip_element_pdf_and_highlight_lifecycle() {
         runtime.clone(),
         BrowserActionRequest {
             acknowledge_session_generation: None,
+            expected_session_id: None,
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
             attach_screenshot: None,
@@ -2803,6 +2812,7 @@ async fn locator_handler_clears_cookie_banner_before_click_and_records_firing() 
         runtime.clone(),
         BrowserActionRequest {
             acknowledge_session_generation: None,
+            expected_session_id: None,
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
             attach_screenshot: None,
@@ -2864,6 +2874,7 @@ async fn locator_handler_clears_interstitial_that_appears_between_actions() {
         runtime.clone(),
         BrowserActionRequest {
             acknowledge_session_generation: None,
+            expected_session_id: None,
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
             attach_screenshot: None,
@@ -3025,6 +3036,7 @@ async fn wait_for_popup_click_and_popup_action_share_one_batch() {
         runtime.clone(),
         BrowserActionRequest {
             acknowledge_session_generation: None,
+            expected_session_id: None,
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
             attach_screenshot: None,
@@ -3084,6 +3096,7 @@ async fn network_routes_fulfill_abort_modify_redirects_unroute_and_reach_popups(
         runtime.clone(),
         BrowserActionRequest {
             acknowledge_session_generation: None,
+            expected_session_id: None,
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
             attach_screenshot: None,
@@ -3131,6 +3144,7 @@ async fn network_routes_fulfill_abort_modify_redirects_unroute_and_reach_popups(
         runtime.clone(),
         BrowserActionRequest {
             acknowledge_session_generation: None,
+            expected_session_id: None,
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
             attach_screenshot: None,
@@ -3179,6 +3193,7 @@ async fn network_routes_fulfill_abort_modify_redirects_unroute_and_reach_popups(
         runtime.clone(),
         BrowserActionRequest {
             acknowledge_session_generation: None,
+            expected_session_id: None,
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
             attach_screenshot: None,
@@ -3241,6 +3256,7 @@ async fn network_routes_fulfill_abort_modify_redirects_unroute_and_reach_popups(
         runtime.clone(),
         BrowserActionRequest {
             acknowledge_session_generation: None,
+            expected_session_id: None,
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
             attach_screenshot: None,
@@ -3280,6 +3296,7 @@ async fn network_routes_fulfill_abort_modify_redirects_unroute_and_reach_popups(
         runtime,
         BrowserActionRequest {
             acknowledge_session_generation: None,
+            expected_session_id: None,
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
             attach_screenshot: None,
@@ -3344,6 +3361,7 @@ async fn newest_route_falls_back_to_the_older_handler_and_times_expires_it() {
         runtime.clone(),
         BrowserActionRequest {
             acknowledge_session_generation: None,
+            expected_session_id: None,
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
             attach_screenshot: None,
@@ -3405,6 +3423,7 @@ async fn newest_route_falls_back_to_the_older_handler_and_times_expires_it() {
         runtime.clone(),
         BrowserActionRequest {
             acknowledge_session_generation: None,
+            expected_session_id: None,
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
             attach_screenshot: None,
@@ -3440,6 +3459,7 @@ async fn fetch_and_fulfill_replays_the_real_response_with_overrides() {
         runtime.clone(),
         BrowserActionRequest {
             acknowledge_session_generation: None,
+            expected_session_id: None,
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
             attach_screenshot: None,
@@ -3506,6 +3526,7 @@ async fn websocket_route_registers_page_socket_and_delivers_mock_frame() {
         runtime.clone(),
         BrowserActionRequest {
             acknowledge_session_generation: None,
+            expected_session_id: None,
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
             attach_screenshot: None,
@@ -3606,6 +3627,7 @@ async fn intercept_case(
         runtime.clone(),
         BrowserActionRequest {
             acknowledge_session_generation: None,
+            expected_session_id: None,
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
             attach_screenshot: None,
@@ -3989,6 +4011,7 @@ async fn dialog_fixture_auto_dismisses_confirm_and_reports_it() {
         runtime,
         BrowserActionRequest {
             acknowledge_session_generation: None,
+            expected_session_id: None,
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
             attach_screenshot: None,
@@ -4033,6 +4056,7 @@ async fn dialog_fixture_uses_armed_accept_and_prompt_text() {
         runtime.clone(),
         BrowserActionRequest {
             acknowledge_session_generation: None,
+            expected_session_id: None,
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
             attach_screenshot: None,
@@ -4070,6 +4094,7 @@ async fn dialog_fixture_uses_armed_accept_and_prompt_text() {
         runtime,
         BrowserActionRequest {
             acknowledge_session_generation: None,
+            expected_session_id: None,
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
             attach_screenshot: None,
@@ -5461,6 +5486,7 @@ struct ClockCase {
 fn clock_request(steps: Vec<BrowserStep>) -> BrowserActionRequest {
     BrowserActionRequest {
         acknowledge_session_generation: None,
+        expected_session_id: None,
         session: SessionPolicy::SharedDefault,
         target: TabTarget::Active,
         attach_screenshot: None,
@@ -6086,6 +6112,7 @@ async fn set_content_replaces_the_document_and_is_visible_in_the_next_snapshot()
         runtime.clone(),
         BrowserActionRequest {
             acknowledge_session_generation: None,
+            expected_session_id: None,
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
             attach_screenshot: Some(false),
@@ -6139,6 +6166,7 @@ async fn cdp_send_reaches_page_and_browser_targets_and_keeps_overrides() {
         runtime.clone(),
         BrowserActionRequest {
             acknowledge_session_generation: None,
+            expected_session_id: None,
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
             attach_screenshot: Some(false),
@@ -6227,6 +6255,7 @@ async fn init_script_survives_navigation_and_clears_on_remove_and_reset() {
         runtime.clone(),
         BrowserActionRequest {
             acknowledge_session_generation: None,
+            expected_session_id: None,
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
             attach_screenshot: Some(false),
@@ -6267,6 +6296,7 @@ async fn init_script_survives_navigation_and_clears_on_remove_and_reset() {
         runtime.clone(),
         BrowserActionRequest {
             acknowledge_session_generation: None,
+            expected_session_id: None,
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
             attach_screenshot: Some(false),
@@ -6299,6 +6329,7 @@ async fn init_script_survives_navigation_and_clears_on_remove_and_reset() {
         runtime,
         BrowserActionRequest {
             acknowledge_session_generation: None,
+            expected_session_id: None,
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
             attach_screenshot: Some(false),
@@ -6434,6 +6465,7 @@ async fn dispatch_event_fires_listeners_with_the_inferred_class_and_detail() {
                 runtime,
                 BrowserActionRequest {
                     acknowledge_session_generation: None,
+                    expected_session_id: None,
                     session: SessionPolicy::SharedDefault,
                     target: TabTarget::Active,
                     attach_screenshot: Some(false),
@@ -6975,6 +7007,7 @@ async fn a_page_streaming_twelve_megabytes_of_sse_keeps_the_browser_alive() {
         runtime.clone(),
         BrowserActionRequest {
             acknowledge_session_generation: None,
+            expected_session_id: None,
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
             attach_screenshot: None,

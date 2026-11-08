@@ -209,6 +209,8 @@ struct TabRefState {
     frame_generation: u64,
     latest: Option<SnapshotGeneration>,
     known_refs: HashSet<Ref>,
+    bindings: HashMap<Ref, RefFrameBinding>,
+    next_frame_prefix: u64,
 }
 
 #[derive(Default)]
@@ -221,7 +223,67 @@ pub struct RefRegistry {
     state: Arc<Mutex<RegistryState>>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RefFrameBinding {
+    pub frame_id: String,
+    pub context_id: i64,
+    pub generation: u64,
+    pub local_reference: Option<Ref>,
+}
+
+impl RefFrameBinding {
+    pub(crate) fn is_current(&self, tree: Option<&crate::FrameTree>) -> bool {
+        tree.and_then(|tree| tree.frame(&self.frame_id))
+            .is_some_and(|frame| {
+                frame.generation == self.generation
+                    && frame.session_id.is_none()
+                    && frame
+                        .utility_context
+                        .as_ref()
+                        .is_some_and(|context| context.context_id == self.context_id)
+            })
+    }
+}
+
 impl RefRegistry {
+    pub(crate) fn allocate_frame_prefix(&self, target_id: &str) -> String {
+        let mut state = self.state.lock().unwrap();
+        let tab = state.tabs.entry(target_id.to_string()).or_default();
+        tab.next_frame_prefix = tab
+            .next_frame_prefix
+            .checked_add(1)
+            .expect("frame ref prefix exhausted");
+        format!("f{}", (1u64 << 63) + tab.next_frame_prefix)
+    }
+
+    pub(crate) fn bind_snapshot_frames(
+        &self,
+        target_id: &str,
+        bindings: HashMap<Ref, RefFrameBinding>,
+    ) {
+        let mut state = self.state.lock().unwrap();
+        state
+            .tabs
+            .entry(target_id.to_string())
+            .or_default()
+            .bindings = bindings;
+    }
+
+    pub(crate) fn frame_binding(
+        &self,
+        target_id: &str,
+        reference: &Ref,
+    ) -> Option<RefFrameBinding> {
+        self.state
+            .lock()
+            .unwrap()
+            .tabs
+            .get(target_id)?
+            .bindings
+            .get(reference)
+            .cloned()
+    }
+
     pub fn replace_snapshot(
         &self,
         target_id: &str,
@@ -337,6 +399,31 @@ impl RefRegistry {
 impl WorldManager {
     pub fn resolve_ref(&self, tab: &Tab, reference: &Ref) -> Result<ElementHandle, RefError> {
         self.refs.resolve_current(tab.get_target_id(), reference)?;
+        if let Some(binding) = self.refs.frame_binding(tab.get_target_id(), reference) {
+            let tree = self.frame_tree(tab.get_target_id());
+            if !binding.is_current(tree.as_ref()) {
+                return Err(RefError::Stale {
+                    reference: reference.clone(),
+                });
+            }
+            return self
+                .resolve_frame_ref_handle(
+                    tab,
+                    &binding.frame_id,
+                    binding.context_id,
+                    binding.local_reference.as_ref().unwrap_or(reference),
+                )
+                .map_err(|error| map_handle_error(reference, error));
+        }
+        // Expanded refs must never fall back to the main frame if their binding was lost.
+        if reference
+            .frame_sequence()
+            .is_some_and(|sequence| sequence >= 1u64 << 63)
+        {
+            return Err(RefError::Stale {
+                reference: reference.clone(),
+            });
+        }
         self.call_injected_handle(tab, "resolveAriaRef", json!([reference]))
             .map_err(|error| map_handle_error(reference, error))
     }
@@ -369,6 +456,82 @@ mod tests {
             role: "button".to_string(),
             name: Some(name.to_string()),
         }
+    }
+
+    #[test]
+    fn child_binding_never_rebinds_on_navigation_or_context_reuse() {
+        let mut tree = crate::FrameTree::default();
+        tree.attach("main".into(), None);
+        tree.attach("child".into(), Some("main".into()));
+        tree.set_utility_context("child", None, 7);
+        let binding = RefFrameBinding {
+            frame_id: "child".into(),
+            context_id: 7,
+            generation: 0,
+            local_reference: None,
+        };
+        assert!(binding.is_current(Some(&tree)));
+        tree.navigate("child");
+        // Even a delayed/reused numeric context must not resurrect the old document's ref.
+        tree.set_utility_context("child", None, 7);
+        assert!(!binding.is_current(Some(&tree)));
+        let fresh = RefFrameBinding {
+            generation: 1,
+            ..binding.clone()
+        };
+        assert!(fresh.is_current(Some(&tree)));
+        tree.detach("child");
+        assert!(!fresh.is_current(Some(&tree)));
+        assert!(!fresh.is_current(None));
+    }
+
+    #[test]
+    fn cross_frame_same_element_sequence_has_distinct_registry_bindings() {
+        let registry = RefRegistry::default();
+        let first: Ref = format!("{}e1", registry.allocate_frame_prefix("tab"))
+            .parse()
+            .unwrap();
+        let second: Ref = format!("{}e1", registry.allocate_frame_prefix("tab"))
+            .parse()
+            .unwrap();
+        assert_ne!(first, second);
+        registry.replace_snapshot(
+            "tab",
+            HashMap::from([(first.clone(), info("A")), (second.clone(), info("B"))]),
+        );
+        let binding = RefFrameBinding {
+            frame_id: "child-a".into(),
+            context_id: 7,
+            generation: 0,
+            local_reference: None,
+        };
+        registry.bind_snapshot_frames(
+            "tab",
+            HashMap::from([
+                (first.clone(), binding.clone()),
+                (
+                    second.clone(),
+                    RefFrameBinding {
+                        frame_id: "child-b".into(),
+                        context_id: 8,
+                        ..binding
+                    },
+                ),
+            ]),
+        );
+        assert_eq!(
+            registry.frame_binding("tab", &first).unwrap().frame_id,
+            "child-a"
+        );
+        assert_eq!(
+            registry.frame_binding("tab", &second).unwrap().frame_id,
+            "child-b"
+        );
+        registry.top_level_navigation("tab");
+        assert!(matches!(
+            registry.resolve_current("tab", &first),
+            Err(RefError::GenerationMismatch { .. })
+        ));
     }
 
     #[test]

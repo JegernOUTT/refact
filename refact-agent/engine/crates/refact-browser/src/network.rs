@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
-use std::sync::{Condvar, Mutex};
+use std::sync::{Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use regex::{Regex, RegexBuilder};
@@ -49,6 +49,9 @@ struct TrackedRequest {
     entry: NetworkEntry,
     matching_url: String,
     counted: bool,
+    base_request_headers: BTreeMap<String, String>,
+    base_response_headers: BTreeMap<String, String>,
+    response_extra_seen: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -207,13 +210,27 @@ struct SequencedEntry {
     entry: NetworkEntry,
 }
 
+#[derive(Clone, Debug)]
+struct DiscoveryEntry {
+    cdp_id: String,
+    entry: NetworkEntry,
+    // Base events identify the hop; ExtraInfo does not. Keep these to undo a
+    // speculative merge if a later redirect reveals that the ID is shared.
+    base_request_headers: BTreeMap<String, String>,
+    base_response_headers: BTreeMap<String, String>,
+    response_extra_seen: bool,
+}
+
 #[derive(Debug)]
 struct NetworkMonitor {
     started_at: Instant,
+    namespace: String,
+    discovery: VecDeque<DiscoveryEntry>,
     active: HashMap<String, TrackedRequest>,
     request_extra: HashMap<String, BTreeMap<String, String>>,
     response_extra: HashMap<String, BTreeMap<String, String>>,
     response_extra_order: VecDeque<String>,
+    request_extra_order: VecDeque<String>,
     completed: Vec<NetworkEntry>,
     requests: VecDeque<SequencedEntry>,
     responses: VecDeque<SequencedEntry>,
@@ -226,10 +243,13 @@ impl Default for NetworkMonitor {
     fn default() -> Self {
         Self {
             started_at: Instant::now(),
+            namespace: uuid::Uuid::new_v4().to_string(),
+            discovery: VecDeque::new(),
             active: HashMap::new(),
             request_extra: HashMap::new(),
             response_extra: HashMap::new(),
             response_extra_order: VecDeque::new(),
+            request_extra_order: VecDeque::new(),
             completed: Vec::new(),
             requests: VecDeque::new(),
             responses: VecDeque::new(),
@@ -248,27 +268,57 @@ impl NetworkMonitor {
     fn record_request(&mut self, event: RequestStarted) {
         let now_ms = self.now_ms();
         let matching_url = event.url.clone();
+        // Fence the active previous hop before finish removes it, even if its
+        // discovery record has already aged out. No extra history map is needed.
+        if event.redirect_response.is_some() {
+            self.mark_header_ambiguity(&event.request_id);
+        }
         let redirect_from = if let Some(redirect) = event.redirect_response.as_ref() {
             self.finish_redirect(&event.request_id, redirect.clone());
             self.completed.last().map(|entry| entry.url.clone())
         } else {
             None
         };
+        let ambiguous = event.redirect_response.is_some()
+            || self
+                .discovery
+                .iter()
+                .any(|item| item.cdp_id == event.request_id);
+        if ambiguous {
+            self.mark_header_ambiguity(&event.request_id);
+        }
+        let base_request_headers = mask_headers(event.headers.clone());
+        self.request_extra_order
+            .retain(|id| id != &event.request_id);
         let request_headers = self
             .request_extra
             .remove(&event.request_id)
             .unwrap_or(event.headers);
-        let is_navigation_request = event.request_id == event.loader_id
+        let is_navigation_request = event
+            .request_id
+            .rsplit_once('\0')
+            .map_or(event.request_id.as_str(), |(_, id)| id)
+            == event.loader_id
             && event.resource_type.eq_ignore_ascii_case("document");
         let document_id = is_navigation_request.then(|| event.loader_id.clone());
         let entry = NetworkEntry {
+            request_id: Some(format!(
+                "net_{}_{}",
+                self.namespace,
+                self.request_sequence + 1
+            )),
             timestamp: event.timestamp,
             method: event.method,
             url: mask_text(&event.url),
             resource_type: event.resource_type,
             status: None,
             status_text: None,
-            request_headers: mask_headers(request_headers),
+            request_headers: if ambiguous {
+                base_request_headers.clone()
+            } else {
+                mask_headers(request_headers)
+            },
+            header_attribution: ambiguous.then(|| "redirect_extra_info_unverified".into()),
             response_headers: BTreeMap::new(),
             frame_id: event.frame_id.clone(),
             loader_id: Some(event.loader_id),
@@ -302,21 +352,166 @@ impl NetworkMonitor {
                 entry: entry.clone(),
             },
         );
+        self.discovery.push_back(DiscoveryEntry {
+            cdp_id: event.request_id.clone(),
+            entry: entry.clone(),
+            base_request_headers: base_request_headers.clone(),
+            base_response_headers: BTreeMap::new(),
+            response_extra_seen: false,
+        });
+        if self.discovery.len() > RECENT_EVENT_CAP {
+            self.discovery.pop_front();
+        }
         self.active.insert(
             event.request_id,
             TrackedRequest {
                 entry,
                 matching_url,
                 counted,
+                base_request_headers,
+                base_response_headers: BTreeMap::new(),
+                response_extra_seen: false,
             },
         );
     }
 
     fn record_request_extra(&mut self, request_id: String, headers: BTreeMap<String, String>) {
-        if let Some(request) = self.active.get_mut(&request_id) {
-            request.entry.request_headers = mask_headers(headers);
+        self.record_extra(request_id, headers, false);
+    }
+
+    fn record_extra(
+        &mut self,
+        request_id: String,
+        headers: BTreeMap<String, String>,
+        response: bool,
+    ) {
+        let headers = mask_headers(headers);
+        if let Some(item) = self
+            .discovery
+            .iter_mut()
+            .rev()
+            .find(|item| item.cdp_id == request_id)
+        {
+            if item.entry.header_attribution.is_some() {
+                return; // No hop ordinal/hasExtraInfo is supplied by our event API.
+            }
+            if response {
+                item.entry.response_headers = headers.clone();
+                item.response_extra_seen = true;
+            } else {
+                item.entry.request_headers = headers.clone();
+            }
+            let id = item.entry.request_id.clone();
+            if let Some(active) = self.active.get_mut(&request_id) {
+                if active.entry.request_id == id {
+                    if response {
+                        active.response_extra_seen = true;
+                        active.entry.response_headers = headers.clone();
+                    } else {
+                        active.entry.request_headers = headers.clone();
+                    }
+                }
+            }
+            for entry in self
+                .completed
+                .iter_mut()
+                .chain(self.requests.iter_mut().map(|event| &mut event.entry))
+                .chain(self.responses.iter_mut().map(|event| &mut event.entry))
+            {
+                if entry.request_id == id {
+                    if response {
+                        entry.response_headers = headers.clone();
+                    } else {
+                        entry.request_headers = headers.clone();
+                    }
+                }
+            }
+            return;
+        }
+        // Discovery is a bounded index, not the lifetime of an in-flight
+        // request. Preserve report behavior for a slow request evicted from it.
+        if let Some(active) = self.active.get_mut(&request_id) {
+            if active.entry.header_attribution.is_some() {
+                return;
+            }
+            if response {
+                active.entry.response_headers = headers.clone();
+                active.response_extra_seen = true;
+            } else {
+                active.entry.request_headers = headers.clone();
+            }
+            let id = active.entry.request_id.clone();
+            for event in self.requests.iter_mut().chain(self.responses.iter_mut()) {
+                if event.entry.request_id == id {
+                    if response {
+                        event.entry.response_headers = headers.clone();
+                    } else {
+                        event.entry.request_headers = headers.clone();
+                    }
+                }
+            }
+            return;
+        }
+        let (map, order) = if response {
+            (&mut self.response_extra, &mut self.response_extra_order)
         } else {
-            self.request_extra.insert(request_id, headers);
+            (&mut self.request_extra, &mut self.request_extra_order)
+        };
+        if map.insert(request_id.clone(), headers).is_none() {
+            order.push_back(request_id);
+        }
+        while order.len() > RECENT_EVENT_CAP {
+            if let Some(stale) = order.pop_front() {
+                map.remove(&stale);
+            }
+        }
+    }
+
+    fn mark_header_ambiguity(&mut self, request_id: &str) {
+        if let Some(active) = self.active.get_mut(request_id) {
+            active.entry.request_headers = active.base_request_headers.clone();
+            active.entry.response_headers = active.base_response_headers.clone();
+            active.entry.header_attribution = Some("redirect_extra_info_unverified".into());
+            let id = active.entry.request_id.clone();
+            for entry in self
+                .completed
+                .iter_mut()
+                .chain(self.requests.iter_mut().map(|event| &mut event.entry))
+                .chain(self.responses.iter_mut().map(|event| &mut event.entry))
+            {
+                if entry.request_id == id {
+                    entry.request_headers = active.entry.request_headers.clone();
+                    entry.response_headers = active.entry.response_headers.clone();
+                    entry.header_attribution = active.entry.header_attribution.clone();
+                }
+            }
+        }
+        self.request_extra.remove(request_id);
+        self.response_extra.remove(request_id);
+        self.request_extra_order.retain(|id| id != request_id);
+        self.response_extra_order.retain(|id| id != request_id);
+        for item in self
+            .discovery
+            .iter_mut()
+            .filter(|item| item.cdp_id == request_id)
+        {
+            item.entry.request_headers = item.base_request_headers.clone();
+            item.entry.response_headers = item.base_response_headers.clone();
+            item.entry.header_attribution = Some("redirect_extra_info_unverified".into());
+            let id = &item.entry.request_id;
+            for entry in self
+                .completed
+                .iter_mut()
+                .chain(self.requests.iter_mut().map(|event| &mut event.entry))
+                .chain(self.responses.iter_mut().map(|event| &mut event.entry))
+                .chain(self.active.values_mut().map(|active| &mut active.entry))
+            {
+                if &entry.request_id == id {
+                    entry.request_headers = item.entry.request_headers.clone();
+                    entry.response_headers = item.entry.response_headers.clone();
+                    entry.header_attribution = item.entry.header_attribution.clone();
+                }
+            }
         }
     }
 
@@ -324,6 +519,7 @@ impl NetworkMonitor {
         let Some(request) = self.active.get_mut(&response.request_id) else {
             return;
         };
+        request.base_response_headers = mask_headers(response.headers.clone());
         request.entry.status = Some(response.status);
         request.entry.status_text = Some(mask_text(&response.status_text));
         if response.status >= 400 {
@@ -332,9 +528,28 @@ impl NetworkMonitor {
                 response.status, response.status_text
             )));
         }
+        if let Some(item) = self
+            .discovery
+            .iter_mut()
+            .find(|item| item.entry.request_id == request.entry.request_id)
+        {
+            item.base_response_headers = mask_headers(response.headers.clone());
+        }
+        self.response_extra_order
+            .retain(|id| id != &response.request_id);
+        let active_extra = (request.response_extra_seen
+            && request.entry.header_attribution.is_none())
+        .then(|| request.entry.response_headers.clone());
+        let attached_extra = self
+            .discovery
+            .iter()
+            .find(|item| item.entry.request_id == request.entry.request_id)
+            .filter(|item| item.response_extra_seen && item.entry.header_attribution.is_none())
+            .map(|item| item.entry.response_headers.clone());
         request.entry.response_headers = mask_headers(
-            self.response_extra
-                .remove(&response.request_id)
+            active_extra
+                .or(attached_extra)
+                .or_else(|| self.response_extra.remove(&response.request_id))
                 .unwrap_or(response.headers),
         );
         request.entry.encoded_data_length = response.encoded_data_length;
@@ -355,23 +570,7 @@ impl NetworkMonitor {
     }
 
     fn record_response_extra(&mut self, request_id: String, headers: BTreeMap<String, String>) {
-        if let Some(request) = self.active.get_mut(&request_id) {
-            request.entry.response_headers = mask_headers(headers);
-            return;
-        }
-        if self
-            .response_extra
-            .insert(request_id.clone(), headers)
-            .is_none()
-        {
-            self.response_extra_order.push_back(request_id);
-        }
-        while self.response_extra_order.len() > RECENT_EVENT_CAP {
-            let Some(stale) = self.response_extra_order.pop_front() else {
-                break;
-            };
-            self.response_extra.remove(&stale);
-        }
+        self.record_extra(request_id, headers, true);
     }
 
     fn finish(
@@ -391,6 +590,7 @@ impl NetworkMonitor {
             timing.response_end = Some(timestamp);
         }
         self.finish_inflight(request_id, &request);
+        self.update_discovery(&request.entry, true);
         self.completed.push(request.entry.clone());
         Some(request.entry)
     }
@@ -413,6 +613,7 @@ impl NetworkMonitor {
             timing.response_end = Some(timestamp);
         }
         self.finish_inflight(request_id, &request);
+        self.update_discovery(&request.entry, true);
         self.completed.push(request.entry.clone());
         Some(request.entry)
     }
@@ -420,6 +621,17 @@ impl NetworkMonitor {
     fn finish_redirect(&mut self, request_id: &str, response: ResponseReceived) {
         self.record_response(response.clone());
         let _ = self.finish(request_id, response.timestamp, response.encoded_data_length);
+    }
+
+    fn update_discovery(&mut self, entry: &NetworkEntry, finished: bool) {
+        if let Some(item) = self
+            .discovery
+            .iter_mut()
+            .find(|item| item.entry.request_id == entry.request_id)
+        {
+            item.entry = entry.clone();
+            let _ = finished;
+        }
     }
 
     fn finish_inflight(&mut self, request_id: &str, request: &TrackedRequest) {
@@ -439,6 +651,180 @@ pub struct NetworkMonitorHandle {
 }
 
 impl NetworkMonitorHandle {
+    /// Return at most the latest 1000 requests, without changing wait/report cursors.
+    pub fn network_requests(&self, limit: usize) -> Vec<NetworkEntry> {
+        let state = self.state.lock().unwrap();
+        state
+            .discovery
+            .iter()
+            .rev()
+            .take(limit.min(RECENT_EVENT_CAP))
+            .map(|item| {
+                state
+                    .active
+                    .get(&item.cdp_id)
+                    .filter(|active| active.entry.request_id == item.entry.request_id)
+                    .map(|active| active.entry.clone())
+                    .unwrap_or_else(|| item.entry.clone())
+            })
+            .collect()
+    }
+
+    pub fn network_requests_for_tab(&self, tab_id: &str, limit: usize) -> Vec<NetworkEntry> {
+        let state = self.state.lock().unwrap();
+        state
+            .discovery
+            .iter()
+            .rev()
+            .filter(|item| {
+                item.cdp_id
+                    .split_once('\0')
+                    .is_some_and(|(target, _)| target == tab_id)
+            })
+            .take(limit.min(RECENT_EVENT_CAP))
+            .map(|item| {
+                state
+                    .active
+                    .get(&item.cdp_id)
+                    .filter(|active| active.entry.request_id == item.entry.request_id)
+                    .map(|active| active.entry.clone())
+                    .unwrap_or_else(|| item.entry.clone())
+            })
+            .collect()
+    }
+
+    pub fn network_request_for_tab(&self, tab_id: &str, id: &str) -> Result<NetworkEntry, String> {
+        let state = self.state.lock().unwrap();
+        let item = state
+            .discovery
+            .iter()
+            .find(|item| {
+                item.entry.request_id.as_deref() == Some(id)
+                    && item
+                        .cdp_id
+                        .split_once('\0')
+                        .is_some_and(|(target, _)| target == tab_id)
+            })
+            .ok_or_else(|| {
+                "Unknown, stale, evicted, or cross-tab network request ID".to_string()
+            })?;
+        Ok(state
+            .active
+            .get(&item.cdp_id)
+            .filter(|active| active.entry.request_id == item.entry.request_id)
+            .map(|active| active.entry.clone())
+            .unwrap_or_else(|| item.entry.clone()))
+    }
+
+    pub fn network_request(&self, id: &str) -> Result<NetworkEntry, String> {
+        let state = self.state.lock().unwrap();
+        let item = state
+            .discovery
+            .iter()
+            .find(|item| item.entry.request_id.as_deref() == Some(id))
+            .ok_or_else(|| "Unknown, stale, or evicted network request ID".to_string())?;
+        Ok(state
+            .active
+            .get(&item.cdp_id)
+            .filter(|active| active.entry.request_id == item.entry.request_id)
+            .map(|active| active.entry.clone())
+            .unwrap_or_else(|| item.entry.clone()))
+    }
+
+    /// Resolve only monitor-issued IDs against the originating CDP target.
+    /// CDP is not streaming: a dishonest content-length can still cause a larger transient allocation.
+    pub fn network_response_body(
+        &self,
+        tab: &headless_chrome::Tab,
+        id: &str,
+    ) -> Result<String, String> {
+        use headless_chrome::protocol::cdp::Network;
+        let cdp_id = self.response_body_request_id(tab.get_target_id(), id)?;
+        let response = tab
+            .call_method(Network::GetResponseBody {
+                request_id: cdp_id,
+            })
+            .map_err(|_| "Response body unavailable from browser".to_string())?;
+        if response.base_64_encoded || response.body.len() > 65536 {
+            return Err("Binary or oversized response body unavailable".into());
+        }
+        let mut json: serde_json::Value = serde_json::from_str(&response.body)
+            .map_err(|_| "Invalid JSON response body".to_string())?;
+        redact_json(&mut json);
+        let output = serde_json::to_string(&json)
+            .map_err(|_| "Cannot serialize response body".to_string())?;
+        if output.len() > 65536 {
+            return Err("Redacted response body exceeds 65536 bytes".into());
+        }
+        Ok(output)
+    }
+
+    // Validation returns owned data so the monitor lock ends before transport or parsing.
+    fn response_body_request_id(&self, tab_id: &str, id: &str) -> Result<String, String> {
+        let state = self.state.lock().unwrap();
+        let item = state
+            .discovery
+            .iter()
+            .find(|item| item.entry.request_id.as_deref() == Some(id))
+            .ok_or_else(|| "Unknown, stale, or evicted network request ID".to_string())?;
+        if state
+            .discovery
+            .iter()
+            .rev()
+            .find(|candidate| candidate.cdp_id == item.cdp_id)
+            .is_none_or(|candidate| candidate.entry.request_id != item.entry.request_id)
+        {
+            return Err("Response body unavailable for an earlier request hop".into());
+        }
+        if item.entry.header_attribution.is_some() {
+            return Err("Response body unavailable: redirect header attribution unknown".into());
+        }
+        let (target, cdp_id) = item
+            .cdp_id
+            .split_once('\0')
+            .ok_or("Request source tab unavailable")?;
+        if target != tab_id {
+            return Err("Network request belongs to another tab".into());
+        }
+        if item
+            .entry
+            .timing
+            .as_ref()
+            .and_then(|timing| timing.response_end)
+            .is_none()
+        {
+            return Err("Response body unavailable for pending request".into());
+        }
+        if item
+            .entry
+            .status
+            .is_none_or(|status| (300..400).contains(&status))
+        {
+            return Err("Response body unavailable for redirect or failed request".into());
+        }
+        let header = |name: &str| {
+            item.entry
+                .response_headers
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case(name))
+                .map(|(_, v)| v.as_str())
+        };
+        let length = header("content-length")
+            .and_then(|v| v.parse::<usize>().ok())
+            .ok_or("Response body size unknown")?;
+        if length > 65536 {
+            return Err("Response body exceeds 65536 bytes".into());
+        }
+        if header("content-encoding").is_some_and(|v| !v.eq_ignore_ascii_case("identity")) {
+            return Err("Encoded response body unavailable".into());
+        }
+        let mime = header("content-type").unwrap_or("").to_ascii_lowercase();
+        if !mime.contains("json") {
+            return Err("Only JSON response bodies are available for safe redaction".into());
+        }
+        Ok(cdp_id.to_string())
+    }
+
     pub fn attach_frame(&self, frame_id: String, parent_id: Option<String>) {
         let mut state = self.state.lock().unwrap();
         let now_ms = state.now_ms();
@@ -780,7 +1166,17 @@ pub(crate) fn mask_headers(headers: BTreeMap<String, String>) -> BTreeMap<String
             let lower = name.to_ascii_lowercase();
             let value = if matches!(
                 lower.as_str(),
-                "authorization" | "proxy-authorization" | "cookie" | "set-cookie" | "x-api-key"
+                "authorization"
+                    | "proxy-authorization"
+                    | "cookie"
+                    | "set-cookie"
+                    | "x-api-key"
+                    | "x-auth-token"
+                    | "x-api-token"
+                    | "x-csrf-token"
+                    | "x-xsrf-token"
+                    | "csrf-token"
+                    | "xsrf-token"
             ) {
                 "[REDACTED]".to_string()
             } else {
@@ -791,11 +1187,58 @@ pub(crate) fn mask_headers(headers: BTreeMap<String, String>) -> BTreeMap<String
         .collect()
 }
 
+fn redact_json(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, value) in map.iter_mut() {
+                let key = key.to_ascii_lowercase();
+                if [
+                    "password",
+                    "passwd",
+                    "token",
+                    "secret",
+                    "credential",
+                    "authorization",
+                    "cookie",
+                    "api_key",
+                    "api-key",
+                    "apikey",
+                    "signature",
+                    "private_key",
+                    "private-key",
+                    "privatekey",
+                ]
+                .iter()
+                .any(|part| key.contains(part))
+                {
+                    *value = serde_json::Value::String("[REDACTED]".into());
+                } else {
+                    redact_json(value);
+                }
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                redact_json(item);
+            }
+        }
+        serde_json::Value::String(text) => *text = mask_text(text),
+        _ => {}
+    }
+}
+
 pub fn mask_text(value: &str) -> String {
+    // Recognizable private-key envelopes are secrets even under an innocuous JSON key.
+    let upper = value.to_ascii_uppercase();
+    if upper.contains("-----BEGIN ") && upper.contains("PRIVATE KEY-----") {
+        return "[REDACTED]".into();
+    }
     let redacted = redact_sensitive(value);
-    let expression =
-        Regex::new(r"(?i)(password|passwd|token|api[_-]?key|authorization)(=|%3[dD])([^&\s]+)")
-            .unwrap();
+    static EXPRESSION: OnceLock<Regex> = OnceLock::new();
+    let expression = EXPRESSION.get_or_init(|| {
+        Regex::new(r"(?i)(password|passwd|token|api[_-]?key|authorization|signature|x-amz-signature|x-goog-signature|credential|secret)(=|%3[dD])([^&\s]+)")
+            .unwrap()
+    });
     expression
         .replace_all(&redacted, "$1$2[REDACTED]")
         .into_owned()
@@ -914,6 +1357,348 @@ mod tests {
             request_start: Some(10.1),
             response_start: Some(10.5),
         }
+    }
+
+    #[test]
+    #[ignore = "launches an isolated owned Chrome; enable with REFACT_NETWORK_CHROME=1"]
+    fn owned_chrome_burst_delivers_response_fence_and_evicts_old_request() {
+        use std::io::{Read, Write};
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        };
+
+        assert_eq!(std::env::var("REFACT_NETWORK_CHROME").as_deref(), Ok("1"));
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        struct Server(Arc<AtomicBool>, Option<std::thread::JoinHandle<()>>);
+        impl Drop for Server {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Relaxed);
+                self.1.take().unwrap().join().unwrap();
+            }
+        }
+        let stopped = Arc::new(AtomicBool::new(false));
+        let server_stopped = stopped.clone();
+        let _server = Server(
+            stopped,
+            Some(std::thread::spawn(move || {
+                while !server_stopped.load(Ordering::Relaxed) {
+                    let Ok((mut stream, _)) = listener.accept() else {
+                        std::thread::sleep(Duration::from_millis(1));
+                        continue;
+                    };
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(2)))
+                        .unwrap();
+                    let mut bytes = [0; 8192];
+                    let _ = stream.read(&mut bytes);
+                    let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 2\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n{}");
+                }
+            })),
+        );
+        let profile = tempfile::tempdir().unwrap();
+        let options = crate::BrowserLaunchOptions {
+            headless: true,
+            chromium_sandbox: false,
+            ..Default::default()
+        };
+        let args = options.chrome_args();
+        let ignored = options.ignored_default_args();
+        let browser = headless_chrome::Browser::new(crate::chrome_launch_options(
+            &options,
+            profile.path(),
+            &args,
+            &ignored,
+        ))
+        .unwrap();
+        let tab = browser.new_tab().unwrap();
+        let monitor = Arc::new(NetworkMonitorHandle::default());
+        crate::setup_network_capture(
+            tab.clone(),
+            monitor.clone(),
+            Arc::new(Mutex::new(Vec::new())),
+            Arc::new(crate::websocket::WebSocketRegistry::default()),
+            Arc::new(crate::har::HarRecorder::default()),
+        )
+        .unwrap();
+        let base = format!("http://{address}");
+        let cursor = monitor.response_cursor();
+        tab.navigate_to(&base)
+            .unwrap()
+            .wait_until_navigated()
+            .unwrap();
+        let old = monitor
+            .wait_for_response(
+                &UrlMatcher::glob(&format!("{base}/")).unwrap(),
+                &NetworkWaitFilters {
+                    status: Some(200),
+                    ..Default::default()
+                },
+                cursor,
+                Duration::from_secs(10),
+            )
+            .unwrap()
+            .request_id
+            .unwrap();
+        let cursor = monitor.response_cursor();
+        let started = Instant::now();
+        let result = tab.evaluate(
+            "(async()=>{for(let i=0;i<1001;i++){if(!(await fetch('/fast?evict='+i)).ok)return false;}return (await fetch('/eviction-fence')).ok;})()",
+            true,
+        ).unwrap();
+        let eval_elapsed = started.elapsed();
+        assert_eq!(result.value, Some(serde_json::json!(true)));
+        let fence = monitor.wait_for_response(
+            &UrlMatcher::glob("**/eviction-fence").unwrap(),
+            &NetworkWaitFilters {
+                status: Some(200),
+                ..Default::default()
+            },
+            cursor,
+            Duration::from_secs(10),
+        );
+        eprintln!("burst eval={eval_elapsed:?}, fence elapsed={:?}, captured requests={}, responses={}, fence={:?}", started.elapsed(), monitor.request_cursor(), monitor.response_cursor(), fence.as_ref().map(|entry| entry.status));
+        fence.unwrap();
+        assert!(monitor.network_request(&old).is_err());
+        assert_eq!(monitor.network_requests(usize::MAX).len(), RECENT_EVENT_CAP);
+    }
+
+    #[test]
+    fn active_evicted_request_keeps_extra_headers_without_discovery_resurrection() {
+        let monitor = NetworkMonitorHandle::default();
+        let raw = "tab-a\0slow";
+        monitor.request_started(request(raw, "main", "https://x.test/slow", "Fetch"));
+        let id = monitor.network_requests(1)[0].request_id.clone().unwrap();
+        monitor.response_received(response(raw, 200, BTreeMap::new()));
+        for index in 0..RECENT_EVENT_CAP {
+            monitor.request_started(request(
+                &format!("tab-a\0filler-{index}"),
+                "main",
+                "https://x.test/fill",
+                "Fetch",
+            ));
+        }
+        assert!(monitor.network_request(&id).is_err());
+        assert!(monitor.state.lock().unwrap().active.contains_key(raw));
+        monitor.request_extra(
+            raw.into(),
+            BTreeMap::from([("x-late-request".into(), "request-extra".into())]),
+        );
+        monitor.response_extra(
+            raw.into(),
+            BTreeMap::from([("x-late-response".into(), "response-extra".into())]),
+        );
+        let done = monitor.loading_finished(raw, 12.0, Some(2)).unwrap();
+        assert_eq!(
+            done.request_headers
+                .get("x-late-request")
+                .map(String::as_str),
+            Some("request-extra")
+        );
+        assert_eq!(
+            done.response_headers
+                .get("x-late-response")
+                .map(String::as_str),
+            Some("response-extra")
+        );
+        assert!(monitor.network_request(&id).is_err());
+        assert_eq!(monitor.network_requests(usize::MAX).len(), RECENT_EVENT_CAP);
+    }
+
+    #[test]
+    fn redirect_after_discovery_eviction_clears_uncertain_retained_headers() {
+        let mut monitor = NetworkMonitor::default();
+        let raw = "tab-a\0redirect-evicted";
+        monitor.record_request(request(raw, "main", "https://x.test/start", "Fetch"));
+        let old_id = monitor.active[raw].entry.request_id.clone();
+        monitor.record_request_extra(
+            raw.into(),
+            BTreeMap::from([("x-uncertain".into(), "old-extra".into())]),
+        );
+        monitor.record_response_extra(
+            raw.into(),
+            BTreeMap::from([("x-uncertain".into(), "old-extra".into())]),
+        );
+        for index in 0..RECENT_EVENT_CAP {
+            monitor.record_request(request(
+                &format!("tab-a\0filler-{index}"),
+                "main",
+                "https://x.test/fill",
+                "Fetch",
+            ));
+        }
+        assert!(!monitor
+            .discovery
+            .iter()
+            .any(|item| item.entry.request_id == old_id));
+        let mut next = request(raw, "main", "https://x.test/end", "Fetch");
+        next.redirect_response = Some(response(raw, 302, BTreeMap::new()));
+        monitor.record_request(next);
+        let old = monitor
+            .completed
+            .iter()
+            .find(|entry| entry.request_id == old_id)
+            .unwrap();
+        assert!(!old.request_headers.contains_key("x-uncertain"));
+        assert!(!old.response_headers.contains_key("x-uncertain"));
+        assert_eq!(
+            old.header_attribution.as_deref(),
+            Some("redirect_extra_info_unverified")
+        );
+    }
+
+    #[test]
+    fn known_csrf_private_key_and_pem_secrets_do_not_escape() {
+        let headers = mask_headers(BTreeMap::from([
+            ("X-CSRF-Token".into(), "opaque-csrf-value".into()),
+            ("X-XSRF-Token".into(), "opaque-xsrf-value".into()),
+        ]));
+        assert_eq!(headers["X-CSRF-Token"], "[REDACTED]");
+        assert_eq!(headers["X-XSRF-Token"], "[REDACTED]");
+        let mut body = serde_json::json!({"private_key": "opaque-private-material", "nested": [{"privateKey": "other-private-material"}], "safe": "hello", "pem": "-----BEGIN RSA PRIVATE KEY-----\nfixture-material\n-----END RSA PRIVATE KEY-----"});
+        redact_json(&mut body);
+        assert_eq!(body["private_key"], "[REDACTED]");
+        assert_eq!(body["nested"][0]["privateKey"], "[REDACTED]");
+        assert_eq!(body["pem"], "[REDACTED]");
+        assert_eq!(body["safe"], "hello");
+    }
+
+    #[test]
+    fn completed_discovery_accepts_late_unambiguous_extra_headers() {
+        let monitor = NetworkMonitorHandle::default();
+        monitor.request_started(request("tab-a\0late", "main", "https://x.test/", "Fetch"));
+        monitor.response_received(response("tab-a\0late", 200, BTreeMap::new()));
+        monitor.loading_finished("tab-a\0late", 12.0, Some(2));
+        let id = monitor.network_requests_for_tab("tab-a", 1)[0]
+            .request_id
+            .clone()
+            .unwrap();
+        monitor.request_extra(
+            "tab-a\0late".into(),
+            BTreeMap::from([("X-CSRF-Token".into(), "opaque".into())]),
+        );
+        monitor.response_extra(
+            "tab-a\0late".into(),
+            BTreeMap::from([
+                ("Content-Type".into(), "application/json".into()),
+                ("Content-Length".into(), "2".into()),
+            ]),
+        );
+        let detail = monitor.network_request_for_tab("tab-a", &id).unwrap();
+        assert_eq!(
+            detail
+                .request_headers
+                .get("X-CSRF-Token")
+                .map(String::as_str),
+            Some("[REDACTED]")
+        );
+        assert_eq!(
+            detail
+                .response_headers
+                .get("Content-Length")
+                .map(String::as_str),
+            Some("2")
+        );
+        assert_eq!(
+            monitor.response_body_request_id("tab-a", &id).unwrap(),
+            "late"
+        );
+        assert!(monitor.response_body_request_id("tab-b", &id).is_err());
+        assert!(NetworkMonitorHandle::default()
+            .response_body_request_id("tab-a", &id)
+            .is_err());
+    }
+
+    #[test]
+    fn redirected_extra_info_is_never_assigned_to_a_guessed_hop() {
+        // ExtraInfo may precede redirect requestWillBeSent, or follow it. In
+        // either order no ordinal/hasExtraInfo exists in our event interface.
+        for extra_before_redirect in [false, true] {
+            let monitor = NetworkMonitorHandle::default();
+            let raw = "tab-a\0redirect";
+            let mut first = request(raw, "main", "https://x.test/start", "Fetch");
+            first.headers.insert("x-hop".into(), "first-base".into());
+            monitor.request_started(first);
+            let old = monitor.network_requests(1)[0].request_id.clone().unwrap();
+            let extras = BTreeMap::from([("x-hop".into(), "unattributable-extra".into())]);
+            if extra_before_redirect {
+                monitor.request_extra(raw.into(), extras.clone());
+                monitor.response_extra(raw.into(), extras.clone());
+            }
+            let mut next = request(raw, "main", "https://x.test/end", "Fetch");
+            next.headers.insert("x-hop".into(), "second-base".into());
+            next.redirect_response = Some(response(
+                raw,
+                302,
+                BTreeMap::from([("x-hop".into(), "redirect-base".into())]),
+            ));
+            monitor.request_started(next);
+            if !extra_before_redirect {
+                monitor.request_extra(raw.into(), extras.clone());
+                monitor.response_extra(raw.into(), extras);
+            }
+            let headers = BTreeMap::from([
+                ("Content-Length".into(), "2".into()),
+                ("Content-Type".into(), "application/json".into()),
+            ]);
+            monitor.response_received(response(raw, 200, headers));
+            monitor.loading_finished(raw, 12.0, Some(2));
+            let entries = monitor.network_requests_for_tab("tab-a", 10);
+            assert_eq!(entries.len(), 2);
+            assert_eq!(entries[0].request_headers["x-hop"], "second-base");
+            assert_eq!(entries[1].request_headers["x-hop"], "first-base");
+            assert_eq!(entries[1].response_headers["x-hop"], "redirect-base");
+            for entry in entries {
+                assert_eq!(
+                    entry.header_attribution.as_deref(),
+                    Some("redirect_extra_info_unverified")
+                );
+                assert!(entry.failure_text.is_none());
+                let id = entry.request_id.unwrap();
+                assert!(monitor.response_body_request_id("tab-a", &id).is_err());
+                assert_eq!(
+                    monitor
+                        .network_request(&id)
+                        .unwrap()
+                        .header_attribution
+                        .as_deref(),
+                    Some("redirect_extra_info_unverified")
+                );
+            }
+            assert!(monitor.response_body_request_id("tab-a", &old).is_err());
+        }
+    }
+
+    #[test]
+    fn extra_response_before_base_response_and_orphan_buffers_are_bounded() {
+        let monitor = NetworkMonitorHandle::default();
+        monitor.request_started(request("tab-a\0early", "main", "https://x.test/", "Fetch"));
+        monitor.response_extra(
+            "tab-a\0early".into(),
+            BTreeMap::from([("x-source".into(), "extra".into())]),
+        );
+        monitor.response_received(response(
+            "tab-a\0early",
+            200,
+            BTreeMap::from([("x-source".into(), "base".into())]),
+        ));
+        monitor.loading_finished("tab-a\0early", 12.0, Some(2));
+        assert_eq!(
+            monitor.network_requests(1)[0].response_headers["x-source"],
+            "extra"
+        );
+        for index in 0..(RECENT_EVENT_CAP + 250) {
+            monitor.request_extra(format!("orphan-{index}"), BTreeMap::new());
+            monitor.response_extra(format!("orphan-{index}"), BTreeMap::new());
+        }
+        let state = monitor.state.lock().unwrap();
+        assert_eq!(state.request_extra.len(), RECENT_EVENT_CAP);
+        assert_eq!(state.request_extra_order.len(), RECENT_EVENT_CAP);
+        assert_eq!(state.response_extra.len(), RECENT_EVENT_CAP);
+        assert_eq!(state.response_extra_order.len(), RECENT_EVENT_CAP);
+        assert!(!state.request_extra.contains_key("orphan-0"));
     }
 
     #[test]
@@ -1083,5 +1868,121 @@ mod tests {
         assert!(entry.url.contains("[REDACTED]"));
         assert_eq!(entry.request_headers["Authorization"], "[REDACTED]");
         assert_eq!(entry.failure_text.as_deref(), Some("token=[REDACTED]"));
+    }
+    #[test]
+    fn discovery_scopes_redirects_eviction_and_header_updates() {
+        let monitor = NetworkMonitorHandle::default();
+        let mut first = request(
+            "tab-a\0same",
+            "main",
+            "https://x.test/?token=secret",
+            "Fetch",
+        );
+        first.headers.insert("x-api-key".into(), "hidden".into());
+        monitor.request_started(first);
+        let old = monitor.network_requests_for_tab("tab-a", 10)[0]
+            .request_id
+            .clone()
+            .unwrap();
+        monitor.request_extra(
+            "tab-a\0same".into(),
+            BTreeMap::from([("Cookie".into(), "secret".into())]),
+        );
+        assert_eq!(
+            monitor
+                .network_request_for_tab("tab-a", &old)
+                .unwrap()
+                .request_headers["Cookie"],
+            "[REDACTED]"
+        );
+        let mut next = request("tab-a\0same", "main", "https://x.test/next", "Fetch");
+        next.redirect_response = Some(response("tab-a\0same", 302, BTreeMap::new()));
+        monitor.request_started(next);
+        let entries = monitor.network_requests_for_tab("tab-a", 10);
+        assert_eq!(entries.len(), 2);
+        assert_ne!(entries[0].request_id, entries[1].request_id);
+        assert_eq!(entries[1].request_id.as_deref(), Some(old.as_str()));
+        assert!(!entries[1].url.contains("secret"));
+        assert!(monitor.network_request_for_tab("tab-b", &old).is_err());
+        assert!(NetworkMonitorHandle::default()
+            .network_request(&old)
+            .is_err());
+        assert!(monitor.network_request("arbitrary").is_err());
+        for i in 0..RECENT_EVENT_CAP {
+            monitor.request_started(request(
+                &format!("tab-a\0{i}"),
+                "main",
+                "https://x.test/",
+                "Fetch",
+            ));
+        }
+        assert!(monitor.network_request(&old).is_err());
+        assert_eq!(
+            monitor.network_requests_for_tab("tab-a", usize::MAX).len(),
+            RECENT_EVENT_CAP
+        );
+    }
+
+    #[test]
+    fn structured_body_secrets_are_redacted_recursively() {
+        let mut value = serde_json::json!({"nested": [{"password": "hunter2", "x-api-key": "abc", "safe": "token=secret"}], "signature": "signed"});
+        redact_json(&mut value);
+        assert_eq!(value["nested"][0]["password"], "[REDACTED]");
+        assert_eq!(value["nested"][0]["x-api-key"], "[REDACTED]");
+        assert_eq!(value["nested"][0]["safe"], "token=[REDACTED]");
+        assert_eq!(value["signature"], "[REDACTED]");
+    }
+    #[test]
+    fn body_preflight_rejects_cross_target_non_json_and_stale_hop() {
+        let monitor = NetworkMonitorHandle::default();
+        monitor.request_started(request(
+            "tab-a\0request",
+            "main",
+            "https://x.test/",
+            "Fetch",
+        ));
+        let first = monitor.network_requests_for_tab("tab-a", 1)[0]
+            .request_id
+            .clone()
+            .unwrap();
+        let headers = BTreeMap::from([
+            ("Content-Length".into(), "2".into()),
+            ("Content-Type".into(), "application/json".into()),
+        ]);
+        monitor.response_received(response("tab-a\0request", 200, headers));
+        monitor.loading_finished("tab-a\0request", 12.0, Some(2));
+        assert_eq!(
+            monitor.response_body_request_id("tab-a", &first).unwrap(),
+            "request"
+        );
+        assert!(monitor.response_body_request_id("tab-b", &first).is_err());
+        let mut next = request("tab-a\0request", "main", "https://x.test/next", "Fetch");
+        next.redirect_response = Some(response("tab-a\0request", 302, BTreeMap::new()));
+        monitor.request_started(next);
+        assert!(monitor.response_body_request_id("tab-a", &first).is_err());
+        // Use an independent request: the redirect chain is now deliberately
+        // refused earlier for unknown header attribution, not MIME type.
+        monitor.request_started(request(
+            "tab-a\0plain",
+            "main",
+            "https://x.test/plain",
+            "Fetch",
+        ));
+        let second = monitor.network_requests_for_tab("tab-a", 1)[0]
+            .request_id
+            .clone()
+            .unwrap();
+        let headers = BTreeMap::from([
+            ("Content-Length".into(), "5".into()),
+            ("Content-Type".into(), "text/plain".into()),
+        ]);
+        monitor.response_received(response("tab-a\0plain", 200, headers));
+        monitor.loading_finished("tab-a\0plain", 13.0, Some(5));
+        assert_eq!(
+            monitor
+                .response_body_request_id("tab-a", &second)
+                .unwrap_err(),
+            "Only JSON response bodies are available for safe redaction"
+        );
     }
 }

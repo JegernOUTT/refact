@@ -57,6 +57,7 @@ itertools = "0.14.0"
 lazy_static = "1.4.0"
 clap = { version = "=4.5.60", features = ["derive"] }
 libc = "0.2"
+cap-std = "=3.4.6"
 md5 = "0.7"
 regex = "1.9.5"
 ropey = "1.6"
@@ -286,6 +287,7 @@ pnet_datalink = "0.35.0"
 
 [dependencies]
 clap.workspace = true
+cap-std.workspace = true
 
 # Pinned transitive dep (via rustls -> aws-lc-rs): aws-lc-sys 0.42.0's build script
 # aborts with a false-positive "COMPILER BUG DETECTED" (gcc bug 95189) on the CI

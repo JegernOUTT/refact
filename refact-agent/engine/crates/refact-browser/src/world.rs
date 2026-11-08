@@ -200,6 +200,23 @@ impl WorldManager {
         Ok(context_id)
     }
 
+    pub(crate) fn ensure_snapshot_world(&self, tab: &Tab) -> Result<String, String> {
+        self.install_for_tab(tab)?;
+        let tree = tab
+            .call_method(Page::GetFrameTree(None))
+            .map_err(|e| format!("Failed to read snapshot frame tree: {e}"))?
+            .frame_tree;
+        let main = tree.frame.id.clone();
+        self.record_frame_tree(tab.get_target_id(), &tree);
+        if self.context_for_frame(tab.get_target_id(), &main).is_none()
+            && self.note_main_world_created(tab.get_target_id())
+        {
+            self.refs.utility_world_recreated(tab.get_target_id());
+        }
+        self.ensure_utility_world_for_frame(tab, &main)?;
+        Ok(main)
+    }
+
     pub fn eval_in_utility(&self, tab: &Tab, expression: &str) -> Result<Value, String> {
         let context_id = self.ensure_utility_world(tab)?;
         let result = tab
@@ -336,6 +353,38 @@ impl WorldManager {
             )
         })?;
         self.register_handle(tab, object_id, context_id, frame_id)
+    }
+
+    pub(crate) fn resolve_frame_ref_handle(
+        &self,
+        tab: &Tab,
+        frame_id: &str,
+        context_id: i64,
+        reference: &crate::Ref,
+    ) -> Result<ElementHandle, HandleError> {
+        let expression = format!(
+            "globalThis.__refact_injected__.resolveAriaRef({})",
+            serde_json::to_string(reference).map_err(|e| HandleError::Protocol(e.to_string()))?
+        );
+        let result = tab
+            .call_method(runtime_evaluate_handle(
+                expression,
+                context_id as Runtime::ExecutionContextId,
+            ))
+            .map_err(|e| HandleError::Protocol(e.to_string()))?;
+        if let Some(exception) = result.exception_details {
+            return Err(HandleError::Resolution(exception_message(&exception)));
+        }
+        let object_id = result
+            .result
+            .object_id
+            .ok_or_else(|| HandleError::Resolution("Ref returned no element handle".into()))?;
+        self.register_handle(
+            tab,
+            object_id,
+            context_id as Runtime::ExecutionContextId,
+            frame_id.to_string(),
+        )
     }
 
     pub fn call_injected_handles(

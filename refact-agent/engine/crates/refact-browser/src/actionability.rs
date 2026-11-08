@@ -3,6 +3,7 @@ use std::fmt::{Display, Formatter};
 use std::time::{Duration, Instant};
 
 use crate::ElementState;
+use crate::profiling::{Span, Stage};
 use refact_integrations::browser_models::ActionabilityDiagnostics;
 
 pub const LOCATOR_RETRY_BACKOFF_MS: &[u64] = &[0, 20, 50, 100, 100, 500, 500];
@@ -751,6 +752,7 @@ impl<C: Clock> ActionabilityEngine<C> {
         action_retry_backoff_ms: &[u64],
         driver: &mut D,
     ) -> Result<ActionabilitySuccess<D::Output>, ActionabilityError> {
+        let _profile = Span::action(action);
         let started_at = self.clock.now();
         let mut call_log = CallLog::default();
         let mut last_diagnostic = ActionabilityDiagnostic::NotFound;
@@ -792,7 +794,7 @@ impl<C: Clock> ActionabilityEngine<C> {
             }
             locator_attempt += 1;
 
-            match driver.resolve() {
+            match Span::measure(Stage::Resolve, || driver.resolve()) {
                 LocatorOutcome::Error {
                     description,
                 } => {
@@ -898,9 +900,10 @@ impl<C: Clock> ActionabilityEngine<C> {
         driver: &mut D,
         call_log: &mut CallLog,
     ) -> Result<Duration, ActionabilityError> {
+        let _profile = Span::new(Stage::Prechecks);
         let mut handler_elapsed = Duration::ZERO;
         call_log.push("checking pending navigation before locator handlers");
-        if let Err(diagnostic) = driver.wait_for_navigation() {
+        if let Err(diagnostic) = Span::measure(Stage::Navigation, || driver.wait_for_navigation()) {
             call_log.push(diagnostic.log_line());
             return Err(ActionabilityError::Failed {
                 diagnostic,
@@ -916,7 +919,8 @@ impl<C: Clock> ActionabilityEngine<C> {
             ActionabilityExecutionMode::Standard => {
                 call_log.push("checking locator handlers");
                 let handler_started_at = self.clock.now();
-                let checkpoint = driver.locator_handlers_checkpoint();
+                let checkpoint =
+                    Span::measure(Stage::Handlers, || driver.locator_handlers_checkpoint());
                 handler_elapsed = self.clock.now().saturating_sub(handler_started_at);
                 if let Err(diagnostic) = checkpoint {
                     call_log.push(diagnostic.log_line());
@@ -936,7 +940,7 @@ impl<C: Clock> ActionabilityEngine<C> {
             }
         }
         call_log.push("checking pending navigation after locator handlers");
-        if let Err(diagnostic) = driver.wait_for_navigation() {
+        if let Err(diagnostic) = Span::measure(Stage::Navigation, || driver.wait_for_navigation()) {
             call_log.push(diagnostic.log_line());
             return Err(ActionabilityError::Failed {
                 diagnostic,
@@ -1018,7 +1022,7 @@ impl<C: Clock> ActionabilityEngine<C> {
 
             if let Some(description) = &state_description {
                 call_log.push(format!("waiting for element to be {description}"));
-                match driver.element_state() {
+                match Span::measure(Stage::ElementState, || driver.element_state()) {
                     Ok(state) => {
                         *last_state = Some(state.clone());
                         if let Some(diagnostic) = missing_state(required, &state) {
@@ -1044,7 +1048,7 @@ impl<C: Clock> ActionabilityEngine<C> {
                 }
             }
 
-            match driver.perform() {
+            match Span::measure(Stage::Perform, || driver.perform()) {
                 Ok(output) => {
                     if required.receives_events {
                         *receives_events = Some(true);
@@ -1075,6 +1079,7 @@ impl<C: Clock> ActionabilityEngine<C> {
     }
 
     fn wait(&self, requested: Duration, deadline: Deadline, call_log: &mut CallLog) -> bool {
+        let _profile = Span::new(Stage::Backoff);
         if deadline.expired(&self.clock) {
             return false;
         }

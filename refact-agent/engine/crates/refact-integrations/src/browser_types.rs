@@ -109,6 +109,10 @@ pub struct ConsoleEntry {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct NetworkEntry {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header_attribution: Option<String>,
     pub timestamp: f64,
     pub method: String,
     pub url: String,

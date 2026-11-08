@@ -1,16 +1,15 @@
-use std::borrow::BorrowMut;
+use std::cell::RefCell;
 use std::ffi::OsStr;
 use std::hash::{Hash, Hasher};
 use std::io::prelude::*;
 use std::io::{BufRead, BufReader};
 use std::net;
 use std::process::{Child, Command, Stdio};
+use std::rc::Rc;
+use std::sync::{Arc, Mutex, TryLockError};
 use std::time::{Duration, Instant};
 
 use super::transport::{CommandDeadlineGuard, CommandTimeout};
-
-#[cfg(test)]
-use std::cell::RefCell;
 
 use derive_builder::Builder;
 
@@ -41,8 +40,119 @@ impl ForTesting {
 }
 
 pub struct Process {
-    child_process: TemporaryProcess,
+    child_process: OwnedProcess,
     pub debug_ws_url: Url,
+}
+
+#[derive(Clone)]
+pub struct OwnedProcess {
+    child: Arc<Mutex<TemporaryProcess>>,
+    id: u32,
+}
+
+thread_local! {
+    static LAUNCH_TRACKERS: RefCell<Vec<Rc<RefCell<Vec<OwnedProcess>>>>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Observes actual children spawned by launches on this thread until dropped.
+///
+/// Install before the entire runtime initialization, not just `Browser::new`.
+/// An empty snapshot proves no child was spawned in this scope. After a failure,
+/// retain the snapshot and use each child's `terminate_before` receipt; an error
+/// or `false` is not proof of exit. Never infer exit from a PID or profile lock.
+///
+/// Nested scopes capture only their own launches (the innermost active scope).
+/// This guard is deliberately !Send/!Sync. Returned child capabilities are Send.
+/// Dropping the guard unregisters it; it does not terminate a surviving runtime.
+/// Retain unknown child capabilities before dropping the guard, otherwise the
+/// last owner's normal synchronous kill/reap fallback may run during drop.
+pub struct OwnedLaunchTracker {
+    processes: Rc<RefCell<Vec<OwnedProcess>>>,
+}
+
+impl OwnedLaunchTracker {
+    pub fn new() -> Self {
+        let processes = Rc::new(RefCell::new(Vec::new()));
+        LAUNCH_TRACKERS.with(|trackers| trackers.borrow_mut().push(processes.clone()));
+        Self {
+            processes,
+        }
+    }
+
+    pub fn processes(&self) -> Vec<OwnedProcess> {
+        self.processes.borrow().clone()
+    }
+
+    fn observe(process: &OwnedProcess) {
+        LAUNCH_TRACKERS.with(|trackers| {
+            if let Some(tracker) = trackers.borrow().last() {
+                tracker.borrow_mut().push(process.clone());
+            }
+        });
+    }
+}
+
+impl Default for OwnedLaunchTracker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Drop for OwnedLaunchTracker {
+    fn drop(&mut self) {
+        // Identity-based removal also handles non-LIFO guard drops without
+        // restoring an expired observer or authorizing a later unrelated launch.
+        LAUNCH_TRACKERS.with(|trackers| {
+            trackers
+                .borrow_mut()
+                .retain(|tracker| !Rc::ptr_eq(tracker, &self.processes));
+        });
+    }
+}
+
+impl OwnedProcess {
+    fn new(child: TemporaryProcess) -> Self {
+        Self {
+            id: child.0.id(),
+            child: Arc::new(Mutex::new(child)),
+        }
+    }
+
+    pub fn id(&self) -> u32 {
+        self.id
+    }
+
+    pub fn terminate_before(&self, deadline: Instant) -> std::io::Result<bool> {
+        let mut kill_requested = false;
+        loop {
+            if Instant::now() >= deadline {
+                return Ok(false);
+            }
+            match self.child.try_lock() {
+                Ok(mut child) => {
+                    if child.0.try_wait()?.is_some() {
+                        return Ok(true);
+                    }
+                    if !kill_requested {
+                        if let Err(error) = child.0.kill() {
+                            if child.0.try_wait()?.is_some() {
+                                return Ok(true);
+                            }
+                            return Err(error);
+                        }
+                        kill_requested = true;
+                    }
+                }
+                Err(TryLockError::WouldBlock) => {}
+                Err(TryLockError::Poisoned(_)) => {
+                    return Err(std::io::Error::other("Owned Chrome process lock poisoned"));
+                }
+            }
+            std::thread::sleep(
+                Duration::from_millis(5).min(deadline.saturating_duration_since(Instant::now())),
+            );
+        }
+    }
 }
 
 #[derive(Debug, Error)]
@@ -319,7 +429,7 @@ impl Process {
 
         let mut process = Self::start_process(&launch_options)?;
 
-        info!("Started Chrome. PID: {}", process.0.id());
+        info!("Started Chrome. PID: {}", process.id());
 
         let url;
         let mut attempts = 0;
@@ -328,7 +438,14 @@ impl Process {
                 return Err(ChromeLaunchError::NoAvailablePorts {}.into());
             }
 
-            match Self::ws_url_from_output(process.0.borrow_mut()) {
+            let ws_result = {
+                let mut child = process
+                    .child
+                    .lock()
+                    .map_err(|_| anyhow!("Owned Chrome process lock poisoned"))?;
+                Self::ws_url_from_output(&mut child.0)
+            };
+            match ws_result {
                 Ok(debug_ws_url) => {
                     url = debug_ws_url;
                     debug!("Found debugging WS URL: {url:?}");
@@ -348,6 +465,15 @@ impl Process {
                     }
 
                     if launch_options.port.is_none() {
+                        // Observer clones must not keep superseded attempts alive.
+                        // Reap the original child before another attempt, within the
+                        // same startup budget; unknown ownership remains in the tracker.
+                        let deadline = CommandDeadlineGuard::current_deadline()
+                            .expect("Process::new installs a startup deadline");
+                        if !process.terminate_before(deadline)? {
+                            check_deadline(deadline)?;
+                            return Err(anyhow!("Chrome retry cleanup did not confirm child exit"));
+                        }
                         process = Self::start_process(&launch_options)?;
                     } else {
                         return Err(error);
@@ -359,8 +485,12 @@ impl Process {
             attempts += 1;
         }
 
-        let child = process.0.borrow_mut();
-        child.stderr = None;
+        process
+            .child
+            .lock()
+            .map_err(|_| anyhow!("Owned Chrome process lock poisoned"))?
+            .0
+            .stderr = None;
 
         Ok(Self {
             child_process: process,
@@ -368,7 +498,7 @@ impl Process {
         })
     }
 
-    fn start_process(launch_options: &LaunchOptions) -> Result<TemporaryProcess> {
+    fn start_process(launch_options: &LaunchOptions) -> Result<OwnedProcess> {
         check_startup_deadline()?;
         let debug_port = if let Some(port) = launch_options.port {
             port
@@ -514,6 +644,8 @@ impl Process {
                 .spawn()?,
             temp_user_data_dir,
         );
+        let process = OwnedProcess::new(process);
+        OwnedLaunchTracker::observe(&process);
         Ok(process)
     }
 
@@ -597,7 +729,11 @@ impl Process {
     }
 
     pub fn get_id(&self) -> u32 {
-        self.child_process.0.id()
+        self.child_process.id()
+    }
+
+    pub fn owned_process(&self) -> OwnedProcess {
+        self.child_process.clone()
     }
 }
 
@@ -750,6 +886,246 @@ mod tests {
         INIT.call_once(|| {
             env_logger::try_init().unwrap_or(());
         });
+    }
+
+    #[cfg(any(unix, windows))]
+    fn owned_fixture() -> OwnedProcess {
+        #[cfg(unix)]
+        let mut command = {
+            let mut command = Command::new("sh");
+            command.args(["-c", "printf 'ready\\n'; read ignored"]);
+            command
+        };
+        #[cfg(windows)]
+        let mut command = {
+            let mut command = Command::new("powershell.exe");
+            command.args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "[Console]::Out.WriteLine('ready'); [Console]::In.ReadLine() | Out-Null",
+            ]);
+            command
+        };
+        let mut child = command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut ready = String::new();
+        BufReader::new(child.stdout.take().unwrap())
+            .read_line(&mut ready)
+            .unwrap();
+        assert_eq!(ready.trim(), "ready");
+        assert!(child.try_wait().unwrap().is_none());
+        OwnedProcess::new(TemporaryProcess(child, None))
+    }
+
+    #[test]
+    #[cfg(any(unix, windows))]
+    fn owned_process_termination_reaps_only_its_original_child() {
+        let owned = owned_fixture();
+        let other = owned_fixture();
+        let handle = owned.clone();
+        assert_eq!(handle.id(), owned.id());
+        assert_ne!(handle.id(), other.id());
+        assert!(
+            handle
+                .terminate_before(Instant::now() + Duration::from_secs(5))
+                .unwrap()
+        );
+        assert!(owned.child.lock().unwrap().0.try_wait().unwrap().is_some());
+        assert!(other.child.lock().unwrap().0.try_wait().unwrap().is_none());
+        assert!(
+            handle
+                .terminate_before(Instant::now() + Duration::from_secs(1))
+                .unwrap()
+        );
+        assert!(
+            other
+                .terminate_before(Instant::now() + Duration::from_secs(5))
+                .unwrap()
+        );
+    }
+
+    #[cfg(unix)]
+    fn launch_fixture(script: &str) -> (tempfile::TempDir, LaunchOptions<'static>) {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let executable = directory.path().join("browser-fixture");
+        std::fs::write(&executable, format!("#!/bin/sh\n{script}\n")).unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let options = LaunchOptions {
+            path: Some(executable),
+            // Fixed option suppresses automatic retries; fixture never binds it.
+            port: Some(1),
+            ..Default::default()
+        };
+        (directory, options)
+    }
+
+    #[test]
+    fn launch_tracker_missing_executable_proves_no_spawn() {
+        let tracker = OwnedLaunchTracker::new();
+        let directory = tempfile::tempdir().unwrap();
+        let options = LaunchOptions {
+            path: Some(directory.path().join("does-not-exist")),
+            port: Some(1),
+            ..Default::default()
+        };
+        assert!(Process::new(options).is_err());
+        assert!(tracker.processes().is_empty());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn launch_tracker_silent_startup_failure_retains_original_child_until_receipt() {
+        let (_fixture, options) = launch_fixture("exec sleep 30");
+        let other = owned_fixture();
+        let tracker = OwnedLaunchTracker::new();
+        let deadline = Instant::now() + Duration::from_millis(100);
+        let guard = CommandDeadlineGuard::new(deadline);
+        let error = Process::new(options)
+            .err()
+            .expect("silent startup must time out");
+        assert!(error.downcast_ref::<CommandTimeout>().is_some());
+        drop(guard);
+        let children = tracker.processes();
+        assert_eq!(children.len(), 1);
+        drop(tracker);
+        let child = &children[0];
+        assert!(child.child.lock().unwrap().0.try_wait().unwrap().is_none());
+        assert!(!child.terminate_before(Instant::now()).unwrap());
+        assert!(
+            child
+                .terminate_before(Instant::now() + Duration::from_secs(2))
+                .unwrap()
+        );
+        assert!(child.child.lock().unwrap().0.try_wait().unwrap().is_some());
+        assert!(other.child.lock().unwrap().0.try_wait().unwrap().is_none());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn launch_tracker_survives_late_initialization_failure_and_success_observer_drop() {
+        let (_fixture, options) = launch_fixture(
+            "echo 'DevTools listening on ws://127.0.0.1:1/devtools/browser/test' >&2\nexec sleep 30",
+        );
+        let tracker = OwnedLaunchTracker::new();
+        let process = Process::new(options).unwrap();
+        let children = tracker.processes();
+        assert_eq!(children.len(), 1);
+        assert_eq!(process.get_id(), children[0].id());
+        drop(tracker);
+        assert!(
+            children[0]
+                .child
+                .lock()
+                .unwrap()
+                .0
+                .try_wait()
+                .unwrap()
+                .is_none()
+        );
+        // Model failure after successful Process construction (e.g. transport or
+        // download-monitor initialization). The receipt outlives runtime teardown.
+        drop(process);
+        assert!(
+            children[0]
+                .child
+                .lock()
+                .unwrap()
+                .0
+                .try_wait()
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            children[0]
+                .terminate_before(Instant::now() + Duration::from_secs(2))
+                .unwrap()
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn launch_tracker_retries_reap_superseded_children() {
+        let (_fixture, mut options) = launch_fixture("echo 'ERROR bind()' >&2\nexec sleep 30");
+        options.port = None;
+        let tracker = OwnedLaunchTracker::new();
+        assert!(Process::new(options).is_err());
+        let children = tracker.processes();
+        assert_eq!(children.len(), 12);
+        for child in &children[..children.len() - 1] {
+            assert!(child.child.lock().unwrap().0.try_wait().unwrap().is_some());
+        }
+        for child in children {
+            assert!(
+                child
+                    .terminate_before(Instant::now() + Duration::from_secs(2))
+                    .unwrap()
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn launch_tracker_nested_non_lifo_and_thread_scopes_do_not_leak_authority() {
+        let (_fixture, options) = launch_fixture("exec sleep 30");
+        let outer = OwnedLaunchTracker::new();
+        let first = Process::start_process(&options).unwrap();
+        let inner = OwnedLaunchTracker::new();
+        let second = Process::start_process(&options).unwrap();
+        assert_eq!(outer.processes().len(), 1);
+        assert_eq!(inner.processes().len(), 1);
+        assert_eq!(inner.processes()[0].id(), second.id());
+        let other_options = options.clone();
+        thread::spawn(move || {
+            let process = Process::start_process(&other_options).unwrap();
+            assert!(
+                process
+                    .terminate_before(Instant::now() + Duration::from_secs(2))
+                    .unwrap()
+            );
+        })
+        .join()
+        .unwrap();
+        assert_eq!(inner.processes().len(), 1);
+        drop(outer);
+        let third = Process::start_process(&options).unwrap();
+        assert_eq!(inner.processes().len(), 2);
+        drop(inner);
+        LAUNCH_TRACKERS.with(|trackers| assert!(trackers.borrow().is_empty()));
+        let fresh = OwnedLaunchTracker::new();
+        assert!(fresh.processes().is_empty());
+        for process in [first, second, third] {
+            assert!(
+                process
+                    .terminate_before(Instant::now() + Duration::from_secs(2))
+                    .unwrap()
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(any(unix, windows))]
+    fn owned_process_expired_or_contended_deadline_never_dispatches_kill() {
+        let owned = owned_fixture();
+        assert!(!owned.terminate_before(Instant::now()).unwrap());
+        let mut child = owned.child.lock().unwrap();
+        assert!(child.0.try_wait().unwrap().is_none());
+        assert!(
+            !owned
+                .terminate_before(Instant::now() + Duration::from_millis(20))
+                .unwrap()
+        );
+        assert!(child.0.try_wait().unwrap().is_none());
+        drop(child);
+        assert!(
+            owned
+                .terminate_before(Instant::now() + Duration::from_secs(5))
+                .unwrap()
+        );
     }
 
     #[test]

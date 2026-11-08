@@ -29,6 +29,10 @@ on:
         description: Execute and restore controlled Windows artifact and startup faults
         type: boolean
         default: false
+      browser_roadmap_windows:
+        description: Run real Chrome Windows roadmap qualification
+        type: boolean
+        default: false
       expected_sha:
         description: Exact qualification revision to execute
         type: string
@@ -51,7 +55,7 @@ env:
 jobs:
   check:
     name: Engine correctness (Linux x86_64)
-    if: ${{ !inputs.browser_artifacts_only && (github.event_name != 'push' || github.ref == 'refs/heads/main') }}
+    if: ${{ !inputs.browser_artifacts_only && !inputs.browser_roadmap_windows && (github.event_name != 'push' || github.ref == 'refs/heads/main') }}
     runs-on: ubuntu-22.04
     steps:
       - name: Checkout repository
@@ -103,7 +107,7 @@ jobs:
 
   platform-tests:
     name: Platform tests (${{ matrix.target }})
-    if: ${{ !inputs.browser_artifacts_only && (github.event_name != 'push' || startsWith(github.ref, 'refs/tags/')) }}
+    if: ${{ !inputs.browser_artifacts_only && !inputs.browser_roadmap_windows && (github.event_name != 'push' || startsWith(github.ref, 'refs/tags/')) }}
     env:
       REFACT_SKIP_GUI_BUILD: "1"
     strategy:
@@ -202,9 +206,9 @@ jobs:
 
   browser-artifacts-windows:
     name: Browser artifact qualification (Windows x86_64)
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.browser_artifacts_only }}
+    if: ${{ github.event_name == 'workflow_dispatch' && (inputs.browser_artifacts_only || inputs.browser_roadmap_windows) }}
     runs-on: windows-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
     permissions:
       contents: read
     env:
@@ -247,6 +251,36 @@ jobs:
         if: ${{ inputs.browser_artifact_witnesses }}
         shell: bash
         run: python ../../tools/dev/browser_artifact_witness.py
+
+      - name: Install LLVM for full engine build
+        if: ${{ inputs.browser_roadmap_windows }}
+        run: choco install llvm -y --no-progress
+
+      - name: Parse Windows qualification runner
+        if: ${{ inputs.browser_roadmap_windows }}
+        shell: pwsh
+        run: |
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path '../../tools/dev/browser_windows_roadmap_qualification.ps1').Path, [ref]$null, [ref]$errors) | Out-Null
+          if ($errors.Count) { $errors | ForEach-Object { Write-Error $_ }; exit 1 }
+
+      - name: Run isolated Windows Chrome roadmap qualification
+        if: ${{ inputs.browser_roadmap_windows }}
+        shell: pwsh
+        env:
+          REFACT_GUI_DIR: ${{ github.workspace }}\refact-agent\gui
+          CMAKE_POLICY_DEFAULT_CMP0091: NEW
+          CMAKE_MSVC_RUNTIME_LIBRARY: MultiThreaded
+        run: ../../tools/dev/browser_windows_roadmap_qualification.ps1
+
+      - name: Retain Windows roadmap evidence
+        if: ${{ always() && inputs.browser_roadmap_windows }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-windows-roadmap-${{ github.sha }}
+          path: ${{ runner.temp }}/browser-windows-roadmap-evidence/
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Retain fault witness evidence
         if: ${{ always() && inputs.browser_artifact_witnesses }}

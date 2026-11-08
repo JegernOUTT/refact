@@ -821,6 +821,10 @@ pub struct AccessibilitySnapshotOptions {
     pub depth: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_chars: Option<usize>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub include_frames: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_frame_depth: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1883,6 +1887,44 @@ pub enum BrowserStep {
         #[serde(default)]
         max_chars: Option<usize>,
     },
+    CreateSession {
+        name: String,
+    },
+    ListSessions,
+    CloseSession {
+        name: String,
+        expected_session_id: String,
+    },
+    SearchSnapshot {
+        pattern: String,
+        #[serde(default)]
+        regex: bool,
+        #[serde(default)]
+        case_sensitive: bool,
+        #[serde(default)]
+        subtree: Option<String>,
+        #[serde(default)]
+        max_results: Option<usize>,
+        #[serde(default)]
+        include_frames: bool,
+        #[serde(default)]
+        max_frame_depth: Option<u32>,
+    },
+    NetworkRequests {
+        #[serde(default)]
+        limit: Option<usize>,
+        #[serde(default)]
+        url_contains: Option<String>,
+        #[serde(default)]
+        method: Option<String>,
+        #[serde(default)]
+        status: Option<u16>,
+    },
+    NetworkRequest {
+        request_id: String,
+        #[serde(default)]
+        include_body: bool,
+    },
     AccessibilitySnapshot {
         #[serde(flatten)]
         options: AccessibilitySnapshotOptions,
@@ -2320,6 +2362,12 @@ impl BrowserStep {
         "extract_links",
         "extract_table",
         "dom_snapshot",
+        "create_session",
+        "list_sessions",
+        "close_session",
+        "search_snapshot",
+        "network_requests",
+        "network_request",
         "accessibility_snapshot",
         "screenshot",
         "screenshot_element",
@@ -2669,10 +2717,42 @@ impl BrowserStep {
         ("extract_links", &[], &["limit", "locator"], &[]),
         ("extract_table", &["locator"], &["limit"], &[]),
         ("dom_snapshot", &["selector"], &["max_chars"], &[]),
+        ("create_session", &["name"], &[], &[]),
+        ("list_sessions", &[], &[], &[]),
+        ("close_session", &["name", "expected_session_id"], &[], &[]),
+        (
+            "search_snapshot",
+            &["pattern"],
+            &[
+                "regex",
+                "case_sensitive",
+                "subtree",
+                "max_results",
+                "include_frames",
+                "max_frame_depth",
+            ],
+            &[],
+        ),
+        (
+            "network_requests",
+            &[],
+            &["limit", "url_contains", "method", "status"],
+            &[],
+        ),
+        ("network_request", &["request_id"], &["include_body"], &[]),
         (
             "accessibility_snapshot",
             &[],
-            &["boxes", "depth", "locator", "max_chars", "mode", "refs"],
+            &[
+                "boxes",
+                "depth",
+                "locator",
+                "max_chars",
+                "mode",
+                "refs",
+                "include_frames",
+                "max_frame_depth",
+            ],
             &["root"],
         ),
         (
@@ -2809,9 +2889,39 @@ impl BrowserStep {
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "snake_case")]
+#[serde(try_from = "String", into = "String")]
 pub enum SessionPolicy {
     SharedDefault,
+    Named(String),
+}
+
+pub fn valid_browser_session_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name != "shared_default"
+        && name
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')
+}
+impl TryFrom<String> for SessionPolicy {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, String> {
+        if value == "shared_default" {
+            Ok(Self::SharedDefault)
+        } else if valid_browser_session_name(&value) {
+            Ok(Self::Named(value))
+        } else {
+            Err("Invalid browser session name".into())
+        }
+    }
+}
+impl From<SessionPolicy> for String {
+    fn from(value: SessionPolicy) -> Self {
+        match value {
+            SessionPolicy::SharedDefault => "shared_default".into(),
+            SessionPolicy::Named(name) => name,
+        }
+    }
 }
 
 impl Default for SessionPolicy {
@@ -2857,6 +2967,8 @@ pub struct BrowserActionRequest {
     pub acknowledge_session_generation: Option<String>,
     #[serde(default)]
     pub session: SessionPolicy,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_session_id: Option<String>,
     #[serde(default)]
     pub target: TabTarget,
     #[serde(default)]
@@ -3971,6 +4083,33 @@ mod tests {
             BrowserStep::DomSnapshot {
                 selector: "main".to_string(),
                 max_chars: Some(1_000),
+            },
+            BrowserStep::CreateSession {
+                name: "isolated".into(),
+            },
+            BrowserStep::ListSessions,
+            BrowserStep::CloseSession {
+                name: "isolated".into(),
+                expected_session_id: "opaque".into(),
+            },
+            BrowserStep::SearchSnapshot {
+                pattern: "Save".into(),
+                regex: false,
+                case_sensitive: false,
+                subtree: None,
+                max_results: Some(50),
+                include_frames: true,
+                max_frame_depth: Some(2),
+            },
+            BrowserStep::NetworkRequests {
+                limit: Some(50),
+                url_contains: None,
+                method: None,
+                status: None,
+            },
+            BrowserStep::NetworkRequest {
+                request_id: "opaque".into(),
+                include_body: false,
             },
             BrowserStep::AccessibilitySnapshot {
                 options: AccessibilitySnapshotOptions::default(),

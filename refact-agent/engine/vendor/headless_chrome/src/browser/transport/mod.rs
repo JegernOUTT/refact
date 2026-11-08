@@ -123,6 +123,79 @@ impl CancellationHandle {
     }
 }
 
+/// Fixed-cardinality, calling-thread telemetry. No method arguments or dynamic names retained.
+#[derive(Clone, Copy, Debug, Default, serde::Serialize)]
+pub struct ProfileCounters {
+    pub commands: u64,
+    pub command_us: u64,
+    pub send_us: u64,
+    pub target_acks: u64,
+    pub evaluate: u64,
+    pub call_function: u64,
+    pub input: u64,
+    pub frame_tree: u64,
+    pub other: u64,
+    /// Inclusive command duration buckets: <=1,5,10,20,50,100,500ms, then overflow.
+    pub latency_buckets: [u64; 8],
+}
+thread_local! {
+    static PROFILE_COUNTERS: Cell<ProfileCounters> = const { Cell::new(ProfileCounters {
+        commands: 0, command_us: 0, send_us: 0, target_acks: 0,
+        evaluate: 0, call_function: 0, input: 0, frame_tree: 0, other: 0, latency_buckets: [0; 8],
+    }) };
+}
+pub fn profiling_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("REFACT_BROWSER_PROFILE").is_some_and(|v| v == "1"))
+}
+pub fn profile_counters() -> ProfileCounters {
+    PROFILE_COUNTERS.with(Cell::get)
+}
+struct ProfileCommand(Option<Instant>);
+impl ProfileCommand {
+    fn new(method: &str) -> Self {
+        if !profiling_enabled() {
+            return Self(None);
+        }
+        PROFILE_COUNTERS.with(|cell| {
+            let mut c = cell.get();
+            c.commands = c.commands.saturating_add(1);
+            match method {
+                "Target.sendMessageToTarget" => c.target_acks = c.target_acks.saturating_add(1),
+                "Runtime.evaluate" => c.evaluate = c.evaluate.saturating_add(1),
+                "Runtime.callFunctionOn" => c.call_function = c.call_function.saturating_add(1),
+                "Page.getFrameTree" => c.frame_tree = c.frame_tree.saturating_add(1),
+                "Input.dispatchMouseEvent"
+                | "Input.dispatchKeyEvent"
+                | "Input.insertText"
+                | "Input.dispatchTouchEvent" => c.input = c.input.saturating_add(1),
+                _ => c.other = c.other.saturating_add(1),
+            }
+            cell.set(c);
+        });
+        Self(Some(Instant::now()))
+    }
+}
+impl Drop for ProfileCommand {
+    fn drop(&mut self) {
+        if let Some(start) = self.0 {
+            PROFILE_COUNTERS.with(|cell| {
+                let mut c = cell.get();
+                let us = start.elapsed().as_micros();
+                let bucket = [1000, 5000, 10000, 20000, 50000, 100000, 500000]
+                    .iter()
+                    .position(|bound| us <= *bound)
+                    .unwrap_or(7);
+                c.latency_buckets[bucket] = c.latency_buckets[bucket].saturating_add(1);
+                c.command_us = c
+                    .command_us
+                    .saturating_add(start.elapsed().as_micros().min(u64::MAX as u128) as u64);
+                cell.set(c);
+            });
+        }
+    }
+}
+
 impl Transport {
     pub fn new(
         ws_url: Url,
@@ -228,6 +301,7 @@ impl Transport {
     where
         C: Method + serde::Serialize,
     {
+        let _profile = ProfileCommand::new(C::NAME);
         let call_id = self.unique_call_id();
         let message_text = serde_json::to_string(&method.to_method_call(call_id))?;
         let response =
@@ -243,6 +317,7 @@ impl Transport {
         params: serde_json::Value,
         session: Option<&str>,
     ) -> Result<serde_json::Value> {
+        let _profile = ProfileCommand::new(method);
         let deadline = self.command_deadline();
         let call_id = self.unique_call_id();
         let mut frame = serde_json::json!({"id": call_id, "method": method});

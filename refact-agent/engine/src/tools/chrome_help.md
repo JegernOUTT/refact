@@ -125,7 +125,7 @@ overlay that would be dismissed before a locator action will still swallow a coo
 
 Touch and low-level keyboard: `tap` takes either a locator (full actionability and hit-target checks,
 like click) or x/y coordinates, and requires touch emulation from an earlier set_viewport step with
-`has_touch` true. `insert_text` types into the focused element with one input event and no key
+`has_touch` true **and** `is_mobile` true (or use `emulate_device`). The committed managed context is checked at the tap step, before input; an earlier configuration step in the same batch is supported. Non-mobile touch-only configuration is refused rather than timing out. Dirty/partially applied context must be reset before tapping. `insert_text` types into the focused element with one input event and no key
 events, which suits IME-style entry but skips keyboard shortcuts; it focuses an optional locator
 first. `press_sequentially` focuses its locator and then sends real per-character key events with an
 optional `delay_ms` (default 0) for inputs driven by keystroke handlers such as autocomplete; prefer
@@ -485,7 +485,49 @@ permission overrides, reporting what it cleared with counts.
 It leaves cookies, storage, open tabs, and the current page untouched, and it does not touch window
 bounds.
 
+## sessions
+
+The omitted/default `request.session` is `shared_default`; legacy commands preserve that path.
+Named sessions are explicit, isolated owned browser processes with exact chat and trusted-project
+ownership. Create with a standalone `{"steps":[{"action":"create_session","name":"checkout"}]}`.
+The result returns an opaque `session_id`. Every ordinary named request must carry both
+`"session":"checkout"` and `"expected_session_id":"<returned UUID>"`; names alone never resolve,
+missing sessions never implicitly create, and stale UUIDs fail even after name reuse.
+`list_sessions` lists only this owner. Close with standalone
+`{"steps":[{"action":"close_session","name":"checkout","expected_session_id":"<UUID>"}]}`.
+Lifecycle actions cannot mix with page steps or a named request selector, and never launch the
+default browser. Named sessions never automatically reconnect or replace their runtime. Closing
+invalidates execution first; incomplete process/tab cleanup returns `ok:false` with a truthful
+receipt, retaining quota/profile when cleanup cannot be verified. Explicitly close sessions when done.
+
+## discovery
+
+`search_snapshot` takes `pattern`, optional `regex`/`case_sensitive`, `subtree` (a live ref),
+`max_results` (1–200, default 50), `include_frames` and `max_frame_depth` (0–8, default 2).
+It captures a live snapshot then searches its actual minted refs; results include role, name,
+ancestor refs and frame identity. No arbitrary DOM-text-to-ref conversion occurs.
+`accessibility_snapshot` accepts the same frame inclusion/depth options. Included child frames
+have separate YAML/nodes and provenance; warnings describe partial/unsupported frame coverage.
+Snapshot output is bounded, but the renderer DOM traversal itself is not a hard-bounded walk.
+
+`network_requests` inspects the current tab's retained 200-request window, with `limit` (1–200,
+default 50), optional `url_contains`, `method`, and `status`. It returns opaque request IDs;
+`network_request` takes `request_id` for masked details. IDs are monitor/runtime/tab scoped and
+stale or foreign IDs fail closed. `include_body:true` requests a redacted JSON response only:
+identity encoding, declared bounded length, completed nonredirect response, maximum 64 KiB.
+Unsupported, pending, encoded, oversized or unknown-length bodies fail explicitly; this is not
+an unrestricted binary/text body API. Known header credentials and JSON secret fields are masked;
+this is best-effort redaction, not detection of every semantic secret. Redirect chains whose
+ExtraInfo events cannot be attributed to an exact hop expose
+`header_attribution:"redirect_extra_info_unverified"`, retain only known base headers, and refuse
+body retrieval rather than return potentially misattributed data.
+
 ## troubleshooting
+
+**Strict help preflight:** documentation-only batches are still parsed and bounded before the help fast path. Unknown request/action fields, wrong types, and more than 64 steps are rejected without launching or touching a browser session.
+
+**Opt-in profiling:** start an isolated worker with `REFACT_BROWSER_PROFILE=1` to attach a scalar-only `browser_profile` diagnostic envelope. It includes bounded fixed-label stages and transport counters, never page content or command arguments. Records are process-wide, so serialize requests in the benchmark worker; concurrent requests are not individually attributable. Inclusive CDP command time overlaps stages and must not be added to them. Ordinary workers do not drain or serialize profiling records.
+
 
 Stale refs: refs come from the most recent snapshot. If a batch changed the page, use the refs from
 that batch's `page.snapshot`, not from an older one. Re-read with `accessibility_snapshot` when in

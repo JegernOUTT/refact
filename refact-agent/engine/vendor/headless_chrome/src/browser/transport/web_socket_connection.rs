@@ -13,7 +13,8 @@ use url::Url;
 
 use crate::types::{Message, parse_raw_message};
 
-const READ_TIMEOUT_DURATION: std::time::Duration = std::time::Duration::from_millis(10);
+const SOCKET: mio::Token = mio::Token(0);
+const WAKE: mio::Token = mio::Token(1);
 
 #[cfg(feature = "rustls-tls-webpki-roots")]
 static RUSTLS_INIT: std::sync::Once = std::sync::Once::new();
@@ -68,7 +69,7 @@ fn set_read_timeout(stream: &mut MaybeTlsStream<TcpStream>) -> Result<()> {
         }
     };
 
-    tcp_stream.set_read_timeout(Some(READ_TIMEOUT_DURATION))?;
+    tcp_stream.set_read_timeout(None)?;
     tcp_stream.set_write_timeout(Some(Duration::from_millis(100)))?;
 
     Ok(())
@@ -89,6 +90,9 @@ struct Outgoing {
 
 pub struct WebSocketConnection {
     outgoing: mpsc::SyncSender<Outgoing>,
+    wake: Arc<mio::Waker>,
+    #[cfg(test)]
+    iterations: Arc<std::sync::atomic::AtomicUsize>,
     stopped: Arc<AtomicBool>,
     socket: TcpStream,
     thread: Mutex<Option<std::thread::JoinHandle<()>>>,
@@ -116,6 +120,34 @@ fn tcp(stream: &mut MaybeTlsStream<TcpStream>) -> Result<&mut TcpStream> {
     }
 }
 
+fn transient(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::WouldBlock
+            | std::io::ErrorKind::TimedOut
+            | std::io::ErrorKind::Interrupted
+    )
+}
+
+// try_io is essential on Windows: a WouldBlock from a cloned TCP handle must
+// rearm mio's readiness registration as well as the websocket's TLS state.
+fn readiness_io<T>(
+    socket: &mio::net::TcpStream,
+    operation: impl FnOnce() -> tungstenite::Result<T>,
+) -> tungstenite::Result<T> {
+    let mut result = None;
+    socket
+        .try_io(|| match operation() {
+            Err(tungstenite::Error::Io(e)) => Err(e),
+            other => {
+                result = Some(other);
+                Ok(())
+            }
+        })
+        .map_err(tungstenite::Error::Io)?;
+    result.expect("successful readiness operation has a result")
+}
+
 impl WebSocketConnection {
     pub fn new(
         ws_url: &Url,
@@ -126,69 +158,158 @@ impl WebSocketConnection {
         let (mut connection, _) =
             Self::websocket_connection_with_root_cert(ws_url, root_cert.as_deref())?;
         let socket = tcp(connection.get_mut())?.try_clone()?;
+        tcp(connection.get_mut())?.set_nonblocking(true)?;
+        let mut poll = mio::Poll::new()?;
+        let mut readiness = mio::net::TcpStream::from_std(socket.try_clone()?);
+        poll.registry()
+            .register(&mut readiness, SOCKET, mio::Interest::READABLE)?;
+        let wake = Arc::new(mio::Waker::new(poll.registry(), WAKE)?);
         let (outgoing, rx) = mpsc::sync_channel::<Outgoing>(64);
         let stopped = Arc::new(AtomicBool::new(false));
         let stop = Arc::clone(&stopped);
+        #[cfg(test)]
+        let iterations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        #[cfg(test)]
+        let owner_iterations = Arc::clone(&iterations);
         let thread = std::thread::spawn(move || {
-            while !stop.load(Ordering::Acquire) {
-                // Limit work per iteration so incoming replies cannot starve behind writes.
-                for _ in 0..16 {
-                    let Ok(request) = rx.try_recv() else { break };
-                    // A caller can cancel an enqueued request without touching a healthy socket.
-                    if request
-                        .state
-                        .compare_exchange(QUEUED, WRITING, Ordering::AcqRel, Ordering::Acquire)
-                        .is_err()
-                    {
-                        continue;
-                    }
-                    let remaining = request.deadline.saturating_duration_since(Instant::now());
-                    if remaining.is_zero() {
-                        request.state.store(CANCELLED, Ordering::Release);
-                        let _ = request.done.send(Err(super::CommandTimeout {
-                            method: "websocket send",
-                            effect_unknown: false,
-                        }
-                        .into()));
-                        continue;
-                    }
-                    let result = tcp(connection.get_mut())
-                        .and_then(|s| {
-                            s.set_write_timeout(Some(remaining.min(Duration::from_millis(100))))?;
-                            Ok(())
-                        })
-                        .and_then(|()| {
-                            connection
-                                .send(tungstenite::Message::text(request.text))
-                                .map_err(Into::into)
-                        });
-                    let failed = result.is_err();
-                    let _ = request.done.send(result);
-                    request.state.store(COMPLETED, Ordering::Release);
-                    // A partial write has unknown effect; retire only this connection, never replay.
-                    if failed {
-                        stop.store(true, Ordering::Release);
-                        break;
-                    }
-                }
-                if stop.load(Ordering::Acquire) {
+            let mut events = mio::Events::with_capacity(8);
+            let mut pending: Option<(Outgoing, Instant)> = None;
+            let mut writable = false;
+            let mut flush_deadline = None;
+            'owner: while !stop.load(Ordering::Acquire) {
+                #[cfg(test)]
+                owner_iterations.fetch_add(1, Ordering::SeqCst);
+                if pending.as_ref().is_some_and(|(_, d)| Instant::now() >= *d)
+                    || flush_deadline.is_some_and(|d| Instant::now() >= d)
+                {
                     break;
                 }
-                match connection.read() {
-                    Ok(tungstenite::Message::Text(text)) => {
-                        if let Ok(message) = parse_raw_message(&text) {
-                            if messages_tx.send(message).is_err() {
+                // Drain the websocket, not just the TCP socket: TLS and tungstenite may
+                // already hold complete frames even when the OS reports no readiness.
+                let mut drained = false;
+                for _ in 0..64 {
+                    if stop.load(Ordering::Acquire)
+                        || pending.as_ref().is_some_and(|(_, d)| Instant::now() >= *d)
+                        || flush_deadline.is_some_and(|d| Instant::now() >= d)
+                    {
+                        break 'owner;
+                    }
+                    match readiness_io(&readiness, || connection.read()) {
+                        Ok(tungstenite::Message::Text(text)) => {
+                            if let Ok(message) = parse_raw_message(&text) {
+                                if messages_tx.send(message).is_err() {
+                                    break 'owner;
+                                }
+                            }
+                        }
+                        Ok(tungstenite::Message::Close(_)) => break 'owner,
+                        Ok(_) => {}
+                        Err(tungstenite::Error::Io(e)) if transient(&e) => {
+                            if e.kind() == std::io::ErrorKind::Interrupted {
+                                continue;
+                            }
+                            drained = true;
+                            break;
+                        }
+                        Err(_) => break 'owner,
+                    }
+                }
+                let mut queue_drained = false;
+                if pending.is_none() && flush_deadline.is_none() {
+                    // At most one accepted frame is outstanding. Never resubmit a frame
+                    // after WouldBlock: tungstenite retains it for flush().
+                    for _ in 0..16 {
+                        let Ok(request) = rx.try_recv() else {
+                            queue_drained = true;
+                            break;
+                        };
+                        if request
+                            .state
+                            .compare_exchange(QUEUED, WRITING, Ordering::AcqRel, Ordering::Acquire)
+                            .is_err()
+                        {
+                            continue;
+                        }
+                        let now = Instant::now();
+                        if request.deadline <= now {
+                            request.state.store(CANCELLED, Ordering::Release);
+                            let _ = request.done.send(Err(super::CommandTimeout {
+                                method: "websocket send",
+                                effect_unknown: false,
+                            }
+                            .into()));
+                            continue;
+                        }
+                        let limit = request.deadline.min(now + Duration::from_millis(100));
+                        let result = readiness_io(&readiness, || {
+                            connection.send(tungstenite::Message::text(request.text.clone()))
+                        });
+                        match result {
+                            Ok(()) => {
+                                request.state.store(COMPLETED, Ordering::Release);
+                                let _ = request.done.send(Ok(()));
+                            }
+                            Err(tungstenite::Error::Io(e)) if transient(&e) => {
+                                pending = Some((request, limit));
                                 break;
+                            }
+                            Err(e) => {
+                                request.state.store(COMPLETED, Ordering::Release);
+                                let _ = request.done.send(Err(e.into()));
+                                break 'owner;
                             }
                         }
                     }
-                    Ok(tungstenite::Message::Close(_)) => break,
-                    Ok(_) => {}
-                    Err(tungstenite::Error::Io(e))
-                        if matches!(
-                            e.kind(),
-                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                        ) => {}
+                }
+                // Never continue a partial command after its absolute write budget.
+                if pending.as_ref().is_some_and(|(_, d)| Instant::now() >= *d)
+                    || flush_deadline.is_some_and(|d| Instant::now() >= d)
+                {
+                    break;
+                }
+                // Also flush automatic pong/control frames, even without a command.
+                match readiness_io(&readiness, || connection.flush()) {
+                    Ok(()) => {
+                        flush_deadline = None;
+                        if let Some((request, _)) = pending.take() {
+                            request.state.store(COMPLETED, Ordering::Release);
+                            let _ = request.done.send(Ok(()));
+                        }
+                    }
+                    Err(tungstenite::Error::Io(e)) if transient(&e) => {
+                        flush_deadline
+                            .get_or_insert_with(|| Instant::now() + Duration::from_millis(100));
+                    }
+                    Err(_) => break,
+                }
+                let limit = pending.as_ref().map(|(_, d)| *d).or(flush_deadline);
+                if limit.is_some_and(|d| Instant::now() >= d) {
+                    break;
+                }
+                let needs_write = limit.is_some();
+                if needs_write != writable {
+                    let interest = if needs_write {
+                        mio::Interest::READABLE.add(mio::Interest::WRITABLE)
+                    } else {
+                        mio::Interest::READABLE
+                    };
+                    if poll
+                        .registry()
+                        .reregister(&mut readiness, SOCKET, interest)
+                        .is_err()
+                    {
+                        break;
+                    }
+                    writable = needs_write;
+                }
+                // A full drain/work batch may leave buffered work, so do not sleep.
+                if !drained || (!needs_write && !queue_drained) {
+                    continue;
+                }
+                let timeout = limit.map(|d| d.saturating_duration_since(Instant::now()));
+                match poll.poll(&mut events, timeout) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
                     Err(_) => break,
                 }
             }
@@ -198,6 +319,9 @@ impl WebSocketConnection {
         });
         Ok(Self {
             outgoing,
+            wake,
+            #[cfg(test)]
+            iterations,
             stopped,
             socket,
             thread: Mutex::new(Some(thread)),
@@ -207,6 +331,7 @@ impl WebSocketConnection {
     /// Interrupt I/O immediately without waiting for the socket owner.
     pub fn interrupt(&self) {
         self.stopped.store(true, Ordering::Release);
+        let _ = self.wake.wake();
         let _ = self.socket.shutdown(std::net::Shutdown::Both);
     }
 
@@ -218,6 +343,7 @@ impl WebSocketConnection {
     }
 
     pub fn send_message(&self, message_text: &str, deadline: Instant) -> Result<()> {
+        let _profile = SendProfile(super::profiling_enabled().then(Instant::now));
         let (tx, rx) = mpsc::channel();
         let state = Arc::new(AtomicU8::new(QUEUED));
         let mut request = Outgoing {
@@ -238,7 +364,12 @@ impl WebSocketConnection {
                 .into());
             }
             match self.outgoing.try_send(request) {
-                Ok(()) => break,
+                Ok(()) => {
+                    if self.wake.wake().is_err() {
+                        self.interrupt();
+                    }
+                    break;
+                }
                 Err(mpsc::TrySendError::Full(r)) => {
                     request = r;
                     std::thread::park_timeout(Duration::from_millis(1));
@@ -423,13 +554,134 @@ impl Drop for WebSocketConnection {
 mod queue_tests {
     use super::*;
     #[test]
+    fn idle_owner_sleeps_and_queue_wakeup_drives_real_roundtrips() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = Url::parse(&format!("ws://{}/test", listener.local_addr().unwrap())).unwrap();
+        let (release, wait) = mpsc::channel();
+        let peer = std::thread::spawn(move || {
+            let (socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            let mut ws = tungstenite::accept(socket).unwrap();
+            // No incoming socket bytes can wake the owner until it dispatches a command.
+            wait.recv_timeout(Duration::from_secs(3)).unwrap();
+            for id in 1..=96 {
+                let frame = ws.read().unwrap().into_text().unwrap();
+                let call: serde_json::Value = serde_json::from_str(&frame).unwrap();
+                assert_eq!(call["id"], id, "frame replayed or reordered");
+                ws.send(tungstenite::Message::text(format!(
+                    r#"{{"id":{id},"result":{{}}}}"#
+                )))
+                .unwrap();
+            }
+            let _ = ws.read();
+        });
+        let (tx, replies) = mpsc::channel();
+        let connection = WebSocketConnection::new(&url, None, tx, None).unwrap();
+        // This is an iteration oracle, not a latency benchmark: the idle owner may
+        // enter poll once but must not keep making progress without a wake source.
+        std::thread::sleep(Duration::from_millis(30));
+        let before = connection.iterations.load(Ordering::SeqCst);
+        assert!(before > 0);
+        std::thread::sleep(Duration::from_millis(80));
+        assert_eq!(
+            connection.iterations.load(Ordering::SeqCst),
+            before,
+            "idle owner is polling instead of sleeping"
+        );
+        release.send(()).unwrap();
+        let (done, cancelled_result) = mpsc::channel();
+        connection
+            .outgoing
+            .try_send(Outgoing {
+                text: r#"{"id":0,"method":"must.not.dispatch"}"#.into(),
+                deadline: Instant::now() + Duration::from_secs(2),
+                done,
+                state: Arc::new(AtomicU8::new(CANCELLED)),
+            })
+            .unwrap();
+        connection.wake.wake().unwrap();
+        for id in 1..=96 {
+            connection
+                .send_message(
+                    &format!(r#"{{"id":{id},"method":"Browser.getVersion"}}"#),
+                    Instant::now() + Duration::from_secs(2),
+                )
+                .unwrap();
+            match replies.recv_timeout(Duration::from_secs(2)).unwrap() {
+                Message::Response(response) => assert_eq!(response.call_id, id),
+                other => panic!("unexpected reply: {other:?}"),
+            }
+        }
+        assert!(matches!(
+            cancelled_result.try_recv(),
+            Err(mpsc::TryRecvError::Disconnected)
+        ));
+        connection.shutdown();
+        peer.join().unwrap();
+    }
+
+    #[test]
+    fn buffered_frame_batch_and_automatic_pong_are_not_stranded() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = Url::parse(&format!("ws://{}/test", listener.local_addr().unwrap())).unwrap();
+        let peer = std::thread::spawn(move || {
+            let (socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            let mut ws = tungstenite::accept(socket).unwrap();
+            for id in 1..=130 {
+                ws.write(tungstenite::Message::text(format!(
+                    r#"{{"id":{id},"result":{{}}}}"#
+                )))
+                .unwrap();
+            }
+            ws.write(tungstenite::Message::Ping(vec![1, 2, 3].into()))
+                .unwrap();
+            ws.flush().unwrap();
+            assert_eq!(
+                ws.read().unwrap(),
+                tungstenite::Message::Pong(vec![1, 2, 3].into())
+            );
+            // Abrupt disconnect must wake the owner and propagate shutdown once.
+        });
+        let (tx, replies) = mpsc::channel();
+        let connection = WebSocketConnection::new(&url, None, tx, None).unwrap();
+        for id in 1..=130 {
+            match replies.recv_timeout(Duration::from_secs(2)).unwrap() {
+                Message::Response(response) => assert_eq!(response.call_id, id),
+                other => panic!("unexpected reply: {other:?}"),
+            }
+        }
+        assert!(matches!(
+            replies.recv_timeout(Duration::from_secs(2)).unwrap(),
+            Message::ConnectionShutdown
+        ));
+        connection.shutdown();
+        peer.join().unwrap();
+        assert!(
+            connection
+                .send_message(
+                    "must not replay after crash",
+                    Instant::now() + Duration::from_secs(1)
+                )
+                .is_err()
+        );
+    }
+
+    #[test]
     fn enqueued_timeout_cancels_only_request_not_healthy_socket() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let socket = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
         let (mut peer, _) = listener.accept().unwrap();
         let (outgoing, receiver) = mpsc::sync_channel(1);
+        let poll = mio::Poll::new().unwrap();
         let connection = WebSocketConnection {
             outgoing,
+            wake: Arc::new(mio::Waker::new(poll.registry(), WAKE).unwrap()),
+            iterations: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             stopped: Arc::new(AtomicBool::new(false)),
             socket,
             thread: Mutex::new(None),
@@ -520,8 +772,11 @@ mod queue_tests {
                 state: Arc::new(AtomicU8::new(QUEUED)),
             })
             .unwrap();
+        let poll = mio::Poll::new().unwrap();
         let connection = WebSocketConnection {
             outgoing,
+            wake: Arc::new(mio::Waker::new(poll.registry(), WAKE).unwrap()),
+            iterations: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             stopped: Arc::new(AtomicBool::new(false)),
             socket,
             thread: Mutex::new(None),
@@ -537,5 +792,21 @@ mod queue_tests {
                 .effect_unknown
         );
         assert!(Instant::now() < deadline + Duration::from_secs(1));
+    }
+}
+
+// Counts calling-thread queue+write-completion latency without retaining wire data.
+struct SendProfile(Option<Instant>);
+impl Drop for SendProfile {
+    fn drop(&mut self) {
+        if let Some(start) = self.0 {
+            super::PROFILE_COUNTERS.with(|cell| {
+                let mut c = cell.get();
+                c.send_us = c
+                    .send_us
+                    .saturating_add(start.elapsed().as_micros().min(u64::MAX as u128) as u64);
+                cell.set(c);
+            });
+        }
     }
 }

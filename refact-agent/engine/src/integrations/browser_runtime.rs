@@ -8,6 +8,9 @@ use tracing::{info, warn};
 
 pub use refact_browser::*;
 
+#[path = "named_sessions.rs"]
+pub mod named_sessions;
+
 use crate::http::routers::v1::browser_settings;
 
 /// Bound cancellable waits only: never use this around a launch worker or publication.
@@ -1531,10 +1534,12 @@ pub async fn browser_monitor_background_task(app: crate::app_state::AppState) {
                     tokio::time::sleep(Duration::from_millis(200)).await;
                 }
             } => {
+                named_sessions::maintain_named_sessions(&app, true).await;
                 return;
             }
         }
 
+        named_sessions::maintain_named_sessions(&app, false).await;
         let runtime_ids: Vec<String> = {
             let browser_runtimes = app.integrations.browser_runtimes.clone();
             let browser_runtimes = browser_runtimes.lock().await;
