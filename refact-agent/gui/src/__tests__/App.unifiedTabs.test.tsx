@@ -393,7 +393,7 @@ describe("App unified tab regression", () => {
     expect(store.getState().workspace.tabs).toEqual([chat("chat-a")]);
   });
 
-  it("keeps one global toolbar row when splitting a chat", async () => {
+  it("keeps one header per split pane without duplicating its chat tab", async () => {
     const { store } = renderApp((appStore) => {
       createChat(appStore, "chat-a", "Chat Alpha");
       appStore.dispatch(splitTab({ tabId: chat("chat-a"), dir: "row" }));
@@ -409,13 +409,13 @@ describe("App unified tab regression", () => {
       expect(store.getState().workspace.groups[chat("chat-a")]).toBeDefined();
     });
 
-    expect(screen.getAllByRole("tablist")).toHaveLength(1);
-    const row = screen.getByRole("tablist", { name: "Workspace tabs" });
-    expect(within(row).getAllByRole("tab")).toHaveLength(1);
-    expect(row.closest("[data-workspace-leaf-id]")).toBeNull();
+    await waitFor(() => expect(screen.getAllByRole("tablist")).toHaveLength(2));
+    expect(screen.getAllByRole("tab", { name: /Chat Alpha/ })).toHaveLength(1);
     expect(screen.getAllByLabelText("Workspace pane controls")).toHaveLength(2);
     for (const pane of document.querySelectorAll("[data-workspace-leaf-id]")) {
-      expect(within(pane as HTMLElement).queryByRole("tablist")).toBeNull();
+      expect(
+        within(pane as HTMLElement).getByRole("tablist"),
+      ).toBeInTheDocument();
     }
     expect(screen.getByRole("tab", { name: /Chat Alpha/ })).toHaveAttribute(
       "aria-selected",

@@ -5,6 +5,11 @@
   overflow: hidden;
 }
 
+.host {
+  width: 100%;
+  min-width: 0;
+}
+
 .section {
   position: absolute;
   left: var(--toolbar-pane-left);

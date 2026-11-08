@@ -400,14 +400,19 @@ function LeafView({
         data-focused={focused || undefined}
         data-pane-entering={entering || undefined}
         data-workspace-leaf-id={leaf.id}
-        onMouseDownCapture={handleFocusPane}
-        onPointerDownCapture={handleFocusPane}
+        onMouseDownCapture={(event) => {
+          if (event.button === 0) handleFocusPane();
+        }}
+        onPointerDownCapture={(event) => {
+          if (event.button === 0) handleFocusPane();
+        }}
         onClick={handleFocusPane}
         onFocusCapture={handleFocusPane}
         onDragOverCapture={handlePaneDragOver}
         onDragLeave={handlePaneDragLeave}
         onDrop={handlePaneDrop}
       >
+        <div data-pane-tab-header={leaf.id} className={styles.tabHeader} />
         <div
           className={styles.paneControls}
           data-pane-controls

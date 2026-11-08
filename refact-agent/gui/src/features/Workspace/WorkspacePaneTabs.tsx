@@ -1,4 +1,11 @@
-import { type CSSProperties } from "react";
+import {
+  type CSSProperties,
+  type ReactNode,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
+import { createPortal } from "react-dom";
 import { useAppDispatch, useAppSelector } from "../../hooks";
 import { findLeaf, type LeafPane, type PaneNode } from "../ChatPanes/panesTree";
 import { push, selectCurrentPage } from "../Pages/pagesSlice";
@@ -19,6 +26,60 @@ import {
 import { usePaneTabGeometry } from "./usePaneTabGeometry";
 import type { PaneTabFitChange } from "./paneTabFit";
 import styles from "./WorkspacePaneTabs.module.css";
+
+function PaneTabHost({
+  children,
+  target,
+  section,
+  paneId,
+  focused,
+}: {
+  children: ReactNode;
+  target?: HTMLElement;
+  section?: { left: number; width: number };
+  paneId: string;
+  focused: boolean;
+}) {
+  const toolbarRef = useRef<HTMLDivElement>(null);
+  const [host] = useState(() => document.createElement("div"));
+  useLayoutEffect(() => {
+    const destination = section
+      ? toolbarRef.current
+      : target ?? toolbarRef.current;
+    if (!destination || host.parentElement === destination) return;
+    const active = document.activeElement;
+    const focusedControl =
+      active instanceof HTMLElement &&
+      host.contains(active) &&
+      active.matches('[role="tab"], button')
+        ? active
+        : null;
+    host.className = styles.host;
+    destination.appendChild(host);
+    focusedControl?.focus({ preventScroll: true });
+  }, [host, section, target]);
+  useLayoutEffect(() => () => host.remove(), [host]);
+  return (
+    <>
+      <div
+        ref={toolbarRef}
+        hidden={!section && Boolean(target)}
+        className={section ? styles.section : styles.fallback}
+        data-toolbar-pane-id={section ? paneId : undefined}
+        data-focused={focused}
+        style={
+          section
+            ? ({
+                "--toolbar-pane-left": `${section.left}px`,
+                "--toolbar-pane-width": `${section.width}px`,
+              } as CSSProperties)
+            : undefined
+        }
+      />
+      {createPortal(children, host)}
+    </>
+  );
+}
 
 export function WorkspaceToolbarTabs({
   onFitChange,
@@ -58,7 +119,7 @@ export function WorkspaceToolbarTabs({
     else node.children.forEach(collectLeaves);
   };
   if (activeGroup) collectLeaves(activeGroup.root);
-  const { slotRef, sections } = usePaneTabGeometry(
+  const { slotRef, sections, targets } = usePaneTabGeometry(
     page?.name === "chat" && activeGroup ? activeTabId : null,
     JSON.stringify(leaves.map((pane) => pane.id)),
   );
@@ -119,46 +180,42 @@ export function WorkspaceToolbarTabs({
       role="group"
       aria-label="Workspace toolbar tabs"
     >
-      {sections ? (
-        sections.map((section, index) => {
-          const pane = leaves.find((item) => item.id === section.id);
-          if (!pane) return null;
-          const focused = pane.id === (focusedLeaf?.id ?? sections[0]?.id);
-          return (
-            <div
-              key={pane.id}
-              className={styles.section}
-              data-toolbar-pane-id={pane.id}
-              data-focused={focused}
-              style={
-                {
-                  "--toolbar-pane-left": `${section.left}px`,
-                  "--toolbar-pane-width": `${section.width}px`,
-                } as CSSProperties
+      {activeGroup && page?.name === "chat" ? (
+        leaves.map((pane, index) => {
+          const section = sections?.find((item) => item.id === pane.id);
+          const target = targets[pane.id];
+          const focused = pane.id === (focusedLeaf?.id ?? leaves[0]?.id);
+          const content = (
+            <PaneTabStrip
+              onFitChange={section ? onFitChange : undefined}
+              leaf={{ ...pane, id: "toolbar" }}
+              tabId={activeTabId ?? "workspace-navigation"}
+              navigationEntries={focused ? [...foreignEntries, ...entries] : []}
+              selectedNavigationKey={focused ? selected : undefined}
+              onActivateLeaf={activate}
+              hidePaneActions
+              ownerBySurface={Object.fromEntries(
+                pane.tabIds
+                  .filter((key) => key in ownerBySurface)
+                  .map((key) => [key, ownerBySurface[key]]),
+              )}
+              tablistLabel={
+                index === 0
+                  ? "Workspace tabs"
+                  : `Workspace tabs: pane ${index + 1}`
               }
+            />
+          );
+          return (
+            <PaneTabHost
+              key={pane.id}
+              paneId={pane.id}
+              focused={focused}
+              section={section}
+              target={target}
             >
-              <PaneTabStrip
-                onFitChange={onFitChange}
-                leaf={{ ...pane, id: "toolbar" }}
-                tabId={activeTabId ?? "workspace-navigation"}
-                navigationEntries={
-                  focused ? [...foreignEntries, ...entries] : []
-                }
-                selectedNavigationKey={focused ? selected : undefined}
-                onActivateLeaf={activate}
-                hidePaneActions
-                ownerBySurface={Object.fromEntries(
-                  pane.tabIds
-                    .filter((key) => key in ownerBySurface)
-                    .map((key) => [key, ownerBySurface[key]]),
-                )}
-                tablistLabel={
-                  index === 0
-                    ? "Workspace tabs"
-                    : `Workspace tabs: pane ${index + 1}`
-                }
-              />
-            </div>
+              {content}
+            </PaneTabHost>
           );
         })
       ) : (

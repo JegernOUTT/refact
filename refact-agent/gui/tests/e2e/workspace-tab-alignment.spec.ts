@@ -123,7 +123,7 @@ for (const width of [1280, 2466]) {
   });
 }
 
-test("narrow stacked panes retain a bounded fallback strip", async ({
+test("narrow stacked panes retain one top strip and one pane-local header", async ({
   page,
 }) => {
   await page.setViewportSize({ width: 360, height: 800 });
@@ -134,7 +134,14 @@ test("narrow stacked panes retain a bounded fallback strip", async ({
     "background-color",
     "rgba(0, 0, 0, 0)",
   );
-  await expect(page.locator("[data-toolbar-pane-id]")).toHaveCount(0);
+  await expect(page.locator("[data-toolbar-pane-id]")).toHaveCount(1);
+  await expect(
+    page
+      .locator("[data-workspace-leaf-id]")
+      .nth(1)
+      .locator("[data-pane-tab-header]")
+      .getByRole("tablist"),
+  ).toHaveCount(1);
   await expect(
     page.getByRole("tablist", { name: "Workspace tabs", exact: true }),
   ).toBeVisible();

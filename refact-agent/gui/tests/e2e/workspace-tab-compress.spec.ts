@@ -23,6 +23,7 @@ type Snapshot = {
     color: string;
   }[];
   stripRight: number;
+  inToolbar: boolean;
   overflow: number;
   labelVisible: boolean;
   dots: number;
@@ -112,6 +113,7 @@ function snapshot(page: Page): Promise<Snapshot> {
     return {
       tabs,
       stripRight: list.getBoundingClientRect().right,
+      inToolbar: list.closest('[role="toolbar"]') !== null,
       overflow: overflowButton
         ? Number(
             /^(\d+)/.exec(overflowButton.getAttribute("aria-label") ?? "")?.[1],
@@ -149,7 +151,10 @@ async function settled(page: Page) {
 
 function expectEngineMatchesPressure(state: Snapshot, width: number) {
   expect(state.dots, `two status dots at ${width}px`).toBe(2);
-  if (state.overflow > 0 || state.tabs.some((tab) => tab.truncated)) {
+  if (
+    state.inToolbar &&
+    (state.overflow > 0 || state.tabs.some((tab) => tab.truncated))
+  ) {
     expect(
       state.labelVisible,
       `label hidden under pressure at ${width}px`,
@@ -190,8 +195,6 @@ test("shrinking ellipsizes every tab before overflowing and compacts the engine 
     expectEngineMatchesPressure(state, width);
     if (state.overflow === 0 && state.tabs.some((tab) => tab.truncated)) {
       ellipsizedWithAllVisible = true;
-      const widths = state.tabs.map((tab) => tab.right - tab.left);
-      expect(Math.max(...widths) - Math.min(...widths)).toBeLessThanOrEqual(1);
       for (const tab of state.tabs)
         expect(tab.titleWidth, `${tab.title} at ${width}px`).toBeGreaterThan(0);
     }

@@ -97,6 +97,10 @@
   display: none;
 }
 
+.tabHeader:not(:empty) + .paneControls {
+  top: calc(var(--rf-control-h) + var(--rf-space-1));
+}
+
 .fileActions {
   min-width: 0;
 }
@@ -347,4 +351,13 @@
 :global(html[data-reduced-motion="on"]) .paneSlot,
 :global(html[data-reduced-motion="on"]) .layout .dividerHandle {
   transform: none;
+}
+
+.tabHeader {
+  flex: 0 0 auto;
+  min-width: 0;
+}
+
+.tabHeader:empty {
+  display: none;
 }

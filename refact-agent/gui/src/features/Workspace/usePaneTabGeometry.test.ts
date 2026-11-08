@@ -45,15 +45,32 @@ describe("projectPaneTabGeometry", () => {
   });
   it.each([
     [],
-    [pane("a", 332, 900), pane("b", 332, 900, 400)],
     [pane("a", 332, 900), pane("b", 800, 1300)],
-    [pane("a", 332, 1140), pane("b", 1140, 1300)],
-    [pane("a", 332, 1200), pane("b", 1200, 1300)],
     [pane("a", 332, 332)],
-  ])(
-    "falls back rather than losing keys for unsuitable layout %j",
-    (...panes) => {
-      expect(projectPaneTabGeometry(slot, panes)).toBeNull();
+  ])("rejects invalid or overlapping top-row bounds %j", (...panes) => {
+    expect(projectPaneTabGeometry(slot, panes)).toBeNull();
+  });
+
+  it("projects only the upper pane of a vertical split", () => {
+    expect(
+      projectPaneTabGeometry(slot, [
+        pane("a", 332, 900),
+        pane("b", 332, 900, 400),
+      ]),
+    ).toEqual([{ id: "a", left: 296, width: 568 }]);
+  });
+
+  it.each([1140, 1200])(
+    "retains the first pane when the next is clipped at %s and needs a local header",
+    (boundary) => {
+      expect(
+        projectPaneTabGeometry(slot, [
+          pane("a", 332, boundary),
+          pane("b", boundary, 1300),
+        ]),
+      ).toEqual([
+        { id: "a", left: 296, width: Math.min(boundary, slot.right) - 332 },
+      ]);
     },
   );
 });
@@ -194,7 +211,7 @@ describe("usePaneTabGeometry lifecycle", () => {
     const view = render(createElement(Harness));
     bounds(latest.slotRef.current, slot.left, slot.right, 0);
     flushFrame();
-    expect(latest.sections).toBeNull();
+    expect(latest.sections).toEqual([{ id: "a", left: 296, width: 300 }]);
     expect(frames.size).toBe(0);
 
     moving.mockReturnValue(new DOMRect(632, 36, 300, 764));

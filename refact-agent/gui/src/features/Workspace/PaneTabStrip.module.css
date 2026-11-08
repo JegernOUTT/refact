@@ -31,7 +31,7 @@
   border: 0;
   display: flex;
   align-items: center;
-  flex: 1 1 0;
+  flex: 0 1 auto;
   min-width: 0;
   background: var(--rf-surface-2);
   color: var(--rf-color-muted);
@@ -45,6 +45,7 @@
   gap: var(--rf-space-2);
   flex: 1 1 auto;
   color: inherit;
+  text-decoration: none;
 }
 
 .overflow {
@@ -91,6 +92,7 @@
   height: 100%;
   flex: 0 0 auto;
   padding-inline: 0;
+  opacity: var(--rf-motion-opacity-visible);
 }
 
 .active .close,
@@ -103,12 +105,6 @@
 .actions,
 .overflow {
   flex: 0 0 auto;
-}
-
-@container (max-width: 240px) {
-  .close {
-    display: none;
-  }
 }
 
 .actions {

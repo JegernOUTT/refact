@@ -9,7 +9,10 @@ export function projectPaneTabGeometry(
   panes: PaneTabBounds[],
 ): PaneTabSection[] | null {
   if (slot.right <= slot.left || panes.length === 0) return null;
-  const ordered = [...panes].sort((a, b) => a.left - b.left);
+  const top = Math.min(...panes.map((pane) => pane.top));
+  const ordered = panes
+    .filter((pane) => Math.abs(pane.top - top) <= 1)
+    .sort((a, b) => a.left - b.left);
   const first = ordered[0];
   if (
     ordered.some(
@@ -20,7 +23,6 @@ export function projectPaneTabGeometry(
         pane.right <= pane.left ||
         pane.bottom <= pane.top ||
         Math.abs(pane.top - first.top) > 1 ||
-        Math.abs(pane.bottom - first.bottom) > 1 ||
         (index > 0 && pane.left < ordered[index - 1].right - 1),
     )
   )
@@ -30,7 +32,7 @@ export function projectPaneTabGeometry(
     const right = Math.min(slot.right, ordered[index + 1]?.left ?? pane.right);
     return { id: pane.id, left: left - slot.left, width: right - left };
   });
-  return sections.some((section) => section.width < 60) ? null : sections;
+  return sections.filter((section) => section.width >= 60);
 }
 
 export function usePaneTabGeometry(
@@ -41,6 +43,7 @@ export function usePaneTabGeometry(
   const [snapshot, setSnapshot] = useState<{
     source: string;
     sections: PaneTabSection[] | null;
+    targets: Partial<Record<string, HTMLElement>>;
   }>();
   const source = JSON.stringify([groupId, leafSignature]);
   useLayoutEffect(() => {
@@ -102,11 +105,23 @@ export function usePaneTabGeometry(
               }),
             )
           : null;
+      const targets = Object.fromEntries(
+        panes.flatMap((pane) => {
+          const target = pane.querySelector<HTMLElement>(
+            "[data-pane-tab-header]",
+          );
+          return target ? [[pane.dataset.workspaceLeafId ?? "", target]] : [];
+        }),
+      );
       setSnapshot((previous) =>
         previous?.source === source &&
-        JSON.stringify(previous.sections) === JSON.stringify(sections)
+        JSON.stringify(previous.sections) === JSON.stringify(sections) &&
+        Object.keys(previous.targets).length === Object.keys(targets).length &&
+        Object.entries(targets).every(
+          ([id, target]) => previous.targets[id] === target,
+        )
           ? previous
-          : { source, sections },
+          : { source, sections, targets },
       );
       if (!root?.isConnected || panes.length !== ids.length) {
         retry = setTimeout(() => {
@@ -138,6 +153,7 @@ export function usePaneTabGeometry(
   }, [groupId, leafSignature, source]);
   return {
     slotRef,
+    targets: snapshot?.source === source ? snapshot.targets : {},
     sections: snapshot?.source === source ? snapshot.sections : null,
   };
 }

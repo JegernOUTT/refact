@@ -23,6 +23,7 @@ import {
   splitTab,
 } from "./workspaceSlice";
 import { WorkspaceSurfaceRoutes } from "./WorkspaceSurfaceRoutes";
+import { projectPaneTabGeometry } from "./usePaneTabGeometry";
 import { WorkspaceToolbarTabs } from "./WorkspacePaneTabs";
 
 const root = "chat:alpha";
@@ -59,7 +60,113 @@ function getGroup(store: ReturnType<typeof setup>) {
   return group;
 }
 
+describe("pane header geometry", () => {
+  it("projects mixed top leaves with different heights and leaves lower panes local", () => {
+    const slot = { left: 0, right: 600, top: 0, bottom: 30 };
+    expect(
+      projectPaneTabGeometry(slot, [
+        { id: "left", left: 0, right: 300, top: 30, bottom: 800 },
+        { id: "upper", left: 300, right: 600, top: 30, bottom: 400 },
+        { id: "lower", left: 300, right: 600, top: 400, bottom: 800 },
+      ]),
+    ).toEqual([
+      { id: "left", left: 0, width: 300 },
+      { id: "upper", left: 300, width: 300 },
+    ]);
+  });
+
+  it("keeps other horizontal boundaries when a clipped pane needs its own header", () => {
+    expect(
+      projectPaneTabGeometry({ left: 0, right: 340, top: 0, bottom: 30 }, [
+        { id: "left", left: 0, right: 300, top: 30, bottom: 800 },
+        { id: "right", left: 300, right: 600, top: 30, bottom: 800 },
+      ]),
+    ).toEqual([{ id: "left", left: 0, width: 300 }]);
+  });
+});
+
 describe("WorkspacePaneTabs", () => {
+  it("keeps every split leaf reachable in one strip outside the chat page", () => {
+    const store = setup();
+    store.dispatch(splitTab({ tabId: root, dir: "col", surfaceKey: root }));
+    store.dispatch(push({ name: "history" }));
+    render(<WorkspaceToolbarTabs />, { store });
+    const band = screen.getByRole("tablist", { name: "Workspace tabs" });
+    expect(screen.getAllByRole("tablist")).toHaveLength(1);
+    expect(within(band).getAllByRole("tab")).toHaveLength(7);
+    expect(within(band).queryByRole("tab", { selected: true })).toBeNull();
+  });
+
+  it("portals lower leaf tabs into their own header, preserving ownership and controls", async () => {
+    const store = setup();
+    store.dispatch(splitTab({ tabId: root, dir: "col", surfaceKey: root }));
+    const sibling = getGroup(store).focusedLeafId;
+    const before = store.getState().workspace;
+    const rect = vi
+      .spyOn(HTMLElement.prototype, "getBoundingClientRect")
+      .mockImplementation(function (this: HTMLElement) {
+        const top = this.dataset.workspaceLeafId === sibling ? 400 : 30;
+        return {
+          left: 0,
+          right: 600,
+          top,
+          bottom: 800,
+          width: 600,
+          height: 800 - top,
+          x: 0,
+          y: top,
+          toJSON: () => ({}),
+        };
+      });
+    try {
+      const view = render(
+        <>
+          <WorkspaceToolbarTabs />
+          <div data-workspace-group-tab-id={root}>
+            <section data-workspace-leaf-id="root">
+              <div data-pane-tab-header="root" />
+            </section>
+            <section data-workspace-leaf-id={sibling}>
+              <div data-pane-tab-header={sibling} />
+              <div role="tabpanel" id={panePanelId(sibling, root)} />
+            </section>
+          </div>
+        </>,
+        { store },
+      );
+      await waitFor(() =>
+        expect(
+          view.container.querySelector(
+            `[data-pane-tab-header="${sibling}"] [role="tab"]`,
+          ),
+        ).not.toBeNull(),
+      );
+      expect(screen.getAllByRole("tab")).toHaveLength(7);
+      const lowerTab = screen.getByRole("tab", { name: /Alpha/ });
+      expect(lowerTab.closest("[data-pane-tab-header]")).toHaveAttribute(
+        "data-pane-tab-header",
+        sibling,
+      );
+      expect(lowerTab).toHaveAttribute(
+        "aria-controls",
+        panePanelId(sibling, root),
+      );
+      expect(
+        screen
+          .getByRole("tab", { name: "example.ts" })
+          .closest("[data-toolbar-pane-id]"),
+      ).toHaveAttribute("data-toolbar-pane-id", "root");
+      expect(store.getState().workspace).toEqual(before);
+      fireEvent.click(screen.getByRole("tab", { name: "example.ts" }));
+      expect(getGroup(store).focusedLeafId).toBe("root");
+      expect(collectTabIds(getGroup(store).root)).toEqual(
+        before.groups[root] ? collectTabIds(before.groups[root].root) : [],
+      );
+    } finally {
+      rect.mockRestore();
+    }
+  });
+
   it("projects actual leaf sections into one top band while preserving owners and toolbar IDs", async () => {
     const store = setup();
     store.dispatch(splitTab({ tabId: root, dir: "row", surfaceKey: root }));
@@ -98,7 +205,9 @@ describe("WorkspacePaneTabs", () => {
         { store },
       );
       await waitFor(() =>
-        expect(screen.getAllByRole("tablist")).toHaveLength(2),
+        expect(
+          view.container.querySelectorAll("[data-toolbar-pane-id]"),
+        ).toHaveLength(2),
       );
       const sections = view.container.querySelectorAll<HTMLElement>(
         "[data-toolbar-pane-id]",

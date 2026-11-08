@@ -151,7 +151,7 @@ describe("compact pane tabs", () => {
     },
   );
 
-  it("web content tabs expose copyable hrefs and leave modified and middle clicks native", () => {
+  it("web content tabs expose copyable hrefs and preserve modified primary navigation while middle-click closes", () => {
     const store = setup();
     store.dispatch(updateConfig({ host: "web" }));
     render(<WorkspaceToolbarTabs />, { store });
@@ -161,6 +161,13 @@ describe("compact pane tabs", () => {
     const before = store.getState().workspace;
     expect(fireEvent.click(alpha, { ctrlKey: true })).toBe(true);
     expect(fireEvent.click(alpha, { metaKey: true })).toBe(true);
+    expect(store.getState().workspace).toBe(before);
+    expect(fireEvent.pointerDown(alpha, { button: 1 })).toBe(false);
+    expect(fireEvent.mouseDown(alpha, { button: 1 })).toBe(false);
+    expect(screen.getByRole("tab", { name: "beta.ts" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
     expect(
       fireEvent(
         alpha,
@@ -170,10 +177,9 @@ describe("compact pane tabs", () => {
           cancelable: true,
         }),
       ),
-    ).toBe(true);
-    expect(store.getState().workspace).toBe(before);
-    fireEvent.click(alpha);
-    expect(alpha).toHaveAttribute("aria-selected", "true");
+    ).toBe(false);
+    expect(screen.queryByRole("tab", { name: "alpha.ts" })).toBeNull();
+    expect(store.getState().workspace.tabs).toEqual([b]);
   });
 
   it("handles middle-click on the close icon once through the normal navigation close path", () => {

@@ -459,7 +459,7 @@ describe("WorkspaceView", () => {
     ]);
   });
 
-  it("renders split panes with distinct surfaces and normal tab close controls", () => {
+  it("renders split panes with distinct surfaces and normal tab close controls", async () => {
     renderWorkspaceView(createSplitWorkspaceStore());
 
     expectSurface(chat("chat-a"));
@@ -470,15 +470,22 @@ describe("WorkspaceView", () => {
       screen.getAllByRole("tablist", { name: "Workspace tabs" }),
     ).toHaveLength(1);
     expect(screen.queryByRole("tablist", { name: "Pane tabs" })).toBeNull();
-    const row = screen.getByRole("tablist", { name: "Workspace tabs" });
-    expect(within(row).getAllByRole("tab")).toHaveLength(2);
-    expect(row.closest("[data-workspace-leaf-id]")).toBeNull();
-    for (const pane of document.querySelectorAll("[data-workspace-leaf-id]")) {
+    await waitFor(() =>
       expect(
-        within(pane as HTMLElement).queryByRole("tablist", {
-          name: "Workspace tabs",
-        }),
-      ).toBeNull();
+        screen.getAllByRole("tablist", { name: /^Workspace tabs/ }),
+      ).toHaveLength(2),
+    );
+    expect(screen.getAllByRole("tab", { name: /Chat Alpha/ })).toHaveLength(1);
+    expect(screen.getAllByRole("tab", { name: /Chat Beta/ })).toHaveLength(1);
+    for (const pane of document.querySelectorAll("[data-workspace-leaf-id]")) {
+      const row = await within(pane as HTMLElement).findByRole("tablist", {
+        name: /^Workspace tabs/,
+      });
+      const tab = within(row).getByRole("tab");
+      expect(tab).toHaveAttribute("aria-selected", "true");
+      expect(
+        pane.querySelector(`[id="${tab.getAttribute("aria-controls")}"]`),
+      ).toHaveAttribute("role", "tabpanel");
       expect(
         within(pane as HTMLElement).queryByRole("tablist", {
           name: "Pane tabs",
@@ -573,9 +580,11 @@ describe("WorkspaceView", () => {
     );
     if (!dropTarget) throw new Error("missing file drop target");
     dragToPane(dropTarget as HTMLElement, dataTransfer, "right");
-    expect(screen.getByRole("tab", { name: "a.ts" })).toHaveAttribute(
-      "aria-selected",
-      "false",
+    await waitFor(() =>
+      expect(screen.getByRole("tab", { name: "a.ts" })).toHaveAttribute(
+        "aria-selected",
+        "true",
+      ),
     );
     expect(screen.getByRole("tab", { name: "b.ts" })).toHaveAttribute(
       "aria-selected",

@@ -167,7 +167,7 @@ function LocalTabButton({
   const dispatch = useAppDispatch();
   const pointerEnabled = usePointerDragHost();
   const config = useConfig();
-  const route = contentRouteForSurface(tab.key);
+  const route = contentRouteForSurface(tab.navigation?.surfaceKey ?? tab.key);
   const href =
     config.host === "web" && route ? contentRouteHref(route) : undefined;
   const cleanup = useRef<() => void>();
@@ -228,17 +228,17 @@ function LocalTabButton({
       style={{ minWidth: minimumWidth }}
       data-pane-tab-key={tab.key}
       onPointerDownCapture={(event) => {
-        if (event.button !== 1 || href) return;
+        if (event.button !== 1) return;
         event.preventDefault();
         event.stopPropagation();
       }}
       onMouseDownCapture={(event) => {
-        if (event.button !== 1 || href) return;
+        if (event.button !== 1) return;
         event.preventDefault();
         event.stopPropagation();
       }}
       onAuxClick={(event) => {
-        if (event.button !== 1 || href) return;
+        if (event.button !== 1) return;
         event.preventDefault();
         event.stopPropagation();
         if (!tab.navigation || tab.navigation.onClose) close(tab);
