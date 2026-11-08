@@ -415,13 +415,22 @@ impl Browser {
                                 // meaning the devtools has ben opened automatically..
                                 // for now ignoring devtools tabs to be in tabs..
                                 if target_info.Type == "page" {
+                                    let target_id = target_info.target_id.clone();
                                     match Tab::new(target_info, Arc::clone(&transport)) {
                                         Ok(new_tab) => {
                                             tabs.lock().unwrap().push(Arc::new(new_tab));
                                         }
-                                        Err(_tab_creation_err) => {
-                                            info!("Failed to create a handle to new tab");
-                                            break;
+                                        Err(tab_creation_err) => {
+                                            // A transient target may disappear during attach/setup.
+                                            // Do not retire discovery (or the shared CDP connection).
+                                            // Protocol messages may contain page data; log only code.
+                                            let protocol_code = tab_creation_err
+                                                .downcast_ref::<crate::types::RemoteError>()
+                                                .map(|error| error.code);
+                                            info!(
+                                                "Failed to initialize tab target {target_id:?} (Chrome #{process_id:?}, protocol code {protocol_code:?}); continuing browser discovery"
+                                            );
+                                            continue;
                                         }
                                     }
                                 }

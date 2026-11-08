@@ -346,6 +346,13 @@ impl ActionabilityDriver for DragActionabilityDriver<'_> {
             Ok(HitTargetResult::Intercepted {
                 description,
             }) => Err(intercepts_pointer_events(description)),
+            Ok(HitTargetResult::EffectUnknown {
+                description,
+            }) => {
+                return Err(ActionabilityDiagnostic::EffectUnknown {
+                    description,
+                });
+            }
             Ok(HitTargetResult::NotConnected) => Err(ActionabilityDiagnostic::Detached),
             Ok(HitTargetResult::Skipped) => Err(ActionabilityDiagnostic::PrecheckFailed {
                 description: "Browser drag hit-target check was skipped".to_string(),
@@ -530,6 +537,13 @@ impl ActionabilityDriver for BrowserActionDriver<'_> {
             }) => {
                 return Err(intercepts_pointer_events(description));
             }
+            Ok(HitTargetResult::EffectUnknown {
+                description,
+            }) => {
+                return Err(ActionabilityDiagnostic::EffectUnknown {
+                    description,
+                });
+            }
             Ok(HitTargetResult::NotConnected) => {
                 return Err(ActionabilityDiagnostic::Detached);
             }
@@ -563,19 +577,8 @@ impl ActionabilityDriver for BrowserActionDriver<'_> {
         action_result.map_err(|error| ActionabilityDiagnostic::EffectUnknown {
             description: error.to_string(),
         })?;
-        match hit_result {
-            Ok(HitTargetResult::Done | HitTargetResult::Skipped) => Ok(resolved.info.tag.clone()),
-            Ok(HitTargetResult::Intercepted {
-                description,
-            }) => Err(intercepts_pointer_events(description)),
-            Ok(HitTargetResult::NotConnected) => Err(ActionabilityDiagnostic::EffectUnknown {
-                description: "Pointer dispatch completed but target disconnected; effect unknown"
-                    .to_string(),
-            }),
-            Err(error) => Err(ActionabilityDiagnostic::EffectUnknown {
-                description: error.to_string(),
-            }),
-        }
+        verify_pointer_delivery(hit_result)?;
+        Ok(resolved.info.tag.clone())
     }
 
     fn wait_for_navigation(&mut self) -> Result<(), ActionabilityDiagnostic> {
@@ -601,6 +604,31 @@ impl ActionabilityDriver for BrowserActionDriver<'_> {
         .map_err(|description| ActionabilityDiagnostic::PrecheckFailed {
             description,
         })
+    }
+}
+
+fn verify_pointer_delivery(
+    hit_result: Result<HitTargetResult, refact_browser::HitTargetError>,
+) -> Result<(), ActionabilityDiagnostic> {
+    match hit_result {
+        Ok(HitTargetResult::Done | HitTargetResult::Skipped) => Ok(()),
+        Ok(HitTargetResult::Intercepted {
+            description,
+        }) => Err(intercepts_pointer_events(description)),
+        Ok(HitTargetResult::EffectUnknown {
+            description,
+        }) => {
+            return Err(ActionabilityDiagnostic::EffectUnknown {
+                description,
+            });
+        }
+        Ok(HitTargetResult::NotConnected) => Err(ActionabilityDiagnostic::EffectUnknown {
+            description: "Pointer dispatch completed but target disconnected; effect unknown"
+                .to_string(),
+        }),
+        Err(error) => Err(ActionabilityDiagnostic::EffectUnknown {
+            description: error.to_string(),
+        }),
     }
 }
 
@@ -3138,6 +3166,12 @@ async fn execute_request_with_runtime_before_deadline(
             id,
         } = &request.target
         {
+            if rt.recovery_fence.is_some() {
+                return Err(
+                    "Browser state was lost; old target ids cannot be used for bootstrap"
+                        .to_string(),
+                );
+            }
             let tabs = rt
                 .browser
                 .get_tabs()
@@ -3556,10 +3590,37 @@ async fn execute_request_with_runtime_before_deadline(
                 StepResult::failure(idx, "Browser action", "No step result produced")
             })
         } else {
+            let mut bootstrap_error = None;
             if current_tab.is_none() {
                 let mut rt = runtime_before!();
                 rt.touch();
                 current_tab = rt.get_active_tab();
+                if current_tab.is_none()
+                    && recovery_fence.is_some()
+                    && matches!(request.target, TabTarget::Active)
+                    && matches!(
+                        step,
+                        BrowserStep::Navigate { .. } | BrowserStep::SetContent { .. }
+                    )
+                {
+                    match browser_block_in_place(deadline, || {
+                        let tab = rt.browser.new_tab().map_err(|e| e.to_string())?;
+                        if let Err(error) =
+                            crate::integrations::browser_runtime::setup_recording_for_tab(
+                                &mut rt,
+                                tab.clone(),
+                            )
+                        {
+                            let _ = tab.close(false);
+                            return Err(error);
+                        }
+                        rt.set_active_tab_target_id(tab.get_target_id().to_string());
+                        Ok::<_, String>(tab)
+                    }) {
+                        Ok(tab) => current_tab = Some(tab),
+                        Err(error) => bootstrap_error = Some(error),
+                    }
+                }
             }
             match &current_tab {
                 Some(tab) => {
@@ -3583,11 +3644,19 @@ async fn execute_request_with_runtime_before_deadline(
                         )
                     })
                 }
-                None => StepResult::failure(
-                    idx,
-                    "No active tab",
-                    "No tab available. Use OpenTab first.",
-                ),
+                None => match bootstrap_error {
+                    Some(error) => {
+                        let mut result =
+                            StepResult::failure(idx, "Browser bootstrap failed", error);
+                        result.outcome = Some("effect_unknown".to_string());
+                        result
+                    }
+                    None => StepResult::failure(
+                        idx,
+                        "No active tab",
+                        "No tab available. Use OpenTab first.",
+                    ),
+                },
             }
         };
         if result.ok && is_image_capture_step(step) {
@@ -11116,6 +11185,18 @@ pub fn describe_locator(locator: &BrowserLocator) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn pointer_delivery_unknown_is_nonretryable() {
+        let error =
+            super::verify_pointer_delivery(Ok(refact_browser::HitTargetResult::EffectUnknown {
+                description: "no terminal".into(),
+            }))
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            refact_browser::ActionabilityDiagnostic::EffectUnknown { .. }
+        ));
+    }
     use super::*;
     use std::collections::BTreeMap;
 

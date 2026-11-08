@@ -771,7 +771,9 @@ fn reconnect_target_requirements(
     let missing = adopted.difference(inventory).cloned().collect();
     let mut required: BTreeSet<_> = adopted.intersection(inventory).cloned().collect();
     if let Some(active) = active {
-        required.insert(active.to_string());
+        if inventory.contains(active) {
+            required.insert(active.to_string());
+        }
     }
     (required, missing)
 }
@@ -859,8 +861,8 @@ impl BrowserRuntime {
         let deadline =
             headless_chrome::browser::transport::CommandDeadlineGuard::current_deadline()
                 .unwrap_or(deadline);
-        if self.active_tab_target_id.is_none() || Instant::now() >= deadline {
-            return Err("Reconnect refused: no active target or original deadline elapsed".into());
+        if Instant::now() >= deadline {
+            return Err("Reconnect refused: original deadline elapsed".into());
         }
         let connection = Browser::connect_with_timeout(
             self.ownership.endpoint.clone(),
@@ -914,12 +916,7 @@ impl BrowserRuntime {
                 .iter()
                 .map(|tab| tab.get_target_id().to_string())
                 .collect();
-            if self
-                .active_tab_target_id
-                .as_ref()
-                .is_some_and(|id| inventory.contains(id))
-                && reconnect_targets_ready(&required, &present)
-            {
+            if reconnect_targets_ready(&required, &present) {
                 break (
                     tabs.into_iter()
                         .filter(|tab| required.contains(tab.get_target_id()))
@@ -1632,6 +1629,9 @@ impl BrowserRuntime {
             {
                 return Some(tab.clone());
             }
+        }
+        if self.recovery_fence.is_some() {
+            return None;
         }
         if let Some(target_id) = &self.recording_tab_target_id {
             if let Some(tab) = tabs_guard
@@ -2404,6 +2404,9 @@ pub fn adopt_new_tabs(
     runtime: &mut BrowserRuntime,
     opened_by_step: Option<usize>,
 ) -> Vec<refact_integrations::browser_models::TabInfo> {
+    if runtime.recovery_fence.is_some() {
+        return Vec::new();
+    }
     runtime.reconcile_tabs();
     let tabs = runtime
         .browser
@@ -2603,10 +2606,17 @@ mod tests {
             Some(&document),
             Some("active")
         ));
-        let (required, _) =
-            reconnect_target_requirements(&adopted, Some("active"), &BTreeSet::new());
-        assert!(required.contains("active"));
-        assert!(!reconnect_targets_ready(&required, &BTreeSet::new()));
+        for active in [Some("active"), None] {
+            let (required, missing) =
+                reconnect_target_requirements(&adopted, active, &BTreeSet::new());
+            assert!(reconnect_targets_ready(&required, &BTreeSet::new()));
+            assert!(!reconnect_same_state_verified(
+                &missing,
+                Some(&document),
+                None,
+                active
+            ));
+        }
     }
 
     #[test]

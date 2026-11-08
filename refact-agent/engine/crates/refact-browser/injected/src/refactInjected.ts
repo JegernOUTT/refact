@@ -417,8 +417,8 @@ export class RefactInjected {
     return this.hitTargetController.install(element, action, point, blockAllEvents);
   }
 
-  takeHitTargetInterceptor(id: number): HitTargetResult {
-    return this.hitTargetController.take(id);
+  takeHitTargetInterceptor(id: number, timeoutMs = 100): Promise<HitTargetResult> {
+    return this.hitTargetController.take(id, timeoutMs);
   }
 
   private bestEffort<T>(read: () => T, fallback: T): T {
@@ -449,6 +449,7 @@ export class RefactInjected {
 
   private async checkElementIsStable(element: Element, budgetMs: number): Promise<StabilityResult> {
     const requestAnimationFrame = this.builtinSnapshot.requestAnimationFrame;
+    const cancelAnimationFrame = this.builtinSnapshot.cancelAnimationFrame;
     const performanceNow = this.builtinSnapshot.performanceNow;
     const setTimeout = this.builtinSnapshot.setTimeout;
     const clearTimeout = this.builtinSnapshot.clearTimeout;
@@ -457,22 +458,40 @@ export class RefactInjected {
     return await new Promise<StabilityResult>((resolve, reject) => {
       let settled = false;
       let deadline = 0;
+      let frame: number | undefined;
+      let fallback: number | undefined;
+      const cancelSample = () => {
+        if (frame !== undefined)
+          cancelAnimationFrame(frame);
+        if (fallback !== undefined)
+          clearTimeout(fallback);
+        frame = fallback = undefined;
+      };
       const settle = (callback: () => void) => {
         if (settled)
           return;
         settled = true;
         clearTimeout(deadline);
+        cancelSample();
         callback();
       };
       deadline = setTimeout(() => settle(() => resolve({ stable: false, unstable: 'deadline' })), budgetMs);
+      // Prefer rendering frames, but hidden headed pages may never deliver them.
+      // Both native schedulers use the same comparator and monotonic spacing;
+      // neither depends on page fake-clock advancement.
+      const schedule = () => {
+        frame = requestAnimationFrame(check);
+        fallback = setTimeout(check, 32);
+      };
       const check = () => {
         if (settled)
           return;
         try {
+          cancelSample();
           this.ensureConnected(element);
           const time = performanceNow();
-          if (lastTime && time - lastTime < 15) {
-            requestAnimationFrame(check);
+          if (lastRect && time - lastTime < 15) {
+            schedule();
             return;
           }
           lastTime = time;
@@ -488,13 +507,13 @@ export class RefactInjected {
             return;
           }
           lastRect = rect;
-          requestAnimationFrame(check);
+          schedule();
         } catch (error) {
           settle(() => reject(error));
         }
       };
       try {
-        requestAnimationFrame(check);
+        schedule();
       } catch (error) {
         settle(() => reject(error));
       }

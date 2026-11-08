@@ -31,9 +31,12 @@ not reached is still listed in `steps[]` with `skipped: true` and `ok: false`, s
 always equals the number of steps you sent. Set batch-level `continue_on_error: true` to keep
 running independent steps (endpoint probes, several `open_tab` candidates) after a failure; the
 batch still reports `ok: false` and each failure keeps its own `error`. Soft assertions and
-`click_if_exists` never stop a batch. A browser that died mid-batch is relaunched and the batch is
-resumed after replaying the last navigate/open_tab/set_content step; when no such step exists in the
-batch the remaining steps are refused (never run against about:blank) and a warning says so.
+`click_if_exists` do not stop a batch for ordinary failures. Transport loss always stops the batch,
+including with `continue_on_error`: interrupted actions are never replayed, their effects may be
+unknown, and remaining steps are skipped. If `recovery.state_lost` is true, inspect the partial
+results and submit a new request with `acknowledge_session_generation` set to the reported
+`session_generation`, followed by an explicit navigate/open_tab/set_content step. Old tab ids and
+refs are invalid after replacement; do not blindly retry actions with uncertain effects.
 
 Page report: a page-changing batch returns `page` with the final URL and title, `page.status` when
 the main document answered with a non-2xx status, `page.console` error/warning COUNTS (full text

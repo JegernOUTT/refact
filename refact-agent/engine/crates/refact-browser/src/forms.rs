@@ -197,6 +197,13 @@ fn trusted_click(
                 description,
             });
         }
+        Ok(HitTargetResult::EffectUnknown {
+            description,
+        }) => {
+            return Err(ActionabilityDiagnostic::EffectUnknown {
+                description,
+            });
+        }
         Ok(HitTargetResult::NotConnected) => return Err(ActionabilityDiagnostic::Detached),
         Err(error) => {
             return Err(ActionabilityDiagnostic::PrecheckFailed {
@@ -216,11 +223,22 @@ fn trusted_click(
     action_result.map_err(|error| ActionabilityDiagnostic::EffectUnknown {
         description: error.to_string(),
     })?;
+    verify_form_pointer_delivery(hit_result)
+}
+
+fn verify_form_pointer_delivery(
+    hit_result: Result<HitTargetResult, crate::HitTargetError>,
+) -> Result<(), ActionabilityDiagnostic> {
     match hit_result {
         Ok(HitTargetResult::Done | HitTargetResult::Skipped) => Ok(()),
         Ok(HitTargetResult::Intercepted {
             description,
         }) => Err(ActionabilityDiagnostic::InterceptsPointerEvents {
+            description,
+        }),
+        Ok(HitTargetResult::EffectUnknown {
+            description,
+        }) => Err(ActionabilityDiagnostic::EffectUnknown {
             description,
         }),
         Ok(HitTargetResult::NotConnected) => Err(ActionabilityDiagnostic::EffectUnknown {
@@ -948,6 +966,18 @@ fn sanitize_error(field_kind: &FieldKind, text: &str, error: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn pointer_delivery_unknown_is_nonretryable() {
+        let error =
+            super::verify_form_pointer_delivery(Ok(crate::HitTargetResult::EffectUnknown {
+                description: "no terminal".into(),
+            }))
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            crate::ActionabilityDiagnostic::EffectUnknown { .. }
+        ));
+    }
     use std::collections::VecDeque;
 
     use super::*;

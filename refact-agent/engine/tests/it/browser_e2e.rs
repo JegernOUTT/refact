@@ -765,6 +765,56 @@ async fn same_process_reconnect_preserves_document_without_replaying_actions() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+async fn missing_active_target_reconnect_is_fenced_until_explicit_bootstrap() {
+    let Some(mut case) = BrowserCase::start("delayed-button.html").await else {
+        return;
+    };
+    case.setup_world();
+    case.runtime.checkpoint_document_identity().unwrap();
+    let pid = case.runtime.ownership.process_id().unwrap();
+    let generation = case.runtime.runtime_id.clone();
+    let other = case.runtime.browser.new_tab().unwrap();
+    let old_target = case.tab.get_target_id().to_string();
+    case.tab.close(false).unwrap();
+    case.runtime.browser.disconnect_transport();
+    let started = std::time::Instant::now();
+    let outcome = case.runtime.reconnect_same_process().unwrap();
+    assert!(started.elapsed() < Duration::from_secs(15));
+    assert!(!outcome.same_state_verified);
+    assert_eq!(outcome.runtime_id, generation);
+    assert_eq!(case.runtime.ownership.process_id(), Some(pid));
+    assert!(refact_lsp::integrations::browser_runtime::pid_is_alive(pid));
+    assert!(case.runtime.recovery_fence.is_some());
+    assert!(case.runtime.get_active_tab().is_none());
+    let runtime = Arc::new(tokio::sync::Mutex::new(case.runtime));
+    let wrong = execute_request_with_runtime(
+        runtime.clone(),
+        serde_json::from_value(serde_json::json!({
+            "acknowledge_session_generation": "wrong", "steps": [{"action":"open_tab"}]
+        }))
+        .unwrap(),
+        &ImagePolicy::browser_capture(),
+    )
+    .await;
+    assert!(wrong.is_err());
+    let stale = execute_request_with_runtime(runtime.clone(), serde_json::from_value(serde_json::json!({
+        "acknowledge_session_generation": generation, "target": {"type":"id", "id":old_target}, "steps": [{"action":"navigate", "url":case.server.url("delayed-button.html")}]
+    })).unwrap(), &ImagePolicy::browser_capture()).await;
+    assert!(stale.is_err());
+    let report = execute_request_with_runtime(runtime.clone(), serde_json::from_value(serde_json::json!({
+        "acknowledge_session_generation": generation, "steps": [{"action":"navigate", "url":case.server.url("delayed-button.html")}]
+    })).unwrap(), &ImagePolicy::browser_capture()).await.unwrap();
+    assert!(report.ok, "{report:?}");
+    let rt = runtime.lock().await;
+    assert_ne!(
+        rt.get_active_tab().unwrap().get_target_id(),
+        other.get_target_id()
+    );
+    assert!(rt.recovery_fence.is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
 async fn dead_cdp_preflight_requires_current_generation_acknowledgement() {
     let Some(mut case) = BrowserCase::start("delayed-button.html").await else {
         return;

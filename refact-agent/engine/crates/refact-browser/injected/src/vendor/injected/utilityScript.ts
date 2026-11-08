@@ -35,7 +35,8 @@ export type Builtins = {
 export type RefactBuiltins = Readonly<Pick<Builtins,
   'setTimeout' |
   'clearTimeout' |
-  'requestAnimationFrame'
+  'requestAnimationFrame' |
+  'cancelAnimationFrame'
 > & {
   arrayFrom: typeof Array.from,
   objectKeys: typeof Object.keys,

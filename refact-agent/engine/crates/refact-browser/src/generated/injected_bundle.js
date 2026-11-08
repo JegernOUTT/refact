@@ -1,4 +1,4 @@
-// @refact-injected-hash 87cf71ebb37c88bf3a63f3c1d28812bdde89ae5af904f7a5c12d7f655ded671a
+// @refact-injected-hash 3325c0680592a059e32ce7b6ed1977e5a2ce773bc79be769b3ab06f377ee273d
 
 var __export = (target, all) => { for (var name in all) target[name] = all[name]; };
 var __toCommonJS = mod => ({ ...mod, __esModule: true });
@@ -345,16 +345,31 @@ var HitTargetController = class {
       events,
       blockAllEvents,
       result: void 0,
+      progressed: false,
+      terminal: false,
       listener: (() => {
       })
     };
     const listener = (event) => {
       if (!events.has(event.type) || !event.isTrusted)
         return;
-      const point = this.eventPoint(event);
-      if (interceptor.result === void 0 && point)
-        interceptor.result = this.checkHitTarget(point, targetElement);
-      if (interceptor.blockAllEvents || interceptor.result !== "done" && interceptor.result !== void 0) {
+      if (!interceptor.result) {
+        const point = this.eventPoint(event);
+        const hit = point ? this.checkHitTarget(point, targetElement) : void 0;
+        const onTarget = event.composedPath().includes(targetElement);
+        if (event.type === "pointercancel" || event.type === "touchcancel") {
+          interceptor.result = { status: "effect_unknown", description: "Pointer sequence was cancelled; effect unknown" };
+        } else if (hit !== "done" || !onTarget) {
+          const description = hit && hit !== "done" ? hit.hitTargetDescription : "Pointer event was not delivered to the intended target";
+          interceptor.result = interceptor.progressed ? { status: "effect_unknown", description } : { status: "intercepted", description };
+        } else {
+          interceptor.progressed = true;
+          if (event.type === "mousedown" || event.type === "pointerdown" || event.type === "touchstart")
+            interceptor.terminal = false;
+          interceptor.terminal = interceptor.terminal || (action === "hover" ? event.type === "mousemove" : action === "tap" ? event.type === "touchend" || event.type === "pointerup" : action === "dblclick" ? event.type === "dblclick" : ["click", "auxclick", "dblclick", "contextmenu"].includes(event.type));
+        }
+      }
+      if (interceptor.blockAllEvents || interceptor.result) {
         this.builtins.preventDefault(event);
         this.builtins.stopPropagation(event);
         this.builtins.stopImmediatePropagation(event);
@@ -366,15 +381,25 @@ var HitTargetController = class {
     this.interceptors.set(id, interceptor);
     return { status: "installed", id };
   }
-  take(id) {
-    var _a;
+  async take(id, timeoutMs = 100) {
     const interceptor = this.interceptors.get(id);
     if (!interceptor)
       throw new Error(`Unknown hit-target interceptor ${id}`);
     this.interceptors.delete(id);
-    for (const eventName of interceptor.events)
-      this.builtins.removeWindowEventListener(eventName, interceptor.listener, { capture: true });
-    return this.toResult((_a = interceptor.result) != null ? _a : "done");
+    let timer;
+    try {
+      const delay = Number.isFinite(timeoutMs) ? Math.max(0, Math.min(100, timeoutMs)) : 0;
+      if (!interceptor.result && !interceptor.terminal && delay > 0)
+        await new Promise((resolve) => {
+          timer = this.builtins.setTimeout(resolve, delay);
+        });
+      return interceptor.result || (interceptor.terminal ? { status: "done" } : { status: "effect_unknown", description: "No trusted terminal pointer event was observed; effect unknown" });
+    } finally {
+      if (timer !== void 0)
+        this.builtins.clearTimeout(timer);
+      for (const eventName of interceptor.events)
+        this.builtins.removeWindowEventListener(eventName, interceptor.listener, { capture: true });
+    }
   }
   checkHitTarget(hitPoint, targetElement) {
     var _a;
@@ -454,7 +479,7 @@ var HitTargetController = class {
   }
   eventPoint(event) {
     if ("touches" in event) {
-      const touch = event.touches[0];
+      const touch = event.touches[0] || event.changedTouches[0];
       return touch ? { x: touch.clientX, y: touch.clientY } : void 0;
     }
     if ("clientX" in event && "clientY" in event) {
@@ -5228,8 +5253,8 @@ var RefactInjected = class {
   installHitTargetInterceptor(element, action, point, blockAllEvents = false) {
     return this.hitTargetController.install(element, action, point, blockAllEvents);
   }
-  takeHitTargetInterceptor(id) {
-    return this.hitTargetController.take(id);
+  takeHitTargetInterceptor(id, timeoutMs = 100) {
+    return this.hitTargetController.take(id, timeoutMs);
   }
   bestEffort(read, fallback) {
     try {
@@ -5255,6 +5280,7 @@ var RefactInjected = class {
   }
   async checkElementIsStable(element, budgetMs) {
     const requestAnimationFrame = this.builtinSnapshot.requestAnimationFrame;
+    const cancelAnimationFrame = this.builtinSnapshot.cancelAnimationFrame;
     const performanceNow = this.builtinSnapshot.performanceNow;
     const setTimeout = this.builtinSnapshot.setTimeout;
     const clearTimeout = this.builtinSnapshot.clearTimeout;
@@ -5263,22 +5289,37 @@ var RefactInjected = class {
     return await new Promise((resolve, reject) => {
       let settled = false;
       let deadline = 0;
+      let frame;
+      let fallback;
+      const cancelSample = () => {
+        if (frame !== void 0)
+          cancelAnimationFrame(frame);
+        if (fallback !== void 0)
+          clearTimeout(fallback);
+        frame = fallback = void 0;
+      };
       const settle = (callback) => {
         if (settled)
           return;
         settled = true;
         clearTimeout(deadline);
+        cancelSample();
         callback();
       };
       deadline = setTimeout(() => settle(() => resolve({ stable: false, unstable: "deadline" })), budgetMs);
+      const schedule = () => {
+        frame = requestAnimationFrame(check);
+        fallback = setTimeout(check, 32);
+      };
       const check = () => {
         if (settled)
           return;
         try {
+          cancelSample();
           this.ensureConnected(element);
           const time = performanceNow();
-          if (lastTime && time - lastTime < 15) {
-            requestAnimationFrame(check);
+          if (lastRect && time - lastTime < 15) {
+            schedule();
             return;
           }
           lastTime = time;
@@ -5290,13 +5331,13 @@ var RefactInjected = class {
             return;
           }
           lastRect = rect;
-          requestAnimationFrame(check);
+          schedule();
         } catch (error) {
           settle(() => reject(error));
         }
       };
       try {
-        requestAnimationFrame(check);
+        schedule();
       } catch (error) {
         settle(() => reject(error));
       }

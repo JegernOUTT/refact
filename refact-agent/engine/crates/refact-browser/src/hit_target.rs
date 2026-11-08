@@ -20,6 +20,7 @@ pub struct HitTargetPoint {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HitTargetResult {
     Done,
+    EffectUnknown { description: String },
     Intercepted { description: String },
     NotConnected,
     Skipped,
@@ -398,11 +399,20 @@ impl HitTargetController {
         let remote_id = entry.remote_id.ok_or_else(|| {
             HitTargetError::InvalidResult("Hit-target interceptor has no result source".to_string())
         })?;
+        let timeout_ms =
+            headless_chrome::browser::transport::CommandDeadlineGuard::current_deadline()
+                .map(|deadline| {
+                    deadline
+                        .saturating_duration_since(std::time::Instant::now())
+                        .as_millis()
+                        .min(100) as u64
+                })
+                .unwrap_or(100);
         let value = worlds.call_function_on(
             tab,
             &entry.handle,
-            "function(id) { const instance = globalThis.__refact_injected__; if (!instance) throw new Error('RefactInjected is not installed'); return instance.takeHitTargetInterceptor(id); }",
-            vec![json!(remote_id)],
+            "function(id, timeoutMs) { const instance = globalThis.__refact_injected__; if (!instance) throw new Error('RefactInjected is not installed'); return instance.takeHitTargetInterceptor(id, timeoutMs); }",
+            vec![json!(remote_id), json!(timeout_ms)],
         )?;
         parse_result(&value)
     }
@@ -497,6 +507,9 @@ pub fn translate_point_to_frame(
             HitTargetResult::Done => {}
             HitTargetResult::Intercepted {
                 description,
+            }
+            | HitTargetResult::EffectUnknown {
+                description,
             } => {
                 return Ok(FramePointTranslation::Unsupported {
                     reason: description,
@@ -533,9 +546,8 @@ pub fn translate_point_to_frame_cdp(
 
 fn interceptor_action(action_kind: ActionKind) -> Option<&'static str> {
     match action_kind {
-        ActionKind::Click | ActionKind::DblClick | ActionKind::Check | ActionKind::Uncheck => {
-            Some("mouse")
-        }
+        ActionKind::Click | ActionKind::Check | ActionKind::Uncheck => Some("mouse"),
+        ActionKind::DblClick => Some("dblclick"),
         ActionKind::Hover => Some("hover"),
         ActionKind::Tap => Some("tap"),
         ActionKind::DragSource | ActionKind::DragTarget => Some("drag"),
@@ -554,11 +566,20 @@ fn parse_result(value: &Value) -> Result<HitTargetResult, HitTargetError> {
         Some("done") => Ok(HitTargetResult::Done),
         Some("not_connected") => Ok(HitTargetResult::NotConnected),
         Some("skipped") => Ok(HitTargetResult::Skipped),
-        Some("intercepted") => value
+        Some("intercepted" | "effect_unknown") => value
             .get("description")
             .and_then(Value::as_str)
-            .map(|description| HitTargetResult::Intercepted {
-                description: description.to_string(),
+            .map(|description| {
+                let description = description.to_string();
+                if value["status"] == "effect_unknown" {
+                    HitTargetResult::EffectUnknown {
+                        description,
+                    }
+                } else {
+                    HitTargetResult::Intercepted {
+                        description,
+                    }
+                }
             })
             .ok_or_else(|| {
                 HitTargetError::InvalidResult(
@@ -574,6 +595,20 @@ fn parse_result(value: &Value) -> Result<HitTargetResult, HitTargetError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn delivery_uncertainty_is_typed_and_requires_description() {
+        assert_eq!(
+            parse_result(&json!({"status": "effect_unknown", "description": "no terminal"}))
+                .unwrap(),
+            HitTargetResult::EffectUnknown {
+                description: "no terminal".into()
+            }
+        );
+        assert!(parse_result(&json!({"status": "effect_unknown"})).is_err());
+        assert_eq!(interceptor_action(ActionKind::DblClick), Some("dblclick"));
+        assert_eq!(interceptor_action(ActionKind::Check), Some("mouse"));
+    }
 
     #[derive(Default)]
     struct RecordingFrameDriver {

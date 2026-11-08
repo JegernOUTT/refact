@@ -171,7 +171,7 @@ const CHROME_DESCRIPTION: &str = concat!(
     "Click, hover, fill, clear, check, and uncheck auto-wait for actionability. Never use `wait_seconds` for readiness; use `wait_for_response`, `wait_for_load_state`, `wait_for_selector`, or `wait_for_function`.\n",
     "Result: one JSON object with `tool`, `summary`, `completion` (steps_requested/reported, failed, unknown, skipped, incomplete) plus `ok`, `steps`, `page`. Under a tight budget it is reduced as JSON: failed and effect-unknown steps are prioritized, with explicit aggregate verdicts and omission counts when step details cannot fit. If even the minimum verdict cannot fit, delivery fails explicitly rather than reporting success. At most 64 steps per call; invalid requests are rejected before the browser starts.\n",
     "Recovery: if `recovery.state_lost` is true, nothing interrupted was retried; resend with `acknowledge_session_generation` set to the report's `session_generation`, then navigate again (old refs and tab ids are invalid).\n",
-    "Large redacted reports may include `full_report.id`. Read it with `read_artifact` using that opaque id and byte `offset`/`limit` (default 8192, maximum 32768). The result's `content_base64` encodes the exact UTF-8 bytes; decode and concatenate chunks using `next_offset`. Retrieval is scoped to the current runtime, does not create another report artifact, and expired or evicted ids fail explicitly. Managed artifacts are bounded to 64 files, 32 MiB total, 8 MiB per file, with one-hour idle TTL. Secure managed storage is currently Unix-only."
+    "Large redacted reports may include `full_report.id`. Read it with `read_artifact` using that opaque id and byte `offset`/`limit` (default 8192, maximum 32768). The result's `content_base64` encodes the exact UTF-8 bytes; decode and concatenate chunks using `next_offset`. Retrieval is scoped to the current runtime, does not create another report artifact, and expired or evicted ids fail explicitly. Managed artifacts are bounded to 64 files, 32 MiB total, 8 MiB per file, with one-hour idle TTL. Secure managed storage is supported on Unix and Windows."
 );
 
 pub fn chrome_help_text(topic: Option<&str>) -> String {
@@ -901,35 +901,35 @@ mod tests {
                 "schema {step}"
             );
         }
-        let read_artifact = crate::integrations::browser_models::BrowserStep::ACTION_FIELDS
-            .iter()
-            .any(|(name, ..)| *name == "read_artifact");
-        if read_artifact {
-            assert_eq!(
-                step_schema["items"]["properties"]["offset"]["type"],
-                "integer"
+        assert!(
+            crate::integrations::browser_models::BrowserStep::ACTION_FIELDS
+                .iter()
+                .any(|(name, ..)| *name == "read_artifact")
+        );
+        assert_eq!(
+            step_schema["items"]["properties"]["offset"]["type"],
+            "integer"
+        );
+        for (step, expected) in [
+            (
+                json!({"action": "read_artifact", "id": "a1", "offset": 0, "limit": 10}),
+                true,
+            ),
+            (json!({"action": "read_artifact"}), false),
+            (
+                json!({"action": "read_artifact", "id": "a1", "url": "u"}),
+                false,
+            ),
+        ] {
+            let runtime = crate::integrations::browser_models::parse_browser_action_request(
+                json!({"steps": [step.clone()]}),
             );
-            for (step, expected) in [
-                (
-                    json!({"action": "read_artifact", "id": "a1", "offset": 0, "limit": 10}),
-                    true,
-                ),
-                (json!({"action": "read_artifact"}), false),
-                (
-                    json!({"action": "read_artifact", "id": "a1", "url": "u"}),
-                    false,
-                ),
-            ] {
-                let runtime = crate::integrations::browser_models::parse_browser_action_request(
-                    json!({"steps": [step.clone()]}),
-                );
-                assert_eq!(runtime.is_ok(), expected, "runtime {step}: {runtime:?}");
-                assert_eq!(
-                    step_variant_admits(variants, &step),
-                    expected,
-                    "schema {step}"
-                );
-            }
+            assert_eq!(runtime.is_ok(), expected, "runtime {step}: {runtime:?}");
+            assert_eq!(
+                step_variant_admits(variants, &step),
+                expected,
+                "schema {step}"
+            );
         }
         let ack = json!({"acknowledge_session_generation": "g1", "steps": [{"action": "tab_log"}]});
         assert!(crate::integrations::browser_models::parse_browser_action_request(ack).is_ok());
@@ -989,6 +989,15 @@ mod tests {
         assert!(input_schema.get("anyOf").is_none());
         let items = &input_schema["properties"]["request"]["properties"]["steps"]["items"];
         assert!(items["anyOf"].as_array().is_some_and(|v| !v.is_empty()));
+        assert_eq!(
+            input_schema["properties"]["request"]["properties"]["acknowledge_session_generation"]
+                ["type"],
+            "string"
+        );
+        assert!(step_variant_admits(
+            items["anyOf"].as_array().unwrap(),
+            &json!({"action": "read_artifact", "id": "a1", "offset": 0, "limit": 10})
+        ));
 
         let google = body(refact_llm::WireFormat::GoogleCloudCode);
         let parameters = &google["request"]["tools"][0]["functionDeclarations"][0]["parameters"];
@@ -1001,7 +1010,18 @@ mod tests {
         }
         let items = &parameters["properties"]["request"]["properties"]["steps"]["items"];
         assert_eq!(items["required"], json!(["action"]));
-        for field in ["url", "locator", "topic", "pattern", "contains"] {
+        assert_eq!(
+            parameters["properties"]["request"]["properties"]["acknowledge_session_generation"]
+                ["type"],
+            "string"
+        );
+        assert!(items["properties"]["action"]["enum"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("read_artifact")));
+        for field in [
+            "url", "locator", "topic", "pattern", "contains", "id", "offset", "limit",
+        ] {
             assert!(
                 items["properties"].get(field).is_some(),
                 "{field} lost in fallback"
@@ -1024,6 +1044,79 @@ mod tests {
         assert!(!help_only_request(&serde_json::json!({
             "steps": [{"action": "navigate", "url": "https://example.com"}]
         })));
+        let overview = chrome_help_text(Some("overview"));
+        assert!(overview.contains("interrupted actions are never replayed"));
+        assert!(overview.contains("acknowledge_session_generation"));
+        assert!(!overview.contains("resumed after replaying"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
+    async fn unhealthy_setup_retains_registered_runtime_and_owned_process() {
+        assert_eq!(std::env::var("REFACT_BROWSER_E2E").as_deref(), Ok("1"));
+        let cache = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let cmdline = crate::global_context::CommandLine::from_iter_safe([
+            "browser-setup-e2e",
+            "--http-port",
+            "0",
+            "--lsp-port",
+            "0",
+            "--no-scheduler",
+        ])
+        .unwrap();
+        let (gcx, _) = crate::global_context::create_global_context(
+            cache.path().to_path_buf(),
+            config.path().to_path_buf(),
+            cmdline,
+        )
+        .await;
+        let chat_id = format!("browser-setup-{}", uuid::Uuid::new_v4());
+        let key = get_session_hashmap_key("chrome", &chat_id);
+        let settings = SettingsChrome {
+            headless: "true".to_string(),
+            chromium_sandbox: "false".to_string(),
+            ..Default::default()
+        };
+        setup_chrome_session(gcx.clone(), &settings, &key, &chat_id)
+            .await
+            .unwrap();
+        let app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
+        let (generation, original) = find_runtime_by_chat_id(app.clone(), &chat_id)
+            .await
+            .unwrap();
+        let pid = {
+            let mut rt = original.lock().await;
+            let pid = rt.ownership.process_id().unwrap();
+            rt.browser.disconnect_transport();
+            assert!(!rt.check_connection());
+            pid
+        };
+        let result = setup_chrome_session(gcx.clone(), &settings, &key, &chat_id).await;
+        let resolved = find_runtime_by_chat_id(app.clone(), &chat_id).await;
+        let retained = resolved
+            .as_ref()
+            .is_some_and(|(id, runtime)| id == &generation && Arc::ptr_eq(runtime, &original));
+        let process_alive = crate::integrations::browser_runtime::pid_is_alive(pid);
+        gcx.integration_sessions.lock().await.remove(&key);
+        if let Some((id, _)) = resolved {
+            remove_browser_runtime(app.clone(), &id).await;
+        }
+        if !retained {
+            remove_browser_runtime(app, &generation).await;
+        }
+        assert!(
+            result.is_ok(),
+            "setup must defer recovery to the controller: {result:?}"
+        );
+        assert!(
+            retained,
+            "unhealthy setup replaced the registered browser generation"
+        );
+        assert!(
+            process_alive,
+            "unhealthy setup terminated the owned live browser"
+        );
     }
 
     #[test]
@@ -1225,21 +1318,13 @@ async fn setup_chrome_session(
             chrome_session.runtime_id.clone()
         };
 
-        let runtime_healthy = {
-            let runtime_arc = {
-                let browser_runtimes = gcx.browser_runtimes.clone();
-                let browser_runtimes = browser_runtimes.lock().await;
-                browser_runtimes.get(&runtime_id).cloned()
-            };
-            if let Some(arc) = runtime_arc {
-                let mut rt = arc.lock().await;
-                rt.check_connection()
-            } else {
-                false
+        let runtime_arc = gcx.browser_runtimes.lock().await.get(&runtime_id).cloned();
+        if let Some(arc) = runtime_arc {
+            let rt = arc.lock().await;
+            if rt.attached_chat_id().as_deref() != Some(chat_id) {
+                return Err("Browser session belongs to another chat".to_string());
             }
-        };
 
-        if runtime_healthy {
             return Ok(setup_log);
         } else {
             dead_pid = runtime_owner_record(&runtime_id).and_then(|owner| owner.process_id());

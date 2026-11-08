@@ -14,7 +14,7 @@ type HitTargetBuiltins = RefactBuiltins & Readonly<{
   stopImmediatePropagation: (event: Event) => void;
 }>;
 
-export type HitTargetAction = 'hover' | 'tap' | 'mouse' | 'drag';
+export type HitTargetAction = 'hover' | 'tap' | 'mouse' | 'dblclick' | 'drag';
 
 export type HitTargetPoint = Readonly<{
   x: number;
@@ -23,6 +23,7 @@ export type HitTargetPoint = Readonly<{
 
 export type HitTargetResult =
   | Readonly<{ status: 'done' }>
+  | Readonly<{ status: 'effect_unknown'; description: string }>
   | Readonly<{ status: 'intercepted'; description: string }>
   | Readonly<{ status: 'not_connected' }>
   | Readonly<{ status: 'skipped' }>;
@@ -33,7 +34,9 @@ type Interceptor = {
   listener: EventListener;
   events: Set<string>;
   blockAllEvents: boolean;
-  result: HitTargetCheckResult | undefined;
+  result: HitTargetResult | undefined;
+  progressed: boolean;
+  terminal: boolean;
 };
 
 const autoClosingTags = [
@@ -97,15 +100,39 @@ export class HitTargetController {
       events,
       blockAllEvents,
       result: undefined,
+      progressed: false,
+      terminal: false,
       listener: (() => {}) as EventListener,
     };
     const listener: EventListener = event => {
       if (!events.has(event.type) || !event.isTrusted)
         return;
-      const point = this.eventPoint(event);
-      if (interceptor.result === undefined && point)
-        interceptor.result = this.checkHitTarget(point, targetElement);
-      if (interceptor.blockAllEvents || (interceptor.result !== 'done' && interceptor.result !== undefined)) {
+      // Observe every trusted event: an earlier down is not proof of completion.
+      if (!interceptor.result) {
+        const point = this.eventPoint(event);
+        const hit = point ? this.checkHitTarget(point, targetElement) : undefined;
+        const onTarget = event.composedPath().includes(targetElement);
+        if (event.type === 'pointercancel' || event.type === 'touchcancel') {
+          interceptor.result = { status: 'effect_unknown', description: 'Pointer sequence was cancelled; effect unknown' };
+        } else if (hit !== 'done' || !onTarget) {
+          const description = hit && hit !== 'done' ? hit.hitTargetDescription : 'Pointer event was not delivered to the intended target';
+          interceptor.result = interceptor.progressed
+            ? { status: 'effect_unknown', description }
+            : { status: 'intercepted', description };
+        } else {
+          interceptor.progressed = true;
+          if (event.type === 'mousedown' || event.type === 'pointerdown' || event.type === 'touchstart')
+            interceptor.terminal = false;
+          interceptor.terminal = interceptor.terminal || (action === 'hover'
+            ? event.type === 'mousemove'
+            : action === 'tap'
+              ? event.type === 'touchend' || event.type === 'pointerup'
+              : action === 'dblclick'
+                ? event.type === 'dblclick'
+                : ['click', 'auxclick', 'dblclick', 'contextmenu'].includes(event.type));
+        }
+      }
+      if (interceptor.blockAllEvents || interceptor.result) {
         this.builtins.preventDefault(event);
         this.builtins.stopPropagation(event);
         this.builtins.stopImmediatePropagation(event);
@@ -118,14 +145,27 @@ export class HitTargetController {
     return { status: 'installed', id };
   }
 
-  take(id: number): HitTargetResult {
+  async take(id: number, timeoutMs = 100): Promise<HitTargetResult> {
     const interceptor = this.interceptors.get(id);
     if (!interceptor)
       throw new Error(`Unknown hit-target interceptor ${id}`);
     this.interceptors.delete(id);
-    for (const eventName of interceptor.events)
-      this.builtins.removeWindowEventListener(eventName, interceptor.listener, { capture: true });
-    return this.toResult(interceptor.result ?? 'done');
+    let timer: number | undefined;
+    try {
+      // CDP acknowledgement can precede event delivery. Drain once, never replay
+      // input, and never give this observation phase a fresh action timeout.
+      const delay = Number.isFinite(timeoutMs) ? Math.max(0, Math.min(100, timeoutMs)) : 0;
+      if (!interceptor.result && !interceptor.terminal && delay > 0)
+        await new Promise<void>(resolve => { timer = this.builtins.setTimeout(resolve, delay); });
+      return interceptor.result || (interceptor.terminal
+        ? { status: 'done' }
+        : { status: 'effect_unknown', description: 'No trusted terminal pointer event was observed; effect unknown' });
+    } finally {
+      if (timer !== undefined)
+        this.builtins.clearTimeout(timer);
+      for (const eventName of interceptor.events)
+        this.builtins.removeWindowEventListener(eventName, interceptor.listener, { capture: true });
+    }
   }
 
   private checkHitTarget(hitPoint: HitTargetPoint, targetElement: Element): HitTargetCheckResult {
@@ -214,7 +254,7 @@ export class HitTargetController {
 
   private eventPoint(event: Event): HitTargetPoint | undefined {
     if ('touches' in event) {
-      const touch = (event as TouchEvent).touches[0];
+      const touch = (event as TouchEvent).touches[0] || (event as TouchEvent).changedTouches[0];
       return touch ? { x: touch.clientX, y: touch.clientY } : undefined;
     }
     if ('clientX' in event && 'clientY' in event) {

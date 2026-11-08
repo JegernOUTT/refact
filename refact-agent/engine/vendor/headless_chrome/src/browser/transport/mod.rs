@@ -475,17 +475,13 @@ impl Transport {
                             }
 
                             _ => {
-                                if let Some(tx) =
-                                    listeners.lock().unwrap().get(&ListenerId::Browser)
-                                {
-                                    if let Err(err) = tx.send(browser_event.clone()) {
-                                        let event_string = format!("{browser_event:?}");
+                                let mut listeners = listeners.lock().unwrap();
+                                if let Some(tx) = listeners.get(&ListenerId::Browser) {
+                                    if tx.send(browser_event).is_err() {
                                         warn!(
-                                            "Couldn't send browser an event: {:?}\n{:?}",
-                                            event_string.chars().take(400).collect::<String>(),
-                                            err
+                                            "Browser event listener disconnected; retiring listener, not shared CDP transport"
                                         );
-                                        break;
+                                        listeners.remove(&ListenerId::Browser);
                                     }
                                 }
                             }
@@ -567,6 +563,190 @@ mod deadline_tests {
             0,
             "deadline leaked a waiter"
         );
+    }
+
+    fn send_json(ws: &mut WebSocket<TcpStream>, value: Value) {
+        ws.send(tungstenite::Message::text(value.to_string()))
+            .unwrap();
+    }
+
+    fn target_created(id: &str) -> Value {
+        json!({"method":"Target.targetCreated", "params":{"targetInfo":{
+            "targetId":id, "type":"page", "title":"fixture", "url":"about:blank",
+            "attached":false, "canAccessOpener":false
+        }}})
+    }
+
+    #[test]
+    fn dropped_browser_listener_preserves_response_routing() {
+        let (transport, server) = fixture(move |mut ws| {
+            let call = read_call(&mut ws);
+            send_json(&mut ws, target_created("orphan"));
+            reply(&mut ws, &call["id"]);
+            let _ = ws.read();
+        });
+        drop(transport.listen_to_browser_events());
+        transport
+            .set_default_command_timeout(Duration::from_secs(2))
+            .unwrap();
+        let result = transport.call_method_on_browser(GetVersion(None));
+        transport.shutdown();
+        server.join().unwrap();
+        empty(&transport);
+        assert!(transport.incoming_thread.lock().unwrap().is_none());
+        assert_eq!(
+            result
+                .expect("dropped listener killed unrelated RPC")
+                .product,
+            "fake"
+        );
+    }
+
+    fn failed_tab_initialization_preserves_browser(fail_page_enable: bool) {
+        use crate::browser::Browser;
+
+        let (failed_tx, failed_rx) = mpsc::channel();
+        let (transport, server) = fixture(move |mut ws| {
+            let discover = read_call(&mut ws);
+            assert_eq!(discover["method"], "Target.setDiscoverTargets");
+            send_json(&mut ws, json!({"id":discover["id"], "result":{}}));
+            send_json(&mut ws, target_created("ephemeral"));
+            while let Ok(message) = ws.read() {
+                if !message.is_text() {
+                    break;
+                }
+                let text = message.to_text().unwrap();
+                let call: Value = serde_json::from_str(text).unwrap();
+                match call["method"].as_str().unwrap() {
+                    "Target.attachToTarget" => {
+                        if call["params"]["targetId"] == "ephemeral" && !fail_page_enable {
+                            send_json(
+                                &mut ws,
+                                json!({"id":call["id"], "error":{
+                                    "code":-32000,"message":"No target with given id found"
+                                }}),
+                            );
+                            send_json(
+                                &mut ws,
+                                json!({"method":"Target.targetDestroyed",
+                                "params":{"targetId":"ephemeral"}}),
+                            );
+                            failed_tx.send(()).unwrap();
+                        } else {
+                            let session = if call["params"]["targetId"] == "ephemeral" {
+                                "ephemeral-session"
+                            } else {
+                                "valid-session"
+                            };
+                            send_json(
+                                &mut ws,
+                                json!({"id":call["id"], "result":{"sessionId":session}}),
+                            );
+                        }
+                    }
+                    "Target.sendMessageToTarget" => {
+                        let inner: Value =
+                            serde_json::from_str(call["params"]["message"].as_str().unwrap())
+                                .unwrap();
+                        send_json(&mut ws, json!({"id":call["id"], "result":{}}));
+                        let failed = call["params"]["sessionId"] == "ephemeral-session";
+                        if failed {
+                            assert_eq!(inner["method"], "Page.enable");
+                        }
+                        let response = if failed {
+                            json!({"id":inner["id"],"error":{"code":-32000,"message":"Session closed"}})
+                        } else {
+                            json!({"id":inner["id"],"result":{}})
+                        };
+                        send_json(
+                            &mut ws,
+                            json!({"method":"Target.receivedMessageFromTarget", "params":{
+                                "sessionId":call["params"]["sessionId"], "message":response.to_string()
+                            }}),
+                        );
+                        if failed {
+                            send_json(
+                                &mut ws,
+                                json!({"method":"Target.targetDestroyed",
+                                "params":{"targetId":"ephemeral"}}),
+                            );
+                            failed_tx.send(()).unwrap();
+                        }
+                    }
+                    "Browser.getVersion" => {
+                        reply(&mut ws, &call["id"]);
+                        send_json(&mut ws, target_created("valid"));
+                    }
+                    other => panic!("unexpected method {other}"),
+                }
+            }
+        });
+        transport
+            .set_default_command_timeout(Duration::from_secs(2))
+            .unwrap();
+        let transport = Arc::new(transport);
+        let browser =
+            Browser::create_browser(None, transport.clone(), Duration::from_secs(10), false)
+                .unwrap();
+        let observed_failure = failed_rx.recv_timeout(Duration::from_secs(3));
+        let health = browser.get_version();
+        let until = Instant::now() + Duration::from_secs(3);
+        let valid_tab_seen = loop {
+            if browser
+                .get_tabs()
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|tab| tab.get_target_id() == "valid")
+            {
+                break true;
+            }
+            if health.is_err() || Instant::now() >= until {
+                break false;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        let targets: Vec<_> = browser
+            .get_tabs()
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|tab| tab.get_target_id().clone())
+            .collect();
+        drop(browser);
+        transport.shutdown();
+        server.join().unwrap();
+        // The browser and tab event workers own transport clones. Shutdown disconnects
+        // their event channels; wait for them to retire before asserting test outcomes.
+        let until = Instant::now() + Duration::from_secs(2);
+        while Arc::strong_count(&transport) != 1 && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        empty(&transport);
+        assert!(transport.incoming_thread.lock().unwrap().is_none());
+        assert_eq!(Arc::strong_count(&transport), 1, "event worker leaked");
+        observed_failure.expect("fixture did not exercise initialization failure");
+        assert_eq!(
+            health
+                .expect("failed target killed browser health RPC")
+                .product,
+            "fake"
+        );
+        assert!(
+            valid_tab_seen,
+            "browser stopped accepting later valid targets"
+        );
+        assert_eq!(targets, vec!["valid"]);
+    }
+
+    #[test]
+    fn failed_attach_preserves_browser_continuity() {
+        failed_tab_initialization_preserves_browser(false);
+    }
+
+    #[test]
+    fn failed_page_enable_preserves_browser_continuity() {
+        failed_tab_initialization_preserves_browser(true);
     }
 
     #[test]

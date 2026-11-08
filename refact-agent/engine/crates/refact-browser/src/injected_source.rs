@@ -18,6 +18,7 @@ const __refact_builtins = {{
   jsonStringify: __refact_JSON.stringify.bind(__refact_JSON),
   jsonParse: __refact_JSON.parse.bind(__refact_JSON),
   requestAnimationFrame: __refact_global.requestAnimationFrame.bind(__refact_global),
+  cancelAnimationFrame: __refact_global.cancelAnimationFrame.bind(__refact_global),
   performanceNow: __refact_performance.now.bind(__refact_performance),
   getComputedStyle: __refact_global.getComputedStyle.bind(__refact_global),
   documentElementsFromPoint: (root, x, y) => __refact_Document.prototype.elementsFromPoint.call(root, x, y),
