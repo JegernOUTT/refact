@@ -2,6 +2,8 @@ import React, { useEffect, useRef, useState } from "react";
 import { humanizeIdentifier } from "../../../../utils/displayNames";
 import { Search } from "lucide-react";
 import { Button, Icon, Popover, Select } from "../../../../components/ui";
+import { useAppSelector } from "../../../../hooks/useAppSelector";
+import { selectStreamItems } from "../../streamSelectors";
 import type { StreamFilter } from "../../streamSelectors";
 import { useOrganizationData } from "../../hooks/useOrganization";
 import styles from "./FilterBar.module.css";
@@ -15,6 +17,13 @@ export const FilterBar: React.FC<FilterBarProps> = ({
   onFilterChange,
 }) => {
   const organization = useOrganizationData();
+  const items = useAppSelector(selectStreamItems);
+  const topics = (organization.topics.currentData?.items ?? []).filter(
+    (topic) => !topic.archived,
+  );
+  const tags = (organization.tags.currentData?.items ?? []).filter(
+    (tag) => !tag.archived,
+  );
   const toolbarRef = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(1000);
   useEffect(() => {
@@ -65,9 +74,19 @@ export const FilterBar: React.FC<FilterBarProps> = ({
         "Type",
         filter.kind,
         [
-          { value: "all", label: "All types" },
-          { value: "chat", label: "Chats" },
-          { value: "task", label: "Tasks" },
+          { value: "all", label: `All types (${items.length})` },
+          {
+            value: "chat",
+            label: `Chats (${
+              items.filter((item) => item.kind === "chat").length
+            })`,
+          },
+          {
+            value: "task",
+            label: `Tasks (${
+              items.filter((item) => item.kind === "task").length
+            })`,
+          },
         ],
         (kind) => {
           if (kind === "all" || kind === "chat" || kind === "task")
@@ -106,51 +125,54 @@ export const FilterBar: React.FC<FilterBarProps> = ({
   );
   const taxonomyControls = (
     <>
-      {select(
-        "Topics",
-        filter.topicId ?? "all",
-        [
-          { value: "all", label: "Topics" },
-          { value: "unclassified", label: "No topic" },
-          ...(organization.topics.currentData?.items ?? [])
-            .filter((topic) => !topic.archived)
-            .map((topic) => ({ value: topic.id, label: topic.name })),
-        ],
-        (topicId) => onFilterChange({ ...filter, topicId }),
+      {topics.length > 0 &&
+        select(
+          "Topics",
+          filter.topicId ?? "all",
+          [
+            { value: "all", label: "Topics" },
+            { value: "unclassified", label: "No topic" },
+            ...(organization.topics.currentData?.items ?? [])
+              .filter((topic) => !topic.archived)
+              .map((topic) => ({ value: topic.id, label: topic.name })),
+          ],
+          (topicId) => onFilterChange({ ...filter, topicId }),
+        )}
+      {tags.length > 0 && (
+        <Popover>
+          <Popover.Trigger asChild>
+            <Button size="sm" variant="ghost">
+              Tags{filter.tagIds?.length ? ` (${filter.tagIds.length})` : ""}
+            </Button>
+          </Popover.Trigger>
+          <Popover.Content>
+            <div className={styles.options}>
+              {(organization.tags.currentData?.items ?? [])
+                .filter((tag) => !tag.archived)
+                .map((tag) => (
+                  <label key={tag.id}>
+                    <input
+                      type="checkbox"
+                      checked={filter.tagIds?.includes(tag.id) ?? false}
+                      onChange={(event) =>
+                        onFilterChange({
+                          ...filter,
+                          tagIds: event.target.checked
+                            ? [...(filter.tagIds ?? []), tag.id]
+                            : filter.tagIds?.filter((id) => id !== tag.id),
+                        })
+                      }
+                    />
+                    {tag.name}
+                  </label>
+                ))}
+              {!organization.tags.currentData?.items.length && (
+                <span>No tags yet</span>
+              )}
+            </div>
+          </Popover.Content>
+        </Popover>
       )}
-      <Popover>
-        <Popover.Trigger asChild>
-          <Button size="sm" variant="ghost">
-            Tags{filter.tagIds?.length ? ` (${filter.tagIds.length})` : ""}
-          </Button>
-        </Popover.Trigger>
-        <Popover.Content>
-          <div className={styles.options}>
-            {(organization.tags.currentData?.items ?? [])
-              .filter((tag) => !tag.archived)
-              .map((tag) => (
-                <label key={tag.id}>
-                  <input
-                    type="checkbox"
-                    checked={filter.tagIds?.includes(tag.id) ?? false}
-                    onChange={(event) =>
-                      onFilterChange({
-                        ...filter,
-                        tagIds: event.target.checked
-                          ? [...(filter.tagIds ?? []), tag.id]
-                          : filter.tagIds?.filter((id) => id !== tag.id),
-                      })
-                    }
-                  />
-                  {tag.name}
-                </label>
-              ))}
-            {!organization.tags.currentData?.items.length && (
-              <span>No tags yet</span>
-            )}
-          </div>
-        </Popover.Content>
-      </Popover>
     </>
   );
   return (

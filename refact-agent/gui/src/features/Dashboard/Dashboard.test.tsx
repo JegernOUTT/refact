@@ -63,7 +63,7 @@ describe("Dashboard composition", () => {
     );
     expect(container.querySelectorAll(".rf-stagger > *")).toHaveLength(3);
     await user.click(screen.getByRole("combobox", { name: "Type" }));
-    await user.click(screen.getByRole("option", { name: "Tasks" }));
+    await user.click(screen.getByRole("option", { name: /^Tasks/ }));
     expect(screen.getByTestId("main-stream")).toHaveTextContent("task:");
   });
 

@@ -1,3 +1,8 @@
+import { setCurrentProjectInfo } from "../../../Chat/currentProject";
+import { upsertChatStub } from "../../../History/historySlice";
+import { QueryStatus } from "@reduxjs/toolkit/query";
+import { organizationApi } from "../../../../services/refact/organization";
+import { act } from "react-dom/test-utils";
 import type {
   Assignment,
   OrganizationOperation,
@@ -102,6 +107,415 @@ function render(
 const ALL_FILTER = { kind: "all" as const, query: "" };
 
 describe("StreamSection", () => {
+  it.each(["recent", "oldest", "title"])(
+    "preserves ordered nonempty groups when sorting %s",
+    (sort) => {
+      const today = new Date();
+      today.setHours(12, 0, 0, 0);
+      const yesterday = new Date(today);
+      yesterday.setDate(today.getDate() - 1);
+      const earlier = new Date(today);
+      earlier.setDate(today.getDate() - 3);
+      const { rerender } = render(
+        <StreamSection
+          filter={{ ...ALL_FILTER, sort }}
+          onOpenChat={vi.fn()}
+          onOpenTask={vi.fn()}
+        />,
+        {
+          preloadedState: preloadedStateWith([
+            makeChat({
+              id: "live",
+              title: "Z live",
+              session_state: "generating",
+              updatedAt: earlier.toISOString(),
+            }),
+            makeChat({
+              id: "today",
+              title: "B today",
+              updatedAt: today.toISOString(),
+            }),
+            makeChat({
+              id: "today2",
+              title: "A today",
+              updatedAt: new Date(today.getTime() - 1000).toISOString(),
+            }),
+            makeChat({
+              id: "yesterday",
+              title: "Yesterday item",
+              updatedAt: yesterday.toISOString(),
+            }),
+            makeChat({
+              id: "earlier",
+              title: "Earlier item",
+              updatedAt: earlier.toISOString(),
+            }),
+          ]),
+        },
+      );
+      const section = screen.getByTestId("stream-section");
+      const content = section.textContent ?? "";
+      const labels = ["Active now", "Today", "Yesterday", "Earlier"];
+      for (let index = 1; index < labels.length; index++)
+        expect(content.indexOf(labels[index])).toBeGreaterThan(
+          content.indexOf(labels[index - 1]),
+        );
+      const rows = within(section)
+        .getAllByTestId(/^stream-row-/)
+        .map((row) => row.getAttribute("data-testid"));
+      expect(rows).toEqual([
+        "stream-row-live",
+        ...(sort === "recent"
+          ? ["stream-row-today", "stream-row-today2"]
+          : ["stream-row-today2", "stream-row-today"]),
+        "stream-row-yesterday",
+        "stream-row-earlier",
+      ]);
+      rerender(
+        <StreamSection
+          filter={{ ...ALL_FILTER, sort, status: "streaming" }}
+          onOpenChat={vi.fn()}
+          onOpenTask={vi.fn()}
+        />,
+      );
+      expect(screen.getByText("Active now")).toBeInTheDocument();
+      for (const label of labels.slice(1))
+        expect(screen.queryByText(label)).not.toBeInTheDocument();
+      rerender(
+        <StreamSection
+          filter={{ ...ALL_FILTER, query: "nonexistent" }}
+          onOpenChat={vi.fn()}
+          onOpenTask={vi.fn()}
+        />,
+      );
+      expect(screen.queryByText("Active now")).not.toBeInTheDocument();
+    },
+  );
+
+  it("silently enriches metadata after failure and deferred success without remounting", async () => {
+    let ready = false;
+    let release: (() => void) | undefined;
+    server.use(
+      http.get("*/v1/organization/taxonomy", async ({ request }) => {
+        if (!ready) return new HttpResponse(null, { status: 503 });
+        if (new URL(request.url).searchParams.get("kind") === "tags")
+          return new HttpResponse(null, { status: 503 });
+        await new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        return HttpResponse.json({
+          revision: 1,
+          items: [{ id: "topic", name: "Interface", archived: false }],
+          next_cursor: null,
+        });
+      }),
+      http.post("*/v1/organization/items", () =>
+        HttpResponse.json({
+          revision: 1,
+          assignments: [
+            {
+              item: { kind: "chat", id: "root" },
+              topic_id: "topic",
+              tag_ids: ["missing"],
+              topic_locked: false,
+              tags_locked: false,
+            },
+          ],
+        }),
+      ),
+    );
+    const { store } = render(
+      <StreamSection
+        filter={ALL_FILTER}
+        onOpenChat={vi.fn()}
+        onOpenTask={vi.fn()}
+      />,
+      {
+        preloadedState: preloadedStateWith([
+          makeChat({
+            id: "root",
+            title: "Root",
+            total_lines_added: 5,
+            total_lines_removed: 2,
+          }),
+          makeChat({
+            id: "child",
+            parent_id: "root",
+            total_lines_added: 7,
+            total_lines_removed: 3,
+          }),
+        ]),
+      },
+    );
+    const row = screen.getByTestId("stream-row-root");
+    expect(within(row).getByText("+12")).toBeInTheDocument();
+    expect(within(row).getByText("−5")).toBeInTheDocument();
+    expect(within(row).getByText("AGENT")).toBeInTheDocument();
+    await waitFor(() =>
+      expect(
+        Object.values(store.getState().organizationApi.queries).some(
+          (query) => query?.status === QueryStatus.rejected,
+        ),
+      ).toBe(true),
+    );
+    expect(
+      screen.queryByText(/Organization unavailable|Unknown/),
+    ).not.toBeInTheDocument();
+    ready = true;
+    act(() => {
+      store.dispatch(organizationApi.util.invalidateTags(["Organization"]));
+    });
+    await waitFor(() => expect(release).toBeDefined());
+    expect(screen.getByTestId("stream-row-root")).toBe(row);
+    act(() => release?.());
+    await waitFor(() =>
+      expect(within(row).getByText("Interface")).toBeInTheDocument(),
+    );
+    expect(within(row).getByText("+12")).toBeInTheDocument();
+    expect(within(row).getByText("−5")).toBeInTheDocument();
+    expect(screen.queryByText("missing")).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(/Organization unavailable|Unknown/),
+    ).not.toBeInTheDocument();
+  });
+
+  it("preserves collapsed task progress and detailed agents and branch", () => {
+    const item = {
+      ...makeStreamItem("task"),
+      cardsDone: 3,
+      cardsTotal: 8,
+      cardsFailed: 2,
+      agentsActive: 4,
+      branch: "feature/home",
+    };
+    render(
+      <>
+        <StreamRow
+          item={item}
+          index={0}
+          isPeekOpen
+          isFamilyOpen={false}
+          onOpen={vi.fn()}
+          onTogglePeek={vi.fn()}
+          onToggleFamily={vi.fn()}
+        />
+        <RowPeek item={item} onOpen={vi.fn()} onDelete={vi.fn()} />
+      </>,
+    );
+    const row = screen.getByTestId("stream-row-content-id");
+    expect(within(row).getByText("3/8")).toBeInTheDocument();
+    expect(within(row).getByText("2 failed")).toBeInTheDocument();
+    const peek = screen.getByTestId("stream-peek-content-id");
+    expect(within(peek).getByText("Status")).toBeInTheDocument();
+    expect(within(peek).getByText("Idle")).toBeInTheDocument();
+    expect(within(peek).getByText("4")).toBeInTheDocument();
+    expect(within(peek).getByText("feature/home")).toBeInTheDocument();
+  });
+
+  it("keeps the manual create editor enabled with an empty taxonomy", async () => {
+    const { user } = render(
+      <StreamSection
+        filter={ALL_FILTER}
+        onOpenChat={vi.fn()}
+        onOpenTask={vi.fn()}
+      />,
+      {
+        preloadedState: preloadedStateWith([
+          makeChat({ id: "a", title: "Editable empty" }),
+        ]),
+      },
+    );
+    fireEvent.click(screen.getByTestId("stream-expand-a"));
+    await user.click(screen.getByRole("button", { name: "Topic & tags" }));
+    await waitFor(() =>
+      expect(
+        screen.getByRole("combobox", { name: "Item topic" }),
+      ).toBeEnabled(),
+    );
+    await user.type(
+      screen.getByRole("textbox", { name: "New topic or tag name" }),
+      "My topic",
+    );
+    expect(
+      screen.getByRole("button", { name: "Create and assign" }),
+    ).toBeEnabled();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("preserves genuine history paging errors and retry", async () => {
+    let fail = true;
+    server.use(
+      http.get("*/v1/trajectories", () =>
+        fail
+          ? new HttpResponse(null, { status: 503 })
+          : HttpResponse.json({
+              items: [trajectoryMeta("older", "Recovered older chat")],
+              next_cursor: null,
+              has_more: false,
+              total_count: 2,
+            }),
+      ),
+    );
+    const state = preloadedStateWith([makeChat({ id: "a", title: "Current" })]);
+    render(
+      <StreamSection
+        filter={ALL_FILTER}
+        onOpenChat={vi.fn()}
+        onOpenTask={vi.fn()}
+      />,
+      {
+        preloadedState: {
+          ...state,
+          history: {
+            ...state.history,
+            pagination: {
+              ...state.history.pagination,
+              hasMore: true,
+              cursor: "older-page",
+            },
+          },
+        },
+      },
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Load older chats" }));
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Retry loading older chats" }),
+      ).toBeInTheDocument(),
+    );
+    expect(screen.getByText("Current")).toBeInTheDocument();
+    fail = false;
+    fireEvent.click(
+      screen.getByRole("button", { name: "Retry loading older chats" }),
+    );
+    await waitFor(() =>
+      expect(screen.getByText("Recovered older chat")).toBeInTheDocument(),
+    );
+  });
+
+  it("keeps newly loaded uncovered rows visible after an assignment refresh fails", async () => {
+    server.use(
+      http.get("*/v1/organization/taxonomy", () =>
+        HttpResponse.json({
+          revision: 1,
+          items: [{ id: "topic", name: "Interface", archived: false }],
+          next_cursor: null,
+        }),
+      ),
+      http.post("*/v1/organization/items", async ({ request }) => {
+        const { items } = (await request.json()) as {
+          items: { kind: "chat"; id: string }[];
+        };
+        if (items.some((item) => item.id === "new"))
+          return new HttpResponse(null, { status: 503 });
+        return HttpResponse.json({
+          revision: 1,
+          assignments: items.map((item) => ({
+            item,
+            topic_id: "topic",
+            tag_ids: [],
+            topic_locked: false,
+            tags_locked: false,
+          })),
+        });
+      }),
+    );
+    const { store } = render(
+      <StreamSection
+        filter={{ ...ALL_FILTER, topicId: "topic" }}
+        onOpenChat={vi.fn()}
+        onOpenTask={vi.fn()}
+      />,
+      {
+        preloadedState: preloadedStateWith([
+          makeChat({ id: "a", title: "Existing" }),
+        ]),
+      },
+    );
+    await waitFor(() =>
+      expect(screen.getByText("Interface")).toBeInTheDocument(),
+    );
+    act(() => {
+      store.dispatch(upsertChatStub({ id: "new", title: "New uncovered" }));
+    });
+    await waitFor(() =>
+      expect(
+        Object.values(store.getState().organizationApi.queries).some(
+          (query) => query?.status === QueryStatus.rejected,
+        ),
+      ).toBe(true),
+    );
+    expect(screen.getByText("New uncovered")).toBeInTheDocument();
+    expect(screen.getByText("Existing")).toBeInTheDocument();
+  });
+
+  it("does not leak retained labels into another project while its metadata loads", async () => {
+    let nextProject = false;
+    let release: (() => void) | undefined;
+    server.use(
+      http.get("*/v1/organization/taxonomy", () =>
+        HttpResponse.json({
+          revision: 1,
+          items: [{ id: "topic", name: "Old project label", archived: false }],
+          next_cursor: null,
+        }),
+      ),
+      http.post("*/v1/organization/items", async () => {
+        if (nextProject) {
+          await new Promise<void>((resolve) => {
+            release = resolve;
+          });
+          return HttpResponse.json({ revision: 1, assignments: [] });
+        }
+        return HttpResponse.json({
+          revision: 1,
+          assignments: [
+            {
+              item: { kind: "chat", id: "a" },
+              topic_id: "topic",
+              tag_ids: [],
+              topic_locked: false,
+              tags_locked: false,
+            },
+          ],
+        });
+      }),
+    );
+    const { store } = render(
+      <StreamSection
+        filter={ALL_FILTER}
+        onOpenChat={vi.fn()}
+        onOpenTask={vi.fn()}
+      />,
+      {
+        preloadedState: preloadedStateWith([
+          makeChat({ id: "a", title: "Same item" }),
+        ]),
+      },
+    );
+    await waitFor(() =>
+      expect(screen.getByText("Old project label")).toBeInTheDocument(),
+    );
+    nextProject = true;
+    act(() => {
+      store.dispatch(
+        setCurrentProjectInfo({ name: "Other", projectRoot: "/other" }),
+      );
+    });
+    expect(screen.queryByText("Old project label")).not.toBeInTheDocument();
+    expect(screen.getByText("Same item")).toBeInTheDocument();
+    await waitFor(() => expect(release).toBeDefined());
+    act(() => release?.());
+    await waitFor(() =>
+      expect(
+        Object.values(store.getState().organizationApi.queries).filter(
+          (query) => query?.status === QueryStatus.pending,
+        ),
+      ).toHaveLength(0),
+    );
+    expect(screen.queryByText("Old project label")).not.toBeInTheDocument();
+  });
+
   it("persists manual tag locks independently and exposes Buddy resumption", async () => {
     let assignment: Assignment = {
       item: { kind: "chat", id: "a" },
@@ -326,7 +740,7 @@ describe("StreamSection", () => {
     expect(screen.getByRole("combobox", { name: "Item topic" })).toBeDisabled();
     expect(
       screen.getByRole("combobox", { name: "Item topic" }),
-    ).toHaveTextContent("Unknown");
+    ).toHaveTextContent("Select topic");
     expect(
       screen.getByRole("button", { name: "Create and assign" }),
     ).toBeDisabled();
@@ -373,8 +787,8 @@ describe("StreamSection", () => {
       expect(screen.getByText("Still available")).toBeInTheDocument(),
     );
     expect(
-      screen.getByRole("button", { name: "Retry organization" }),
-    ).toBeInTheDocument();
+      screen.queryByRole("button", { name: "Retry organization" }),
+    ).not.toBeInTheDocument();
   });
   it("shows truthful coarse chat activity separately from family aggregate status", () => {
     render(

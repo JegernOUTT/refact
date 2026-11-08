@@ -32,8 +32,13 @@ function flatten(groups: StreamGroup[]): FlatEntry[] {
   for (const group of groups) {
     if (group.items.length === 0) continue;
 
+    out.push({
+      type: "header",
+      key: `header:${group.label}`,
+      label: group.label,
+    });
     group.items.forEach((item, index) => {
-      out.push({ type: "row", key: item.id, item, index });
+      out.push({ type: "row", key: `${item.kind}:${item.id}`, item, index });
     });
   }
   return out;
@@ -61,40 +66,68 @@ export const StreamSection: React.FC<StreamSectionProps> = ({
 
   const organization = useOrganizationData();
   const entries = useMemo(() => {
-    const rows = flatten(groups).filter((entry) => {
-      if (entry.type !== "row") return false;
-      if (
-        filter.status &&
-        filter.status !== "all" &&
-        entry.item.status !== filter.status
-      )
-        return false;
-      if (organization.error) return true;
-      const assignment = organization.byKey.get(
-        organizationItemKey(entry.item.organizationKey ?? entry.item),
+    const topicFilter =
+      filter.topicId &&
+      filter.topicId !== "all" &&
+      organization.topics.currentData?.items.some(
+        (topic) =>
+          !topic.archived &&
+          (topic.id === filter.topicId || filter.topicId === "unclassified"),
       );
-      if (filter.topicId && filter.topicId !== "all") {
-        if (
-          filter.topicId === "unclassified"
-            ? !assignment || assignment.topic_id !== null
-            : assignment?.topic_id !== filter.topicId
-        )
-          return false;
-      }
-      return (filter.tagIds ?? []).every(
-        (id) => assignment?.tag_ids.includes(id),
-      );
-    });
-    if (filter.sort === "oldest" || filter.sort === "title")
-      rows.sort((a, b) =>
-        a.type === "row" && b.type === "row"
-          ? filter.sort === "title"
-            ? a.item.title.localeCompare(b.item.title)
-            : a.item.updatedAtMs - b.item.updatedAtMs
-          : 0,
-      );
-    return rows;
-  }, [groups, filter, organization.byKey, organization.error]);
+    const tagFilters = (filter.tagIds ?? []).filter(
+      (id) =>
+        organization.tags.currentData?.items.some(
+          (tag) => !tag.archived && tag.id === id,
+        ),
+    );
+    return flatten(
+      groups.map((group) => {
+        const items = group.items.filter((item) => {
+          if (
+            filter.status &&
+            filter.status !== "all" &&
+            item.status !== filter.status
+          )
+            return false;
+          if (!organization.assignments.currentData) return true;
+          const assignment = organization.byKey.get(
+            organizationItemKey(item.organizationKey ?? item),
+          );
+          if (
+            !assignment &&
+            !organization.assignments.currentData.unavailable_items?.some(
+              (key) =>
+                organizationItemKey(key) ===
+                organizationItemKey(item.organizationKey ?? item),
+            )
+          )
+            return true;
+          if (
+            topicFilter &&
+            (filter.topicId === "unclassified"
+              ? !assignment || assignment.topic_id !== null
+              : assignment?.topic_id !== filter.topicId)
+          )
+            return false;
+          return tagFilters.every((id) => assignment?.tag_ids.includes(id));
+        });
+        if (filter.sort === "oldest" || filter.sort === "title")
+          items.sort((a, b) =>
+            filter.sort === "title"
+              ? a.title.localeCompare(b.title)
+              : a.updatedAtMs - b.updatedAtMs,
+          );
+        return { ...group, items };
+      }),
+    );
+  }, [
+    groups,
+    filter,
+    organization.byKey,
+    organization.assignments.currentData,
+    organization.topics.currentData,
+    organization.tags.currentData,
+  ]);
   const canLoadMoreChats = hasMore && filter.kind !== "task";
 
   const handleToggleFamily = useCallback((id: string) => {
@@ -200,23 +233,6 @@ export const StreamSection: React.FC<StreamSectionProps> = ({
   return (
     <OrganizationContext.Provider value={organization}>
       <div className={styles.container} data-testid="stream-section">
-        {organization.error && (
-          <div className={styles.loadMoreError} role="status">
-            Organization unavailable; showing history.{" "}
-            <Button size="sm" variant="ghost" onClick={organization.retry}>
-              Retry organization
-            </Button>
-          </div>
-        )}
-        {!organization.error &&
-          Boolean(
-            organization.assignments.currentData?.unavailable_items?.length,
-          ) && (
-            <div className={styles.scopeNote} role="status">
-              Organization unavailable for some loaded history. These items are
-              excluded from topic and tag filters.
-            </div>
-          )}
         {(Boolean(filter.topicId && filter.topicId !== "all") ||
           (filter.tagIds?.length ?? 0) > 0) && (
           <div className={styles.scopeNote}>

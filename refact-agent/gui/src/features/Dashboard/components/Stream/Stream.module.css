@@ -700,10 +700,28 @@
   align-items: center;
   gap: var(--rf-space-1);
   min-width: 0;
-  overflow: hidden;
+  max-width: 35%;
   white-space: nowrap;
 }
 .organization span {
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+@container rf-stream (inline-size < 768px) {
+  .organization {
+    display: none;
+  }
+}
+
+@container rf-stream (inline-size < 400px) {
+  .row {
+    grid-template-columns: 20px minmax(0, 1fr) var(--stream-expand-col) 36px;
+    gap: var(--rf-space-1);
+    padding-inline: var(--rf-space-2);
+  }
+
+  .stateSlot {
+    display: none;
+  }
 }

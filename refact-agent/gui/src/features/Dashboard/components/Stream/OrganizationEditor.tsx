@@ -66,10 +66,7 @@ export const OrganizationEditor: React.FC<{ item: StreamItem }> = ({
     }
   };
   const disabled =
-    mutation.isLoading ||
-    !assignment ||
-    organization.error ||
-    organization.assignments.isFetching;
+    mutation.isLoading || !assignment || organization.assignments.isFetching;
   return (
     <Popover>
       <Popover.Trigger asChild>
@@ -80,7 +77,7 @@ export const OrganizationEditor: React.FC<{ item: StreamItem }> = ({
       <Popover.Content maxWidth="360px">
         <div className={styles.options}>
           {!assignment && (
-            <span role="status">Organization unavailable for this item.</span>
+            <span role="status">Metadata has not loaded for this item.</span>
           )}
           <span>Topic</span>
           <Select
@@ -94,7 +91,7 @@ export const OrganizationEditor: React.FC<{ item: StreamItem }> = ({
             disabled={disabled}
           >
             <Select.Trigger aria-label="Item topic">
-              {!assignment ? "Unknown" : undefined}
+              {!assignment ? "Select topic" : undefined}
             </Select.Trigger>
             <Select.Content>
               <Select.Item value="none">No topic</Select.Item>
@@ -170,9 +167,7 @@ export const OrganizationEditor: React.FC<{ item: StreamItem }> = ({
           >
             Create and assign
           </Button>
-          {(error !== null || organization.error) && (
-            <span role="alert">{error ?? "Organization unavailable."}</span>
-          )}
+          {error !== null && <span role="alert">{error}</span>}
           <Button size="sm" variant="ghost" onClick={organization.retry}>
             Reload metadata
           </Button>

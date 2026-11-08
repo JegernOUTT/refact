@@ -1,3 +1,4 @@
+import { organizationApi } from "../../src/services/refact/organization";
 import type {
   Assignment,
   OrganizationItem,
@@ -2043,6 +2044,9 @@ function jsonResponse(data: unknown) {
   });
 }
 
+let organizationMode =
+  new URLSearchParams(window.location.search).get("organization") ?? "ready";
+const organizationWaiters: (() => void)[] = [];
 let organizationRevision = 1;
 const organizationTopics: Taxon[] = [
   { id: "topic-gui", name: "Interface", archived: false },
@@ -2112,13 +2116,21 @@ window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
     }
   }
   showcaseRequests.push({ path, method, body });
+  if (path.startsWith("/v1/organization/")) {
+    if (organizationMode === "delayed")
+      await new Promise<void>((resolve) => organizationWaiters.push(resolve));
+    if (organizationMode === "error")
+      return new Response("Unavailable", { status: 503 });
+  }
   if (path === "/v1/organization/taxonomy")
     return jsonResponse({
       revision: organizationRevision,
       items:
-        url.searchParams.get("kind") === "topics"
-          ? organizationTopics
-          : organizationTags,
+        organizationMode === "empty"
+          ? []
+          : url.searchParams.get("kind") === "topics"
+            ? organizationTopics
+            : organizationTags,
       next_cursor: null,
     });
   if (path === "/v1/organization/items") {
@@ -2129,8 +2141,14 @@ window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
         const key = `${item.kind}:${item.id}`;
         const assignment = organizationAssignments.get(key) ?? {
           item,
-          topic_id: index % 3 === 0 ? null : organizationTopics[index % 2].id,
-          tag_ids: index % 2 ? organizationTags.map((tag) => tag.id) : [],
+          topic_id:
+            organizationMode === "empty" || index % 3 === 0
+              ? null
+              : organizationTopics[index % 2].id,
+          tag_ids:
+            organizationMode !== "empty" && index % 2
+              ? organizationTags.map((tag) => tag.id)
+              : [],
           topic_locked: false,
           tags_locked: false,
         };
@@ -2671,7 +2689,18 @@ const preloadedState: Partial<RootState> = {
     : {}),
   history: {
     chats: {
-      alpha: historyItem("alpha", "Dashboard route smoke coverage", now),
+      alpha: {
+        ...historyItem("alpha", "Dashboard route smoke coverage", now),
+        session_state: "generating",
+        total_lines_added: 12,
+        total_lines_removed: 3,
+      },
+      child: {
+        ...historyItem("child", "Family diff", now),
+        parent_id: "alpha",
+        total_lines_added: 7,
+        total_lines_removed: 2,
+      },
       beta: historyItem(
         "beta",
         "Chat surface responsive check",
@@ -2807,6 +2836,14 @@ if (performanceRoute) {
   };
 }
 const store = setUpStore(preloadedState);
+Object.assign(window, {
+  __setOrganizationFixture: (mode: string) => {
+    organizationMode = mode;
+    organizationAssignments.clear();
+    organizationWaiters.splice(0).forEach((resolve) => resolve());
+    store.dispatch(organizationApi.util.invalidateTags(["Organization"]));
+  },
+});
 if (performanceRoute) {
   const sequences = new Map<string, number>();
   Object.assign(window, {

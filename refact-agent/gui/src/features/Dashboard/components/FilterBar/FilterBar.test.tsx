@@ -1,8 +1,16 @@
+import { QueryStatus } from "@reduxjs/toolkit/query";
+import { organizationApi } from "../../../../services/refact/organization";
+import { http, HttpResponse } from "msw";
 import { server } from "../../../../utils/mockServer";
 import { organizationTestHandlers } from "../../organizationTestHandlers";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { act } from "react-dom/test-utils";
-import { fireEvent, render, screen } from "../../../../utils/test-utils";
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "../../../../utils/test-utils";
 import { FilterBar } from "./FilterBar";
 import type { ChatHistoryItem } from "../../../History/historySlice";
 
@@ -56,14 +64,95 @@ describe("FilterBar controls", () => {
 
     expect(screen.getByRole("combobox", { name: "Type" })).toBeInTheDocument();
     expect(
-      screen.getByRole("combobox", { name: "Topics" }),
-    ).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Tags" })).toBeInTheDocument();
+      screen.queryByRole("combobox", { name: "Topics" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Tags" }),
+    ).not.toBeInTheDocument();
     expect(
       screen.getByRole("searchbox", { name: "Search chats and tasks" }),
     ).toBeInTheDocument();
 
     expect(screen.queryByText(/today/)).not.toBeInTheDocument();
+  });
+
+  it("automatically reveals only available taxonomy controls after empty and error responses", async () => {
+    let mode = "empty";
+    server.use(
+      http.get("*/v1/organization/taxonomy", ({ request }) => {
+        const kind = new URL(request.url).searchParams.get("kind");
+        if (mode === "error" || (mode === "partial" && kind === "tags"))
+          return new HttpResponse(null, { status: 503 });
+        return HttpResponse.json({
+          revision: 1,
+          items:
+            mode === "empty"
+              ? []
+              : [
+                  {
+                    id: kind,
+                    name: kind === "topics" ? "Interface" : "Review",
+                    archived: false,
+                  },
+                ],
+          next_cursor: null,
+        });
+      }),
+    );
+    const { store } = render(
+      <FilterBar
+        filter={{ ...ALL_FILTER, query: "existing" }}
+        onFilterChange={vi.fn()}
+      />,
+    );
+    await waitFor(() =>
+      expect(
+        Object.values(store.getState().organizationApi.queries).some(
+          (query) => query?.status === QueryStatus.fulfilled,
+        ),
+      ).toBe(true),
+    );
+    expect(
+      screen.queryByRole("combobox", { name: "Topics" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Tags" }),
+    ).not.toBeInTheDocument();
+    mode = "error";
+    act(() => {
+      store.dispatch(organizationApi.util.invalidateTags(["Organization"]));
+    });
+    await waitFor(() =>
+      expect(
+        Object.values(store.getState().organizationApi.queries).some(
+          (query) => query?.status === QueryStatus.rejected,
+        ),
+      ).toBe(true),
+    );
+    expect(
+      screen.queryByRole("combobox", { name: "Topics" }),
+    ).not.toBeInTheDocument();
+    mode = "partial";
+    act(() => {
+      store.dispatch(organizationApi.util.invalidateTags(["Organization"]));
+    });
+    await waitFor(() =>
+      expect(
+        screen.getByRole("combobox", { name: "Topics" }),
+      ).toBeInTheDocument(),
+    );
+    expect(
+      screen.queryByRole("button", { name: "Tags" }),
+    ).not.toBeInTheDocument();
+    mode = "ready";
+    act(() => {
+      store.dispatch(organizationApi.util.invalidateTags(["Organization"]));
+    });
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Tags" })).toBeInTheDocument(),
+    );
+    expect(screen.getByRole("searchbox")).toHaveValue("existing");
+    expect(screen.getByRole("combobox", { name: "Type" })).toBeEnabled();
   });
 
   it("changes kind while preserving the current search query", async () => {
@@ -76,13 +165,13 @@ describe("FilterBar controls", () => {
     );
 
     await user.click(screen.getByRole("combobox", { name: "Type" }));
-    await user.click(screen.getByRole("option", { name: "Chats" }));
+    await user.click(screen.getByRole("option", { name: /^Chats/ }));
     expect(onFilterChange).toHaveBeenLastCalledWith({
       kind: "chat",
       query: "existing",
     });
     await user.click(screen.getByRole("combobox", { name: "Type" }));
-    await user.click(screen.getByRole("option", { name: "Tasks" }));
+    await user.click(screen.getByRole("option", { name: /^Tasks/ }));
     expect(onFilterChange).toHaveBeenLastCalledWith({
       kind: "task",
       query: "existing",

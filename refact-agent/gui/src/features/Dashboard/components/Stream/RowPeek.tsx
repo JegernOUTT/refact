@@ -1,3 +1,7 @@
+import { ChatActivityStatus } from "../../../../components/ChatActivity/ChatActivityStatus";
+import { useAppSelector } from "../../../../hooks/useAppSelector";
+import { selectChatActivityById } from "../../../Chat/Thread/selectors";
+import { humanizeIdentifier } from "../../../../utils/displayNames";
 import React from "react";
 import { useConfig } from "../../../../hooks/useConfig";
 import {
@@ -45,9 +49,22 @@ export type RowPeekProps = {
 
 export const RowPeek: React.FC<RowPeekProps> = ({ item, onOpen, onDelete }) => {
   const { host } = useConfig();
+  const activity = useAppSelector((state) =>
+    selectChatActivityById(state, item.id),
+  );
   const href =
     host === "web" ? contentRouteHref({ type: item.kind, id: item.id }) : "";
-  const blocks: { label: string; value: React.ReactNode }[] = [];
+  const blocks: { label: string; value: React.ReactNode }[] = [
+    {
+      label: "Status",
+      value:
+        item.kind === "chat" ? (
+          <ChatActivityStatus activity={activity} />
+        ) : (
+          humanizeIdentifier(item.status)
+        ),
+    },
+  ];
 
   const model = modelLabel(item);
   if (model !== null) blocks.push({ label: "Model", value: model });

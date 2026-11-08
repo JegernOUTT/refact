@@ -1,7 +1,8 @@
-import { createContext, useContext, useMemo } from "react";
+import { createContext, useContext, useMemo, useRef } from "react";
 import { useAppSelector } from "../../../hooks";
 import { buildApiUrlFromState } from "../../../services/refact/apiUrl";
 import {
+  type Assignments,
   organizationItemKey,
   useOrganizationItemsQuery,
   useOrganizationTaxonomyQuery,
@@ -43,21 +44,29 @@ export function useOrganizationData() {
     { scope, items: keys },
     { ...options, skip: keys.length === 0 },
   );
+  const retained = useRef<{ scope: string; data: Assignments | undefined }>({
+    scope,
+    data: undefined,
+  });
+  if (retained.current.scope !== scope)
+    retained.current = { scope, data: undefined };
+  if (assignments.currentData) retained.current.data = assignments.currentData;
+  const assignmentData = assignments.currentData ?? retained.current.data;
   const byKey = useMemo(
     () =>
       new Map(
-        assignments.currentData?.assignments.map((assignment) => [
+        assignmentData?.assignments.map((assignment) => [
           organizationItemKey(assignment.item),
           assignment,
         ]),
       ),
-    [assignments.currentData],
+    [assignmentData],
   );
   return {
     scope,
     topics,
     tags,
-    assignments,
+    assignments: { ...assignments, currentData: assignmentData },
     byKey,
     error: topics.isError || tags.isError || assignments.isError,
     retry: () => {

@@ -166,11 +166,7 @@ export const StreamRow: React.FC<StreamRowProps> = ({
         {isChat && item.messageCount != null && item.messageCount > 0 && (
           <span className={styles.msgCount}>{item.messageCount}</span>
         )}
-      </span>
-
-      <span className={classNames(styles.slot, styles.slot1)}>
         <span className={styles.organization}>
-          {!assignment && <span className={styles.chip}>Unknown</span>}
           {topic && (
             <span className={styles.chip} title={topic.name}>
               {topic.name}
@@ -187,7 +183,32 @@ export const StreamRow: React.FC<StreamRowProps> = ({
         </span>
       </span>
 
-      <span className={styles.slot}>
+      <span className={classNames(styles.slot, styles.slot1)}>
+        {isChat ? (
+          <>
+            {item.mode && <span className={styles.chip}>{item.mode}</span>}
+            {item.diff && (
+              <span className={classNames(styles.chip, styles.chipMono)}>
+                <span className={styles.chipAdds}>+{item.diff.adds}</span>
+                <span className={styles.chipDels}>−{item.diff.dels}</span>
+              </span>
+            )}
+          </>
+        ) : (
+          <>
+            <span className={styles.chip}>
+              {item.cardsDone}/{item.cardsTotal}
+            </span>
+            {item.cardsFailed != null && item.cardsFailed > 0 && (
+              <span className={classNames(styles.chip, styles.chipDels)}>
+                {item.cardsFailed} failed
+              </span>
+            )}
+          </>
+        )}
+      </span>
+
+      <span className={classNames(styles.slot, styles.stateSlot)}>
         <span className={classNames(styles.stateChip, TONE_CLASS[tone])}>
           {isChat ? (
             <ChatActivityStatus activity={activity} />
