@@ -1128,6 +1128,10 @@ struct TrajectoryIndexDirectoryState {
     key: PathBuf,
     index: Option<Arc<TrajectoryIndex>>,
     entries: Option<Arc<Vec<TrajectoryIndexEntry>>>,
+    work_validation: Option<(usize, Option<usize>)>,
+    work_serialized_size: Option<usize>,
+    #[cfg(test)]
+    work_validation_count: usize,
     generation: Option<DirectoryGeneration>,
     generation_verified_at: Option<Instant>,
     loaded: bool,
@@ -1151,12 +1155,98 @@ impl TrajectoryIndexDirectoryState {
     fn set_index(&mut self, index: Arc<TrajectoryIndex>) {
         self.index = Some(index);
         self.entries = None;
+        self.work_validation = None;
+        self.work_serialized_size = None;
     }
 
     fn index_mut(&mut self) -> Option<&mut TrajectoryIndex> {
         self.entries = None;
+        self.work_validation = None;
+        self.work_serialized_size = None;
         self.index.as_mut().map(Arc::make_mut)
     }
+
+    fn apply_mutation(&mut self, mutation: &TrajectoryIndexMutation) -> Result<(), String> {
+        let remaining = self.work_serialized_size.and_then(|size| {
+            let index = self.index.as_ref()?;
+            let mut removed = index_size_envelope(index)?;
+            for entry in &index.entries {
+                let remove = match mutation {
+                    TrajectoryIndexMutation::Upsert(new) => entry.id == new.id,
+                    TrajectoryIndexMutation::Remove(ids) => ids.contains(&entry.id),
+                    TrajectoryIndexMutation::Reconcile(_) => return None,
+                };
+                if remove {
+                    removed = removed.checked_add(exact_index_value_size(entry)?)?;
+                }
+            }
+            if let TrajectoryIndexMutation::Upsert(new) = mutation {
+                for skipped in &index.skipped_files {
+                    if skipped.file_name == new.file_name {
+                        removed = removed.checked_add(exact_index_value_size(skipped)?)?;
+                    }
+                }
+            }
+            size.checked_sub(removed)
+        });
+        if let Some(index) = self.index_mut() {
+            apply_mutation_to_index(index, mutation)?;
+        }
+        self.work_serialized_size = remaining.and_then(|size| {
+            let index = self.index.as_ref()?;
+            let added = match mutation {
+                TrajectoryIndexMutation::Upsert(entry) => exact_index_value_size(entry)?,
+                TrajectoryIndexMutation::Remove(_) => 0,
+                TrajectoryIndexMutation::Reconcile(_) => return None,
+            };
+            size.checked_add(index_size_envelope(index)?)?
+                .checked_add(added)
+        });
+        Ok(())
+    }
+
+    fn publish_flushed_index(&mut self, index: Arc<TrajectoryIndex>) {
+        let size = self.work_serialized_size.and_then(|size| {
+            let previous = self.index.as_ref()?;
+            if previous.entries != index.entries || previous.skipped_files != index.skipped_files {
+                return None;
+            }
+            if previous
+                .entries
+                .iter()
+                .zip(&index.entries)
+                .any(|(old, new)| {
+                    old.total_cost_usd.map(f64::to_bits) != new.total_cost_usd.map(f64::to_bits)
+                        || old
+                            .worktree
+                            .as_ref()
+                            .zip(new.worktree.as_ref())
+                            .is_some_and(|(old, new)| {
+                                old.root.as_os_str() != new.root.as_os_str()
+                                    || old.source_workspace_root.as_os_str()
+                                        != new.source_workspace_root.as_os_str()
+                                    || old.repo_root.as_os_str() != new.repo_root.as_os_str()
+                            })
+                })
+            {
+                return None;
+            }
+            size.checked_sub(index_size_envelope(previous)?)?
+                .checked_add(index_size_envelope(&index)?)
+        });
+        self.set_index(index);
+        self.work_serialized_size = size;
+    }
+}
+
+fn exact_index_value_size(value: &impl Serialize) -> Option<usize> {
+    crate::coordination::bounds::exact_serialized_size(value).ok()
+}
+
+fn index_size_envelope(index: &TrajectoryIndex) -> Option<usize> {
+    exact_index_value_size(&(index.schema_version, &index.updated_at, index.applied_seq))?
+        .checked_add(index.entries.len().saturating_sub(1))?
+        .checked_add(index.skipped_files.len().saturating_sub(1))
 }
 
 #[derive(Clone)]
@@ -1501,29 +1591,64 @@ impl TrajectoryIndexCoordinator {
             .ok_or_else(|| "Trajectory index coordinator did not load an index".to_string())
     }
 
-    pub async fn work_snapshot(&self, dir: &Path) -> Result<TrajectoryIndex, String> {
+    pub async fn work_snapshot(&self, dir: &Path) -> Result<Arc<TrajectoryIndex>, String> {
         let settings = crate::file_activity::settings();
+        self.work_snapshot_with_limits(
+            dir,
+            settings.max_work_history_rows,
+            settings.max_work_history_bytes,
+        )
+        .await
+    }
+
+    async fn work_snapshot_with_limits(
+        &self,
+        dir: &Path,
+        max_rows: usize,
+        max_bytes: usize,
+    ) -> Result<Arc<TrajectoryIndex>, String> {
         let state = self.ensure_loaded(dir, None).await?;
-        let guard = state.lock().await;
+        let mut guard = state.lock().await;
         let index = guard
             .index
             .as_ref()
             .ok_or_else(|| "Work index unavailable".to_string())?;
-        if index.entries.len() > settings.max_work_history_rows {
+        if index.entries.len() > max_rows {
             return Err("Work history exceeds configured projection limits".into());
         }
-        crate::coordination::bounds::serialized_size(index, settings.max_work_history_bytes)
-            .ok_or_else(|| "Work history exceeds configured projection limits".to_string())?;
-        Ok((**index).clone())
+        let size = match guard.work_validation {
+            Some((cap, size)) if cap == max_bytes => size,
+            _ => {
+                let size = match guard.work_serialized_size {
+                    Some(size) => (size <= max_bytes).then_some(size),
+                    None => {
+                        let size = crate::coordination::bounds::serialized_size(index, max_bytes);
+                        #[cfg(test)]
+                        {
+                            guard.work_validation_count += 1;
+                        }
+                        size
+                    }
+                };
+                if let Some(size) = size {
+                    guard.work_serialized_size = Some(size);
+                }
+                guard.work_validation = Some((max_bytes, size));
+                size
+            }
+        };
+        size.ok_or_else(|| "Work history exceeds configured projection limits".to_string())?;
+        guard
+            .index
+            .clone()
+            .ok_or_else(|| "Work index unavailable".to_string())
     }
 
     pub async fn upsert(&self, dir: &Path, entry: TrajectoryIndexEntry) -> Result<(), String> {
         validate_trajectory_index_entry(&entry)?;
         let state = self.directory_state(dir).await?;
         let mut state_guard = state.lock().await;
-        if let Some(index) = state_guard.index_mut() {
-            apply_mutation_to_index(index, &TrajectoryIndexMutation::Upsert(entry.clone()))?;
-        }
+        state_guard.apply_mutation(&TrajectoryIndexMutation::Upsert(entry.clone()))?;
         refresh_generation_for_entry(&mut state_guard, dir, &entry.file_name);
         self.entry_locations_mut().register(
             &state_guard.key,
@@ -1541,9 +1666,7 @@ impl TrajectoryIndexCoordinator {
         }
         let state = self.directory_state(dir).await?;
         let mut state_guard = state.lock().await;
-        if let Some(index) = state_guard.index_mut() {
-            apply_mutation_to_index(index, &TrajectoryIndexMutation::Remove(chat_ids.clone()))?;
-        }
+        state_guard.apply_mutation(&TrajectoryIndexMutation::Remove(chat_ids.clone()))?;
         state_guard.generation = None;
         state_guard.generation_verified_at = None;
         {
@@ -1838,7 +1961,7 @@ impl TrajectoryIndexCoordinator {
         let index = Arc::new(index);
         self.sync_entry_locations(&state_guard.key, &index.entries);
         self.sync_generation_verified_at(&state_guard);
-        state_guard.set_index(index);
+        state_guard.publish_flushed_index(index);
         state_guard.recovery_flush_required = false;
         Ok(())
     }
@@ -4502,6 +4625,353 @@ mod tests {
             .await
             .unwrap();
         path
+    }
+
+    #[tokio::test]
+    async fn work_snapshot_reuses_validation_and_preserves_cow_snapshots() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path();
+        let path = write_trajectory(dir, "chat-1", "One", "agent").await;
+        let coordinator = TrajectoryIndexCoordinator::new();
+        let first = coordinator
+            .work_snapshot_with_limits(dir, 10, usize::MAX)
+            .await
+            .unwrap();
+        let state = coordinator.directory_state(dir).await.unwrap();
+        for _ in 0..3 {
+            let warm = coordinator
+                .work_snapshot_with_limits(dir, 10, usize::MAX)
+                .await
+                .unwrap();
+            assert!(Arc::ptr_eq(&first, &warm));
+        }
+        assert_eq!(state.lock().await.work_validation_count, 1);
+
+        let mut entry = entry_for_path(dir, &path).await;
+        entry.title = "Changed".into();
+        coordinator.upsert(dir, entry).await.unwrap();
+        assert!(state.lock().await.work_validation.is_none());
+        let updated = coordinator
+            .work_snapshot_with_limits(dir, 10, usize::MAX)
+            .await
+            .unwrap();
+        assert!(!Arc::ptr_eq(&first, &updated));
+        assert_eq!(first.entries[0].title, "One");
+        assert_eq!(updated.entries[0].title, "Changed");
+        assert_eq!(state.lock().await.work_validation_count, 1);
+
+        coordinator
+            .remove(dir, HashSet::from(["chat-1".to_string()]))
+            .await
+            .unwrap();
+        assert!(state.lock().await.work_validation.is_none());
+        let removed = coordinator
+            .work_snapshot_with_limits(dir, 10, usize::MAX)
+            .await
+            .unwrap();
+        assert!(removed.entries.is_empty());
+        assert_eq!(updated.entries.len(), 1);
+        assert_eq!(state.lock().await.work_validation_count, 1);
+
+        state.lock().await.set_index(first.clone());
+        assert!(state.lock().await.work_validation.is_none());
+        let replaced = coordinator
+            .work_snapshot_with_limits(dir, 10, usize::MAX)
+            .await
+            .unwrap();
+        assert!(Arc::ptr_eq(&first, &replaced));
+        assert_eq!(state.lock().await.work_validation_count, 2);
+    }
+
+    #[tokio::test]
+    async fn work_snapshot_exact_size_tracks_upserts_removals_and_invalidations() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path();
+        let path = write_trajectory(dir, "chat-1", "One", "agent").await;
+        let coordinator = TrajectoryIndexCoordinator::new();
+        let first = coordinator
+            .work_snapshot_with_limits(dir, 10, usize::MAX)
+            .await
+            .unwrap();
+        let state = coordinator.directory_state(dir).await.unwrap();
+        assert_eq!(
+            state.lock().await.work_serialized_size,
+            Some(serde_json::to_vec(first.as_ref()).unwrap().len())
+        );
+        let mut entry = entry_for_path(dir, &path).await;
+        entry.title = "growth \"\\ 🐈".into();
+        coordinator.upsert(dir, entry).await.unwrap();
+        let grown = coordinator
+            .work_snapshot_with_limits(dir, 10, usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(
+            state.lock().await.work_serialized_size,
+            Some(serde_json::to_vec(grown.as_ref()).unwrap().len())
+        );
+        assert_eq!(state.lock().await.work_validation_count, 1);
+        let cap = serde_json::to_vec(grown.as_ref()).unwrap().len();
+        assert!(coordinator
+            .work_snapshot_with_limits(dir, 10, cap)
+            .await
+            .is_ok());
+        assert!(coordinator
+            .work_snapshot_with_limits(dir, 10, cap - 1)
+            .await
+            .is_err());
+
+        coordinator
+            .remove(dir, HashSet::from(["missing".to_string()]))
+            .await
+            .unwrap();
+        let unchanged = coordinator
+            .work_snapshot_with_limits(dir, 10, usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(
+            state.lock().await.work_serialized_size,
+            Some(serde_json::to_vec(unchanged.as_ref()).unwrap().len())
+        );
+        assert_eq!(state.lock().await.work_validation_count, 1);
+        state.lock().await.set_index(unchanged.clone());
+        assert_eq!(state.lock().await.work_serialized_size, None);
+        let restored = coordinator
+            .work_snapshot_with_limits(dir, 10, usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(
+            state.lock().await.work_serialized_size,
+            Some(serde_json::to_vec(restored.as_ref()).unwrap().len())
+        );
+        assert_eq!(state.lock().await.work_validation_count, 2);
+    }
+
+    #[tokio::test]
+    async fn work_snapshot_flush_publication_preserves_only_wire_exact_sizes() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path();
+        let path = write_trajectory(dir, "chat-1", "One", "agent").await;
+        let coordinator = TrajectoryIndexCoordinator::new();
+        let original = coordinator
+            .work_snapshot_with_limits(dir, 10, usize::MAX)
+            .await
+            .unwrap();
+        let state = coordinator.directory_state(dir).await.unwrap();
+        let mut entry = entry_for_path(dir, &path).await;
+        entry.title = "Changed after validation".into();
+        coordinator.upsert(dir, entry).await.unwrap();
+        let pending = coordinator
+            .work_snapshot_with_limits(dir, 10, usize::MAX)
+            .await
+            .unwrap();
+        let before_flush_size = serde_json::to_vec(pending.as_ref()).unwrap().len();
+        assert_eq!(
+            state.lock().await.work_serialized_size,
+            Some(before_flush_size)
+        );
+        coordinator.flush_all().await.unwrap();
+        let after_flush = coordinator
+            .work_snapshot_with_limits(dir, 10, usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(
+            state.lock().await.work_serialized_size,
+            Some(serde_json::to_vec(after_flush.as_ref()).unwrap().len())
+        );
+        assert_eq!(state.lock().await.work_validation_count, 1);
+        assert_eq!(original.entries[0].title, "One");
+        assert_eq!(after_flush.entries[0].title, "Changed after validation");
+        let persisted = read_trajectory_index(dir).await.unwrap().unwrap();
+        assert_eq!(
+            serde_json::to_value(after_flush.as_ref()).unwrap(),
+            serde_json::to_value(&persisted).unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn work_snapshot_exact_size_covers_duplicate_rows_skips_and_empty_arrays() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path();
+        let path = write_trajectory(dir, "dup", "Duplicate", "agent").await;
+        let entry = entry_for_path(dir, &path).await;
+        let skipped = TrajectoryIndexSkippedFile {
+            file_name: entry.file_name.clone(),
+            file_len: 12,
+            file_modified_unix_ms: 34,
+        };
+        let mut index = TrajectoryIndex {
+            schema_version: TRAJECTORY_INDEX_SCHEMA_VERSION,
+            updated_at: "2026-01-01T00:00:00Z".into(),
+            entries: vec![entry.clone(), entry.clone()],
+            skipped_files: vec![skipped.clone()],
+            applied_seq: 9,
+            baseline: None,
+            needs_compaction: false,
+        };
+        let mut state = TrajectoryIndexDirectoryState::default();
+        state.set_index(Arc::new(index.clone()));
+        state.work_serialized_size = Some(serde_json::to_vec(&index).unwrap().len());
+        state
+            .apply_mutation(&TrajectoryIndexMutation::Remove(HashSet::from([
+                "dup".into()
+            ])))
+            .unwrap();
+        assert!(state.index.as_ref().unwrap().entries.is_empty());
+        let actual = serde_json::to_vec(state.index.as_ref().unwrap().as_ref())
+            .unwrap()
+            .len();
+        assert_eq!(state.work_serialized_size, Some(actual));
+        assert!(actual < serde_json::to_vec(&index).unwrap().len());
+
+        index.entries.clear();
+        let mut state = TrajectoryIndexDirectoryState::default();
+        state.set_index(Arc::new(index.clone()));
+        state.work_serialized_size = Some(serde_json::to_vec(&index).unwrap().len());
+        let mut replacement = entry;
+        replacement.title = "quote \" slash \\ unicode 雪".into();
+        state
+            .apply_mutation(&TrajectoryIndexMutation::Upsert(replacement))
+            .unwrap();
+        let actual = serde_json::to_vec(state.index.as_ref().unwrap().as_ref())
+            .unwrap()
+            .len();
+        assert_eq!(state.work_serialized_size, Some(actual));
+        assert!(state.index.as_ref().unwrap().skipped_files.is_empty());
+    }
+
+    #[tokio::test]
+    async fn work_snapshot_flush_wire_equality_hazards_invalidate_exact_size() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path();
+        let path = write_trajectory(dir, "hazard", "Hazard", "agent").await;
+        let entry = entry_for_path(dir, &path).await;
+        let mut previous = TrajectoryIndex {
+            entries: vec![entry],
+            updated_at: "2026-01-01T00:00:00Z".into(),
+            ..Default::default()
+        };
+        previous.entries[0].total_cost_usd = Some(0.0);
+        let mut state = TrajectoryIndexDirectoryState::default();
+        state.set_index(Arc::new(previous.clone()));
+        state.work_serialized_size = Some(serde_json::to_vec(&previous).unwrap().len());
+
+        let mut next = previous.clone();
+        next.applied_seq = 10;
+        next.updated_at.push('x');
+        state.publish_flushed_index(Arc::new(next.clone()));
+        assert_eq!(
+            state.work_serialized_size,
+            Some(serde_json::to_vec(&next).unwrap().len())
+        );
+
+        next.entries[0].total_cost_usd = Some(-0.0);
+        state.publish_flushed_index(Arc::new(next.clone()));
+        assert_eq!(state.work_serialized_size, None);
+        state.work_serialized_size = Some(serde_json::to_vec(&next).unwrap().len());
+        next.entries[0].total_cost_usd = Some(0.0);
+        next.entries[0].worktree = Some(crate::chat::types::WorktreeMeta {
+            id: "w".into(),
+            kind: "git".into(),
+            root: PathBuf::from("a//b"),
+            source_workspace_root: PathBuf::from("a//b"),
+            repo_root: PathBuf::from("a//b"),
+            branch: None,
+            base_branch: None,
+            base_commit: None,
+            task_id: None,
+            card_id: None,
+            agent_id: None,
+            enforce: false,
+        });
+        state.publish_flushed_index(Arc::new(next.clone()));
+        assert_eq!(state.work_serialized_size, None);
+        let exact = serde_json::to_vec(&next).unwrap().len();
+        state.work_serialized_size = Some(exact);
+        let mut skipped_change = next.clone();
+        skipped_change
+            .skipped_files
+            .push(TrajectoryIndexSkippedFile {
+                file_name: "other.json".into(),
+                file_len: 1,
+                file_modified_unix_ms: 2,
+            });
+        state.publish_flushed_index(Arc::new(skipped_change));
+        assert_eq!(state.work_serialized_size, None);
+        assert_eq!(
+            state.index.as_ref().unwrap().skipped_files[0].file_name,
+            "other.json"
+        );
+        state.set_index(Arc::new(next.clone()));
+        state.work_serialized_size = Some(exact);
+        let mut spelling = next.clone();
+        spelling.entries[0].worktree.as_mut().unwrap().root = PathBuf::from("a/b");
+        spelling.entries[0]
+            .worktree
+            .as_mut()
+            .unwrap()
+            .source_workspace_root = PathBuf::from("a/b");
+        spelling.entries[0].worktree.as_mut().unwrap().repo_root = PathBuf::from("a/b");
+        assert_eq!(next.entries, spelling.entries);
+        assert_ne!(
+            next.entries[0].worktree.as_ref().unwrap().root.as_os_str(),
+            spelling.entries[0]
+                .worktree
+                .as_ref()
+                .unwrap()
+                .root
+                .as_os_str()
+        );
+        state.publish_flushed_index(Arc::new(spelling));
+        assert_eq!(state.work_serialized_size, None);
+    }
+
+    #[tokio::test]
+    async fn work_snapshot_revalidates_live_limits_and_caches_denials_only_at_exact_cap() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path();
+        write_trajectory(dir, "chat-1", "One", "agent").await;
+        let coordinator = TrajectoryIndexCoordinator::new();
+        let first = coordinator
+            .work_snapshot_with_limits(dir, 1, usize::MAX)
+            .await
+            .unwrap();
+        let state = coordinator.directory_state(dir).await.unwrap();
+        let exact_size = serde_json::to_vec(first.as_ref()).unwrap().len();
+        assert_eq!(state.lock().await.work_validation_count, 1);
+        assert!(coordinator
+            .work_snapshot_with_limits(dir, 0, usize::MAX)
+            .await
+            .is_err());
+        assert_eq!(state.lock().await.work_validation_count, 1);
+        for _ in 0..2 {
+            assert!(coordinator
+                .work_snapshot_with_limits(dir, 1, exact_size - 1)
+                .await
+                .is_err());
+        }
+        assert_eq!(state.lock().await.work_validation_count, 1);
+        let restored = coordinator
+            .work_snapshot_with_limits(dir, 1, exact_size)
+            .await
+            .unwrap();
+        assert!(Arc::ptr_eq(&first, &restored));
+        assert_eq!(state.lock().await.work_validation_count, 1);
+        assert!(coordinator
+            .work_snapshot_with_limits(dir, 0, exact_size)
+            .await
+            .is_err());
+        assert_eq!(state.lock().await.work_validation_count, 1);
+        assert!(coordinator
+            .work_snapshot_with_limits(dir, 1, 0)
+            .await
+            .is_err());
+        assert_eq!(state.lock().await.work_validation_count, 1);
+        let relaxed = coordinator
+            .work_snapshot_with_limits(dir, 1, usize::MAX)
+            .await
+            .unwrap();
+        assert!(Arc::ptr_eq(&first, &relaxed));
+        assert_eq!(state.lock().await.work_validation_count, 1);
     }
 
     #[tokio::test]

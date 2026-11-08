@@ -180,18 +180,24 @@ pub async fn prepare_work_context(
         return None;
     }
 
+    use crate::chat::perf_diagnostics::{self, PerfComponent, PerfOutcome};
+    let caller_span = perf_diagnostics::span(PerfComponent::WorkContextCaller, None, None);
     let caller = super::scope::model_caller(app, chat_id, model_id)
         .await
         .ok()?;
+    caller_span.finish(PerfOutcome::Success, None, None, None, None);
+    let projection_span = perf_diagnostics::span(PerfComponent::WorkContextProjection, None, None);
     let (catalog, disclosure) = super::service::visible_projection(app, &caller)
         .await
         .ok()?;
+    projection_span.finish(PerfOutcome::Success, None, None, None, None);
     let own = catalog
         .all_rows()
         .into_iter()
         .find(|row| row.chat_id.as_deref() == Some(chat_id));
     let mut lineage = std::collections::HashSet::from([chat_id.to_string()]);
     let mut ancestor = chat_id.to_string();
+    let lineage_span = perf_diagnostics::span(PerfComponent::WorkContextLineage, None, None);
     for _ in 0..128 {
         let Some(Some(parent)) =
             crate::chat::trajectories::find_trajectory_parent_id(app.gcx.clone(), &ancestor).await
@@ -203,6 +209,7 @@ pub async fn prepare_work_context(
         }
         ancestor = parent;
     }
+    lineage_span.finish(PerfOutcome::Success, None, None, None, None);
     let observed_at = now_ms();
     let recent = observed_at.saturating_sub(settings.recent_window_secs.saturating_mul(1000));
     let visible_rows = catalog

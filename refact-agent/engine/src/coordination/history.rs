@@ -79,7 +79,25 @@ fn timestamp(value: &str) -> Option<u64> {
         .map(|time| time.timestamp_millis().max(0) as u64)
 }
 
+fn sort_history_entries(entries: &mut [&TrajectoryIndexEntry]) {
+    entries.sort_by_cached_key(|entry| std::cmp::Reverse(timestamp(&entry.updated_at)));
+}
+
 pub(super) fn row_from_entry(entry: &TrajectoryIndexEntry, roots: &ProjectRoots) -> WorkRow {
+    let settings = crate::file_activity::settings();
+    let now_ms = super::service::now_ms();
+    let recent_window_ms = settings.recent_window_secs.saturating_mul(1000);
+    let project_root = roots.project_root();
+    row_from_entry_at(entry, roots, now_ms, recent_window_ms, &project_root)
+}
+
+fn row_from_entry_at(
+    entry: &TrajectoryIndexEntry,
+    roots: &ProjectRoots,
+    now_ms: u64,
+    recent_window_ms: u64,
+    project_root: &super::types::WorkRootRef,
+) -> WorkRow {
     let (kind, task_id, card_id) = match &entry.source {
         TrajectoryIndexSource::Task {
             task_id,
@@ -107,9 +125,10 @@ pub(super) fn row_from_entry(entry: &TrajectoryIndexEntry, roots: &ProjectRoots)
             None,
         ),
     };
-    let updated_at_ms = timestamp(&entry.updated_at).unwrap_or(0);
+    let last_activity_at = timestamp(&entry.updated_at);
+    let updated_at_ms = last_activity_at.unwrap_or(0);
     let mut root = entry.worktree.as_ref().map_or_else(
-        || roots.project_root(),
+        || project_root.clone(),
         |meta| {
             roots.get(&meta.id).cloned().unwrap_or_else(|| {
                 let mut root = roots::worktree_root_ref(meta);
@@ -122,7 +141,6 @@ pub(super) fn row_from_entry(entry: &TrajectoryIndexEntry, roots: &ProjectRoots)
         root.path = None;
     }
     let work = entry.work.as_ref();
-    let settings = crate::file_activity::settings();
     let provenance_complete = false;
     WorkRow {
         key: WorkKey::trajectory(&entry.id),
@@ -131,14 +149,12 @@ pub(super) fn row_from_entry(entry: &TrajectoryIndexEntry, roots: &ProjectRoots)
             card_id,
             freshness: if updated_at_ms == 0 {
                 Freshness::Unknown
-            } else if super::service::now_ms().saturating_sub(updated_at_ms)
-                <= settings.recent_window_secs.saturating_mul(1000)
-            {
+            } else if now_ms.saturating_sub(updated_at_ms) <= recent_window_ms {
                 Freshness::Recent
             } else {
                 Freshness::Stale
             },
-            last_activity_at: timestamp(&entry.updated_at),
+            last_activity_at,
             measured_tokens: work.and_then(|work| work.measured_tokens),
             source_revision: work.map_or(0, |work| work.source_revision),
             ..Default::default()
@@ -173,6 +189,7 @@ pub(super) async fn indexed_rows(
     degraded: &mut Vec<String>,
     resolve: bool,
 ) -> Vec<WorkRow> {
+    use crate::chat::perf_diagnostics::{self, PerfComponent, PerfOutcome};
     let directory = roots.source_workspace_root.join(".refact/trajectories");
     let directory = match tokio::fs::canonicalize(&directory)
         .await
@@ -185,6 +202,7 @@ pub(super) async fn indexed_rows(
             return vec![];
         }
     };
+    let snapshot_span = perf_diagnostics::span(PerfComponent::WorkHistorySnapshot, None, None);
     let index = match app
         .gcx
         .trajectory_index_coordinator
@@ -193,10 +211,13 @@ pub(super) async fn indexed_rows(
     {
         Ok(index) => index,
         Err(_) => {
+            snapshot_span.finish(PerfOutcome::Failure, None, None, None, None);
             degraded.push("historical index unavailable".into());
             return vec![];
         }
     };
+    snapshot_span.finish(PerfOutcome::Success, None, None, None, None);
+    let sort_span = perf_diagnostics::span(PerfComponent::WorkHistorySort, None, None);
     let mut entries: Vec<_> = index
         .entries
         .iter()
@@ -210,8 +231,12 @@ pub(super) async fn indexed_rows(
             })
         })
         .collect();
-    entries.sort_by_key(|entry| std::cmp::Reverse(timestamp(&entry.updated_at)));
-    rows_from_entries(&directory, entries, roots, resolve).await
+    sort_history_entries(&mut entries);
+    sort_span.finish(PerfOutcome::Success, None, None, None, None);
+    let rows_span = perf_diagnostics::span(PerfComponent::WorkHistoryRows, None, None);
+    let rows = rows_from_entries(&directory, entries, roots, resolve).await;
+    rows_span.finish(PerfOutcome::Success, None, None, None, None);
+    rows
 }
 
 fn resolve_entry_or_fallback<'a>(
@@ -232,6 +257,10 @@ async fn rows_from_entries(
     roots: &ProjectRoots,
     resolve: bool,
 ) -> Vec<WorkRow> {
+    let settings = crate::file_activity::settings();
+    let now_ms = super::service::now_ms();
+    let recent_window_ms = settings.recent_window_secs.saturating_mul(1000);
+    let project_root = roots.project_root();
     let mut rows = Vec::with_capacity(entries.len());
     let resolved_count = if resolve {
         entries.len().min(MAX_RESOLVED_ROWS)
@@ -245,7 +274,13 @@ async fn rows_from_entries(
     let resolved = stream::iter(jobs).buffered(4);
     let mut suffix = Vec::with_capacity(entries.len() - resolved_count);
     for entry in &entries[resolved_count..] {
-        suffix.push(row_from_entry(entry, roots));
+        suffix.push(row_from_entry_at(
+            entry,
+            roots,
+            now_ms,
+            recent_window_ms,
+            &project_root,
+        ));
     }
     let mut ordered = resolved.chain(stream::iter(suffix));
     let mut evidence_bytes = 0usize;
@@ -542,6 +577,115 @@ mod tests {
     use crate::coordination::privacy_guard;
     use serde_json::json;
     use std::sync::Arc;
+
+    fn sort_entry(updated_at: &str, id: &str) -> TrajectoryIndexEntry {
+        serde_json::from_value(json!({
+            "id": id, "file_name": format!("{id}.json"), "created_at": updated_at,
+            "updated_at": updated_at, "title": id, "model": "", "mode": "AGENT",
+            "message_count": 0
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn cached_history_sort_preserves_old_stable_timestamp_order() {
+        let values = [
+            "2024-01-01T00:00:00Z",
+            "bad",
+            "2024-01-01T01:00:00+01:00",
+            "",
+            "2024-01-01T00:00:00.001Z",
+        ];
+        let source: Vec<_> = (0..500)
+            .map(|i| sort_entry(values[i % values.len()], &i.to_string()))
+            .collect();
+        let mut expected: Vec<_> = source.iter().collect();
+        expected.sort_by_key(|entry| std::cmp::Reverse(timestamp(&entry.updated_at)));
+        let mut actual: Vec<_> = source.iter().collect();
+        sort_history_entries(&mut actual);
+        assert_eq!(
+            actual.iter().map(|e| &e.id).collect::<Vec<_>>(),
+            expected.iter().map(|e| &e.id).collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn projected_fallback_rows_match_single_entry_projection() {
+        let (_dir, _gcx, roots, _) = fixture(vec![]).await;
+        let mut entries = vec![
+            sort_entry("not-a-timestamp", "invalid-time"),
+            sort_entry("2001-01-02T03:04:05+02:00", "timezone"),
+            sort_entry("2020-01-02T03:04:05Z", "old"),
+        ];
+        entries[1].worktree = Some(crate::worktrees::types::WorktreeMeta {
+            id: "foreign-worktree".into(),
+            kind: "chat".into(),
+            root: "/tmp/foreign-worktree".into(),
+            source_workspace_root: "/tmp/foreign-project".into(),
+            repo_root: "/tmp/foreign-project".into(),
+            branch: Some("branch".into()),
+            base_branch: None,
+            base_commit: None,
+            task_id: None,
+            card_id: None,
+            agent_id: None,
+            enforce: false,
+        });
+        let now_ms = crate::coordination::service::now_ms();
+        let recent_window_ms = crate::file_activity::settings()
+            .recent_window_secs
+            .saturating_mul(1000);
+        let project_root = roots.project_root();
+        let projected: Vec<_> = entries
+            .iter()
+            .map(|entry| row_from_entry_at(entry, &roots, now_ms, recent_window_ms, &project_root))
+            .collect();
+        let expected: Vec<_> = entries
+            .iter()
+            .map(|entry| row_from_entry(entry, &roots))
+            .collect();
+        assert_eq!(projected, expected);
+        assert_eq!(projected[0].metadata.last_activity_at, None);
+        assert_eq!(projected[0].metadata.freshness, Freshness::Unknown);
+        assert_eq!(
+            projected[1].root.path, None,
+            "foreign root path is withheld"
+        );
+    }
+
+    #[cfg(feature = "perf-tests")]
+    #[test]
+    #[ignore = "opt-in microbenchmark: cargo test --features perf-tests history_sort_12k -- --ignored --nocapture"]
+    fn history_sort_12k() {
+        use std::time::Instant;
+        let source: Vec<_> = (0..12_000)
+            .rev()
+            .map(|i| {
+                sort_entry(
+                    &format!(
+                        "2024-01-01T00:{:02}:{:02}.{:03}Z",
+                        (i / 60) % 60,
+                        i % 60,
+                        i % 1000
+                    ),
+                    &i.to_string(),
+                )
+            })
+            .collect();
+        let start = Instant::now();
+        let mut old: Vec<_> = source.iter().collect();
+        old.sort_by_key(|entry| std::cmp::Reverse(timestamp(&entry.updated_at)));
+        let old_time = start.elapsed();
+        let start = Instant::now();
+        let mut cached: Vec<_> = source.iter().collect();
+        sort_history_entries(&mut cached);
+        let cached_time = start.elapsed();
+        assert_eq!(
+            old.iter().map(|e| &e.id).collect::<Vec<_>>(),
+            cached.iter().map(|e| &e.id).collect::<Vec<_>>()
+        );
+        eprintln!("history sort 12k: old={old_time:?}, cached={cached_time:?}");
+    }
 
     async fn fixture(
         messages: Vec<serde_json::Value>,

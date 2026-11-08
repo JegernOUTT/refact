@@ -284,16 +284,22 @@ pub(super) async fn build_catalog_for_destination(
     source_workspace_root: Option<&str>,
     resolve_history: bool,
 ) -> Result<WorkCatalog, String> {
+    use crate::chat::perf_diagnostics::{self, PerfComponent, PerfOutcome};
+    let roots_span = perf_diagnostics::span(PerfComponent::WorkCatalogRoots, None, None);
     let source_root =
         roots::resolve_source_workspace_root(app.gcx.clone(), source_workspace_root).await?;
     let roots = roots::load_project_roots(app.gcx.clone(), source_root).await;
+    roots_span.finish(PerfOutcome::Success, None, None, None, None);
     let mut degraded = roots.degraded.clone();
 
     let mut rows: BTreeMap<String, WorkRow> = BTreeMap::new();
 
+    let history_span = perf_diagnostics::span(PerfComponent::WorkCatalogHistory, None, None);
     for row in super::history::indexed_rows(app, &roots, &mut degraded, resolve_history).await {
         rows.insert(row.key.to_string(), row);
     }
+    history_span.finish(PerfOutcome::Success, None, None, None, None);
+    let sources_span = perf_diagnostics::span(PerfComponent::WorkCatalogSources, None, None);
     let (board_rows, boards_unavailable) = app.work_boards.rows(&roots.source_workspace_root).await;
     if boards_unavailable {
         degraded.push("board index unavailable".into());
@@ -456,27 +462,12 @@ pub(super) async fn build_catalog_for_destination(
                 provenance_complete: false,
             });
     }
+    sources_span.finish(PerfOutcome::Success, None, None, None, None);
+    let observations_span =
+        perf_diagnostics::span(PerfComponent::WorkCatalogObservations, None, None);
     let observations = crate::file_activity::observations(None);
-    for row in rows.values_mut() {
-        let actor = row.chat_id.as_deref().unwrap_or(&row.key.id);
-        row.metadata.observed_reads = observations
-            .reads
-            .iter()
-            .filter(|read| read.actor == actor)
-            .map(|read| read.path.clone())
-            .collect();
-        row.observed_files.extend(
-            observations
-                .writes
-                .iter()
-                .filter(|write| write.actor.as_deref() == Some(actor))
-                .map(|write| write.path.clone()),
-        );
-        row.observed_files.sort();
-        row.observed_files.dedup();
-        row.metadata.observed_reads.sort();
-        row.metadata.observed_reads.dedup();
-    }
+    apply_observations(&mut rows, &observations);
+    observations_span.finish(PerfOutcome::Success, None, None, None, None);
 
     // Both adapters use the same admission source. A parked runner can still
     // have ExecutingTools as its raw session state; never call that running.
@@ -519,6 +510,45 @@ pub(super) async fn build_catalog_for_destination(
         rows,
         degraded,
     })
+}
+
+fn apply_observations(
+    rows: &mut BTreeMap<String, WorkRow>,
+    observations: &crate::file_activity::Observations,
+) {
+    let mut reads: HashMap<&str, Vec<&str>> = HashMap::new();
+    let mut writes: HashMap<&str, Vec<&str>> = HashMap::new();
+    for read in &observations.reads {
+        reads
+            .entry(read.actor.as_str())
+            .or_default()
+            .push(&read.path);
+    }
+    for write in &observations.writes {
+        if let Some(actor) = write.actor.as_deref() {
+            writes.entry(actor).or_default().push(&write.path);
+        }
+    }
+    for row in rows.values_mut() {
+        let actor = row.chat_id.as_deref().unwrap_or(&row.key.id);
+        row.metadata.observed_reads = reads
+            .get(actor)
+            .into_iter()
+            .flatten()
+            .map(|path| (*path).to_owned())
+            .collect();
+        row.observed_files.extend(
+            writes
+                .get(actor)
+                .into_iter()
+                .flatten()
+                .map(|path| (*path).to_owned()),
+        );
+        row.observed_files.sort();
+        row.observed_files.dedup();
+        row.metadata.observed_reads.sort();
+        row.metadata.observed_reads.dedup();
+    }
 }
 
 impl WorkCatalog {
@@ -567,6 +597,215 @@ impl WorkCatalog {
 mod tests {
     use super::*;
     use crate::chat::types::ChatSession;
+
+    fn apply_observations_reference(
+        rows: &mut BTreeMap<String, WorkRow>,
+        observations: &crate::file_activity::Observations,
+    ) {
+        for row in rows.values_mut() {
+            let actor = row.chat_id.as_deref().unwrap_or(&row.key.id);
+            row.metadata.observed_reads = observations
+                .reads
+                .iter()
+                .filter(|read| read.actor == actor)
+                .map(|read| read.path.clone())
+                .collect();
+            row.observed_files.extend(
+                observations
+                    .writes
+                    .iter()
+                    .filter(|write| write.actor.as_deref() == Some(actor))
+                    .map(|write| write.path.clone()),
+            );
+            row.observed_files.sort();
+            row.observed_files.dedup();
+            row.metadata.observed_reads.sort();
+            row.metadata.observed_reads.dedup();
+        }
+    }
+
+    fn observation_row(id: &str, chat_id: Option<&str>) -> WorkRow {
+        WorkRow {
+            key: WorkKey::background_agent(id),
+            metadata: WorkMetadata {
+                observed_reads: vec!["/old/read".into()],
+                source_revision: 37,
+                ..Default::default()
+            },
+            kind: WorkKindTag::Subagent,
+            state: WorkStateTag::Completed,
+            attention: false,
+            title: Some("unchanged title".into()),
+            summary: None,
+            root: roots::project_root_ref(std::path::Path::new("/project")),
+            parent_chat_id: None,
+            root_chat_id: None,
+            chat_id: chat_id.map(str::to_owned),
+            model: None,
+            current_tool: None,
+            declared_files: vec!["/declared".into()],
+            observed_files: vec!["/old/write".into(), "/old/write".into()],
+            queue_size: 2,
+            step_count: 3,
+            open_questions: 0,
+            updated_at_ms: 123,
+            stale: true,
+            disclosure: Disclosure::Full,
+            source_records: vec![refact_privacy::FileRecord {
+                path: "/private/source".into(),
+                zone: "guarded".into(),
+                attribution: refact_privacy::Attribution::Declared,
+            }],
+            provenance_complete: true,
+        }
+    }
+
+    fn read_observation(actor: &str, path: &str) -> crate::file_activity::ReadObservation {
+        crate::file_activity::ReadObservation {
+            actor: actor.into(),
+            key: path.into(),
+            path: path.into(),
+            alias: None,
+            line1: 1,
+            line2: 1,
+            total_lines: 1,
+            whole: true,
+            partial_reason: None,
+            bytes: 1,
+            digest: "digest".into(),
+            at_ms: 1,
+        }
+    }
+
+    fn write_observation(
+        actor: Option<&str>,
+        path: &str,
+    ) -> crate::file_activity::WriteObservation {
+        crate::file_activity::WriteObservation {
+            actor: actor.map(str::to_owned),
+            key: path.into(),
+            path: path.into(),
+            alias: None,
+            kind: crate::file_activity::WriteKind::Modified,
+            tool: "test".into(),
+            attributed: actor.is_some(),
+            bytes_after: None,
+            digest_after: None,
+            at_ms: 1,
+        }
+    }
+
+    #[test]
+    fn indexed_observations_match_nested_reference_exactly() {
+        let mut rows: BTreeMap<_, _> = [
+            observation_row("override", Some("shared")),
+            observation_row("repeated", Some("shared")),
+            observation_row("fallback", None),
+            observation_row("unmatched", None),
+            observation_row("empty", Some("")),
+        ]
+        .into_iter()
+        .map(|row| (row.key.to_string(), row))
+        .collect();
+        let observations = crate::file_activity::Observations {
+            reads: [
+                ("shared", "/outside/project/z"),
+                ("shared", "/a"),
+                ("shared", "/a"),
+                ("fallback", "/fallback/read"),
+                ("override", "/must/not/match"),
+                ("foreign", "/foreign/read"),
+                ("", "/empty/read"),
+            ]
+            .into_iter()
+            .map(|(actor, path)| read_observation(actor, path))
+            .collect(),
+            writes: [
+                (Some("shared"), "/outside/project/write"),
+                (Some("shared"), "/a"),
+                (Some("shared"), "/a"),
+                (Some("shared"), "/old/write"),
+                (Some("fallback"), "/fallback/write"),
+                (Some("override"), "/must/not/match"),
+                (Some("foreign"), "/foreign/write"),
+                (None, "/actorless/write"),
+                (Some(""), "/empty/write"),
+            ]
+            .into_iter()
+            .map(|(actor, path)| write_observation(actor, path))
+            .collect(),
+            ..Default::default()
+        };
+        let mut expected = rows.clone();
+        apply_observations_reference(&mut expected, &observations);
+        apply_observations(&mut rows, &observations);
+        assert_eq!(rows, expected);
+        let shared = &rows[&WorkKey::background_agent("override").to_string()];
+        assert_eq!(shared.metadata.observed_reads, ["/a", "/outside/project/z"]);
+        assert_eq!(
+            shared.observed_files,
+            ["/a", "/old/write", "/outside/project/write"]
+        );
+        let unmatched = &rows[&WorkKey::background_agent("unmatched").to_string()];
+        assert!(unmatched.metadata.observed_reads.is_empty());
+        assert_eq!(unmatched.observed_files, ["/old/write"]);
+        apply_observations(&mut rows, &crate::file_activity::Observations::default());
+        apply_observations_reference(
+            &mut expected,
+            &crate::file_activity::Observations::default(),
+        );
+        assert_eq!(rows, expected);
+    }
+
+    #[cfg(feature = "perf-tests")]
+    #[test]
+    #[ignore]
+    fn observation_join_scale_benchmark() {
+        fn cpu_ticks() -> Option<u64> {
+            let stat = std::fs::read_to_string("/proc/self/stat").ok()?;
+            let fields: Vec<_> = stat.rsplit_once(')')?.1.split_whitespace().collect();
+            Some(fields.get(11)?.parse::<u64>().ok()? + fields.get(12)?.parse::<u64>().ok()?)
+        }
+        let rows: BTreeMap<_, _> = (0..12_000)
+            .map(|i| {
+                let row = observation_row(&format!("row-{i}"), None);
+                (row.key.to_string(), row)
+            })
+            .collect();
+        let actor = |i: usize| {
+            if i % 1024 == 0 {
+                format!("row-{}", i % 12_000)
+            } else {
+                format!("foreign-{}", i % 256)
+            }
+        };
+        let observations = crate::file_activity::Observations {
+            reads: (0..16_384)
+                .map(|i| read_observation(&actor(i), &format!("/outside/read-{i}")))
+                .collect(),
+            writes: (0..65_536)
+                .map(|i| write_observation(Some(&actor(i)), &format!("/outside/write-{i}")))
+                .collect(),
+            ..Default::default()
+        };
+        let mut indexed = rows.clone();
+        let mut reference = rows;
+        let cpu_start = cpu_ticks();
+        let start = std::time::Instant::now();
+        apply_observations(&mut indexed, &observations);
+        let indexed_wall = start.elapsed();
+        let indexed_cpu = cpu_ticks().zip(cpu_start).map(|(end, start)| end - start);
+        let cpu_start = cpu_ticks();
+        let start = std::time::Instant::now();
+        apply_observations_reference(&mut reference, &observations);
+        let reference_wall = start.elapsed();
+        let reference_cpu = cpu_ticks().zip(cpu_start).map(|(end, start)| end - start);
+        eprintln!(
+            "observation join rows=12000 reads=16384 writes=65536 reference_actor_comparisons={} indexed_wall={indexed_wall:?} indexed_cpu_ticks={indexed_cpu:?} reference_wall={reference_wall:?} reference_cpu_ticks={reference_cpu:?}",
+            12_000u64 * (16_384 + 65_536)
+        );
+        assert_eq!(indexed, reference);
+    }
 
     #[tokio::test]
     async fn interrupted_session_is_recoverable_and_requires_attention() {

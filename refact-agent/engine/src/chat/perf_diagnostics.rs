@@ -112,10 +112,20 @@ pub enum PerfComponent {
     PreamblePrompt,
     PreambleKnowledge,
     PreambleWorkContext,
+    WorkContextCaller,
+    WorkContextProjection,
+    WorkContextLineage,
+    WorkCatalogRoots,
+    WorkCatalogHistory,
+    WorkCatalogSources,
+    WorkCatalogObservations,
+    WorkHistorySnapshot,
+    WorkHistorySort,
+    WorkHistoryRows,
 }
 
 impl PerfComponent {
-    pub const ALL: [Self; 97] = [
+    pub const ALL: [Self; 107] = [
         Self::TrajectorySnapshot,
         Self::TrajectorySerialize,
         Self::TrajectoryAtomicWrite,
@@ -213,6 +223,16 @@ impl PerfComponent {
         Self::PreamblePrompt,
         Self::PreambleKnowledge,
         Self::PreambleWorkContext,
+        Self::WorkContextCaller,
+        Self::WorkContextProjection,
+        Self::WorkContextLineage,
+        Self::WorkCatalogRoots,
+        Self::WorkCatalogHistory,
+        Self::WorkCatalogSources,
+        Self::WorkCatalogObservations,
+        Self::WorkHistorySnapshot,
+        Self::WorkHistorySort,
+        Self::WorkHistoryRows,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -314,6 +334,16 @@ impl PerfComponent {
             Self::PreamblePrompt => "preamble.prompt",
             Self::PreambleKnowledge => "preamble.knowledge",
             Self::PreambleWorkContext => "preamble.work_context",
+            Self::WorkContextCaller => "work_context.caller",
+            Self::WorkContextProjection => "work_context.projection",
+            Self::WorkContextLineage => "work_context.lineage",
+            Self::WorkCatalogRoots => "work_catalog.roots",
+            Self::WorkCatalogHistory => "work_catalog.history",
+            Self::WorkCatalogSources => "work_catalog.sources",
+            Self::WorkCatalogObservations => "work_catalog.observations",
+            Self::WorkHistorySnapshot => "work_history.snapshot",
+            Self::WorkHistorySort => "work_history.sort",
+            Self::WorkHistoryRows => "work_history.rows",
         }
     }
 

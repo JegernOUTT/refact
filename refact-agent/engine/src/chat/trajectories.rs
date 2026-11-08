@@ -2334,9 +2334,24 @@ async fn find_trajectory_file(
     chat_id: &str,
 ) -> Option<ValidTrajectoryCandidate> {
     validate_trajectory_id(chat_id).ok()?;
-    let normal = normal_trajectory_candidate_paths(gcx.clone(), chat_id).await;
+    let normal = direct_normal_trajectory_candidate_paths(gcx.clone(), chat_id).await;
     let mut seen: std::collections::HashSet<PathBuf> = normal.iter().cloned().collect();
     if let Some(found) = first_valid_trajectory_candidate(normal, chat_id).await {
+        return Some(found);
+    }
+    let mut indexed_normal = Vec::new();
+    extend_unique_paths(
+        &mut indexed_normal,
+        &mut seen,
+        indexed_candidate_paths_in_dirs(
+            &gcx,
+            &get_all_trajectories_dirs(gcx.clone()).await,
+            chat_id,
+            trajectory_index::TrajectoryIndexListingCaller::ChatPathLookup,
+        )
+        .await,
+    );
+    if let Some(found) = first_valid_trajectory_candidate(indexed_normal, chat_id).await {
         return Some(found);
     }
     let mut direct = Vec::new();
@@ -12444,6 +12459,78 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn direct_chat_path_lookup_does_not_list_or_rebuild_index() {
+        for own_folder in [false, true] {
+            let workspace = tempfile::tempdir().unwrap();
+            let (gcx, app) = make_app_with_workspace(workspace.path()).await;
+            let chat_id = "direct-with-broken-index";
+            let root = workspace.path().join(".refact/trajectories");
+            let expected = if own_folder {
+                root.join(chat_id).join(format!("{chat_id}.json"))
+            } else {
+                root.join(format!("{chat_id}.json"))
+            };
+            write_trajectory_file(&expected, chat_id, "Direct", "2024-01-01T00:00:01Z").await;
+            let index_path = root.join(trajectory_index::TRAJECTORY_INDEX_FILE);
+            let broken_index = "{broken index";
+            tokio::fs::write(&index_path, broken_index).await.unwrap();
+            let before = listing_calls_for(
+                &app,
+                trajectory_index::TrajectoryIndexListingCaller::ChatPathLookup,
+            );
+
+            let found = find_trajectory_file(gcx.clone(), chat_id).await.unwrap();
+
+            assert_same_path(&found.path, &expected);
+            assert_eq!(found.json["title"], "Direct");
+            assert_eq!(
+                listing_calls_for(
+                    &app,
+                    trajectory_index::TrajectoryIndexListingCaller::ChatPathLookup,
+                ),
+                before
+            );
+            assert_eq!(
+                tokio::fs::read_to_string(&index_path).await.unwrap(),
+                broken_index
+            );
+            let normal_dirs = get_all_trajectories_dirs(gcx).await;
+            assert_eq!(
+                app.chat
+                    .trajectory_index_coordinator
+                    .unsynced_directories(&normal_dirs),
+                normal_dirs
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn chat_path_lookup_preserves_flat_own_folder_and_indexed_priority() {
+        let workspace = tempfile::tempdir().unwrap();
+        let (gcx, _) = make_app_with_workspace(workspace.path()).await;
+        let chat_id = "direct-priority";
+        let root = workspace.path().join(".refact/trajectories");
+        let flat = root.join(format!("{chat_id}.json"));
+        let own = root.join(chat_id).join(format!("{chat_id}.json"));
+        let indexed = root.join("other-root").join(format!("{chat_id}.json"));
+        let task = workspace
+            .path()
+            .join(".refact/tasks/priority-task/trajectories/agents")
+            .join(format!("{chat_id}.json"));
+        for path in [&flat, &own, &indexed, &task] {
+            write_trajectory_file(path, chat_id, "Valid", "2024-01-01T00:00:01Z").await;
+        }
+
+        assert_same_optional_path(find_trajectory_path(gcx.clone(), chat_id).await, &flat);
+        tokio::fs::write(&flat, "{corrupt").await.unwrap();
+        assert_same_optional_path(find_trajectory_path(gcx.clone(), chat_id).await, &own);
+        tokio::fs::write(&own, "{corrupt").await.unwrap();
+        assert_same_optional_path(find_trajectory_path(gcx.clone(), chat_id).await, &indexed);
+        tokio::fs::write(&indexed, "{corrupt").await.unwrap();
+        assert_same_optional_path(find_trajectory_path(gcx, chat_id).await, &task);
+    }
+
+    #[tokio::test]
     async fn chat_path_lookup_still_finds_chat_in_unsynced_dir() {
         let workspace = tempfile::tempdir().unwrap();
         let (gcx, app) = make_app_with_workspace(workspace.path()).await;
@@ -14099,6 +14186,9 @@ mod tests {
         .await;
         write_trajectory_file(&task_path, chat_id, "Valid Task", "2024-01-01T00:00:01Z").await;
 
+        let candidate = find_trajectory_file(gcx.clone(), chat_id).await.unwrap();
+        assert_same_path(&candidate.path, &task_path);
+        assert_eq!(candidate.json["id"], chat_id);
         assert_same_optional_path(find_trajectory_path(gcx.clone(), chat_id).await, &task_path);
         let loaded = load_trajectory_for_chat(gcx, chat_id).await.unwrap();
         assert_eq!(loaded.thread.title, "Valid Task");
