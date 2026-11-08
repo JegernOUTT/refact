@@ -4,7 +4,8 @@ use std::sync::Arc;
 use refact_privacy::{FileRecord, PrivacyAuditError, PrivacyAudited};
 use crate::caps::BaseModelRecord;
 use crate::global_context::GlobalContext;
-use crate::privacy::destinations::clear_for_model;
+use crate::privacy::destinations::DestinationExt;
+use crate::privacy::records::BatchDeclaredRecords;
 use super::types::WorkRow;
 
 struct WorkAudit {
@@ -46,6 +47,9 @@ pub fn clear_rows(
     model: &BaseModelRecord,
 ) -> Result<Vec<WorkRow>, super::error::WorkError> {
     let before = policy_key(gcx, model)?;
+    let batch = BatchDeclaredRecords::new(gcx)
+        .map_err(|_| super::error::WorkError::policy_unavailable())?;
+    let destination = refact_privacy::Destination::from_model_record(model);
     if model.id.trim().is_empty() {
         return Err(super::error::WorkError::policy_unavailable());
     }
@@ -66,12 +70,12 @@ pub fn clear_rows(
                         .map_or(path.clone(), |root| PathBuf::from(root).join(path))
                 }
             });
-            let mut records = crate::privacy::records::declared_file_records(gcx, paths).ok()?;
+            let mut records = batch.classify_declared_paths(gcx, paths);
             records.extend(row.source_records.iter().cloned());
             let audit = WorkAudit {
                 records: records.iter().cloned().enumerate().collect(),
             };
-            clear_for_model(gcx, audit, model).ok()?;
+            refact_privacy::clear(audit, &destination, &batch.compiled).ok()?;
             // Carry all disclosed path records into future tool/capsule
             // messages, so a later model switch cannot re-send old metadata.
             row.source_records = records;
@@ -83,6 +87,9 @@ pub fn clear_rows(
             Some(row)
         })
         .collect();
+    batch
+        .finish(gcx)
+        .map_err(|_| super::error::WorkError::policy_unavailable())?;
     if policy_key(gcx, model)? != before {
         return Err(super::error::WorkError::policy_unavailable());
     }
@@ -95,6 +102,9 @@ pub fn clear_roots(
     model: &BaseModelRecord,
 ) -> Result<Vec<super::types::WorkRootRef>, super::error::WorkError> {
     let before = policy_key(gcx, model)?;
+    let batch = BatchDeclaredRecords::new(gcx)
+        .map_err(|_| super::error::WorkError::policy_unavailable())?;
+    let destination = refact_privacy::Destination::from_model_record(model);
     let roots = roots
         .into_iter()
         .filter(|root| {
@@ -103,19 +113,20 @@ pub fn clear_roots(
                 .iter()
                 .chain(root.source_path.iter())
                 .map(PathBuf::from);
-            let Ok(records) = crate::privacy::records::declared_file_records(gcx, paths) else {
-                return false;
-            };
-            clear_for_model(
-                gcx,
+            let records = batch.classify_declared_paths(gcx, paths);
+            refact_privacy::clear(
                 WorkAudit {
                     records: records.into_iter().enumerate().collect(),
                 },
-                model,
+                &destination,
+                &batch.compiled,
             )
             .is_ok()
         })
         .collect();
+    batch
+        .finish(gcx)
+        .map_err(|_| super::error::WorkError::policy_unavailable())?;
     if policy_key(gcx, model)? != before {
         return Err(super::error::WorkError::policy_unavailable());
     }
@@ -125,6 +136,7 @@ pub fn clear_roots(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::privacy::destinations::clear_for_model;
     use crate::coordination::types::{
         Disclosure, RootPresence, WorkKindTag, WorkRootKind, WorkRootRef, WorkStateTag,
     };

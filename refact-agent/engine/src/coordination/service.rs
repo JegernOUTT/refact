@@ -538,12 +538,13 @@ fn revalidate_snapshot(
         let current = catalog
             .get(&row.key.to_string())
             .ok_or_else(WorkError::cursor_expired)?;
+        let current_records: HashSet<_> = current.source_records.iter().collect();
         if row_scope(row)? != row_scope(current)?
             || current.metadata.source_revision < row.metadata.source_revision
             || !row
                 .source_records
                 .iter()
-                .all(|record| current.source_records.contains(record))
+                .all(|record| current_records.contains(record))
         {
             return Err(WorkError::cursor_expired());
         }

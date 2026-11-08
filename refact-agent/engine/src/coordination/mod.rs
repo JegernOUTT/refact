@@ -55,6 +55,8 @@ pub mod teams;
 #[cfg(test)]
 mod teams_delegation_tests;
 pub mod types;
+#[cfg(all(test, feature = "perf-tests"))]
+mod validation_perf_tests;
 #[cfg(test)]
 mod work_vocabulary_tests;
 

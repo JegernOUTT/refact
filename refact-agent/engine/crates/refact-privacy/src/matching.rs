@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -173,19 +173,15 @@ impl CompiledPolicy {
             .map(|root| absolute_path(root.as_ref()))
             .collect::<Vec<_>>();
         let canonical_roots = canonical_roots_of(&roots);
-        self.zone_for_path_prepared(path, &roots, &canonical_roots)
+        let root_index = PreparedRootIndex::new(&roots, &canonical_roots);
+        self.zone_for_path_prepared(path, &root_index)
     }
 
-    fn zone_for_path_prepared(
-        &self,
-        path: &Path,
-        roots: &[PathBuf],
-        canonical_roots: &[PathBuf],
-    ) -> &Zone {
+    fn zone_for_path_prepared(&self, path: &Path, root_index: &PreparedRootIndex) -> &Zone {
         let canonical_path = canonicalize_or_original(&absolute_path(path));
 
         let mut candidate_paths = vec![path.to_path_buf(), absolute_path(path), canonical_path];
-        append_relative_candidates(&mut candidate_paths, roots, canonical_roots);
+        append_relative_candidates(&mut candidate_paths, root_index);
 
         let candidates = normalized_candidates(&candidate_paths);
         if let Some((index, _)) = self.zones.iter().enumerate().find(|(_, compiled)| {
@@ -221,10 +217,11 @@ impl CompiledPolicy {
             .map(|root| absolute_path(root.as_ref()))
             .collect::<Vec<_>>();
         let canonical_roots = canonical_roots_of(&roots);
+        let root_index = PreparedRootIndex::new(&roots, &canonical_roots);
         let zones = paths
             .into_iter()
             .map(|path| {
-                let zone = self.zone_for_path_prepared(path.as_ref(), &roots, &canonical_roots);
+                let zone = self.zone_for_path_prepared(path.as_ref(), &root_index);
                 let index = self
                     .zone_index_named(&zone.name)
                     .expect("matched zones should belong to the compiled policy");
@@ -350,16 +347,40 @@ fn canonicalize_or_original(path: &Path) -> PathBuf {
     dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
-fn append_relative_candidates(
-    candidate_paths: &mut Vec<PathBuf>,
-    roots: &[PathBuf],
-    canonical_roots: &[PathBuf],
-) {
+struct PreparedRootIndex {
+    roots: HashSet<PathBuf>,
+}
+
+impl PreparedRootIndex {
+    fn new(roots: &[PathBuf], canonical_roots: &[PathBuf]) -> Self {
+        Self {
+            roots: roots
+                .iter()
+                .zip(canonical_roots)
+                .flat_map(|(root, canonical_root)| [root.clone(), canonical_root.clone()])
+                .collect(),
+        }
+    }
+}
+
+fn append_relative_candidates(candidate_paths: &mut Vec<PathBuf>, root_index: &PreparedRootIndex) {
+    if root_index.roots.is_empty() {
+        return;
+    }
     let paths = candidate_paths.clone();
-    for (root, canonical_root) in roots.iter().zip(canonical_roots.iter()) {
-        for path in &paths {
-            for candidate_root in [root, canonical_root] {
-                if let Ok(relative) = path.strip_prefix(candidate_root) {
+    for path in &paths {
+        let prefixes = path.ancestors().chain(std::iter::once(Path::new("")));
+        #[cfg(windows)]
+        let prefixes = prefixes.chain(path.components().next().and_then(|component| {
+            if let std::path::Component::Prefix(prefix) = component {
+                Some(Path::new(prefix.as_os_str()))
+            } else {
+                None
+            }
+        }));
+        for prefix in prefixes {
+            if let Some(root) = root_index.roots.get(prefix) {
+                if let Ok(relative) = path.strip_prefix(root) {
                     candidate_paths.push(relative.to_path_buf());
                 }
             }
@@ -369,8 +390,13 @@ fn append_relative_candidates(
 
 fn normalized_candidates(paths: &[PathBuf]) -> BTreeSet<String> {
     let mut candidates = BTreeSet::new();
+    let mut seen = HashSet::new();
     for path in paths {
-        let normalized = normalize(&path.to_string_lossy());
+        let raw = path.to_string_lossy();
+        if !seen.insert(raw.clone()) {
+            continue;
+        }
+        let normalized = normalize(&raw);
         if !normalized.is_empty() {
             if let Some(basename) = normalized
                 .rsplit('/')
@@ -414,6 +440,39 @@ mod tests {
             zones,
             subagents: SubagentPolicy::default(),
             ..Default::default()
+        }
+    }
+
+    #[test]
+    fn normalized_candidates_match_reference_dedup_algorithm() {
+        let paths = vec![
+            PathBuf::from("A//./cafe\u{301}.txt"),
+            PathBuf::from("a//./cafe\u{301}.txt"),
+            PathBuf::from("café.txt"),
+            PathBuf::from("A//./cafe\u{301}.txt"),
+            PathBuf::from(r"C:\\Work\\..\\Secret.TXT"),
+        ];
+        let actual = normalized_candidates(&paths);
+        let mut expected = BTreeSet::new();
+        for path in &paths {
+            let normalized = normalize(&path.to_string_lossy());
+            if !normalized.is_empty() {
+                if let Some(base) = normalized.rsplit('/').find(|part| !part.is_empty()) {
+                    expected.insert(base.to_string());
+                }
+                expected.insert(normalized);
+            }
+        }
+        assert_eq!(actual, expected);
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt;
+            let non_utf8 = PathBuf::from(std::ffi::OsString::from_vec(vec![b'x', 0xff]));
+            let replacement = non_utf8.to_string_lossy().into_owned();
+            assert_eq!(
+                normalized_candidates(&[non_utf8]),
+                BTreeSet::from([normalize(&replacement)])
+            );
         }
     }
 
@@ -543,8 +602,15 @@ mod tests {
             [Path::new("b.txt"), Path::new("a.txt")],
         ] {
             let effective = compiled.strictest_zone_for_paths(paths);
-            assert!(effective.send_to.is_empty());
-            assert_eq!(effective.name, "effective:a+b");
+            assert_eq!(
+                effective,
+                Zone {
+                    name: "effective:a+b".to_string(),
+                    patterns: Vec::new(),
+                    send_to: Vec::new(),
+                    on_shell_read: ShellBehavior::Withhold,
+                }
+            );
         }
     }
 
@@ -768,5 +834,188 @@ mod tests {
                 .name,
             "secrets"
         );
+    }
+
+    #[test]
+    fn root_candidates_match_the_old_nested_loop() {
+        let atoms = [
+            "",
+            ".",
+            "./",
+            "a",
+            "b",
+            "a/./b",
+            "a/../b",
+            "a/a/a",
+            "café",
+            "cafe\u{301}",
+            "Case",
+            r"back\slash",
+        ];
+        let mut paths = vec![
+            PathBuf::from("/tmp/a/./b/file"),
+            PathBuf::from("a/a/a"),
+            PathBuf::from("./Case/file"),
+            PathBuf::from("café/file"),
+            PathBuf::from(r"back\slash/file"),
+        ];
+        for a in atoms {
+            for b in ["", "a", "./", "b", "a/../b"] {
+                paths.push(PathBuf::from(format!("{a}/{b}/leaf")));
+            }
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt;
+            paths.push(PathBuf::from(std::ffi::OsString::from_vec(vec![
+                b'x', 0xff,
+            ])));
+        }
+        let roots = [
+            PathBuf::from(""),
+            PathBuf::from("."),
+            PathBuf::from("./"),
+            PathBuf::from("a/"),
+            PathBuf::from("a//"),
+            PathBuf::from("a/./b"),
+            PathBuf::from("a/../b"),
+            PathBuf::from("a/a/a"),
+            PathBuf::from("/tmp/a"),
+            PathBuf::from(r"C:\foo"),
+            PathBuf::from(r"C:\foo\"),
+            PathBuf::from(r"C:foo"),
+            PathBuf::from(r"\foo"),
+            PathBuf::from(r"\server\share"),
+            PathBuf::from("café"),
+            PathBuf::from("cafe\u{301}"),
+            PathBuf::from("Case"),
+        ];
+        let canonical: Vec<_> = roots
+            .iter()
+            .map(|root| canonicalize_or_original(root))
+            .collect();
+        for path in &paths {
+            let candidates = [
+                path.clone(),
+                absolute_path(path),
+                canonicalize_or_original(&absolute_path(path)),
+            ];
+            let mut old = Vec::new();
+            for candidate in &candidates {
+                old.push(candidate.clone());
+                for (root, canon) in roots.iter().zip(&canonical) {
+                    for prefix in [root, canon] {
+                        if let Ok(relative) = candidate.strip_prefix(prefix) {
+                            old.push(relative.to_path_buf());
+                        }
+                    }
+                }
+            }
+            let mut actual = candidates.to_vec();
+            let index = PreparedRootIndex::new(&roots, &canonical);
+            append_relative_candidates(&mut actual, &index);
+            let raw = |values: &[PathBuf]| {
+                values
+                    .iter()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .collect::<BTreeSet<_>>()
+            };
+            assert_eq!(raw(&actual), raw(&old), "path={path:?}");
+            assert_eq!(
+                normalized_candidates(&actual),
+                normalized_candidates(&old),
+                "path={path:?}"
+            );
+        }
+        let unequal_canonical = PreparedRootIndex::new(&roots, &canonical[..canonical.len() - 1]);
+        let path = PathBuf::from("a/a/a/file");
+        let mut actual = vec![path.clone()];
+        append_relative_candidates(&mut actual, &unequal_canonical);
+        let mut old = vec![path.clone()];
+        for (root, canon) in roots.iter().zip(&canonical[..canonical.len() - 1]) {
+            for prefix in [root, canon] {
+                if let Ok(relative) = path.strip_prefix(prefix) {
+                    old.push(relative.to_path_buf());
+                }
+            }
+        }
+        assert_eq!(
+            actual
+                .iter()
+                .map(|p| p.to_string_lossy().into_owned())
+                .collect::<BTreeSet<_>>(),
+            old.iter()
+                .map(|p| p.to_string_lossy().into_owned())
+                .collect::<BTreeSet<_>>()
+        );
+    }
+
+    #[test]
+    fn prepared_root_policy_matches_fresh_reference_classification() {
+        let compiled = policy(vec![
+            zone("private", &["secret/*", "*/secret.txt"], &[]),
+            zone("other", &["other/*"], &["provider"]),
+            zone("normal", &["**"], &["*"]),
+        ])
+        .compile()
+        .unwrap();
+        let roots = [
+            PathBuf::from("."),
+            PathBuf::from("./"),
+            PathBuf::from("secret/.."),
+            PathBuf::from("/tmp"),
+        ];
+        let canonical: Vec<_> = roots
+            .iter()
+            .map(|root| canonicalize_or_original(root))
+            .collect();
+        let index = PreparedRootIndex::new(&roots, &canonical);
+        let paths = [
+            PathBuf::from("secret/secret.txt"),
+            PathBuf::from("other/file"),
+            PathBuf::from("unmatched"),
+            PathBuf::from("/tmp/secret/secret.txt"),
+        ];
+        let mut actual_zones = Vec::new();
+        let mut reference_zones = Vec::new();
+        for path in paths {
+            let actual = compiled.zone_for_path_prepared(&path, &index);
+            let base_candidates = [
+                path.clone(),
+                absolute_path(&path),
+                canonicalize_or_original(&absolute_path(&path)),
+            ];
+            let mut reference_candidates = base_candidates.to_vec();
+            for candidate in &base_candidates {
+                for (root, canon) in roots.iter().zip(&canonical) {
+                    for prefix in [root, canon] {
+                        if let Ok(relative) = candidate.strip_prefix(prefix) {
+                            reference_candidates.push(relative.to_path_buf());
+                        }
+                    }
+                }
+            }
+            let reference_candidates = normalized_candidates(&reference_candidates);
+            let expected = compiled
+                .zones
+                .iter()
+                .find(|compiled_zone| {
+                    compiled_zone.patterns.iter().any(|pattern| {
+                        reference_candidates
+                            .iter()
+                            .any(|candidate| pattern.matches(candidate))
+                    })
+                })
+                .map(|compiled_zone| &compiled_zone.zone)
+                .unwrap_or(&compiled.zones[compiled.normal_index].zone);
+            assert_eq!(actual, expected);
+            let actual_index = compiled.zone_index_named(actual.name.as_str()).unwrap();
+            let expected_index = compiled.zone_index_named(expected.name.as_str()).unwrap();
+            actual_zones.push((actual_index, actual));
+            reference_zones.push((expected_index, expected));
+        }
+        let actual = effective_zone(&actual_zones).unwrap();
+        let expected = effective_zone(&reference_zones).unwrap();
+        assert_eq!(actual, expected);
     }
 }

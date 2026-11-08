@@ -870,6 +870,72 @@ pub fn declared_file_record(gcx: &Arc<GlobalContext>, path: &Path) -> Result<Fil
     )
 }
 
+pub(crate) struct BatchDeclaredRecords {
+    policy: Arc<refact_privacy::PrivacyPolicy>,
+    pub(crate) compiled: refact_privacy::CompiledPolicy,
+    mappings: crate::files_correction::WorktreePathMappings,
+}
+
+impl BatchDeclaredRecords {
+    pub(crate) fn new(gcx: &Arc<GlobalContext>) -> Result<Self, String> {
+        let load = gcx
+            .privacy_policy_load
+            .read()
+            .map_err(|_| "privacy batch unavailable")?;
+        if load.error.is_some() {
+            return Err("privacy batch unavailable".into());
+        }
+        let policy = load.policy.clone();
+        drop(load);
+        let compiled = policy.compile().map_err(|_| "privacy batch unavailable")?;
+        let mappings = registered_worktree_path_mappings(gcx.cache_dir.as_path());
+        Ok(Self {
+            policy,
+            compiled,
+            mappings,
+        })
+    }
+
+    pub(crate) fn classify_declared_paths(
+        &self,
+        gcx: &Arc<GlobalContext>,
+        paths: impl IntoIterator<Item = PathBuf>,
+    ) -> Vec<FileRecord> {
+        let derived_zones = new_derived_privacy_zones();
+        let mut records = Vec::new();
+        let mut seen = HashSet::new();
+        for path in paths {
+            let record = file_record_with(
+                gcx,
+                &self.compiled,
+                &self.mappings,
+                &path,
+                Attribution::Declared,
+                &derived_zones,
+            );
+            if seen.insert(record.clone()) {
+                records.push(record);
+            }
+        }
+        records
+    }
+
+    pub(crate) fn finish(&self, gcx: &Arc<GlobalContext>) -> Result<(), String> {
+        let mappings = registered_worktree_path_mappings(gcx.cache_dir.as_path());
+        let load = gcx
+            .privacy_policy_load
+            .read()
+            .map_err(|_| "privacy batch changed")?;
+        if load.error.is_some()
+            || !Arc::ptr_eq(&load.policy, &self.policy)
+            || *mappings != *self.mappings
+        {
+            return Err("privacy batch changed".into());
+        }
+        Ok(())
+    }
+}
+
 pub fn declared_file_records(
     gcx: &Arc<GlobalContext>,
     paths: impl IntoIterator<Item = PathBuf>,
@@ -1041,6 +1107,61 @@ mod tests {
     use super::*;
     use refact_exec::ObservedAccess;
     use refact_privacy::{PrivacyPolicy, SubagentPolicy, Zone};
+
+    #[tokio::test]
+    async fn declared_batch_matches_sequential_and_finish_revokes_policy_swap() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = ["normal.txt", "guarded.txt", "blocked.txt", "normal.txt"]
+            .into_iter()
+            .map(|name| temp.path().join(name))
+            .collect::<Vec<_>>();
+        for path in &paths {
+            std::fs::write(path, "fixture").unwrap();
+        }
+        let gcx = gcx_with_zones(
+            temp.path(),
+            vec![
+                Zone {
+                    name: "guarded".into(),
+                    patterns: vec!["guarded.txt".into()],
+                    send_to: vec!["trusted".into()],
+                    on_shell_read: ShellBehavior::Ask,
+                },
+                Zone {
+                    name: "normal".into(),
+                    patterns: vec!["*".into()],
+                    send_to: vec!["*".into()],
+                    on_shell_read: ShellBehavior::Withhold,
+                },
+            ],
+        )
+        .await;
+        let zones = gcx.privacy_policy_load.read().unwrap().policy.zones.clone();
+        gcx.privacy_policy_load.write().unwrap().policy = Arc::new(PrivacyPolicy {
+            blocked: vec!["blocked.txt".into()],
+            zones,
+            ..Default::default()
+        });
+        let batch = BatchDeclaredRecords::new(&gcx).unwrap();
+        let expected = declared_file_records(&gcx, paths.clone()).unwrap();
+        assert_eq!(batch.classify_declared_paths(&gcx, paths.clone()), expected);
+        batch.finish(&gcx).unwrap();
+        let old = gcx.privacy_policy_load.read().unwrap().policy.clone();
+        gcx.privacy_policy_load.write().unwrap().policy = Arc::new((*old).clone());
+        assert!(
+            batch.finish(&gcx).is_err(),
+            "policy identity swap must revoke in-flight batch"
+        );
+        let malformed = Arc::new(PrivacyPolicy {
+            blocked: vec!["[".into()],
+            ..Default::default()
+        });
+        gcx.privacy_policy_load.write().unwrap().policy = malformed;
+        assert!(
+            BatchDeclaredRecords::new(&gcx).is_err(),
+            "invalid policy must fail closed"
+        );
+    }
 
     async fn gcx_with_policy(
         workspace_file: &Path,
