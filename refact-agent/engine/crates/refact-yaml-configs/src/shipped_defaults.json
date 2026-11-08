@@ -5,7 +5,7 @@
   "modes/agent.yaml": [[25, "1759b9a55d2a536a90ccfaeffc600666"], [26, "1197095d0a9bde204cd2092d434cd5e1"], [27, "7bee4134a2bf7f56cfd6dec68a07cec2"], [28, "cf92d6a3f9a6a783933bbc133ed8f1b8"], [29, "4fbc721b5d9e357dd4ebf0d5db1f80f7"], [30, "aa96fe9a35d6338f2dd3225dcd123211"], [31, "d10c8534a48dc84a7be156a71a5b1f20"]],
   "modes/ask.yaml": [[13, "28e6879ca94a1f7ae4761cb905ea6faa"], [14, "95d6c249768b8035557e5db813fb8d73"], [15, "d62cc3d7e5bcc5e5396ca3b33e3322b6"]],
   "modes/brainstorming.yaml": [[7, "60de163b20f4dea1ae59ed447971c7cf"], [8, "832a68550f3d28a1666534aad3e07e29"], [9, "3bc93f97dd33ca8b6cb1ab99a7e4d016"], [10, "705274c6d2dc9f2a4f70fa9866b7d834"]],
-  "modes/buddy.yaml": [[20, "eb6bfb9ec914ad6f45228c75a61c1820"]],
+  "modes/buddy.yaml": [[20, "eb6bfb9ec914ad6f45228c75a61c1820"], [21, "17ba7dad5bf26db4df78f7aa358bcbb0"]],
   "modes/configurator.yaml": [[15, "3751674f888a5fd7c95d11721ea7f9ed"]],
   "modes/debug.yaml": [[22, "72e7c6b88acf20546f2424a0a7f19fa8"], [23, "b8aee558ea597bf73bbc53f8fd9f5a68"], [24, "130af5d061e2130b20f142dd597e5424"], [25, "08be5aa44b2f1f3baca4b46ff49e3c45"], [26, "fab0535dc23c0c469e2c72471d784028"]],
   "modes/design.yaml": [[26, "12f69b95d3d464020a7f9b099c13290f"], [27, "c32dc308ada1b3cf94996a3d35007b6e"], [28, "2583eaf8bc4a2ade73dc67af294338b8"], [29, "d5d82a619c7abfca975a30049118d2c4"]],
@@ -70,5 +70,6 @@
   "toolbox_commands/shorter.yaml": [[1, "f808ee52dfc6a44f4c13ae8c56c4415d"]],
   "toolbox_commands/summarize.yaml": [[1, "918b315bac6a2711bcd465b2a03f9f3e"]],
   "toolbox_commands/typehints.yaml": [[1, "004a30da6b1df819debc006e23d271f0"]],
-  "toolbox_commands/typos.yaml": [[1, "46346c1d9621677f580f2ec402917baf"]]
+  "toolbox_commands/typos.yaml": [[1, "46346c1d9621677f580f2ec402917baf"]],
+  "subagents/buddy_organization.yaml": [[1, "e09e01ffb10f0b4ec1969b593f3d9cab"]]
 }

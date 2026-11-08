@@ -1,3 +1,5 @@
+import { useOrganization } from "../../hooks/useOrganization";
+import { organizationItemKey } from "../../../../services/refact/organization";
 import { useAppSelector } from "../../../../hooks/useAppSelector";
 import { useConfig } from "../../../../hooks/useConfig";
 import {
@@ -50,6 +52,16 @@ export const StreamRow: React.FC<StreamRowProps> = ({
   const isChat = item.kind === "chat";
   const activity = useAppSelector((state) =>
     selectChatActivityById(state, item.id),
+  );
+  const organization = useOrganization();
+  const assignment = organization.byKey.get(
+    organizationItemKey(item.organizationKey ?? item),
+  );
+  const topic = organization.topics.currentData?.items.find(
+    (entry) => entry.id === assignment?.topic_id,
+  );
+  const tags = (organization.tags.currentData?.items ?? []).filter(
+    (entry) => assignment?.tag_ids.includes(entry.id),
   );
 
   const handleClick = useCallback(() => {
@@ -157,28 +169,22 @@ export const StreamRow: React.FC<StreamRowProps> = ({
       </span>
 
       <span className={classNames(styles.slot, styles.slot1)}>
-        {isChat ? (
-          <>
-            {item.mode && <span className={styles.chip}>{item.mode}</span>}
-            {item.diff && (
-              <span className={classNames(styles.chip, styles.chipMono)}>
-                <span className={styles.chipAdds}>+{item.diff.adds}</span>
-                <span className={styles.chipDels}>−{item.diff.dels}</span>
-              </span>
-            )}
-          </>
-        ) : (
-          <>
-            <span className={styles.chip}>
-              {item.cardsDone}/{item.cardsTotal}
+        <span className={styles.organization}>
+          {!assignment && <span className={styles.chip}>Unknown</span>}
+          {topic && (
+            <span className={styles.chip} title={topic.name}>
+              {topic.name}
             </span>
-            {item.cardsFailed != null && item.cardsFailed > 0 && (
-              <span className={classNames(styles.chip, styles.chipDels)}>
-                {item.cardsFailed} failed
-              </span>
-            )}
-          </>
-        )}
+          )}
+          {tags.slice(0, 2).map((tag) => (
+            <span className={styles.chip} key={tag.id} title={tag.name}>
+              {tag.name}
+            </span>
+          ))}
+          {tags.length > 2 && (
+            <span className={styles.chip}>+{tags.length - 2}</span>
+          )}
+        </span>
       </span>
 
       <span className={styles.slot}>

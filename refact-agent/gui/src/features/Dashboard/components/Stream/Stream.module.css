@@ -142,12 +142,12 @@
 .row {
   display: grid;
   grid-template-columns:
-    var(--stream-tile-col) minmax(0, 1fr) 128px var(--stream-state-col)
+    var(--stream-tile-col) minmax(0, 1fr) 200px var(--stream-state-col)
     var(--stream-expand-col) var(--stream-time-col);
   align-items: center;
   gap: var(--rf-space-2);
   width: 100%;
-  min-height: 40px;
+  min-height: 34px;
   padding-inline: var(--rf-space-3);
   border: 0;
   background: transparent;
@@ -687,4 +687,23 @@
     transition: none;
     transform: none;
   }
+}
+
+.scopeNote {
+  padding: var(--rf-space-1) var(--rf-space-3);
+  font-size: var(--rf-text-1);
+  line-height: var(--rf-line-1);
+  color: var(--rf-color-muted);
+}
+.organization {
+  display: flex;
+  align-items: center;
+  gap: var(--rf-space-1);
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+.organization span {
+  overflow: hidden;
+  text-overflow: ellipsis;
 }

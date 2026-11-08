@@ -308,6 +308,7 @@ export function defaultBuddySettings(): BuddySettings {
     message_observation_enabled: true,
     chat_reactions_enabled: true,
     housekeeping_enabled: true,
+    organization_enabled: true,
     humor_enabled: true,
     humor_level: "light",
     autonomy_level: "suggest",
@@ -422,6 +423,9 @@ function getBuddySettingsPatchFromSettings(
   }
   if (keys.includes("housekeeping_enabled")) {
     patch.housekeeping_enabled = settings.housekeeping_enabled;
+  }
+  if (keys.includes("organization_enabled")) {
+    patch.organization_enabled = settings.organization_enabled;
   }
   if (keys.includes("humor_enabled")) {
     patch.humor_enabled = settings.humor_enabled;

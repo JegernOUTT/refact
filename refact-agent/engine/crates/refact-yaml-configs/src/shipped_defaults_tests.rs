@@ -262,3 +262,24 @@ tool_confirm:
     assert_eq!(installed, embedded_ask);
     assert!(installed.contains("  - agent_mailbox"));
 }
+
+#[tokio::test]
+async fn organization_bootstrap_installs_exact_semantic_no_tools_builtin() {
+    let dir = tempfile::tempdir().unwrap();
+    global_configs_try_create_all(dir.path()).await.unwrap();
+    let text = fs::read_to_string(dir.path().join("subagents/buddy_organization.yaml"))
+        .await
+        .unwrap();
+    let config: crate::customization_types::SubagentConfig = serde_yaml::from_str(&text).unwrap();
+    assert_eq!(config.id, "buddy_organization");
+    assert!(!config.expose_as_tool);
+    assert!(config.tools.is_empty());
+    let value: serde_yaml::Value = serde_yaml::from_str(&text).unwrap();
+    assert_eq!(value["subchat"]["model_type"].as_str(), Some("buddy"));
+    assert_eq!(value["subchat"]["max_steps"].as_u64(), Some(1));
+    let system = config.messages.system_prompt.unwrap();
+    assert!(system.contains("topic_name"));
+    assert!(system.contains("tag_names"));
+    assert!(system.contains("fingerprint"));
+    assert!(!system.contains("expected_revision"));
+}

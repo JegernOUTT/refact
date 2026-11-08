@@ -135,6 +135,12 @@ export const BuddyChatGroup: React.FC<BuddySettingsGroupProps> = ({
         checked={settings.housekeeping_enabled}
         onChange={(v) => onPatch({ housekeeping_enabled: v })}
       />
+      <SwitchRow
+        title="Topics and tags"
+        description="Periodically organize project chats and tasks by theme."
+        checked={settings.organization_enabled ?? true}
+        onChange={(v) => onPatch({ organization_enabled: v })}
+      />
     </div>
   </BuddySection>
 );

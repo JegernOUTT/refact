@@ -14,6 +14,7 @@ pub mod config_watcher;
 pub mod error_triage;
 pub mod greeting;
 pub mod health_watcher;
+pub mod organization;
 pub mod proactive_suggestions;
 pub mod quest_prompt;
 pub mod refact_compile_sniffer;

@@ -92,10 +92,7 @@ export const Dashboard: React.FC = () => {
     [dispatch],
   );
 
-  const streamFilter = useMemo<StreamFilter>(
-    () => ({ kind: filter.kind, query: filter.query }),
-    [filter.kind, filter.query],
-  );
+  const streamFilter = useMemo<StreamFilter>(() => filter, [filter]);
 
   const isLoading = chatsLoading || tasksLoading;
   const loadError = tasksError ?? chatsError;

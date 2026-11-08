@@ -10,6 +10,7 @@ import { DeletePopover } from "../../../../components/DeletePopover/DeletePopove
 import type { StreamItem } from "../../streamSelectors";
 import { formatCompactNumber, staggerClass } from "./streamRowUtils";
 import styles from "./Stream.module.css";
+import { OrganizationEditor } from "./OrganizationEditor";
 
 function formatDateTime(timestampMs: number): string {
   return new Date(timestampMs).toLocaleString(undefined, {
@@ -162,6 +163,7 @@ export const RowPeek: React.FC<RowPeekProps> = ({ item, onOpen, onDelete }) => {
             handleDelete={() => onDelete()}
           />
         )}
+        <OrganizationEditor item={item} />
       </div>
     </div>
   );

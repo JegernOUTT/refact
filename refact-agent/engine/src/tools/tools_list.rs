@@ -795,6 +795,22 @@ async fn get_builtin_tools(
         Box::new(crate::tools::tool_work_overview::ToolWorkOverview {
             config_path: config_path.clone(),
         }),
+        Box::new(crate::tools::tool_organization::ToolOrganization {
+            name: "organization_list".into(),
+            config_path: config_path.clone(),
+        }),
+        Box::new(crate::tools::tool_organization::ToolOrganization {
+            name: "organization_candidates".into(),
+            config_path: config_path.clone(),
+        }),
+        Box::new(crate::tools::tool_organization::ToolOrganization {
+            name: "organization_apply".into(),
+            config_path: config_path.clone(),
+        }),
+        Box::new(crate::tools::tool_organization::ToolOrganization {
+            name: "organization_status".into(),
+            config_path: config_path.clone(),
+        }),
         Box::new(crate::tools::tool_work_inspect::ToolWorkInspect {
             config_path: config_path.clone(),
         }),

@@ -377,6 +377,54 @@ describe("BuddySettingsPanel_autosave", () => {
   afterEach(() => {
     vi.useRealTimers();
   });
+  it("persists topic organization independently of other background permissions", async () => {
+    let capturedBody: unknown;
+    server.use(
+      http.post("*/v1/buddy/settings", async ({ request }) => {
+        capturedBody = await request.json();
+        return HttpResponse.json({
+          ...makeSnapshot().settings,
+          organization_enabled: false,
+        });
+      }),
+    );
+    const store = setUpStore({ ...CONFIG_STATE });
+    store.dispatch(setBuddySnapshot(makeSnapshot()));
+    const { user } = render(<BuddySettingsPanel />, { store });
+    const control = await screen.findByRole("switch", {
+      name: /topics and tags/i,
+    });
+    expect(control).toBeChecked();
+    await user.click(control);
+    await waitFor(() =>
+      expect(capturedBody).toEqual({ organization_enabled: false }),
+    );
+    expect(control).not.toBeChecked();
+    expect(
+      store.getState().buddy.snapshot?.settings.autonomous_chats_enabled,
+    ).toBe(true);
+  });
+
+  it("restores topic organization after a failed autosave", async () => {
+    server.use(
+      http.post("*/v1/buddy/settings", () =>
+        HttpResponse.json({ error: "save failed" }, { status: 500 }),
+      ),
+    );
+    const store = setUpStore({ ...CONFIG_STATE });
+    store.dispatch(setBuddySnapshot(makeSnapshot()));
+    const { user } = render(<BuddySettingsPanel />, { store });
+    const control = await screen.findByRole("switch", {
+      name: /topics and tags/i,
+    });
+    await user.click(control);
+    expect(await screen.findByRole("alert")).toHaveTextContent("Save failed");
+    expect(control).toBeChecked();
+    expect(store.getState().buddy.snapshot?.settings.organization_enabled).toBe(
+      true,
+    );
+  });
+
   it("toggling a switch immediately sends partial patch to server", async () => {
     let capturedBody: unknown;
     server.use(

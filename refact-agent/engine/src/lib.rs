@@ -81,6 +81,7 @@ pub mod files_correction;
 pub mod files_in_jsonl;
 pub mod files_in_workspace;
 pub mod indexing_routing;
+pub mod organization;
 
 pub mod code_mode;
 pub mod codegraph;

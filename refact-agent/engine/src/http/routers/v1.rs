@@ -202,6 +202,7 @@ mod mcp_marketplace_sources;
 mod mcp_oauth;
 mod mcp_server_info;
 mod metrics;
+mod organization;
 mod performance;
 mod plugins;
 mod privacy;
@@ -305,6 +306,13 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
     let builder = Router::new()
         .merge(core_routes())
         .merge(coordination_routes())
+        .merge(
+            Router::new()
+                .route("/organization/taxonomy", get(organization::taxonomy))
+                .route("/organization/items", post(organization::items))
+                .route("/organization/apply", post(organization::apply))
+                .layer(axum::extract::DefaultBodyLimit::max(128 * 1024)),
+        )
         .merge(tools_routes())
         .merge(lsp_routes())
         .merge(ast_routes())

@@ -1,4 +1,6 @@
-import { describe, expect, it, vi } from "vitest";
+import { server } from "../../../../utils/mockServer";
+import { organizationTestHandlers } from "../../organizationTestHandlers";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { act } from "react-dom/test-utils";
 import { fireEvent, render, screen } from "../../../../utils/test-utils";
 import { FilterBar } from "./FilterBar";
@@ -52,15 +54,15 @@ describe("FilterBar controls", () => {
       ]),
     });
 
-    expect(screen.getByRole("radiogroup")).toBeInTheDocument();
-    expect(screen.getAllByRole("radio")).toHaveLength(3);
-    expect(screen.getByRole("radio", { name: "All" })).toBeChecked();
-    expect(screen.getByRole("radio", { name: "Chats 2" })).toBeInTheDocument();
-    expect(screen.getByRole("radio", { name: "Tasks 0" })).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "Type" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("combobox", { name: "Topics" }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Tags" })).toBeInTheDocument();
     expect(
       screen.getByRole("searchbox", { name: "Search chats and tasks" }),
     ).toBeInTheDocument();
-    expect(screen.queryByRole("button")).not.toBeInTheDocument();
+
     expect(screen.queryByText(/today/)).not.toBeInTheDocument();
   });
 
@@ -73,12 +75,14 @@ describe("FilterBar controls", () => {
       />,
     );
 
-    await user.click(screen.getByRole("radio", { name: /^Chats/ }));
+    await user.click(screen.getByRole("combobox", { name: "Type" }));
+    await user.click(screen.getByRole("option", { name: "Chats" }));
     expect(onFilterChange).toHaveBeenLastCalledWith({
       kind: "chat",
       query: "existing",
     });
-    await user.click(screen.getByRole("radio", { name: /^Tasks/ }));
+    await user.click(screen.getByRole("combobox", { name: "Type" }));
+    await user.click(screen.getByRole("option", { name: "Tasks" }));
     expect(onFilterChange).toHaveBeenLastCalledWith({
       kind: "task",
       query: "existing",
@@ -125,4 +129,13 @@ describe("FilterBar controls", () => {
       vi.useRealTimers();
     }
   });
+});
+
+beforeEach(() => server.use(...organizationTestHandlers));
+
+beforeEach(() => {
+  Element.prototype.hasPointerCapture = () => false;
+  Element.prototype.setPointerCapture = () => undefined;
+  Element.prototype.releasePointerCapture = () => undefined;
+  Element.prototype.scrollIntoView = () => undefined;
 });

@@ -1,3 +1,4 @@
+import { organizationTestHandlers } from "./organizationTestHandlers";
 import { http, HttpResponse } from "msw";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { act } from "react-dom/test-utils";
@@ -61,7 +62,8 @@ describe("Dashboard composition", () => {
       screen.getByRole("region", { name: "Home Buddy" }),
     );
     expect(container.querySelectorAll(".rf-stagger > *")).toHaveLength(3);
-    await user.click(screen.getByRole("radio", { name: /^Tasks/ }));
+    await user.click(screen.getByRole("combobox", { name: "Type" }));
+    await user.click(screen.getByRole("option", { name: "Tasks" }));
     expect(screen.getByTestId("main-stream")).toHaveTextContent("task:");
   });
 
@@ -100,4 +102,13 @@ describe("Dashboard composition", () => {
     expect(screen.getByText("Task service unavailable")).toBeInTheDocument();
     expect(screen.queryByTestId("main-stream")).not.toBeInTheDocument();
   });
+});
+
+beforeEach(() => server.use(...organizationTestHandlers));
+
+beforeEach(() => {
+  Element.prototype.hasPointerCapture = () => false;
+  Element.prototype.setPointerCapture = () => undefined;
+  Element.prototype.releasePointerCapture = () => undefined;
+  Element.prototype.scrollIntoView = () => undefined;
 });

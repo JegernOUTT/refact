@@ -1,3 +1,4 @@
+import { organizationTestHandlers } from "../features/Dashboard/organizationTestHandlers";
 import { http, HttpResponse } from "msw";
 import { QueryStatus } from "@reduxjs/toolkit/query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -446,7 +447,7 @@ describe("Dashboard progressive sidebar readiness", () => {
     ).toBeInTheDocument();
     // Aggregate counters in the filter bar keep reporting the tasks that are
     // already known, even though the unified stream is still gated.
-    expect(screen.getByRole("radio", { name: "Tasks 1" })).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "Type" })).toBeInTheDocument();
     expect(screen.queryByText("Nothing here yet.")).not.toBeInTheDocument();
   });
 
@@ -562,3 +563,5 @@ describe("Dashboard stream row deletion", () => {
     ).toBeGreaterThan(0);
   });
 });
+
+beforeEach(() => server.use(...organizationTestHandlers));

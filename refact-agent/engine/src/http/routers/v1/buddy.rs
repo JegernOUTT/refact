@@ -210,6 +210,7 @@ pub struct BuddySettingsRequest {
     pub message_observation_enabled: Option<bool>,
     pub chat_reactions_enabled: Option<bool>,
     pub housekeeping_enabled: Option<bool>,
+    pub organization_enabled: Option<bool>,
     pub humor_enabled: Option<bool>,
     pub humor_level: Option<HumorLevel>,
     pub autonomy_level: Option<AutonomyLevel>,
@@ -307,6 +308,9 @@ impl BuddySettingsRequest {
         }
         if let Some(v) = self.housekeeping_enabled {
             settings.housekeeping_enabled = v;
+        }
+        if let Some(v) = self.organization_enabled {
+            settings.organization_enabled = v;
         }
         if let Some(v) = self.humor_enabled {
             settings.humor_enabled = v;

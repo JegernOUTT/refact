@@ -2,7 +2,7 @@
   container-type: inline-size;
   display: flex;
   align-items: center;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   gap: var(--rf-space-2);
   min-width: 0;
   flex-shrink: 0;
@@ -41,13 +41,21 @@
   outline: none;
 }
 
-@container (max-width: 420px) {
-  .segmented {
-    flex: 1 1 100%;
-  }
-
-  .searchField {
-    flex-basis: 100%;
-    min-width: 0;
-  }
+.secondary {
+  display: flex;
+  gap: var(--rf-space-1);
+  flex-shrink: 0;
+}
+.overflow {
+  display: block;
+}
+.select {
+  max-width: 140px;
+  min-width: 0;
+}
+.options {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-2);
+  padding: var(--rf-space-2);
 }

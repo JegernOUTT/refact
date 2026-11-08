@@ -110,6 +110,8 @@ pub struct BuddySettings {
     #[serde(default = "default_true")]
     pub housekeeping_enabled: bool,
     #[serde(default = "default_true")]
+    pub organization_enabled: bool,
+    #[serde(default = "default_true")]
     pub humor_enabled: bool,
     #[serde(default)]
     pub humor_level: HumorLevel,
@@ -165,6 +167,7 @@ impl Default for BuddySettings {
             message_observation_enabled: true,
             chat_reactions_enabled: true,
             housekeeping_enabled: true,
+            organization_enabled: true,
             humor_enabled: true,
             humor_level: HumorLevel::default(),
             autonomy_level: AutonomyLevel::default(),
@@ -202,5 +205,19 @@ mod tests {
         assert!(settings.muted_chat_ids.is_empty());
         assert_eq!(settings.daily_llm_token_budget, None);
         assert!(settings.operator_enabled);
+        assert!(settings.organization_enabled);
+    }
+}
+
+#[cfg(test)]
+mod organization_settings_tests {
+    #[test]
+    fn organization_disable_survives_settings_roundtrip() {
+        let mut settings = super::BuddySettings::default();
+        settings.organization_enabled = false;
+        let restored: super::BuddySettings =
+            serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
+        assert!(!restored.organization_enabled);
+        assert!(restored.enabled);
     }
 }

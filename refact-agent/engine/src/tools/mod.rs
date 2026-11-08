@@ -91,6 +91,7 @@ pub(crate) use tool_shell::approval_request_without_cache as shell_approval_requ
 pub(crate) use tool_process::approval_request_without_cache as process_approval_request_without_cache;
 #[cfg(test)]
 mod plan_history_archive_tests;
+pub mod tool_organization;
 pub(crate) mod tool_sleep;
 pub(crate) mod tool_spawn_ab;
 mod tool_subagent;

@@ -1222,6 +1222,7 @@ export interface BuddySettings {
   message_observation_enabled: boolean;
   chat_reactions_enabled: boolean;
   housekeeping_enabled: boolean;
+  organization_enabled?: boolean;
   humor_enabled: boolean;
   humor_level: HumorLevel;
   autonomy_level: AutonomyLevel;

@@ -1,4 +1,4 @@
-schema_version: 20
+schema_version: 21
 id: buddy
 title: Buddy
 description: Persistent project companion for setup, diagnostics, and knowledge management
@@ -86,6 +86,10 @@ tools:
   - search_semantic
   - knowledge
   - create_knowledge
+  - organization_list
+  - organization_candidates
+  - organization_apply
+  - organization_status
   - web
   - web_search
   - apply_patch
@@ -179,6 +183,8 @@ tool_confirm:
     - match: "buddy_speak"
       action: auto
     - match: "buddy_runtime_event"
+      action: auto
+    - match: "organization_*"
       action: auto
     - match: "buddy_memory_*"
       action: auto

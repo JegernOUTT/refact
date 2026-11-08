@@ -1,3 +1,9 @@
+import type {
+  Assignment,
+  OrganizationItem,
+  OrganizationOperation,
+  Taxon,
+} from "../../src/services/refact/organization";
 import React from "react";
 import { createRoot } from "react-dom/client";
 import { Provider, useSelector } from "react-redux";
@@ -2035,6 +2041,17 @@ function jsonResponse(data: unknown) {
   });
 }
 
+let organizationRevision = 1;
+const organizationTopics: Taxon[] = [
+  { id: "topic-gui", name: "Interface", archived: false },
+  { id: "topic-engine", name: "Engine", archived: false },
+];
+const organizationTags: Taxon[] = [
+  { id: "tag-review", name: "Review", archived: false },
+  { id: "tag-tests", name: "Tests", archived: false },
+  { id: "tag-polish", name: "Polish", archived: false },
+];
+const organizationAssignments = new Map<string, Assignment>();
 const nativeFetch = window.fetch.bind(window);
 const showcaseCommandLog: unknown[] = [];
 const showcaseClipboardWrites: string[] = [];
@@ -2093,6 +2110,59 @@ window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
     }
   }
   showcaseRequests.push({ path, method, body });
+  if (path === "/v1/organization/taxonomy")
+    return jsonResponse({
+      revision: organizationRevision,
+      items:
+        url.searchParams.get("kind") === "topics"
+          ? organizationTopics
+          : organizationTags,
+      next_cursor: null,
+    });
+  if (path === "/v1/organization/items") {
+    const { items } = body as { items: OrganizationItem[] };
+    return jsonResponse({
+      revision: organizationRevision,
+      assignments: items.map((item, index) => {
+        const key = `${item.kind}:${item.id}`;
+        const assignment = organizationAssignments.get(key) ?? {
+          item,
+          topic_id: index % 3 === 0 ? null : organizationTopics[index % 2].id,
+          tag_ids: index % 2 ? organizationTags.map((tag) => tag.id) : [],
+          topic_locked: false,
+          tags_locked: false,
+        };
+        organizationAssignments.set(key, assignment);
+        return assignment;
+      }),
+    });
+  }
+  if (path === "/v1/organization/apply") {
+    const payload = body as {
+      expected_revision: number;
+      operations: OrganizationOperation[];
+    };
+    if (payload.expected_revision !== organizationRevision)
+      return new Response("Organization changed", { status: 409 });
+    const results = payload.operations.map((operation, op_index) => {
+      if (operation.op === "assign_item") {
+        organizationAssignments.set(
+          `${operation.item.kind}:${operation.item.id}`,
+          operation,
+        );
+        return { op_index };
+      }
+      const id = `created-${organizationRevision}-${op_index}`;
+      (operation.op === "create_topic"
+        ? organizationTopics
+        : organizationTags
+      ).push({ id, name: operation.name, archived: false });
+      return { op_index, id };
+    });
+    organizationRevision++;
+    return jsonResponse({ revision: organizationRevision, results });
+  }
+
   if (path === "/v1/chats/activity") {
     return jsonResponse({ chats: homeActivityRoute ? homeActivityChats : [] });
   }

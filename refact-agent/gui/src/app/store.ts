@@ -13,6 +13,7 @@ import {
   persistStore,
   type PersistedState,
 } from "redux-persist";
+import { organizationApi } from "../services/refact/organization";
 import { statsApi } from "../services/refact/stats";
 import { codeIntelApi } from "../services/refact/codeIntel";
 import { workApi } from "../services/refact/work";
@@ -162,6 +163,7 @@ const rootReducer = combineSlices(
     sidebar: sidebarReducer,
     selected_snippet: selectedSnippetReducer,
     chat: chatReducer,
+    [organizationApi.reducerPath]: organizationApi.reducer,
     [statsApi.reducerPath]: statsApi.reducer,
     [codeIntelApi.reducerPath]: codeIntelApi.reducer,
     [workApi.reducerPath]: workApi.reducer,
@@ -314,6 +316,7 @@ export function setUpStore(preloadedState?: Partial<RootState>) {
       return middleware
         .prepend(
           pingApi.middleware,
+          organizationApi.middleware,
           statsApi.middleware,
           codeIntelApi.middleware,
           workApi.middleware,

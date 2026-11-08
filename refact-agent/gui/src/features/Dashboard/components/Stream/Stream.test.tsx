@@ -1,8 +1,17 @@
+import type {
+  Assignment,
+  OrganizationOperation,
+} from "../../../../services/refact/organization";
+import {
+  OrganizationContext,
+  useOrganizationData,
+} from "../../hooks/useOrganization";
+import { organizationTestHandlers } from "../../organizationTestHandlers";
 import { http, HttpResponse } from "msw";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { server } from "../../../../utils/mockServer";
 import {
-  render,
+  render as renderWithoutOrganization,
   screen,
   fireEvent,
   waitFor,
@@ -69,9 +78,304 @@ function trajectoryMeta(id: string, title: string) {
   };
 }
 
+beforeEach(() => server.use(...organizationTestHandlers));
+
+function OrganizationTestProvider({ children }: { children: React.ReactNode }) {
+  const organization = useOrganizationData();
+  return (
+    <OrganizationContext.Provider value={organization}>
+      {children}
+    </OrganizationContext.Provider>
+  );
+}
+
+function render(
+  ui: Parameters<typeof renderWithoutOrganization>[0],
+  options?: Parameters<typeof renderWithoutOrganization>[1],
+) {
+  return renderWithoutOrganization(
+    <OrganizationTestProvider>{ui}</OrganizationTestProvider>,
+    options,
+  );
+}
+
 const ALL_FILTER = { kind: "all" as const, query: "" };
 
 describe("StreamSection", () => {
+  it("persists manual tag locks independently and exposes Buddy resumption", async () => {
+    let assignment: Assignment = {
+      item: { kind: "chat", id: "a" },
+      topic_id: null,
+      tag_ids: [],
+      topic_locked: false,
+      tags_locked: false,
+    };
+    let revision = 1;
+    const operations: OrganizationOperation[] = [];
+    server.use(
+      http.get("*/v1/organization/taxonomy", ({ request }) =>
+        HttpResponse.json({
+          revision,
+          items:
+            new URL(request.url).searchParams.get("kind") === "tags"
+              ? [{ id: "tag", name: "Review", archived: false }]
+              : [],
+          next_cursor: null,
+        }),
+      ),
+      http.post("*/v1/organization/items", () =>
+        HttpResponse.json({ revision, assignments: [assignment] }),
+      ),
+      http.post("*/v1/organization/apply", async ({ request }) => {
+        const body = (await request.json()) as {
+          operations: OrganizationOperation[];
+          expected_revision: number;
+        };
+        expect(body.expected_revision).toBe(revision);
+        operations.push(...body.operations);
+        const operation = body.operations[0];
+        if (operation.op === "assign_item") assignment = operation;
+        revision++;
+        return HttpResponse.json({ revision, results: [{ op_index: 0 }] });
+      }),
+    );
+    const { user } = render(
+      <StreamSection
+        filter={ALL_FILTER}
+        onOpenChat={vi.fn()}
+        onOpenTask={vi.fn()}
+      />,
+      {
+        preloadedState: preloadedStateWith([
+          makeChat({ id: "a", title: "Editable" }),
+        ]),
+      },
+    );
+    fireEvent.click(screen.getByTestId("stream-expand-a"));
+    await user.click(screen.getByRole("button", { name: "Topic & tags" }));
+    await waitFor(() =>
+      expect(screen.getByRole("checkbox", { name: "Review" })).toBeEnabled(),
+    );
+    await user.click(screen.getByRole("checkbox", { name: "Review" }));
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Let Buddy manage tags" }),
+      ).toBeEnabled(),
+    );
+    expect(operations[0]).toMatchObject({
+      op: "assign_item",
+      item: { kind: "chat", id: "a" },
+      tag_ids: ["tag"],
+      tags_locked: true,
+      topic_locked: false,
+    });
+    await user.click(
+      screen.getByRole("button", { name: "Let Buddy manage tags" }),
+    );
+    await waitFor(() => expect(operations).toHaveLength(2));
+    expect(operations[1]).toMatchObject({
+      tags_locked: false,
+      tag_ids: ["tag"],
+      topic_locked: false,
+    });
+  });
+  it("filters real loaded assignments while keeping unclassified history and pagination honest", async () => {
+    server.use(
+      http.get("*/v1/organization/taxonomy", ({ request }) =>
+        HttpResponse.json({
+          revision: 1,
+          items:
+            new URL(request.url).searchParams.get("kind") === "topics"
+              ? [{ id: "topic", name: "Interface", archived: false }]
+              : [{ id: "tag", name: "Review", archived: false }],
+          next_cursor: null,
+        }),
+      ),
+      http.post("*/v1/organization/items", () =>
+        HttpResponse.json({
+          revision: 1,
+          assignments: [
+            {
+              item: { kind: "chat", id: "a" },
+              topic_id: "topic",
+              tag_ids: ["tag"],
+              topic_locked: false,
+              tags_locked: false,
+            },
+            {
+              item: { kind: "chat", id: "b" },
+              topic_id: null,
+              tag_ids: [],
+              topic_locked: false,
+              tags_locked: false,
+            },
+          ],
+        }),
+      ),
+    );
+    const state = preloadedStateWith([
+      makeChat({ id: "a", title: "Classified" }),
+      makeChat({ id: "b", title: "Unclassified" }),
+    ]);
+    const { rerender } = render(
+      <StreamSection
+        filter={ALL_FILTER}
+        onOpenChat={vi.fn()}
+        onOpenTask={vi.fn()}
+      />,
+      {
+        preloadedState: {
+          ...state,
+          history: {
+            ...state.history,
+            pagination: {
+              ...state.history.pagination,
+              hasMore: true,
+              cursor: "older",
+            },
+          },
+        },
+      },
+    );
+    await waitFor(() =>
+      expect(screen.getByText("Interface")).toBeInTheDocument(),
+    );
+    expect(screen.getByText("Unclassified")).toBeInTheDocument();
+    rerender(
+      <StreamSection
+        filter={{ ...ALL_FILTER, topicId: "topic", tagIds: ["tag"] }}
+        onOpenChat={vi.fn()}
+        onOpenTask={vi.fn()}
+      />,
+    );
+    expect(screen.getByText("Classified")).toBeInTheDocument();
+    expect(screen.queryByText("Unclassified")).not.toBeInTheDocument();
+    expect(
+      screen.getByText(/Filtering loaded history only/),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Load older chats" }),
+    ).toBeInTheDocument();
+    rerender(
+      <StreamSection
+        filter={{ ...ALL_FILTER, topicId: "unclassified" }}
+        onOpenChat={vi.fn()}
+        onOpenTask={vi.fn()}
+      />,
+    );
+    expect(screen.getByText("Unclassified")).toBeInTheDocument();
+    expect(screen.queryByText("Classified")).not.toBeInTheDocument();
+  });
+  it("keeps a valid root filterable and editable beside a forbidden orphan", async () => {
+    server.use(
+      http.get("*/v1/organization/taxonomy", ({ request }) =>
+        HttpResponse.json({
+          revision: 1,
+          items:
+            new URL(request.url).searchParams.get("kind") === "topics"
+              ? [{ id: "topic", name: "Interface", archived: false }]
+              : [{ id: "tag", name: "Review", archived: false }],
+          next_cursor: null,
+        }),
+      ),
+      http.post("*/v1/organization/items", async ({ request }) => {
+        const { items } = (await request.json()) as {
+          items: { kind: string; id: string }[];
+        };
+        if (items.some((item) => item.id === "orphan"))
+          return new HttpResponse(null, { status: 403 });
+        return HttpResponse.json({
+          revision: 1,
+          assignments: items.map((item) => ({
+            item,
+            topic_id: "topic",
+            tag_ids: ["tag"],
+            topic_locked: false,
+            tags_locked: false,
+          })),
+        });
+      }),
+    );
+    const { rerender, user } = render(
+      <StreamSection
+        filter={ALL_FILTER}
+        onOpenChat={vi.fn()}
+        onOpenTask={vi.fn()}
+      />,
+      {
+        preloadedState: preloadedStateWith([
+          makeChat({ id: "root", title: "Valid root" }),
+          makeChat({ id: "orphan", title: "Legacy orphan" }),
+        ]),
+      },
+    );
+    await waitFor(() =>
+      expect(screen.getByText("Interface")).toBeInTheDocument(),
+    );
+    expect(screen.getByText("Review")).toBeInTheDocument();
+    expect(screen.getByText("Legacy orphan")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Retry organization" }),
+    ).not.toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("stream-expand-root"));
+    await user.click(screen.getByRole("button", { name: "Topic & tags" }));
+    expect(screen.getByRole("combobox", { name: "Item topic" })).toBeEnabled();
+    await user.keyboard("{Escape}");
+    fireEvent.click(screen.getByTestId("stream-expand-orphan"));
+    await user.click(screen.getByRole("button", { name: "Topic & tags" }));
+    expect(screen.getByRole("combobox", { name: "Item topic" })).toBeDisabled();
+    expect(
+      screen.getByRole("combobox", { name: "Item topic" }),
+    ).toHaveTextContent("Unknown");
+    expect(
+      screen.getByRole("button", { name: "Create and assign" }),
+    ).toBeDisabled();
+    await user.keyboard("{Escape}");
+    rerender(
+      <StreamSection
+        filter={{ ...ALL_FILTER, topicId: "topic", tagIds: ["tag"] }}
+        onOpenChat={vi.fn()}
+        onOpenTask={vi.fn()}
+      />,
+    );
+    expect(screen.getByText("Valid root")).toBeInTheDocument();
+    expect(screen.queryByText("Legacy orphan")).not.toBeInTheDocument();
+    rerender(
+      <StreamSection
+        filter={{ ...ALL_FILTER, topicId: "unclassified" }}
+        onOpenChat={vi.fn()}
+        onOpenTask={vi.fn()}
+      />,
+    );
+    expect(screen.queryByText("Legacy orphan")).not.toBeInTheDocument();
+    expect(screen.queryByText("Valid root")).not.toBeInTheDocument();
+  });
+  it("keeps history visible on organization failure even with topic filters", async () => {
+    server.use(
+      http.get(
+        "*/v1/organization/taxonomy",
+        () => new HttpResponse(null, { status: 503 }),
+      ),
+    );
+    render(
+      <StreamSection
+        filter={{ ...ALL_FILTER, topicId: "missing" }}
+        onOpenChat={vi.fn()}
+        onOpenTask={vi.fn()}
+      />,
+      {
+        preloadedState: preloadedStateWith([
+          makeChat({ id: "a", title: "Still available" }),
+        ]),
+      },
+    );
+    await waitFor(() =>
+      expect(screen.getByText("Still available")).toBeInTheDocument(),
+    );
+    expect(
+      screen.getByRole("button", { name: "Retry organization" }),
+    ).toBeInTheDocument();
+  });
   it("shows truthful coarse chat activity separately from family aggregate status", () => {
     render(
       <StreamSection
@@ -241,7 +545,9 @@ describe("StreamSection", () => {
       },
     );
 
-    expect(screen.getByText("Nothing here yet.")).toBeInTheDocument();
+    expect(
+      screen.getByText("No matches in loaded history."),
+    ).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "Load older chats" }),
     ).toBeInTheDocument();

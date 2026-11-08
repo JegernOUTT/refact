@@ -61,6 +61,7 @@ const BUDDY_SETTINGS_PATCH_KEYS = [
   "message_observation_enabled",
   "chat_reactions_enabled",
   "housekeeping_enabled",
+  "organization_enabled",
   "humor_enabled",
   "humor_level",
   "autonomy_level",
@@ -125,6 +126,9 @@ function getBuddySettingsRollbackPatch(
   }
   if (keys.includes("housekeeping_enabled")) {
     patch.housekeeping_enabled = settings.housekeeping_enabled;
+  }
+  if (keys.includes("organization_enabled")) {
+    patch.organization_enabled = settings.organization_enabled ?? true;
   }
   if (keys.includes("humor_enabled"))
     patch.humor_enabled = settings.humor_enabled;

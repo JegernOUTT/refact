@@ -377,6 +377,8 @@ impl BuddyScheduler {
             super::jobs::buddy_daily_digest::BuddyDailyDigestJob,
         ));
         s.jobs
+            .push(Box::new(super::jobs::organization::BuddyOrganizationJob));
+        s.jobs
             .push(Box::new(super::jobs::buddy_briefing::BuddyBriefingJob));
         s.jobs.push(Box::new(
             super::jobs::buddy_handbook_distiller::BuddyHandbookDistillerJob,

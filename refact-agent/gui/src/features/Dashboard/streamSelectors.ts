@@ -1,3 +1,4 @@
+import type { OrganizationItem } from "../../services/refact/organization";
 import { createSelector } from "@reduxjs/toolkit";
 import type { RootState } from "../../app/store";
 import {
@@ -22,6 +23,7 @@ export type StreamStatus =
 export type StreamItem = {
   kind: StreamKind;
   id: string;
+  organizationKey?: OrganizationItem;
   title: string;
   updatedAtMs: number;
   createdAtMs: number | null;
@@ -54,7 +56,14 @@ export type FamilyChild = {
   depth: number;
 };
 
-export type StreamFilter = { kind: "all" | "chat" | "task"; query: string };
+export type StreamFilter = {
+  kind: "all" | "chat" | "task";
+  query: string;
+  topicId?: string;
+  tagIds?: string[];
+  status?: string;
+  sort?: string;
+};
 
 const EMPTY_CHATS: Record<string, ChatHistoryItem> = {};
 const EMPTY_TASKS: TaskMeta[] = [];
@@ -176,7 +185,10 @@ type FamilyStream = {
   searchText: string;
 };
 
-function familyToStream(root: HistoryTreeNode): FamilyStream {
+function familyToStream(
+  root: HistoryTreeNode,
+  chats: Record<string, ChatHistoryItem>,
+): FamilyStream {
   const family: HistoryTreeNode[] = [];
   collectFamily(root, family);
 
@@ -199,9 +211,15 @@ function familyToStream(root: HistoryTreeNode): FamilyStream {
     titles.push(node.title);
   }
 
+  const rootChatId = chats[root.id].root_chat_id ?? root.id;
+  const original = chats[rootChatId] as ChatHistoryItem | undefined;
+  const taskId = chats[root.id].task_id ?? original?.task_id;
   const item: StreamItem = {
     kind: "chat",
     id: root.id,
+    organizationKey: taskId
+      ? { kind: "task", id: taskId }
+      : { kind: "chat", id: rootChatId },
     title: root.title.length > 0 ? root.title : "New Chat",
     updatedAtMs,
     createdAtMs: toMsOrNull(root.createdAt),
@@ -235,6 +253,7 @@ function taskToStream(
   const item: StreamItem = {
     kind: "task",
     id: task.id,
+    organizationKey: { kind: "task", id: task.id },
     title: task.name.length > 0 ? task.name : "Untitled task",
     updatedAtMs: toMs(task.updated_at),
     createdAtMs: toMsOrNull(task.created_at),
@@ -322,9 +341,16 @@ const selectLinkedChatsByTask = createSelector(
 );
 
 const selectStreams = createSelector(
-  [selectHistoryTree, selectTaskMetas, selectLinkedChatsByTask],
-  (roots, tasks, linkedChatsByTask): FamilyStream[] => {
-    const streams: FamilyStream[] = roots.map((root) => familyToStream(root));
+  [
+    selectHistoryTree,
+    selectTaskMetas,
+    selectLinkedChatsByTask,
+    selectHistoryChats,
+  ],
+  (roots, tasks, linkedChatsByTask, chats): FamilyStream[] => {
+    const streams: FamilyStream[] = roots.map((root) =>
+      familyToStream(root, chats),
+    );
     for (const task of tasks) {
       streams.push(taskToStream(task, linkedChatsByTask));
     }

@@ -384,3 +384,40 @@ describe("selectFamilyChildren", () => {
     expect(selectFamilyChildren(state, "root")).toBe(forRoot);
   });
 });
+
+describe("organization canonical identity", () => {
+  it("keeps original root key when the history tree displays the latest handoff", () => {
+    const state = makeState([
+      makeChat({ id: "original", updatedAt: EARLIER }),
+      makeChat({
+        id: "handoff",
+        parent_id: "original",
+        root_chat_id: "original",
+        link_type: "handoff",
+        updatedAt: TODAY,
+      }),
+    ]);
+    const items = selectStreamGroups(state, ALL).flatMap(
+      (group) => group.items,
+    );
+    expect(items).toHaveLength(1);
+    expect(items[0].id).toBe("handoff");
+    expect(items[0].organizationKey).toEqual({ kind: "chat", id: "original" });
+  });
+  it("prefers task identity for task-owned stream chats", () => {
+    const state = makeState(
+      [makeChat({ id: "planner", task_id: "task-1", task_role: "planner" })],
+      [makeTask({ id: "task-1" })],
+    );
+    const items = selectStreamGroups(state, ALL).flatMap(
+      (group) => group.items,
+    );
+    expect(
+      items.every(
+        (item) =>
+          item.organizationKey?.kind === "task" &&
+          item.organizationKey.id === "task-1",
+      ),
+    ).toBe(true);
+  });
+});

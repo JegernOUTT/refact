@@ -1,3 +1,8 @@
+import {
+  OrganizationContext,
+  useOrganizationData,
+} from "../../hooks/useOrganization";
+import { organizationItemKey } from "../../../../services/refact/organization";
 import React, { useCallback, useMemo, useState } from "react";
 import classNames from "classnames";
 import { Virtuoso } from "react-virtuoso";
@@ -26,11 +31,7 @@ function flatten(groups: StreamGroup[]): FlatEntry[] {
   const out: FlatEntry[] = [];
   for (const group of groups) {
     if (group.items.length === 0) continue;
-    out.push({
-      type: "header",
-      key: `header-${group.label}`,
-      label: group.label,
-    });
+
     group.items.forEach((item, index) => {
       out.push({ type: "row", key: item.id, item, index });
     });
@@ -58,7 +59,42 @@ export const StreamSection: React.FC<StreamSectionProps> = ({
   );
   const [peekId, setPeekId] = useState<string | null>(null);
 
-  const entries = useMemo(() => flatten(groups), [groups]);
+  const organization = useOrganizationData();
+  const entries = useMemo(() => {
+    const rows = flatten(groups).filter((entry) => {
+      if (entry.type !== "row") return false;
+      if (
+        filter.status &&
+        filter.status !== "all" &&
+        entry.item.status !== filter.status
+      )
+        return false;
+      if (organization.error) return true;
+      const assignment = organization.byKey.get(
+        organizationItemKey(entry.item.organizationKey ?? entry.item),
+      );
+      if (filter.topicId && filter.topicId !== "all") {
+        if (
+          filter.topicId === "unclassified"
+            ? !assignment || assignment.topic_id !== null
+            : assignment?.topic_id !== filter.topicId
+        )
+          return false;
+      }
+      return (filter.tagIds ?? []).every(
+        (id) => assignment?.tag_ids.includes(id),
+      );
+    });
+    if (filter.sort === "oldest" || filter.sort === "title")
+      rows.sort((a, b) =>
+        a.type === "row" && b.type === "row"
+          ? filter.sort === "title"
+            ? a.item.title.localeCompare(b.item.title)
+            : a.item.updatedAtMs - b.item.updatedAtMs
+          : 0,
+      );
+    return rows;
+  }, [groups, filter, organization.byKey, organization.error]);
   const canLoadMoreChats = hasMore && filter.kind !== "task";
 
   const handleToggleFamily = useCallback((id: string) => {
@@ -162,35 +198,70 @@ export const StreamSection: React.FC<StreamSectionProps> = ({
   );
 
   return (
-    <div className={styles.container} data-testid="stream-section">
-      {entries.length === 0 ? (
-        <div className={styles.empty}>Nothing here yet.</div>
-      ) : (
-        <Virtuoso
-          data={entries}
-          overscan={200}
-          className={styles.list}
-          computeItemKey={(_index, entry) => entry.key}
-          itemContent={renderEntry}
-        />
-      )}
-      {canLoadMoreChats ? (
-        <div className={styles.loadMore}>
-          <Button
-            size="sm"
-            variant="soft"
-            onClick={handleLoadMore}
-            disabled={isLoading}
-          >
-            {isLoading
-              ? "Loading older chats…"
-              : error
-                ? "Retry loading older chats"
-                : "Load older chats"}
-          </Button>
-          {error ? <span className={styles.loadMoreError}>{error}</span> : null}
-        </div>
-      ) : null}
-    </div>
+    <OrganizationContext.Provider value={organization}>
+      <div className={styles.container} data-testid="stream-section">
+        {organization.error && (
+          <div className={styles.loadMoreError} role="status">
+            Organization unavailable; showing history.{" "}
+            <Button size="sm" variant="ghost" onClick={organization.retry}>
+              Retry organization
+            </Button>
+          </div>
+        )}
+        {!organization.error &&
+          Boolean(
+            organization.assignments.currentData?.unavailable_items?.length,
+          ) && (
+            <div className={styles.scopeNote} role="status">
+              Organization unavailable for some loaded history. These items are
+              excluded from topic and tag filters.
+            </div>
+          )}
+        {(Boolean(filter.topicId && filter.topicId !== "all") ||
+          (filter.tagIds?.length ?? 0) > 0) && (
+          <div className={styles.scopeNote}>
+            Filtering loaded history only. Load older chats to include more.
+          </div>
+        )}
+        {entries.length === 0 ? (
+          <div className={styles.empty}>
+            {filter.query.length > 0 ||
+            filter.kind !== "all" ||
+            Boolean(filter.topicId && filter.topicId !== "all") ||
+            (filter.tagIds?.length ?? 0) > 0 ||
+            (filter.status && filter.status !== "all")
+              ? "No matches in loaded history."
+              : "Nothing here yet."}
+          </div>
+        ) : (
+          <Virtuoso
+            data={entries}
+            overscan={200}
+            className={styles.list}
+            computeItemKey={(_index, entry) => entry.key}
+            itemContent={renderEntry}
+          />
+        )}
+        {canLoadMoreChats ? (
+          <div className={styles.loadMore}>
+            <Button
+              size="sm"
+              variant="soft"
+              onClick={handleLoadMore}
+              disabled={isLoading}
+            >
+              {isLoading
+                ? "Loading older chats…"
+                : error
+                  ? "Retry loading older chats"
+                  : "Load older chats"}
+            </Button>
+            {error ? (
+              <span className={styles.loadMoreError}>{error}</span>
+            ) : null}
+          </div>
+        ) : null}
+      </div>
+    </OrganizationContext.Provider>
   );
 };
