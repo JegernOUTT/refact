@@ -529,13 +529,13 @@ describe("Dashboard stream row deletion", () => {
     expect(await screen.findByText("Destructive action")).toBeInTheDocument();
     // Nothing happens until the destructive action is confirmed: the peek and
     // its Open action are still on screen.
-    expect(screen.getByRole("button", { name: "Open" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Open" })).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Delete" }));
 
     await waitFor(() => {
       expect(
-        screen.queryByRole("button", { name: "Open" }),
+        screen.queryByRole("link", { name: "Open" }),
       ).not.toBeInTheDocument();
     });
   });
@@ -556,7 +556,7 @@ describe("Dashboard stream row deletion", () => {
     await waitFor(() => {
       expect(screen.queryByText("Destructive action")).not.toBeInTheDocument();
     });
-    expect(screen.getByRole("button", { name: "Open" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Open" })).toBeInTheDocument();
     expect(
       screen.getAllByRole("button", { name: /Chat to delete/ }).length,
     ).toBeGreaterThan(0);

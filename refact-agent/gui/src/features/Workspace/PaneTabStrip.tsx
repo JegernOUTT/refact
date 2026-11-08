@@ -1,3 +1,9 @@
+import { useConfig } from "../../hooks/useConfig";
+import {
+  contentRouteForSurface,
+  contentRouteHref,
+  isPrimaryContentClick,
+} from "../../utils/contentRoutes";
 import { ChatActivityStatus } from "../../components/ChatActivity/ChatActivityStatus";
 import { activityFromSessionState } from "../../utils/chatActivity";
 import classNames from "classnames";
@@ -160,6 +166,10 @@ function LocalTabButton({
 }) {
   const dispatch = useAppDispatch();
   const pointerEnabled = usePointerDragHost();
+  const config = useConfig();
+  const route = contentRouteForSurface(tab.key);
+  const href =
+    config.host === "web" && route ? contentRouteHref(route) : undefined;
   const cleanup = useRef<() => void>();
   useEffect(() => () => cleanup.current?.(), []);
   const drop = (key: SurfaceKey | null) => {
@@ -218,17 +228,17 @@ function LocalTabButton({
       style={{ minWidth: minimumWidth }}
       data-pane-tab-key={tab.key}
       onPointerDownCapture={(event) => {
-        if (event.button !== 1) return;
+        if (event.button !== 1 || href) return;
         event.preventDefault();
         event.stopPropagation();
       }}
       onMouseDownCapture={(event) => {
-        if (event.button !== 1) return;
+        if (event.button !== 1 || href) return;
         event.preventDefault();
         event.stopPropagation();
       }}
       onAuxClick={(event) => {
-        if (event.button !== 1) return;
+        if (event.button !== 1 || href) return;
         event.preventDefault();
         event.stopPropagation();
         if (!tab.navigation || tab.navigation.onClose) close(tab);
@@ -249,8 +259,8 @@ function LocalTabButton({
     >
       <Tooltip>
         <Tooltip.Trigger asChild>
-          <button
-            type="button"
+          <a
+            href={href}
             role="tab"
             id={paneTabId(headerLeafId, tab.key)}
             aria-selected={active}
@@ -287,7 +297,11 @@ function LocalTabButton({
                 label: tab.title,
               }));
             }}
-            onClick={() => activate(tab.key)}
+            onClick={(event) => {
+              if (href && !isPrimaryContentClick(event)) return;
+              event.preventDefault();
+              activate(tab.key);
+            }}
             onKeyDown={(event) => {
               const index = keys.indexOf(tab.key);
               const next =
@@ -310,7 +324,7 @@ function LocalTabButton({
               display={tab.display}
               titleClassName={styles.title}
             />
-          </button>
+          </a>
         </Tooltip.Trigger>
         <Tooltip.Content
           side="bottom"

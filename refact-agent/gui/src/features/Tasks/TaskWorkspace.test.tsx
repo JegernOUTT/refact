@@ -48,6 +48,9 @@ import { taskDocumentsApi } from "../../services/refact/taskDocumentsApi";
 import { taskMemoriesApi } from "../../services/refact/taskMemoriesApi";
 import { server } from "../../utils/mockServer";
 import { updateConfig } from "../Config/configSlice";
+import { change } from "../Pages/pagesSlice";
+import { openTab, setContentTaskView } from "../Workspace/workspaceSlice";
+import { selectContentRoute } from "../../utils/contentRoutes";
 
 const TASK_ID = "task-1";
 const CARD_ID = "T-1";
@@ -1721,6 +1724,127 @@ describe("TaskWorkspace worktree actions", () => {
 describe("TaskWorkspace layout and chat surfaces", () => {
   beforeEach(() => {
     clearWorkspaceStorage();
+  });
+
+  it.each([undefined, "chat"] as const)(
+    "publishes persisted Board with an active planner unless URL view is %s",
+    async (routedView) => {
+      setProjectStorageNamespace("content-route-initial-view");
+      saveTaskWorkspaceTab(TASK_ID, "board");
+      expect(loadTaskWorkspaceTab(TASK_ID)).toBe("board");
+      server.use(...taskWorkspaceHandlers(makeCard(), []));
+      server.use(
+        http.get("*/v1/tasks/task-1/trajectories/planner", () =>
+          HttpResponse.json([
+            {
+              id: PLANNER_ID,
+              title: "Saved planner",
+              created_at: "2026-01-01T00:00:00Z",
+              updated_at: "2026-01-02T00:00:00Z",
+            },
+          ]),
+        ),
+      );
+      const { store } = render(<TaskWorkspace taskId={TASK_ID} embedded />, {
+        preloadedState: {
+          ...workspacePreloadedState(PLANNER_ID),
+          pages: [{ name: "chat" }],
+          workspace: {
+            tabs: [`task:${TASK_ID}`],
+            activeTabId: `task:${TASK_ID}`,
+            groups: {},
+            ...(routedView
+              ? { contentTaskView: { [TASK_ID]: routedView } }
+              : {}),
+          },
+          tasksUI: {
+            openTasks: [
+              {
+                id: TASK_ID,
+                name: "Task",
+                plannerChats: [makePlanner()],
+                activeChat: { type: "planner", chatId: PLANNER_ID },
+              },
+            ],
+          },
+        },
+      });
+      await waitFor(() =>
+        expect(
+          screen.getByRole("tab", {
+            name: routedView === "chat" ? "Chat" : /^Board/,
+          }),
+        ).toHaveAttribute("data-state", "active"),
+      );
+      expect(selectContentRoute(store.getState())).toEqual(
+        routedView === "chat"
+          ? { type: "chat", id: PLANNER_ID }
+          : { type: "task", id: TASK_ID },
+      );
+      expect(store.getState().workspace.contentTaskView?.[TASK_ID]).toBe(
+        routedView ?? "board",
+      );
+    },
+  );
+
+  it("waits for delayed saved planners before publishing the default Chat view", async () => {
+    let releasePlanners: () => void = () => undefined;
+    const heldPlanners = new Promise<void>((resolve) => {
+      releasePlanners = resolve;
+    });
+    let requested = false;
+    server.use(...taskWorkspaceHandlers(makeCard(), []));
+    server.use(
+      http.get("*/v1/tasks/task-1/trajectories/planner", async () => {
+        requested = true;
+        await heldPlanners;
+        return HttpResponse.json([
+          {
+            id: PLANNER_ID,
+            title: "Delayed planner",
+            created_at: "2026-01-01T00:00:00Z",
+            updated_at: "2026-01-02T00:00:00Z",
+          },
+        ]);
+      }),
+    );
+    const { store } = render(<TaskWorkspace taskId={TASK_ID} embedded />, {
+      preloadedState: workspacePreloadedState(PLANNER_ID),
+    });
+    act(() => {
+      store.dispatch(change({ name: "chat" }));
+      store.dispatch(openTab(`task:${TASK_ID}`));
+    });
+    try {
+      await waitFor(() => expect(requested).toBe(true));
+      expect(
+        store.getState().workspace.contentTaskView?.[TASK_ID],
+      ).toBeUndefined();
+    } finally {
+      act(() => releasePlanners());
+    }
+    await waitFor(() =>
+      expect(screen.getByRole("tab", { name: "Chat" })).toHaveAttribute(
+        "data-state",
+        "active",
+      ),
+    );
+    expect(store.getState().workspace.contentTaskView?.[TASK_ID]).toBe("chat");
+    expect(selectContentRoute(store.getState())).toEqual({
+      type: "chat",
+      id: PLANNER_ID,
+    });
+    act(() => {
+      store.dispatch(setContentTaskView({ taskId: TASK_ID, view: "board" }));
+    });
+    expect(screen.getByRole("tab", { name: /^Board/ })).toHaveAttribute(
+      "data-state",
+      "active",
+    );
+    expect(selectContentRoute(store.getState())).toEqual({
+      type: "task",
+      id: TASK_ID,
+    });
   });
 
   it("persists_workspace_tab_choice_round_trip", async () => {

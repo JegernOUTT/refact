@@ -1,4 +1,9 @@
 import React from "react";
+import { useConfig } from "../../../../hooks/useConfig";
+import {
+  contentRouteHref,
+  isPrimaryContentClick,
+} from "../../../../utils/contentRoutes";
 import classNames from "classnames";
 import { Button } from "../../../../components/ui";
 import { DeletePopover } from "../../../../components/DeletePopover/DeletePopover";
@@ -38,6 +43,9 @@ export type RowPeekProps = {
 };
 
 export const RowPeek: React.FC<RowPeekProps> = ({ item, onOpen, onDelete }) => {
+  const { host } = useConfig();
+  const href =
+    host === "web" ? contentRouteHref({ type: item.kind, id: item.id }) : "";
   const blocks: { label: string; value: React.ReactNode }[] = [];
 
   const model = modelLabel(item);
@@ -118,9 +126,31 @@ export const RowPeek: React.FC<RowPeekProps> = ({ item, onOpen, onDelete }) => {
       </div>
 
       <div className={styles.peekActions}>
-        <Button variant="primary" size="sm" onClick={onOpen}>
-          Open
-        </Button>
+        {href ? (
+          <Button variant="primary" size="sm" asChild>
+            <a
+              href={href}
+              onClick={(event) => {
+                event.stopPropagation();
+                if (
+                  !isPrimaryContentClick(event) ||
+                  (event.currentTarget.target &&
+                    event.currentTarget.target !== "_self")
+                )
+                  return;
+                event.preventDefault();
+                onOpen();
+              }}
+              onAuxClick={(event) => event.stopPropagation()}
+            >
+              Open
+            </a>
+          </Button>
+        ) : (
+          <Button variant="primary" size="sm" onClick={onOpen}>
+            Open
+          </Button>
+        )}
         {item.kind === "chat" && (
           <DeletePopover
             size="sm"

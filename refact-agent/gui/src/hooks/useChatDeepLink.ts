@@ -52,10 +52,11 @@ function isNotFound(cause: unknown): boolean {
   );
 }
 
-export function useChatDeepLink(ready: boolean) {
+export function useChatDeepLink(ready: boolean, active = true) {
   const store = useAppStore();
   const config = useConfig();
-  const enabled = config.host === "web" && config.engineServed === true;
+  const enabled =
+    active && config.host === "web" && config.engineServed === true;
   const [linkedChatId] = useState(readChatDeepLinkChatId);
   const targetId = enabled ? linkedChatId : null;
   const [phase, setPhase] = useState<Phase>("waiting");

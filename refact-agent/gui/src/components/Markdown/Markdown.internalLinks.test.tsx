@@ -1,3 +1,5 @@
+import { setUpStore } from "../../app/store";
+import { updateConfig } from "../../features/Config/configSlice";
 import { describe, expect, it, vi } from "vitest";
 import { render, screen, waitFor, within } from "../../utils/test-utils";
 import { Markdown } from "./Markdown";
@@ -51,6 +53,11 @@ function snapshotWithLink(chatId: string): ChatEventEnvelope {
 }
 
 describe("Markdown internal links", () => {
+  const ideStore = () => {
+    const store = setUpStore();
+    store.dispatch(updateConfig({ host: "vscode" }));
+    return store;
+  };
   it("renders markdown images through the image viewer", async () => {
     const { user } = render(
       <Markdown>
@@ -82,6 +89,7 @@ describe("Markdown internal links", () => {
           Open the child trajectory: [view](refact://chat/child-chat-1)
         </Markdown>
       </InternalLinkProvider>,
+      { store: ideStore() },
     );
 
     const link = screen.getByRole("link", { name: "view" });
@@ -101,6 +109,7 @@ describe("Markdown internal links", () => {
       <Markdown>
         Open the child trajectory: [view](refact://chat/child-chat-1)
       </Markdown>,
+      { store: ideStore() },
     );
 
     store.dispatch(applyChatEvent(snapshotWithLink(chatId)));
@@ -113,7 +122,6 @@ describe("Markdown internal links", () => {
 
     const link = screen.getByRole("link", { name: "view" });
     expect(link).toHaveAttribute("href", "refact://chat/child-chat-1");
-    expect(link).toHaveStyle({ cursor: "pointer" });
     expect(link.outerHTML).toContain("refact://chat/child-chat-1");
   });
 
@@ -152,7 +160,7 @@ describe("Markdown internal links", () => {
         </InternalLinkProvider>
       );
     }
-    const { user, store } = render(<LinkedPane />);
+    const { user, store } = render(<LinkedPane />, { store: ideStore() });
     const globalParent = store.getState().chat.current_thread_id;
     await user.click(screen.getByRole("link", { name: "view" }));
     await waitFor(() =>
@@ -181,6 +189,7 @@ describe("Markdown internal links", () => {
           [blocked](refact://card/T-1) [external](https://example.com/docs)
         </Markdown>
       </InternalLinkProvider>,
+      { store: ideStore() },
     );
     await user.click(screen.getByRole("link", { name: "blocked" }));
     expect(await screen.findByRole("alert")).toHaveTextContent(

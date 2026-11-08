@@ -1,3 +1,7 @@
+import {
+  setContentTaskView,
+  setContentCard,
+} from "../features/Workspace/workspaceSlice";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useStore } from "react-redux";
 import type { AppStore } from "../app/store";
@@ -278,6 +282,12 @@ export function useInternalNavigation({
           }
           unsubscribe();
           store.dispatch(openTask({ id: task.id, name: task.name }));
+          store.dispatch(
+            setContentTaskView({ taskId: task.id, view: "board" }),
+          );
+          store.dispatch(
+            setContentCard({ taskId: task.id, cardId: target.cardId ?? null }),
+          );
           if (target.cardId && onCardOpened && origin.taskId === task.id) {
             onCardOpened(task.id, target.cardId);
           } else {
@@ -469,6 +479,12 @@ export function useInternalNavigation({
           );
         }
         if (validatedTask && activeChat) {
+          store.dispatch(
+            setContentTaskView({ taskId: validatedTask.id, view: "chat" }),
+          );
+          store.dispatch(
+            setContentCard({ taskId: validatedTask.id, cardId: null }),
+          );
           store.dispatch(
             openTask({ id: validatedTask.id, name: validatedTask.name }),
           );

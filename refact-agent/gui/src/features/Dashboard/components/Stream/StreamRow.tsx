@@ -1,4 +1,9 @@
 import { useAppSelector } from "../../../../hooks/useAppSelector";
+import { useConfig } from "../../../../hooks/useConfig";
+import {
+  contentRouteHref,
+  isPrimaryContentClick,
+} from "../../../../utils/contentRoutes";
 import { ChatActivityStatus } from "../../../../components/ChatActivity/ChatActivityStatus";
 import { selectChatActivityById } from "../../../Chat/Thread/selectors";
 import React, { useCallback } from "react";
@@ -39,6 +44,9 @@ export const StreamRow: React.FC<StreamRowProps> = ({
   onTogglePeek,
   onToggleFamily,
 }) => {
+  const { host } = useConfig();
+  const href =
+    host === "web" ? contentRouteHref({ type: item.kind, id: item.id }) : "";
   const isChat = item.kind === "chat";
   const activity = useAppSelector((state) =>
     selectChatActivityById(state, item.id),
@@ -86,6 +94,7 @@ export const StreamRow: React.FC<StreamRowProps> = ({
       className={classNames(styles.row, staggerClass(index))}
       onClick={handleClick}
       onKeyDown={(event) => {
+        if (event.target !== event.currentTarget) return;
         if (event.key === "Enter" || event.key === " ") {
           event.preventDefault();
           handleClick();
@@ -106,7 +115,28 @@ export const StreamRow: React.FC<StreamRowProps> = ({
       </span>
 
       <span className={styles.titleCell}>
-        <span className={styles.title}>{item.title}</span>
+        {href ? (
+          <a
+            href={href}
+            className={classNames(styles.title, styles.contentLink)}
+            onClick={(event) => {
+              event.stopPropagation();
+              if (
+                !isPrimaryContentClick(event) ||
+                (event.currentTarget.target &&
+                  event.currentTarget.target !== "_self")
+              )
+                return;
+              event.preventDefault();
+              handleClick();
+            }}
+            onAuxClick={(event) => event.stopPropagation()}
+          >
+            {item.title}
+          </a>
+        ) : (
+          <span className={styles.title}>{item.title}</span>
+        )}
         {item.familyChildCount > 0 && (
           <span
             role="button"

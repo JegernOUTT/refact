@@ -3,6 +3,11 @@ import { selectChatActivityById } from "../../../Chat/Thread/selectors";
 import React from "react";
 import classNames from "classnames";
 import { useAppSelector } from "../../../../hooks/useAppSelector";
+import { useConfig } from "../../../../hooks/useConfig";
+import {
+  contentRouteHref,
+  isPrimaryContentClick,
+} from "../../../../utils/contentRoutes";
 import type { FamilyChild } from "../../streamSelectors";
 import { selectFamilyChildren } from "../../streamSelectors";
 import { formatRelativeTime } from "./streamRowUtils";
@@ -50,6 +55,7 @@ export const ThreadRail: React.FC<ThreadRailProps> = ({
   rootId,
   onOpenChat,
 }) => {
+  const { host } = useConfig();
   const children = useAppSelector((state) =>
     selectFamilyChildren(state, rootId),
   );
@@ -65,6 +71,14 @@ export const ThreadRail: React.FC<ThreadRailProps> = ({
         const isLive =
           child.status === "streaming" || child.status === "working";
         const meta = metaLabel(child);
+        const href =
+          host === "web"
+            ? contentRouteHref({ type: "chat", id: child.id })
+            : "";
+        const titleClassName = classNames(
+          styles.railTitle,
+          isLive && styles.railTitleLive,
+        );
 
         return (
           <div
@@ -75,6 +89,7 @@ export const ThreadRail: React.FC<ThreadRailProps> = ({
             className={classNames(styles.railRow, indentClass(child.depth))}
             onClick={() => onOpenChat(child.id)}
             onKeyDown={(event) => {
+              if (event.target !== event.currentTarget) return;
               if (event.key !== "Enter" && event.key !== " ") return;
               event.preventDefault();
               onOpenChat(child.id);
@@ -91,14 +106,28 @@ export const ThreadRail: React.FC<ThreadRailProps> = ({
               className={classNames(styles.railDot, dotClass(child.status))}
             />
             <span className={styles.railTitleWrap}>
-              <span
-                className={classNames(
-                  styles.railTitle,
-                  isLive && styles.railTitleLive,
-                )}
-              >
-                {child.title}
-              </span>
+              {href ? (
+                <a
+                  href={href}
+                  className={classNames(titleClassName, styles.contentLink)}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    if (
+                      !isPrimaryContentClick(event) ||
+                      (event.currentTarget.target &&
+                        event.currentTarget.target !== "_self")
+                    )
+                      return;
+                    event.preventDefault();
+                    onOpenChat(child.id);
+                  }}
+                  onAuxClick={(event) => event.stopPropagation()}
+                >
+                  {child.title}
+                </a>
+              ) : (
+                <span className={titleClassName}>{child.title}</span>
+              )}
               <span className={styles.railMeta}>
                 <ChildActivity id={child.id} />
                 {meta !== null && <> · {meta}</>}

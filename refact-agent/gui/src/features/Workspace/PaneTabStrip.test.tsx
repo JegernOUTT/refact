@@ -1,3 +1,4 @@
+import { updateConfig } from "../Config/configSlice";
 import { act } from "react-dom/test-utils";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { setUpStore } from "../../app/store";
@@ -107,9 +108,12 @@ describe("compact pane tabs", () => {
   });
 
   it.each(["alpha.ts", "beta.ts"])(
-    "middle-click closes %s without activating it and focuses the surviving tab",
+    "non-web middle-click closes %s without activating it and focuses the surviving tab",
     (title) => {
       const store = setup();
+      store.dispatch(
+        updateConfig({ host: "ide", capabilities: { filesPanel: true } }),
+      );
       render(
         <>
           <WorkspaceToolbarTabs />
@@ -146,6 +150,31 @@ describe("compact pane tabs", () => {
       ]);
     },
   );
+
+  it("web content tabs expose copyable hrefs and leave modified and middle clicks native", () => {
+    const store = setup();
+    store.dispatch(updateConfig({ host: "web" }));
+    render(<WorkspaceToolbarTabs />, { store });
+    const alpha = screen.getByRole("tab", { name: "alpha.ts" });
+    expect(alpha.tagName).toBe("A");
+    expect(alpha).toHaveAttribute("href", "/#/file/%2Fproject%2Falpha.ts");
+    const before = store.getState().workspace;
+    expect(fireEvent.click(alpha, { ctrlKey: true })).toBe(true);
+    expect(fireEvent.click(alpha, { metaKey: true })).toBe(true);
+    expect(
+      fireEvent(
+        alpha,
+        new MouseEvent("auxclick", {
+          button: 1,
+          bubbles: true,
+          cancelable: true,
+        }),
+      ),
+    ).toBe(true);
+    expect(store.getState().workspace).toBe(before);
+    fireEvent.click(alpha);
+    expect(alpha).toHaveAttribute("aria-selected", "true");
+  });
 
   it("handles middle-click on the close icon once through the normal navigation close path", () => {
     const onClose = vi.fn();

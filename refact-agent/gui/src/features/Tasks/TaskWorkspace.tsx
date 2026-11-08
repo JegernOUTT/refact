@@ -1,3 +1,7 @@
+import {
+  setContentTaskView,
+  setContentCard,
+} from "../Workspace/workspaceSlice";
 import React, { useCallback, useState, useEffect, useMemo } from "react";
 import { Flex, Box, Text } from "@radix-ui/themes";
 import {
@@ -1330,7 +1334,15 @@ const TaskWorkspaceContent: React.FC<TaskWorkspaceProps> = ({
     activeChat ? Boolean(selectRuntimeById(state, activeChat.chatId)) : false,
   );
   const currentThreadId = useAppSelector(selectCurrentThreadId);
-  const [selectedCardId, setSelectedCardId] = useState<string | null>(null);
+  const selectedCardId = useAppSelector(
+    (state) => state.workspace.contentCardByTask?.[taskId] ?? null,
+  );
+  const setSelectedCardId = useCallback(
+    (cardId: string | null) => {
+      dispatch(setContentCard({ taskId, cardId }));
+    },
+    [dispatch, taskId],
+  );
   const [cardEditTarget, setCardEditTarget] = useState<CardEditTarget | null>(
     null,
   );
@@ -1376,7 +1388,16 @@ const TaskWorkspaceContent: React.FC<TaskWorkspaceProps> = ({
   );
   const smartDefaultTab: TaskWorkspaceTab =
     (savedPlanners?.length ?? 0) > 0 ? "chat" : "board";
-  const workspaceTab: TaskWorkspaceTab = explicitTab ?? smartDefaultTab;
+  const routedTab = useAppSelector(
+    (state) => state.workspace.contentTaskView?.[taskId],
+  );
+  const workspaceTab: TaskWorkspaceTab =
+    routedTab ?? explicitTab ?? smartDefaultTab;
+  useEffect(() => {
+    if (routedTab !== undefined) return;
+    if (explicitTab === null && savedPlanners === undefined) return;
+    dispatch(setContentTaskView({ taskId, view: workspaceTab }));
+  }, [dispatch, taskId, routedTab, explicitTab, savedPlanners, workspaceTab]);
   const prevTaskStatusRef = React.useRef<string | undefined>(undefined);
   // Just-created chats are protected from reconciliation until the saved
   // trajectory list refetch includes them (prevents bouncing to old planner).
@@ -1646,14 +1667,20 @@ const TaskWorkspaceContent: React.FC<TaskWorkspaceProps> = ({
     else if (!embedded) dispatch(pop());
   }, [dispatch, embedded, onBack]);
 
-  const handleCardClick = useCallback((card: BoardCard) => {
-    setSelectedCardId(card.id);
-  }, []);
+  const handleCardClick = useCallback(
+    (card: BoardCard) => {
+      setSelectedCardId(card.id);
+    },
+    [setSelectedCardId],
+  );
 
-  const handleManageCard = useCallback((target: CardEditTarget) => {
-    setSelectedCardId(null);
-    setCardEditTarget(target);
-  }, []);
+  const handleManageCard = useCallback(
+    (target: CardEditTarget) => {
+      setSelectedCardId(null);
+      setCardEditTarget(target);
+    },
+    [setSelectedCardId],
+  );
 
   const showNotification = useCallback((message: string) => {
     setNotification(message);
@@ -1669,9 +1696,10 @@ const TaskWorkspaceContent: React.FC<TaskWorkspaceProps> = ({
     (value: string) => {
       if (!isTaskWorkspaceTab(value)) return;
       setExplicitTab(value);
+      dispatch(setContentTaskView({ taskId, view: value }));
       saveTaskWorkspaceTab(taskId, value);
     },
-    [taskId],
+    [dispatch, taskId],
   );
 
   const openChatTab = useCallback(() => {
@@ -1683,7 +1711,7 @@ const TaskWorkspaceContent: React.FC<TaskWorkspaceProps> = ({
       handleWorkspaceTabChange("board");
       setSelectedCardId(cardId);
     },
-    [handleWorkspaceTabChange],
+    [handleWorkspaceTabChange, setSelectedCardId],
   );
   const openLinkedWorktree = useCallback((record: WorktreeRecordView) => {
     setDiffTarget({
@@ -1872,7 +1900,7 @@ const TaskWorkspaceContent: React.FC<TaskWorkspaceProps> = ({
           if (opened) setSelectedCardId(null);
         });
     },
-    [navigation, taskId],
+    [navigation, taskId, setSelectedCardId],
   );
 
   const handleInternalLink = useCallback(
@@ -1890,7 +1918,7 @@ const TaskWorkspaceContent: React.FC<TaskWorkspaceProps> = ({
         setSelectedCardId(null);
       return opened;
     },
-    [navigation, selectedCardId, taskId],
+    [navigation, selectedCardId, taskId, setSelectedCardId],
   );
 
   useEffect(() => {
@@ -1899,7 +1927,7 @@ const TaskWorkspaceContent: React.FC<TaskWorkspaceProps> = ({
       setSelectedCardId(null);
       showNotification("Card was deleted by another planner.");
     }
-  }, [board, selectedCardId, showNotification]);
+  }, [board, selectedCardId, showNotification, setSelectedCardId]);
 
   useEffect(() => {
     const onVisible = () => {

@@ -32,12 +32,15 @@ const SAFE_URL_PREFIXES = [
 ];
 
 function transformMarkdownUrl(url: string): string {
+  if (routeFromContentLink(url)) return url;
   const lowerUrl = url.toLowerCase();
   return SAFE_URL_PREFIXES.some((prefix) => lowerUrl.startsWith(prefix))
     ? url
     : "";
 }
 
+import { routeFromContentLink } from "../../utils/contentRoutes";
+import { useConfig } from "../../hooks/useConfig";
 import { ChatLinkButton } from "../ChatLinks";
 import { extractLinkFromPuzzle } from "../../utils/extractLinkFromPuzzle";
 import { useInternalLinkHandler } from "../../contexts/internalLinkUtils";
@@ -82,6 +85,76 @@ const MaybeInteractiveElement: React.FC<{
   return <div className={styles.maybe_pin}>{processed}</div>;
 };
 
+const MarkdownLink: React.FC<
+  React.ComponentPropsWithoutRef<"a"> & {
+    href?: string;
+    onLinkError: (error: string | null) => void;
+  }
+> = ({ onLinkError, href = "", ...props }) => {
+  const internalLinkContext = useInternalLinkHandler();
+  const config = useConfig();
+  const contentRoute = routeFromContentLink(href);
+  const isInternalLink = href.startsWith("refact://") || Boolean(contentRoute);
+  const isHttpLink = href.startsWith("http://") || href.startsWith("https://");
+  const isMailtoLink = href.startsWith("mailto:");
+  if (!isInternalLink && !isHttpLink && !isMailtoLink && href.includes(":"))
+    return <span>{props.children}</span>;
+
+  if (isInternalLink) {
+    return (
+      <Link
+        {...props}
+        href={href}
+        onClick={(event) => {
+          if (
+            config.host === "web" &&
+            contentRoute &&
+            (!internalLinkContext ||
+              (contentRoute.type !== "chat" && contentRoute.type !== "task"))
+          )
+            return;
+          event.preventDefault();
+          onLinkError(null);
+          if (!internalLinkContext) {
+            onLinkError("Internal link navigation is unavailable here.");
+            return;
+          }
+          void (async () => {
+            try {
+              const opened = await internalLinkContext.handleInternalLink(
+                contentRoute &&
+                  (contentRoute.type === "chat" || contentRoute.type === "task")
+                  ? `refact://${contentRoute.type}/${contentRoute.id}${
+                      contentRoute.type === "task" && contentRoute.cardId
+                        ? `/card/${contentRoute.cardId}`
+                        : ""
+                    }`
+                  : href,
+              );
+              if (!opened)
+                onLinkError(
+                  "This internal link could not be opened. The current view has been kept.",
+                );
+            } catch {
+              onLinkError(
+                "This internal link could not be opened. The current view has been kept.",
+              );
+            }
+          })();
+        }}
+      />
+    );
+  }
+  return (
+    <Link
+      {...props}
+      href={href}
+      target={isHttpLink ? "_blank" : undefined}
+      rel={isHttpLink ? "noopener noreferrer" : undefined}
+    />
+  );
+};
+
 const _Markdown: React.FC<MarkdownProps> = ({
   children,
   allowedElements,
@@ -94,7 +167,6 @@ const _Markdown: React.FC<MarkdownProps> = ({
   onCopyClick,
   isStreaming,
 }) => {
-  const internalLinkContext = useInternalLinkHandler();
   const [linkError, setLinkError] = useState<string | null>(null);
 
   const components: Partial<Components> = useMemo(() => {
@@ -167,56 +239,7 @@ const _Markdown: React.FC<MarkdownProps> = ({
         return <kbd {...props} />;
       },
       a({ color: _color, ref: _ref, node: _node, ...props }) {
-        const href = props.href ?? "";
-        const isInternalLink = href.startsWith("refact://");
-        const isHttpLink =
-          href.startsWith("http://") || href.startsWith("https://");
-        const isMailtoLink = href.startsWith("mailto:");
-        const isSafeProtocol = isInternalLink || isHttpLink || isMailtoLink;
-
-        if (!isSafeProtocol && href.includes(":")) {
-          return <span>{props.children}</span>;
-        }
-
-        if (isInternalLink) {
-          return (
-            <Link
-              {...props}
-              href={href}
-              onClick={(e: React.MouseEvent) => {
-                e.preventDefault();
-                setLinkError(null);
-                if (!internalLinkContext) {
-                  setLinkError("Internal link navigation is unavailable here.");
-                  return;
-                }
-                void (async () => {
-                  try {
-                    const opened =
-                      await internalLinkContext.handleInternalLink(href);
-                    if (!opened)
-                      setLinkError(
-                        "This internal link could not be opened. The current view has been kept.",
-                      );
-                  } catch {
-                    setLinkError(
-                      "This internal link could not be opened. The current view has been kept.",
-                    );
-                  }
-                })();
-              }}
-              style={{ cursor: "pointer" }}
-            />
-          );
-        }
-
-        return (
-          <Link
-            {...props}
-            target={isHttpLink ? "_blank" : undefined}
-            rel={isHttpLink ? "noopener noreferrer" : undefined}
-          />
-        );
+        return <MarkdownLink {...props} onLinkError={setLinkError} />;
       },
       q({ color: _color, ref: _ref, node: _node, ...props }) {
         return <q {...props} />;
@@ -264,7 +287,6 @@ const _Markdown: React.FC<MarkdownProps> = ({
   }, [
     canHaveInteractiveElements,
     color,
-    internalLinkContext,
     showLineNumbers,
     wrap,
     onCopyClick,

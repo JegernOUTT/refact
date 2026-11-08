@@ -203,6 +203,15 @@
   min-width: 0;
 }
 
+.contentLink {
+  text-decoration: none;
+}
+
+.contentLink:focus-visible {
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
+  outline-offset: var(--rf-hairline);
+}
+
 .title {
   overflow: hidden;
   text-overflow: ellipsis;

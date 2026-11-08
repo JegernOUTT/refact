@@ -509,7 +509,7 @@ describe("TaskDocumentsView transcript route", () => {
     ).not.toHaveAttribute("tabindex", "-1");
     expect(screen.getByRole("link", { name: "Open task" })).toHaveAttribute(
       "href",
-      "refact://task/task-123",
+      "/#/task/task-123",
     );
     expect(
       container.querySelector('script, img[onerror], a[href^="javascript:"]'),

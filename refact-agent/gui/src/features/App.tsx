@@ -28,6 +28,7 @@ import {
 } from "../hooks";
 import { useBrowserOnlineStatus } from "../hooks/useBrowserOnlineStatus";
 import { useChatDeepLink } from "../hooks/useChatDeepLink";
+import { useContentRouting } from "../hooks/useContentRouting";
 import { useInternalNavigation } from "../hooks/useInternalNavigation";
 import { useBuddyWorkDeepLink } from "../hooks/useBuddyWorkDeepLink";
 import { store } from "../app/store";
@@ -120,6 +121,7 @@ const WorkspaceApp: React.FC<AppProps> = ({ style }: AppProps) => {
   const sawZeroHeightRef = useRef(false);
   const crashSessionStartedRef = useRef(false);
   const restoredActiveTabRef = useRef(false);
+  const [activeTabRestored, setActiveTabRestored] = useState(false);
   const persistedActiveTabRef = useRef<ReturnType<
     typeof loadPersistedActiveTab
   > | null>(null);
@@ -314,7 +316,14 @@ const WorkspaceApp: React.FC<AppProps> = ({ style }: AppProps) => {
 
   const canAccessApp = providerBootstrap.canAccessApp;
   useBuddyWorkDeepLink(canAccessApp && isLoggedIn);
-  const deepLink = useChatDeepLink(canAccessApp && isLoggedIn);
+  const deepLink = useChatDeepLink(
+    canAccessApp && isLoggedIn,
+    !window.location.hash,
+  );
+  const contentRouting = useContentRouting(
+    canAccessApp && isLoggedIn && !deepLink.pending,
+    activeTabRestored,
+  );
   const navigation = useInternalNavigation();
   const hadAppAccessRef = useRef(canAccessApp);
   const [startupResolved, setStartupResolved] = useState(false);
@@ -475,6 +484,7 @@ const WorkspaceApp: React.FC<AppProps> = ({ style }: AppProps) => {
         trustedProjectStorageNamespace !== previousTrustedNamespace
       ) {
         restoredActiveTabRef.current = false;
+        setActiveTabRestored(false);
         persistedActiveTabRef.current = null;
       }
     }
@@ -498,8 +508,9 @@ const WorkspaceApp: React.FC<AppProps> = ({ style }: AppProps) => {
   useEffect(() => {
     if (restoredActiveTabRef.current) return;
     if (!canAccessApp || !isLoggedIn) return;
-    if (deepLink.targetId) {
+    if (contentRouting.hasInitialTarget) {
       restoredActiveTabRef.current = true;
+      setActiveTabRestored(true);
       return;
     }
     if (!isProjectStorageNamespaceTrusted()) return;
@@ -509,17 +520,20 @@ const WorkspaceApp: React.FC<AppProps> = ({ style }: AppProps) => {
     persistedActiveTabRef.current = persistedActiveTab;
     if (!persistedActiveTab) {
       restoredActiveTabRef.current = true;
+      setActiveTabRestored(true);
       return;
     }
 
     if (persistedActiveTab.type === "dashboard") {
       restoredActiveTabRef.current = true;
+      setActiveTabRestored(true);
       dispatch(popBackTo({ name: "history" }));
       return;
     }
 
     if (persistedActiveTab.type === "buddy") {
       restoredActiveTabRef.current = true;
+      setActiveTabRestored(true);
       dispatch(popBackTo({ name: "history" }));
       dispatch(push({ name: "buddy" }));
       return;
@@ -531,6 +545,7 @@ const WorkspaceApp: React.FC<AppProps> = ({ style }: AppProps) => {
           ? focusedWorkspaceChatId
           : persistedActiveTab.id;
       restoredActiveTabRef.current = true;
+      setActiveTabRestored(true);
       if (allThreads[restoredChatId]) {
         dispatch(switchToThread({ id: restoredChatId, openTab: false }));
         dispatch(popBackTo({ name: "history" }));
@@ -542,6 +557,7 @@ const WorkspaceApp: React.FC<AppProps> = ({ style }: AppProps) => {
     }
 
     restoredActiveTabRef.current = true;
+    setActiveTabRestored(true);
     dispatch(popBackTo({ name: "history" }));
     if (openTasks.some((task) => task.id === persistedActiveTab.taskId)) {
       dispatch(
@@ -551,7 +567,7 @@ const WorkspaceApp: React.FC<AppProps> = ({ style }: AppProps) => {
   }, [
     allThreads,
     canAccessApp,
-    deepLink.targetId,
+    contentRouting.hasInitialTarget,
     dispatch,
     focusedWorkspaceChatId,
     isLoggedIn,
@@ -616,10 +632,21 @@ const WorkspaceApp: React.FC<AppProps> = ({ style }: AppProps) => {
                   }
                 />
               )}
-              {deepLink.resolving && (
+              {contentRouting.error && (
+                <ErrorState
+                  title="Could not open content link"
+                  description={contentRouting.error}
+                  retry={
+                    <Button size="sm" onClick={contentRouting.dismissError}>
+                      Dismiss
+                    </Button>
+                  }
+                />
+              )}
+              {contentRouting.pending && (
                 <LoadingState label="Opening chat…" variant="full" />
               )}
-              {!deepLink.resolving && pageSwitching && <ChatLoading />}
+              {!contentRouting.pending && pageSwitching && <ChatLoading />}
               {!pageHidden && renderedPage.name === "history" && <Dashboard />}
               {!pageHidden && renderedPage.name === "chat" && (
                 <InternalLinkProvider onInternalLink={navigation.navigate}>

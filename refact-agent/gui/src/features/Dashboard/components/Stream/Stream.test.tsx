@@ -9,6 +9,10 @@ import {
   within,
 } from "../../../../utils/test-utils";
 import { StreamSection } from "./StreamSection";
+import { StreamRow } from "./StreamRow";
+import { RowPeek } from "./RowPeek";
+import { ThreadRail } from "./ThreadRail";
+import type { StreamItem } from "../../streamSelectors";
 import type { ChatHistoryItem } from "../../../History/historySlice";
 
 const NOW = Date.now();
@@ -156,7 +160,7 @@ describe("StreamSection", () => {
     const peek = screen.getByTestId("stream-peek-a");
     expect(peek).toBeInTheDocument();
     expect(screen.getByText("Model")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Open" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Open" })).toBeInTheDocument();
   });
 
   it("gates row deletion behind the DeletePopover confirm", () => {
@@ -289,4 +293,191 @@ describe("StreamSection", () => {
       expect(screen.getByText("Older flat chat")).toBeInTheDocument();
     });
   });
+});
+
+function makeStreamItem(kind: StreamItem["kind"]): StreamItem {
+  return {
+    kind,
+    id: "content-id",
+    title: "Content title",
+    updatedAtMs: NOW,
+    createdAtMs: null,
+    status: "idle",
+    mode: null,
+    model: null,
+    messageCount: null,
+    diff: null,
+    branch: null,
+    costUsd: null,
+    totalTokens: null,
+    cacheReadTokens: null,
+    familyChildCount: 1,
+    cardsDone: null,
+    cardsTotal: null,
+    cardsFailed: null,
+    agentsActive: null,
+    linkedChats: null,
+  };
+}
+
+describe("Stream native content links", () => {
+  it.each(["chat", "task"] as const)(
+    "provides token-free %s title and Open links with one primary callback",
+    (kind) => {
+      const previousUrl = window.location.href;
+      window.history.replaceState({}, "", "/gui?token=secret#/dashboard");
+      try {
+        const onOpen = vi.fn();
+        const item = makeStreamItem(kind);
+        render(
+          <>
+            <StreamRow
+              item={item}
+              index={0}
+              isPeekOpen={false}
+              isFamilyOpen={false}
+              onOpen={onOpen}
+              onTogglePeek={vi.fn()}
+              onToggleFamily={vi.fn()}
+            />
+            <RowPeek item={item} onOpen={onOpen} onDelete={vi.fn()} />
+          </>,
+        );
+
+        for (const name of [item.title, "Open"]) {
+          const link = screen.getByRole("link", { name });
+          expect(link).toHaveAttribute("href", `/gui#/${kind}/${item.id}`);
+          expect(link.querySelector("button, [role=button]")).toBeNull();
+          onOpen.mockClear();
+          expect(fireEvent.click(link)).toBe(false);
+          expect(onOpen).toHaveBeenCalledTimes(1);
+          onOpen.mockClear();
+          for (const modifiers of [
+            { ctrlKey: true },
+            { metaKey: true },
+            { shiftKey: true },
+            { altKey: true },
+            { button: 1 },
+          ]) {
+            expect(fireEvent.click(link, modifiers)).toBe(true);
+          }
+          expect(
+            fireEvent(
+              link,
+              new MouseEvent("auxclick", {
+                button: 1,
+                bubbles: true,
+                cancelable: true,
+              }),
+            ),
+          ).toBe(true);
+          link.setAttribute("target", "_blank");
+          expect(fireEvent.click(link)).toBe(true);
+          link.removeAttribute("target");
+          fireEvent.keyDown(link, { key: "Enter", ctrlKey: true });
+          expect(onOpen).not.toHaveBeenCalled();
+        }
+        fireEvent.click(screen.getByTestId(`stream-row-${item.id}`));
+        expect(onOpen).toHaveBeenCalledTimes(1);
+        expect(onOpen).toHaveBeenCalledWith(item);
+      } finally {
+        window.history.replaceState({}, "", previousUrl);
+      }
+    },
+  );
+
+  it("keeps family and peek controls independent from title navigation", () => {
+    const onOpen = vi.fn();
+    const onToggleFamily = vi.fn();
+    const onTogglePeek = vi.fn();
+    const item = makeStreamItem("chat");
+    render(
+      <StreamRow
+        item={item}
+        index={0}
+        isPeekOpen={false}
+        isFamilyOpen={false}
+        onOpen={onOpen}
+        onTogglePeek={onTogglePeek}
+        onToggleFamily={onToggleFamily}
+      />,
+    );
+    const family = screen.getByRole("button", {
+      name: `Toggle thread family for ${item.title}`,
+    });
+    expect(family.closest("a")).toBeNull();
+    fireEvent.click(family);
+    expect(onToggleFamily).toHaveBeenCalledExactlyOnceWith(item.id);
+    const expand = screen.getByTestId(`stream-expand-${item.id}`);
+    expect(expand.closest("a")).toBeNull();
+    fireEvent.click(expand);
+    expect(onTogglePeek).toHaveBeenCalledExactlyOnceWith(item.id);
+    fireEvent.keyDown(expand, { key: "Enter" });
+    expect(onOpen).not.toHaveBeenCalled();
+  });
+
+  it("gives expanded thread titles native links without bubbling to the row", () => {
+    const onOpenChat = vi.fn();
+    render(<ThreadRail rootId="root" onOpenChat={onOpenChat} />, {
+      preloadedState: preloadedStateWith([
+        makeChat({ id: "root", title: "Root" }),
+        makeChat({ id: "child", title: "Child", parent_id: "root" }),
+      ]),
+    });
+    const link = screen.getByRole("link", { name: "Child" });
+    expect(link).toHaveAttribute(
+      "href",
+      `${window.location.pathname}#/chat/child`,
+    );
+    expect(fireEvent.click(link, { metaKey: true })).toBe(true);
+    expect(fireEvent.click(link, { ctrlKey: true })).toBe(true);
+    expect(fireEvent.click(link, { button: 1 })).toBe(true);
+    link.setAttribute("target", "_blank");
+    expect(fireEvent.click(link)).toBe(true);
+    link.removeAttribute("target");
+    fireEvent.keyDown(link, { key: "Enter" });
+    expect(onOpenChat).not.toHaveBeenCalled();
+    expect(fireEvent.click(link)).toBe(false);
+    expect(onOpenChat).toHaveBeenCalledExactlyOnceWith("child");
+  });
+
+  it.each(["ide", "vscode", "jetbrains"] as const)(
+    "preserves original %s title and Open elements",
+    (host) => {
+      const onOpen = vi.fn();
+      const onOpenChat = vi.fn();
+      const item = makeStreamItem("chat");
+      render(
+        <>
+          <StreamRow
+            item={item}
+            index={0}
+            isPeekOpen={false}
+            isFamilyOpen={false}
+            onOpen={onOpen}
+            onTogglePeek={vi.fn()}
+            onToggleFamily={vi.fn()}
+          />
+          <RowPeek item={item} onOpen={onOpen} onDelete={vi.fn()} />
+          <ThreadRail rootId="root" onOpenChat={onOpenChat} />
+        </>,
+        {
+          preloadedState: {
+            ...preloadedStateWith([
+              makeChat({ id: "root" }),
+              makeChat({ id: "child", title: "Child", parent_id: "root" }),
+            ]),
+            config: { host, lspPort: 8001, themeProps: {} },
+          },
+        },
+      );
+      expect(screen.queryByRole("link")).toBeNull();
+      fireEvent.click(screen.getByText(item.title), { ctrlKey: true });
+      expect(onOpen).toHaveBeenCalledExactlyOnceWith(item);
+      fireEvent.click(screen.getByRole("button", { name: "Open" }));
+      expect(onOpen).toHaveBeenCalledTimes(2);
+      fireEvent.click(screen.getByText("Child"), { metaKey: true });
+      expect(onOpenChat).toHaveBeenCalledExactlyOnceWith("child");
+    },
+  );
 });

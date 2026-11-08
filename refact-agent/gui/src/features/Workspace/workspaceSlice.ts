@@ -33,6 +33,8 @@ export type PaneGroup = {
 export type WorkspaceGroups = Record<SurfaceKey, PaneGroup | undefined>;
 
 export type WorkspaceState = {
+  contentTaskView?: Record<string, "chat" | "board" | "memories" | "documents">;
+  contentCardByTask?: Record<string, string | null>;
   tabs: SurfaceKey[];
   activeTabId: SurfaceKey | null;
   groups: WorkspaceGroups;
@@ -1258,6 +1260,8 @@ export const reconcileWorkspaceState = (
     return !chatId || contextOwners.has(chatId);
   };
   const nextState: WorkspaceState = {
+    contentCardByTask: state.contentCardByTask,
+    contentTaskView: state.contentTaskView,
     tabs: unique(state.tabs)
       .filter(
         (key) =>
@@ -1335,6 +1339,27 @@ export const workspaceSlice = createSlice({
   reducerPath: "workspace",
   initialState,
   reducers: {
+    setContentTaskView: (
+      state,
+      action: PayloadAction<{
+        taskId: string;
+        view: "chat" | "board" | "memories" | "documents";
+      }>,
+    ) => {
+      state.contentTaskView = {
+        ...state.contentTaskView,
+        [action.payload.taskId]: action.payload.view,
+      };
+    },
+    setContentCard: (
+      state,
+      action: PayloadAction<{ taskId: string; cardId: string | null }>,
+    ) => {
+      state.contentCardByTask = {
+        ...state.contentCardByTask,
+        [action.payload.taskId]: action.payload.cardId,
+      };
+    },
     consolidateWorkspaceTabs: (state) => ensureSingleWorkspaceLayout(state),
     setPanelsForced: (state, action: PayloadAction<boolean>) => {
       state.panelsForced = action.payload;
@@ -2070,6 +2095,8 @@ export const workspaceSlice = createSlice({
 });
 
 export const {
+  setContentTaskView,
+  setContentCard,
   clearWorkspaceChatState,
   consolidateWorkspaceTabs,
   setPanelsForced,
