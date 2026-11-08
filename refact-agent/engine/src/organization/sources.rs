@@ -96,7 +96,7 @@ pub(crate) async fn catalog(app: &AppState, caller: &WorkCaller) -> Result<Vec<S
             .work_snapshot(&canonical)
             .await
             .map_err(Error::storage)?;
-        for entry in index.entries {
+        for entry in &index.entries {
             if !entry.displayable_chat
                 || !crate::chat::trajectory_index::index_entry_file_name_is_valid(&entry.file_name)
             {
@@ -108,7 +108,7 @@ pub(crate) async fn catalog(app: &AppState, caller: &WorkCaller) -> Result<Vec<S
             }) {
                 continue;
             }
-            let Some(item) = canonical_item(&entry) else {
+            let Some(item) = canonical_item(entry) else {
                 continue;
             };
             if item.kind == ItemKind::Task {
@@ -119,7 +119,7 @@ pub(crate) async fn catalog(app: &AppState, caller: &WorkCaller) -> Result<Vec<S
                 Source {
                     item,
                     path: canonical.join(&entry.file_name),
-                    entry: Some(entry),
+                    entry: Some(entry.clone()),
                 },
             );
         }
