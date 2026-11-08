@@ -1,75 +1,105 @@
-use tokio::io::AsyncWriteExt;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::Mutex as AMutex;
+use tokio::sync::{Mutex as AMutex, Semaphore};
 use tokenizers::Tokenizer;
 use reqwest::header::AUTHORIZATION;
-use reqwest::Response;
-use uuid::Uuid;
-
-use crate::custom_error::MapErrToString;
 use crate::files_correction::canonical_path;
 use crate::global_context::GlobalContext;
 use crate::caps::{default_hf_tokenizer_template, strip_model_from_finetune, BaseModelRecord};
 use refact_core::model_caps::is_predefined_cloud_tokenizer;
 
-async fn try_open_tokenizer(res: Response, to: impl AsRef<Path>) -> Result<(), String> {
-    let mut file = tokio::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .open(&to)
+const TOKENIZER_REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
+const TOKENIZER_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(60);
+const TOKENIZER_DOWNLOAD_ATTEMPTS: usize = 3;
+const TOKENIZER_RETRY_DELAY: Duration = Duration::from_millis(200);
+const TOKENIZER_MAX_BYTES: usize = 32 * 1024 * 1024;
+static TOKENIZER_PARSE_PERMITS: Semaphore = Semaphore::const_new(1);
+
+async fn tokenizer_blocking<F>(work: F) -> Result<Tokenizer, String>
+where
+    F: FnOnce() -> Result<Tokenizer, String> + Send + 'static,
+{
+    let permit = TOKENIZER_PARSE_PERMITS
+        .acquire()
         .await
-        .map_err(|e| format!("failed to open file: {}", e))?;
-    file.write_all(
-        &res.bytes()
-            .await
-            .map_err(|e| format!("failed to fetch bytes: {}", e))?,
-    )
+        .map_err(|_| "tokenizer loader unavailable".to_string())?;
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        work()
+    })
     .await
-    .map_err(|e| format!("failed to write to file: {}", e))?;
-    file.flush()
-        .await
-        .map_err(|e| format!("failed to flush file: {}", e))?;
-    tracing::info!("saved tokenizer to {}", to.as_ref().display());
-    Ok(())
+    .map_err(|_| "tokenizer loader failed".to_string())?
+}
+
+fn parse_tokenizer(bytes: &[u8]) -> Result<Tokenizer, String> {
+    if bytes.len() > TOKENIZER_MAX_BYTES {
+        return Err("tokenizer exceeds size limit".to_string());
+    }
+    Tokenizer::from_bytes(bytes).map_err(|_| "invalid tokenizer file".to_string())
+}
+
+async fn open_tokenizer(path: &Path) -> Result<Tokenizer, String> {
+    let path = path.to_path_buf();
+    tokenizer_blocking(move || {
+        let metadata =
+            std::fs::metadata(&path).map_err(|_| "failed to inspect tokenizer file".to_string())?;
+        if !metadata.is_file() || metadata.len() > TOKENIZER_MAX_BYTES as u64 {
+            return Err("tokenizer file is not regular or exceeds size limit".to_string());
+        }
+        let file =
+            std::fs::File::open(path).map_err(|_| "failed to open tokenizer file".to_string())?;
+        let metadata = file
+            .metadata()
+            .map_err(|_| "failed to inspect tokenizer file".to_string())?;
+        if !metadata.is_file() || metadata.len() > TOKENIZER_MAX_BYTES as u64 {
+            return Err("tokenizer file is not regular or exceeds size limit".to_string());
+        }
+        let mut bytes = Vec::new();
+        file.take((TOKENIZER_MAX_BYTES + 1) as u64)
+            .read_to_end(&mut bytes)
+            .map_err(|_| "failed to read tokenizer file".to_string())?;
+        parse_tokenizer(&bytes)
+    })
+    .await
 }
 
 async fn download_tokenizer_file(
     http_client: &reqwest::Client,
     http_path: &str,
     tokenizer_api_token: &str,
-    to: &Path,
-) -> Result<(), String> {
-    tokio::fs::create_dir_all(to.parent().ok_or_else(|| "tokenizer path has no parent")?)
-        .await
-        .map_err(|e| format!("failed to create parent dir: {}", e))?;
-    if to.exists() {
-        return Ok(());
-    }
-
-    tracing::info!("downloading tokenizer from {}", http_path);
-    let mut req = http_client.get(http_path);
-
+) -> Result<Vec<u8>, String> {
+    let mut req = http_client
+        .get(http_path)
+        .timeout(TOKENIZER_REQUEST_TIMEOUT);
     if !tokenizer_api_token.is_empty() {
-        req = req.header(AUTHORIZATION, format!("Bearer {tokenizer_api_token}"))
+        req = req.header(AUTHORIZATION, format!("Bearer {tokenizer_api_token}"));
     }
-
-    let res = req
+    let mut res = req
         .send()
         .await
-        .map_err(|e| format!("failed to get response: {}", e))?
+        .map_err(|_| "tokenizer request failed".to_string())?
         .error_for_status()
-        .map_err(|e| format!("failed to get response: {}", e))?;
-    try_open_tokenizer(res, to).await?;
-    Ok(())
-}
-
-fn check_json_file(path: &Path) -> bool {
-    match Tokenizer::from_file(path) {
-        Ok(_) => true,
-        Err(_) => false,
+        .map_err(|_| "tokenizer request returned an unsuccessful status".to_string())?;
+    if res
+        .content_length()
+        .is_some_and(|len| len > TOKENIZER_MAX_BYTES as u64)
+    {
+        return Err("tokenizer exceeds size limit".to_string());
     }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = res
+        .chunk()
+        .await
+        .map_err(|_| "failed to read tokenizer response".to_string())?
+    {
+        if chunk.len() > TOKENIZER_MAX_BYTES - bytes.len() {
+            return Err("tokenizer exceeds size limit".to_string());
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
 }
 
 fn tokenizer_load_is_disabled(tokenizer: &str) -> bool {
@@ -81,58 +111,48 @@ async fn try_download_tokenizer_file_and_open(
     http_path: &str,
     tokenizer_api_token: &str,
     path: &Path,
-) -> Result<(), String> {
-    if path.exists() && check_json_file(path) {
-        return Ok(());
+) -> Result<Tokenizer, String> {
+    if let Ok(tokenizer) = open_tokenizer(path).await {
+        return Ok(tokenizer);
     }
-
-    let tmp_file = std::env::temp_dir().join(Uuid::new_v4().to_string());
-    let tmp_path = tmp_file.as_path();
-
-    // Track the last error message
-    let mut last_error = String::from("");
-    for i in 0..15 {
-        if i != 0 {
-            tokio::time::sleep(Duration::from_millis(200)).await;
-        }
-        let res =
-            download_tokenizer_file(http_client, http_path, tokenizer_api_token, tmp_path).await;
-        if let Err(err_msg) = res {
-            last_error = format!("failed to download tokenizer: {}", err_msg);
-            tracing::error!("{last_error}");
-            continue;
-        }
-
-        let parent = path.parent();
-        if parent.is_none() {
-            last_error = String::from("failed to download tokenizer: parent is not set");
-            tracing::error!("{last_error}");
-            continue;
-        }
-
-        let res = tokio::fs::create_dir_all(parent.unwrap()).await;
-        if let Err(err_msg) = res {
-            last_error = format!("failed to create parent dir: {}", err_msg);
-            tracing::error!("{last_error}");
-            continue;
-        }
-
-        if !check_json_file(tmp_path) {
-            last_error = String::from("failed to download tokenizer: file is not a tokenizer");
-            tracing::error!("{last_error}");
-            continue;
-        }
-
-        match tokio::fs::copy(tmp_path, path).await {
-            Ok(_) => {
-                tracing::info!("moved tokenizer to {}", path.display());
-                return Ok(());
+    let deadline = tokio::time::Instant::now() + TOKENIZER_DOWNLOAD_TIMEOUT;
+    let mut last_error = "failed to download tokenizer".to_string();
+    for attempt in 0..TOKENIZER_DOWNLOAD_ATTEMPTS {
+        let download = async {
+            if attempt != 0 {
+                tokio::time::sleep(TOKENIZER_RETRY_DELAY).await;
             }
-            Err(e) => {
-                last_error = format!("failed to copy tokenizer file: {}", e);
-                tracing::error!("{last_error}");
+            download_tokenizer_file(http_client, http_path, tokenizer_api_token).await
+        };
+        let bytes = match tokio::time::timeout_at(deadline, download).await {
+            Ok(Ok(bytes)) => bytes,
+            Ok(Err(err)) => {
+                last_error = err;
                 continue;
             }
+            Err(_) => return Err("tokenizer download deadline exceeded".to_string()),
+        };
+        let path = path.to_path_buf();
+        match tokenizer_blocking(move || {
+            let tokenizer = parse_tokenizer(&bytes)?;
+            let parent = path
+                .parent()
+                .ok_or_else(|| "tokenizer path has no parent".to_string())?;
+            std::fs::create_dir_all(parent)
+                .map_err(|_| "failed to create tokenizer cache directory".to_string())?;
+            let mut temp = tempfile::NamedTempFile::new_in(parent)
+                .map_err(|_| "failed to create tokenizer staging file".to_string())?;
+            temp.write_all(&bytes)
+                .and_then(|_| temp.flush())
+                .map_err(|_| "failed to write tokenizer staging file".to_string())?;
+            temp.persist(&path)
+                .map_err(|_| "failed to publish tokenizer cache file".to_string())?;
+            Ok(tokenizer)
+        })
+        .await
+        {
+            Ok(tokenizer) => return Ok(tokenizer),
+            Err(err) => last_error = err,
         }
     }
     Err(last_error)
@@ -144,11 +164,20 @@ pub async fn cached_tokenizer(
 ) -> Result<Option<Arc<Tokenizer>>, String> {
     let model_id = strip_model_from_finetune(&model_rec.id);
     let tokenizer_state = global_context.tokenizer_state.clone();
+    if let Some(tokenizer) = tokenizer_state.read().unwrap().map.get(&model_id).cloned() {
+        return Ok(tokenizer);
+    }
+    if tokenizer_load_is_disabled(&model_rec.tokenizer) {
+        return Ok(None);
+    }
     let tokenizer_download_lock: Arc<AMutex<bool>> =
         tokenizer_state.read().unwrap().download_lock.clone();
     let _tokenizer_download_locked = tokenizer_download_lock.lock().await;
+    if let Some(tokenizer) = tokenizer_state.read().unwrap().map.get(&model_id).cloned() {
+        return Ok(tokenizer);
+    }
 
-    let (client2, cache_dir, tokenizer_in_gcx, hf_tokenizer_template) = {
+    let (client2, cache_dir, hf_tokenizer_template) = {
         let (client, cache_dir, caps_state) = {
             (
                 global_context.http_client.clone(),
@@ -163,17 +192,8 @@ pub async fn cached_tokenizer(
             .clone()
             .map(|caps| caps.hf_tokenizer_template.clone())
             .unwrap_or_else(default_hf_tokenizer_template);
-        (
-            client,
-            cache_dir,
-            tokenizer_state.read().unwrap().map.get(&model_id).cloned(),
-            template,
-        )
+        (client, cache_dir, template)
     };
-
-    if let Some(tokenizer) = tokenizer_in_gcx {
-        return Ok(tokenizer);
-    }
 
     let (mut tok_file_path, tok_url) = match &model_rec.tokenizer {
         empty_tok if empty_tok.is_empty() => {
@@ -194,7 +214,7 @@ pub async fn cached_tokenizer(
             let file = if file_tok.starts_with("file://") {
                 url::Url::parse(file_tok)
                     .and_then(|url| url.to_file_path().map_err(|_| url::ParseError::EmptyHost))
-                    .map_err_with_prefix(format!("Invalid path URL {file_tok}:"))?
+                    .map_err(|_| "invalid tokenizer file URL".to_string())?
             } else {
                 canonical_path(file_tok)
             };
@@ -202,7 +222,7 @@ pub async fn cached_tokenizer(
         }
     };
 
-    if tok_file_path.as_os_str().is_empty() {
+    let mut tokenizer = if tok_file_path.as_os_str().is_empty() {
         let tokenizer_cache_dir = std::path::PathBuf::from(cache_dir).join("tokenizers");
         let sanitized_tok_key = tok_url
             .chars()
@@ -219,12 +239,10 @@ pub async fn cached_tokenizer(
             &model_rec.tokenizer_api_key,
             &tok_file_path,
         )
-        .await?;
-    }
-
-    tracing::info!("loading tokenizer \"{}\"", tok_file_path.display());
-    let mut tokenizer = Tokenizer::from_file(tok_file_path)
-        .map_err(|e| format!("failed to load tokenizer: {}", e))?;
+        .await?
+    } else {
+        open_tokenizer(&tok_file_path).await?
+    };
     let _ = tokenizer.with_truncation(None);
     tokenizer.with_padding(None);
     let arc = Some(Arc::new(tokenizer));
@@ -263,6 +281,19 @@ pub fn count_text_tokens_with_fallback(tokenizer: Option<Arc<Tokenizer>>, text: 
 mod tests {
     use super::*;
 
+    fn small_tokenizer() -> Tokenizer {
+        use tokenizers::models::wordlevel::WordLevel;
+        use std::collections::HashMap;
+        let vocab = HashMap::from([("[UNK]".to_string(), 0), ("hello".to_string(), 1)]);
+        Tokenizer::new(
+            WordLevel::builder()
+                .vocab(vocab.into_iter().collect())
+                .unk_token("[UNK]".into())
+                .build()
+                .unwrap(),
+        )
+    }
+
     #[test]
     fn tokenizer_load_is_disabled_for_fake_and_predefined_cloud_tokenizers() {
         assert!(tokenizer_load_is_disabled("fake"));
@@ -280,5 +311,232 @@ mod tests {
         ));
         assert!(!tokenizer_load_is_disabled("file:///tmp/tokenizer.json"));
         assert!(!tokenizer_load_is_disabled("/tmp/tokenizer.json"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cached_present_and_absent_entries_bypass_download_lock() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let model = BaseModelRecord {
+            id: "cached-test/model".into(),
+            tokenizer: "https://127.0.0.1:1/tokenizer.json".into(),
+            ..Default::default()
+        };
+        let tokenizer = Arc::new(small_tokenizer());
+        gcx.tokenizer_state
+            .write()
+            .unwrap()
+            .map
+            .insert(model.id.clone(), Some(tokenizer.clone()));
+        let lock = gcx.tokenizer_state.read().unwrap().download_lock.clone();
+        let guard = lock.lock().await;
+        let mut future = Box::pin(cached_tokenizer(gcx.clone(), &model));
+        let ready = match futures::poll!(future.as_mut()) {
+            std::task::Poll::Ready(result) => result.unwrap().unwrap(),
+            std::task::Poll::Pending => panic!("cached tokenizer waited for download lock"),
+        };
+        assert!(Arc::ptr_eq(&tokenizer, &ready));
+
+        let absent = BaseModelRecord {
+            id: "cached-test/none".into(),
+            ..model.clone()
+        };
+        gcx.tokenizer_state
+            .write()
+            .unwrap()
+            .map
+            .insert(absent.id.clone(), None);
+        let mut absent_future = Box::pin(cached_tokenizer(gcx.clone(), &absent));
+        match futures::poll!(absent_future.as_mut()) {
+            std::task::Poll::Ready(result) => assert!(result.unwrap().is_none()),
+            std::task::Poll::Pending => panic!("cached None waited for download lock"),
+        }
+        let disabled = BaseModelRecord {
+            id: "fake-model".into(),
+            tokenizer: "fake".into(),
+            ..Default::default()
+        };
+        let mut disabled_future = Box::pin(cached_tokenizer(gcx, &disabled));
+        match futures::poll!(disabled_future.as_mut()) {
+            std::task::Poll::Ready(result) => assert!(result.unwrap().is_none()),
+            std::task::Poll::Pending => panic!("disabled tokenizer waited for download lock"),
+        }
+        drop(guard);
+    }
+
+    fn serve_responses(responses: Vec<(u16, Vec<u8>)>) -> (String, std::thread::JoinHandle<usize>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        let thread = std::thread::spawn(move || {
+            let mut count = 0;
+            for (status, body) in responses {
+                let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                let mut stream = loop {
+                    match listener.accept() {
+                        Ok((stream, _)) => break stream,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            if std::time::Instant::now() >= deadline {
+                                return count;
+                            }
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                        Err(_) => return count,
+                    }
+                };
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                stream
+                    .set_write_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut request = [0; 4096];
+                let _ = stream.read(&mut request).unwrap();
+                count += 1;
+                let reason = if status == 200 {
+                    "OK"
+                } else {
+                    "Internal Server Error"
+                };
+                write!(
+                    stream,
+                    "HTTP/1.1 {status} {reason}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .unwrap();
+                stream.write_all(&body).unwrap();
+            }
+            count
+        });
+        (format!("http://{address}/tokenizer.json"), thread)
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(tokenizer_blocking)]
+    async fn tokenizer_download_retries_invalid_body_and_preserves_existing_file_on_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tokenizer.json");
+        std::fs::write(&path, b"initially malformed").unwrap();
+        let expected = small_tokenizer();
+        let expected_json = expected.to_string(false).unwrap();
+        let body = expected_json.as_bytes().to_vec();
+        let (url, server) = serve_responses(vec![(200, b"invalid json".to_vec()), (200, body)]);
+        let loaded = try_download_tokenizer_file_and_open(&reqwest::Client::new(), &url, "", &path)
+            .await
+            .unwrap();
+        assert_eq!(
+            loaded.encode("hello", false).unwrap().get_ids(),
+            expected.encode("hello", false).unwrap().get_ids()
+        );
+        assert_eq!(server.join().unwrap(), 2);
+        assert_eq!(
+            std::fs::read_dir(dir.path()).unwrap().count(),
+            1,
+            "staging file remained"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), expected_json.as_bytes());
+
+        std::fs::write(&path, b"preserve these invalid bytes").unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let (url, server) = serve_responses(vec![(500, Vec::new()); TOKENIZER_DOWNLOAD_ATTEMPTS]);
+        let error = try_download_tokenizer_file_and_open(&reqwest::Client::new(), &url, "", &path)
+            .await
+            .unwrap_err();
+        assert!(error.contains("unsuccessful status"), "{error}");
+        assert_eq!(server.join().unwrap(), TOKENIZER_DOWNLOAD_ATTEMPTS);
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert_eq!(
+            std::fs::read_dir(dir.path()).unwrap().count(),
+            1,
+            "staging file remained"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn tokenizer_request_timeout_covers_stalled_response_body() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/tokenizer.json", listener.local_addr().unwrap());
+        let (headers_tx, headers_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0; 4096];
+            let _ = stream.read(&mut request).await.unwrap();
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\nx")
+                .await
+                .unwrap();
+            let _ = headers_tx.send(());
+            let _ = release_rx.await;
+        });
+        let client = tokio::spawn(async move {
+            download_tokenizer_file(&reqwest::Client::new(), &url, "").await
+        });
+        headers_rx
+            .await
+            .expect("server did not send response headers");
+        tokio::time::advance(TOKENIZER_REQUEST_TIMEOUT + Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+        let timed_out = client.is_finished();
+        let _ = release_tx.send(());
+        server.await.expect("server task failed");
+        let result = client.await.expect("client task failed");
+        assert!(timed_out, "client did not finish at the request timeout");
+        assert!(
+            result.is_err(),
+            "stalled response body unexpectedly succeeded"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(tokenizer_blocking)]
+    async fn cancelled_tokenizer_blocking_keeps_permit_until_worker_exits() {
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+        let mut waiter = tokio::spawn(async move {
+            tokenizer_blocking(move || {
+                started_tx.send(()).unwrap();
+                release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                finished_tx.send(()).unwrap();
+                Ok(small_tokenizer())
+            })
+            .await
+        });
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            tokio::task::spawn_blocking(move || started_rx.recv().unwrap()),
+        )
+        .await
+        .expect("worker did not start")
+        .unwrap();
+        waiter.abort();
+        let permit_retained = TOKENIZER_PARSE_PERMITS.try_acquire().is_err();
+        release_tx.send(()).unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            tokio::task::spawn_blocking(move || finished_rx.recv().unwrap()),
+        )
+        .await
+        .expect("worker did not finish")
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), TOKENIZER_PARSE_PERMITS.acquire())
+            .await
+            .expect("worker did not release parse permit")
+            .unwrap();
+        assert!(
+            permit_retained,
+            "cancelling the waiter released the worker's permit"
+        );
+    }
+
+    #[test]
+    fn invalid_and_oversized_tokenizer_bodies_are_rejected_without_parse_leaks() {
+        assert!(parse_tokenizer(b"not json").is_err());
+        assert_eq!(
+            parse_tokenizer(&vec![0; TOKENIZER_MAX_BYTES + 1]).unwrap_err(),
+            "tokenizer exceeds size limit"
+        );
     }
 }

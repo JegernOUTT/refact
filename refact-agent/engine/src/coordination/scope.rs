@@ -10,6 +10,7 @@ use crate::chat::types::ChatSession;
 use super::error::WorkError;
 use super::roots;
 
+#[derive(Clone)]
 pub struct WorkCaller {
     pub source_root: PathBuf,
     pub checkout_root: PathBuf,

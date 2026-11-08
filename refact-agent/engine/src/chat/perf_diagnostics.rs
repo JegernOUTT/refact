@@ -122,10 +122,19 @@ pub enum PerfComponent {
     WorkHistorySnapshot,
     WorkHistorySort,
     WorkHistoryRows,
+    WorkContextSnapshot,
+    WorkContextPublish,
+    WorkContextOverlap,
+    WorkContextRender,
+    WorkContextInventory,
+    WorkPagingLockWait,
+    WorkPagingLockHold,
+    WorkPagingValidate,
+    WorkPagingSelect,
 }
 
 impl PerfComponent {
-    pub const ALL: [Self; 107] = [
+    pub const ALL: [Self; 116] = [
         Self::TrajectorySnapshot,
         Self::TrajectorySerialize,
         Self::TrajectoryAtomicWrite,
@@ -233,6 +242,15 @@ impl PerfComponent {
         Self::WorkHistorySnapshot,
         Self::WorkHistorySort,
         Self::WorkHistoryRows,
+        Self::WorkContextSnapshot,
+        Self::WorkContextPublish,
+        Self::WorkContextOverlap,
+        Self::WorkContextRender,
+        Self::WorkContextInventory,
+        Self::WorkPagingLockWait,
+        Self::WorkPagingLockHold,
+        Self::WorkPagingValidate,
+        Self::WorkPagingSelect,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -344,6 +362,15 @@ impl PerfComponent {
             Self::WorkHistorySnapshot => "work_history.snapshot",
             Self::WorkHistorySort => "work_history.sort",
             Self::WorkHistoryRows => "work_history.rows",
+            Self::WorkContextSnapshot => "work_context.session_snapshot",
+            Self::WorkContextPublish => "work_context.session_publish",
+            Self::WorkContextOverlap => "work_context.overlap",
+            Self::WorkContextRender => "work_context.render",
+            Self::WorkContextInventory => "work_context.inventory",
+            Self::WorkPagingLockWait => "work_paging.lock_wait",
+            Self::WorkPagingLockHold => "work_paging.lock_hold",
+            Self::WorkPagingValidate => "work_paging.validate",
+            Self::WorkPagingSelect => "work_paging.select",
         }
     }
 

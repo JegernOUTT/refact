@@ -233,10 +233,12 @@ pub async fn prepare_work_context(
     }
     let mut hasher = DefaultHasher::new();
     significant_fingerprint(&visible_rows).hash(&mut hasher);
+    let overlap_span = perf_diagnostics::span(PerfComponent::WorkContextOverlap, None, None);
     let overlapping = super::capsule_render::overlapping_work(&visible_rows, own.as_ref());
     let mut overlap_keys: Vec<_> = overlapping.iter().collect();
     overlap_keys.sort();
     overlap_keys.hash(&mut hasher);
+    overlap_span.finish(PerfOutcome::Success, None, None, None, None);
     let fingerprint = hasher.finish();
     let mut candidate = state.clone();
     if decide(&mut candidate, fingerprint, &settings, observed_at) == CapsuleDecision::Skip {
@@ -259,6 +261,7 @@ pub async fn prepare_work_context(
     let count =
         |text: &str| crate::tokens::count_text_tokens_with_fallback(tokenizer.clone(), text);
     let message = loop {
+        let render_span = perf_diagnostics::span(PerfComponent::WorkContextRender, None, None);
         let mut rendered = super::capsule_render::render(
             &catalog.project,
             &visible_rows,
@@ -268,21 +271,26 @@ pub async fn prepare_work_context(
             observed_at,
             &count,
         )?;
+        render_span.finish(PerfOutcome::Success, None, None, None, None);
         if rendered.omitted > 0 {
             if inventory_cursor.is_none() {
+                let inventory_span =
+                    perf_diagnostics::span(PerfComponent::WorkContextInventory, None, None);
                 let page = super::service::overview_from_projection(
                     app,
                     &caller,
                     super::types::WorkOverviewRequest::default(),
-                    &catalog,
+                    std::sync::Arc::clone(&catalog),
                     &disclosure,
                 )
+                .await
                 .ok()?;
                 inventory_cursor = Some(
                     app.work_views
                         .beginning_cursor(&page.snapshot_id, page.seq, observed_at)
                         .ok()?,
                 );
+                inventory_span.finish(PerfOutcome::Success, None, None, None, None);
             }
             let cursor = inventory_cursor.as_ref()?;
             rendered.body.push_str(&format!(

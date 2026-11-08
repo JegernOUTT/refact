@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
@@ -12,6 +13,52 @@ use super::paging::ViewBinding;
 use super::privacy_guard;
 use super::scope::{canonical_candidate, resolve_path, WorkCaller};
 use super::types::{OverviewScope, WorkOverview, WorkOverviewRequest, WorkRootRef, WorkRow};
+
+static WORK_PROJECTION_PERMITS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
+
+pub(super) async fn projection_blocking<T: Send + 'static>(
+    work: impl FnOnce() -> Result<T, WorkError> + Send + 'static,
+) -> Result<T, WorkError> {
+    let permit = WORK_PROJECTION_PERMITS
+        .acquire()
+        .await
+        .map_err(|_| WorkError::unavailable())?;
+    let result = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        work()
+    })
+    .await
+    .map_err(|_| WorkError::unavailable())?;
+    #[cfg(test)]
+    if let Ok(Some((entered, release))) =
+        PROJECTION_POST_WORK_GATE.try_with(|gate| gate.borrow_mut().take())
+    {
+        let _ = entered.send(());
+        let _ = release.await;
+    }
+    result
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    pub(super) static PROJECTION_POST_WORK_GATE: std::cell::RefCell<Option<(
+        tokio::sync::oneshot::Sender<()>,
+        tokio::sync::oneshot::Receiver<()>,
+    )>>;
+}
+
+fn check_disclosure(
+    app: &AppState,
+    caller: &WorkCaller,
+    disclosure: &str,
+) -> Result<(), WorkError> {
+    if let Some(model) = &caller.model {
+        if privacy_guard::policy_key(&app.gcx, model)? != disclosure {
+            return Err(WorkError::policy_unavailable());
+        }
+    }
+    Ok(())
+}
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -190,7 +237,7 @@ pub(super) fn budget_page(
 pub async fn visible_projection(
     app: &AppState,
     caller: &WorkCaller,
-) -> Result<(WorkCatalog, String), WorkError> {
+) -> Result<(Arc<WorkCatalog>, String), WorkError> {
     #[cfg(test)]
     let _ = PROJECTION_BUILDS.try_with(|count| count.set(count.get() + 1));
     let before = match &caller.model {
@@ -210,28 +257,32 @@ pub async fn visible_projection(
                 WorkError::projection_failure(WorkFailureCause::ScopedSourceUnavailable)
             }
         })?;
-    if let Some(model) = &caller.model {
-        if catalog
-            .degraded
-            .iter()
-            .any(|reason| reason == "historical index unavailable")
-        {
-            return Err(WorkError::unavailable());
+    let app_owned = app.clone();
+    let caller_owned = caller.clone();
+    let expected_disclosure = before.clone();
+    let catalog = projection_blocking(move || {
+        if let Some(model) = &caller_owned.model {
+            if catalog
+                .degraded
+                .iter()
+                .any(|reason| reason == "historical index unavailable")
+            {
+                return Err(WorkError::unavailable());
+            }
+            catalog.retain_visible(privacy_guard::clear_rows(
+                &app_owned.gcx,
+                catalog.all_rows(),
+                model,
+            )?);
+            let roots = privacy_guard::clear_roots(&app_owned.gcx, catalog.roots.all(), model)?;
+            catalog.roots.by_id = roots.into_iter().map(|r| (r.id.clone(), r)).collect();
+            catalog.degraded.clear();
+            check_disclosure(&app_owned, &caller_owned, &expected_disclosure)?;
         }
-        catalog.retain_visible(privacy_guard::clear_rows(
-            &app.gcx,
-            catalog.all_rows(),
-            model,
-        )?);
-        let roots = privacy_guard::clear_roots(&app.gcx, catalog.roots.all(), model)?;
-        catalog.roots.by_id = roots.into_iter().map(|r| (r.id.clone(), r)).collect();
-        // Coverage is deliberately fixed for the model view: a contended or
-        // denied foreign source must not leak through diagnostics or counts.
-        catalog.degraded.clear();
-        if privacy_guard::policy_key(&app.gcx, model)? != before {
-            return Err(WorkError::policy_unavailable());
-        }
-    }
+        Ok(Arc::new(catalog))
+    })
+    .await?;
+    check_disclosure(app, caller, &before)?;
     Ok((catalog, before))
 }
 
@@ -615,6 +666,7 @@ fn page(
             Ok(end)
         },
     )?;
+    check_disclosure(app, caller, &disclosure)?;
     let window = frozen.window;
     let snapshot = frozen.snapshot;
     let page_unit = if snapshot.rows.is_empty() && !snapshot.roots.is_empty() {
@@ -667,7 +719,7 @@ pub async fn overview(
 ) -> Result<WorkOverview, WorkError> {
     let selected = overview_selection(caller, &mut request)?;
     let (catalog, disclosure) = visible_projection(app, caller).await?;
-    overview_selected(app, caller, request, selected, &catalog, &disclosure)
+    overview_offloaded(app, caller, request, selected, catalog, disclosure).await
 }
 
 fn overview_selection(
@@ -689,15 +741,49 @@ fn overview_selection(
         .transpose()
 }
 
-pub(super) fn overview_from_projection(
+pub(super) async fn overview_from_projection(
     app: &AppState,
     caller: &WorkCaller,
     mut request: WorkOverviewRequest,
-    catalog: &WorkCatalog,
+    catalog: Arc<WorkCatalog>,
     disclosure: &str,
 ) -> Result<WorkOverview, WorkError> {
     let selected = overview_selection(caller, &mut request)?;
-    overview_selected(app, caller, request, selected, catalog, disclosure)
+    overview_offloaded(
+        app,
+        caller,
+        request,
+        selected,
+        catalog,
+        disclosure.to_owned(),
+    )
+    .await
+}
+
+async fn overview_offloaded(
+    app: &AppState,
+    caller: &WorkCaller,
+    request: WorkOverviewRequest,
+    selected: Option<PathBuf>,
+    catalog: Arc<WorkCatalog>,
+    disclosure: String,
+) -> Result<WorkOverview, WorkError> {
+    let app_owned = app.clone();
+    let caller_owned = caller.clone();
+    let expected_disclosure = disclosure.clone();
+    let result = projection_blocking(move || {
+        overview_selected(
+            &app_owned,
+            &caller_owned,
+            request,
+            selected,
+            &catalog,
+            &disclosure,
+        )
+    })
+    .await?;
+    check_disclosure(app, caller, &expected_disclosure)?;
+    Ok(result)
 }
 
 fn overview_selected(
@@ -878,25 +964,33 @@ pub async fn inspect(
         caller.model.as_ref(),
         super::file_provenance::entries_for_files(&file_keys).await,
     )?;
-    let (page, snapshot) = page(
-        app,
-        caller,
-        disclosure,
-        &overview_request,
-        WorkSnapshot {
-            rows,
-            roots,
-            detail: row,
-            degraded: catalog.degraded.clone(),
-            advisory: advisory.into_iter().collect(),
-            wait_graph,
-            file_provenance,
-            selected_paths: paths,
-            guard_rows,
-        },
-        filter,
-        &catalog,
-    )?;
+    let snapshot = WorkSnapshot {
+        rows,
+        roots,
+        detail: row,
+        degraded: catalog.degraded.clone(),
+        advisory: advisory.into_iter().collect(),
+        wait_graph,
+        file_provenance,
+        selected_paths: paths,
+        guard_rows,
+    };
+    let app_owned = app.clone();
+    let caller_owned = caller.clone();
+    let expected_disclosure = disclosure.clone();
+    let (page, snapshot) = projection_blocking(move || {
+        page(
+            &app_owned,
+            &caller_owned,
+            disclosure,
+            &overview_request,
+            snapshot,
+            filter,
+            &catalog,
+        )
+    })
+    .await?;
+    check_disclosure(app, caller, &expected_disclosure)?;
     Ok(Inspection {
         selector: request.selector,
         row: snapshot.detail,

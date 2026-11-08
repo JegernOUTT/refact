@@ -5,6 +5,39 @@ use crate::chat::types::ChatSession;
 use crate::call_validation::ChatMessage;
 use super::capsule::{prepare_work_context, CapsuleState, CAPSULE_MARKER_KEY};
 
+#[tokio::test(flavor = "current_thread")]
+async fn blocking_projection_does_not_starve_current_thread_executor() {
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let job = tokio::spawn(async move {
+        super::service::projection_blocking(move || {
+            let _ = ready_tx.send(());
+            let _ = release_rx.blocking_recv();
+            Ok::<_, super::error::WorkError>(())
+        })
+        .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), ready_rx)
+        .await
+        .expect("blocking closure did not start")
+        .expect("ready signal dropped");
+    assert_eq!(
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            tokio::task::yield_now().await;
+            17
+        })
+        .await
+        .expect("current-thread executor was blocked"),
+        17
+    );
+    release_tx.send(()).unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), job)
+        .await
+        .expect("projection failed to join")
+        .expect("projection task panicked")
+        .expect("projection returned error");
+}
+
 async fn fixture() -> (AppState, tempfile::TempDir, Arc<Mutex<ChatSession>>) {
     let dir = tempfile::tempdir_in(dunce::canonicalize(std::env::temp_dir()).unwrap()).unwrap();
     let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
@@ -392,4 +425,139 @@ async fn model_policy_changes_force_recheck_inside_debounce_and_never_disclose_d
             .await
             .is_none()
     );
+}
+
+#[serial_test::serial(runtime_settings)]
+#[tokio::test]
+async fn policy_revocation_after_blocking_projection_prevents_returned_metadata() {
+    let (app, dir, _caller) = fixture().await;
+    let caller = super::scope::model_caller(&app, "capsule-caller", "trusted/model")
+        .await
+        .unwrap();
+    let gate_app = app.clone();
+    let gate_caller = caller.clone();
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let task = tokio::spawn(super::service::PROJECTION_POST_WORK_GATE.scope(
+        std::cell::RefCell::new(Some((entered_tx, release_rx))),
+        async move { super::service::visible_projection(&gate_app, &gate_caller).await },
+    ));
+    tokio::time::timeout(std::time::Duration::from_secs(10), entered_rx)
+        .await
+        .expect("projection did not reach gate")
+        .expect("gate dropped");
+    let path = dir.path().join("guarded.rs");
+    app.gcx.privacy_policy_load.write().unwrap().policy = Arc::new(refact_privacy::PrivacyPolicy {
+        zones: vec![refact_privacy::Zone {
+            name: "guarded".into(),
+            patterns: vec![path.to_string_lossy().into()],
+            send_to: vec!["other".into()],
+            on_shell_read: refact_privacy::ShellBehavior::Withhold,
+        }],
+        ..Default::default()
+    });
+    release_tx.send(()).unwrap();
+    let result = tokio::time::timeout(std::time::Duration::from_secs(10), task)
+        .await
+        .expect("projection did not finish")
+        .expect("projection panicked");
+    match result {
+        Err(error) => assert_eq!(error.code, "policy_unavailable"),
+        Ok(_) => panic!("revoked disclosure must not return catalog metadata"),
+    }
+}
+
+#[cfg(feature = "perf-tests")]
+#[serial_test::serial(runtime_settings)]
+#[tokio::test]
+#[ignore = "opt-in synthetic capsule benchmark; run with --features perf-tests -- --ignored"]
+async fn benchmark_provenance_rich_capsule_omission_inventory() {
+    let (app, dir, _caller) = fixture().await;
+    let files: Vec<_> = (0..10)
+        .map(|n| {
+            let path = dir.path().join(format!("synthetic-{n}.rs"));
+            std::fs::write(&path, format!("// synthetic benchmark file {n}\n")).unwrap();
+            path
+        })
+        .collect();
+    for count in [100usize, 1000] {
+        if count == 1000 {
+            app.chat
+                .sessions
+                .write()
+                .await
+                .retain(|id, _| !id.starts_with("bench-100-"));
+        }
+        for index in 0..count {
+            let id = format!("bench-{count}-{index}");
+            let mut peer = ChatSession::new(id.clone());
+            peer.work_project_root = Some(dir.path().into());
+            peer.thread.title = format!(
+                "Synthetic inventory work {index} — {}",
+                "details ".repeat(5)
+            );
+            let mut records_message =
+                ChatMessage::new("tool".into(), "synthetic declared files".into());
+            crate::privacy::records::merge_records(
+                &mut records_message,
+                files.iter().map(|path| refact_privacy::FileRecord {
+                    path: path.to_string_lossy().into_owned(),
+                    zone: "normal".into(),
+                    attribution: refact_privacy::Attribution::Declared,
+                }),
+            );
+            peer.add_message(records_message);
+            app.chat
+                .sessions
+                .write()
+                .await
+                .insert(id, Arc::new(Mutex::new(peer)));
+        }
+        let build = async {
+            let start = std::time::Instant::now();
+            let message = prepare_work_context(
+                &app,
+                &mut CapsuleState::default(),
+                "capsule-caller",
+                "trusted/model",
+            )
+            .await
+            .expect("synthetic capsule should be produced");
+            (message, start.elapsed())
+        };
+        let (message, elapsed) = build.await;
+        let body = message.content.content_text_only();
+        assert!(
+            body.contains("rows hidden"),
+            "expected capsule omission for {count} rows"
+        );
+        let token = body
+            .split("work_overview(cursor=\"")
+            .nth(1)
+            .unwrap()
+            .split('"')
+            .next()
+            .unwrap();
+        let caller = super::scope::model_caller(&app, "capsule-caller", "trusted/model")
+            .await
+            .unwrap();
+        let inventory_start = std::time::Instant::now();
+        let page = super::service::overview(
+            &app,
+            &caller,
+            super::types::WorkOverviewRequest {
+                cursor: Some(token.into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("inventory cursor should recover inventory");
+        let inventory_elapsed = inventory_start.elapsed();
+        assert!(
+            page.source_records.len() >= 10,
+            "provenance must be real before counting benchmark valid"
+        );
+        assert_eq!(page.total, count + 2);
+        eprintln!("capsule synthetic rows={count} records={} capsule_stage_ms={} inventory_stage_ms={} inventory_page_rows={}", page.source_records.len(), elapsed.as_millis(), inventory_elapsed.as_millis(), page.rows.len());
+    }
 }

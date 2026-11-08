@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, HashMap};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use refact_work_core::CoordinationSettings;
 use serde::Serialize;
@@ -25,7 +25,7 @@ struct View {
 }
 
 struct FrozenView {
-    snapshot: WorkSnapshot,
+    snapshot: Arc<WorkSnapshot>,
     fingerprint: String,
     observed_at: u64,
     expires_at: u64,
@@ -316,9 +316,15 @@ impl WorkViews {
                 "limit is outside the configured page range",
             ));
         }
+        let started = std::time::Instant::now();
         let (fingerprint, bytes) = current.signature(&binding)?;
         let units = current.units();
+        use crate::chat::perf_diagnostics::{self, PerfComponent, PerfOutcome};
+        let mut wait = perf_diagnostics::span(PerfComponent::WorkPagingLockWait, None, None);
+        let mut hold;
         let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        wait.pause();
+        hold = perf_diagnostics::span(PerfComponent::WorkPagingLockHold, None, None);
         state.prune_snapshots(settings, now_ms);
         let (view_id, seq, offset) = match cursor {
             Some(token) => {
@@ -375,7 +381,7 @@ impl WorkViews {
                     view.snapshots.insert(
                         seq,
                         FrozenView {
-                            snapshot: current,
+                            snapshot: Arc::new(current),
                             fingerprint: fingerprint.clone(),
                             observed_at: now_ms,
                             expires_at: now_ms
@@ -393,30 +399,101 @@ impl WorkViews {
             .get(&view_id)
             .and_then(|view| view.snapshots.get(&seq))
             .ok_or_else(WorkError::cursor_expired)?;
-        if let Err(error) = revalidate(&saved.snapshot) {
-            state.remove_snapshot(&view_id, seq);
-            return Err(error);
-        }
-        let total = saved.snapshot.total();
-        if offset > total {
+        let retained = Arc::clone(&saved.snapshot);
+        let observed_at = saved.observed_at;
+        let expires_at = saved.expires_at;
+        let stale = saved.fingerprint != fingerprint;
+        hold.pause();
+        drop(state);
+        wait.finish(PerfOutcome::Success, None, None, None, None);
+        hold.finish(PerfOutcome::Success, None, None, None, None);
+        let validate = perf_diagnostics::span(PerfComponent::WorkPagingValidate, None, None);
+        let validation = revalidate(&retained);
+        validate.finish(
+            if validation.is_ok() {
+                PerfOutcome::Success
+            } else {
+                PerfOutcome::Failure
+            },
+            None,
+            None,
+            None,
+            None,
+        );
+        let total = retained.total();
+        if validation.is_ok() && offset > total {
             return Err(WorkError::cursor_expired());
         }
         let requested_end = offset.saturating_add(limit).min(total);
-        let end = select_end(&saved.snapshot, offset, requested_end)?;
+        let select = perf_diagnostics::span(PerfComponent::WorkPagingSelect, None, None);
+        let selected = if validation.is_ok() {
+            Some(select_end(&retained, offset, requested_end))
+        } else {
+            None
+        };
+        let snapshot = selected
+            .as_ref()
+            .and_then(|result| result.as_ref().ok())
+            .filter(|&&end| end <= requested_end && end >= offset)
+            .map(|&end| retained.slice(offset, end));
+        select.finish(
+            if selected.as_ref().is_some_and(Result::is_ok) {
+                PerfOutcome::Success
+            } else {
+                PerfOutcome::Failure
+            },
+            None,
+            None,
+            None,
+            None,
+        );
+        let mut wait = perf_diagnostics::span(PerfComponent::WorkPagingLockWait, None, None);
+        let mut hold;
+        let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        wait.pause();
+        hold = perf_diagnostics::span(PerfComponent::WorkPagingLockHold, None, None);
+        let commit_now =
+            now_ms.saturating_add(started.elapsed().as_millis().min(u64::MAX as u128) as u64);
+        state.prune_snapshots(settings, commit_now);
+        let same = state.views.get(&view_id).is_some_and(|view| {
+            view.binding == binding
+                && view
+                    .snapshots
+                    .get(&seq)
+                    .is_some_and(|saved| Arc::ptr_eq(&saved.snapshot, &retained))
+        });
+        if let Err(error) = validation {
+            if same {
+                state.remove_snapshot(&view_id, seq);
+            }
+            return Err(error);
+        }
+        if !same || commit_now >= expires_at {
+            return Err(WorkError::cursor_expired());
+        }
+        if let Some(token) = cursor {
+            if !state.cursors.get(token).is_some_and(|saved| {
+                saved.binding == binding
+                    && saved.view_id == view_id
+                    && saved.generation == seq
+                    && saved.offset == offset
+                    && commit_now < saved.expires_at
+            }) {
+                return Err(WorkError::cursor_expired());
+            }
+        }
+        let end = selected.expect("selection follows successful validation")?;
         if end > requested_end || end < offset || (end == offset && offset < total) {
             return Err(WorkError::projection_failure(
                 WorkFailureCause::ProvenanceCapacity,
             ));
         }
-        let snapshot = saved.snapshot.slice(offset, end);
-        let observed_at = saved.observed_at;
-        let expires_at = saved.expires_at;
-        let stale = saved.fingerprint != fingerprint;
+        let snapshot = snapshot.ok_or_else(WorkError::cursor_expired)?;
         state
             .views
             .get_mut(&view_id)
             .ok_or_else(WorkError::cursor_expired)?
-            .accessed_at = now_ms;
+            .accessed_at = commit_now;
         let next_cursor = if end < total {
             let existing = state
                 .cursors
@@ -425,7 +502,7 @@ impl WorkViews {
                     c.view_id == view_id
                         && c.generation == seq
                         && c.offset == end
-                        && now_ms < c.expires_at
+                        && commit_now < c.expires_at
                 })
                 .map(|(token, _)| token.clone());
             Some(match existing {
@@ -457,6 +534,10 @@ impl WorkViews {
         } else {
             None
         };
+        hold.pause();
+        drop(state);
+        wait.finish(PerfOutcome::Success, None, None, None, None);
+        hold.finish(PerfOutcome::Success, None, None, None, None);
         Ok(FrozenPage {
             window: PageWindow {
                 snapshot_id: view_id,
@@ -612,6 +693,139 @@ mod tests {
                 .collect(),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn frozen_page_revalidation_does_not_hold_global_state_lock() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let views = Arc::new(WorkViews::default());
+        let settings = CoordinationSettings::default();
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let (b_tx, b_rx) = mpsc::channel();
+        let a_views = Arc::clone(&views);
+        let a_settings = settings.clone();
+        let a = std::thread::spawn(move || {
+            a_views.frozen_page_select(
+                binding(),
+                snapshot("a"),
+                1,
+                None,
+                &a_settings,
+                10,
+                |_| {
+                    entered_tx.send(()).unwrap();
+                    let _ = release_rx.recv_timeout(Duration::from_secs(5));
+                    Ok(())
+                },
+                |_, _, end| Ok(end),
+            )
+        });
+        let entered = entered_rx.recv_timeout(Duration::from_secs(2)).is_ok();
+        if !entered {
+            let _ = release_tx.send(());
+            let _ = a.join();
+            panic!("revalidation callback did not start");
+        }
+        let b_views = Arc::clone(&views);
+        let b_settings = settings.clone();
+        let b = std::thread::spawn(move || {
+            let mut other = binding();
+            other.principal = "other".into();
+            let result = b_views
+                .frozen_page_select(
+                    other,
+                    snapshot("b"),
+                    1,
+                    None,
+                    &b_settings,
+                    11,
+                    |_| Ok(()),
+                    |_, _, end| Ok(end),
+                )
+                .map(|page| page.window.snapshot_id);
+            let _ = b_tx.send(result);
+        });
+        let result_before_release = b_rx.recv_timeout(Duration::from_secs(2));
+        let _ = release_tx.send(());
+        assert!(a.join().unwrap().is_ok());
+        b.join().unwrap();
+        assert!(
+            result_before_release.is_ok_and(|result| result.is_ok()),
+            "independent frozen page did not complete successfully before release"
+        );
+    }
+
+    #[test]
+    fn revalidation_commit_after_eviction_cannot_remove_replacement_view() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let views = Arc::new(WorkViews::default());
+        let settings = CoordinationSettings {
+            max_work_views: 1,
+            ..Default::default()
+        };
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let a_views = Arc::clone(&views);
+        let a_settings = settings.clone();
+        let a = std::thread::spawn(move || {
+            a_views.frozen_page_select(
+                binding(),
+                snapshot("a"),
+                1,
+                None,
+                &a_settings,
+                10,
+                |_| {
+                    entered_tx.send(()).unwrap();
+                    let _ = release_rx.recv_timeout(Duration::from_secs(5));
+                    Ok(())
+                },
+                |_, _, end| Ok(end),
+            )
+        });
+        let entered = entered_rx.recv_timeout(Duration::from_secs(2)).is_ok();
+        if !entered {
+            let _ = release_tx.send(());
+            let _ = a.join();
+            panic!("revalidation callback did not start");
+        }
+        let mut other = binding();
+        other.principal = "other".into();
+        let replacement = views
+            .frozen_page_select(
+                other.clone(),
+                snapshot("b"),
+                1,
+                None,
+                &settings,
+                11,
+                |_| Ok(()),
+                |_, _, end| Ok(end),
+            )
+            .unwrap();
+        let _ = release_tx.send(());
+        let error = a.join().unwrap().err().unwrap();
+        assert_eq!(error.code, "cursor_expired");
+        let retained = views
+            .frozen_page_select(
+                other,
+                snapshot("b"),
+                1,
+                None,
+                &settings,
+                12,
+                |_| Ok(()),
+                |_, _, end| Ok(end),
+            )
+            .unwrap();
+        assert_eq!(retained.window.snapshot_id, replacement.window.snapshot_id);
+        assert_eq!(retained.window.seq, replacement.window.seq);
+        assert_eq!(retained.snapshot.roots[0].id, "b-0");
     }
 
     #[test]

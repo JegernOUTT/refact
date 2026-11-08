@@ -911,6 +911,7 @@ async fn prepare_session_knowledge_inner(app: AppState, session_arc: Arc<AMutex<
 }
 
 pub async fn prepare_project_work_context(app: &AppState, session_arc: &Arc<AMutex<ChatSession>>) {
+    let snapshot_span = perf_diagnostics::span(PerfComponent::WorkContextSnapshot, None, None);
     let (thread, chat_id, version, source_root, mut state) = {
         let mut session = session_arc.lock().await;
         if session.closed || !is_agentic_mode_id(&session.thread.mode) {
@@ -927,6 +928,7 @@ pub async fn prepare_project_work_context(app: &AppState, session_arc: &Arc<AMut
             session.work_capsule_state.clone(),
         )
     };
+    snapshot_span.finish(PerfOutcome::Success, None, None, None, None);
     let original_state = state.clone();
     let message = crate::coordination::capsule::prepare_work_context(
         app,
@@ -935,6 +937,7 @@ pub async fn prepare_project_work_context(app: &AppState, session_arc: &Arc<AMut
         &thread.model,
     )
     .await;
+    let publish_span = perf_diagnostics::span(PerfComponent::WorkContextPublish, None, None);
     let mut session = session_arc.lock().await;
     if session.closed
         || session.trajectory_version != version
@@ -952,6 +955,7 @@ pub async fn prepare_project_work_context(app: &AppState, session_arc: &Arc<AMut
     if let Some(message) = message {
         session.add_message(message);
     }
+    publish_span.finish(PerfOutcome::Success, None, None, None, None);
 }
 
 pub fn save_rag_results_to_session(session: &mut ChatSession, rag_results: &[serde_json::Value]) {
