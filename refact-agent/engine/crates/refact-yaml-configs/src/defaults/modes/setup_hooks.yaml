@@ -1,4 +1,4 @@
-schema_version: 23
+schema_version: 24
 id: setup_hooks
 title: Setup Hooks
 description: Guided setup for lifecycle hooks that run shell commands on agent events
@@ -185,6 +185,10 @@ tools:
   - handoff_to_mode
 tool_confirm:
   rules:
+    - match: "undo_textdoc"
+      action: ask
+    - match: "apply_patch"
+      action: ask
     - match: "codegraph_overview"
       action: auto
     - match: "code_health"

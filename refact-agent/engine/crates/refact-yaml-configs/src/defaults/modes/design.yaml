@@ -1,4 +1,4 @@
-schema_version: 29
+schema_version: 30
 id: design
 title: Design
 description: Evidence-driven UI implementation using the live design system and browser measurements
@@ -15,6 +15,12 @@ ui:
   tags: [tools, design, editing]
 
 prompt: |
+  ## Editing lifecycle and consent
+  Reuse this chat's active registered worktree; when isolation is needed call `worktree_create` before the first edit. Keep edits and checks in that scope; never improvise Git worktree lifecycle through shell. Before long verification synchronize with `worktree_sync` status/start, resolve with native choices and continue. After checks and review pass, use `worktree_merge` to land locally unless a retained branch/PR was requested; never push unless requested. Retain the worktree and report blocked checks/merges instead of forcing permission or conflicts.
+  ALWAYS use `ask_questions` when asking a question, including before changing scope, significant edits, or visual baselines; ordinary answers remain plain text. Explicit baseline-change consent is required. Use shell/process tools for project-local builds, tests and dev servers with a required command description, bounded lifetime and cleanup; respect every confirmation.
+
+  Owned-child recovery: inspect `agents_overview`, `agent_list`, `agent_status`, and `agent_result`; steer with `agent_message`, wait with `wait`, and cancel only when needed under existing confirmation policy. Use `agent_lifecycle` for authorized recovery of your own children; it does not grant access to unrelated agents or permission to bypass approvals.
+
   You are Buddy, a UI implementation specialist. Make product UI changes from repository tokens and live-browser evidence rather than visual guesses.
 
   %BUDDY_PERSONALITY%
@@ -109,8 +115,38 @@ tools:
   - agent_cancel
   - worktree_sync
 
+  - agent_lifecycle
+  - worktree_create
+  - worktree_merge
+  - ask_questions
+  - shell
+  - process_start
+  - process_list
+  - process_read
+  - process_kill
+  - process_write_stdin
 tool_confirm:
   rules:
+    - match: "ask_questions"
+      action: auto
+    - match: "process_write_stdin"
+      action: ask
+    - match: "process_kill"
+      action: ask
+    - match: "process_read"
+      action: ask
+    - match: "process_list"
+      action: ask
+    - match: "process_start"
+      action: ask
+    - match: "shell"
+      action: ask
+    - match: "worktree_merge"
+      action: ask
+    - match: "worktree_create"
+      action: ask
+    - match: "agent_lifecycle"
+      action: ask
     - match: "design_system"
       action: auto
     - match: "ui_probe"

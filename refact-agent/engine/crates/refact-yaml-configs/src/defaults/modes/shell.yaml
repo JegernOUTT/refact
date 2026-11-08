@@ -1,4 +1,4 @@
-schema_version: 15
+schema_version: 16
 id: shell
 title: Shell
 description: Execute shell commands for system tasks

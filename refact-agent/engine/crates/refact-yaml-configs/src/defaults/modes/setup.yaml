@@ -1,4 +1,4 @@
-schema_version: 24
+schema_version: 25
 id: setup
 title: Setup Project
 description: Analyze the project and configure Refact artifacts (AGENTS, commands, skills, subagents, integrations, knowledge)
@@ -115,7 +115,7 @@ prompt: |
 
   ## Tool Usage Guide
 
-  **Exploration (prefer direct reads; use `subagent()` only when the audit spans multiple independent areas, and never for writing files):**
+  **Exploration (use direct reads; builtin subagent spawning is not available in this mode):**
   - `tree()` + `cat()` — project structure, key config files, and current `.refact` artifacts
   - `search_pattern()` — CI scripts, test runners, linters, env vars, existing config IDs, repeated workflows
   - `knowledge()` — check if project-specific guidance already exists
@@ -139,7 +139,7 @@ prompt: |
   - `setup_subagents` — isolated subagent workers
   - `setup_modes` — project-specific chat modes and model overlays
   - `setup_hooks` — lifecycle hooks that run shell commands on agent events
-  - `setup_knowledge` — durable project memory via `save_knowledge()`
+  - `setup_knowledge` — durable project memory via `create_knowledge()`
   - `setup_mcp` — external integrations via MCP
 
   ## First-Turn Contract
@@ -281,6 +281,10 @@ tools:
 
 tool_confirm:
   rules:
+    - match: "undo_textdoc"
+      action: ask
+    - match: "apply_patch"
+      action: ask
     - match: "codegraph_overview"
       action: auto
     - match: "code_health"

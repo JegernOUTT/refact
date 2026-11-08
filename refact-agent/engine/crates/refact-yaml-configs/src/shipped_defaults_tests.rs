@@ -283,3 +283,345 @@ async fn organization_bootstrap_installs_exact_semantic_no_tools_builtin() {
     assert!(system.contains("fingerprint"));
     assert!(!system.contains("expected_revision"));
 }
+
+const AUDIT_BASELINE_MODES: &[(&str, u32)] = &[
+    ("agent", 31),
+    ("ask", 15),
+    ("brainstorming", 10),
+    ("buddy", 21),
+    ("configurator", 15),
+    ("debug", 26),
+    ("design", 29),
+    ("explore", 22),
+    ("learn", 24),
+    ("past_work", 15),
+    ("plan", 23),
+    ("setup", 24),
+    ("setup_agents_md", 25),
+    ("setup_commands", 25),
+    ("setup_hooks", 23),
+    ("setup_knowledge", 23),
+    ("setup_mcp", 24),
+    ("setup_modes", 24),
+    ("setup_skills", 25),
+    ("setup_subagents", 22),
+    ("shell", 15),
+    ("solo", 3),
+    ("task_agent", 30),
+    ("task_planner", 34),
+];
+
+fn audit_baseline(name: &str, version: u32) -> String {
+    format!("schema_version: {version}\nid: {name}\ntools: [cat, worktree_merge]\nprompt: |\n  Previous installed mode fixture.\n")
+}
+
+#[test]
+fn audit_bumps_every_mode_exactly_once_above_its_previous_manifest_max() {
+    let manifest = shipped_defaults();
+    let embedded: HashMap<_, _> = embedded_defaults("modes").into_iter().collect();
+    assert_eq!(AUDIT_BASELINE_MODES.len(), 24);
+    assert_eq!(embedded.len(), AUDIT_BASELINE_MODES.len());
+    for &(name, old_version) in AUDIT_BASELINE_MODES {
+        let key = format!("modes/{name}.yaml");
+        let entries = &manifest[&key];
+        assert_eq!(entries[entries.len() - 2].0, old_version);
+        let previous_max = entries[..entries.len() - 1]
+            .iter()
+            .map(|(v, _)| *v)
+            .max()
+            .unwrap();
+        let text = &embedded[&format!("{name}.yaml")];
+        let mode: crate::customization_types::ModeConfig = serde_yaml::from_str(text).unwrap();
+        assert_eq!(
+            mode.schema_version,
+            previous_max.max(old_version) + 1,
+            "single revision bump for {name}"
+        );
+        assert_eq!(
+            entries.last().unwrap(),
+            &(mode.schema_version, compute_checksum(text))
+        );
+    }
+}
+
+async fn install_audit_baselines(
+    dir: &std::path::Path,
+    modified: bool,
+    baselined: bool,
+) -> HashMap<String, String> {
+    fs::create_dir_all(dir.join("modes")).await.unwrap();
+    let mut checksums = HashMap::new();
+    for &(name, version) in AUDIT_BASELINE_MODES {
+        let baseline = audit_baseline(name, version);
+        let key = format!("modes/{name}.yaml");
+        let content = if modified {
+            // Deliberately remove grants and deny a tool: upgrades must not undo intentional policy.
+            let mut value: serde_yaml::Value = serde_yaml::from_str(&baseline).unwrap();
+            value["tools"] = serde_yaml::from_str("[cat]").unwrap();
+            value["tool_confirm"] =
+                serde_yaml::from_str("rules: [{match: shell, action: deny}]").unwrap();
+            format!(
+                "# intentional local restriction\n{}",
+                serde_yaml::to_string(&value).unwrap()
+            )
+        } else {
+            baseline.to_owned()
+        };
+        fs::write(dir.join(&key), content).await.unwrap();
+        checksums.insert(key, compute_checksum(&baseline));
+    }
+    if baselined {
+        fs::write(
+            dir.join("default-checksums.yaml"),
+            serde_yaml::to_string(&checksums).unwrap(),
+        )
+        .await
+        .unwrap();
+    }
+    checksums
+}
+
+async fn saved_baselines(dir: &std::path::Path) -> HashMap<String, String> {
+    serde_yaml::from_str(
+        &fs::read_to_string(dir.join("default-checksums.yaml"))
+            .await
+            .unwrap(),
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+async fn all_audit_modes_upgrade_unmodified_baselined_installs_and_remain_stable() {
+    let temp = tempfile::tempdir().unwrap();
+    install_audit_baselines(temp.path(), false, true).await;
+    for _ in 0..2 {
+        global_configs_try_create_all(temp.path()).await.unwrap();
+        let saved = saved_baselines(temp.path()).await;
+        for (file, embedded) in embedded_defaults("modes") {
+            let key = format!("modes/{file}");
+            assert_eq!(
+                fs::read_to_string(temp.path().join(&key)).await.unwrap(),
+                embedded,
+                "{key}"
+            );
+            assert_eq!(saved[&key], compute_checksum(&embedded));
+        }
+    }
+}
+
+#[tokio::test]
+async fn all_audit_modes_preserve_baselined_custom_restrictions_byte_for_byte() {
+    let temp = tempfile::tempdir().unwrap();
+    let old_checksums = install_audit_baselines(temp.path(), true, true).await;
+    let mut before = HashMap::new();
+    for key in old_checksums.keys() {
+        before.insert(key.clone(), fs::read(temp.path().join(key)).await.unwrap());
+    }
+    for _ in 0..2 {
+        global_configs_try_create_all(temp.path()).await.unwrap();
+        let saved = saved_baselines(temp.path()).await;
+        for (key, content) in &before {
+            assert_eq!(
+                &fs::read(temp.path().join(key)).await.unwrap(),
+                content,
+                "{key}"
+            );
+            assert_eq!(saved[key], old_checksums[key]);
+        }
+    }
+}
+
+#[tokio::test]
+async fn unbaselined_older_unknown_modes_upgrade_with_exact_backups() {
+    let temp = tempfile::tempdir().unwrap();
+    install_audit_baselines(temp.path(), true, false).await;
+    let mut originals = HashMap::new();
+    for &(name, _) in AUDIT_BASELINE_MODES {
+        originals.insert(
+            format!("{name}.yaml"),
+            fs::read(temp.path().join(format!("modes/{name}.yaml")))
+                .await
+                .unwrap(),
+        );
+    }
+    global_configs_try_create_all(temp.path()).await.unwrap();
+    let saved = saved_baselines(temp.path()).await;
+    for (file, embedded) in embedded_defaults("modes") {
+        let key = format!("modes/{file}");
+        assert_eq!(
+            fs::read_to_string(temp.path().join(&key)).await.unwrap(),
+            embedded
+        );
+        assert_eq!(saved[&key], compute_checksum(&embedded));
+        let backups: Vec<_> = std::fs::read_dir(temp.path().join("modes"))
+            .unwrap()
+            .map(Result::unwrap)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(&format!("{file}.bak-"))
+            })
+            .collect();
+        assert_eq!(
+            backups.len(),
+            1,
+            "unknown older custom {file} needs a backup"
+        );
+        assert_eq!(fs::read(backups[0].path()).await.unwrap(), originals[&file]);
+    }
+}
+
+#[tokio::test]
+async fn prior_same_version_missing_sync_now_upgrades_with_exact_backup() {
+    let temp = tempfile::tempdir().unwrap();
+    let &(name, old_version) = AUDIT_BASELINE_MODES
+        .iter()
+        .find(|(name, _)| *name == "agent")
+        .unwrap();
+    let baseline = audit_baseline(name, old_version);
+    let stale = baseline.clone();
+    assert_eq!(
+        serde_yaml::from_str::<SchemaVersion>(&stale)
+            .unwrap()
+            .schema_version,
+        old_version
+    );
+    assert!(!stale.contains("worktree_sync"));
+    fs::create_dir_all(temp.path().join("modes")).await.unwrap();
+    let path = temp.path().join(format!("modes/{name}.yaml"));
+    fs::write(&path, &stale).await.unwrap();
+    global_configs_try_create_all(temp.path()).await.unwrap();
+    let current = embedded_defaults("modes")
+        .into_iter()
+        .find(|(file, _)| file == "agent.yaml")
+        .unwrap()
+        .1;
+    assert_eq!(fs::read_to_string(&path).await.unwrap(), current);
+    let backup = std::fs::read_dir(temp.path().join("modes"))
+        .unwrap()
+        .map(Result::unwrap)
+        .find(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("agent.yaml.bak-")
+        })
+        .unwrap();
+    assert_eq!(fs::read_to_string(backup.path()).await.unwrap(), stale);
+}
+
+#[test]
+fn audited_mode_semantic_workflows_and_confirmation_boundaries() {
+    use crate::customization_types::ModeConfig;
+    let modes: HashMap<String, ModeConfig> = embedded_defaults("modes")
+        .into_iter()
+        .map(|(_, text)| {
+            let mode: ModeConfig = serde_yaml::from_str(&text).unwrap();
+            (mode.id.clone(), mode)
+        })
+        .collect();
+    let has = |mode: &ModeConfig, tool: &str| mode.tools.iter().any(|name| name == tool);
+    let exact_rule = |mode: &ModeConfig, tool: &str, action: &str| {
+        mode.tool_confirm
+            .rules
+            .iter()
+            .any(|rule| rule.match_pattern == tool && rule.action == action)
+    };
+    let mut spawning = 0;
+    for mode in modes.values() {
+        assert!(
+            !mode.prompt.contains("ask_questions(questions='"),
+            "{} JSON arrays must not be strings",
+            mode.id
+        );
+        if has(mode, "subagent") {
+            spawning += 1;
+            for tool in [
+                "agents_overview",
+                "agent_message",
+                "agent_list",
+                "agent_status",
+                "wait",
+                "agent_result",
+                "agent_cancel",
+                "agent_lifecycle",
+            ] {
+                assert!(has(mode, tool), "{} missing {tool}", mode.id);
+            }
+            assert!(exact_rule(mode, "agent_lifecycle", "ask"));
+        }
+        if mode.id.starts_with("setup") && mode.id != "setup_knowledge" {
+            for tool in ["apply_patch", "undo_textdoc"] {
+                assert!(exact_rule(mode, tool, "ask"), "{} {tool}", mode.id);
+            }
+        }
+    }
+    assert_eq!(spawning, 15);
+    let design = &modes["design"];
+    for tool in [
+        "worktree_create",
+        "worktree_merge",
+        "worktree_sync",
+        "shell",
+        "process_start",
+        "process_list",
+        "process_read",
+        "process_kill",
+        "process_write_stdin",
+    ] {
+        assert!(has(design, tool));
+        assert!(exact_rule(design, tool, "ask"));
+    }
+    assert!(has(design, "ask_questions"));
+    for tool in ["set_goal", "board_create", "schedule"] {
+        assert!(!has(design, tool));
+    }
+    assert!(has(&modes["task_planner"], "restart_agent"));
+    assert!(exact_rule(&modes["task_planner"], "restart_agent", "ask"));
+    assert!(!has(&modes["task_planner"], "worktree_create"));
+    assert!(has(&modes["configurator"], "ask_questions"));
+    assert!(!has(&modes["configurator"], "shell"));
+    assert!(exact_rule(&modes["configurator"], "ask_questions", "auto"));
+    assert!(modes["learn"].ui.tags.iter().any(|tag| tag == "guided"));
+    assert!(!has(&modes["learn"], "create_knowledge"));
+    for id in [
+        "ask",
+        "brainstorming",
+        "explore",
+        "past_work",
+        "plan",
+        "setup_knowledge",
+    ] {
+        for tool in [
+            "apply_patch",
+            "create_textdoc",
+            "shell",
+            "process_start",
+            "worktree_create",
+            "worktree_merge",
+            "worktree_sync",
+        ] {
+            assert!(!has(&modes[id], tool), "{id} must exclude {tool}");
+        }
+    }
+    for id in ["setup", "setup_knowledge"] {
+        assert!(!has(&modes[id], "subagent"));
+    }
+    for id in ["task_agent", "task_planner"] {
+        let prompt = &modes[id].prompt;
+        for unsafe_advice in [
+            "git add -A",
+            "rm -rf node_modules",
+            "ship the production fix without the test",
+            "cherry-pick just the production files",
+        ] {
+            assert!(!prompt.contains(unsafe_advice), "{id}: {unsafe_advice}");
+        }
+    }
+    assert!(modes["task_agent"].prompt.contains("`goal.plan.content`"));
+    assert!(modes["setup_subagents"].prompt.contains("agent_profile"));
+    assert!(modes["setup_modes"]
+        .prompt
+        .contains("independently monotonic"));
+}

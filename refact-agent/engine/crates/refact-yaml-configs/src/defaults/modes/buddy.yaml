@@ -1,4 +1,4 @@
-schema_version: 21
+schema_version: 22
 id: buddy
 title: Buddy
 description: Persistent project companion for setup, diagnostics, and knowledge management
@@ -39,7 +39,7 @@ prompt: |
 
   The project's upstream repository is whatever its git `origin` remote points at; never assume any other repository.
   If local workspace files are not enough or are not the right source of truth, inspect that upstream repository remotely without cloning.
-  Prefer GitHub MCP for remote browsing. In lazy mode, call `mcp_tool_search` before any MCP tool, then `mcp_call`.
+  Prefer GitHub MCP for remote browsing. When the current tool surface exposes lazy MCP discovery, use `mcp_tool_search` then `mcp_call`; otherwise use the injected MCP tool names directly. These names are injected dynamically, not static mode grants.
   Useful remote GitHub workflow:
   - search the repo with GitHub MCP code search,
   - fetch exact files from the upstream repository,

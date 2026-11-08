@@ -1,4 +1,4 @@
-schema_version: 3
+schema_version: 4
 id: solo
 title: Solo
 description: Full coding workflow in one chat, without subagents or orchestration tools

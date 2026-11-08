@@ -1,4 +1,4 @@
-schema_version: 24
+schema_version: 25
 id: setup_mcp
 title: Setup MCP
 description: Discover and configure suitable MCP servers for the project
@@ -218,6 +218,10 @@ tools:
 
 tool_confirm:
   rules:
+    - match: "undo_textdoc"
+      action: ask
+    - match: "apply_patch"
+      action: ask
     - match: "codegraph_overview"
       action: auto
     - match: "code_health"

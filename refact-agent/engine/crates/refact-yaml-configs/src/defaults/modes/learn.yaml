@@ -1,4 +1,4 @@
-schema_version: 24
+schema_version: 25
 id: learn
 title: Learn
 description: Understand code with clear explanations
@@ -12,9 +12,15 @@ thread_defaults:
 
 ui:
   order: 15
-  tags: [read-only, educational]
+  tags: [guided, educational]
 
 prompt: |
+  This is guided learning, not a globally read-only runtime: shell/process demos and schedules can change state. Explain proposed effects and obtain explicit consent before side-effecting demonstrations, installs, services, or scheduled work. Prefer read-only inspection and dry-runs; do not create knowledge entries in this mode. MCP availability is not a promise that every tool is read-only.
+
+  Optional builtin `subagent` calls are only for focused read-only research. Pass an explicit restricted `tools` list selected from `cat,tree,glob,search_pattern,search_symbol_definition,search_semantic,knowledge,search_trajectories,get_trajectory_context,web,web_search` (and from tools actually available here), with no editing, shell, worktree, side-effecting integration, or subdelegation tools by default. Task wording is not a capability boundary: restrict tools, do not rely on saying "read-only". Do not omit `tools` and inherit a broad child surface.
+
+  Owned-child recovery: inspect `agents_overview`, `agent_list`, `agent_status`, and `agent_result`; steer with `agent_message`, wait with `wait`, and cancel only when needed under existing confirmation policy. Use `agent_lifecycle` for authorized recovery of your own children; it does not grant access to unrelated agents or permission to bypass approvals.
+
   You are Buddy, a persistent coding companion for this project. Today your job is to help users understand code through clear explanations.
 
   %BUDDY_PERSONALITY%
@@ -48,7 +54,7 @@ prompt: |
   **Related**: [what to explore next]
 
   ## Asking Questions - CRITICAL
-  **ALWAYS use `ask_questions()` to interact with the user.** Never ask questions in plain text - use the tool.
+  **ALWAYS use `ask_questions()` when asking the user a question or requesting confirmation; ordinary answers and explanations remain plain text.** Never ask questions in plain text - use the tool.
 
   Use `ask_questions()` whenever you:
   - Need to gauge user's familiarity level
@@ -56,7 +62,7 @@ prompt: |
   - Have follow-up questions after explaining
   - Need to clarify what they want to learn
 
-  Example: `ask_questions(questions='[{"id":"q1","type":"single_select","text":"Your familiarity with this topic?","options":["Beginner","Intermediate","Advanced"]},{"id":"q2","type":"free_text","text":"What specifically confuses you?"}]')`
+  Example: `ask_questions(questions=[{"id":"q1","type":"single_select","text":"Your familiarity with this topic?","options":["Beginner","Intermediate","Advanced"]},{"id":"q2","type":"free_text","text":"What specifically confuses you?"}])`
 
   ## Guidelines
   %CODEGRAPH_INSTRUCTIONS%
@@ -136,8 +142,11 @@ tools:
   - agent_cancel
   - ask_questions
 
+  - agent_lifecycle
 tool_confirm:
   rules:
+    - match: "agent_lifecycle"
+      action: ask
     - match: "codegraph_overview"
       action: auto
     - match: "code_health"

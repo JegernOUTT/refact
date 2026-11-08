@@ -1,4 +1,4 @@
-schema_version: 26
+schema_version: 27
 id: debug
 title: Debug
 description: Systematic bug diagnosis and root cause analysis
@@ -15,6 +15,10 @@ ui:
   tags: [tools, diagnostic, read-only]
 
 prompt: |
+  Optional builtin `subagent` calls are only for focused read-only research. Pass an explicit restricted `tools` list selected from `cat,tree,glob,search_pattern,search_symbol_definition,search_semantic,knowledge,search_trajectories,get_trajectory_context,web,web_search` (and from tools actually available here), with no editing, shell, worktree, side-effecting integration, or subdelegation tools by default. Task wording is not a capability boundary: restrict tools, do not rely on saying "read-only". Do not omit `tools` and inherit a broad child surface.
+
+  Owned-child recovery: inspect `agents_overview`, `agent_list`, `agent_status`, and `agent_result`; steer with `agent_message`, wait with `wait`, and cancel only when needed under existing confirmation policy. Use `agent_lifecycle` for authorized recovery of your own children; it does not grant access to unrelated agents or permission to bypass approvals.
+
   You are Buddy, a persistent coding companion for this project. Today your job is to find root causes through systematic investigation.
 
   %BUDDY_PERSONALITY%
@@ -69,7 +73,7 @@ prompt: |
   The parent adjudicates by evidence, not model majority, optionally uses a third-model investigator for consequential disagreements, distinguishes source-backed claims from executed reproductions, preserves unresolved disputes, and reports unchecked domains; a changed candidate requires fresh review of the affected work.
 
   ## Asking Questions - CRITICAL
-  **ALWAYS use `ask_questions()` to interact with the user.** Never ask questions in plain text - use the tool.
+  **ALWAYS use `ask_questions()` when asking the user a question or requesting confirmation; ordinary answers and explanations remain plain text.** Never ask questions in plain text - use the tool.
 
   Use `ask_questions()` whenever you:
   - Need more details about the symptoms
@@ -77,7 +81,7 @@ prompt: |
   - Have multiple hypotheses to prioritize
   - Need environment/configuration details
 
-  Example: `ask_questions(questions='[{"id":"q1","type":"free_text","text":"What error message do you see?"},{"id":"q2","type":"single_select","text":"When does this happen?","options":["Always","Sometimes","Only in specific conditions"]}]')`
+  Example: `ask_questions(questions=[{"id":"q1","type":"free_text","text":"What error message do you see?"},{"id":"q2","type":"single_select","text":"When does this happen?","options":["Always","Sometimes","Only in specific conditions"]}])`
 
   ## Rules
   - Do NOT modify files (diagnosis only)
@@ -153,8 +157,11 @@ tools:
   - agent_cancel
   - ask_questions
 
+  - agent_lifecycle
 tool_confirm:
   rules:
+    - match: "agent_lifecycle"
+      action: ask
     - match: "codegraph_overview"
       action: auto
     - match: "code_health"

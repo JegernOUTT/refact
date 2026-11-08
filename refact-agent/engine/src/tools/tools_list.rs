@@ -1170,6 +1170,350 @@ mod tests {
         )
     }
 
+    fn embedded_contract_modes() -> Vec<crate::yaml_configs::customization_types::ModeConfig> {
+        let mut modes = crate::yaml_configs::project_configs_bootstrap::embedded_defaults("modes")
+            .into_iter()
+            .map(|(filename, raw)| {
+                let mode: crate::yaml_configs::customization_types::ModeConfig =
+                    serde_yaml::from_str(&raw)
+                        .unwrap_or_else(|error| panic!("{filename}: {error}"));
+                assert_eq!(filename, format!("{}.yaml", mode.id));
+                mode
+            })
+            .collect::<Vec<_>>();
+        modes.sort_by(|a, b| a.id.cmp(&b.id));
+        assert_eq!(
+            modes.len(),
+            24,
+            "review contracts when shipped modes change"
+        );
+        assert_eq!(
+            modes
+                .iter()
+                .map(|mode| &mode.id)
+                .collect::<HashSet<_>>()
+                .len(),
+            24
+        );
+        modes
+    }
+
+    fn contract_availability() -> ToolAvailability {
+        // A registration ceiling, not a claim about any running engine's capabilities.
+        ToolAvailability {
+            codegraph_on: true,
+            vecdb_on: true,
+            is_there_a_thinking_model: true,
+            allow_knowledge: true,
+            allow_experimental: true,
+        }
+    }
+
+    async fn contract_described_tools(
+        gcx: Arc<GlobalContext>,
+        availability: &ToolAvailability,
+    ) -> Vec<DescribedTool> {
+        get_builtin_tools(gcx, availability, None)
+            .await
+            .into_iter()
+            .flat_map(|group| {
+                let category = group.category;
+                group.tools.into_iter().map(move |tool| {
+                    let desc = tool.tool_description();
+                    (category, desc, tool)
+                })
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn all_embedded_modes_reference_unique_registered_builtin_descriptors() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let tools = contract_described_tools(gcx, &contract_availability()).await;
+        let registered = tools
+            .iter()
+            .map(|(_, desc, _)| desc.name.as_str())
+            .collect::<HashSet<_>>();
+        assert_eq!(
+            registered.len(),
+            tools.len(),
+            "duplicate builtin registration"
+        );
+        // No optional-integration exemption: every current shipped tools entry is builtin.
+        for mode in embedded_contract_modes() {
+            let mut seen = HashSet::new();
+            for name in &mode.tools {
+                assert!(seen.insert(name), "{}: duplicate tool {name}", mode.id);
+                assert!(
+                    registered.contains(name.as_str()),
+                    "{}: unregistered tool {name}",
+                    mode.id
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn all_embedded_modes_effective_filter_respects_capabilities_order_and_categories() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let ceiling = contract_described_tools(gcx.clone(), &contract_availability()).await;
+        for mode in embedded_contract_modes() {
+            for codegraph_on in [false, true] {
+                for vecdb_on in [false, true] {
+                    for native_web in [false, true] {
+                        let availability = ToolAvailability {
+                            codegraph_on,
+                            vecdb_on,
+                            ..contract_availability()
+                        };
+                        // Expected entries are derived from actual registered dependencies,
+                        // not a second catalog copied from implementation module names.
+                        let expected = mode
+                            .tools
+                            .iter()
+                            .filter(|name| {
+                                ceiling.iter().any(|(_, desc, tool)| {
+                                    &desc.name == *name
+                                        && availability.allows(tool)
+                                        && tool.config().unwrap_or_default().enabled
+                                        && !(native_web && desc.name == "web_search")
+                                })
+                            })
+                            .cloned()
+                            .collect::<Vec<_>>();
+                        let mut described =
+                            contract_described_tools(gcx.clone(), &availability).await;
+                        for (category, name) in [
+                            (ToolGroupCategory::Integration, "contract_integration_probe"),
+                            (ToolGroupCategory::MCP, "mcp_contract_probe"),
+                            (
+                                ToolGroupCategory::ConfigSubagent,
+                                "contract_config_subagent_probe",
+                            ),
+                        ] {
+                            let desc = builtin_desc(name);
+                            described.push((category, desc.clone(), Box::new(TestTool(desc))));
+                        }
+                        let actual = selected_names(select_and_order_mode_tools(
+                            described,
+                            &mode.tools,
+                            mode.allow_integrations,
+                            mode.allow_mcp,
+                            mode.allow_subagents,
+                            native_web,
+                            None,
+                        ));
+                        let mut expected = expected;
+                        let mut extras = Vec::new();
+                        for (allowed, name) in [
+                            (mode.allow_integrations, "contract_integration_probe"),
+                            (mode.allow_mcp, "mcp_contract_probe"),
+                            (mode.allow_subagents, "contract_config_subagent_probe"),
+                        ] {
+                            if allowed {
+                                extras.push(name.to_string());
+                            }
+                        }
+                        extras.sort();
+                        expected.extend(extras);
+                        assert_eq!(actual, expected,
+                            "{}: codegraph={codegraph_on}, vecdb={vecdb_on}, native_web={native_web}", mode.id);
+                    }
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn builtin_availability_gates_report_real_descriptor_dependencies() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let ceiling = contract_described_tools(gcx.clone(), &contract_availability()).await;
+        for availability in [
+            ToolAvailability {
+                codegraph_on: false,
+                ..contract_availability()
+            },
+            ToolAvailability {
+                vecdb_on: false,
+                ..contract_availability()
+            },
+            ToolAvailability {
+                is_there_a_thinking_model: false,
+                ..contract_availability()
+            },
+            ToolAvailability {
+                allow_knowledge: false,
+                ..contract_availability()
+            },
+            ToolAvailability {
+                allow_experimental: false,
+                ..contract_availability()
+            },
+        ] {
+            let mut gated = HashMap::new();
+            let actual = get_builtin_tools(gcx.clone(), &availability, Some(&mut gated))
+                .await
+                .into_iter()
+                .flat_map(|group| group.tools)
+                .map(|tool| tool.tool_description().name)
+                .collect::<HashSet<_>>();
+            // Anchor the two indexed tool families independently of tool_gating,
+            // so dropping their dependency metadata cannot make this a tautology.
+            if !availability.codegraph_on {
+                for name in ["codegraph_overview", "search_symbol_definition"] {
+                    assert!(!actual.contains(name), "codegraph-off still exposes {name}");
+                    assert_eq!(
+                        gated.get(name).map(|gate| gate.capability),
+                        Some("code graph index")
+                    );
+                }
+            }
+            if !availability.vecdb_on {
+                assert!(!actual.contains("search_semantic"));
+                assert_eq!(
+                    gated.get("search_semantic").map(|gate| gate.capability),
+                    Some("vector database")
+                );
+            }
+            for (_, desc, tool) in &ceiling {
+                let reason = tool_gating(tool, &availability);
+                assert_eq!(
+                    actual.contains(&desc.name),
+                    reason.is_none(),
+                    "{}",
+                    desc.name
+                );
+                assert_eq!(gated.get(&desc.name), reason.as_ref(), "{}", desc.name);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn embedded_mode_workflows_have_effective_native_tools_and_preserve_boundaries() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        for mode in embedded_contract_modes() {
+            let names = selected_names(select_and_order_mode_tools(
+                contract_described_tools(gcx.clone(), &contract_availability()).await,
+                &mode.tools,
+                mode.allow_integrations,
+                mode.allow_mcp,
+                mode.allow_subagents,
+                false,
+                None,
+            ))
+            .into_iter()
+            .collect::<HashSet<_>>();
+            let require = |required: &[&str]| {
+                for name in required {
+                    assert!(names.contains(*name), "{} workflow missing {name}", mode.id);
+                }
+            };
+            if names.contains("worktree_merge") {
+                require(&["worktree_sync"]);
+            }
+            // allow_subagents controls ConfigSubagent category expansion, not this
+            // explicitly allowlisted builtin launcher or its owned-child controls.
+            if names.contains("subagent") {
+                require(&[
+                    "agents_overview",
+                    "agent_message",
+                    "agent_list",
+                    "agent_status",
+                    "wait",
+                    "agent_result",
+                    "agent_cancel",
+                    "agent_lifecycle",
+                ]);
+                assert_eq!(
+                    crate::yaml_configs::customization_registry::match_tool_confirm_action(
+                        &mode.tool_confirm.rules,
+                        "agent_lifecycle",
+                    )
+                    .as_deref(),
+                    Some("ask"),
+                    "{} child recovery must retain explicit confirmation",
+                    mode.id
+                );
+            }
+            match mode.id.as_str() {
+                "design" => require(&[
+                    "design_system",
+                    "ui_probe",
+                    "chrome",
+                    "contrast_audit",
+                    "visual_diff",
+                    "apply_patch",
+                    "worktree_create",
+                    "worktree_merge",
+                    "worktree_sync",
+                    "shell",
+                    "process_start",
+                    "process_list",
+                    "process_read",
+                    "process_kill",
+                    "process_write_stdin",
+                    "wait",
+                    "ask_questions",
+                ]),
+                "task_planner" => {
+                    require(&[
+                        "spawn_agent",
+                        "check_agents",
+                        "merge_agent",
+                        "restart_agent",
+                        "worktree_sync",
+                    ]);
+                    assert!(
+                        !names.contains("worktree_create"),
+                        "planner must use task-owned checkout lifecycle"
+                    );
+                }
+                "configurator" => require(&[
+                    "ask_questions",
+                    "create_textdoc",
+                    "update_textdoc",
+                    "apply_patch",
+                ]),
+                "learn" => require(&[
+                    "set_trajectory_label",
+                    "shell",
+                    "process_start",
+                    "process_list",
+                    "process_read",
+                    "process_kill",
+                    "process_write_stdin",
+                    "wait",
+                    "schedule",
+                ]),
+                _ => {}
+            }
+            if ["ask", "brainstorming", "explore", "past_work", "plan"].contains(&mode.id.as_str())
+            {
+                for name in &names {
+                    assert!(
+                        !name.starts_with("worktree_")
+                            && !name.starts_with("process_")
+                            && !name.starts_with("update_textdoc")
+                            && ![
+                                "shell",
+                                "shell_service",
+                                "schedule",
+                                "clean_background_processes",
+                                "apply_patch",
+                                "create_textdoc",
+                                "undo_textdoc",
+                                "rm",
+                                "mv"
+                            ]
+                            .contains(&name.as_str()),
+                        "{} must not expose core file/worktree/shell mutator {name}",
+                        mode.id,
+                    );
+                }
+            }
+        }
+    }
+
     #[tokio::test]
     async fn builtin_catalog_registers_set_trajectory_label() {
         let gcx = crate::global_context::tests::make_test_gcx().await;

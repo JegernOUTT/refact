@@ -1,4 +1,4 @@
-schema_version: 22
+schema_version: 23
 id: setup_subagents
 title: Setup Subagents
 description: Guided setup for project-specific subagents
@@ -15,6 +15,10 @@ ui:
   tags: [setup, subagents]
 
 prompt: |
+  Optional builtin `subagent` calls are only for focused read-only research. Pass an explicit restricted `tools` list selected from `cat,tree,glob,search_pattern,search_symbol_definition,search_semantic,knowledge,search_trajectories,get_trajectory_context,web,web_search` (and from tools actually available here), with no editing, shell, worktree, side-effecting integration, or subdelegation tools by default. Task wording is not a capability boundary: restrict tools, do not rely on saying "read-only". Do not omit `tools` and inherit a broad child surface.
+
+  Owned-child recovery: inspect `agents_overview`, `agent_list`, `agent_status`, and `agent_result`; steer with `agent_message`, wait with `wait`, and cancel only when needed under existing confirmation policy. Use `agent_lifecycle` for authorized recovery of your own children; it does not grant access to unrelated agents or permission to bypass approvals.
+
   [setup_subagents] You are Buddy, a persistent coding companion for this project. Today your job is to design project-specific subagents.
 
   %BUDDY_PERSONALITY%
@@ -34,7 +38,7 @@ prompt: |
   ## What is a Subagent?
 
   A subagent is a specialized assistant defined in `.refact/subagents/<id>.yaml`.
-  It can be launched via `subagent()` calls or exposed as a tool for the orchestrating agent.
+  Config-defined helpers and builtin background `subagent(task, expected_result, ...)` runs are different surfaces. The builtin does not take a config ID as its task parameter. A config may supply a reusable `agent_profile`, selected with `subagent(profile="my_profile", task="...", expected_result="...")`, subject to the caller's tool ceiling; inspect the shipped example before authoring profiles.
   A great subagent owns a **narrow, well-defined responsibility** with an explicit tool allowlist,
   and returns structured, predictable output the caller can act on.
 
@@ -49,7 +53,7 @@ prompt: |
   Important schema reminders:
   - use `tools:` — not `allowed_tools:`
   - use `messages:` or `prompts:` — not a single top-level `prompt:` field
-  - if `expose_as_tool: true`, include a `tool:` block describing parameters and behavior
+  - a custom helper is dynamically exposed only with `expose_as_tool: true` AND `has_code: false` AND a non-reserved ID; include a `tool:` block and invoke that exposed helper by its own name and declared parameters, not via a builtin config-ID argument
 
   If you want a direct user-facing config subagent tool, start with a **lightweight helper** and inspect shipped examples first.
 
@@ -110,7 +114,7 @@ prompt: |
 
   For simple custom subagents, choose the right pattern.
 
-  **Internal-only subagent:**
+  **Internal-only config (not directly callable by config ID through the builtin):**
   ```yaml
   schema_version: 2
   id: <subagent-id>
@@ -229,8 +233,20 @@ tools:
   - ask_questions
   - handoff_to_mode
 
+  - agent_list
+  - agent_status
+  - wait
+  - agent_result
+  - agent_cancel
+  - agent_lifecycle
 tool_confirm:
   rules:
+    - match: "undo_textdoc"
+      action: ask
+    - match: "apply_patch"
+      action: ask
+    - match: "agent_lifecycle"
+      action: ask
     - match: "codegraph_overview"
       action: auto
     - match: "code_health"

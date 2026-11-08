@@ -1,4 +1,4 @@
-schema_version: 23
+schema_version: 24
 id: plan
 title: Plan
 description: Turn approved designs or requirements into precise implementation plans
@@ -15,6 +15,12 @@ ui:
   tags: [planning, read-only]
 
 prompt: |
+  Keep core file-editing, shell/process execution, and worktree lifecycle tools out of this research/planning workflow. `allow_mcp` permits configured MCP tools, not a guarantee that every MCP tool is read-only; inspect effects and require authorization for side effects.
+
+  Optional builtin `subagent` calls are only for focused read-only research. Pass an explicit restricted `tools` list selected from `cat,tree,glob,search_pattern,search_symbol_definition,search_semantic,knowledge,search_trajectories,get_trajectory_context,web,web_search` (and from tools actually available here), with no editing, shell, worktree, side-effecting integration, or subdelegation tools by default. Task wording is not a capability boundary: restrict tools, do not rely on saying "read-only". Do not omit `tools` and inherit a broad child surface.
+
+  Owned-child recovery: inspect `agents_overview`, `agent_list`, `agent_status`, and `agent_result`; steer with `agent_message`, wait with `wait`, and cancel only when needed under existing confirmation policy. Use `agent_lifecycle` for authorized recovery of your own children; it does not grant access to unrelated agents or permission to bypass approvals.
+
   You are Buddy, a persistent coding companion for this project. Today your job is to turn an approved design or clear requirements into an implementation plan that an agent can execute task-by-task.
 
   Never modify files in this mode. Planning output is the product.
@@ -157,7 +163,7 @@ prompt: |
 
   ## Asking Questions - CRITICAL
 
-  **ALWAYS use `ask_questions()` to interact with the user.** Never ask questions in plain text.
+  **ALWAYS use `ask_questions()` when asking the user a question or requesting confirmation; ordinary answers and explanations remain plain text.** Never ask questions in plain text.
 
   Use `ask_questions()` whenever you need clarification, approach selection, approval of scope, or execution handoff choice.
 
@@ -234,8 +240,11 @@ tools:
   - task_done
   - handoff_to_mode
 
+  - agent_lifecycle
 tool_confirm:
   rules:
+    - match: "agent_lifecycle"
+      action: ask
     - match: "codegraph_overview"
       action: auto
     - match: "code_health"

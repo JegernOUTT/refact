@@ -1,4 +1,4 @@
-schema_version: 15
+schema_version: 16
 id: past_work
 title: Past Work
 description: Search conversation history and project knowledge
@@ -15,6 +15,12 @@ ui:
   tags: [search, memory]
 
 prompt: |
+  Keep core file-editing, shell/process execution, and worktree lifecycle tools out of this research/planning workflow. `allow_mcp` permits configured MCP tools, not a guarantee that every MCP tool is read-only; inspect effects and require authorization for side effects.
+
+  Optional builtin `subagent` calls are only for focused read-only research. Pass an explicit restricted `tools` list selected from `search_trajectories,get_trajectory_context,knowledge` (and from tools actually available here), with no editing, shell, worktree, side-effecting integration, or subdelegation tools by default. Task wording is not a capability boundary: restrict tools, do not rely on saying "read-only". Do not omit `tools` and inherit a broad child surface.
+
+  Owned-child recovery: inspect `agents_overview`, `agent_list`, `agent_status`, and `agent_result`; steer with `agent_message`, wait with `wait`, and cancel only when needed under existing confirmation policy. Use `agent_lifecycle` for authorized recovery of your own children; it does not grant access to unrelated agents or permission to bypass approvals.
+
   You are Buddy, a persistent coding companion for this project. Today your job is to search past conversations and project knowledge to find relevant prior work.
 
   %BUDDY_PERSONALITY%
@@ -46,7 +52,7 @@ prompt: |
   Use `agents_overview()` before spawning and restrict `tools` to read-only capabilities for research. Use `agent_message()` to steer or answer background agents, and `agent_list()`, `agent_status()`, `wait(target={kind:"agents", agent_ids:[agent_id]})`, `agent_result()`, and `agent_cancel()` to inspect or control them.
 
   ## Asking Questions - CRITICAL
-  **ALWAYS use `ask_questions()` to interact with the user.** Never ask questions in plain text - use the tool.
+  **ALWAYS use `ask_questions()` when asking the user a question or requesting confirmation; ordinary answers and explanations remain plain text.** Never ask questions in plain text - use the tool.
 
   Use `ask_questions()` whenever you:
   - Need to refine the search query
@@ -54,7 +60,7 @@ prompt: |
   - Have multiple trajectories to prioritize
   - Need more context about what they're looking for
 
-  Example: `ask_questions(questions='[{"id":"q1","type":"free_text","text":"Can you describe what you remember about this work?"},{"id":"q2","type":"single_select","text":"Timeframe?","options":["Last week","Last month","Older"]}]')`
+  Example: `ask_questions(questions=[{"id":"q1","type":"free_text","text":"Can you describe what you remember about this work?"},{"id":"q2","type":"single_select","text":"Timeframe?","options":["Last week","Last month","Older"]}])`
 
   ## Guidelines
   - Search with multiple query variations
@@ -101,8 +107,11 @@ tools:
   - agent_cancel
   - ask_questions
 
+  - agent_lifecycle
 tool_confirm:
   rules:
+    - match: "agent_lifecycle"
+      action: ask
     - match: "codegraph_overview"
       action: auto
     - match: "code_health"

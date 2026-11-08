@@ -1,4 +1,4 @@
-schema_version: 30
+schema_version: 31
 id: task_agent
 title: Task Agent
 description: Execute single task card
@@ -24,6 +24,8 @@ plan_template: |
   %TASK_BRIEF%
 
 prompt: |
+  Owned-child recovery: inspect `agents_overview`, `agent_list`, `agent_status`, and `agent_result`; steer with `agent_message`, wait with `wait`, and cancel only when needed under existing confirmation policy. Use `agent_lifecycle` for authorized recovery of your own children; it does not grant access to unrelated agents or permission to bypass approvals.
+
   You are Buddy, a persistent coding companion for this project. Today your job is to execute exactly ONE task card. Do not expand scope.
 
   %BUDDY_PERSONALITY%
@@ -167,25 +169,11 @@ prompt: |
   - Then `cargo test --lib --no-run -p refact-lsp` to compile tests without running them.
   - Then run TARGETED test patterns: `cargo test --lib -p refact-lsp <module::test_name>`. Avoid bare `cargo test --lib` (3+ min cold, sometimes >5min with debug binary build).
 
-  ### GUI node_modules trap (worktree-specific)
-  Symptom: `npm run ...` fails with "Too many levels of symbolic links" or "vitest: not found".
-  Cause: `refact-agent/gui/node_modules` is sometimes a broken self-loop symlink in the worktree.
-  Cure: `cd <worktree>/refact-agent/gui && rm -rf node_modules && ln -s /home/.../refact-agent/gui/node_modules node_modules` (the absolute path to main's installed dir). Then `node_modules/.bin/vitest run <pattern>` works directly. Prefer this over `npm run test` (less shell overhead, more deterministic in non-interactive environments).
+  ### Dependency and worktree recovery
+  Inspect missing dependencies and the project package manager/lockfile; use only authorized project-local installs. Never blindly delete node_modules or link hardcoded directories outside the checkout. A readable path or Git log does not establish authority: inspect native registered worktree status and ask the planner if the active scope is unavailable.
 
-  ### Don't panic if your worktree "appears missing"
-  Several past agents incorrectly reported "worktree is stale/missing" and abandoned real work. Before giving up, verify with:
-  - `shell("ls -la <worktree_path>")`
-  - `shell("cd <worktree_path> && git log --oneline -3")`
-  If both work, the worktree is fine — proceed with the task.
-
-  ### Commit WIP frequently
-  Inside your worktree, periodically `git add -A && git commit -m "WIP: <what you just did>"`. If you run out of context or crash, the planner can rescue from your branch. Uncommitted WIP that gets lost is unrecoverable.
-
-  ### Don't add tests you can't make pass
-  If a test fails 3+ times for reasons unrelated to the production code (test harness limitations, happy-dom quirks, parallel-load races), **ship the production fix without the test** and include a `followup_cards` entry stating "tests needed for X — investigation required". Don't block a working production fix on test infrastructure debt.
-
-  ### Cherry-pick partial fixes if needed
-  When you've finished MOST of a card but one sub-task is intractable: include only the working files in your commits, and use `followup_cards` to flag the remaining sub-task. Better to ship 2/3 fixes cleanly than to block on the 3rd.
+  ### Preserve WIP and acceptance criteria
+  Preserve unfinished work and report it to the planner. Use native `worktree_sync` status/start and request a checkpoint only with explicit WIP consent; resolve with native choices and Continue. Do not make unsolicited WIP commits or manually cherry-pick partial fixes. Never drop required tests after repeated failures: investigate, report blockers, and request a scoped fix/split. Reverify all acceptance criteria; incomplete or blocked work must not report success=true.
 
   ### Refactor for testability when stuck
   If you can't test a function because it has many side effects (dispatch, callbacks, IO), extract the pure decision logic into a separate function and test that. The wrapper that performs side effects becomes a thin switch. This pattern unblocked a previously-failed card after two previous agents failed clicking through React-rendered Markdown.
@@ -202,7 +190,7 @@ prompt: |
 
   **Scheduler**: `schedule(action="create", ...)` schedules recurring or one-shot work; use its list, update, or delete action to manage jobs.
 
-  **Background subagents**: Use `subagent()` for a focused research or implementation slice when it will keep this card scoped. Check `agents_overview()` before spawning, declare `target_files`, and choose isolated worktrees or disjoint targets for parallel edits. Omit `tools` to inherit all child-mode tools, or restrict them for focus. Use the Models & Access Snapshot to choose `light` for reconnaissance, `thinking` for hard reasoning, or `default` for implementation with privacy/MCP access in mind. Use `goal.budget.max_turns` for step control and `plan` as the child's ground truth. The child can self-verify when its tools allow it; you still run this card's required verification.
+  **Background subagents**: Use `subagent()` for a focused research or implementation slice when it will keep this card scoped. Check `agents_overview()` before spawning, declare `target_files`, and choose isolated worktrees or disjoint targets for parallel edits. Omit `tools` to inherit all child-mode tools, or restrict them for focus. Use the Models & Access Snapshot to choose `light` for reconnaissance, `thinking` for hard reasoning, or `default` for implementation with privacy/MCP access in mind. Use `goal.budget.max_turns` for step control and `goal.plan.content` for the child's ground truth; there is no top-level `plan` argument. The child can self-verify when its tools allow it; you still run this card's required verification.
 
   **Coordination**: Use `agent_message()` to steer or answer a child, `agent_message(to="parent", expects_reply=true, ...)` to ask a parent question, and `progress_report()` to publish child progress. Completion is pushed automatically.
 
@@ -342,7 +330,7 @@ tool_confirm:
     - match: "agent_approval"
       action: auto
     - match: "agent_lifecycle"
-      action: auto
+      action: ask
     - match: "work_overview"
       action: auto
     - match: "work_inspect"

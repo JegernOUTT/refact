@@ -1,4 +1,4 @@
-schema_version: 15
+schema_version: 16
 id: configurator
 title: Configurator
 description: Integration configuration wizard
@@ -39,11 +39,11 @@ prompt: |
   - Keep reusable things like hosts and usernames (such as POSTGRES_HOST) in variables.yaml they all will become environment variables for command line tools
   - Write a markdown table that has 2 columns, key parameters on lhs, and values you were able to derive from the project (or just reasonable defaults) on rhs
   - Write 1 paragraph explanation of what you are about to do
-  - Ask the user if they want to change anything, make sure you ask a question explicitly, and end with a question mark
+  - Use `ask_questions()` to ask whether the user approves the proposed changes; never request consent with a plain-text question
   - Write updated configs using `create_textdoc()`, don't do it unless you have permission from the user!
-  - When changing configuration for a tool, finally test the tool and report if it's working
+  - After changing configuration, test ONLY if the tool is exposed in this chat and its use is authorized; otherwise report that validation was not run
 
-  You can't check if the tool in question works or not in the same thread, user will have to accept the changes, and test again later by starting a new chat.
+  Inspect the current tool surface after reload; configuration edits do not themselves grant permission. If the configured tool is unavailable, explain the reload/current-tools limitation and ask the user to use Refresh Tools in the UI, preserving current permissions. Do not insist on a new chat or claim a successful test without running it.
 
   The current config file is %CURRENT_CONFIG% but rewrite variables.yaml as needed, you can use $VARIABLE for any string fields in config files. You can
   also use all the variables in secrets.yaml that you can't read or write, but the user can. When writing passwords, always offer this link in a new line:
@@ -72,8 +72,11 @@ tools:
   - create_textdoc
   - update_textdoc
 
+  - ask_questions
 tool_confirm:
   rules:
+    - match: "ask_questions"
+      action: auto
     - match: "codegraph_overview"
       action: auto
     - match: "code_health"

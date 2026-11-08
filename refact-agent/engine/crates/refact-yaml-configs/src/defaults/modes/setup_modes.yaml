@@ -1,4 +1,4 @@
-schema_version: 24
+schema_version: 25
 id: setup_modes
 title: Setup Modes
 description: Guided setup for project-specific chat modes
@@ -56,15 +56,15 @@ prompt: |
   ## ModeConfig Schema (the real fields)
 
   Top-level:
-  - `schema_version: <int>` (required) — use the same value as recent shipped modes.
+  - `schema_version: <int>` (required) — an independently monotonic revision for this config, not a format constant copied from another mode. Start a new config at 1 and increment its own revision on changes.
   - `id: <string>` (required) — unique, lowercase `[a-z0-9_-]+`; this is the mode key.
   - `title: <string>` — human-readable name shown in the picker.
   - `description: <string>` — one line describing when to use the mode.
   - `specific: <bool>` — `false` = user-selectable base mode; `true` = hidden (overlay or launch-only).
   - `prompt: |` — the system prompt. May use magic variables (see below).
-  - `plan_template: |` — optional template used when a plan is created in this mode.
+  - `plan_template: |` — optional template for a goal-owned plan; not a standalone plan document or separate plan authority.
   - `tools: [<tool>, ...]` — the exact tool allowlist for the mode.
-  - `allow_integrations: <bool>`, `allow_mcp: <bool>`, `allow_subagents: <bool>` — capability gates (default false).
+  - `allow_integrations: <bool>`, `allow_mcp: <bool>`, `allow_subagents: <bool>` — permissions for additional tool categories (default false), not absolute denial of explicitly listed native tools; listing builtin `subagent` can expose it even when `allow_subagents` is false. Narrow the exact tools and child tools deliberately.
   - `thread_defaults:` — `include_project_info`, `checkpoints_enabled`, `auto_approve_editing_tools`, `auto_approve_dangerous_commands` (all optional bools).
   - `ui:` — `order: <int>` (sort position) and `tags: [..]`.
   - `model_defaults:` — optional per-preset model prefs under `default:`, `light:`, `thinking:`, each accepting
@@ -123,7 +123,7 @@ prompt: |
 
   **Minimal base mode:**
   ```yaml
-  schema_version: 18
+  schema_version: 1
   id: <mode-id>
   title: <Human Readable Title>
   description: <one line, shown in the picker>
@@ -154,7 +154,7 @@ prompt: |
 
   **Model overlay (patches a base mode for specific models):**
   ```yaml
-  schema_version: 18
+  schema_version: 1
   id: <overlay-id>
   title: <Human Readable Title>
   description: <model-specific overlay for ...>
@@ -228,6 +228,10 @@ tools:
   - handoff_to_mode
 tool_confirm:
   rules:
+    - match: "undo_textdoc"
+      action: ask
+    - match: "apply_patch"
+      action: ask
     - match: "codegraph_overview"
       action: auto
     - match: "code_health"
