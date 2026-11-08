@@ -8,6 +8,8 @@ import {
   selectManualPreviewItems,
   selectManualPreviewItemsById,
   selectManyToolResultsByIds,
+  selectThreadIds,
+  selectTabsDisplayData,
   selectToolResultById,
 } from "../features/Chat/Thread/selectors";
 import type { RootState } from "../app/store";
@@ -19,11 +21,43 @@ import { Chat } from "../components/Chat";
 import { InnerApp } from "../features/App";
 import { MARKDOWN_ISSUE } from "../__fixtures__";
 import { applyChatEvent } from "../features/Chat/Thread";
+import { chatReducer } from "../features/Chat/Thread/reducer";
 import type {
   ChatMessages,
   DiffChunk,
   ToolConfirmationPauseReason,
 } from "../services/refact";
+
+function createTabLoadState(count: number): RootState {
+  const base = createDefaultChatState();
+  const template = base.threads[base.current_thread_id];
+  const ids = Array.from({ length: count }, (_, index) => `tab-${index}`);
+  const threads = Object.fromEntries(
+    ids.map((id, index) => [
+      id,
+      {
+        ...template,
+        thread: {
+          ...template.thread,
+          id,
+          title: `Chat ${index}`,
+          messages: [],
+        },
+      },
+    ]),
+  );
+
+  return {
+    chat: {
+      ...base,
+      current_thread_id: ids[0] ?? "",
+      open_thread_ids: ids,
+      threads,
+    },
+    history: { chats: {} },
+    notifications: { pendingByThread: {}, lastSeenByThread: {} },
+  } as unknown as RootState;
+}
 
 const codeToHtmlSpy = vi.fn((code: string, options: { lang: string }) => {
   return `<pre><code class="language-${options.lang}"><span data-token="1">${code}</span></code></pre>`;
@@ -53,6 +87,36 @@ function renderTooltip(toolCall: ToolCall) {
 vi.mock("shiki", () => ({
   createHighlighter: createHighlighterSpy,
 }));
+
+function createTestSnapshot(chatId: string) {
+  return {
+    chat_id: chatId,
+    seq: "1",
+    type: "snapshot" as const,
+    thread: {
+      id: chatId,
+      title: "Load test",
+      model: "gpt-4",
+      mode: "AGENT",
+      tool_use: "agent",
+      boost_reasoning: false,
+      context_tokens_cap: null,
+      include_project_info: true,
+      checkpoints_enabled: true,
+      is_title_generated: false,
+    },
+    runtime: {
+      state: "idle" as const,
+      paused: false,
+      error: null,
+      queue_size: 0,
+      pause_reasons: [],
+      queued_items: [],
+    },
+    background_agents: [],
+    messages: [],
+  };
+}
 
 function createThreadState(messages: ChatMessages) {
   const chat = createDefaultChatState();
@@ -187,6 +251,266 @@ describe("applyDeltaOps", () => {
 });
 
 describe("selectToolResultById optimization", () => {
+  it("keeps thread membership IDs stable across metadata updates and changes them on membership edits", () => {
+    const state = createTabLoadState(3);
+    const ids = selectThreadIds(state);
+    const runtime = state.chat.threads[ids[0]];
+    if (!runtime) throw new Error("Missing load-test runtime");
+    const metadataOnly = {
+      ...state,
+      chat: {
+        ...state.chat,
+        threads: {
+          ...state.chat.threads,
+          [ids[0]]: {
+            ...runtime,
+            thread: { ...runtime.thread, title: "Only metadata changed" },
+          },
+        },
+      },
+    } as RootState;
+    expect(selectThreadIds(metadataOnly)).toBe(ids);
+    const added = {
+      ...metadataOnly,
+      chat: {
+        ...metadataOnly.chat,
+        threads: { ...metadataOnly.chat.threads, added: runtime },
+      },
+    } as RootState;
+    const nextIds = selectThreadIds(added);
+    expect(nextIds).not.toBe(ids);
+    expect(nextIds).toEqual([...ids, "added"]);
+  });
+
+  it.each([10, 30, 60, 100])(
+    "keeps tab array and unaffected entries stable for %i open chats",
+    (count) => {
+      const selectTabs = selectTabsDisplayData;
+      const state = createTabLoadState(count);
+      const first = selectTabs(state);
+      const second = selectTabs(state);
+      expect(second).toBe(first);
+
+      const changedId = "tab-0";
+      const changedRuntime = state.chat.threads[changedId];
+      if (!changedRuntime) throw new Error("Missing load-test runtime");
+      const nextState = {
+        ...state,
+        chat: {
+          ...state.chat,
+          threads: {
+            ...state.chat.threads,
+            [changedId]: {
+              ...changedRuntime,
+              thread: { ...changedRuntime.thread, title: "Renamed" },
+            },
+          },
+        },
+      } as RootState;
+      const next = selectTabs(nextState);
+
+      expect(next).not.toBe(first);
+      expect(next[0]).not.toBe(first[0]);
+      expect(next[0]?.title).toBe("Renamed");
+      for (let index = 1; index < count; index++) {
+        expect(next[index]).toBe(first[index]);
+      }
+      let streamingState = nextState;
+      for (let chunk = 0; chunk < 200; chunk++) {
+        const runtime = streamingState.chat.threads[changedId];
+        if (!runtime) throw new Error("Missing load-test runtime");
+        streamingState = {
+          ...streamingState,
+          chat: {
+            ...streamingState.chat,
+            threads: {
+              ...streamingState.chat.threads,
+              [changedId]: {
+                ...runtime,
+                thread: {
+                  ...runtime.thread,
+                  messages: [{ role: "assistant", content: String(chunk) }],
+                },
+              },
+            },
+          },
+        };
+        expect(selectTabs(streamingState)).toBe(next);
+      }
+    },
+  );
+
+  it("keeps tab order and history fallback while metadata, notification, and removal change", () => {
+    const original = createTabLoadState(3);
+    const ids = original.chat.open_thread_ids;
+    const selected = selectTabsDisplayData(original);
+    const withoutRuntime = {
+      ...original,
+      chat: {
+        ...original.chat,
+        threads: { ...original.chat.threads, [ids[1]]: undefined },
+      },
+      history: {
+        chats: {
+          [ids[1]]: {
+            title: "Archived title",
+            mode: "history-mode",
+            session_state: "completed",
+          },
+        },
+      },
+    } as unknown as RootState;
+    const fallback = selectTabsDisplayData(withoutRuntime);
+    expect(fallback.map((tab) => tab.id)).toEqual(ids);
+    expect(fallback[1]).toMatchObject({
+      title: "Archived title",
+      mode: "history-mode",
+      session_state: "completed",
+    });
+    expect(fallback[0]).toBe(selected[0]);
+    expect(fallback[2]).toBe(selected[2]);
+
+    const pendingState = {
+      ...withoutRuntime,
+      notifications: {
+        pendingByThread: { [ids[0]]: [{ receivedAt: 2 }, { receivedAt: 4 }] },
+        lastSeenByThread: { [ids[0]]: 2 },
+      },
+    } as unknown as RootState;
+    const withNotification = selectTabsDisplayData(pendingState);
+    expect(withNotification[0]?.unreadNotificationCount).toBe(1);
+    expect(withNotification[1]).toBe(fallback[1]);
+
+    const removed = selectTabsDisplayData({
+      ...pendingState,
+      chat: { ...pendingState.chat, open_thread_ids: [ids[0], ids[2]] },
+    } as RootState);
+    expect(removed.map((tab) => tab.id)).toEqual([ids[0], ids[2]]);
+    expect(removed[1]).toBe(fallback[2]);
+  });
+
+  it("applies ordered stream deltas without replacing unrelated tab rows", () => {
+    const initial = createDefaultChatState();
+    const chatId = initial.current_thread_id;
+    let chat = chatReducer(initial, applyChatEvent(createTestSnapshot(chatId)));
+    const selectTabs = selectTabsDisplayData;
+    const first = selectTabs({
+      chat,
+      history: { chats: {} },
+      notifications: { pendingByThread: {}, lastSeenByThread: {} },
+    } as unknown as RootState);
+    chat = chatReducer(
+      chat,
+      applyChatEvent({
+        chat_id: chatId,
+        seq: "2",
+        type: "stream_started",
+        message_id: "load-stream",
+      }),
+    );
+    const afterStarted = selectTabs({
+      chat,
+      history: { chats: {} },
+      notifications: { pendingByThread: {}, lastSeenByThread: {} },
+    } as unknown as RootState);
+    expect(afterStarted[0]?.activity).toBe("working");
+    chat = chatReducer(
+      chat,
+      applyChatEvent({
+        chat_id: chatId,
+        seq: "3",
+        type: "stream_delta",
+        message_id: "load-stream",
+        ops: [{ op: "append_content", text: "delta" }],
+      }),
+    );
+    const afterDelta = selectTabs({
+      chat,
+      history: { chats: {} },
+      notifications: { pendingByThread: {}, lastSeenByThread: {} },
+    } as unknown as RootState);
+    expect(afterDelta[0]).toBe(afterStarted[0]);
+    expect(afterDelta).not.toBe(first);
+    const messages = chat.threads[chatId]?.thread.messages ?? [];
+    expect(messages[messages.length - 1]?.content).toBe("delta");
+  });
+
+  it("updates each tab-visible thread field only on its ordered metadata event", () => {
+    const initial = createTabLoadState(2);
+    const id = initial.chat.open_thread_ids[0];
+    const otherId = initial.chat.open_thread_ids[1];
+    const baseline = selectTabsDisplayData(initial);
+    const runtime = initial.chat.threads[id];
+    if (!runtime) throw new Error("Missing load-test runtime");
+    const changed = {
+      ...runtime,
+      thread: {
+        ...runtime.thread,
+        title: "Updated title",
+        mode: "updated-mode",
+        is_task_chat: true,
+        buddy_meta: { is_buddy_chat: true },
+      },
+      error: "failed",
+      confirmation: { ...runtime.confirmation, pause: true },
+    };
+    const stateAfter = (rt: typeof changed): RootState =>
+      ({
+        ...initial,
+        chat: {
+          ...initial.chat,
+          threads: { ...initial.chat.threads, [id]: rt },
+        },
+      }) as RootState;
+
+    let state = initial;
+    const prior = selectTabsDisplayData(state);
+    state = stateAfter(changed);
+    const next = selectTabsDisplayData(state);
+    expect(next[0]).not.toBe(prior[0]);
+    expect(next[1]).toBe(baseline[1]);
+    expect(next[0]?.id).toBe(id);
+    const final = selectTabsDisplayData(state);
+    expect(final[0]).toMatchObject({
+      title: "Updated title",
+      mode: "updated-mode",
+      is_task_chat: true,
+      is_buddy_chat: true,
+      session_state: "error",
+      activity: "error",
+    });
+    expect(
+      selectTabsDisplayData({
+        ...state,
+        chat: {
+          ...state.chat,
+          threads: { ...state.chat.threads, [otherId]: undefined },
+        },
+      } as RootState)[0],
+    ).toBe(final[0]);
+    const approval = selectTabsDisplayData({
+      ...initial,
+      chat: {
+        ...initial.chat,
+        threads: {
+          ...initial.chat.threads,
+          [id]: {
+            ...runtime,
+            confirmation: {
+              ...runtime.confirmation,
+              pause: true,
+              pause_reasons: [
+                { type: "confirmation", command: "shell", rule: "ask" },
+              ],
+            },
+          },
+        },
+      },
+    } as RootState);
+    expect(approval[0]?.activity).toBe("needs_approval");
+    expect(approval[1]).toEqual(final[1]);
+  });
+
   it("treats tools with both result and diff as resolved once per id", async () => {
     const messages: ChatMessages = [
       {

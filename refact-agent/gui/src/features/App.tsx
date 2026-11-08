@@ -7,7 +7,7 @@ import React, {
 } from "react";
 import { Flex } from "@radix-ui/themes";
 import {
-  selectAllThreads,
+  selectThreadIds,
   selectChatId,
   selectIsStreaming,
   switchToThread,
@@ -130,7 +130,7 @@ const WorkspaceApp: React.FC<AppProps> = ({ style }: AppProps) => {
 
   const pages = useAppSelector(selectPages);
   const isStreaming = useAppSelector(selectIsStreaming);
-  const allThreads = useAppSelector(selectAllThreads);
+  const threadIds = useAppSelector(selectThreadIds);
   const openTasks = useAppSelector(selectOpenTasksFromRoot);
   const focusedWorkspaceChatId = useAppSelector(selectWorkspaceFocusedChatId);
 
@@ -541,12 +541,12 @@ const WorkspaceApp: React.FC<AppProps> = ({ style }: AppProps) => {
 
     if (persistedActiveTab.type === "chat") {
       const restoredChatId =
-        focusedWorkspaceChatId && allThreads[focusedWorkspaceChatId]
+        focusedWorkspaceChatId && threadIds.includes(focusedWorkspaceChatId)
           ? focusedWorkspaceChatId
           : persistedActiveTab.id;
       restoredActiveTabRef.current = true;
       setActiveTabRestored(true);
-      if (allThreads[restoredChatId]) {
+      if (threadIds.includes(restoredChatId)) {
         dispatch(switchToThread({ id: restoredChatId, openTab: false }));
         dispatch(popBackTo({ name: "history" }));
         dispatch(push({ name: "chat" }));
@@ -565,7 +565,7 @@ const WorkspaceApp: React.FC<AppProps> = ({ style }: AppProps) => {
       );
     }
   }, [
-    allThreads,
+    threadIds,
     canAccessApp,
     contentRouting.hasInitialTarget,
     dispatch,

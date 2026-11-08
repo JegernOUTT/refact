@@ -16,6 +16,7 @@ import { AbortControllerProvider } from "../../src/contexts/AbortControllers";
 import { Dashboard } from "../../src/features/Dashboard";
 import { Toolbar } from "../../src/components/Toolbar/Toolbar";
 import { WorkspaceView } from "../../src/features/Workspace/WorkspaceView";
+import { InnerApp } from "../../src/features/App";
 import { WorkspaceShell } from "../../src/features/Workspace/WorkspaceShell";
 import { WorkPanel } from "../../src/features/Workspace/WorkPanel/WorkPanel";
 import { ToolContent } from "../../src/components/ChatContent/ToolsContent";
@@ -552,6 +553,7 @@ const splitChatId = "showcase-chat-b";
 const chatSurface = (id: string) => makeSurfaceKey("chat", id);
 const route =
   new URLSearchParams(window.location.search).get("route") ?? "dashboard";
+const performanceRoute = route === "ui-performance";
 const terminalDisabledRoute = route === "workspace-chrome-disabled";
 const workspaceGitDiffRoute = route === "workspace-git-diff";
 const workspaceGitLogRoute = route === "workspace-git-log";
@@ -2532,6 +2534,14 @@ window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
   if (path === "/v1/privacy/inspect")
     return Promise.resolve(jsonResponse(privacyInspectResponse));
   if (rebuildRoute) return jsonResponse({});
+  if (performanceRoute) {
+    if (path.includes("subscribe")) {
+      return new Response(new ReadableStream(), {
+        headers: { "Content-Type": "text/event-stream" },
+      });
+    }
+    return jsonResponse({});
+  }
   return nativeFetch(input, init);
 };
 
@@ -2751,7 +2761,73 @@ if (
     chatSurface(splitChatId),
   ];
 }
+if (performanceRoute) {
+  const count = Number(
+    new URLSearchParams(window.location.search).get("chats") ?? 10,
+  );
+  const ids = Array.from(
+    { length: Math.min(100, Math.max(2, count)) },
+    (_, i) => `perf-${i}`,
+  );
+  preloadedState.pages = [{ name: "chat" }];
+  preloadedState.chat = {
+    ...preloadedState.chat!,
+    current_thread_id: ids[0],
+    open_thread_ids: ids,
+    threads: Object.fromEntries(
+      ids.map((id) => [
+        id,
+        {
+          ...chatRuntime,
+          streaming: true,
+          waiting_for_response: false,
+          session_state: "generating",
+          thread: {
+            ...chatRuntime.thread,
+            id,
+            title: `Performance chat ${id}`,
+            messages: [
+              {
+                role: "assistant",
+                message_id: `${id}-message`,
+                content: "Controlled streaming content. ",
+              },
+            ],
+          },
+        },
+      ]),
+    ),
+  };
+  preloadedState.workspace = {
+    tabs: ids.map(chatSurface),
+    activeTabId: chatSurface(ids[0]),
+    groups: {},
+    dock: { open: false, width: 300, section: "files" },
+    drawer: { open: false, height: 280 },
+  };
+}
 const store = setUpStore(preloadedState);
+if (performanceRoute) {
+  const sequences = new Map<string, number>();
+  Object.assign(window, {
+    __uiPerformance: {
+      store,
+      delta: (id: string, text: string) => {
+        const seq = (sequences.get(id) ?? 0) + 1;
+        sequences.set(id, seq);
+        store.dispatch(
+          applyChatEvent({
+            chat_id: id,
+            type: "stream_delta",
+            seq: String(seq),
+            message_id: `${id}-message`,
+            ops: [{ op: "append_content", text }],
+          }),
+        );
+      },
+    },
+  });
+}
 if (toolbarAlignmentRoute) {
   Object.defineProperty(window, "__toolbarAlignmentStore", {
     get: () => store,
@@ -3442,11 +3518,14 @@ const QueueDemoControls = () => {
 
 const ShowcaseSurface = () => {
   const currentPage = useSelector((state: RootState) => {
+    if (performanceRoute) return state.pages[state.pages.length - 1];
     const page = state.pages[state.pages.length - 1];
     return page && isMarketplacePage(page)
       ? page
       : marketplaceTabToPage(marketplaceTab);
   });
+
+  if (performanceRoute) return <InnerApp />;
 
   if (route === "overlay-regression") {
     return <OverlayRegressionSurface />;

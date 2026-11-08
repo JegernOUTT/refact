@@ -148,6 +148,12 @@ export const selectAllThreads = (
   state: RootState,
 ): Record<string, ChatThreadRuntime | undefined> => state.chat.threads;
 
+export const selectThreadIds = createSelector(
+  [selectAllThreads],
+  (threads) => Object.keys(threads).filter((id) => threads[id] !== undefined),
+  { memoizeOptions: { resultEqualityCheck: sameRefArray } },
+);
+
 export type TabDisplayData = {
   id: string;
   title: string;
@@ -159,31 +165,33 @@ export type TabDisplayData = {
   unreadNotificationCount: number;
 };
 
-export const selectTabsDisplayData = createSelector(
-  [
-    selectOpenThreadIds,
-    selectAllThreads,
-    (state: RootState) => state.history.chats,
-    (state: RootState) => state.notifications.pendingByThread,
-    (state: RootState) => state.notifications.lastSeenByThread,
-  ],
-  (
-    openIds,
-    threads,
-    historyChats,
-    pendingByThread,
-    lastSeenByThread,
-  ): TabDisplayData[] =>
-    openIds.flatMap((id) => {
-      const runtime = threads[id];
-      const historyItem = historyChats[id] as
-        | (typeof historyChats)[string]
-        | undefined;
-      const liveSessionState = deriveSessionStateFromRuntime(runtime);
-      const pendingNotifications = pendingByThread[id];
-      const lastSeen = lastSeenByThread[id] ?? 0;
-      return [
-        {
+export const selectTabsDisplayData = (() => {
+  let previous: TabDisplayData[] = [];
+  return createSelector(
+    [
+      selectOpenThreadIds,
+      selectAllThreads,
+      (state: RootState) => state.history.chats,
+      (state: RootState) => state.notifications.pendingByThread,
+      (state: RootState) => state.notifications.lastSeenByThread,
+    ],
+    (
+      openIds,
+      threads,
+      historyChats,
+      pendingByThread,
+      lastSeenByThread,
+    ): TabDisplayData[] => {
+      const previousById = new Map(previous.map((tab) => [tab.id, tab]));
+      const next = openIds.map((id) => {
+        const runtime = threads[id];
+        const historyItem = historyChats[id] as
+          | (typeof historyChats)[string]
+          | undefined;
+        const liveSessionState = deriveSessionStateFromRuntime(runtime);
+        const pendingNotifications = pendingByThread[id];
+        const lastSeen = lastSeenByThread[id] ?? 0;
+        const tab: TabDisplayData = {
           id,
           title: runtime?.thread.title ?? historyItem?.title ?? "New Chat",
           session_state: liveSessionState ?? historyItem?.session_state,
@@ -195,10 +203,25 @@ export const selectTabsDisplayData = createSelector(
             pendingNotifications?.filter(
               (notification) => notification.receivedAt > lastSeen,
             ).length ?? 0,
-        },
-      ];
-    }),
-);
+        };
+        const old = previousById.get(id);
+        return old &&
+          old.title === tab.title &&
+          old.session_state === tab.session_state &&
+          old.activity === tab.activity &&
+          old.mode === tab.mode &&
+          old.is_buddy_chat === tab.is_buddy_chat &&
+          old.is_task_chat === tab.is_task_chat &&
+          old.unreadNotificationCount === tab.unreadNotificationCount
+          ? old
+          : tab;
+      });
+      if (sameRefArray(previous, next)) return previous;
+      previous = next;
+      return next;
+    },
+  );
+})();
 
 export const selectRuntimeById = (
   state: RootState,
