@@ -11,6 +11,7 @@ import type {
   WorktreeSyncResponse,
 } from "../../services/refact";
 import { MergeWorktreeModal } from "./MergeWorktreeModal";
+import { useWorktreeSync } from "../../hooks/useWorktreeActions";
 
 const configState = () => ({
   host: "web" as const,
@@ -204,6 +205,184 @@ async function openConflict(user: ReturnType<typeof renderModal>["user"]) {
 }
 
 describe("native worktree synchronization", () => {
+  test("an older A run cannot clear busy ownership of a new A run", async () => {
+    const releases: (() => void)[] = [];
+    let completed = 0;
+    server.use(
+      http.post("*/v1/worktrees/:id/sync", async () => {
+        await new Promise<void>((resolve) => releases.push(resolve));
+        return HttpResponse.json(syncResponse());
+      }),
+    );
+    function Harness({ id }: { id: string }) {
+      const sync = useWorktreeSync({ worktreeId: id, enabled: false });
+      return (
+        <>
+          <span>{sync.busy ? "busy" : "available"}</span>
+          <button
+            onClick={() =>
+              void sync.refresh().then(() => {
+                completed += 1;
+              })
+            }
+          >
+            Run status
+          </button>
+        </>
+      );
+    }
+    const { user, rerender } = render(<Harness id="A" />, {
+      preloadedState: { config: configState() },
+    });
+    const run = () =>
+      user.click(screen.getByRole("button", { name: "Run status" }));
+    await run();
+    await waitFor(() => expect(releases).toHaveLength(1));
+    rerender(<Harness id="B" />);
+    await run();
+    await waitFor(() => expect(releases).toHaveLength(2));
+    rerender(<Harness id="A" />);
+    await run();
+    await waitFor(() => expect(releases).toHaveLength(3));
+    releases[0]();
+    await waitFor(() => expect(completed).toBe(1));
+    expect(screen.getByText("busy")).toBeVisible();
+    await run();
+    expect(releases).toHaveLength(3);
+    releases[1]();
+    releases[2]();
+    await waitFor(() => expect(screen.getByText("available")).toBeVisible());
+  });
+
+  test.each(["worktree round trip", "close and reopen"])(
+    "ignores a pre-start status after %s",
+    async (transition) => {
+      let release: () => void = () => undefined;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let statusCalls = 0;
+      const sync = installSyncServer(syncResponse());
+      server.use(
+        http.post("*/v1/worktrees/:id/sync", async ({ request }) => {
+          const body = (await request.json()) as WorktreeSyncRequest;
+          sync.calls.push(body);
+          if (body.action === "status" && ++statusCalls === 2) await gate;
+          return HttpResponse.json(syncResponse());
+        }),
+      );
+      const element = (id = "wt-1", open = true) => (
+        <MergeWorktreeModal
+          open={open}
+          worktreeId={id}
+          record={makeRecord()}
+          onOpenChange={() => undefined}
+        />
+      );
+      const { user, rerender } = render(element(), {
+        preloadedState: { config: configState() },
+      });
+      await user.click(
+        await screen.findByRole("button", { name: "Synchronize with target" }),
+      );
+      await waitFor(() => expect(statusCalls).toBe(2));
+      rerender(
+        transition === "worktree round trip"
+          ? element("wt-2")
+          : element("wt-1", false),
+      );
+      rerender(element());
+      release();
+      await waitFor(() =>
+        expect(
+          screen.getByRole("button", { name: "Refresh status" }),
+        ).toBeEnabled(),
+      );
+      expect(sync.calls.some((call) => call.action === "start")).toBe(false);
+    },
+  );
+
+  test("writer blockers stay separate from Git phase and refresh enables synchronization", async () => {
+    const sync = installSyncServer(
+      syncResponse({
+        writer_readiness: {
+          ready: false,
+          blockers: [
+            {
+              kind: "execution_active",
+              agent_id: "agent-writing",
+              chat_id: "chat-owning",
+              run_generation: 3,
+              recovery_actions: [
+                "inspect_agent",
+                "wait",
+                "cancel_agent",
+                "retry_status",
+              ],
+            },
+          ],
+          truncated: false,
+        },
+      }),
+      (request) =>
+        request.action === "start"
+          ? syncResponse({ status: "ready", operation: operation() })
+          : undefined,
+    );
+    const { user } = renderModal();
+    expect(await screen.findByText("Waiting for writers")).toBeVisible();
+    expect(screen.getByText(/Agent agent-writing/)).toHaveTextContent(
+      "Chat chat-owning · Run 3",
+    );
+    expect(
+      screen.getByText(/Ask the owning chat to inspect this agent/),
+    ).toBeVisible();
+    const start = screen.getByRole("button", {
+      name: "Synchronize with target",
+    });
+    expect(start).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Merge" })).toBeDisabled();
+    expect(screen.getAllByText("No synchronization").length).toBeGreaterThan(0);
+    expect(sync.calls.every((call) => call.action === "status")).toBe(true);
+
+    sync.state.current = syncResponse({
+      writer_readiness: { ready: true, blockers: [], truncated: false },
+    });
+    await user.click(screen.getByRole("button", { name: "Refresh status" }));
+    expect(await screen.findByText("Writers ready")).toBeVisible();
+    expect(screen.queryByText(/Agent agent-writing/)).not.toBeInTheDocument();
+    await waitFor(() => expect(start).toBeEnabled());
+    await user.click(start);
+    await waitFor(() =>
+      expect(sync.calls.some((call) => call.action === "start")).toBe(true),
+    );
+  });
+
+  test("a writer appearing in the fresh pre-start status prevents mutation", async () => {
+    const sync = installSyncServer(syncResponse());
+    const { user } = renderModal();
+    const start = await screen.findByRole("button", {
+      name: "Synchronize with target",
+    });
+    sync.state.current = syncResponse({
+      writer_readiness: {
+        ready: false,
+        blockers: [
+          {
+            kind: "chat_active",
+            chat_id: "new-writer",
+            recovery_actions: ["stop_chat", "retry_status"],
+          },
+        ],
+        truncated: false,
+      },
+    });
+    await user.click(start);
+    expect(await screen.findByText("Waiting for writers")).toBeVisible();
+    expect(sync.calls.some((call) => call.action === "start")).toBe(false);
+    expect(screen.queryByText("Synchronized")).not.toBeInTheDocument();
+  });
+
   test("pins fresh status for the selected target branch", async () => {
     const sync = installSyncServer(syncResponse(), (request) => {
       if (request.action === "status")

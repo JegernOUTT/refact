@@ -162,6 +162,8 @@ export const MergeWorktreeModal: React.FC<MergeWorktreeModalProps> = ({
   const [strategy, setStrategy] = useState<WorktreeMergeStrategy>("squash");
   const [deleteAfterMerge, setDeleteAfterMerge] = useState(true);
   const [includeUncommitted, setIncludeUncommitted] = useState(true);
+  const [acknowledgeDirtyBaseline, setAcknowledgeDirtyBaseline] =
+    useState(false);
   const [targetBranch, setTargetBranch] = useState(
     initialTargetBranch(record, worktree, defaultTargetBranch),
   );
@@ -178,6 +180,25 @@ export const MergeWorktreeModal: React.FC<MergeWorktreeModalProps> = ({
   const queryId = worktreeId ?? record?.meta.id ?? worktree?.id ?? "";
   const sourceWorkspaceRoot =
     record?.meta.source_workspace_root ?? worktree?.source_workspace_root;
+  const mergeContext = JSON.stringify([
+    open,
+    queryId,
+    sourceWorkspaceRoot,
+    targetBranch,
+  ]);
+  const mergeGeneration = useRef({ context: mergeContext, value: 0 });
+  useEffect(
+    () => () => {
+      mergeGeneration.current.value += 1;
+    },
+    [],
+  );
+  if (mergeGeneration.current.context !== mergeContext) {
+    mergeGeneration.current = {
+      context: mergeContext,
+      value: mergeGeneration.current.value + 1,
+    };
+  }
   const sync = useWorktreeSync({
     worktreeId: queryId,
     sourceWorkspaceRoot,
@@ -206,6 +227,10 @@ export const MergeWorktreeModal: React.FC<MergeWorktreeModalProps> = ({
     [result],
   );
   const resolvedTaskId = taskId ?? record?.meta.task_id ?? worktree?.task_id;
+
+  useEffect(() => {
+    setAcknowledgeDirtyBaseline(false);
+  }, [open, queryId, sourceWorkspaceRoot, targetBranch]);
 
   useEffect(() => {
     if (!open) {
@@ -241,7 +266,10 @@ export const MergeWorktreeModal: React.FC<MergeWorktreeModalProps> = ({
 
   const handleMerge = useCallback(async () => {
     if (!canActOnWorktree || mergeState.isLoading) return;
-    setCompletedResult(null);
+    const generation = mergeGeneration.current.value;
+    setCompletedResult((previous) =>
+      previous && !isMerged(previous.response) ? previous : null,
+    );
     setError(null);
     setActionFeedback(null);
     try {
@@ -254,8 +282,10 @@ export const MergeWorktreeModal: React.FC<MergeWorktreeModalProps> = ({
           trimmedTargetBranch.length > 0 ? trimmedTargetBranch : undefined,
         delete_after_merge: deleteAfterMerge,
         include_uncommitted: includeUncommitted,
+        acknowledge_dirty_baseline: acknowledgeDirtyBaseline,
         generate_commit_message: true,
       }).unwrap();
+      if (mergeGeneration.current.value !== generation) return;
       setCompletedResult({ response, id: queryId, label });
       invalidateTask();
       const completed =
@@ -269,9 +299,11 @@ export const MergeWorktreeModal: React.FC<MergeWorktreeModalProps> = ({
         onOpenChange(false);
       }
     } catch (mergeError) {
+      if (mergeGeneration.current.value !== generation) return;
       setError(worktreeErrorText(mergeError));
     }
   }, [
+    acknowledgeDirtyBaseline,
     canActOnWorktree,
     deleteAfterMerge,
     includeUncommitted,
@@ -350,7 +382,11 @@ export const MergeWorktreeModal: React.FC<MergeWorktreeModalProps> = ({
   const merged = result ? isMerged(result) : false;
 
   const isBusy = mergeState.isLoading;
-  const controlsDisabled = isBusy || !canActOnWorktree || sync.isActive;
+  const controlsDisabled =
+    isBusy ||
+    !canActOnWorktree ||
+    sync.isActive ||
+    sync.current?.writer_readiness?.ready === false;
 
   return (
     <KitDialog
@@ -455,6 +491,14 @@ export const MergeWorktreeModal: React.FC<MergeWorktreeModalProps> = ({
         ariaLabel="Include uncommitted changes by auto-committing first"
         checked={includeUncommitted}
         onCheckedChange={setIncludeUncommitted}
+        disabled={controlsDisabled}
+      />
+      <KitCheckRow
+        label="Preserve uncommitted target changes"
+        hint="Allow the registered merge to stash and restore target changes around the merge. Restoration can conflict; review any warnings before continuing."
+        ariaLabel="Allow stashing and restoring uncommitted target changes"
+        checked={acknowledgeDirtyBaseline}
+        onCheckedChange={setAcknowledgeDirtyBaseline}
         disabled={controlsDisabled}
       />
 

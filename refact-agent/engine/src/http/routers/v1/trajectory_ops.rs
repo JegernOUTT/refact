@@ -111,6 +111,114 @@ fn epoch_ms_now() -> u64 {
         .unwrap_or(0)
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RefreshToolsRequest {
+    pub chat_id: String,
+    pub expected_version: Option<u64>,
+}
+
+pub async fn handle_refresh_tools(
+    State(app): State<AppState>,
+    headers: axum::http::HeaderMap,
+    body_bytes: hyper::body::Bytes,
+) -> Result<Response<Body>, ScratchError> {
+    if app
+        .gcx
+        .cmdline
+        .daemon_auth_token
+        .as_deref()
+        .is_some_and(|token| !token.is_empty())
+    {
+        crate::buddy::operator_runtime::authenticated_operator_request(&app, &headers)
+            .map_err(|error| ScratchError::new(StatusCode::FORBIDDEN, error))?;
+    }
+    let req: RefreshToolsRequest = serde_json::from_slice(&body_bytes)
+        .map_err(|_| ScratchError::new(StatusCode::BAD_REQUEST, "Invalid JSON request".into()))?;
+    crate::chat::trajectories::validate_trajectory_id(&req.chat_id)?;
+    let session = app
+        .chat
+        .sessions
+        .read()
+        .await
+        .get(&req.chat_id)
+        .cloned()
+        .ok_or_else(|| {
+            ScratchError::new(
+                StatusCode::NOT_FOUND,
+                "Open this chat before refreshing tools".into(),
+            )
+        })?;
+    refresh_session_tools(app.gcx.clone(), session, req.expected_version).await?;
+    json_response(&serde_json::json!({
+        "chat_id": req.chat_id,
+        "refreshed": true,
+        "effective_next_turn": true,
+    }))
+}
+
+async fn refresh_session_tools(
+    gcx: Arc<GlobalContext>,
+    session_arc: Arc<tokio::sync::Mutex<crate::chat::types::ChatSession>>,
+    expected_version: Option<u64>,
+) -> Result<(), ScratchError> {
+    let conflict = |message: String| ScratchError::new(StatusCode::CONFLICT, message);
+    let _transition =
+        crate::chat::worktree_lifecycle::try_transition_lock(&session_arc).map_err(conflict)?;
+    let save_mutex = session_arc.lock().await.trajectory_save_mutex.clone();
+    let _save = save_mutex
+        .try_lock()
+        .map_err(|_| conflict("Trajectory save is active; retry when idle".into()))?;
+    let mut session = session_arc.lock().await;
+    if !matches!(
+        session.runtime.state,
+        SessionState::Idle | SessionState::Completed | SessionState::Error
+    ) || !crate::chat::context_rebuild::explicit_context_ready(&session)
+        || compression_attempt_active(&session)
+        || session.pending_mode_handoff.is_some()
+        || session.pending_context_rebuild.is_some()
+        || !live_tool_call_ids(&session).is_empty()
+        || session.pending_browser_message.is_some()
+        || !session.command_queue.is_empty()
+        || session
+            .queue_processor_running
+            .load(std::sync::atomic::Ordering::SeqCst)
+        || session
+            .native_commands_in_flight
+            .load(std::sync::atomic::Ordering::SeqCst)
+            != 0
+        || session.external_reload_pending.is_some()
+        || expected_version.is_some_and(|version| version != session.trajectory_version)
+    {
+        return Err(conflict(
+            "Chat changed or is busy; resolve pending tools and retry when idle".into(),
+        ));
+    }
+    let mut snapshot = crate::chat::trajectories::trajectory_snapshot_from_session(&session);
+    snapshot.messages = session.messages.clone();
+    snapshot.version = session.trajectory_version.saturating_add(1);
+    reset_transition_snapshot_identity(&mut snapshot);
+    // Keep both writer ordering and the idle epoch stable until the reset is durable.
+    crate::chat::trajectories::save_tool_refresh_snapshot(gcx, snapshot)
+        .await
+        .map_err(|error| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, error))?;
+    session.thread.previous_response_id = None;
+    session.thread.frozen_request_prefix = None;
+    session.thread.claude_code_identity = None;
+    session.openai_codex_websocket = Default::default();
+    session.reset_cache_guard_snapshot();
+    session.cache_guard_snapshot = None;
+    session.release_turn_only_state();
+    session.provider_usage_stale = true;
+    session.increment_version();
+    let version = session.trajectory_version;
+    session.complete_trajectory_commit(version);
+    session.trajectory_commit_notify.notify_waiters();
+    let event = session.snapshot();
+    session.emit(event);
+    Ok(())
+}
+
 #[cfg(test)]
 fn transfer_goal_into_transition_messages(
     source_messages: &[ChatMessage],
@@ -1102,6 +1210,211 @@ mod tests {
     use super::*;
     use refact_chat_api::{GoalAttempt, GoalBudget, GoalProgress, GoalStatus};
     use serde_json::json;
+
+    fn stale_tools_session() -> crate::chat::types::ChatSession {
+        let (mut session, _) = source_session_with_active_goal("refresh-tools");
+        session.thread.mode = "explore".into();
+        session.thread.previous_response_id = Some("old-response".into());
+        session.thread.claude_code_identity = Some(refact_chat_api::ClaudeCodeIdentity {
+            device_id: "old-device".into(),
+            session_id: "old-session".into(),
+        });
+        session.thread.frozen_request_prefix = Some(refact_chat_api::FrozenRequestPrefix {
+            schema_version: 1,
+            created_at: "old".into(),
+            system_prompt: Some("old".into()),
+            tools_canonical: Some(json!([])),
+        });
+        session.cache_guard_snapshot = Some(json!({"tools": []}));
+        session
+    }
+
+    #[tokio::test]
+    async fn refresh_tools_persists_reset_without_changing_history_or_permissions() {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
+            dir.path().join("cache"),
+            dir.path().join("config"),
+        )
+        .await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![dir.path().to_path_buf()];
+        let mut source = stale_tools_session();
+        source.thread.worktree = Some(sample_worktree(dir.path()));
+        let app = AppState::from_gcx(gcx.clone()).await;
+        let catalog = app
+            .tool_registry
+            .acquire_tool_catalog("explore", None, None)
+            .await;
+        assert!(!catalog.index.tools.is_empty());
+        assert!(!catalog
+            .index
+            .tools
+            .iter()
+            .any(|tool| tool.name == "worktree_sync"));
+        source.tool_catalog = Some(catalog);
+        let history = serde_json::to_value(&source.messages).unwrap();
+        let goal = serde_json::to_value(&source.goal).unwrap();
+        let mut expected = crate::chat::trajectories::trajectory_snapshot_from_session(&source);
+        expected.messages = source.messages.clone();
+        expected.version += 1;
+        reset_transition_snapshot_identity(&mut expected);
+        let session = Arc::new(tokio::sync::Mutex::new(source));
+        gcx.chat_sessions
+            .write()
+            .await
+            .insert("refresh-tools".into(), session.clone());
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            refresh_session_tools(gcx.clone(), session.clone(), None),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let source = session.lock().await;
+        assert_eq!(serde_json::to_value(&source.messages).unwrap(), history);
+        assert_eq!(serde_json::to_value(&source.goal).unwrap(), goal);
+        assert_eq!(
+            serde_json::to_value(crate::chat::trajectories::trajectory_snapshot_from_session(
+                &source
+            ))
+            .unwrap(),
+            serde_json::to_value(expected).unwrap()
+        );
+        assert!(source.thread.frozen_request_prefix.is_none());
+        assert!(source.thread.previous_response_id.is_none());
+        assert!(source.thread.claude_code_identity.is_none());
+        assert!(source.cache_guard_snapshot.is_none());
+        assert!(source.tool_catalog.is_none());
+        assert!(source.turn_tool_pool.is_none());
+        assert!(source.command_queue.is_empty());
+        assert!(!source.thread.auto_approve_editing_tools);
+        assert!(!source.thread.auto_approve_dangerous_commands);
+        drop(source);
+        let catalog = app
+            .tool_registry
+            .acquire_tool_catalog("explore", None, None)
+            .await;
+        let catalog =
+            crate::tools::tools_list::filter_tool_catalog_for_chat(&app, "refresh-tools", catalog)
+                .await;
+        assert!(!catalog.index.tools.is_empty());
+        assert!(!catalog
+            .index
+            .tools
+            .iter()
+            .any(|tool| tool.name == "worktree_sync"));
+        let loaded = crate::chat::trajectories::load_trajectory_for_chat(gcx, "refresh-tools")
+            .await
+            .unwrap();
+        assert!(loaded.thread.frozen_request_prefix.is_none());
+        assert!(loaded.thread.previous_response_id.is_none());
+        assert!(loaded.thread.claude_code_identity.is_none());
+        assert_eq!(serde_json::to_value(loaded.messages).unwrap(), history);
+    }
+
+    #[tokio::test]
+    async fn refresh_tools_rejects_busy_transition_and_stale_version_without_mutation() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        for state in [
+            SessionState::Generating,
+            SessionState::ExecutingTools,
+            SessionState::Paused,
+            SessionState::WaitingIde,
+            SessionState::WaitingUserInput,
+        ] {
+            let mut source = stale_tools_session();
+            source.runtime.state = state;
+            let before = serde_json::to_value(&source.thread).unwrap();
+            let session = Arc::new(tokio::sync::Mutex::new(source));
+            let error = refresh_session_tools(gcx.clone(), session.clone(), None)
+                .await
+                .unwrap_err();
+            assert_eq!(error.status_code, StatusCode::CONFLICT);
+            assert_eq!(
+                serde_json::to_value(&session.lock().await.thread).unwrap(),
+                before
+            );
+        }
+        let session = Arc::new(tokio::sync::Mutex::new(stale_tools_session()));
+        let transition = crate::chat::worktree_lifecycle::try_transition_lock(&session).unwrap();
+        assert_eq!(
+            refresh_session_tools(gcx.clone(), session.clone(), None)
+                .await
+                .unwrap_err()
+                .status_code,
+            StatusCode::CONFLICT
+        );
+        drop(transition);
+        assert_eq!(
+            refresh_session_tools(gcx, session.clone(), Some(u64::MAX))
+                .await
+                .unwrap_err()
+                .status_code,
+            StatusCode::CONFLICT
+        );
+        assert!(session.lock().await.thread.frozen_request_prefix.is_some());
+    }
+
+    #[tokio::test]
+    async fn refresh_tools_save_failure_keeps_memory_and_ack_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
+            dir.path().join("cache"),
+            dir.path().join("config"),
+        )
+        .await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![dir.path().to_path_buf()];
+        std::fs::write(dir.path().join(".refact"), "not a directory").unwrap();
+        let source = stale_tools_session();
+        let before = serde_json::to_value(
+            crate::chat::trajectories::trajectory_snapshot_from_session(&source),
+        )
+        .unwrap();
+        let seq = source.event_seq;
+        let session = Arc::new(tokio::sync::Mutex::new(source));
+        let error = refresh_session_tools(gcx, session.clone(), None)
+            .await
+            .unwrap_err();
+        assert_eq!(error.status_code, StatusCode::INTERNAL_SERVER_ERROR);
+        let source = session.lock().await;
+        assert_eq!(
+            serde_json::to_value(crate::chat::trajectories::trajectory_snapshot_from_session(
+                &source
+            ))
+            .unwrap(),
+            before
+        );
+        assert_eq!(source.event_seq, seq);
+        assert!(source.cache_guard_snapshot.is_some());
+    }
+
+    #[tokio::test]
+    async fn refresh_tools_configured_auth_rejects_missing_wrong_and_accepts_valid() {
+        let mut gcx = crate::global_context::tests::make_test_gcx().await;
+        Arc::get_mut(&mut gcx).unwrap().cmdline.daemon_auth_token = Some("refresh-secret".into());
+        let app = AppState::from_gcx(gcx).await;
+        for token in [None, Some("Bearer wrong"), Some("Bearer refresh-secret")] {
+            let mut headers = axum::http::HeaderMap::new();
+            if let Some(token) = token {
+                headers.insert("authorization", token.parse().unwrap());
+            }
+            let error = handle_refresh_tools(
+                State(app.clone()),
+                headers,
+                hyper::body::Bytes::from_static(br#"{"chat_id":"missing"}"#),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(
+                error.status_code,
+                if token == Some("Bearer refresh-secret") {
+                    StatusCode::NOT_FOUND
+                } else {
+                    StatusCode::FORBIDDEN
+                }
+            );
+        }
+    }
 
     #[test]
     fn planner_mode_transition_retains_task_without_planner_authority() {

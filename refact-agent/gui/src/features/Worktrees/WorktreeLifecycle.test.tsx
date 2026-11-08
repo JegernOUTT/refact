@@ -394,6 +394,143 @@ describe("Worktree lifecycle GUI", () => {
     expect(onOpenChange).not.toHaveBeenCalledWith(false);
   });
 
+  test("dirty-target preservation needs explicit consent and keeps refusal evidence after a failed retry", async () => {
+    const calls: JsonObject[] = [];
+    const onMerged = vi.fn();
+    const onOpenChange = vi.fn();
+    const warning =
+      "Target changes were not merged; retry with acknowledge_dirty_baseline=true to stash and restore them.";
+    server.use(
+      http.post("*/v1/worktrees/:id/merge", async ({ request }) => {
+        calls.push((await request.json()) as JsonObject);
+        if (calls.length === 1)
+          return HttpResponse.json({
+            status: "dirty_baseline",
+            merged: false,
+            warnings: [warning],
+          });
+        return HttpResponse.json(
+          { error: "Target restoration needs attention" },
+          { status: 409 },
+        );
+      }),
+    );
+    const { user } = render(
+      <MergeWorktreeModal
+        open
+        record={makeRecord()}
+        onOpenChange={onOpenChange}
+        onMerged={onMerged}
+      />,
+      { preloadedState: { config: configState() } },
+    );
+    const consent = screen.getByRole("checkbox", {
+      name: "Allow stashing and restoring uncommitted target changes",
+    });
+    expect(consent).not.toBeChecked();
+    await user.click(screen.getByRole("button", { name: "Merge" }));
+    expect(await screen.findByText(warning)).toBeVisible();
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({ acknowledge_dirty_baseline: false });
+    await user.click(consent);
+    expect(calls).toHaveLength(1);
+    await user.click(screen.getByRole("button", { name: "Merge" }));
+    expect(
+      await screen.findByText("Target restoration needs attention"),
+    ).toBeVisible();
+    expect(calls).toHaveLength(2);
+    expect(calls[1]).toMatchObject({ acknowledge_dirty_baseline: true });
+    expect(screen.getByText(warning)).toBeVisible();
+    expect(screen.queryByText("Merge completed.")).not.toBeInTheDocument();
+    expect(onMerged).not.toHaveBeenCalled();
+    expect(onOpenChange).not.toHaveBeenCalled();
+  });
+
+  test("target preservation consent resets on target, worktree and modal changes", async () => {
+    const calls: JsonObject[] = [];
+    server.use(
+      mergeHandler({ status: "dirty_baseline", merged: false }, calls),
+    );
+    const element = (record: WorktreeRecordView, open = true) => (
+      <MergeWorktreeModal
+        open={open}
+        record={record}
+        onOpenChange={() => undefined}
+      />
+    );
+    const first = makeRecord();
+    const second = makeRecord("wt-2", "refact/task/T-2");
+    const { user, rerender } = render(element(first), {
+      preloadedState: { config: configState() },
+    });
+    const consent = () =>
+      screen.getByRole("checkbox", {
+        name: "Allow stashing and restoring uncommitted target changes",
+      });
+    await user.click(consent());
+    await user.type(screen.getByLabelText("Target branch"), "-release");
+    expect(consent()).not.toBeChecked();
+    await user.click(consent());
+    rerender(element({ ...first, updated_at: "new timestamp" }));
+    expect(consent()).toBeChecked();
+    rerender(element(second));
+    expect(consent()).not.toBeChecked();
+    await user.click(screen.getByRole("button", { name: "Merge" }));
+    await waitFor(() => expect(calls).toHaveLength(1));
+    expect(calls[0]).toMatchObject({ acknowledge_dirty_baseline: false });
+    await user.click(consent());
+    rerender(element(second, false));
+    rerender(element(second));
+    expect(consent()).not.toBeChecked();
+  });
+
+  test.each(["worktree round trip", "close and reopen"])(
+    "does not publish a delayed merge after %s",
+    async (transition) => {
+      let release: () => void = () => undefined;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let started = false;
+      const onMerged = vi.fn();
+      const onOpenChange = vi.fn();
+      server.use(
+        http.post("*/v1/worktrees/:id/merge", async () => {
+          started = true;
+          await gate;
+          return HttpResponse.json({ merged: true, status: "merged" });
+        }),
+      );
+      const element = (id = "wt-1", open = true) => (
+        <MergeWorktreeModal
+          open={open}
+          worktreeId={id}
+          record={makeRecord(id)}
+          onOpenChange={onOpenChange}
+          onMerged={onMerged}
+        />
+      );
+      const { user, rerender } = render(element(), {
+        preloadedState: { config: configState() },
+      });
+      await user.click(screen.getByRole("button", { name: "Merge" }));
+      await waitFor(() => expect(started).toBe(true));
+      rerender(
+        transition === "worktree round trip"
+          ? element("wt-2")
+          : element("wt-1", false),
+      );
+      rerender(element());
+      release();
+      await waitFor(() =>
+        expect(screen.getByRole("button", { name: "Merge" })).toBeEnabled(),
+      );
+      expect(onMerged).not.toHaveBeenCalled();
+      expect(onOpenChange).not.toHaveBeenCalled();
+      expect(screen.queryByText("Merge completed.")).not.toBeInTheDocument();
+    },
+  );
+
   test("merge modal displays structured backend error text", async () => {
     const record = makeRecord();
     server.use(

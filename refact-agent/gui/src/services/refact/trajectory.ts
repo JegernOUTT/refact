@@ -7,7 +7,7 @@ import {
   TRAJECTORY_LLM_COMPRESS_APPLY_URL,
   TRAJECTORY_MODE_TRANSITION_APPLY_URL,
 } from "./consts";
-import { buildApiUrlFromState } from "./apiUrl";
+import { buildApiUrlFromState, getEngineEndpointIdentity } from "./apiUrl";
 
 export type TransformOptions = {
   dedup_and_compress_context?: boolean;
@@ -39,6 +39,12 @@ export type TransformPreviewResponse = {
 
 export type TransformApplyResponse = {
   stats: TransformStats;
+};
+
+export type RefreshToolsResponse = {
+  chat_id: string;
+  refreshed: true;
+  effective_next_turn: true;
 };
 
 export type LlmCompressPreviewResponse = {
@@ -85,6 +91,43 @@ export const trajectoryApi = createApi({
     },
   }),
   endpoints: (builder) => ({
+    refreshTools: builder.mutation<
+      RefreshToolsResponse,
+      { chatId: string; expectedVersion?: number }
+    >({
+      async queryFn({ chatId, expectedVersion }, api, _opts, baseQuery) {
+        const start = api.getState() as RootState;
+        const identity = getEngineEndpointIdentity(start.config);
+        const result = await baseQuery({
+          url: buildApiUrlFromState(start, "/v1/trajectory/refresh-tools"),
+          method: "POST",
+          body: { chat_id: chatId, expected_version: expectedVersion },
+        });
+        if (result.error) return { error: result.error };
+        const current = api.getState() as RootState;
+        const data = result.data;
+        if (
+          identity !== getEngineEndpointIdentity(current.config) ||
+          start.config.apiKey !== current.config.apiKey ||
+          typeof data !== "object" ||
+          data === null ||
+          !("chat_id" in data) ||
+          data.chat_id !== chatId ||
+          !("refreshed" in data) ||
+          data.refreshed !== true ||
+          !("effective_next_turn" in data) ||
+          data.effective_next_turn !== true
+        ) {
+          return {
+            error: {
+              status: "CUSTOM_ERROR",
+              error: "Tool refresh acknowledgement is stale or invalid",
+            },
+          };
+        }
+        return { data: result.data as RefreshToolsResponse };
+      },
+    }),
     previewTransform: builder.mutation<
       TransformPreviewResponse,
       { chatId: string; options: TransformOptions }
@@ -200,6 +243,7 @@ export const trajectoryApi = createApi({
 });
 
 export const {
+  useRefreshToolsMutation,
   usePreviewTransformMutation,
   useApplyTransformMutation,
   usePreviewLlmCompressMutation,

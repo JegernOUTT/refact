@@ -14,6 +14,29 @@ use crate::worktrees::types::{WorktreeSyncRequest, WorktreeSyncResponse};
 
 pub struct ToolWorktreeSync;
 
+#[derive(serde::Serialize)]
+pub(crate) struct SyncResponse {
+    #[serde(flatten)]
+    pub sync: WorktreeSyncResponse,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub writer_readiness: Option<sync_authority::WriterReadiness>,
+}
+
+pub(crate) async fn status_readiness(
+    app: &crate::app_state::AppState,
+    service: &WorktreeService,
+    id: &str,
+    actor: Option<&str>,
+) -> Result<sync_authority::WriterReadiness, String> {
+    let registry = service.load_registry().await?;
+    let record = registry
+        .records
+        .iter()
+        .find(|r| r.meta.id == id)
+        .ok_or("Source worktree not found")?;
+    sync_authority::source_writer_readiness(app, &record.meta, &record.references, actor).await
+}
+
 pub(crate) async fn sync_under_lease(
     app: &crate::app_state::AppState,
     service: &WorktreeService,
@@ -227,7 +250,12 @@ impl Tool for ToolWorktreeSync {
                 | WorktreeSyncRequest::Recover { .. }
         );
         let caller = SyncCaller::from_context(&ccx).await;
-        let mut authority = sync_authority::resolve(&caller, &parsed.selector, recovery).await?;
+        let inspect = matches!(parsed.request, WorktreeSyncRequest::Status { .. });
+        let mut authority = if inspect {
+            sync_authority::resolve_status(&caller, &parsed.selector).await?
+        } else {
+            sync_authority::resolve(&caller, &parsed.selector, recovery).await?
+        };
         let selected = authority.worktree.clone();
         if parsed
             .worktree_id
@@ -256,12 +284,31 @@ impl Tool for ToolWorktreeSync {
             selected.source_workspace_root.clone(),
         )
         .await?;
-        let again = sync_authority::resolve(&caller, &parsed.selector, recovery).await?;
+        let again = if inspect {
+            sync_authority::resolve_status(&caller, &parsed.selector).await?
+        } else {
+            sync_authority::resolve(&caller, &parsed.selector, recovery).await?
+        };
         if !authority.same(&again) {
             return Err("Source synchronization authority changed; request Status again".into());
         }
-        let validator =
-            authority.phase_validator(caller.clone(), parsed.selector.clone(), recovery);
+        let mut writer_readiness = if matches!(parsed.request, WorktreeSyncRequest::Status { .. }) {
+            Some(
+                status_readiness(caller.app(), &service, &selected.id, Some(&authority.actor))
+                    .await?,
+            )
+        } else {
+            None
+        };
+        if let Some(readiness) = &mut writer_readiness {
+            authority.clear_writer_identities(&caller, readiness).await;
+        }
+        let validator = authority.phase_validator(
+            caller.clone(),
+            parsed.selector.clone(),
+            recovery,
+            matches!(parsed.request, WorktreeSyncRequest::Status { .. }),
+        );
         let response = sync_under_lease(
             caller.app(),
             &service,
@@ -274,10 +321,15 @@ impl Tool for ToolWorktreeSync {
         authority
             .clear_source_paths(&caller, response.conflicts.iter().map(|c| c.path.as_str()))
             .await?;
+        let next = if writer_readiness.as_ref().is_some_and(|r| !r.ready) {
+            "Git status is only the current synchronization phase, not writer readiness. For an identified authorized child, use agent_status with agent_id, then wait with target {kind:agents,agent_ids:[agent_id]}; if stopping is explicitly desired, use existing agent_cancel only when your current tools and ownership permit it. Otherwise ask the user to stop the owning chat in the UI; then retry worktree_sync Status. Do not continue retained follow-ups or use external Git to bypass this guard."
+        } else {
+            instructions(&response)
+        };
         let content = serde_json::to_string(&json!({
-            "sync": response,
+            "sync": SyncResponse { sync: response, writer_readiness },
             "authority": authority.provenance,
-            "next": instructions(&response),
+            "next": next,
         }))
         .map_err(|e| e.to_string())?;
         let mut message = ChatMessage {
@@ -449,6 +501,94 @@ mod tests {
         } else {
             Err(value.to_string())
         }
+    }
+
+    #[tokio::test]
+    async fn readiness_tracks_real_writers_and_bounds_private_diagnostics() {
+        let f = fixture().await;
+        let app = f.ccx.lock().await.app.clone();
+        let service = WorktreeService::new(app.gcx.cache_dir.clone(), f.source.clone()).unwrap();
+        let own = status_readiness(&app, &service, &f.worktree.id, Some("chat:sync-root"))
+            .await
+            .unwrap();
+        assert!(own.ready);
+        let (release, pending) = tokio::sync::oneshot::channel::<()>();
+        app.agent_executions
+            .spawn_owned(
+                "finishing-writer".into(),
+                Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                Arc::new(tokio::sync::Notify::new()),
+                async {
+                    let _ = pending.await;
+                },
+            )
+            .unwrap();
+        let refs = vec![crate::worktrees::types::WorktreeReference {
+            chat_id: Some("finishing-writer".into()),
+            ..Default::default()
+        }];
+        assert!(app.agent_executions.task_active("finishing-writer"));
+        let finishing = sync_authority::source_writer_readiness(
+            &app,
+            &f.worktree,
+            &refs,
+            Some("chat:sync-root"),
+        )
+        .await
+        .unwrap();
+        assert!(!finishing.ready);
+        assert!(matches!(
+            finishing.blockers[0].kind,
+            sync_authority::WriterBlockerKind::ExecutionActive
+        ));
+        assert!(sync_authority::ensure_source_quiescent(
+            &app,
+            &f.worktree,
+            &refs,
+            Some("chat:sync-root")
+        )
+        .await
+        .is_err());
+        release.send(()).unwrap();
+        app.agent_executions.shutdown().await;
+        let user = http(&f, json!({"action":"status"})).await.unwrap();
+        assert_eq!(user["status"], "idle");
+        assert_eq!(user["writer_readiness"]["ready"], false);
+        assert_eq!(
+            user["writer_readiness"]["blockers"][0]["kind"],
+            "chat_active"
+        );
+        assert_eq!(
+            user["writer_readiness"]["blockers"][0]["chat_id"],
+            "sync-root"
+        );
+        for i in 0..35 {
+            let mut writer = ChatSession::new(format!("foreign-{i:02}"));
+            writer.thread.worktree = Some(f.worktree.clone());
+            writer.set_runtime_state(SessionState::Generating, None);
+            app.chat
+                .sessions
+                .write()
+                .await
+                .insert(writer.chat_id.clone(), Arc::new(Mutex::new(writer)));
+        }
+        let model = call(&f, json!({"action":"status"})).await.unwrap();
+        let readiness = &model["sync"]["writer_readiness"];
+        assert_eq!(readiness["ready"], false);
+        assert_eq!(readiness["truncated"], true);
+        let blockers = readiness["blockers"].as_array().unwrap();
+        assert_eq!(blockers.len(), 32);
+        assert!(blockers
+            .iter()
+            .all(|b| b.get("chat_id").is_none() && b["kind"] == "chat_active"));
+        assert!(sync_authority::ensure_source_quiescent(
+            &app,
+            &f.worktree,
+            &[],
+            Some("chat:sync-root")
+        )
+        .await
+        .is_err());
     }
 
     #[tokio::test]
@@ -737,12 +877,11 @@ mod tests {
             .await
             .insert("sync-child".into(), child.clone());
         conflict(&f);
-        assert!(
-            call(&f, json!({"action":"status","child_chat_id":"sync-child"}))
-                .await
-                .unwrap_err()
-                .contains("stopped")
-        );
+        let busy = call(&f, json!({"action":"status","child_chat_id":"sync-child"}))
+            .await
+            .unwrap();
+        assert_eq!(busy["sync"]["writer_readiness"]["ready"], false);
+        assert!(call(&f, json!({"action":"start","child_chat_id":"sync-child","expected_source_head":busy["sync"]["source_head"],"expected_target_head":busy["sync"]["target_head"]})).await.is_err());
         app.agents
             .mark_cancelled(&agent.agent_id, None)
             .await
@@ -751,6 +890,22 @@ mod tests {
             .lock()
             .await
             .set_runtime_state(SessionState::Completed, None);
+        assert!(app
+            .agents
+            .get_any(&agent.agent_id)
+            .await
+            .unwrap()
+            .followups
+            .is_empty());
+        let mut records = app.agents.records_write_guard_for_test().await;
+        let record = records.get_mut(&agent.agent_id).unwrap();
+        let retained = serde_json::from_value(json!({
+            "id":"retained-mail", "messages":[{"role":"user","content":"preserve exactly\n"}], "push":"append",
+            "enqueued_at_ms":1
+        })).unwrap();
+        record.followups.push(retained);
+        let followups = serde_json::to_vec(&record.followups).unwrap();
+        drop(records);
         let status = call(&f, json!({"action":"status","child_chat_id":"sync-child"}))
             .await
             .unwrap();
@@ -782,6 +937,11 @@ mod tests {
         let op = &resolved["sync"]["operation"];
         let done = call(&f, json!({"action":"continue","child_chat_id":"sync-child","operation_id":op["operation_id"],"expected_revision":op["revision"]})).await.unwrap();
         assert_eq!(done["sync"]["status"], "completed", "{done}");
+        assert_eq!(
+            serde_json::to_vec(&app.agents.get_any(&agent.agent_id).await.unwrap().followups)
+                .unwrap(),
+            followups
+        );
     }
 
     #[tokio::test]

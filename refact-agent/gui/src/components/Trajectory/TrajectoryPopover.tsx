@@ -22,6 +22,7 @@ import { useCapsForToolUse } from "../../hooks/useCapsForToolUse";
 import { ModelSelector } from "../Chat/ModelSelector";
 import { formatContextWindow } from "../../features/Providers/ProviderForm/ProviderModelsList/utils/groupModelsWithPricing";
 import styles from "./TrajectoryPopover.module.css";
+import { RefreshTools } from "./RefreshTools";
 
 type TrajectoryPopoverContentProps = {
   onClose: () => void;
@@ -285,6 +286,17 @@ export const TrajectoryPopoverContent: React.FC<
               content: llmSummary,
             },
           ]}
+        />
+        <KitDivider />
+        <RefreshTools
+          chatId={chatId}
+          busy={
+            isStreaming ||
+            isPreviewingTransform ||
+            isApplyingTransform ||
+            isPreviewingLlmCompress ||
+            isApplyingLlmCompress
+          }
         />
       </KitPanel>
     </Popover.Content>

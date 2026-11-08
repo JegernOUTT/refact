@@ -122,6 +122,7 @@ use crate::http::routers::v1::tasks::{
 use crate::http::routers::v1::trajectory_ops::{
     handle_transform_preview, handle_transform_apply, handle_mode_transition_apply,
     handle_planner_from_transition, handle_llm_compress_preview, handle_llm_compress_apply,
+    handle_refresh_tools,
 };
 use crate::http::routers::v1::project_configs::{
     handle_v1_project_configs_get, handle_v1_project_configs_rescan,
@@ -796,6 +797,7 @@ fn trajectories_routes() -> Router<AppState> {
                 .post(settings_config::handle_v1_trajectory_settings_post),
         )
         .route("/trajectory-compress", post(handle_v1_trajectory_compress))
+        .route("/trajectory/refresh-tools", post(handle_refresh_tools))
         .route("/trajectories", get(handle_v1_trajectories_list))
         .route("/trajectories/all", get(handle_v1_trajectories_all))
         .route(

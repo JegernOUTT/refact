@@ -150,6 +150,7 @@ export type MergeWorktreeRequest = {
   target_branch?: string;
   delete_after_merge?: boolean;
   include_uncommitted?: boolean;
+  acknowledge_dirty_baseline?: boolean;
   commit_message?: string;
   generate_commit_message?: boolean;
 };
@@ -277,6 +278,26 @@ export type WorktreeSyncConflict = {
   target?: WorktreeSyncStage | null;
 };
 
+export type WorktreeWriterBlocker = {
+  kind:
+    | "agent_pending"
+    | "execution_active"
+    | "board_admitted"
+    | "chat_commands_queued"
+    | "chat_active";
+  chat_id?: string;
+  agent_id?: string;
+  run_generation?: number;
+  recovery_actions: (
+    | "wait"
+    | "inspect_agent"
+    | "cancel_agent"
+    | "stop_chat"
+    | "user_required"
+    | "retry_status"
+  )[];
+};
+
 export type WorktreeSyncResponse = {
   id: string;
   status: WorktreeSyncStatus;
@@ -290,6 +311,11 @@ export type WorktreeSyncResponse = {
   recovery_journal_digest?: string | null;
   restore_archive_id?: string | null;
   recovery_archives?: { archive_id: string; path: string }[];
+  writer_readiness?: {
+    ready: boolean;
+    blockers: WorktreeWriterBlocker[];
+    truncated: boolean;
+  };
 };
 
 export type GetWorktreeSyncStatusRequest = GetWorktreeRequest & {

@@ -70,84 +70,196 @@ fn execution_live(app: &AppState, chat_id: &str) -> bool {
         .is_some_and(|run| run.state() != crate::agents::execution::ExecutionState::Gone)
 }
 
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum WriterBlockerKind {
+    AgentPending,
+    ExecutionActive,
+    BoardAdmitted,
+    ChatCommandsQueued,
+    ChatActive,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum WriterRecoveryAction {
+    Wait,
+    InspectAgent,
+    StopChat,
+    UserRequired,
+    RetryStatus,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+pub(crate) struct WriterBlocker {
+    pub kind: WriterBlockerKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chat_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_generation: Option<u64>,
+    pub recovery_actions: Vec<WriterRecoveryAction>,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+pub(crate) struct WriterReadiness {
+    pub ready: bool,
+    pub blockers: Vec<WriterBlocker>,
+    pub truncated: bool,
+}
+
 pub(crate) async fn ensure_source_quiescent(
     app: &AppState,
     meta: &WorktreeMeta,
     references: &[WorktreeReference],
     actor: Option<&str>,
 ) -> Result<(), String> {
-    let sessions: Vec<_> = app.chat.sessions.read().await.values().cloned().collect();
-    let mut chats: std::collections::HashSet<String> = references
+    let readiness = source_writer_readiness(app, meta, references, actor).await?;
+    if readiness.ready {
+        Ok(())
+    } else {
+        Err("Source synchronization refused: source writer is active or queued; request worktree_sync Status for writer_readiness and authorized recovery actions".into())
+    }
+}
+
+pub(crate) async fn source_writer_readiness(
+    app: &AppState,
+    meta: &WorktreeMeta,
+    references: &[WorktreeReference],
+    actor: Option<&str>,
+) -> Result<WriterReadiness, String> {
+    let agents = app.agents.list_all().await;
+    let mut chats: std::collections::BTreeSet<String> = references
         .iter()
         .filter_map(|r| r.chat_id.clone())
         .collect();
-    for agent in app.agents.list_all().await {
-        if agent.worktree_id.as_deref() == Some(meta.id.as_str()) {
-            if agent
-                .child_chat_id
-                .as_ref()
-                .is_some_and(|chat| actor == Some(format!("chat:{chat}").as_str()))
+    let mut pending = Vec::new();
+    for agent in &agents {
+        if agent.worktree_id.as_deref() == Some(&meta.id) {
+            if let Some(chat) = &agent.child_chat_id {
+                chats.insert(chat.clone());
+            }
+            if !agent.status.is_terminal()
+                && !agent
+                    .child_chat_id
+                    .as_ref()
+                    .is_some_and(|chat| actor == Some(format!("chat:{chat}").as_str()))
             {
-                continue;
-            }
-            if !agent.status.is_terminal() || !agent.followups.is_empty() {
-                return Err(
-                    "Source synchronization refused: source agent writer is active or queued"
-                        .into(),
-                );
-            }
-            if let Some(chat) = agent.child_chat_id {
-                chats.insert(chat);
+                pending.push((
+                    WriterBlockerKind::AgentPending,
+                    agent.child_chat_id.clone(),
+                    Some(agent),
+                ));
             }
         }
     }
+    let sessions: Vec<_> = app.chat.sessions.read().await.values().cloned().collect();
     for session in sessions {
-        let session = session.lock().await;
-        if session.thread.worktree.as_ref().is_some_and(|w| {
+        let s = session.lock().await;
+        if s.thread.worktree.as_ref().is_some_and(|w| {
             w.id == meta.id && w.source_workspace_root == meta.source_workspace_root
         }) {
-            chats.insert(session.chat_id.clone());
+            chats.insert(s.chat_id.clone());
         }
     }
     for chat in chats {
         if actor == Some(format!("chat:{chat}").as_str()) {
             continue;
         }
-        if execution_live(app, &chat)
-            || app.agent_executions.task_active(&chat)
-            || crate::tasks::admission::is_tracked(&chat).await
-        {
-            return Err(
-                "Source synchronization refused: source writer execution is active or queued"
-                    .into(),
-            );
+        let agent = agents
+            .iter()
+            .find(|a| a.child_chat_id.as_deref() == Some(&chat));
+        if execution_live(app, &chat) || app.agent_executions.task_active(&chat) {
+            pending.push((
+                WriterBlockerKind::ExecutionActive,
+                Some(chat.clone()),
+                agent,
+            ));
         }
-        if let Some(agent) = app.agents.find_agent_id_by_child_chat_id(&chat).await {
-            let record = app.agents.get_any(&agent).await?;
-            if !record.status.is_terminal() || !record.followups.is_empty() {
-                return Err(
-                    "Source synchronization refused: source agent is active or queued".into(),
-                );
+        if crate::tasks::admission::is_tracked(&chat).await {
+            pending.push((WriterBlockerKind::BoardAdmitted, Some(chat.clone()), agent));
+        }
+        if let Some(agent) = agent {
+            if !agent.status.is_terminal() && agent.worktree_id.as_deref() != Some(&meta.id) {
+                pending.push((
+                    WriterBlockerKind::AgentPending,
+                    Some(chat.clone()),
+                    Some(agent),
+                ));
             }
         }
         if let Some(session) = session(app, &chat).await {
-            let session = session.lock().await;
-            if !session.command_queue.is_empty()
-                || matches!(
-                    session.runtime.state,
-                    refact_runtime_api::SessionState::Generating
-                        | refact_runtime_api::SessionState::ExecutingTools
-                        | refact_runtime_api::SessionState::WaitingIde
-                        | refact_runtime_api::SessionState::Paused
-                )
-            {
-                return Err(
-                    "Source synchronization refused: source chat writer is active or queued".into(),
-                );
+            let s = session.lock().await;
+            if !s.command_queue.is_empty() {
+                pending.push((
+                    WriterBlockerKind::ChatCommandsQueued,
+                    Some(chat.clone()),
+                    agent,
+                ));
+            }
+            if matches!(
+                s.runtime.state,
+                refact_runtime_api::SessionState::Generating
+                    | refact_runtime_api::SessionState::ExecutingTools
+                    | refact_runtime_api::SessionState::WaitingIde
+                    | refact_runtime_api::SessionState::Paused
+            ) {
+                pending.push((WriterBlockerKind::ChatActive, Some(chat.clone()), agent));
             }
         }
     }
-    Ok(())
+    let ready = pending.is_empty();
+    let truncated = pending.len() > 32;
+    let owner = actor.and_then(|a| {
+        a.strip_prefix("chat:")
+            .or_else(|| {
+                a.strip_prefix("parent:")
+                    .and_then(|rest| rest.split(':').next())
+            })
+            .or_else(|| {
+                a.strip_prefix("card:")
+                    .and_then(|rest| rest.rsplit(':').next())
+            })
+    });
+    let blockers = pending
+        .into_iter()
+        .take(32)
+        .map(|(kind, chat, agent)| {
+            let authorized = actor.is_none()
+                || agent.is_some_and(|a| Some(a.parent_chat_id.as_str()) == owner)
+                || chat.as_deref() == owner;
+            let recovery_actions = if authorized && agent.is_some() {
+                vec![
+                    WriterRecoveryAction::InspectAgent,
+                    WriterRecoveryAction::Wait,
+                    WriterRecoveryAction::RetryStatus,
+                ]
+            } else if authorized && actor.is_none() {
+                vec![
+                    WriterRecoveryAction::StopChat,
+                    WriterRecoveryAction::RetryStatus,
+                ]
+            } else {
+                vec![
+                    WriterRecoveryAction::UserRequired,
+                    WriterRecoveryAction::RetryStatus,
+                ]
+            };
+            WriterBlocker {
+                kind,
+                chat_id: authorized.then_some(chat).flatten(),
+                agent_id: agent.filter(|_| authorized).map(|a| a.agent_id.clone()),
+                run_generation: agent.filter(|_| authorized).map(|a| a.run_generation),
+                recovery_actions,
+            }
+        })
+        .collect();
+    Ok(WriterReadiness {
+        ready,
+        blockers,
+        truncated,
+    })
 }
 
 async fn live_caller(caller: &SyncCaller) -> Result<Value, String> {
@@ -353,6 +465,7 @@ async fn resolve_card(
     card_id: &str,
     expected_worktree: Option<&str>,
     recovery: bool,
+    inspect: bool,
 ) -> Result<(WorktreeMeta, String, Value, Vec<PathBuf>), String> {
     let thread = root_caller(caller).await?;
     let task = caller.task_meta.clone().ok_or(REFUSED)?;
@@ -433,7 +546,9 @@ async fn resolve_card(
                 return Err(REFUSED.into());
             }
         }
-        ensure_source_quiescent(&caller.app, &meta, &view.references, None).await?;
+        if !inspect {
+            ensure_source_quiescent(&caller.app, &meta, &view.references, None).await?;
+        }
         let actor = format!("card:{}:{}:{}", task.task_id, card_id, caller.chat_id);
         let board_path = source
             .join(".refact/tasks")
@@ -503,6 +618,7 @@ async fn resolve_child(
     caller: &SyncCaller,
     child: &str,
     recovery: bool,
+    inspect: bool,
 ) -> Result<(WorktreeMeta, String, Value, Vec<PathBuf>), String> {
     let thread = root_caller(caller).await?;
     if caller.task_meta.is_some() {
@@ -522,26 +638,28 @@ async fn resolve_child(
         .map_err(|_| REFUSED)?;
     if record.child_chat_id.as_deref() != Some(child)
         || record.parent_chat_id != caller.chat_id
-        || !record.status.is_terminal()
-        || !record.followups.is_empty()
         || record.worktree_id.is_none()
-        || execution_live(&caller.app, child)
-        || crate::tasks::admission::is_tracked(child).await
+        || (!inspect
+            && (!record.status.is_terminal()
+                || execution_live(&caller.app, child)
+                || caller.app.agent_executions.task_active(child)
+                || crate::tasks::admission::is_tracked(child).await))
     {
-        return Err("Child source synchronization requires a direct child whose execution is stopped with no queued follow-ups".into());
+        return Err("Child source synchronization requires a direct child whose execution is stopped; request Status for writer readiness".into());
     }
     let child_thread = match session(&caller.app, child).await {
         Some(live) => {
             let s = live.lock().await;
             if s.chat_id != child
-                || !s.command_queue.is_empty()
-                || matches!(
-                    s.runtime.state,
-                    refact_runtime_api::SessionState::Generating
-                        | refact_runtime_api::SessionState::ExecutingTools
-                        | refact_runtime_api::SessionState::WaitingIde
-                        | refact_runtime_api::SessionState::Paused
-                )
+                || (!inspect
+                    && (!s.command_queue.is_empty()
+                        || matches!(
+                            s.runtime.state,
+                            refact_runtime_api::SessionState::Generating
+                                | refact_runtime_api::SessionState::ExecutingTools
+                                | refact_runtime_api::SessionState::WaitingIde
+                                | refact_runtime_api::SessionState::Paused
+                        )))
             {
                 return Err(REFUSED.into());
             }
@@ -586,12 +704,28 @@ pub(crate) async fn resolve(
     selector: &SyncSelector,
     recovery: bool,
 ) -> Result<SyncAuthority, String> {
+    resolve_mode(caller, selector, recovery, false).await
+}
+
+pub(crate) async fn resolve_status(
+    caller: &SyncCaller,
+    selector: &SyncSelector,
+) -> Result<SyncAuthority, String> {
+    resolve_mode(caller, selector, true, true).await
+}
+
+async fn resolve_mode(
+    caller: &SyncCaller,
+    selector: &SyncSelector,
+    recovery: bool,
+    inspect: bool,
+) -> Result<SyncAuthority, String> {
     let (worktree, actor, identity, extra) = match selector {
         SyncSelector::Own => resolve_own(caller, recovery).await?,
         SyncSelector::Card(card, worktree) => {
-            resolve_card(caller, card, worktree.as_deref(), recovery).await?
+            resolve_card(caller, card, worktree.as_deref(), recovery, inspect).await?
         }
-        SyncSelector::Child(child) => resolve_child(caller, child, recovery).await?,
+        SyncSelector::Child(child) => resolve_child(caller, child, recovery, inspect).await?,
     };
     let mut paths = vec![
         worktree.root.clone(),
@@ -641,6 +775,54 @@ async fn clear_paths(
 }
 
 impl SyncAuthority {
+    pub(crate) async fn clear_writer_identities(
+        &mut self,
+        caller: &SyncCaller,
+        readiness: &mut WriterReadiness,
+    ) {
+        for blocker in &mut readiness.blockers {
+            let Some(id) = &blocker.agent_id else {
+                continue;
+            };
+            let cleared = match caller.app.agent_executions.launch_provenance(id) {
+                Some((records, true)) => {
+                    match crate::coordination::scope::model_caller(
+                        &caller.app,
+                        &caller.chat_id,
+                        &caller.model,
+                    )
+                    .await
+                    {
+                        Ok(work) => work
+                            .model
+                            .is_some_and(|model| {
+                                crate::privacy::destinations::clear_for_model(
+                                    &caller.app.gcx,
+                                    Audit(records.clone()),
+                                    &model,
+                                )
+                                .is_ok()
+                            })
+                            .then_some(records),
+                        Err(_) => None,
+                    }
+                }
+                _ => None,
+            };
+            if let Some(records) = cleared {
+                self.records.extend(records);
+            } else {
+                blocker.agent_id = None;
+                blocker.chat_id = None;
+                blocker.run_generation = None;
+                blocker.recovery_actions = vec![
+                    WriterRecoveryAction::UserRequired,
+                    WriterRecoveryAction::RetryStatus,
+                ];
+            }
+        }
+    }
+
     pub(crate) async fn clear_source_paths<'a>(
         &mut self,
         caller: &SyncCaller,
@@ -671,11 +853,18 @@ impl SyncAuthority {
         caller: SyncCaller,
         selector: SyncSelector,
         recovery: bool,
+        inspect: bool,
     ) -> refact_worktrees::locking::PhaseValidator {
         let runtime = tokio::runtime::Handle::current();
         let expected = self.digest.clone();
         Arc::new(move || {
-            let current = runtime.block_on(resolve(&caller, &selector, recovery))?;
+            let current = runtime.block_on(async {
+                if inspect {
+                    resolve_status(&caller, &selector).await
+                } else {
+                    resolve(&caller, &selector, recovery).await
+                }
+            })?;
             if current.digest != expected {
                 return Err(REFUSED.into());
             }

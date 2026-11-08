@@ -5382,6 +5382,7 @@ async fn publish_trajectory_snapshot_updates(
     background_messages_json: Option<Vec<serde_json::Value>>,
     updated_at: String,
     should_generate_title: bool,
+    allow_background_generation: bool,
 ) -> Result<(), String> {
     if !is_internal_trace_link_type(snapshot.link_type.as_deref()) {
         if let Some(dir) = index_dir_for_trajectory_file(gcx.clone(), file_path).await {
@@ -5515,7 +5516,7 @@ async fn publish_trajectory_snapshot_updates(
             );
         }
 
-        if task_meta.role == "planner" {
+        if allow_background_generation && task_meta.role == "planner" {
             let user_message_count = count_user_messages(&background_messages_json);
             if user_message_count >= 1 {
                 spawn_task_name_generation_task(
@@ -5532,8 +5533,24 @@ async fn publish_trajectory_snapshot_updates(
 
 async fn save_trajectory_snapshot_inner(
     gcx: Arc<GlobalContext>,
+    snapshot: TrajectorySnapshot,
+    write_cache: Option<Arc<AMutex<DetachedTrajectoryWriteCache>>>,
+) -> Result<(), String> {
+    save_trajectory_snapshot_inner_options(gcx, snapshot, write_cache, true).await
+}
+
+pub(crate) async fn save_tool_refresh_snapshot(
+    gcx: Arc<GlobalContext>,
+    snapshot: TrajectorySnapshot,
+) -> Result<(), String> {
+    save_trajectory_snapshot_inner_options(gcx, snapshot, None, false).await
+}
+
+async fn save_trajectory_snapshot_inner_options(
+    gcx: Arc<GlobalContext>,
     mut snapshot: TrajectorySnapshot,
     write_cache: Option<Arc<AMutex<DetachedTrajectoryWriteCache>>>,
+    allow_background_generation: bool,
 ) -> Result<(), String> {
     validate_trajectory_id(&snapshot.chat_id).map_err(|e| e.message)?;
     let chat_id = snapshot.chat_id.clone();
@@ -5559,8 +5576,10 @@ async fn save_trajectory_snapshot_inner(
 
     let message_count = snapshot.messages.len();
     let collect_metrics = snapshot.task_meta.is_none() && snapshot.buddy_meta.is_none();
-    let should_generate_title =
-        is_placeholder_title(&snapshot.title) && !snapshot.is_title_generated && message_count > 0;
+    let should_generate_title = allow_background_generation
+        && is_placeholder_title(&snapshot.title)
+        && !snapshot.is_title_generated
+        && message_count > 0;
     let should_generate_task_name = snapshot
         .task_meta
         .as_ref()
@@ -5609,6 +5628,7 @@ async fn save_trajectory_snapshot_inner(
         background_messages_json,
         updated_at,
         should_generate_title,
+        allow_background_generation,
     )
     .await
 }

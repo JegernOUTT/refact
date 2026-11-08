@@ -81,6 +81,20 @@ export function useWorktreeSync({
   ]);
   const sourceKeyRef = useRef(sourceKey);
   sourceKeyRef.current = sourceKey;
+  const lifecycleKey = JSON.stringify([sourceKey, enabled]);
+  const lifecycle = useRef({ key: lifecycleKey, generation: 0 });
+  useEffect(
+    () => () => {
+      lifecycle.current.generation += 1;
+    },
+    [],
+  );
+  if (lifecycle.current.key !== lifecycleKey) {
+    lifecycle.current = {
+      key: lifecycleKey,
+      generation: lifecycle.current.generation + 1,
+    };
+  }
 
   const statusQuery = useGetWorktreeSyncStatusQuery(
     {
@@ -96,9 +110,14 @@ export function useWorktreeSync({
     key: string;
     message: string;
   } | null>(null);
-  const [busyKey, setBusyKey] = useState<string | null>(null);
+  const [busyOwner, setBusyOwner] = useState<{
+    key: string;
+    generation: number;
+    token: number;
+  } | null>(null);
   const [consentKey, setConsentKey] = useState<string | null>(null);
-  const busyRef = useRef<string | null>(null);
+  const busyRef = useRef<typeof busyOwner>(null);
+  const runSequence = useRef(0);
   const refetchRef = useRef<() => void>(noop);
   refetchRef.current = skip ? noop : () => void statusQuery.refetch();
 
@@ -116,7 +135,9 @@ export function useWorktreeSync({
     if (published !== null && published.key !== sourceKey) setPublished(null);
   }, [published, sourceKey]);
 
-  const busy = busyKey === sourceKey;
+  const busy =
+    busyOwner?.key === sourceKey &&
+    busyOwner.generation === lifecycle.current.generation;
   const error = errorState?.key === sourceKey ? errorState.message : null;
   const checkpointConsent = consentKey === sourceKey;
   const setCheckpointConsent = useCallback(
@@ -129,29 +150,49 @@ export function useWorktreeSync({
       operation: (post: PostSync) => Promise<WorktreeSyncResponse>,
     ): Promise<WorktreeSyncResponse | null> => {
       const key = sourceKey;
-      if (busyRef.current === key) return null;
+      const generation = lifecycle.current.generation;
+      if (
+        busyRef.current?.key === key &&
+        busyRef.current.generation === generation
+      )
+        return null;
+      const owner = { key, generation, token: ++runSequence.current };
       const assertCurrent = () => {
-        if (sourceKeyRef.current !== key) throw new StaleSourceError();
+        if (
+          sourceKeyRef.current !== key ||
+          lifecycle.current.generation !== generation
+        )
+          throw new StaleSourceError();
       };
       const post: PostSync = async (request) => {
+        assertCurrent();
         const response = await syncWorktree({
           id,
           source_workspace_root: sourceWorkspaceRoot,
           request,
         }).unwrap();
         assertCurrent();
-        setPublished({ key, at: Date.now(), response });
+        setPublished({
+          key,
+          at: Date.now(),
+          response: {
+            ...response,
+            writer_readiness:
+              response.writer_readiness ?? currentRef.current?.writer_readiness,
+          },
+        });
         return response;
       };
-      busyRef.current = key;
-      setBusyKey(key);
+      busyRef.current = owner;
+      setBusyOwner(owner);
       setErrorState(null);
       try {
         return await operation(post);
       } catch (caught) {
         if (
           caught instanceof StaleSourceError ||
-          sourceKeyRef.current !== key
+          sourceKeyRef.current !== key ||
+          lifecycle.current.generation !== generation
         ) {
           return null;
         }
@@ -160,8 +201,10 @@ export function useWorktreeSync({
         refetchRef.current();
         return null;
       } finally {
-        if (busyRef.current === key) busyRef.current = null;
-        setBusyKey((previous) => (previous === key ? null : previous));
+        if (busyRef.current === owner) busyRef.current = null;
+        setBusyOwner((previous) =>
+          previous?.token === owner.token ? null : previous,
+        );
       }
     },
     [id, sourceKey, sourceWorkspaceRoot, syncWorktree],
@@ -175,6 +218,7 @@ export function useWorktreeSync({
           target_branch: requestedTarget,
         });
         if (isSyncOperationActive(status)) return status;
+        if (status.writer_readiness?.ready === false) return status;
         if (status.status === "recovery_required")
           throw new Error(
             "Recover synchronization before starting a new operation.",

@@ -20,6 +20,7 @@ import type {
   WorktreeSyncStatus,
 } from "../../services/refact";
 import { humanizeIdentifier } from "../../utils/displayNames";
+import type { WorktreeWriterBlocker } from "../../services/refact/worktrees";
 import styles from "./Worktrees.module.css";
 
 type WorktreeSyncPanelProps = {
@@ -71,6 +72,18 @@ function choiceOptions(conflict: WorktreeSyncConflict) {
 }
 
 type PendingConfirmation = "abort" | "restore" | "recover";
+
+const WRITER_ACTION_LABELS: Record<
+  WorktreeWriterBlocker["recovery_actions"][number],
+  string
+> = {
+  wait: "Wait for this writer to finish",
+  inspect_agent: "Ask the owning chat to inspect this agent",
+  cancel_agent: "Ask the owning chat to cancel this agent if authorized",
+  stop_chat: "Stop the owning chat before retrying",
+  user_required: "User action is required",
+  retry_status: "Refresh status after resolving the blocker",
+};
 
 type KeyedState<T> = { key: string; value: T };
 
@@ -132,7 +145,10 @@ export const WorktreeSyncPanel: React.FC<WorktreeSyncPanelProps> = ({
   const recoveryDigest = current?.recovery_journal_digest ?? null;
   const status = current?.status ?? "idle";
   const statusStale = statusError !== null;
-  const controlsDisabled = busy || disabled === true || statusStale;
+  const writers = current?.writer_readiness;
+  const writersBlocked = writers?.ready === false;
+  const controlsDisabled =
+    busy || disabled === true || statusStale || writersBlocked;
 
   const pendingResolutions = useMemo(
     () =>
@@ -217,6 +233,51 @@ export const WorktreeSyncPanel: React.FC<WorktreeSyncPanelProps> = ({
   return (
     <section aria-label="Source synchronization">
       <KitSection>Source synchronization</KitSection>
+      {writers ? (
+        <>
+          <KitStaticRow
+            label={writers.ready ? "Writers ready" : "Waiting for writers"}
+            tone="muted"
+          />
+          {writers.blockers.map((blocker, index) => (
+            <KitStaticRow
+              key={`${blocker.kind}-${
+                blocker.agent_id ?? blocker.chat_id ?? index
+              }`}
+              label={humanizeIdentifier(blocker.kind)}
+              sub={[
+                blocker.agent_id && `Agent ${blocker.agent_id}`,
+                blocker.chat_id && `Chat ${blocker.chat_id}`,
+                blocker.run_generation !== undefined &&
+                  `Run ${blocker.run_generation}`,
+                ...blocker.recovery_actions.map(
+                  (action) => WRITER_ACTION_LABELS[action],
+                ),
+              ]
+                .filter(Boolean)
+                .join(" · ")}
+            />
+          ))}
+          {writersBlocked ? (
+            <p className={`${styles.warningText} ${styles.resultLine}`}>
+              Ask the owning chat to inspect or wait for the listed writers, or
+              request an authorized stop, then refresh status. Nothing is
+              stopped or retried automatically.
+            </p>
+          ) : null}
+          {writers.truncated ? (
+            <p className={`${styles.warningText} ${styles.resultLine}`}>
+              More writers may be blocking. Refresh status after resolving the
+              listed writers.
+            </p>
+          ) : null}
+          {writersBlocked && current.instructions ? (
+            <p className={`${styles.metaText} ${styles.resultLine}`}>
+              {current.instructions}
+            </p>
+          ) : null}
+        </>
+      ) : null}
       <KitStaticRow
         label={STATUS_LABELS[status]}
         sub={
@@ -386,7 +447,7 @@ export const WorktreeSyncPanel: React.FC<WorktreeSyncPanelProps> = ({
         ) : null}
         {isActive && onAskRefact ? (
           <KitButton
-            disabled={controlsDisabled}
+            disabled={busy || disabled === true || statusStale}
             onClick={() => void onAskRefact()}
           >
             Ask Refact to help
@@ -427,12 +488,15 @@ export const WorktreeSyncPanel: React.FC<WorktreeSyncPanelProps> = ({
             <KitDialogCancel disabled={busy}>
               Keep synchronizing
             </KitDialogCancel>
-            <KitButton disabled={busy} onClick={() => void handleAbort(false)}>
+            <KitButton
+              disabled={controlsDisabled}
+              onClick={() => void handleAbort(false)}
+            >
               Abort safely
             </KitButton>
             <KitButton
               variant="danger"
-              disabled={busy || !forceAcknowledged}
+              disabled={controlsDisabled || !forceAcknowledged}
               onClick={() => void handleAbort(true)}
             >
               Force abort with backup
@@ -474,7 +538,7 @@ export const WorktreeSyncPanel: React.FC<WorktreeSyncPanelProps> = ({
             <KitDialogCancel disabled={busy}>Cancel</KitDialogCancel>
             <KitButton
               variant="primary"
-              disabled={busy}
+              disabled={controlsDisabled}
               onClick={() => void handleRestore()}
             >
               Restore backup
@@ -507,7 +571,7 @@ export const WorktreeSyncPanel: React.FC<WorktreeSyncPanelProps> = ({
             <KitDialogCancel disabled={busy}>Cancel</KitDialogCancel>
             <KitButton
               variant="danger"
-              disabled={busy}
+              disabled={controlsDisabled}
               onClick={() => void handleRecover()}
             >
               Archive journal and recover

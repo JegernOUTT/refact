@@ -16,7 +16,7 @@ use crate::worktrees::types::{
     CreateWorktreeRequest, CreateWorktreeResponse, DeleteWorktreeResponse, MergeWorktreeRequest,
     MergeWorktreeResponse, OpenWorktreeResponse, WorktreeCleanupPlan, WorktreeCleanupRequest,
     WorktreeCleanupResult, WorktreeDiffResponse, WorktreeInventory, WorktreeListResponse,
-    WorktreeRecordView, WorktreeSyncRequest, WorktreeSyncResponse,
+    WorktreeRecordView, WorktreeSyncRequest,
 };
 
 type ApiResult<T> = Result<Json<T>, (StatusCode, Json<Value>)>;
@@ -361,8 +361,17 @@ pub async fn handle_v1_worktrees_sync(
     Path(id): Path<String>,
     Query(query): Query<WorktreeQuery>,
     Json(request): Json<WorktreeSyncRequest>,
-) -> ApiResult<WorktreeSyncResponse> {
+) -> ApiResult<crate::tools::tool_worktree_sync::SyncResponse> {
     let service = service_for_request(app.gcx.clone(), query.source_workspace_root).await?;
+    let writer_readiness = if matches!(request, WorktreeSyncRequest::Status { .. }) {
+        Some(
+            crate::tools::tool_worktree_sync::status_readiness(&app, &service, &id, None)
+                .await
+                .map_err(map_service_error)?,
+        )
+    } else {
+        None
+    };
     crate::tools::tool_worktree_sync::sync_under_lease(
         &app,
         &service,
@@ -372,7 +381,12 @@ pub async fn handle_v1_worktrees_sync(
         None,
     )
     .await
-    .map(Json)
+    .map(|sync| {
+        Json(crate::tools::tool_worktree_sync::SyncResponse {
+            sync,
+            writer_readiness,
+        })
+    })
     .map_err(map_service_error)
 }
 
