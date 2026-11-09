@@ -162,74 +162,136 @@ pub fn json_schema_from_params(params: &[(&str, &str, &str)], required: &[&str])
     })
 }
 
-pub fn is_strict_compatible(schema: &Value) -> bool {
+const UNSUPPORTED_STRICT_SCHEMA_KEYWORDS: &[&str] = &[
+    "oneOf",
+    "allOf",
+    "not",
+    "dependentRequired",
+    "dependentSchemas",
+    "if",
+    "then",
+    "else",
+];
+
+fn schema_has_type(obj: &serde_json::Map<String, Value>, expected: &str) -> bool {
+    match obj.get("type") {
+        Some(Value::String(actual)) => actual == expected,
+        Some(Value::Array(types)) => types.iter().any(|actual| actual.as_str() == Some(expected)),
+        _ => false,
+    }
+}
+
+fn strict_schema_node_is_compatible(schema: &Value) -> bool {
     let Some(obj) = schema.as_object() else {
-        return true;
-    };
-    if obj.get("type") != Some(&json!("object")) {
-        return true;
-    }
-    if obj.get("additionalProperties") == Some(&json!(true)) {
-        return false;
-    }
-    let Some(props) = obj.get("properties").and_then(|p| p.as_object()) else {
         return false;
     };
-    if props.is_empty() {
-        return true;
+
+    if UNSUPPORTED_STRICT_SCHEMA_KEYWORDS
+        .iter()
+        .any(|keyword| obj.contains_key(*keyword))
+    {
+        return false;
     }
-    let required_set: std::collections::HashSet<&str> = obj
-        .get("required")
-        .and_then(|r| r.as_array())
-        .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
-        .unwrap_or_default();
-    for (key, val) in props {
-        if !required_set.contains(key.as_str()) {
+
+    if let Some(any_of) = obj.get("anyOf") {
+        let Some(branches) = any_of.as_array() else {
+            return false;
+        };
+        if branches.is_empty() || !branches.iter().all(strict_schema_node_is_compatible) {
             return false;
         }
-        if val.get("type") == Some(&json!("object")) && !is_strict_compatible(val) {
+    }
+
+    if schema_has_type(obj, "object") {
+        if obj
+            .get("additionalProperties")
+            .is_some_and(|additional| additional != &Value::Bool(false))
+        {
             return false;
         }
-        if let Some(items) = val.get("items") {
-            if items.get("type") == Some(&json!("object")) && !is_strict_compatible(items) {
+        let Some(props) = obj.get("properties").and_then(|p| p.as_object()) else {
+            return false;
+        };
+        let required_set: std::collections::HashSet<&str> = obj
+            .get("required")
+            .and_then(|r| r.as_array())
+            .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
+            .unwrap_or_default();
+        for (key, value) in props {
+            if !required_set.contains(key.as_str()) || !strict_schema_node_is_compatible(value) {
                 return false;
             }
         }
     }
+
+    if schema_has_type(obj, "array") {
+        let Some(items) = obj.get("items") else {
+            return false;
+        };
+        if !strict_schema_node_is_compatible(items) {
+            return false;
+        }
+    }
+
+    for definitions_key in ["$defs", "definitions"] {
+        if let Some(definitions) = obj.get(definitions_key) {
+            let Some(definitions) = definitions.as_object() else {
+                return false;
+            };
+            if !definitions.values().all(strict_schema_node_is_compatible) {
+                return false;
+            }
+        }
+    }
+
     true
+}
+
+pub fn is_strict_compatible(schema: &Value) -> bool {
+    let Some(obj) = schema.as_object() else {
+        return false;
+    };
+    obj.get("type").and_then(Value::as_str) == Some("object")
+        && !obj.contains_key("anyOf")
+        && strict_schema_node_is_compatible(schema)
 }
 
 fn apply_strict_schema(schema: Value) -> Value {
     let Value::Object(mut map) = schema else {
         return schema;
     };
-    if map.get("type") == Some(&json!("object")) {
+
+    if schema_has_type(&map, "object") {
         if !map.contains_key("additionalProperties") {
             map.insert("additionalProperties".to_string(), json!(false));
         }
-        if let Some(Value::Object(props)) = map.remove("properties") {
-            let new_props: serde_json::Map<String, Value> = props
-                .into_iter()
-                .map(|(k, v)| {
-                    let new_v = if v.get("type") == Some(&json!("object")) {
-                        apply_strict_schema(v)
-                    } else if v.get("type") == Some(&json!("array")) {
-                        let Value::Object(mut arr_map) = v else {
-                            unreachable!()
-                        };
-                        if let Some(items) = arr_map.remove("items") {
-                            arr_map.insert("items".to_string(), apply_strict_schema(items));
-                        }
-                        Value::Object(arr_map)
-                    } else {
-                        v
-                    };
-                    (k, new_v)
-                })
-                .collect();
-            map.insert("properties".to_string(), Value::Object(new_props));
+        if let Some(Value::Object(props)) = map.get_mut("properties") {
+            for value in props.values_mut() {
+                *value = apply_strict_schema(std::mem::take(value));
+            }
         }
     }
+
+    if schema_has_type(&map, "array") {
+        if let Some(items) = map.get_mut("items") {
+            *items = apply_strict_schema(std::mem::take(items));
+        }
+    }
+
+    if let Some(Value::Array(branches)) = map.get_mut("anyOf") {
+        for branch in branches {
+            *branch = apply_strict_schema(std::mem::take(branch));
+        }
+    }
+
+    for definitions_key in ["$defs", "definitions"] {
+        if let Some(Value::Object(definitions)) = map.get_mut(definitions_key) {
+            for definition in definitions.values_mut() {
+                *definition = apply_strict_schema(std::mem::take(definition));
+            }
+        }
+    }
+
     Value::Object(map)
 }
 
@@ -500,6 +562,117 @@ mod tests {
             "required": ["url", "options"]
         });
         assert!(!is_strict_compatible(&schema));
+    }
+
+    #[test]
+    fn test_strict_compatibility_rejects_non_object_root_and_nested_one_of() {
+        let root_union = json!({
+            "oneOf": [
+                {"type": "object", "properties": {}, "required": []},
+                {"type": "object", "properties": {}, "required": []}
+            ]
+        });
+        assert!(!is_strict_compatible(&root_union));
+        let result = make_openai_tool_value(
+            "root_union".to_string(),
+            "Root union".to_string(),
+            root_union,
+            true,
+        );
+        assert!(result["function"]["strict"].is_null());
+
+        let nested_union = json!({
+            "type": "object",
+            "properties": {
+                "target": {"oneOf": [{"type": "string"}, {"type": "integer"}]}
+            },
+            "required": ["target"]
+        });
+        assert!(!is_strict_compatible(&nested_union));
+    }
+
+    #[test]
+    fn test_strict_compatibility_requires_exact_object_root_and_closed_objects() {
+        let nullable_root = json!({
+            "type": ["object", "null"],
+            "properties": {},
+            "required": []
+        });
+        assert!(!is_strict_compatible(&nullable_root));
+
+        let schema_valued_additional_properties = json!({
+            "type": "object",
+            "properties": {
+                "values": {
+                    "type": "object",
+                    "properties": {},
+                    "required": [],
+                    "additionalProperties": {
+                        "oneOf": [{"type": "string"}, {"type": "integer"}]
+                    }
+                }
+            },
+            "required": ["values"]
+        });
+        assert!(!is_strict_compatible(&schema_valued_additional_properties));
+    }
+
+    #[test]
+    fn test_strict_compatibility_supports_valid_nested_any_of() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "target": {
+                    "anyOf": [
+                        {
+                            "type": "object",
+                            "properties": {"id": {"type": "string"}},
+                            "required": ["id"]
+                        },
+                        {"type": "string"}
+                    ]
+                }
+            },
+            "required": ["target"]
+        });
+        assert!(is_strict_compatible(&schema));
+        let result = make_openai_tool_value(
+            "nested_union".to_string(),
+            "Nested union".to_string(),
+            schema,
+            true,
+        );
+        assert_eq!(result["function"]["strict"], json!(true));
+        assert_eq!(
+            result["function"]["parameters"]["additionalProperties"],
+            json!(false)
+        );
+        assert_eq!(
+            result["function"]["parameters"]["properties"]["target"]["anyOf"][0]
+                ["additionalProperties"],
+            json!(false)
+        );
+    }
+
+    #[test]
+    fn test_strict_compatibility_rejects_unsupported_composition_keywords() {
+        for keyword in UNSUPPORTED_STRICT_SCHEMA_KEYWORDS {
+            let mut property_schema = json!({"type": "string"});
+            property_schema[*keyword] = json!([]);
+            let schema = json!({
+                "type": "object",
+                "properties": {"value": property_schema},
+                "required": ["value"]
+            });
+            assert!(!is_strict_compatible(&schema), "accepted {keyword}");
+        }
+
+        let property_named_not = json!({
+            "type": "object",
+            "properties": {"not": {"type": "boolean"}},
+            "required": ["not"]
+        });
+        assert!(is_strict_compatible(&property_named_not));
     }
 
     #[test]

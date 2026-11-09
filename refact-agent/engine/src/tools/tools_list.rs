@@ -1226,6 +1226,104 @@ mod tests {
             .collect()
     }
 
+    fn contains_schema_keyword(value: &serde_json::Value, keyword: &str) -> bool {
+        let Some(object) = value.as_object() else {
+            return false;
+        };
+        if object.contains_key(keyword) {
+            return true;
+        }
+        for map_keyword in [
+            "properties",
+            "patternProperties",
+            "$defs",
+            "definitions",
+            "dependentSchemas",
+        ] {
+            if object
+                .get(map_keyword)
+                .and_then(serde_json::Value::as_object)
+                .is_some_and(|schemas| {
+                    schemas
+                        .values()
+                        .any(|schema| contains_schema_keyword(schema, keyword))
+                })
+            {
+                return true;
+            }
+        }
+        for child_keyword in [
+            "items",
+            "additionalProperties",
+            "contains",
+            "propertyNames",
+            "not",
+            "if",
+            "then",
+            "else",
+        ] {
+            if object
+                .get(child_keyword)
+                .is_some_and(|schema| contains_schema_keyword(schema, keyword))
+            {
+                return true;
+            }
+        }
+        for array_keyword in ["anyOf", "oneOf", "allOf", "prefixItems"] {
+            if object
+                .get(array_keyword)
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|schemas| {
+                    schemas
+                        .iter()
+                        .any(|schema| contains_schema_keyword(schema, keyword))
+                })
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    #[tokio::test]
+    async fn registered_builtin_schemas_have_object_roots_and_safe_strict_projection() {
+        assert!(!contains_schema_keyword(
+            &serde_json::json!({
+                "type": "object",
+                "properties": {"oneOf": {"type": "string"}},
+                "required": ["oneOf"]
+            }),
+            "oneOf"
+        ));
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        for (_, desc, _) in contract_described_tools(gcx, &contract_availability()).await {
+            assert_eq!(
+                desc.input_schema
+                    .get("type")
+                    .and_then(serde_json::Value::as_str),
+                Some("object"),
+                "{} input schema must have an object root",
+                desc.name
+            );
+            assert!(
+                desc.input_schema
+                    .get("properties")
+                    .is_some_and(serde_json::Value::is_object),
+                "{} input schema must define object properties",
+                desc.name
+            );
+
+            let name = desc.name.clone();
+            let wire = desc.into_openai_style(true);
+            if wire["function"]["strict"] == serde_json::json!(true) {
+                assert!(
+                    !contains_schema_keyword(&wire["function"]["parameters"], "oneOf"),
+                    "{name} emitted oneOf in a strict schema"
+                );
+            }
+        }
+    }
+
     #[tokio::test]
     async fn all_embedded_modes_reference_unique_registered_builtin_descriptors() {
         let gcx = crate::global_context::tests::make_test_gcx().await;

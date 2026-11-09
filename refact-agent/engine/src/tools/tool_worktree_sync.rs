@@ -177,22 +177,8 @@ fn instructions(response: &WorktreeSyncResponse) -> &'static str {
 #[async_trait]
 impl Tool for ToolWorktreeSync {
     fn tool_description(&self) -> ToolDesc {
-        let props = json!({
-            "worktree_id":{"type":"string","minLength":1},
-            "source_workspace_root":{"type":"string","minLength":1},
-            "card_id":{"type":"string","minLength":1,"description":"Planner only: completed card in your owned board whose stopped agent checkout is the source."},
-            "child_chat_id":{"type":"string","minLength":1,"description":"Root chat only: your direct stopped subagent child whose isolated checkout is the source."},
-            "action":{"enum":["status","recover","start","resolve","continue","abort","restore"]},
-            "expected_journal_digest":{"type":"string","minLength":1,"description":"recovery_journal_digest copied from Status; quarantines unreadable or orphaned sync metadata without Git mutation."},
-            "target_branch":{"type":"string"}, "expected_source_head":{"type":"string"},
-            "expected_target_head":{"type":"string"}, "checkpoint":{"type":"boolean","description":"Explicitly consent to checkpointing dirty source work."},
-            "archive_id":{"type":"string","minLength":1,"description":"Stable ID from recovery_archives; omission selects primary, never a path."},
-            "operation_id":{"type":"string"}, "expected_revision":{"type":"integer","minimum":0},
-            "resolutions":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["path","choice"],"properties":{"path":{"type":"string"},"choice":{"enum":["working_tree","source","target","delete"]}}}},
-            "commit_message":{"type":"string"}, "force":{"type":"boolean","description":"Abort with preservation backup if normal abort cannot safely restore."}
-        });
         let variants = [
-            ("status", vec![]),
+            ("status", Vec::new()),
             ("recover", vec!["expected_journal_digest"]),
             (
                 "start",
@@ -206,34 +192,44 @@ impl Tool for ToolWorktreeSync {
             ("abort", vec!["operation_id", "expected_revision"]),
             ("restore", vec!["operation_id", "expected_revision"]),
         ];
-        let common = [
-            "worktree_id",
-            "source_workspace_root",
-            "card_id",
-            "child_chat_id",
-        ];
-        let one_of: Vec<Value> = variants.into_iter().map(|(action, required)| {
-            let mut names = common.to_vec();
-            names.extend(match action {
-                "start" => vec!["target_branch", "expected_source_head", "expected_target_head", "checkpoint"],
-                "resolve" => vec!["operation_id", "expected_revision", "resolutions"],
-                "continue" => vec!["operation_id", "expected_revision", "commit_message"],
-                "abort" => vec!["operation_id", "expected_revision", "force"],
-                "restore" => vec!["operation_id", "expected_revision", "archive_id"],
-                "recover" => vec!["expected_journal_digest"],
-                "status" => vec!["target_branch"],
-                _ => vec![],
-            });
-            let mut properties = serde_json::Map::new();
-            properties.insert("action".into(), json!({"const":action}));
-            for name in names { properties.insert(name.into(), props[name].clone()); }
-            let mut required_fields = vec!["action"];
-            required_fields.extend(required);
-            json!({"type":"object", "additionalProperties":false, "required":required_fields, "properties":properties})
-        }).collect();
+        let one_of = variants
+            .into_iter()
+            .map(|(action, required)| {
+                let mut required_fields = vec!["action"];
+                required_fields.extend(required);
+                json!({
+                    "properties": {"action": {"const": action}},
+                    "required": required_fields
+                })
+            })
+            .collect::<Vec<_>>();
+        let input_schema = json!({
+            "type":"object",
+            "additionalProperties":false,
+            "required":["action"],
+            "properties":{
+            "worktree_id":{"type":"string","minLength":1,"description":"Optional expected source worktree ID; authority still comes from the current chat, card, or child."},
+            "source_workspace_root":{"type":"string","minLength":1,"description":"Optional expected source workspace root; authority still comes from the current chat, card, or child."},
+            "card_id":{"type":"string","minLength":1,"description":"Planner only: completed card in your owned board whose stopped agent checkout is the source."},
+            "child_chat_id":{"type":"string","minLength":1,"description":"Root chat only: your direct stopped subagent child whose isolated checkout is the source."},
+            "action":{"type":"string","enum":["status","recover","start","resolve","continue","abort","restore"],"description":"Operation to perform. Runtime validation rejects fields that do not belong to the selected action."},
+            "expected_journal_digest":{"type":"string","minLength":1,"description":"recovery_journal_digest copied from Status; quarantines unreadable or orphaned sync metadata without Git mutation."},
+            "target_branch":{"type":"string","description":"Optional target branch for status or start."},
+            "expected_source_head":{"type":"string","description":"Start only: source head copied from status."},
+            "expected_target_head":{"type":"string","description":"Start only: target head copied from status."},
+            "checkpoint":{"type":"boolean","description":"Start only: explicitly consent to checkpointing dirty source work."},
+            "archive_id":{"type":"string","minLength":1,"description":"Stable ID from recovery_archives; omission selects primary, never a path."},
+            "operation_id":{"type":"string","description":"Resolve, continue, abort, or restore only: current operation ID."},
+            "expected_revision":{"type":"integer","minimum":0,"description":"Resolve, continue, abort, or restore only: current operation revision."},
+            "resolutions":{"type":"array","description":"Resolve only: one choice for each conflicted path.","items":{"type":"object","additionalProperties":false,"required":["path","choice"],"properties":{"path":{"type":"string"},"choice":{"type":"string","enum":["working_tree","source","target","delete"]}}}},
+            "commit_message":{"type":"string","description":"Continue only: optional merge commit message."},
+            "force":{"type":"boolean","description":"Abort only: preserve a backup if normal abort cannot safely restore."}
+            },
+            "oneOf":one_of
+        });
         ToolDesc { name:"worktree_sync".into(), display_name:"Sync Worktree Source".into(), source:ToolSource { source_type:ToolSourceType::Builtin, config_path:String::new() }, experimental:false, allow_parallel:false,
             description:"Synchronize the authorized source worktree with its target branch without landing it. Status returns pinned heads; start requires both heads. Resolve, continue, abort and restore require the current operation ID and revision. Restore is for a preserved force-abort backup and requires unchanged post-abort state.".into(),
-            input_schema:json!({"oneOf":one_of}), output_schema:None, annotations:None }
+            input_schema, output_schema:None, annotations:None }
     }
 
     async fn tool_execute(
@@ -365,6 +361,47 @@ mod tests {
                 .selector,
             SyncSelector::Child(_)
         ));
+    }
+
+    #[test]
+    fn tool_schema_has_object_root_preserves_action_constraints_and_is_not_strict() {
+        let desc = ToolWorktreeSync.tool_description();
+        assert_eq!(desc.input_schema["type"], json!("object"));
+        assert_eq!(desc.input_schema["additionalProperties"], json!(false));
+        assert_eq!(desc.input_schema["required"], json!(["action"]));
+        assert_eq!(
+            desc.input_schema["properties"]["action"]["enum"],
+            json!(["status", "recover", "start", "resolve", "continue", "abort", "restore"])
+        );
+        let variants = desc.input_schema["oneOf"].as_array().unwrap();
+        assert_eq!(variants.len(), 7);
+        let start = variants
+            .iter()
+            .find(|variant| variant["properties"]["action"]["const"] == json!("start"))
+            .unwrap();
+        assert_eq!(
+            start["required"],
+            json!(["action", "expected_source_head", "expected_target_head"])
+        );
+        let resolve = variants
+            .iter()
+            .find(|variant| variant["properties"]["action"]["const"] == json!("resolve"))
+            .unwrap();
+        assert_eq!(
+            resolve["required"],
+            json!(["action", "operation_id", "expected_revision", "resolutions"])
+        );
+
+        let wire = desc.into_openai_style(true);
+        assert!(wire["function"]["strict"].is_null());
+        assert_eq!(wire["function"]["parameters"]["type"], json!("object"));
+        assert_eq!(
+            wire["function"]["parameters"]["oneOf"]
+                .as_array()
+                .unwrap()
+                .len(),
+            7
+        );
     }
 
     use crate::chat::types::ChatSession;
