@@ -1241,7 +1241,6 @@ startListening({
       return;
     }
     listenerApi.dispatch(clearError());
-    listenerApi.dispatch(capsApi.util.resetApiState());
     listenerApi.dispatch(modelsApi.util.resetApiState());
   },
 });

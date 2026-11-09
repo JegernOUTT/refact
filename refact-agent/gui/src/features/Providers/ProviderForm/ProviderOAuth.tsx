@@ -175,7 +175,7 @@ export const ProviderOAuth: React.FC<ProviderOAuthProps> = ({
 
   const invalidateProviderAndCaps = useCallback(() => {
     invalidateProvider();
-    dispatch(capsApi.util.resetApiState());
+    dispatch(capsApi.util.invalidateTags(["CAPS"]));
   }, [dispatch, invalidateProvider]);
 
   const resetOAuthState = useCallback(() => {

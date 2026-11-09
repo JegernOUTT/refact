@@ -7,6 +7,7 @@ import type { ModelPricing } from "./providers";
 
 export const capsApi = createApi({
   reducerPath: "caps",
+  tagTypes: ["CAPS"],
   baseQuery: fetchBaseQuery({
     prepareHeaders: (headers, { getState }) => {
       const token = (getState() as RootState).config.apiKey;
@@ -18,6 +19,7 @@ export const capsApi = createApi({
   }),
   endpoints: (builder) => ({
     getCaps: builder.query<CapsResponse, undefined>({
+      providesTags: ["CAPS"],
       queryFn: async (_args, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
         const url = buildApiUrlFromState(state, CAPS_URL);

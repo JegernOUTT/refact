@@ -8,6 +8,7 @@ import { setUpStore, type AppStore } from "../app/store";
 import { InnerApp } from "./App";
 import { updateConfig } from "./Config/configSlice";
 import { setBackendStatus } from "./Connection";
+import { push } from "./Pages/pagesSlice";
 import { capsApi, providersApi } from "../services/refact";
 import { render, screen, waitFor } from "../utils/test-utils";
 import {
@@ -27,6 +28,12 @@ vi.mock("../components/Toolbar", async () => {
 
 vi.mock("../components/MCPInteractionCenter", () => ({
   MCPInteractionCenter: () => null,
+}));
+
+vi.mock("./DefaultModels", () => ({ DefaultModels: () => null }));
+
+vi.mock("./Buddy/Companion/BuddyRailButton", () => ({
+  BuddyRailButton: () => null,
 }));
 
 vi.mock("./Workspace/WorkspaceView", async () => {
@@ -59,11 +66,6 @@ vi.mock("./StatsDashboard", async () => {
     StatsDashboard: () => React.createElement("section"),
   };
 });
-
-vi.mock("./Settings", () => ({
-  SettingsHub: () => null,
-  isSettingsPage: () => false,
-}));
 
 vi.mock("./Tasks", async () => {
   const React = await vi.importActual<typeof import("react")>("react");
@@ -155,6 +157,113 @@ afterEach(() => {
 });
 
 describe("App-level caps/providers error surface", () => {
+  it.each(["model toggle", "provider update"] as const)(
+    "keeps the selected provider mounted during caps refresh after a %s",
+    async (action) => {
+      let refreshStarted = false;
+      let holdRefresh = false;
+      let releaseRefresh: () => void = () => undefined;
+      const refreshGate = new Promise<void>((resolve) => {
+        releaseRefresh = resolve;
+      });
+      let modelEnabled = false;
+      server.use(
+        http.get("*/v1/providers", () =>
+          HttpResponse.json({ providers: [activeProvider] }),
+        ),
+        http.get("*/v1/providers/openai", () =>
+          HttpResponse.json({ ...activeProvider, settings: {}, runtime: null }),
+        ),
+        http.get("*/v1/providers/openai/schema", () =>
+          HttpResponse.json({ name: "openai", schema: "fields: {}" }),
+        ),
+        http.get("*/v1/providers/openai/quota", () =>
+          HttpResponse.json({ detail: "Unavailable" }, { status: 503 }),
+        ),
+        http.get("*/v1/providers/openai/available-models", () =>
+          HttpResponse.json({
+            source: "model_caps",
+            models: [
+              { id: "navigation-model", enabled: modelEnabled, n_ctx: 8192 },
+            ],
+          }),
+        ),
+        http.post("*/v1/providers/openai/models/toggle", () => {
+          modelEnabled = true;
+          return HttpResponse.json({ success: true });
+        }),
+        http.post("*/v1/providers/openai", () =>
+          HttpResponse.json({ success: true }),
+        ),
+        http.get("*/v1/caps", async () => {
+          if (holdRefresh) {
+            refreshStarted = true;
+            await refreshGate;
+          }
+          return HttpResponse.json({
+            ...STUB_CAPS_RESPONSE,
+            ...(holdRefresh ? { chat_default_model: "refreshed-model" } : {}),
+          });
+        }),
+      );
+      const store = createAppStore();
+      const { user } = render(<InnerApp />, { store });
+      try {
+        await waitForBootstrap(store);
+        act(() => {
+          store.dispatch(push({ name: "providers page" }));
+        });
+        await user.click(
+          await screen.findByRole("button", { name: /^OpenAI openai/ }),
+        );
+        await screen.findByText("navigation-model");
+        const heading = screen.getByRole("heading", {
+          name: "OpenAI Configuration",
+        });
+        holdRefresh = true;
+
+        if (action === "model toggle") {
+          await user.click(screen.getByRole("switch"));
+        } else {
+          await act(async () => {
+            await store
+              .dispatch(
+                providersApi.endpoints.updateProvider.initiate({
+                  providerName: "openai",
+                  settings: { display_name: "OpenAI" },
+                }),
+              )
+              .unwrap();
+          });
+        }
+
+        await waitFor(() => expect(refreshStarted).toBe(true));
+        expect(
+          capsApi.endpoints.getCaps.select(undefined)(store.getState()).data,
+        ).toEqual(STUB_CAPS_RESPONSE);
+        expect(heading).toBeInTheDocument();
+        expect(
+          screen.queryByRole("heading", { name: "Configured providers" }),
+        ).not.toBeInTheDocument();
+
+        releaseRefresh();
+        await waitFor(() => {
+          expect(
+            capsApi.endpoints.getCaps.select(undefined)(store.getState()).data
+              ?.chat_default_model,
+          ).toBe("refreshed-model");
+        });
+        expect(heading).toBeInTheDocument();
+        expect(screen.getByRole("switch")).toHaveAttribute(
+          "aria-checked",
+          String(modelEnabled),
+        );
+      } finally {
+        releaseRefresh();
+      }
+    },
+  );
+
   it("keeps the current page and shows the banner when caps fails after bootstrap", async () => {
     const caps: { current: CapsOutcome } = { current: "ok" };
     server.use(

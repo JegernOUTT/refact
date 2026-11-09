@@ -833,7 +833,7 @@ export const providersApi = createApi({
           credentials: "same-origin",
         });
         if (result.error) return { error: result.error };
-        api.dispatch(capsApi.util.resetApiState());
+        api.dispatch(capsApi.util.invalidateTags(["CAPS"]));
         return {
           data: result.data as { success: boolean; model_ids: string[] },
         };
@@ -1560,7 +1560,7 @@ export const providersApi = createApi({
           };
         }
 
-        api.dispatch(capsApi.util.resetApiState());
+        api.dispatch(capsApi.util.invalidateTags(["CAPS"]));
 
         return {
           data: {
@@ -1611,7 +1611,7 @@ export const providersApi = createApi({
           return { error: result.error };
         }
 
-        api.dispatch(capsApi.util.resetApiState());
+        api.dispatch(capsApi.util.invalidateTags(["CAPS"]));
 
         return {
           data: {
@@ -1666,7 +1666,7 @@ export const providersApi = createApi({
           };
         }
 
-        api.dispatch(capsApi.util.resetApiState());
+        api.dispatch(capsApi.util.invalidateTags(["CAPS"]));
 
         return { data: { success: true, model_id: args.model.id } };
       },
@@ -1715,7 +1715,7 @@ export const providersApi = createApi({
           };
         }
 
-        api.dispatch(capsApi.util.resetApiState());
+        api.dispatch(capsApi.util.invalidateTags(["CAPS"]));
 
         return { data: { success: true, model_id: args.modelId } };
       },
@@ -1762,7 +1762,7 @@ export const providersApi = createApi({
           };
         }
 
-        api.dispatch(capsApi.util.resetApiState());
+        api.dispatch(capsApi.util.invalidateTags(["CAPS"]));
 
         return { data: { success: true } };
       },
@@ -1851,7 +1851,7 @@ export const providersApi = createApi({
           };
         }
         if (result.data.success) {
-          api.dispatch(capsApi.util.resetApiState());
+          api.dispatch(capsApi.util.invalidateTags(["CAPS"]));
         }
         return { data: result.data };
       },
@@ -1886,7 +1886,7 @@ export const providersApi = createApi({
         if (result.error) {
           return { error: result.error };
         }
-        api.dispatch(capsApi.util.resetApiState());
+        api.dispatch(capsApi.util.invalidateTags(["CAPS"]));
         return { data: { success: true } };
       },
     }),
@@ -1927,7 +1927,7 @@ export const providersApi = createApi({
           };
         }
 
-        api.dispatch(capsApi.util.resetApiState());
+        api.dispatch(capsApi.util.invalidateTags(["CAPS"]));
 
         return { data: { success: true } };
       },
@@ -1988,7 +1988,7 @@ export const providersApi = createApi({
           return { error: result.error };
         }
 
-        api.dispatch(capsApi.util.resetApiState());
+        api.dispatch(capsApi.util.invalidateTags(["CAPS"]));
 
         return { data: { success: true } };
       },
@@ -2049,7 +2049,7 @@ export const providersApi = createApi({
           return { error: result.error };
         }
 
-        api.dispatch(capsApi.util.resetApiState());
+        api.dispatch(capsApi.util.invalidateTags(["CAPS"]));
 
         return { data: { success: true } };
       },
