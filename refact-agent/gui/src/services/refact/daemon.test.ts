@@ -326,6 +326,84 @@ describe("daemonApi", () => {
     ]);
   });
 
+  it("uses no-wake console endpoints without sending the model credential", async () => {
+    const requests: {
+      path: string;
+      method: string;
+      auth: string | null;
+      body: unknown;
+    }[] = [];
+    server.use(
+      http.all(
+        "https://daemon.example.test/daemon/v1/*",
+        async ({ request }) => {
+          const path = new URL(request.url).pathname;
+          requests.push({
+            path,
+            method: request.method,
+            auth: request.headers.get("Authorization"),
+            body: request.method === "POST" ? await request.json() : null,
+          });
+          return HttpResponse.json(
+            path.endsWith("/attach")
+              ? { id: "attached:one" }
+              : path.endsWith("/one")
+                ? { detached: true }
+                : { schema_version: 1, observed_at_ms: 1, engines: [] },
+          );
+        },
+      ),
+    );
+    const store = setUpStore({
+      config: {
+        host: "web",
+        lspPort: 8488,
+        lspUrl: "https://daemon.example.test/p/project/",
+        apiKey: "model-secret",
+        themeProps: {},
+      },
+    });
+    await store
+      .dispatch(
+        daemonApi.endpoints.getEngines.initiate(undefined, {
+          subscribe: false,
+        }),
+      )
+      .unwrap();
+    await store
+      .dispatch(
+        daemonApi.endpoints.getLiveChats.initiate(undefined, {
+          subscribe: false,
+        }),
+      )
+      .unwrap();
+    await store
+      .dispatch(
+        daemonApi.endpoints.attachEngine.initiate({
+          host: "::1",
+          port: 8001,
+          label: "IDE",
+        }),
+      )
+      .unwrap();
+    await store
+      .dispatch(daemonApi.endpoints.detachEngine.initiate("attached:one"))
+      .unwrap();
+    expect(
+      requests.map(({ path, method, auth }) => ({ path, method, auth })),
+    ).toEqual([
+      { path: "/daemon/v1/engines", method: "GET", auth: null },
+      { path: "/daemon/v1/chats/live", method: "GET", auth: null },
+      { path: "/daemon/v1/engines/attach", method: "POST", auth: null },
+      {
+        path: "/daemon/v1/engines/attached%3Aone",
+        method: "DELETE",
+        auth: null,
+      },
+    ]);
+    expect(requests[2].body).toEqual({ host: "::1", port: 8001, label: "IDE" });
+  });
+
   it("requests and parses daemon event backfill", async () => {
     let requestedUrl = "";
     server.use(

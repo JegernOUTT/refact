@@ -25,6 +25,7 @@ import {
 } from "../workspaceSlice";
 import { makeSurfaceKey } from "../surfaceKey";
 import { ActivityRail } from "./ActivityRail";
+import { daemonConsoleUrl } from "./daemonConsoleUrl";
 import styles from "./ActivityRail.module.css";
 
 const chatId = "chat-a";
@@ -86,6 +87,44 @@ function renderRail(store: AppStore) {
 }
 
 describe("ActivityRail", () => {
+  it("resolves only an engine-served web project's owning daemon without credentials", () => {
+    const url = "https://work.local:8488/p/project/?daemon_token=secret#chat";
+    expect(daemonConsoleUrl({ host: "web", engineServed: true }, url)).toBe(
+      "https://work.local:8488/",
+    );
+    expect(
+      daemonConsoleUrl({ host: "web", engineServed: false }, url),
+    ).toBeNull();
+    expect(
+      daemonConsoleUrl(
+        { host: "web", engineServed: true },
+        "http://127.0.0.1:8001/",
+      ),
+    ).toBeNull();
+    expect(
+      daemonConsoleUrl({ host: "vscode", engineServed: true }, url),
+    ).toBeNull();
+    expect(
+      daemonConsoleUrl({ host: "jetbrains", engineServed: true }, url),
+    ).toBeNull();
+  });
+
+  it("adds a distinct colorful daemon link without replacing Home", () => {
+    const original = window.location.href;
+    window.history.replaceState(null, "", "/p/project/?chat=one");
+    try {
+      const store = createRailStore();
+      store.dispatch(updateConfig({ host: "web", engineServed: true }));
+      renderRail(store);
+      const daemon = screen.getByRole("link", { name: "Daemon console" });
+      expect(daemon).toHaveAttribute("href", `${window.location.origin}/`);
+      expect(daemon.querySelectorAll("linearGradient stop")).toHaveLength(3);
+      expect(screen.getByRole("button", { name: "Home" })).toBeInTheDocument();
+    } finally {
+      window.history.replaceState(null, "", original);
+    }
+  });
+
   beforeEach(() => {
     server.use(
       http.get("*/v1/git/status", () => HttpResponse.json({ roots: [] })),

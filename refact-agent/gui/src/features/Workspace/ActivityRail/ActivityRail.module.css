@@ -43,6 +43,32 @@
   margin-top: auto;
 }
 
+.daemonButton {
+  width: var(--rf-control-h-icon-sm);
+  height: var(--rf-control-h-icon-sm);
+  padding: 0;
+  color: var(--rf-color-accent);
+  text-decoration: none;
+  background: var(--rf-color-accent-soft);
+}
+
+.daemonWarm {
+  stop-color: var(--rf-color-danger);
+}
+
+.daemonButton svg {
+  width: var(--rf-space-5);
+  height: var(--rf-space-5);
+}
+
+.daemonAccent {
+  stop-color: var(--rf-color-accent);
+}
+
+.daemonCool {
+  stop-color: var(--rf-color-success);
+}
+
 .button .homeLogo {
   color: var(--rf-color-danger);
 }

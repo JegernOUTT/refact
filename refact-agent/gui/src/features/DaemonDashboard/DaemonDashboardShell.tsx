@@ -1,4 +1,12 @@
-import { Badge } from "../../components/ui";
+import { useState } from "react";
+import { Menu } from "lucide-react";
+import { humanizeIdentifier } from "../../utils/displayNames";
+import { RefactIcon } from "../../images/RefactIcon";
+import { EnginesPage } from "./EnginesPage";
+import { ActiveChatsPage } from "./ActiveChatsPage";
+import { QuickTour } from "./QuickTour";
+import { useObservationPolling } from "./useObservationPolling";
+import { Badge, Button, Sheet } from "../../components/ui";
 import { useAppSelector } from "../../hooks";
 import { useDaemonEventsStream } from "../../hooks/useDaemonEventsStream";
 import { useGetDaemonInfoQuery } from "../../services/refact/daemon";
@@ -13,8 +21,6 @@ import { SettingsPage } from "./Settings/SettingsPage";
 import { UsagePage } from "./Usage/UsagePage";
 import { selectDashboardNavigation } from "./dashboardSlice";
 import styles from "./DaemonDashboard.module.css";
-
-const DAEMON_POLLING_INTERVAL_MS = 5_000;
 
 function formatUptime(totalSeconds: number): string {
   if (!Number.isFinite(totalSeconds) || totalSeconds < 60) {
@@ -35,6 +41,10 @@ function DashboardPageContent() {
       ) : (
         <ProjectsPage />
       );
+    case "engines":
+      return <EnginesPage />;
+    case "chats":
+      return <ActiveChatsPage />;
     case "activity":
       return <ActivityPage />;
     case "scheduler":
@@ -51,9 +61,20 @@ function DashboardPageContent() {
 }
 
 export function DaemonDashboardShell() {
-  const { data, error } = useGetDaemonInfoQuery(undefined, {
-    pollingInterval: DAEMON_POLLING_INTERVAL_MS,
-  });
+  const [navOpen, setNavOpen] = useState(false);
+  const navigation = useAppSelector(selectDashboardNavigation);
+  const pageName =
+    navigation.page === "activity"
+      ? "Logs"
+      : navigation.page === "chats"
+        ? "Active chats"
+        : navigation.page === "doctor"
+          ? "Diagnostics"
+          : humanizeIdentifier(navigation.page);
+  const { data, error } = useGetDaemonInfoQuery(
+    undefined,
+    useObservationPolling(),
+  );
   const status = data?.status;
   useDaemonEventsStream({ daemonStartedAtMs: status?.started_at_ms });
   const live = status !== undefined && error === undefined;
@@ -62,23 +83,52 @@ export function DaemonDashboardShell() {
     <div className={styles.shell} data-testid="daemon-dashboard-shell">
       <aside className={styles.sidebar}>
         <div className={styles.brand}>
-          <span className={styles.brandMark}>R</span>
-          <span className={styles.brandText}>Refact</span>
+          <RefactIcon className={styles.brandMark} aria-hidden="true" />
+          <span>
+            Refact<small className={styles.brandSub}>Daemon console</small>
+          </span>
         </div>
         <DashboardNav />
+        <div className={styles.sidebarFooter}>
+          Local daemon
+          <br />
+          {status
+            ? `v${status.version} · ${formatUptime(status.uptime_secs)}`
+            : "Not connected"}
+        </div>
       </aside>
       <div className={styles.workspace}>
         <header className={styles.header}>
-          <div>
-            <span className={styles.eyebrow}>Daemon dashboard</span>
-            <h1>Mission control</h1>
+          <div className={styles.breadcrumb}>
+            <Sheet open={navOpen} onOpenChange={setNavOpen}>
+              <Sheet.Trigger asChild>
+                <Button
+                  className={styles.mobileMenu}
+                  variant="ghost"
+                  leftIcon={Menu}
+                  aria-label="Open navigation"
+                />
+              </Sheet.Trigger>
+              <Sheet.Content side="left" maxWidth="var(--rf-nav-w)">
+                <Sheet.Title>Refact console</Sheet.Title>
+                <Sheet.Description>Dashboard navigation</Sheet.Description>
+                <DashboardNav onNavigate={() => setNavOpen(false)} />
+                <Sheet.Close asChild>
+                  <Button variant="ghost">Close navigation</Button>
+                </Sheet.Close>
+              </Sheet.Content>
+            </Sheet>
+            <span className={styles.muted}>Refact</span>
+            <span aria-hidden="true"> / </span>
+            <span>{pageName}</span>
           </div>
           <div className={styles.status} aria-live="polite">
+            <QuickTour />
             <Badge tone={live ? "success" : "danger"} variant="soft">
               {live ? "Live" : "Unreachable"}
             </Badge>
             {status ? (
-              <span>
+              <span className={styles.statusDetail}>
                 v{status.version} · {formatUptime(status.uptime_secs)} ·{" "}
                 {status.workers} workers
               </span>

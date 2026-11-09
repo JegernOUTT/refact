@@ -34,7 +34,7 @@
 
 .panes {
   display: grid;
-  grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+  grid-template-columns: minmax(0, 1fr);
   gap: var(--rf-space-4);
   min-width: 0;
   min-height: 0;
@@ -244,4 +244,18 @@
   .logPane {
     min-height: calc(var(--rf-control-h-lg) * 12);
   }
+}
+
+.activityTabs {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-3);
+  min-height: 0;
+  min-width: 0;
+}
+.panes {
+  flex: 1;
+}
+.panes[data-state="inactive"] {
+  display: none;
 }

@@ -4,6 +4,8 @@ import type { RootState } from "../../app/store";
 import type { DaemonEvent } from "../../services/refact/daemon";
 
 export type DashboardPage =
+  | "engines"
+  | "chats"
   | "home"
   | "projects"
   | "activity"
@@ -28,7 +30,7 @@ export type DashboardState = {
 const MAX_DAEMON_EVENTS = 1_000;
 
 const initialState: DashboardState = {
-  navigation: { page: "home", params: {} },
+  navigation: { page: "projects", params: {} },
   events: [],
   streamStatus: "connecting",
 };

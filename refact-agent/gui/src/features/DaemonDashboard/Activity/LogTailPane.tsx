@@ -1,9 +1,11 @@
+import { useObservationPolling } from "../useObservationPolling";
 import { useEffect, useRef, useState } from "react";
 
 import { Badge, Button, Select, Surface } from "../../../components/ui";
 import { useConfig } from "../../../hooks";
 import {
   resolveDaemonLogsUrl,
+  useGetEnginesQuery,
   type DaemonWorker,
 } from "../../../services/refact/daemon";
 import { appendLogLine, MAX_LOG_LINES, mergeLogLines } from "./activityState";
@@ -16,6 +18,10 @@ type LogTailPaneProps = {
 
 export function LogTailPane({ projectIdParam, workers }: LogTailPaneProps) {
   const config = useConfig();
+  const { data: engineSnapshot } = useGetEnginesQuery(
+    undefined,
+    useObservationPolling(),
+  );
   const [target, setTarget] = useState(projectIdParam ?? "daemon");
   const [lines, setLines] = useState<string[]>([]);
   const [paused, setPaused] = useState(false);
@@ -27,7 +33,8 @@ export function LogTailPane({ projectIdParam, workers }: LogTailPaneProps) {
   const pausedRef = useRef(paused);
   const pausedLinesRef = useRef<string[]>([]);
   const outputRef = useRef<HTMLPreElement>(null);
-  const projectId = target === "daemon" ? null : target;
+  const unavailable = target.startsWith("attached:");
+  const projectId = target === "daemon" || unavailable ? null : target;
   const selectedWorker = workers.find(
     (worker) => worker.project_id === projectId,
   );
@@ -50,6 +57,8 @@ export function LogTailPane({ projectIdParam, workers }: LogTailPaneProps) {
     setLines([]);
     pausedLinesRef.current = [];
     setStreamStatus("connecting");
+    setDownloadError(null);
+    if (unavailable) return;
     const source = new EventSource(
       resolveDaemonLogsUrl(config, projectId, true, MAX_LOG_LINES),
     );
@@ -68,7 +77,7 @@ export function LogTailPane({ projectIdParam, workers }: LogTailPaneProps) {
     };
     source.onerror = () => setStreamStatus("reconnecting");
     return () => source.close();
-  }, [config, projectId]);
+  }, [config, projectId, target, unavailable]);
 
   useEffect(() => {
     if (paused) return;
@@ -118,16 +127,21 @@ export function LogTailPane({ projectIdParam, workers }: LogTailPaneProps) {
           <p>{lines.length} retained lines</p>
         </div>
         <Badge tone={statusTone} variant="soft">
-          {streamStatus}
+          {unavailable ? "Unavailable" : streamStatus}
         </Badge>
       </div>
       <div className={styles.logControls}>
         <Select value={target} onValueChange={setTarget}>
-          <Select.Trigger aria-label="Choose log source">
-            <Select.Value />
-          </Select.Trigger>
+          <Select.Trigger aria-label="Choose log source" />
           <Select.Content>
             <Select.Item value="daemon">Daemon log</Select.Item>
+            {engineSnapshot?.engines
+              .filter((engine) => engine.kind === "attached")
+              .map((engine) => (
+                <Select.Item key={engine.id} value={engine.id}>
+                  {engine.label} (attached)
+                </Select.Item>
+              ))}
             {workers.map((worker) => (
               <Select.Item key={worker.project_id} value={worker.project_id}>
                 {worker.slug}
@@ -136,6 +150,7 @@ export function LogTailPane({ projectIdParam, workers }: LogTailPaneProps) {
           </Select.Content>
         </Select>
         <Button
+          disabled={unavailable}
           aria-pressed={paused}
           onClick={() => setPaused((current) => !current)}
           size="sm"
@@ -154,6 +169,7 @@ export function LogTailPane({ projectIdParam, workers }: LogTailPaneProps) {
           Clear
         </Button>
         <Button
+          disabled={unavailable}
           loading={downloading}
           onClick={() => void downloadLog()}
           size="sm"
@@ -168,8 +184,12 @@ export function LogTailPane({ projectIdParam, workers }: LogTailPaneProps) {
         </p>
       ) : null}
       <div className={`${styles.logOutput} scrollX`}>
-        <pre ref={outputRef} aria-live={paused ? "off" : "polite"}>
-          {lines.length > 0 ? lines.join("\n") : "Waiting for log output…"}
+        <pre ref={outputRef} aria-label="Engine log output" aria-live="off">
+          {unavailable
+            ? "Live logs unavailable for attached engines. No log request is made."
+            : lines.length > 0
+              ? lines.join("\n")
+              : "Waiting for log output…"}
         </pre>
       </div>
     </Surface>

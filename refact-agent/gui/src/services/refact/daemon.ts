@@ -5,6 +5,49 @@ import type { EngineApiConfig } from "./apiUrl";
 
 const DEFAULT_DAEMON_PORT = 8488;
 
+export type EngineRow = {
+  id: string;
+  kind: "managed" | "attached";
+  label: string;
+  project_id: string | null;
+  root: string | null;
+  state: string;
+  instance_id: string | null;
+  http_port: number | null;
+  observe_only: boolean;
+  log_stream: boolean;
+  logs_unavailable_reason: string | null;
+  observed_at_ms: number | null;
+  error: string | null;
+};
+export type EnginesSnapshot = {
+  schema_version: 1;
+  observed_at_ms: number;
+  engines: EngineRow[];
+};
+export type LiveChat = {
+  id: string;
+  title: string;
+  mode: string;
+  session_state: string;
+  paused: boolean;
+  project_root: string | null;
+  updated_at_ms: number;
+  kind: "chat" | "subagent" | "buddy" | "internal";
+};
+export type LiveChatsSnapshot = {
+  schema_version: 1;
+  observed_at_ms: number;
+  engines: {
+    engine_id: string;
+    status: "available" | "stopped" | "unavailable" | "unsupported";
+    coverage: "loaded_sessions";
+    observed_at_ms: number | null;
+    error: string | null;
+    chats: LiveChat[];
+  }[];
+};
+
 export type DaemonStatus = {
   pid: number;
   version: string;
@@ -245,9 +288,65 @@ function parseDaemonEvents(body: string): DaemonEvent[] {
 
 export const daemonApi = createApi({
   reducerPath: "daemon",
-  tagTypes: ["Daemon"],
-  baseQuery: fetchBaseQuery(),
+  tagTypes: ["Daemon", "Engines"],
+  baseQuery: fetchBaseQuery({ timeout: 15_000 }),
   endpoints: (builder) => ({
+    getEngines: builder.query<EnginesSnapshot, undefined>({
+      providesTags: ["Engines"],
+      queryFn: async (_arg, api, _opts, baseQuery) => {
+        const { config } = api.getState() as { config: EngineApiConfig };
+        const result = await baseQuery(
+          `${resolveDaemonBaseUrl(config)}/daemon/v1/engines`,
+        );
+        return result.error
+          ? { error: result.error }
+          : { data: result.data as EnginesSnapshot };
+      },
+    }),
+    getLiveChats: builder.query<LiveChatsSnapshot, undefined>({
+      queryFn: async (_arg, api, _opts, baseQuery) => {
+        const { config } = api.getState() as { config: EngineApiConfig };
+        const result = await baseQuery(
+          `${resolveDaemonBaseUrl(config)}/daemon/v1/chats/live`,
+        );
+        return result.error
+          ? { error: result.error }
+          : { data: result.data as LiveChatsSnapshot };
+      },
+    }),
+    attachEngine: builder.mutation<
+      EngineRow,
+      { host: "127.0.0.1" | "::1"; port: number; label?: string }
+    >({
+      invalidatesTags: ["Engines"],
+      queryFn: async (body, api, _opts, baseQuery) => {
+        const { config } = api.getState() as { config: EngineApiConfig };
+        const result = await baseQuery({
+          url: `${resolveDaemonBaseUrl(config)}/daemon/v1/engines/attach`,
+          method: "POST",
+          body,
+        });
+        return result.error
+          ? { error: result.error }
+          : { data: result.data as EngineRow };
+      },
+    }),
+    detachEngine: builder.mutation<{ detached: boolean }, string>({
+      invalidatesTags: ["Engines"],
+      queryFn: async (id, api, _opts, baseQuery) => {
+        const { config } = api.getState() as { config: EngineApiConfig };
+        const result = await baseQuery({
+          url: `${resolveDaemonBaseUrl(
+            config,
+          )}/daemon/v1/engines/${encodeURIComponent(id)}`,
+          method: "DELETE",
+        });
+        return result.error
+          ? { error: result.error }
+          : { data: result.data as { detached: boolean } };
+      },
+    }),
+
     getDaemonInfo: builder.query<DaemonInfo, undefined>({
       keepUnusedDataFor: 10,
       providesTags: ["Daemon"],
@@ -575,6 +674,10 @@ export const daemonApi = createApi({
 });
 
 export const {
+  useGetEnginesQuery,
+  useGetLiveChatsQuery,
+  useAttachEngineMutation,
+  useDetachEngineMutation,
   useBrowseFoldersMutation,
   useCheckDaemonUpdateQuery,
   useForgetProjectMutation,

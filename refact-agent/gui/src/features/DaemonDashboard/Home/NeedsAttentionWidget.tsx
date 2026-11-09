@@ -7,6 +7,8 @@ import type { DashboardPage } from "../dashboardSlice";
 import styles from "./Home.module.css";
 
 type NeedsAttentionWidgetProps = {
+  coverageUnknown?: boolean;
+  workersUnavailable?: boolean;
   updateAvailable: boolean;
   crashedWorkers: DaemonWorker[];
   failedCrons: FailedProjectCron[];
@@ -15,6 +17,8 @@ type NeedsAttentionWidgetProps = {
 };
 
 export function NeedsAttentionWidget({
+  coverageUnknown = false,
+  workersUnavailable = false,
   updateAvailable,
   crashedWorkers,
   failedCrons,
@@ -42,13 +46,28 @@ export function NeedsAttentionWidget({
           tone={itemCount > 0 ? "warning" : "success"}
         />
       </div>
+      {coverageUnknown && (
+        <p className={styles.muted}>
+          Scheduled-run health is not observed in this passive overview. Open
+          Scheduler to inspect it.
+        </p>
+      )}
       {loading ? (
         <p className={styles.muted}>Checking project health…</p>
+      ) : workersUnavailable ? (
+        <p role="alert" className={styles.muted}>
+          Worker health is unavailable. Last-known information is not a current
+          health check.
+        </p>
       ) : itemCount === 0 ? (
         <EmptyState
-          description="Updates, workers, and scheduled runs look healthy."
+          description={
+            coverageUnknown
+              ? "No daemon update or worker failures reported. Scheduled-run coverage is unknown."
+              : "Updates, workers, and scheduled runs look healthy."
+          }
           icon={CheckCircle2}
-          title="All clear"
+          title={coverageUnknown ? "No worker alerts" : "All clear"}
         />
       ) : (
         <ul className={styles.list}>

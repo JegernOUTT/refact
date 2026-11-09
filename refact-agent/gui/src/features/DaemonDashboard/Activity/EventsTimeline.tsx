@@ -171,9 +171,7 @@ export function EventsTimeline({
             setProjectId(value === "all" ? null : value)
           }
         >
-          <Select.Trigger aria-label="Filter events by project">
-            <Select.Value />
-          </Select.Trigger>
+          <Select.Trigger aria-label="Filter events by project" />
           <Select.Content>
             <Select.Item value="all">All projects</Select.Item>
             {workers.map((worker) => (

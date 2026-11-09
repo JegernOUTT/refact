@@ -71,21 +71,37 @@ function updateCheck(updateAvailable = false) {
   );
 }
 
-function trajectory(id: string, title: string, updatedAt: string) {
+function liveSnapshot(projectId: string, title: string) {
   return {
-    id,
-    title,
-    created_at: updatedAt,
-    updated_at: updatedAt,
-    model: "test",
-    mode: "agent",
-    message_count: 2,
-    total_lines_added: 0,
-    total_lines_removed: 0,
-    tasks_total: 0,
-    tasks_done: 0,
-    tasks_failed: 0,
+    schema_version: 1,
+    observed_at_ms: 1,
+    engines: [
+      {
+        engine_id: `managed:${projectId}`,
+        status: "available",
+        coverage: "loaded_sessions",
+        observed_at_ms: 1,
+        error: null,
+        chats: [
+          {
+            id: "chat-1",
+            title,
+            mode: "agent",
+            session_state: "idle",
+            paused: false,
+            project_root: `/work/${projectId}`,
+            updated_at_ms: Date.now(),
+            kind: "chat",
+          },
+        ],
+      },
+    ],
   };
+}
+function liveHandler(projectId: string, title: string) {
+  return http.get("*/daemon/v1/chats/live", () =>
+    HttpResponse.json(liveSnapshot(projectId, title)),
+  );
 }
 
 function cron(id: string, failed: boolean) {
@@ -120,6 +136,15 @@ function cron(id: string, failed: boolean) {
 describe("Dashboard Home", () => {
   beforeEach(() => {
     window.localStorage.clear();
+    server.use(
+      http.get("*/daemon/v1/chats/live", () =>
+        HttpResponse.json({
+          schema_version: 1,
+          observed_at_ms: 1,
+          engines: [],
+        }),
+      ),
+    );
   });
 
   it("shows the first wizard step with widgets below on a fresh daemon", async () => {
@@ -145,7 +170,7 @@ describe("Dashboard Home", () => {
       screen.getByRole("button", { name: "Skip setup" }),
     ).toBeInTheDocument();
     expect(await screen.findByText("No recent chats yet")).toBeInTheDocument();
-    expect(screen.getByText("All clear")).toBeInTheDocument();
+    expect(screen.getByText("No worker alerts")).toBeInTheDocument();
     expect(
       screen.getByRole("heading", { name: "Quick actions" }),
     ).toBeInTheDocument();
@@ -243,16 +268,7 @@ describe("Dashboard Home", () => {
           ],
         }),
       ),
-      http.get("https://daemon.example.test/p/refact/v1/trajectories", () =>
-        HttpResponse.json({
-          items: [
-            trajectory("chat-1", "Ship the release", new Date().toISOString()),
-          ],
-          next_cursor: null,
-          has_more: false,
-          total_count: 1,
-        }),
-      ),
+      liveHandler("refact", "Ship the release"),
       http.get("https://daemon.example.test/p/refact/v1/scheduler/cron", () =>
         HttpResponse.json([]),
       ),
@@ -277,16 +293,7 @@ describe("Dashboard Home", () => {
           worker("crashed", "crashed", { last_error: "worker exited" }),
         ]),
       ),
-      http.get("https://daemon.example.test/p/ready/v1/trajectories", () =>
-        HttpResponse.json({
-          items: [
-            trajectory("chat-1", "Fix dashboard", new Date().toISOString()),
-          ],
-          next_cursor: null,
-          has_more: false,
-          total_count: 1,
-        }),
-      ),
+      liveHandler("ready", "Fix dashboard"),
       http.get("https://daemon.example.test/p/ready/v1/scheduler/cron", () =>
         HttpResponse.json([cron("cron-1", true)]),
       ),
@@ -314,7 +321,10 @@ describe("Dashboard Home", () => {
     expect(await screen.findByText("Fix dashboard")).toBeInTheDocument();
     expect(screen.getByText("Daemon update available")).toBeInTheDocument();
     expect(screen.getByText("crashed worker crashed")).toBeInTheDocument();
-    expect(screen.getByText("Nightly checks failed")).toBeInTheDocument();
+    expect(screen.queryByText("Nightly checks failed")).toBeNull();
+    expect(
+      screen.getByText(/Scheduled-run health is not observed/),
+    ).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "Add project" }),
     ).toBeInTheDocument();
@@ -341,114 +351,68 @@ describe("Dashboard Home", () => {
     renderHome();
 
     expect(await screen.findByText("No recent chats yet")).toBeInTheDocument();
-    expect(screen.getByText("All clear")).toBeInTheDocument();
+    expect(screen.getByText("No worker alerts")).toBeInTheDocument();
   });
 
-  it("shows loading until the first fan-out resolves", async () => {
+  it("keeps loaded chats visible during refresh without waking project proxies", async () => {
     window.localStorage.setItem(WIZARD_DONE_KEY, "true");
-    let releaseTrajectories: () => void = () => undefined;
-    const trajectoriesBlocked = new Promise<void>((resolve) => {
-      releaseTrajectories = resolve;
-    });
+    let title = "Initial chat";
+    const proxyRequests: string[] = [];
     server.use(
-      http.get("https://daemon.example.test/daemon/v1/workers", () =>
-        HttpResponse.json([worker("ready", "ready")]),
+      http.get("*/daemon/v1/workers", () =>
+        HttpResponse.json([
+          worker("ready", "ready"),
+          worker("stopped", "stopped"),
+        ]),
       ),
-      http.get(
-        "https://daemon.example.test/p/ready/v1/trajectories",
-        async () => {
-          await trajectoriesBlocked;
-          return HttpResponse.json({
-            items: [
-              trajectory("chat-1", "Loaded chat", new Date().toISOString()),
-            ],
-          });
-        },
+      http.get("*/daemon/v1/chats/live", () =>
+        HttpResponse.json(liveSnapshot("ready", title)),
       ),
-      http.get("https://daemon.example.test/p/ready/v1/scheduler/cron", () =>
-        HttpResponse.json([]),
-      ),
+      http.get("*/p/:projectId/*", ({ request }) => {
+        proxyRequests.push(request.url);
+        return HttpResponse.json({});
+      }),
       updateCheck(),
     );
+    const view = renderHome();
+    expect(await screen.findByText("Initial chat")).toBeInTheDocument();
+    await refetchWorkers(view.store);
+    expect(screen.getByText("Initial chat")).toBeInTheDocument();
+    title = "Refreshed chat";
+    await view.store
+      .dispatch(
+        daemonApi.endpoints.getLiveChats.initiate(undefined, {
+          forceRefetch: true,
+          subscribe: false,
+        }),
+      )
+      .unwrap();
+    expect(await screen.findByText("Refreshed chat")).toBeInTheDocument();
+    expect(proxyRequests).toEqual([]);
+  });
 
+  it("shows loading until the first passive snapshot resolves", async () => {
+    window.localStorage.setItem(WIZARD_DONE_KEY, "true");
+    let release: () => void = vi.fn();
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    server.use(
+      http.get("*/daemon/v1/workers", () =>
+        HttpResponse.json([worker("ready", "ready")]),
+      ),
+      updateCheck(),
+      http.get("*/daemon/v1/chats/live", async () => {
+        await blocked;
+        return HttpResponse.json(liveSnapshot("ready", "Loaded chat"));
+      }),
+    );
     renderHome();
-
     expect(
       await screen.findByText("Loading recent chats…"),
     ).toBeInTheDocument();
-    expect(screen.queryByText("Loaded chat")).not.toBeInTheDocument();
-
-    releaseTrajectories();
-
+    release();
     expect(await screen.findByText("Loaded chat")).toBeInTheDocument();
-    expect(screen.queryByText("Loading recent chats…")).not.toBeInTheDocument();
-  });
-
-  it("keeps stable polls quiet and refreshes exactly once when recency changes", async () => {
-    window.localStorage.setItem(WIZARD_DONE_KEY, "true");
-    let lastActiveMs = 1;
-    let lastStatusReportMs = 1;
-    let trajectoryRequests = 0;
-    let releaseRefresh: () => void = () => undefined;
-    const refreshBlocked = new Promise<void>((resolve) => {
-      releaseRefresh = resolve;
-    });
-    server.use(
-      http.get("https://daemon.example.test/daemon/v1/workers", () =>
-        HttpResponse.json([
-          worker("ready", "ready", {
-            last_active_ms: lastActiveMs,
-            last_status_report_ms: lastStatusReportMs,
-          }),
-        ]),
-      ),
-      http.get(
-        "https://daemon.example.test/p/ready/v1/trajectories",
-        async () => {
-          trajectoryRequests += 1;
-          if (trajectoryRequests > 1) await refreshBlocked;
-          return HttpResponse.json({
-            items: [
-              trajectory(
-                `chat-${String(trajectoryRequests)}`,
-                trajectoryRequests === 1 ? "Initial chat" : "Refreshed chat",
-                new Date().toISOString(),
-              ),
-            ],
-          });
-        },
-      ),
-      http.get("https://daemon.example.test/p/ready/v1/scheduler/cron", () =>
-        HttpResponse.json([]),
-      ),
-      updateCheck(),
-    );
-
-    const view = renderHome();
-    expect(await screen.findByText("Initial chat")).toBeInTheDocument();
-    expect(trajectoryRequests).toBe(1);
-
-    lastStatusReportMs = 2;
-    await refetchWorkers(view.store);
-    lastStatusReportMs = 3;
-    await refetchWorkers(view.store);
-
-    expect(trajectoryRequests).toBe(1);
-    expect(screen.queryByText("Loading recent chats…")).not.toBeInTheDocument();
-
-    lastActiveMs = 2;
-    await refetchWorkers(view.store);
-    await waitFor(() => expect(trajectoryRequests).toBe(2));
-    await refetchWorkers(view.store);
-
-    expect(screen.getByText("Initial chat")).toBeInTheDocument();
-    expect(screen.queryByText("Loading recent chats…")).not.toBeInTheDocument();
-    expect(trajectoryRequests).toBe(2);
-
-    releaseRefresh();
-
-    expect(await screen.findByText("Refreshed chat")).toBeInTheDocument();
-    expect(trajectoryRequests).toBe(2);
   });
 
   it("uses worker state and selected recency for a deterministic fan-out signature", () => {
@@ -498,40 +462,6 @@ describe("Dashboard Home", () => {
     expect(homeFanoutWorkerSignature(workers)).not.toBe(
       homeFanoutWorkerSignature(enteringRecentSelection),
     );
-  });
-
-  it("fans out only to ready workers", async () => {
-    window.localStorage.setItem(WIZARD_DONE_KEY, "true");
-    const requestedProjects: string[] = [];
-    server.use(
-      http.get("https://daemon.example.test/daemon/v1/workers", () =>
-        HttpResponse.json([
-          worker("ready", "ready"),
-          worker("starting", "starting"),
-          worker("crashed", "crashed"),
-        ]),
-      ),
-      http.get(
-        "https://daemon.example.test/p/:projectId/v1/trajectories",
-        ({ params }) => {
-          requestedProjects.push(`chat:${String(params.projectId)}`);
-          return HttpResponse.json({ items: [] });
-        },
-      ),
-      http.get(
-        "https://daemon.example.test/p/:projectId/v1/scheduler/cron",
-        ({ params }) => {
-          requestedProjects.push(`cron:${String(params.projectId)}`);
-          return HttpResponse.json([]);
-        },
-      ),
-      updateCheck(),
-    );
-
-    renderHome();
-
-    await waitFor(() => expect(requestedProjects).toHaveLength(2));
-    expect(requestedProjects.sort()).toEqual(["chat:ready", "cron:ready"]);
   });
 
   it("limits combined home fan-out to three requests", async () => {

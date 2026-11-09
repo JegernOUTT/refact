@@ -1,9 +1,11 @@
 import {
   Activity,
+  House,
+  Server,
+  MessagesSquare,
   CalendarClock,
   ChartNoAxesCombined,
   FolderKanban,
-  House,
   Settings,
   Stethoscope,
   type LucideIcon,
@@ -27,14 +29,16 @@ type DashboardNavItem = {
 const NAV_ITEMS: DashboardNavItem[] = [
   { page: "home", label: "Home", icon: House },
   { page: "projects", label: "Projects", icon: FolderKanban },
-  { page: "activity", label: "Activity", icon: Activity },
+  { page: "engines", label: "Engines", icon: Server },
+  { page: "activity", label: "Logs", icon: Activity },
+  { page: "chats", label: "Active chats", icon: MessagesSquare },
   { page: "scheduler", label: "Scheduler", icon: CalendarClock },
   { page: "usage", label: "Usage", icon: ChartNoAxesCombined },
-  { page: "doctor", label: "Doctor", icon: Stethoscope },
+  { page: "doctor", label: "Diagnostics", icon: Stethoscope },
   { page: "settings", label: "Settings", icon: Settings },
 ];
 
-export function DashboardNav() {
+export function DashboardNav({ onNavigate }: { onNavigate?: () => void } = {}) {
   const dispatch = useAppDispatch();
   const currentPage = useAppSelector(selectDashboardPage);
 
@@ -50,9 +54,10 @@ export function DashboardNav() {
             aria-current={active ? "page" : undefined}
             aria-label={item.label}
             title={item.label}
-            onClick={() =>
-              dispatch(navigateDashboard({ page: item.page, params: {} }))
-            }
+            onClick={() => {
+              dispatch(navigateDashboard({ page: item.page, params: {} }));
+              onNavigate?.();
+            }}
           >
             <Icon icon={item.icon} tone={active ? "accent" : "muted"} />
             <span className={styles.navLabel}>{item.label}</span>

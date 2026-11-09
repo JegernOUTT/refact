@@ -146,6 +146,15 @@ function daemonWorker(projectId: string, slug: string): DaemonWorker {
 
 describe("ActivityPage navigation params", () => {
   beforeEach(() => {
+    server.use(
+      http.get("*/daemon/v1/engines", () =>
+        HttpResponse.json({
+          schema_version: 1,
+          observed_at_ms: 1,
+          engines: [],
+        }),
+      ),
+    );
     RecordingEventSource.urls = [];
     vi.stubGlobal("EventSource", RecordingEventSource);
     server.use(
@@ -175,7 +184,8 @@ describe("ActivityPage navigation params", () => {
       navigateDashboard({ page: "activity", params: { projectId: "p2" } }),
     );
 
-    render(<ActivityPage />, { store });
+    const view = render(<ActivityPage />, { store });
+    await view.user.click(screen.getByRole("tab", { name: "Events" }));
 
     expect(await screen.findByText("beta event")).toBeInTheDocument();
     expect(screen.queryByText("alpha event")).toBeNull();
@@ -189,6 +199,7 @@ describe("ActivityPage navigation params", () => {
 
     expect(await screen.findByText("alpha event")).toBeInTheDocument();
     expect(screen.queryByText("beta event")).toBeNull();
+    await view.user.click(screen.getByRole("tab", { name: "Log tail" }));
     expect(RecordingEventSource.urls.at(-1)).toContain("project_id=p1");
   });
 
@@ -196,7 +207,8 @@ describe("ActivityPage navigation params", () => {
     const store = setUpActivityStore();
     store.dispatch(navigateDashboard({ page: "activity", params: {} }));
 
-    render(<ActivityPage />, { store });
+    const view = render(<ActivityPage />, { store });
+    await view.user.click(screen.getByRole("tab", { name: "Events" }));
 
     expect(await screen.findByText("alpha event")).toBeInTheDocument();
     expect(screen.getByText("beta event")).toBeInTheDocument();

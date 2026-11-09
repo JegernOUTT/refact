@@ -160,6 +160,7 @@ pub mod buddy_editorial;
 pub mod buddy_frontend_error;
 pub mod buddy_improvement;
 pub mod buddy_native_approvals;
+pub mod engine_observation;
 pub mod buddy_native_work;
 pub mod buddy_observability;
 pub mod buddy_operator;
@@ -306,6 +307,8 @@ use crate::http::routers::v1::v1_browser::{
 
 pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
     let builder = Router::new()
+        .route("/engine/identity", get(engine_observation::identity))
+        .route("/chats/live", get(engine_observation::live))
         .merge(core_routes())
         .merge(coordination_routes())
         .merge(

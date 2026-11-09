@@ -139,16 +139,18 @@ describe("App dashboard surface", () => {
     for (const label of [
       "Home",
       "Projects",
-      "Activity",
+      "Engines",
+      "Active chats",
+      "Logs",
       "Scheduler",
       "Usage",
-      "Doctor",
+      "Diagnostics",
       "Settings",
     ]) {
       expect(screen.getByRole("button", { name: label })).toBeInTheDocument();
     }
 
-    await view.user.click(screen.getByRole("button", { name: "Doctor" }));
+    await view.user.click(screen.getByRole("button", { name: "Diagnostics" }));
     expect(selectDashboardNavigation(store.getState()).page).toBe("doctor");
     expect(screen.getByRole("heading", { name: "Doctor" })).toBeInTheDocument();
   });

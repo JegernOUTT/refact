@@ -393,6 +393,8 @@ serde_yaml.workspace = true
 # all features = ["compression", "docs", "event_log", "failpoints", "io_uring", "lock_free_delays", "measure_allocs", "miri_optimizations", "mutex", "no_inline", "no_logs", "pretty_backtrace", "testing"]
 shadow-rs = { version = "1.1.0", features = [], default-features = false }
 sha2.workspace = true
+hmac = "0.13"
+sha2-observation = { package = "sha2", version = "0.11" }
 hex.workspace = true
 shell-words.workspace = true
 shell-escape = "0.1.5"

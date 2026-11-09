@@ -1,11 +1,11 @@
 import { useState } from "react";
 import {
   ExternalLink,
+  MoreHorizontal,
   Pin,
   PinOff,
   RefreshCw,
   Square,
-  Trash2,
 } from "lucide-react";
 
 import {
@@ -15,6 +15,7 @@ import {
   Dialog,
   FieldError,
   IconButton,
+  Menu,
   Tooltip,
 } from "../../../components/ui";
 import {
@@ -26,14 +27,12 @@ import {
 } from "../../../services/refact/daemon";
 import { useAppDispatch } from "../../../hooks";
 import { navigateDashboard } from "../dashboardSlice";
-import type { ProjectRagStatus } from "./projectRagStatus";
 import { workerPresentation, workerStateName } from "./projectRagStatus";
 import styles from "./Projects.module.css";
 
 type ProjectCardProps = {
   daemonBase: string;
   worker: DaemonWorker;
-  ragStatus?: ProjectRagStatus;
   onMutated: () => void;
 };
 
@@ -54,46 +53,9 @@ function mutationError(error: unknown): string | null {
   return "Project action failed.";
 }
 
-function CodeGraphStatus({ status }: { status: ProjectRagStatus }) {
-  if (status.state === "loading") return <>CodeGraph: loading…</>;
-  if (status.state === "error") return <>worker asleep — open to wake</>;
-  const codegraph = status.data.codegraph;
-  if (!codegraph) return <>CodeGraph: unavailable</>;
-  switch (codegraph.state) {
-    case "indexing":
-      return <>CodeGraph: indexing · queued {codegraph.queued}</>;
-    case "working":
-      return <>CodeGraph: working ✓</>;
-    case "error":
-      return <>CodeGraph: error</>;
-    case "turned_off":
-      return <>CodeGraph: off</>;
-  }
-}
-
-function VecDbStatus({ status }: { status: ProjectRagStatus }) {
-  if (status.state !== "ready") return null;
-  const vecdb = status.data.vecdb;
-  if (!vecdb) {
-    return <span>VecDB: unavailable</span>;
-  }
-  if (status.data.vec_db_error) {
-    return <span>VecDB: error</span>;
-  }
-  if (vecdb.state === "done" || vecdb.state === "cooldown") {
-    return <span>VecDB: ready ✓</span>;
-  }
-  return (
-    <span>
-      VecDB: {vecdb.state} · {vecdb.files_unprocessed} queued
-    </span>
-  );
-}
-
 export function ProjectCard({
   daemonBase,
   worker,
-  ragStatus,
   onMutated,
 }: ProjectCardProps) {
   const dispatch = useAppDispatch();
@@ -191,26 +153,6 @@ export function ProjectCard({
         ) : null}
       </div>
 
-      <div
-        className={styles.indexStatus}
-        aria-label={`${worker.slug} index status`}
-      >
-        {workerState === "ready" ? (
-          ragStatus ? (
-            <>
-              <span>
-                <CodeGraphStatus status={ragStatus} />
-              </span>
-              <VecDbStatus status={ragStatus} />
-            </>
-          ) : (
-            <span>CodeGraph: loading…</span>
-          )
-        ) : (
-          <span>Indexes available when the worker is ready</span>
-        )}
-      </div>
-
       <div className={styles.stats}>
         <span>LSP {worker.lsp_clients}</span>
         <span>Busy chats {worker.busy_chats}</span>
@@ -228,8 +170,16 @@ export function ProjectCard({
             Open workspace
           </Button>
         ) : (
-          <Button asChild leftIcon={ExternalLink} size="sm" variant="primary">
-            <a href={openUrl}>Open workspace</a>
+          <Button
+            className={styles.primaryAction}
+            asChild
+            leftIcon={ExternalLink}
+            size="sm"
+            variant="primary"
+          >
+            <a href={openUrl}>
+              {workerState === "stopped" ? "Start & open" : "Open workspace"}
+            </a>
           </Button>
         )}
         <Button
@@ -256,15 +206,34 @@ export function ProjectCard({
         >
           Stop
         </Button>
-        <Button
-          disabled={pending}
-          leftIcon={Trash2}
-          onClick={() => setForgetOpen(true)}
-          size="sm"
-          variant="ghost"
-        >
-          Forget
-        </Button>
+        <Menu>
+          <Menu.Trigger asChild>
+            <IconButton
+              aria-label={`More actions for ${worker.slug}`}
+              disabled={pending}
+              icon={MoreHorizontal}
+              size="sm"
+              variant="ghost"
+            />
+          </Menu.Trigger>
+          <Menu.Content align="end">
+            <Menu.Item
+              onSelect={() =>
+                dispatch(
+                  navigateDashboard({
+                    page: "activity",
+                    params: { projectId: worker.project_id },
+                  }),
+                )
+              }
+            >
+              View logs
+            </Menu.Item>
+            <Menu.Item onSelect={() => setForgetOpen(true)}>
+              Forget project…
+            </Menu.Item>
+          </Menu.Content>
+        </Menu>
       </div>
 
       <Dialog open={forgetOpen} onOpenChange={setForgetOpen}>

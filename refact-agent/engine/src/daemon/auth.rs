@@ -131,7 +131,7 @@ fn basic_auth_matches(req_headers: &HeaderMap, expected_user: &str, expected_pas
     }
 }
 
-fn remote_authorized<B>(req: &Request<B>, policy: &DaemonAuthPolicy) -> bool {
+pub(crate) fn remote_authorized<B>(req: &Request<B>, policy: &DaemonAuthPolicy) -> bool {
     if let Some((username, password)) = policy.basic_credentials() {
         if basic_auth_matches(req.headers(), username, password) {
             return true;

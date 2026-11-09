@@ -109,6 +109,7 @@ pub fn make_router(state: Arc<DaemonState>, port: u16) -> Router {
     let open_hooks_allowed =
         crate::daemon::auth::hooks_unauthenticated_allowed_for_bind(&state.config.bind);
     let control = Router::new()
+        .merge(crate::daemon::console::routes(state.clone()))
         .route("/", get(crate::daemon::web::handle_dashboard_index))
         .route("/picker", get(crate::daemon::web::handle_project_picker))
         .route("/hooks", post(crate::daemon::hooks::bare))

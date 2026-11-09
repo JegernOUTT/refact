@@ -16,6 +16,7 @@ pub mod chat_client;
 pub mod cli;
 pub mod client;
 pub mod config;
+pub mod console;
 pub mod cron_clock;
 pub mod doctor;
 pub mod events;

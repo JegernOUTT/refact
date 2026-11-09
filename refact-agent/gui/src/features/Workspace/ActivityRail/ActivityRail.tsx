@@ -11,7 +11,7 @@ import {
 import { skipToken } from "@reduxjs/toolkit/query";
 import { forwardRef, useCallback, useId } from "react";
 
-import { Badge, IconButton, Tooltip } from "../../../components/ui";
+import { Badge, Button, IconButton, Tooltip } from "../../../components/ui";
 import { RefactIcon } from "../../../images/RefactIcon";
 import { BuddyRailButton } from "../../Buddy/Companion/BuddyRailButton";
 import { useAppDispatch, useAppSelector } from "../../../hooks";
@@ -25,7 +25,11 @@ import {
 import { popBackTo, selectCurrentPage } from "../../Pages/pagesSlice";
 import { collectTabIds } from "../../ChatPanes/panesTree";
 import { isFileSurface } from "../surfaceKey";
-import { selectCapabilities, selectHost } from "../../Config/configSlice";
+import {
+  selectCapabilities,
+  selectHost,
+  selectConfig,
+} from "../../Config/configSlice";
 import { changedFileCount } from "../GitPanel";
 import { activeChatsNeedAttention } from "../Dock/activeChatsModel";
 import { useActiveChats } from "../Dock/useActiveChats";
@@ -47,6 +51,8 @@ import {
   resolveWorkspaceDockAvailability,
 } from "../workspaceAvailability";
 import styles from "./ActivityRail.module.css";
+import { DaemonConsoleIcon } from "./DaemonConsoleIcon";
+import { daemonConsoleUrl } from "./daemonConsoleUrl";
 
 const isMac =
   typeof navigator !== "undefined" &&
@@ -113,6 +119,8 @@ export function ActivityRail() {
       group ? collectTabIds(group.root).some(isFileSurface) : false,
     );
   const host = useAppSelector(selectHost);
+  const config = useAppSelector(selectConfig);
+  const daemonUrl = daemonConsoleUrl(config, window.location.href);
   const capabilities = useAppSelector(selectCapabilities);
   const panelsForced = useAppSelector(selectPanelsForced);
   const dock = useAppSelector(selectWorkspaceDock);
@@ -180,6 +188,22 @@ export function ActivityRail() {
 
   return (
     <nav aria-label="Workspace sections" className={styles.rail}>
+      {daemonUrl && (
+        <div className={styles.slot}>
+          <Tooltip content="Daemon console">
+            <Button
+              asChild
+              aria-label="Daemon console"
+              className={styles.daemonButton}
+              leftIcon={DaemonConsoleIcon}
+              size="sm"
+              variant="ghost"
+            >
+              <a href={daemonUrl} />
+            </Button>
+          </Tooltip>
+        </div>
+      )}
       <div className={styles.slot}>
         <Tooltip content="Home">
           <IconButton

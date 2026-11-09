@@ -79,7 +79,7 @@ function renderProjects() {
 }
 
 describe("Projects dashboard", () => {
-  it("renders ready, crashed, and stopped workers and fetches indexes only for ready workers", async () => {
+  it("renders workers without querying waking project proxy endpoints", async () => {
     const ragRequests: string[] = [];
     server.use(
       http.get("https://daemon.example.test/daemon/v1/workers", () =>
@@ -117,11 +117,8 @@ describe("Projects dashboard", () => {
     expect(within(readyCard).getByText("LSP 2")).toBeInTheDocument();
     expect(within(readyCard).getByText("Busy chats 1")).toBeInTheDocument();
     expect(within(readyCard).getByText("Exec 3")).toBeInTheDocument();
-    expect(
-      await within(readyCard).findByText("CodeGraph: working ✓"),
-    ).toBeInTheDocument();
-    expect(within(readyCard).getByText("VecDB: ready ✓")).toBeInTheDocument();
-    expect(ragRequests).toEqual(["ready-project"]);
+    expect(within(readyCard).queryByLabelText(/index status/i)).toBeNull();
+    expect(ragRequests).toEqual([]);
   });
 
   it("limits ready-worker index requests to three at a time", async () => {

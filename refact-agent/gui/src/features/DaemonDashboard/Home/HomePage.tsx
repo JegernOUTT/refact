@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import { selectConfig } from "../../Config/configSlice";
 import { useAppDispatch, useAppSelector } from "../../../hooks";
@@ -6,6 +6,7 @@ import {
   resolveDaemonBaseUrl,
   useCheckDaemonUpdateQuery,
   useListProjectsQuery,
+  useGetLiveChatsQuery,
   type DaemonProjectOpenResponse,
   type DaemonWorker,
 } from "../../../services/refact/daemon";
@@ -14,23 +15,13 @@ import { AddProjectDialog } from "../Projects/AddProjectDialog";
 import { workerStateName } from "../Projects/projectRagStatus";
 import { ContinueWidget } from "./ContinueWidget";
 import { FirstRunWizard } from "./FirstRunWizard";
-import {
-  fetchHomeFanout,
-  homeFanoutWorkerSignature,
-  type HomeFanoutResult,
-} from "./homeFanout";
+import type { HomeFanoutResult } from "./homeFanout";
+import { useObservationPolling } from "../useObservationPolling";
 import { NeedsAttentionWidget } from "./NeedsAttentionWidget";
 import { QuickActions } from "./QuickActions";
 import styles from "./Home.module.css";
 
 export const WIZARD_DONE_KEY = "dashboard:v1:wizard_done";
-const WORKERS_POLLING_INTERVAL_MS = 4_000;
-
-const emptyFanout: HomeFanoutResult = {
-  chats: [],
-  failedCrons: [],
-  hadErrors: false,
-};
 
 function pendingWorker(response: DaemonProjectOpenResponse): DaemonWorker {
   return {
@@ -38,6 +29,7 @@ function pendingWorker(response: DaemonProjectOpenResponse): DaemonWorker {
     slug: response.slug,
     root: response.root,
     pinned: response.pinned,
+    root_exists: true,
     last_active_ms: null,
     state: "starting",
     pid: null,
@@ -72,16 +64,15 @@ export function HomePage() {
   const [optimisticWorker, setOptimisticWorker] = useState<DaemonWorker | null>(
     null,
   );
-  const [fanout, setFanout] = useState<HomeFanoutResult>(emptyFanout);
-  const [fanoutLoading, setFanoutLoading] = useState(true);
-  const hasFanoutResult = useRef(false);
+  const polling = useObservationPolling();
+  const liveChats = useGetLiveChatsQuery(undefined, polling);
+  const fanoutLoading = liveChats.isLoading;
   const {
     data: workersData = [],
     isLoading,
+    isError: workersUnavailable,
     refetch,
-  } = useListProjectsQuery(undefined, {
-    pollingInterval: WORKERS_POLLING_INTERVAL_MS,
-  });
+  } = useListProjectsQuery(undefined, polling);
   const { data: updateCheck, isLoading: updateLoading } =
     useCheckDaemonUpdateQuery(undefined);
 
@@ -111,31 +102,27 @@ export function HomePage() {
     }
     return [optimisticWorker, ...workersData];
   }, [optimisticWorker, workersData]);
-  const workerSignature = useMemo(
-    () => homeFanoutWorkerSignature(workers),
-    [workers],
-  );
-  const currentWorkers = useRef(workers);
-  currentWorkers.current = workers;
-
-  useEffect(() => {
-    if (isLoading) return;
-    const controller = new AbortController();
-    const isFirstFanout = !hasFanoutResult.current;
-    void fetchHomeFanout(daemonBase, currentWorkers.current, controller.signal)
-      .then((result) => {
-        if (!controller.signal.aborted) {
-          hasFanoutResult.current = true;
-          setFanout(result);
-        }
-      })
-      .finally(() => {
-        if (!controller.signal.aborted && isFirstFanout) {
-          setFanoutLoading(false);
-        }
-      });
-    return () => controller.abort();
-  }, [daemonBase, isLoading, workerSignature]);
+  const fanout: HomeFanoutResult = {
+    failedCrons: [],
+    hadErrors:
+      liveChats.isError ||
+      !liveChats.data ||
+      liveChats.data.engines.some((engine) => engine.status !== "available"),
+    chats:
+      liveChats.data?.engines.flatMap((engine) => {
+        const project = workers.find(
+          (worker) => engine.engine_id === `managed:${worker.project_id}`,
+        );
+        if (!project || engine.status !== "available") return [];
+        return engine.chats.map((chat) => ({
+          id: chat.id,
+          projectId: project.project_id,
+          projectSlug: project.slug,
+          title: chat.title,
+          updatedAt: new Date(chat.updated_at_ms).toISOString(),
+        }));
+      }) ?? [],
+  };
 
   function persistWizardDone(done: boolean) {
     setWizardDone(done);
@@ -198,6 +185,8 @@ export function HomePage() {
           data-testid="home-secondary-column"
         >
           <NeedsAttentionWidget
+            coverageUnknown
+            workersUnavailable={workersUnavailable}
             crashedWorkers={crashedWorkers}
             failedCrons={fanout.failedCrons}
             loading={fanoutLoading || updateLoading}

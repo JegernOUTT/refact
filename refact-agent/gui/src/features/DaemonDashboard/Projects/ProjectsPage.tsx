@@ -1,3 +1,4 @@
+import { useObservationPolling } from "../useObservationPolling";
 import { useEffect, useMemo, useState } from "react";
 import { FolderKanban, Plus } from "lucide-react";
 
@@ -6,6 +7,8 @@ import {
   EmptyState,
   ErrorState,
   LoadingState,
+  FieldText,
+  Button as FilterButton,
 } from "../../../components/ui";
 import { selectConfig } from "../../Config/configSlice";
 import { useAppSelector } from "../../../hooks";
@@ -19,14 +22,8 @@ import { AddProjectDialog } from "./AddProjectDialog";
 import { MissingProjectsSection } from "./MissingProjectsSection";
 import { ProjectCard } from "./ProjectCard";
 import { splitProjectWorkers } from "./projectOrdering";
-import {
-  fetchReadyProjectStatuses,
-  isReadyWorker,
-  type ProjectRagStatus,
-} from "./projectRagStatus";
+import { workerStateName } from "./projectRagStatus";
 import styles from "./Projects.module.css";
-
-const WORKERS_POLLING_INTERVAL_MS = 4_000;
 
 function pendingWorker(root: string): DaemonWorker {
   const normalized = root.replace(/[\\/]+$/, "");
@@ -71,13 +68,13 @@ export function ProjectsPage() {
   const [optimisticWorker, setOptimisticWorker] = useState<DaemonWorker | null>(
     null,
   );
-  const [ragStatuses, setRagStatuses] = useState<
-    Partial<Record<string, ProjectRagStatus>>
-  >({});
-  const { data, error, fulfilledTimeStamp, isLoading, refetch } =
-    useListProjectsQuery(undefined, {
-      pollingInterval: WORKERS_POLLING_INTERVAL_MS,
-    });
+  const [search, setSearch] = useState("");
+  const [filter, setFilter] = useState("all");
+  const [sort, setSort] = useState("recent");
+  const { data, error, isLoading, refetch } = useListProjectsQuery(
+    undefined,
+    useObservationPolling(),
+  );
   const workers = useMemo(() => data ?? [], [data]);
 
   useEffect(() => {
@@ -93,30 +90,6 @@ export function ProjectsPage() {
     }
   }, [optimisticWorker, workers]);
 
-  useEffect(() => {
-    const readyWorkers = workers.filter(isReadyWorker);
-    let active = true;
-
-    setRagStatuses((current) =>
-      Object.fromEntries(
-        readyWorkers.map((worker) => [
-          worker.project_id,
-          current[worker.project_id] ?? { state: "loading" },
-        ]),
-      ),
-    );
-
-    void fetchReadyProjectStatuses(daemonBase, readyWorkers).then(
-      (statuses) => {
-        if (active) setRagStatuses(statuses);
-      },
-    );
-
-    return () => {
-      active = false;
-    };
-  }, [daemonBase, fulfilledTimeStamp, workers]);
-
   const displayedWorkers = useMemo(() => {
     if (
       !optimisticWorker ||
@@ -131,10 +104,29 @@ export function ProjectsPage() {
     return [optimisticWorker, ...workers];
   }, [optimisticWorker, workers]);
 
-  const { present, missing } = useMemo(
+  const { present: allPresent, missing } = useMemo(
     () => splitProjectWorkers(displayedWorkers),
     [displayedWorkers],
   );
+
+  const present = allPresent
+    .filter(
+      (worker) =>
+        `${worker.slug} ${worker.root}`
+          .toLowerCase()
+          .includes(search.toLowerCase()) &&
+        (filter === "all" ||
+          (filter === "attention"
+            ? Boolean(worker.last_error) ||
+              ["crashed", "failed"].includes(workerStateName(worker))
+            : workerStateName(worker) === filter)),
+    )
+    .sort((a, b) =>
+      sort === "recent"
+        ? (b.last_active_ms ?? 0) - (a.last_active_ms ?? 0) ||
+          a.slug.localeCompare(b.slug)
+        : a.slug.localeCompare(b.slug),
+    );
 
   if (isLoading && displayedWorkers.length === 0) {
     return <LoadingState label="Loading projects" variant="full" />;
@@ -163,11 +155,12 @@ export function ProjectsPage() {
             Projects
           </h2>
           <p className={styles.pageDescription}>
-            Open workspaces and watch their workers and indexes.
+            Your workspaces, engines and local activity.
           </p>
         </div>
         {displayedWorkers.length > 0 ? (
           <Button
+            className={styles.primaryAction}
             leftIcon={Plus}
             onClick={() => setDialogOpen(true)}
             variant="primary"
@@ -177,6 +170,72 @@ export function ProjectsPage() {
         ) : null}
       </header>
 
+      <div className={styles.consoleMetrics}>
+        <div>
+          <strong>{displayedWorkers.length}</strong>
+          <span>Projects</span>
+        </div>
+        <div>
+          <strong>
+            {
+              displayedWorkers.filter((worker) => worker.state === "ready")
+                .length
+            }
+          </strong>
+          <span>Running workers</span>
+        </div>
+        <div>
+          <strong>
+            {displayedWorkers.reduce(
+              (count, worker) => count + worker.busy_chats,
+              0,
+            )}
+          </strong>
+          <span>Busy chats reported</span>
+        </div>
+        <div>
+          <strong>
+            {
+              displayedWorkers.filter((worker) => worker.state === "stopped")
+                .length
+            }
+          </strong>
+          <span>Stopped</span>
+        </div>
+      </div>
+      <div className={styles.consoleFilters}>
+        <FieldText
+          aria-label="Search projects"
+          placeholder="Search projects or paths…"
+          value={search}
+          onChange={setSearch}
+        />
+        {["all", "ready", "stopped", "attention"].map((value) => (
+          <FilterButton
+            key={value}
+            size="sm"
+            variant={filter === value ? "soft" : "ghost"}
+            aria-pressed={filter === value}
+            onClick={() => setFilter(value)}
+          >
+            {value === "all"
+              ? "All projects"
+              : value === "ready"
+                ? "Running"
+                : value === "stopped"
+                  ? "Stopped"
+                  : "Needs attention"}
+          </FilterButton>
+        ))}
+        <FilterButton
+          size="sm"
+          variant="ghost"
+          onClick={() => setSort(sort === "recent" ? "name" : "recent")}
+          aria-label="Change project sort"
+        >
+          {sort === "recent" ? "Recent activity" : "Name"}
+        </FilterButton>
+      </div>
       {error ? (
         <ErrorState
           className={styles.inlineError}
@@ -211,15 +270,29 @@ export function ProjectsPage() {
         <>
           {present.length > 0 ? (
             <div className={styles.grid}>
-              {present.map((worker) => (
-                <ProjectCard
-                  daemonBase={daemonBase}
-                  key={worker.project_id}
-                  onMutated={() => void refetch()}
-                  ragStatus={ragStatuses[worker.project_id]}
-                  worker={worker}
-                />
-              ))}
+              {[true, false].map((pinned) => {
+                const group = present.filter(
+                  (worker) => worker.pinned === pinned,
+                );
+                return group.length > 0 ? (
+                  <section
+                    key={String(pinned)}
+                    aria-label={pinned ? "Pinned projects" : "Other projects"}
+                  >
+                    <h3 className={styles.groupTitle}>
+                      {pinned ? "Pinned" : "Other projects"}
+                    </h3>
+                    {group.map((worker) => (
+                      <ProjectCard
+                        daemonBase={daemonBase}
+                        key={worker.project_id}
+                        onMutated={() => void refetch()}
+                        worker={worker}
+                      />
+                    ))}
+                  </section>
+                ) : null;
+              })}
             </div>
           ) : null}
           {missing.length > 0 ? (

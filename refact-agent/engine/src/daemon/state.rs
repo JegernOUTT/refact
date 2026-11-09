@@ -97,6 +97,7 @@ pub struct DaemonState {
     pub supervisor: Arc<crate::daemon::supervisor::Supervisor>,
     pub proxy_client: reqwest::Client,
     pub proxy_stream_client: reqwest::Client,
+    pub(crate) console: crate::daemon::console::Console,
     pub events: EventBus,
     pub daemon_dir: PathBuf,
     cron_pending: Arc<SyncRwLock<HashMap<String, u64>>>,
@@ -293,6 +294,7 @@ impl DaemonState {
             supervisor,
             proxy_client,
             proxy_stream_client,
+            console: crate::daemon::console::Console::new(),
             events,
             daemon_dir,
 
