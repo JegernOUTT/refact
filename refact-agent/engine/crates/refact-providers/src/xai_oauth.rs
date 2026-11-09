@@ -18,7 +18,7 @@ use crate::xai_oauth_flow::OAuthTokens;
 
 const XAI_MODELS_URL: &str = "https://cli-chat-proxy.grok.com/v1/models";
 const XAI_RESPONSES_URL: &str = "https://cli-chat-proxy.grok.com/v1/responses";
-const XAI_CLIENT_VERSION: &str = "1.0.5";
+const XAI_CLIENT_VERSION: &str = "1.0.13";
 const XAI_CLIENT_IDENTIFIER: &str = "grok-shell";
 const RATE_LIMIT_SAMPLE_MAX_AGE_MS: i64 = 60_000;
 
@@ -111,11 +111,12 @@ impl XAIOAuthProvider {
     }
 
     fn cli_request_headers() -> HashMap<String, String> {
+        let version = std::env::var("XAI_GROK_CLI_VERSION")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or_else(|| XAI_CLIENT_VERSION.to_string());
         HashMap::from([
-            (
-                "x-grok-client-version".to_string(),
-                XAI_CLIENT_VERSION.to_string(),
-            ),
+            ("x-grok-client-version".to_string(), version),
             (
                 "x-grok-client-identifier".to_string(),
                 XAI_CLIENT_IDENTIFIER.to_string(),
@@ -1100,9 +1101,13 @@ mod tests {
         assert_eq!(runtime.chat_endpoint, XAI_RESPONSES_URL);
         assert_eq!(runtime.api_key, "oauth-access-token");
         assert!(runtime.auth_token.is_empty());
+        let expected_version = std::env::var("XAI_GROK_CLI_VERSION")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or_else(|| XAI_CLIENT_VERSION.to_string());
         assert_eq!(
             runtime.extra_headers.get("x-grok-client-version"),
-            Some(&XAI_CLIENT_VERSION.to_string())
+            Some(&expected_version)
         );
         assert_eq!(
             runtime.extra_headers.get("x-grok-client-identifier"),
@@ -1111,6 +1116,17 @@ mod tests {
         assert_eq!(
             XAIOAuthProvider::cli_request_headers(),
             runtime.extra_headers
+        );
+    }
+
+    #[test]
+    fn cli_version_defaults_to_at_least_1_0_13() {
+        assert_eq!(XAI_CLIENT_VERSION, "1.0.13");
+        let headers = XAIOAuthProvider::cli_request_headers();
+        assert!(headers.contains_key("x-grok-client-version"));
+        assert_eq!(
+            headers.get("x-grok-client-identifier"),
+            Some(&"grok-shell".to_string())
         );
     }
 }
