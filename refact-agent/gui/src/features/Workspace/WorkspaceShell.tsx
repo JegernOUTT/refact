@@ -9,7 +9,6 @@ import { ActivityRail } from "./ActivityRail";
 import { Dock } from "./Dock";
 import { selectEditPlayer } from "./FilesPanel/filesPanelSlice";
 import { isFileSurface, isGitDiffSurface, isGitSurface } from "./surfaceKey";
-import { useAgentsSidebarAutoOpen } from "./useAgentsSidebarAutoOpen";
 import { useWorkspaceShortcuts } from "./useWorkspaceShortcuts";
 import { WORKSPACE_NARROW_QUERY } from "./workspaceBreakpoints";
 import {
@@ -77,7 +76,6 @@ export function WorkspaceShell({
   toolbar?: ReactNode;
 }) {
   useWorkspaceShortcuts();
-  useAgentsSidebarAutoOpen();
   useWorkspaceSurfaceNavigation();
   const dispatch = useAppDispatch();
   const host = useAppSelector(selectHost);

@@ -2,8 +2,9 @@ import { describe, expect, it } from "vitest";
 import { act } from "react-dom/test-utils";
 
 import { type AppStore, setUpStore } from "../../app/store";
+import type { BackgroundAgentSummary } from "../../services/refact";
 import { render, screen } from "../../utils/test-utils";
-import { createChatWithId } from "../Chat/Thread";
+import { applyChatEvent, createChatWithId } from "../Chat/Thread";
 import { updateConfig } from "../Config/configSlice";
 import { popBackTo, push } from "../Pages/pagesSlice";
 import { openTask, setTaskActiveChat } from "../Tasks/tasksSlice";
@@ -79,7 +80,126 @@ function goTo(store: AppStore, page: Parameters<typeof push>[0]) {
   });
 }
 
+function updateAgent(
+  store: AppStore,
+  status: BackgroundAgentSummary["status"],
+  seq: number,
+) {
+  act(() => {
+    store.dispatch(
+      applyChatEvent({
+        chat_id: "chat-a",
+        seq: String(seq),
+        type: "background_agent_updated",
+        agent: {
+          agent_id: "background-agent-1",
+          parent_chat_id: "chat-a",
+          child_chat_id: "child-chat-1",
+          kind: "subagent",
+          status,
+          title: "Background agent",
+          progress: null,
+          step_count: 0,
+          last_activity: "2026-11-09T10:00:00Z",
+          target_files: [],
+          edited_files: [],
+          diff_summary: null,
+          conflict_summary: null,
+          result_summary: null,
+          error: null,
+          started_at: null,
+          finished_at: null,
+          change_seq: seq,
+        },
+      }),
+    );
+  });
+}
+
 describe("WorkspaceShell", () => {
+  it.each(["files", "agents"] as const)(
+    "keeps the closed %s dock closed when agents start and finish",
+    (section) => {
+      const store = createStore();
+      goTo(store, { name: "chat" });
+      store.dispatch(setActiveTab(chat("chat-a")));
+      store.dispatch(setDockSection(section));
+      store.dispatch(setDockOpen(false));
+      renderShell(store);
+      const dockBefore = store.getState().workspace.dock;
+      const activeTabIdBefore = store.getState().workspace.activeTabId;
+      const button = screen.getByRole("button", { name: "Agents" });
+
+      updateAgent(store, "running", 1);
+
+      expect(button).toHaveAccessibleDescription("1 active agent");
+      expect(button).toHaveAttribute("aria-pressed", "false");
+      expect(store.getState().workspace.dock).toEqual(dockBefore);
+      expect(store.getState().workspace.activeTabId).toBe(activeTabIdBefore);
+
+      updateAgent(store, "completed", 2);
+
+      expect(button).not.toHaveAttribute("aria-describedby");
+      expect(store.getState().workspace.dock).toEqual(dockBefore);
+    },
+  );
+
+  it.each(["files", "agents"] as const)(
+    "leaves the manually opened %s dock unchanged throughout an agent run",
+    (section) => {
+      const store = createStore();
+      goTo(store, { name: "chat" });
+      store.dispatch(setActiveTab(chat("chat-a")));
+      store.dispatch(setDockSection(section));
+      store.dispatch(setDockOpen(true));
+      renderShell(store);
+      const dockBefore = store.getState().workspace.dock;
+
+      updateAgent(store, "running", 1);
+      expect(store.getState().workspace.dock).toEqual(dockBefore);
+
+      updateAgent(store, "completed", 2);
+      expect(store.getState().workspace.dock).toEqual(dockBefore);
+    },
+  );
+
+  it("keeps rail and shortcut opening manual across agent runs", async () => {
+    const store = createStore();
+    goTo(store, { name: "chat" });
+    store.dispatch(setActiveTab(chat("chat-a")));
+    store.dispatch(setDockOpen(false));
+    const view = renderShell(store);
+    const button = screen.getByRole("button", { name: "Agents" });
+
+    updateAgent(store, "running", 1);
+    expect(store.getState().workspace.dock?.open).toBe(false);
+
+    await view.user.click(button);
+    expect(store.getState().workspace.dock).toMatchObject({
+      open: true,
+      section: "agents",
+    });
+    expect(button).toHaveAttribute("aria-pressed", "true");
+
+    await view.user.click(button);
+    updateAgent(store, "completed", 2);
+    updateAgent(store, "running", 3);
+    expect(store.getState().workspace.dock?.open).toBe(false);
+
+    act(() => {
+      window.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "3", ctrlKey: true }),
+      );
+    });
+    expect(store.getState().workspace.dock).toMatchObject({
+      open: true,
+      section: "agents",
+    });
+
+    updateAgent(store, "completed", 4);
+    expect(store.getState().workspace.dock?.open).toBe(true);
+  });
+
   it("closes initial narrow state even when the stored section is unavailable, then permits first manual open", async () => {
     const original = window.matchMedia;
     window.matchMedia = ((query: string) => ({

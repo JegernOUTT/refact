@@ -11,12 +11,6 @@ import {
 import type { BackgroundAgentSummary } from "../../services/refact/types";
 import type { FetchBaseQueryError } from "@reduxjs/toolkit/query";
 
-import {
-  setDockOpen,
-  setDockSection,
-  toggleDock,
-} from "../Workspace/workspaceSlice";
-
 export type AgentsPanelTab = "active" | "all";
 
 export type AgentRosterSource = {
@@ -31,9 +25,7 @@ type AgentRosterState = Pick<
 >;
 
 export type AgentsPanelState = {
-  autoOpenedFor: string | null;
   tab: AgentsPanelTab;
-  userClosedByChat: Record<string, boolean>;
   generation: number;
   disclosure: number;
   authorized: boolean;
@@ -45,9 +37,7 @@ export type AgentsPanelState = {
 };
 
 const initialState: AgentsPanelState = {
-  autoOpenedFor: null,
   tab: "active",
-  userClosedByChat: {},
   generation: 0,
   disclosure: 0,
   authorized: false,
@@ -148,33 +138,6 @@ export const agentsPanelSlice = createSlice({
     tabChanged: (state, action: PayloadAction<AgentsPanelTab>) => {
       state.tab = action.payload;
     },
-    autoOpenRequested: (state, action: PayloadAction<string>) => {
-      if (state.userClosedByChat[action.payload]) return;
-      state.autoOpenedFor = action.payload;
-    },
-    autoOpenCleared: (state) => {
-      state.autoOpenedFor = null;
-    },
-    agentsSectionUserClosed: (state, action: PayloadAction<string>) => {
-      state.userClosedByChat[action.payload] = true;
-      state.autoOpenedFor = null;
-    },
-    agentsSectionUserOpened: (state, action: PayloadAction<string>) => {
-      state.userClosedByChat[action.payload] = false;
-      state.autoOpenedFor = null;
-    },
-  },
-  extraReducers: (builder) => {
-    builder
-      .addCase(setDockSection, (state) => {
-        state.autoOpenedFor = null;
-      })
-      .addCase(setDockOpen, (state) => {
-        state.autoOpenedFor = null;
-      })
-      .addCase(toggleDock, (state) => {
-        state.autoOpenedFor = null;
-      });
   },
 });
 
@@ -186,10 +149,6 @@ export const {
   agentRosterReceived,
   agentRosterTransportFailed,
   tabChanged,
-  autoOpenRequested,
-  autoOpenCleared,
-  agentsSectionUserClosed,
-  agentsSectionUserOpened,
 } = agentsPanelSlice.actions;
 
 type AgentsPanelRootState = {
@@ -237,17 +196,5 @@ export function isCurrentAgentRosterSource(
 
 export const selectDisclosedAgentPool = (state: RootState) =>
   state.agentsPanel.liveAgents;
-
-export const selectAgentsPanelAutoOpenedFor = (state: AgentsPanelRootState) =>
-  state.agentsPanel.autoOpenedFor;
-
-export const selectAgentsPanelUserClosed = (
-  state: AgentsPanelRootState,
-  chatId: string,
-) => {
-  const userClosedByChat: Partial<Record<string, boolean>> =
-    state.agentsPanel.userClosedByChat;
-  return userClosedByChat[chatId] ?? false;
-};
 
 export default agentsPanelSlice.reducer;

@@ -17,10 +17,6 @@ import { BuddyRailButton } from "../../Buddy/Companion/BuddyRailButton";
 import { useAppDispatch, useAppSelector } from "../../../hooks";
 import { useGetGitStatusQuery } from "../../../services/refact/gitRead";
 import {
-  agentsSectionUserClosed,
-  agentsSectionUserOpened,
-} from "../../AgentsPanel/agentsPanelSlice";
-import {
   closeThread,
   selectActiveBackgroundAgents,
   selectAllThreads,
@@ -170,22 +166,16 @@ export function ActivityRail() {
         dock.section === section &&
         isDockSectionAvailable(section, availability);
       if (showing) {
-        if (section === "agents" && focusedChatId) {
-          dispatch(agentsSectionUserClosed(focusedChatId));
-        }
         dispatch(setDockOpen(false));
         return;
       }
       if (!isDockSectionAvailable(section, availability)) {
         dispatch(setPanelsForced(true));
       }
-      if (section === "agents" && focusedChatId) {
-        dispatch(agentsSectionUserOpened(focusedChatId));
-      }
       dispatch(setDockSection(section));
       dispatch(setDockOpen(true));
     },
-    [availability, dispatch, dock.open, dock.section, focusedChatId],
+    [availability, dispatch, dock.open, dock.section],
   );
 
   return (

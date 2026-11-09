@@ -4,7 +4,6 @@ export { Dock } from "./Dock";
 export { SurfacePane } from "./SurfacePane";
 export { TabBar } from "./TabBar";
 export { WorkspaceView } from "./WorkspaceView";
-export { useAgentsSidebarAutoOpen } from "./useAgentsSidebarAutoOpen";
 export * from "./FilesPanel";
 export * from "./GitPanel";
 export * from "./surfaceKey";

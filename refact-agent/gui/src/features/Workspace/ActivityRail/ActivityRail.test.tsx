@@ -308,17 +308,19 @@ describe("ActivityRail", () => {
     });
   });
 
-  it("records agents open and close intent for the focused chat", async () => {
+  it("toggles the agents dock when the rail button is clicked", async () => {
     const store = createRailStore();
     store.dispatch(setDockSection("files"));
     store.dispatch(setDockOpen(true));
     const view = renderRail(store);
 
     await view.user.click(screen.getByRole("button", { name: "Agents" }));
-    expect(store.getState().agentsPanel.userClosedByChat[chatId]).toBe(false);
+    expect(store.getState().workspace.dock).toMatchObject({
+      open: true,
+      section: "agents",
+    });
 
     await view.user.click(screen.getByRole("button", { name: "Agents" }));
-    expect(store.getState().agentsPanel.userClosedByChat[chatId]).toBe(true);
     expect(store.getState().workspace.dock?.open).toBe(false);
   });
 
