@@ -37,6 +37,64 @@ impl IntoResponse for WorkError {
     }
 }
 
+pub(super) fn protected_origin_allowed(headers: &HeaderMap) -> bool {
+    let mut origins = headers.get_all(header::ORIGIN).iter();
+    let Some(origin) = origins.next() else {
+        return true;
+    };
+    if origins.next().is_some() {
+        return false;
+    }
+    let Ok(origin) = origin.to_str() else {
+        return false;
+    };
+    if origin.bytes().any(|b| b.is_ascii_whitespace()) {
+        return false;
+    }
+    if crate::daemon::auth::origin_is_trusted_ide_webview(origin) {
+        return true;
+    }
+    let Some((scheme, authority)) = origin.split_once("://") else {
+        return false;
+    };
+    if !matches!(scheme, "http" | "https")
+        || authority.is_empty()
+        || authority.ends_with(':')
+        || authority.parse::<axum::http::uri::Authority>().is_err()
+        || authority.contains(['/', '?', '#', '@', ',', '\\'])
+    {
+        return false;
+    }
+    let Ok(origin_url) = url::Url::parse(origin) else {
+        return false;
+    };
+    if crate::daemon::auth::origin_is_loopback(origin) {
+        return true;
+    }
+    let mut hosts = headers.get_all(header::HOST).iter();
+    let Some(host) = hosts.next() else {
+        return false;
+    };
+    if hosts.next().is_some() {
+        return false;
+    }
+    let Ok(host) = host.to_str() else {
+        return false;
+    };
+    if host.is_empty()
+        || host.ends_with(':')
+        || host.parse::<axum::http::uri::Authority>().is_err()
+        || host.bytes().any(|b| b.is_ascii_whitespace())
+        || host.contains(['/', '?', '#', '@', ',', '\\'])
+    {
+        return false;
+    }
+    let Ok(host_url) = url::Url::parse(&format!("{scheme}://{host}")) else {
+        return false;
+    };
+    origin_url.origin() == host_url.origin()
+}
+
 pub(super) fn authorize(
     app: &AppState,
     headers: &HeaderMap,

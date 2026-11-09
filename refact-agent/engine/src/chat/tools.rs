@@ -103,8 +103,7 @@ pub(crate) const SHELL_PRIVACY_APPROVAL_RULE: &str =
     "Privacy approval required: command read guarded files";
 
 pub(crate) fn requires_actual_human_approval(reason: &str) -> bool {
-    reason == crate::tools::tool_app::HUMAN_APP_APPROVAL
-        || reason == crate::scheduler::automation_approval::HUMAN_AUTOMATION_APPROVAL
+    reason == crate::scheduler::automation_approval::HUMAN_AUTOMATION_APPROVAL
 }
 
 pub(crate) fn is_shell_privacy_approval(reason: &PauseReason) -> bool {
@@ -2826,21 +2825,6 @@ async fn check_tools_confirmation_with_pool(
                         ) && !allowed_tools.is_empty()
                             && (allowed_tools.contains(&tool_call.function.name)
                                 || allowed_tools.contains(&resolved_tool_name)));
-                let forced_app_confirmation =
-                    match crate::tools::tool_app::inspect_mutation(&ccx, tool_call).await {
-                        Ok(forced) => forced,
-                        Err(error) => {
-                            denials.push(PauseReason {
-                                reason_type: "denial".into(),
-                                tool_name: tool_call.function.name.clone(),
-                                command: result.result.command,
-                                rule: error,
-                                tool_call_id: tool_call.id.clone(),
-                                integr_config_path,
-                            });
-                            continue;
-                        }
-                    };
                 let forced_automation_confirmation =
                     match crate::scheduler::automation_approval::inspect_automation_approval(
                         &ccx,
@@ -2868,9 +2852,12 @@ async fn check_tools_confirmation_with_pool(
                     is_auto_approved,
                     &resolved_tool_name,
                 );
-                if (forced_app_confirmation || forced_automation_confirmation)
-                    && final_action != "deny"
+                if crate::tools::tool_app::family_for_tool(&resolved_tool_name).is_some()
+                    && final_action == "ask"
                 {
+                    final_action = "allow";
+                }
+                if forced_automation_confirmation && final_action != "deny" {
                     final_action = "ask";
                 }
                 if final_action != "deny"
@@ -2887,8 +2874,6 @@ async fn check_tools_confirmation_with_pool(
 
                 let rule_text = if forced_automation_confirmation {
                     crate::scheduler::automation_approval::HUMAN_AUTOMATION_APPROVAL.into()
-                } else if forced_app_confirmation {
-                    crate::tools::tool_app::HUMAN_APP_APPROVAL.into()
                 } else {
                     match mode_action.as_deref() {
                         Some(action) => format!("mode policy: {}", action),

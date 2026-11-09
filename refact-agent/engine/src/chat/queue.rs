@@ -2394,7 +2394,6 @@ async fn handle_regular_tool_decisions(
         let any_rejected = !outcome.denied_ids.is_empty();
 
         for id in &outcome.denied_ids {
-            session.app_mutation_receipts.remove(id);
             session.automation_approval_receipts.remove(id);
             if let Some(call) = session.approval_wrapper_calls.remove(id) {
                 if let Ok(args) =
@@ -2428,9 +2427,6 @@ async fn handle_regular_tool_decisions(
             {
                 session.automation_approval_receipts.remove(id);
                 tracing::warn!(tool_call_id = %id, "automation human approval refused: {error}");
-            }
-            if let Some(receipt) = session.app_mutation_receipts.get_mut(id) {
-                receipt.accepted = true;
             }
             if !session.runtime.accepted_tool_ids.contains(id) {
                 session.runtime.accepted_tool_ids.push(id.clone());

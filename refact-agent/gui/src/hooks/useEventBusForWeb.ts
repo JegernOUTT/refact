@@ -69,7 +69,7 @@ export function useEventBusForWeb() {
     const nextLspPort = config.engineServed
       ? currentWindowPort()
       : config.lspPort;
-    const nextApiKey = apiKey;
+    const nextApiKey = config.engineServed ? config.apiKey : apiKey;
 
     if (
       config.lspUrl === nextLspUrl &&

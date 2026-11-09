@@ -338,9 +338,7 @@ pub async fn preflight_tool_records(
     privacy::preflight_metadata(app, &runtime, caller).await
 }
 
-/// Trusted tool adapter entrypoint: call only after the normal confirmation pipeline succeeds.
-/// HTTP has no route to this capability.
-pub async fn execute_approved_source_control(
+pub async fn execute_tool_source_control(
     app: &crate::app_state::AppState,
     caller: Caller,
     app_id: uuid::Uuid,
@@ -349,7 +347,7 @@ pub async fn execute_approved_source_control(
     expected_revision: &str,
 ) -> Result<serde_json::Value, String> {
     if !matches!(caller, Caller::Tool { .. }) {
-        return Err("source grants require confirmed tool invocation".into());
+        return Err("source grants require tool invocation".into());
     }
     let runtime = runtime(app, &caller).await?;
     let _activation = runtime.activation.lock().await;
@@ -472,8 +470,7 @@ pub async fn execute_approved_source_control(
     Ok(serde_json::json!({"status":"applied","source_id":source_id,"operation":operation}))
 }
 
-/// This capability is available only to the confirmed Rust tool adapter, never HTTP JSON.
-pub async fn execute_approved_endpoint_grant(
+pub async fn execute_tool_endpoint_grant(
     app: &crate::app_state::AppState,
     caller: Caller,
     app_id: uuid::Uuid,
@@ -483,7 +480,7 @@ pub async fn execute_approved_endpoint_grant(
     allowed_private_ips: Vec<std::net::IpAddr>,
 ) -> Result<serde_json::Value, String> {
     if !matches!(caller, Caller::Tool { .. }) {
-        return Err("endpoint grant requires confirmed tool invocation".into());
+        return Err("endpoint grant requires tool invocation".into());
     }
     let runtime = runtime(app, &caller).await?;
     let _activation = runtime.activation.lock().await;
@@ -516,7 +513,7 @@ pub async fn execute_approved_endpoint_grant(
         .origin()
         .ascii_serialization();
     if actual != origin {
-        return Err("confirmed origin does not match source endpoint".into());
+        return Err("granted origin does not match source endpoint".into());
     }
     runtime
         .automation

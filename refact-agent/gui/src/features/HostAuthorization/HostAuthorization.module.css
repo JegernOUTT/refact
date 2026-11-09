@@ -1,0 +1,29 @@
+.authorization {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-3);
+  min-width: 0;
+  padding: var(--rf-panel-pad);
+  overflow-wrap: anywhere;
+}
+
+.authorization h3,
+.authorization p {
+  margin: 0;
+}
+
+.form {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--rf-space-3);
+  min-width: 0;
+}
+
+.form > button {
+  align-self: flex-start;
+}
+
+.warning {
+  color: var(--rf-color-warning);
+}

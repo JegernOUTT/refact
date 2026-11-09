@@ -1,7 +1,7 @@
 use std::{convert::Infallible, net::SocketAddr};
 use axum::{
     extract::{State, Path, Query, ConnectInfo},
-    http::{HeaderMap, StatusCode, header},
+    http::{HeaderMap, StatusCode},
     response::{Response, IntoResponse, Sse, sse::Event},
     Json,
 };
@@ -28,11 +28,7 @@ fn authorize(
     peer: Option<ConnectInfo<SocketAddr>>,
 ) -> Result<(), Error> {
     // Even valid host credentials must not turn an opaque sandbox into a host.
-    if headers.get(header::ORIGIN).is_some_and(|v| {
-        v.to_str()
-            .ok()
-            .is_none_or(|v| !crate::daemon::auth::origin_allowed_for_loopback_or_ide(v))
-    }) {
+    if !super::work::protected_origin_allowed(headers) {
         return Err((
             StatusCode::FORBIDDEN,
             Json(json!({"error":"untrusted app host origin"})),
@@ -165,6 +161,7 @@ pub async fn subscribe(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::http::header;
     #[tokio::test]
     async fn opaque_origin_denied_even_with_valid_bearer() {
         let mut gcx = crate::global_context::tests::make_test_gcx().await;

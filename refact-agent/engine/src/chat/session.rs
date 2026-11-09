@@ -961,7 +961,6 @@ impl ChatSession {
             stream_started_at: None,
             confirmation_paused_at: None,
             approval_wrapper_calls: HashMap::new(),
-            app_mutation_receipts: HashMap::new(),
             automation_approval_receipts: HashMap::new(),
             app_workspace_mutation_lock: Arc::new(AMutex::new(())),
             last_tool_started_at: None,
@@ -1121,7 +1120,6 @@ impl ChatSession {
             stream_started_at: None,
             confirmation_paused_at: None,
             approval_wrapper_calls: HashMap::new(),
-            app_mutation_receipts: HashMap::new(),
             automation_approval_receipts: HashMap::new(),
             app_workspace_mutation_lock: Arc::new(AMutex::new(())),
             last_tool_started_at: None,
@@ -2245,7 +2243,6 @@ impl ChatSession {
         self.tool_catalog = None;
         self.turn_tool_pool = None;
         self.approval_wrapper_calls.clear();
-        self.app_mutation_receipts.clear();
         self.automation_approval_receipts.clear();
         self.post_turn_task_handles
             .retain(|task| !task.is_finished());

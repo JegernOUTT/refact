@@ -22,6 +22,7 @@ import {
   supportsDefinition,
 } from "./automationTypes";
 import styles from "./Scheduler.module.css";
+import { HostAuthorization } from "../HostAuthorization/HostAuthorization";
 
 function initialDefinition(view: AutomationView): AutomationDefinition {
   return {
@@ -293,6 +294,8 @@ export function AutomationDefinitions({
       setError(schedulerErrorMessage(failure));
     }
   };
+  if (query.error && "status" in query.error && query.error.status === 401)
+    return <HostAuthorization resource="automation" />;
   return (
     <section className={styles.panel} aria-label="Automation definitions">
       <p className={styles.sectionHint}>

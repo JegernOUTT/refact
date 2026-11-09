@@ -33,6 +33,7 @@ import {
   setDockOpen,
 } from "../Workspace/workspaceSlice";
 import { WORKSPACE_NARROW_QUERY } from "../Workspace/workspaceBreakpoints";
+import { HostAuthorization } from "../HostAuthorization/HostAuthorization";
 
 type Props = {
   onNavigate: () => void;
@@ -41,6 +42,7 @@ type Props = {
   loading: boolean;
   unavailable: boolean;
   error: boolean;
+  unauthorized?: boolean;
   onRetry: () => void;
   onOpen: (app: CatalogApp) => void;
 };
@@ -332,6 +334,7 @@ export function AppsCatalog({
   loading,
   unavailable,
   error,
+  unauthorized,
   onRetry,
   onOpen,
 }: Props) {
@@ -440,6 +443,8 @@ export function AppsCatalog({
             <p role="status">Connect to an engine to discover project apps.</p>
           ) : loading ? (
             <p role="status">Loading apps…</p>
+          ) : unauthorized ? (
+            <HostAuthorization resource="apps" />
           ) : error ? (
             <div role="alert">
               Apps could not be loaded. <Button onClick={onRetry}>Retry</Button>
@@ -561,7 +566,7 @@ export function AppsDockPanel() {
     hasUsableEngineEndpoint(state.config),
   );
   const isNarrow = useMediaQuery(WORKSPACE_NARROW_QUERY);
-  const { data, isLoading, isError, refetch } = useGetAppsQuery(chatId, {
+  const { data, isLoading, isError, error, refetch } = useGetAppsQuery(chatId, {
     skip: !ready,
     pollingInterval: 15000,
   });
@@ -576,6 +581,9 @@ export function AppsDockPanel() {
       loading={isLoading}
       unavailable={!ready}
       error={isError}
+      unauthorized={
+        error !== undefined && "status" in error && error.status === 401
+      }
       onRetry={() => {
         void refetch();
       }}

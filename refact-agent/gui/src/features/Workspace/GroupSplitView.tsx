@@ -195,7 +195,7 @@ function LeafView({
   const pointerDragEnabled = usePointerDragHost();
   const resolveDisplay = useTabDisplay();
   const canSplit = useAppSelector((state) => {
-    const group = selectGroupForTab(state, tabId);
+    const group = state.workspace.groups[tabId];
     return Boolean(
       group && collectLeafIds(group.root).length < MAX_GROUP_LEAVES,
     );
@@ -534,12 +534,14 @@ function SplitView({
   const containerRef = useRef<HTMLDivElement>(null);
   const [draggingDivider, setDraggingDivider] = useState<number | null>(null);
   const sizes = normalizedSizes(node.sizes, node.children.length);
+  const childSignature = JSON.stringify(node.children.map((child) => child.id));
 
   const resizeSession = useRef<{
     pointerId: number;
     dividerIndex: number;
     element: HTMLDivElement;
     sizes: number[];
+    childIds: string[];
   } | null>(null);
 
   const endResize = useCallback(() => {
@@ -557,7 +559,7 @@ function SplitView({
       window.removeEventListener("blur", endResize);
       endResize();
     };
-  }, [endResize, node.dir, stacked]);
+  }, [endResize, node.dir, stacked, childSignature]);
 
   const handleDividerPointerDown = (
     dividerIndex: number,
@@ -573,6 +575,7 @@ function SplitView({
       dividerIndex,
       element: event.currentTarget,
       sizes,
+      childIds: node.children.map((child) => child.id),
     };
     setDraggingDivider(dividerIndex);
   };
@@ -583,6 +586,10 @@ function SplitView({
     const session = resizeSession.current;
     const container = containerRef.current;
     if (!session || session.pointerId !== event.pointerId || !container) return;
+    if (JSON.stringify(session.childIds) !== childSignature) {
+      endResize();
+      return;
+    }
     const rect = container.getBoundingClientRect();
     const length = node.dir === "row" ? rect.width : rect.height;
     if (!Number.isFinite(length) || length <= 0) return;
@@ -592,6 +599,7 @@ function SplitView({
       resizeGroupSplit({
         tabId,
         splitId: node.id,
+        childIds: session.childIds,
         sizes: resizeAtDivider(
           session.sizes,
           session.dividerIndex,
@@ -631,6 +639,7 @@ function SplitView({
       resizeGroupSplit({
         tabId,
         splitId: node.id,
+        childIds: node.children.map((child) => child.id),
         sizes: resizeAtDivider(sizes, dividerIndex, next),
       }),
     );

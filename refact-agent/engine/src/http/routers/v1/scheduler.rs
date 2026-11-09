@@ -32,24 +32,12 @@ fn automation_error(error: String) -> ScratchError {
     ScratchError::new(code, error)
 }
 
-// The permissive read CORS policy is not mutation authority. Opaque iframe origins
-// and cross-origin browser requests cannot edit desired project configuration.
 fn automation_mutation_origin(headers: &axum::http::HeaderMap) -> Result<(), ScratchError> {
-    if let Some(origin) = headers.get("origin") {
-        let origin = origin.to_str().ok().and_then(|s| url::Url::parse(s).ok());
-        let host = headers.get("host").and_then(|s| s.to_str().ok());
-        let authority = origin.as_ref().and_then(|u| {
-            u.host_str().map(|h| match u.port() {
-                Some(p) => format!("{h}:{p}"),
-                None => h.to_owned(),
-            })
-        });
-        if authority.as_deref() != host || origin.is_none() {
-            return Err(ScratchError::new(
-                StatusCode::FORBIDDEN,
-                "cross-origin automation mutation refused".into(),
-            ));
-        }
+    if !super::work::protected_origin_allowed(headers) {
+        return Err(ScratchError::new(
+            StatusCode::FORBIDDEN,
+            "cross-origin automation mutation refused".into(),
+        ));
     }
     Ok(())
 }
@@ -63,7 +51,8 @@ fn automation_authorize(
             StatusCode::UNAUTHORIZED,
             "host authorization required".into(),
         )
-    })
+    })?;
+    automation_mutation_origin(headers)
 }
 pub async fn handle_v1_scheduler_automation_get(
     State(app): State<AppState>,
@@ -97,7 +86,6 @@ pub async fn handle_v1_scheduler_automation_post(
     Json(request): Json<automation::DefinitionRequest>,
 ) -> Result<Json<serde_json::Value>, ScratchError> {
     automation_authorize(&app, &headers, peer)?;
-    automation_mutation_origin(&headers)?;
     let rt = automation::active(&app).await.map_err(automation_error)?;
     automation::save(&rt, None, request)
         .await
@@ -112,7 +100,6 @@ pub async fn handle_v1_scheduler_automation_put(
     Json(request): Json<automation::DefinitionRequest>,
 ) -> Result<Json<serde_json::Value>, ScratchError> {
     automation_authorize(&app, &headers, peer)?;
-    automation_mutation_origin(&headers)?;
     let rt = automation::active(&app).await.map_err(automation_error)?;
     automation::save(&rt, Some(&id), request)
         .await
@@ -127,7 +114,6 @@ pub async fn handle_v1_scheduler_automation_delete(
     Json(request): Json<automation::RevisionRequest>,
 ) -> Result<Json<serde_json::Value>, ScratchError> {
     automation_authorize(&app, &headers, peer)?;
-    automation_mutation_origin(&headers)?;
     let rt = automation::active(&app).await.map_err(automation_error)?;
     automation::delete(&rt, &id, request)
         .await
@@ -142,7 +128,6 @@ pub async fn handle_v1_scheduler_automation_control(
     Json(request): Json<automation::ControlRequest>,
 ) -> Result<Json<serde_json::Value>, ScratchError> {
     automation_authorize(&app, &headers, peer)?;
-    automation_mutation_origin(&headers)?;
     let rt = automation::active(&app).await.map_err(automation_error)?;
     automation::control(&rt, &id, request)
         .await

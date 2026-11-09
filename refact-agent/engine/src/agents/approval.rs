@@ -401,9 +401,6 @@ pub async fn request(
                 &mut session,
                 &call.id,
             )?;
-            if let Some(receipt) = session.app_mutation_receipts.get_mut(&call.id) {
-                receipt.accepted = true;
-            }
         }
         if let Some(execution) = pending.execution {
             ccx.lock().await.approved_executions.insert(
@@ -1002,7 +999,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn mandatory_app_human_approval_blocks_pinned_auto_parent_then_accepts_exact_user_once() {
+    async fn child_app_write_needs_no_human_approval() {
         let fixture = fixture().await;
         let mut config = fixture
             .app
@@ -1064,107 +1061,13 @@ pub(crate) mod tests {
                 "expected_revision":created["revision"]
             }).to_string()}
         })).unwrap();
-        assert!(
-            crate::tools::tool_app::inspect_mutation(&fixture.ccx, &call)
-                .await
-                .unwrap()
-        );
-        let mut future = Box::pin(request(
-            &fixture.app,
-            &fixture.ccx,
-            &call,
-            crate::tools::tool_app::HUMAN_APP_APPROVAL,
-        ));
-        let pending = fixture.waiting(future.as_mut()).await;
-        // Finish publishing the human question before attempting the public model tool.
-        tokio::time::timeout(std::time::Duration::from_secs(15), async {
-            loop {
-                assert!(futures::poll!(future.as_mut()).is_pending());
-                if !parent.lock().await.pending_questions.is_empty() {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("human approval question was not published");
-        assert!(pending.requires_human);
-        let thread = parent.lock().await.thread.clone();
-        let (asks, denials) = parent_command_policy(&fixture.app, &thread, &pending)
-            .await
-            .unwrap();
-        assert!(asks.is_empty(), "parent pinned the App: {asks:?}");
-        assert!(denials.is_empty(), "{denials:?}");
-        let context = Arc::new(Mutex::new(
-            AtCommandsContext::new_from_app(
-                fixture.app.clone(),
-                4096,
-                10,
-                false,
-                vec![],
-                "parent".into(),
-                None,
-                "test/model".into(),
-                None,
-                None,
-            )
-            .await,
-        ));
-        let error = fixture
-            .app
-            .tool_registry
-            .execute_tool(
-                &context,
-                "agent",
-                Some("test/model"),
-                "model-approve",
-                "agent_approval",
-                serde_json::json!({"action":"approve", "request_id":pending.id})
-                    .as_object()
-                    .unwrap()
-                    .clone(),
-            )
-            .await
-            .err()
-            .expect("parent model bypassed exact human approval");
-        assert!(error.contains("explicit user approval"), "{error}");
-        assert_eq!(
-            fixture.app.agent_approvals.decide(
-                "parent",
-                pending.run_generation,
-                &pending.id,
-                true,
-                now_ms()
-            ),
-            Err(refact_work_core::ApprovalError::NotApproved)
-        );
-        assert!(futures::poll!(future.as_mut()).is_pending());
-        let set = parent.lock().await.pending_questions[0].clone();
-        let response = crate::chat::handle_v1_chat_command(
-            axum::extract::State(fixture.app.clone()),
-            axum::extract::Path("parent".into()),
-            hyper::body::Bytes::from(
-                serde_json::json!({"client_request_id":"actual-human", "type":"answer_questions",
-                "tool_call_id":set.tool_call_id,"asked_at_ms":set.asked_at_ms,
-                "answers":[{"id":pending.id,"answer":"approve"}]})
-                .to_string(),
-            ),
-        )
-        .await
-        .unwrap();
-        assert_eq!(response.status(), axum::http::StatusCode::OK);
-        assert!(future.await.unwrap());
         let result = fixture.execute(&call).await.unwrap();
         assert!(
             result
                 .messages
                 .iter()
                 .all(|message| message.tool_failed != Some(true)),
-            "approved child App write failed"
-        );
-        assert!(
-            fixture.execute(&call).await.is_err(),
-            "human receipt replay executed"
+            "child App write failed"
         );
         fixture.app.gcx.apps.shutdown().await;
     }

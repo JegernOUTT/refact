@@ -573,19 +573,47 @@ const resizeSplitNode = (
   node: PaneNode,
   splitId: string,
   sizes: number[],
+  childIds?: string[],
 ): PaneNode => {
   if (node.kind === "leaf") {
     return normalizeLeaf(node);
   }
 
   const children = node.children.map((child) =>
-    resizeSplitNode(child, splitId, sizes),
+    resizeSplitNode(child, splitId, sizes, childIds),
   );
+  let nextSizes = node.id === splitId ? sizes : node.sizes;
+  if (node.id === splitId && childIds) {
+    const indices = childIds.map((id) =>
+      node.children.findIndex((child) => paneNodeIdExists(child, id)),
+    );
+    const total = sizes.reduce((sum, size) => sum + size, 0);
+    if (
+      childIds.length !== sizes.length ||
+      indices.some((index) => index < 0) ||
+      new Set(indices).size !== indices.length ||
+      sizes.some((size) => !Number.isFinite(size) || size < 0) ||
+      total <= 0
+    )
+      return node;
+    const normalized = normalizeSizes(node);
+    if (normalized.kind !== "split") return node;
+    const visibleWeight = indices.reduce(
+      (sum, index) => sum + normalized.sizes[index],
+      0,
+    );
+    nextSizes = normalized.sizes.map((size, index) => {
+      const visibleIndex = indices.indexOf(index);
+      return visibleIndex < 0
+        ? size
+        : (sizes[visibleIndex] / total) * visibleWeight;
+    });
+  }
 
   return normalizePaneTree({
     ...node,
     children,
-    sizes: node.id === splitId ? sizes : node.sizes,
+    sizes: nextSizes,
   });
 };
 
@@ -1975,6 +2003,7 @@ export const workspaceSlice = createSlice({
         tabId: SurfaceKey;
         splitId: string;
         sizes: number[];
+        childIds?: string[];
       }>,
     ) => {
       const group = state.groups[action.payload.tabId];
@@ -1985,6 +2014,7 @@ export const workspaceSlice = createSlice({
           group.root,
           action.payload.splitId,
           action.payload.sizes,
+          action.payload.childIds,
         ),
         focusedLeafId: group.focusedLeafId,
       });
@@ -2187,6 +2217,7 @@ type WorkspaceRootState = {
   workspace: WorkspaceState;
   pages?: readonly WorkspacePageState[];
   tasksUI?: { openTasks: readonly WorkspaceTaskState[] };
+  apps?: { views: Record<string, { chatId?: string } | undefined> };
 };
 
 type FocusedChatWorkspaceRootState = WorkspaceRootState & {
@@ -2214,7 +2245,41 @@ type FocusedChatWorkspaceRootState = WorkspaceRootState & {
 
 const EMPTY_WORKSPACE_ROOTS: string[] = [];
 
-export const selectTabs = (state: WorkspaceRootState) => state.workspace.tabs;
+const selectLinkedAppChatId = (state: WorkspaceRootState): string | null => {
+  const page = state.pages?.[state.pages.length - 1];
+  if (page && page.name !== "chat") return null;
+  const group = state.workspace.activeTabId
+    ? state.workspace.groups[state.workspace.activeTabId]
+    : undefined;
+  const surface = group
+    ? focusedSurfaceKey(group)
+    : state.workspace.activeTabId;
+  return (
+    selectFocusedWorkspaceChatId(state) ??
+    (surface && isAppSurface(surface)
+      ? state.apps?.views[surface]?.chatId ?? null
+      : null)
+  );
+};
+
+const selectAppSurfaceVisibility = createSelector(
+  [(state: WorkspaceRootState) => state.apps?.views, selectLinkedAppChatId],
+  (views, chatId) => (key: SurfaceKey) => {
+    const owner = isAppSurface(key) ? views?.[key]?.chatId : undefined;
+    return !owner || owner === chatId;
+  },
+);
+
+export const selectTabs = createSelector(
+  [
+    (state: WorkspaceRootState) => state.workspace.tabs,
+    selectAppSurfaceVisibility,
+  ],
+  (tabs, visible) => {
+    const filtered = tabs.filter(visible);
+    return filtered.length === tabs.length ? tabs : filtered;
+  },
+);
 
 export const selectPanelsForced = (state: WorkspaceRootState) =>
   state.workspace.panelsForced ?? false;
@@ -2225,16 +2290,58 @@ export const selectWorkspaceDock = (state: WorkspaceRootState) =>
 export const selectWorkspaceDrawer = (state: WorkspaceRootState) =>
   state.workspace.drawer ?? DEFAULT_WORKSPACE_DRAWER;
 
-export const selectActiveTabId = (state: WorkspaceRootState) =>
-  state.workspace.activeTabId;
+export const selectActiveTabId = (
+  state: WorkspaceRootState,
+): SurfaceKey | null => {
+  const active = state.workspace.activeTabId;
+  const tabs = selectTabs(state);
+  return active && tabs.includes(active) ? active : tabs[0] ?? null;
+};
+
+export const selectWorkspaceGroups = createSelector(
+  [
+    (state: WorkspaceRootState) => state.workspace.groups,
+    selectAppSurfaceVisibility,
+  ],
+  (groups, visible): WorkspaceGroups => {
+    const project = (node: PaneNode): PaneNode | null => {
+      if (node.kind === "leaf") {
+        const tabIds = node.tabIds.filter(visible);
+        if (tabIds.length === node.tabIds.length) return node;
+        return tabIds.length ? normalizeLeaf({ ...node, tabIds }) : null;
+      }
+      const children = node.children.map(project);
+      if (children.every((child, index) => child === node.children[index]))
+        return node;
+      const kept = children.filter(
+        (child): child is PaneNode => child !== null,
+      );
+      if (kept.length === 0) return null;
+      if (kept.length === 1) return kept[0];
+      return normalizeSizes({
+        ...node,
+        children: kept,
+        sizes: node.sizes.filter((_, index) => children[index] !== null),
+      });
+    };
+    const projected = Object.fromEntries(
+      Object.entries(groups).map(([key, group]) => {
+        if (!group) return [key, group];
+        const root = project(group.root);
+        if (root === group.root) return [key, group];
+        return [key, root ? ensureGroupFocus({ ...group, root }) : undefined];
+      }),
+    );
+    return Object.keys(groups).every((key) => projected[key] === groups[key])
+      ? groups
+      : projected;
+  },
+);
 
 export const selectGroupForTab = (
   state: WorkspaceRootState,
   tabId: SurfaceKey,
-) => state.workspace.groups[tabId] ?? null;
-
-export const selectWorkspaceGroups = (state: WorkspaceRootState) =>
-  state.workspace.groups;
+) => selectWorkspaceGroups(state)[tabId] ?? null;
 
 export const selectLiveEditsForChat = (
   state: FocusedChatWorkspaceRootState,
@@ -2244,10 +2351,10 @@ export const selectLiveEditsForChat = (
   state.workspace.liveEditsDefault ??
   false;
 
-export const selectActiveGroup = (state: WorkspaceRootState) =>
-  state.workspace.activeTabId
-    ? selectGroupForTab(state, state.workspace.activeTabId)
-    : null;
+export const selectActiveGroup = (state: WorkspaceRootState) => {
+  const activeTabId = selectActiveTabId(state);
+  return activeTabId ? selectGroupForTab(state, activeTabId) : null;
+};
 
 export const selectIsTabSplit = (
   state: WorkspaceRootState,
@@ -2257,10 +2364,10 @@ export const selectIsTabSplit = (
 export const selectVisibleSurfaceKeys = (
   state: WorkspaceRootState,
 ): SurfaceKey[] => {
-  const activeTabId = state.workspace.activeTabId;
+  const activeTabId = selectActiveTabId(state);
   if (!activeTabId) return [];
 
-  const group = state.workspace.groups[activeTabId];
+  const group = selectGroupForTab(state, activeTabId);
   if (!group) return [activeTabId];
 
   return unique(activeSurfaceKeys(group.root));

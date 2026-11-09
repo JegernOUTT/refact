@@ -29,17 +29,6 @@ pub struct ToolApp {
     pub family: Family,
 }
 
-pub(crate) const HUMAN_APP_APPROVAL: &str = "exact human app approval required";
-
-/// Ephemeral, one-use authority. Never serialized into a trajectory or supplied in tool JSON.
-pub(crate) struct AppMutationReceipt {
-    call: crate::call_validation::ChatToolCall,
-    targets: Vec<uuid::Uuid>,
-    requires_human: bool,
-    created: std::time::Instant,
-    pub(crate) accepted: bool,
-}
-
 pub(crate) fn family_for_tool(name: &str) -> Option<Family> {
     [
         Family::App,
@@ -106,14 +95,14 @@ fn mutation_targets(
 }
 
 impl ToolApp {
-    async fn mutation_policy(
+    async fn validate_mutation(
         &self,
         ccx: &Arc<Mutex<AtCommandsContext>>,
         args: &HashMap<String, Value>,
-    ) -> Result<Option<(Vec<uuid::Uuid>, bool)>, String> {
+    ) -> Result<(), String> {
         let operation = self.parse(args)?;
         if !operation.mutates {
-            return Ok(None);
+            return Ok(());
         }
         let (app, chat_id, model) = {
             let c = ccx.lock().await;
@@ -154,75 +143,9 @@ impl ToolApp {
         } else {
             None
         };
-        let targets = mutation_targets(self.family, operation.action, args, &workspace, view_app)?;
-        let new_app =
-            matches!(self.family, Family::App) && matches!(operation.action, "create" | "clone");
-        let stricter = matches!(self.family, Family::Source)
-            && matches!(
-                operation.action,
-                "control" | "grant_endpoint" | "grant_file" | "set_policy" | "remove"
-            )
-            || matches!(self.family, Family::App) && operation.action == "remove"
-            || matches!(self.family, Family::Binding) && operation.action == "detach";
-        let requires_human = new_app
-            || stricter
-            || targets
-                .iter()
-                .any(|id| !workspace.bindings.iter().any(|b| b.app_id == *id));
-        Ok(Some((targets, requires_human)))
+        mutation_targets(self.family, operation.action, args, &workspace, view_app)?;
+        Ok(())
     }
-}
-
-pub(crate) async fn inspect_mutation(
-    ccx: &Arc<Mutex<AtCommandsContext>>,
-    call: &crate::call_validation::ChatToolCall,
-) -> Result<bool, String> {
-    let name = crate::llm::adapters::claude_code_compat::cc_normalize_internal_tool_name(
-        &call.function.name,
-    );
-    let Some(family) = family_for_tool(&name) else {
-        return Ok(false);
-    };
-    let tool = ToolApp {
-        config_path: String::new(),
-        family,
-    };
-    let Some((targets, requires_human)) = tool
-        .mutation_policy(ccx, &call.function.parse_args().map_err(|e| e.to_string())?)
-        .await?
-    else {
-        return Ok(false);
-    };
-    let (app, chat_id) = {
-        let c = ccx.lock().await;
-        (c.app.clone(), c.chat_id.clone())
-    };
-    let session = app
-        .chat
-        .sessions
-        .read()
-        .await
-        .get(&chat_id)
-        .cloned()
-        .ok_or("caller chat unavailable")?;
-    let mut session = session.lock().await;
-    session
-        .app_mutation_receipts
-        .retain(|_, r| r.created.elapsed() < std::time::Duration::from_secs(900));
-    if session.app_mutation_receipts.len() >= 128 {
-        return Err("app confirmation capacity reached".into());
-    }
-    session
-        .app_mutation_receipts
-        .entry(call.id.clone())
-        .or_insert_with(|| AppMutationReceipt {
-            call: call.clone(),
-            targets,
-            requires_human,
-            created: std::time::Instant::now(),
-            accepted: false,
-        });
-    Ok(requires_human)
 }
 
 struct AppToolAudit(Vec<ChatMessage>);
@@ -289,7 +212,7 @@ impl Family {
         Self::Binding => "List, attach, update or detach actual UUID app bindings in this chat's persisted AppWorkspace. Mutations require the current workspace revision; attach can create a split layout containing chat:self and the app. Apps remain independently stored; detach does not delete an app.",
         Self::Layout => "Get or replace this chat's validated AppWorkspace layout tree with revision fencing. Leaves reference chat:self or existing UUID app bindings; multiple apps and recursive splits are supported. Future opaque schemas are read-only.",
         Self::View => "List registered live app viewers or request open/focus/close through the connected host. A requested action is not evidence of a registered or focused browser. No viewer token is model-visible and the tool cannot register an arbitrary browser.",
-        Self::Source => "List/read app source declarations and inspect supervised adapter status. Configure/update/remove writes app.json with revision fencing, never silently publishes or executes. Drivers are manual, file_tail, interval, http_poll, sse, websocket, process or internal. policy reads host-applied source policy; set_policy changes bounded retry/freshness/network protocol and credential REFERENCES only, revoking execution approval. grant_file requires exact project-relative path and stop/follow rotation policy. Both require actual human confirmation even for linked Apps; no secret enrollment is model-visible. Durable background control remains explicit start/stop; declarations alone never start it; permissions are declarations, not grants. grant_endpoint binds an exact origin and explicit allowed_private_ips to the published expected_revision; local endpoints require this user-approved capability. Source start/stop/pause/resume/grant/revoke uses normal tool approval and runtime authority; caller-supplied approval flags are forbidden. Arbitrary adapters are authorized supervised work, not a sandbox claim.",
+        Self::Source => "List/read app source declarations and inspect supervised adapter status. Configure/update/remove writes app.json with revision fencing, never silently publishes or executes. Drivers are manual, file_tail, interval, http_poll, sse, websocket, process or internal. policy reads host-applied source policy; set_policy changes bounded retry/freshness/network protocol and credential REFERENCES only, revoking execution approval. grant_file requires exact project-relative path and stop/follow rotation policy. App operations run without confirmation prompts; no secret enrollment is model-visible. Durable background control remains explicit start/stop; declarations alone never start it; permissions are declarations, not grants. grant_endpoint binds an exact origin and explicit allowed_private_ips to the published expected_revision; local endpoints require this explicit capability. Source start/stop/pause/resume/grant/revoke requires runtime authority without confirmation prompts; caller-supplied approval flags are forbidden. Arbitrary adapters are authorized supervised work, not a sandbox claim.",
         Self::Event => "List bounded caller-scoped runtime event envelopes, inspect their envelope schema, or read one by sequence number. Declared channels are in app.json sources/actions. Emit an app event only through the trusted runtime, never by fabricating a viewer token. Event payloads do not grant permissions or execute undeclared actions.",
         Self::Inspect => "Inspect app manifest, draft/published revision metadata and bounded runtime diagnostics without executing app code. Runtime privacy and source provenance remain enforced.",
         Self::Screenshot => "Capture a genuinely registered app viewer through the connected host, with revision/generation fencing and timeout. Returns actual image/png multimodal content when available; SVG fallback is reported honestly as an SVG artifact, never disguised as PNG. No frontend means an error, not fabricated screenshot success.",
@@ -706,27 +629,20 @@ impl Tool for ToolApp {
     }
     async fn match_against_confirm_deny(
         &self,
-        _ccx: Arc<Mutex<AtCommandsContext>>,
+        ccx: Arc<Mutex<AtCommandsContext>>,
         args: &HashMap<String, Value>,
     ) -> Result<MatchConfirmDeny, String> {
         let operation = self.parse(args)?;
+        self.validate_mutation(&ccx, args).await?;
         Ok(MatchConfirmDeny {
-            result: if operation.mutates {
-                MatchConfirmDenyResult::CONFIRMATION
-            } else {
-                MatchConfirmDenyResult::PASS
-            },
+            result: MatchConfirmDenyResult::PASS,
             command: format!(
                 "{} {} {}",
                 self.family.name(),
                 operation.action,
                 serde_json::to_string(args).map_err(|e| e.to_string())?
             ),
-            rule: if operation.mutates {
-                "app mutation requires approval".into()
-            } else {
-                String::new()
-            },
+            rule: String::new(),
         })
     }
     async fn tool_execute(
@@ -850,41 +766,7 @@ impl Tool for ToolApp {
         } else {
             None
         };
-        if let Some((targets, requires_human)) = self.mutation_policy(&ccx, args).await? {
-            let session = app
-                .chat
-                .sessions
-                .read()
-                .await
-                .get(&chat_id)
-                .cloned()
-                .ok_or("caller chat unavailable")?;
-            let receipt = session
-                .lock()
-                .await
-                .app_mutation_receipts
-                .remove(tool_call_id);
-            if requires_human || receipt.is_some() {
-                let receipt = receipt.ok_or(HUMAN_APP_APPROVAL)?;
-                let original_args = receipt
-                    .call
-                    .function
-                    .parse_args()
-                    .map_err(|e| e.to_string())?;
-                let original_name =
-                    crate::llm::adapters::claude_code_compat::cc_normalize_internal_tool_name(
-                        &receipt.call.function.name,
-                    );
-                if receipt.created.elapsed() >= std::time::Duration::from_secs(900)
-                    || original_name != self.family.name()
-                    || original_args != *args
-                    || receipt.targets != targets
-                    || ((requires_human || receipt.requires_human) && !receipt.accepted)
-                {
-                    return Err("App approval expired or call/target changed; request fresh exact human confirmation".into());
-                }
-            }
-        }
+        self.validate_mutation(&ccx, args).await?;
         let result = match self.family {
             Family::Binding | Family::Layout => {
                 workspace_execute(
@@ -1092,8 +974,6 @@ async fn source_execute(
     let app_id: uuid::Uuid =
         serde_json::from_value(args["app_id"].clone()).map_err(|e| e.to_string())?;
     if matches!(action, "policy" | "set_policy" | "grant_file") {
-        // The outer ToolApp mutation guard has consumed an exact one-use actual
-        // human receipt even for linked Apps. This port is not HTTP reachable.
         let runtime = crate::apps::runtime(app, caller).await?;
         let _activation = runtime.activation.lock().await;
         crate::apps::preflight_tool_records(app, caller).await?;
@@ -1149,7 +1029,7 @@ async fn source_execute(
         let ips: Vec<std::net::IpAddr> =
             serde_json::from_value(args["allowed_private_ips"].clone())
                 .map_err(|error| error.to_string())?;
-        return crate::apps::execute_approved_endpoint_grant(
+        return crate::apps::execute_tool_endpoint_grant(
             app,
             caller.clone(),
             app_id,
@@ -1163,7 +1043,7 @@ async fn source_execute(
         .await;
     }
     if action == "control" {
-        return crate::apps::execute_approved_source_control(
+        return crate::apps::execute_tool_source_control(
             app,
             caller.clone(),
             app_id,
@@ -1429,7 +1309,7 @@ fn prune_binding(
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
 
     fn tool(family: Family) -> ToolApp {
@@ -1443,7 +1323,7 @@ mod tests {
         serde_json::from_value(value).unwrap()
     }
 
-    async fn approval_fixture() -> (
+    pub(crate) async fn approval_fixture() -> (
         crate::app_state::AppState,
         Arc<Mutex<AtCommandsContext>>,
         tempfile::TempDir,
@@ -1547,14 +1427,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn app_preflight_auto_and_explicit_allow_cannot_replace_human_approval() {
+    async fn app_preflight_does_not_require_confirmation() {
         let (app, _ccx, _dir) = approval_fixture().await;
         let session = app.chat.sessions.read().await["app-approval"].clone();
-        let mut thread = session.lock().await.thread.clone();
-        thread.autonomous_no_confirm = true;
-        thread.auto_approve_editing_tools = true;
-        thread.auto_approve_dangerous_commands = true;
-        let call: crate::call_validation::ChatToolCall = serde_json::from_value(json!({"id":"auto-create","type":"function","function":{"name":"app","arguments":json!({"action":"create","slug":"auto","name":"Auto"}).to_string()}})).unwrap();
+        let thread = session.lock().await.thread.clone();
+        let call: crate::call_validation::ChatToolCall = serde_json::from_value(json!({"id":"create","type":"function","function":{"name":"app","arguments":json!({"action":"create","slug":"auto","name":"Auto"}).to_string()}})).unwrap();
         let (confirmations, denials) = crate::chat::tools::check_tools_confirmation(
             app.clone(),
             &[call.clone()],
@@ -1563,17 +1440,12 @@ mod tests {
             None,
             "agent",
             Some("test/model"),
-            &["app".into()],
+            &[],
             "",
         )
         .await;
+        assert!(confirmations.is_empty(), "{confirmations:?}");
         assert!(denials.is_empty(), "{denials:?}");
-        assert_eq!(confirmations.len(), 1);
-        assert_eq!(confirmations[0].rule, HUMAN_APP_APPROVAL);
-        let mut prefixed = call.clone();
-        prefixed.id = "prefixed-create".into();
-        prefixed.function.name = "t_app".into();
-        assert!(inspect_mutation(&_ccx, &prefixed).await.unwrap());
         let mut denied_thread = thread;
         denied_thread.id = "missing-chat".into();
         let (confirmations, denials) = crate::chat::tools::check_tools_confirmation(
@@ -1584,7 +1456,7 @@ mod tests {
             None,
             "agent",
             Some("test/model"),
-            &["app".into()],
+            &[],
             "",
         )
         .await;
@@ -1594,147 +1466,69 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn attach_cannot_self_pin_and_binding_resolution_is_chat_local() {
+    async fn attach_without_confirmation_keeps_binding_resolution_chat_local() {
         let (app, ccx, _dir) = approval_fixture().await;
-        let created = crate::apps::execute(
-            &app,
-            crate::apps::Caller::Host,
-            crate::apps::Command::Create {
-                slug: "existing".into(),
-                name: "Existing".into(),
-            },
-        )
-        .await
-        .unwrap();
-        let app_id: uuid::Uuid =
-            serde_json::from_value(created["manifest"]["app_id"].clone()).unwrap();
-        let binding_id = uuid::Uuid::new_v4();
-        let attach = args(json!({"action":"attach","app_id":app_id,"expected_revision":0}));
-        assert!(
-            tool(Family::Binding)
-                .mutation_policy(&ccx, &attach)
-                .await
-                .unwrap()
-                .unwrap()
-                .1
-        );
-        assert_eq!(
-            tool(Family::Binding)
-                .tool_execute(ccx.clone(), &"self-pin".into(), &attach)
-                .await
-                .unwrap_err(),
-            HUMAN_APP_APPROVAL
-        );
-        let session = app.chat.sessions.read().await["app-approval"].clone();
-        let mut workspace = refact_chat_api::AppWorkspace::empty();
-        workspace.bindings.push(refact_chat_api::AppBinding {
-            binding_id,
-            app_id,
-            params: Map::new(),
-            state: Map::new(),
-        });
-        session.lock().await.thread.app_workspace =
-            Some(refact_chat_api::StoredAppWorkspace::Supported(workspace));
-        // Binding existence, not visibility in the layout, defines pinning.
-        let write = args(
-            json!({"action":"write_file","app_id":app_id,"path":"ui/index.html","content":"changed","expected_revision":created["revision"]}),
-        );
-        assert!(
-            !tool(Family::App)
-                .mutation_policy(&ccx, &write)
-                .await
-                .unwrap()
-                .unwrap()
-                .1
-        );
-        tool(Family::App)
-            .tool_execute(ccx.clone(), &"pinned".into(), &write)
+        let created = tool(Family::App)
+            .tool_execute(
+                ccx.clone(),
+                &"create".into(),
+                &args(json!({"action":"create","slug":"existing","name":"Existing"})),
+            )
             .await
             .unwrap();
-        let pinned_call: crate::call_validation::ChatToolCall = serde_json::from_value(json!({"id":"unpin-race","type":"function","function":{"name":"app","arguments":serde_json::to_string(&write).unwrap()}})).unwrap();
-        assert!(!inspect_mutation(&ccx, &pinned_call).await.unwrap());
-        let stored = session.lock().await.thread.app_workspace.take();
+        assert_eq!(created.1.len(), 1);
+        let runtime = crate::apps::runtime(&app, &crate::apps::Caller::Host)
+            .await
+            .unwrap();
+        let app_id = runtime.store.list().await.unwrap().apps[0].manifest.app_id;
+        tool(Family::Binding)
+            .tool_execute(
+                ccx.clone(),
+                &"attach".into(),
+                &args(json!({"action":"attach","app_id":app_id,"expected_revision":0})),
+            )
+            .await
+            .unwrap();
+        let session = app.chat.sessions.read().await["app-approval"].clone();
+        let record = runtime.store.get_by_id(app_id).await.unwrap();
+        session.lock().await.thread.app_workspace = None;
+        let write = args(
+            json!({"action":"write_file","app_id":app_id,"path":"ui/index.html","content":"unbound change","expected_revision":record.revision}),
+        );
+        tool(Family::App)
+            .tool_execute(ccx.clone(), &"unbound".into(), &write)
+            .await
+            .unwrap();
         assert!(tool(Family::App)
-            .tool_execute(ccx.clone(), &pinned_call.id, &write)
+            .tool_execute(ccx.clone(), &"stale".into(), &write)
             .await
             .unwrap_err()
-            .contains("fresh exact human"));
-        session.lock().await.thread.app_workspace = stored;
+            .contains("conflict"));
         let foreign = args(
-            json!({"action":"update","binding_id":uuid::Uuid::new_v4(),"expected_revision":0}),
+            json!({"action":"update","binding_id":uuid::Uuid::new_v4(),"expected_revision":1}),
         );
         assert_eq!(
             tool(Family::Binding)
-                .mutation_policy(&ccx, &foreign)
+                .tool_execute(ccx.clone(), &"foreign".into(), &foreign)
                 .await
                 .unwrap_err(),
             "binding not found in caller chat"
-        );
-        let source = args(
-            json!({"action":"grant_endpoint","app_id":app_id,"source_id":"weather","expected_revision":"published","origin":"https://example.com","allowed_private_ips":[]}),
-        );
-        assert!(
-            tool(Family::Source)
-                .mutation_policy(&ccx, &source)
-                .await
-                .unwrap()
-                .unwrap()
-                .1
         );
         app.gcx.apps.shutdown().await;
     }
 
     #[tokio::test]
-    async fn unbound_create_dispatch_requires_exact_one_use_human_receipt() {
+    async fn unbound_create_dispatch_needs_no_receipt_and_retains_store_validation() {
         let (app, ccx, _dir) = approval_fixture().await;
         let create = args(json!({"action":"create","slug":"approved","name":"Approved"}));
         let mut tool = tool(Family::App);
-        assert_eq!(
-            tool.tool_execute(ccx.clone(), &"missing".into(), &create)
-                .await
-                .unwrap_err(),
-            HUMAN_APP_APPROVAL
-        );
-        let call: crate::call_validation::ChatToolCall = serde_json::from_value(json!({"id":"exact","type":"function","function":{"name":"app","arguments":serde_json::to_string(&create).unwrap()}})).unwrap();
-        assert!(inspect_mutation(&ccx, &call).await.unwrap());
-        assert!(tool
-            .tool_execute(ccx.clone(), &call.id, &create)
-            .await
-            .unwrap_err()
-            .contains("fresh exact human"));
-        assert!(inspect_mutation(&ccx, &call).await.unwrap());
-        let session = app.chat.sessions.read().await["app-approval"].clone();
-        session
-            .lock()
-            .await
-            .app_mutation_receipts
-            .get_mut(&call.id)
-            .unwrap()
-            .accepted = true;
-        let mut rewritten = create.clone();
-        rewritten.insert("slug".into(), json!("rewritten"));
-        assert!(tool
-            .tool_execute(ccx.clone(), &call.id, &rewritten)
-            .await
-            .unwrap_err()
-            .contains("call/target changed"));
-        assert!(inspect_mutation(&ccx, &call).await.unwrap());
-        session
-            .lock()
-            .await
-            .app_mutation_receipts
-            .get_mut(&call.id)
-            .unwrap()
-            .accepted = true;
-        tool.tool_execute(ccx.clone(), &call.id, &create)
+        tool.tool_execute(ccx.clone(), &"create".into(), &create)
             .await
             .unwrap();
-        assert_eq!(
-            tool.tool_execute(ccx.clone(), &call.id, &create)
-                .await
-                .unwrap_err(),
-            HUMAN_APP_APPROVAL
-        );
+        assert!(tool
+            .tool_execute(ccx.clone(), &"create-again".into(), &create)
+            .await
+            .is_err());
         app.gcx.apps.shutdown().await;
     }
 
