@@ -667,10 +667,20 @@ impl Tool for ToolApp {
         };
         let runtime = crate::apps::runtime(&app, &caller).await?;
         if let Some(scope) = execution_scope {
-            if tokio::fs::canonicalize(scope.effective_root())
+            let resolved = crate::apps::work_caller(&app, &caller).await?;
+            if tokio::fs::canonicalize(&resolved.source_root)
                 .await
                 .map_err(|e| e.to_string())?
                 != runtime.root
+            {
+                return Err("app runtime project changed".into());
+            }
+            if tokio::fs::canonicalize(scope.effective_root())
+                .await
+                .map_err(|e| e.to_string())?
+                != tokio::fs::canonicalize(resolved.checkout_root)
+                    .await
+                    .map_err(|e| e.to_string())?
             {
                 return Err("app runtime checkout does not match tool execution scope".into());
             }

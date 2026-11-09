@@ -21,6 +21,7 @@ import {
   sameAppThemeTokens,
   type AppThemeTokens,
 } from "./appTheme";
+import { v4 as uuidv4 } from "uuid";
 import styles from "./AppSurface.module.css";
 import { closeTab, setActiveTab } from "../Workspace/workspaceSlice";
 
@@ -364,7 +365,7 @@ function AppSurfaceView({
           return command({
             action: "action_request",
             ...credentials,
-            request_id: crypto.randomUUID(),
+            request_id: uuidv4(),
             action_id: params.name,
             payload: params.payload,
           }).unwrap();

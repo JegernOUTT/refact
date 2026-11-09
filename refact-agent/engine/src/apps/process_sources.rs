@@ -27,13 +27,14 @@ struct Target {
     generation: String,
     process: ExecProcessId,
     caller: String,
+    checkout: PathBuf,
     cursor: u64,
     terminal_sent: bool,
 }
 #[derive(Default)]
 struct Provenance {
     records: HashSet<FileRecord>,
-    processes: HashMap<ExecProcessId, String>,
+    processes: HashMap<ExecProcessId, (String, PathBuf)>,
     failure: Option<String>,
     inherited_incomplete: bool,
     marker_loaded: bool,
@@ -165,7 +166,9 @@ impl ProcessSourceAdapter {
                 return Err("manifest chat identity is not process authority".into());
             }
             let process = ExecProcessId(process_id.clone());
-            self.authorize(&process, approved_caller_chat).await?;
+            let checkout = self.owner_checkout(approved_caller_chat).await?;
+            self.authorize(&process, approved_caller_chat, &checkout)
+                .await?;
             let generation = snapshots
                 .iter()
                 .find(|s| s.source_id == def.source_id)
@@ -183,6 +186,7 @@ impl ProcessSourceAdapter {
                 generation,
                 process,
                 caller: approved_caller_chat.into(),
+                checkout,
                 cursor: 0,
                 terminal_sent: false,
             });
@@ -212,13 +216,17 @@ impl ProcessSourceAdapter {
                     && old.generation == target.generation
                     && old.process == target.process
                     && old.caller == target.caller
+                    && old.checkout == target.checkout
             });
             state
                 .provenance
                 .entry(app.into())
                 .or_default()
                 .processes
-                .insert(target.process.clone(), target.caller.clone());
+                .insert(
+                    target.process.clone(),
+                    (target.caller.clone(), target.checkout.clone()),
+                );
             if !unchanged {
                 state.targets.insert(key, target);
             }
@@ -236,43 +244,82 @@ impl ProcessSourceAdapter {
         Ok(())
     }
 
-    async fn authorize(
-        &self,
-        process: &ExecProcessId,
-        caller: &str,
-    ) -> Result<ExecProcessSnapshot, String> {
-        let canonical = tokio::fs::canonicalize(&self.root)
-            .await
-            .map_err(|_| "process source root unavailable")?;
-        if canonical != self.root {
-            return Err("process source root changed".into());
-        }
+    async fn owner_checkout(&self, caller: &str) -> Result<PathBuf, String> {
         let gcx = self.gcx.upgrade().ok_or("process runtime unavailable")?;
-        {
-            let session = gcx
-                .chat_sessions
-                .read()
-                .await
-                .get(caller)
-                .cloned()
-                .ok_or("process owner session unavailable")?;
+        let session = gcx
+            .chat_sessions
+            .read()
+            .await
+            .get(caller)
+            .cloned()
+            .ok_or("process owner session unavailable")?;
+        let (source, checkout, worktree_id) = {
             let session = session
                 .try_lock()
                 .map_err(|_| "process owner session busy")?;
-            let active_root = session
+            let source = crate::coordination::scope::session_source_root(&session)
+                .ok_or("process owner project unavailable")?;
+            let checkout = session
                 .thread
                 .worktree
                 .as_ref()
                 .map(|w| w.root.clone())
-                .or_else(|| session.work_project_root.clone())
-                .ok_or("process owner checkout unavailable")?;
-            if crate::exec::types::normalize_workspace_path(&active_root) != self.root {
-                return Err("process owner checkout changed".into());
+                .unwrap_or_else(|| source.clone());
+            (
+                source,
+                checkout,
+                session.thread.worktree.as_ref().map(|w| w.id.clone()),
+            )
+        };
+        let source =
+            crate::coordination::roots::resolve_source_workspace_root(gcx.clone(), source.to_str())
+                .await
+                .map_err(|_| "process owner project unavailable")?;
+        if crate::exec::types::normalize_workspace_path(&source)
+            != crate::exec::types::normalize_workspace_path(&self.root)
+        {
+            return Err("process owner project changed".into());
+        }
+        let checkout = tokio::fs::canonicalize(checkout)
+            .await
+            .map_err(|_| "process owner checkout unavailable")?;
+        if let Some(id) = worktree_id {
+            let roots = crate::coordination::roots::load_project_roots(gcx, source).await;
+            let registered = roots
+                .get(&id)
+                .and_then(|r| r.path.as_ref())
+                .ok_or("process owner worktree not registered")?;
+            if tokio::fs::canonicalize(registered)
+                .await
+                .map_err(|_| "process owner checkout unavailable")?
+                != checkout
+            {
+                return Err("process owner checkout not registered".into());
             }
         }
+        Ok(crate::exec::types::normalize_workspace_path(&checkout))
+    }
+
+    async fn authorize(
+        &self,
+        process: &ExecProcessId,
+        caller: &str,
+        checkout: &std::path::Path,
+    ) -> Result<ExecProcessSnapshot, String> {
+        if tokio::fs::canonicalize(&self.root)
+            .await
+            .map_err(|_| "process source root unavailable")?
+            != self.root
+        {
+            return Err("process source root changed".into());
+        }
+        if self.owner_checkout(caller).await? != checkout {
+            return Err("process owner checkout changed".into());
+        }
+        let gcx = self.gcx.upgrade().ok_or("process runtime unavailable")?;
         let snapshot = gcx
             .exec_registry
-            .authorize_process_access(process, caller, Some(&self.root))
+            .authorize_process_access(process, caller, Some(checkout))
             .await?;
         if snapshot.meta.owner.chat_id.as_deref() != Some(caller)
             || snapshot
@@ -281,7 +328,7 @@ impl ProcessSourceAdapter {
                 .workspace
                 .as_ref()
                 .map(|p| crate::exec::types::normalize_workspace_path(p))
-                != Some(self.root.clone())
+                != Some(crate::exec::types::normalize_workspace_path(checkout))
         {
             return Err("process source owner or checkout mismatch".into());
         }
@@ -293,11 +340,12 @@ impl ProcessSourceAdapter {
         provenance: &mut Provenance,
         process: &ExecProcessId,
         caller: &str,
+        checkout: &std::path::Path,
     ) -> Result<(), String> {
         if let Some(reason) = &provenance.failure {
             return Err(reason.clone());
         }
-        self.authorize(process, caller).await?;
+        self.authorize(process, caller, checkout).await?;
         let gcx = self.gcx.upgrade().ok_or("process runtime unavailable")?;
         let reader = gcx
             .exec_registry
@@ -383,8 +431,12 @@ impl ProcessSourceAdapter {
     async fn persist_marker(&self, app: &str, provenance: &mut Provenance) -> Result<(), String> {
         self.load_marker(app, provenance).await?;
         let mut incomplete = provenance.inherited_incomplete || provenance.failure.is_some();
-        for (process, caller) in provenance.processes.clone() {
-            if self.capture(provenance, &process, &caller).await.is_err() {
+        for (process, (caller, checkout)) in provenance.processes.clone() {
+            if self
+                .capture(provenance, &process, &caller, &checkout)
+                .await
+                .is_err()
+            {
                 incomplete = true;
             }
         }
@@ -437,8 +489,9 @@ impl ProcessSourceAdapter {
             return Err(reason.clone());
         }
         let processes = provenance.processes.clone();
-        for (process, caller) in processes {
-            self.capture(provenance, &process, &caller).await?;
+        for (process, (caller, checkout)) in processes {
+            self.capture(provenance, &process, &caller, &checkout)
+                .await?;
         }
         Ok(provenance.records.iter().cloned().collect())
     }
@@ -479,7 +532,9 @@ impl ProcessSourceAdapter {
         target: &mut Target,
         lagged: bool,
     ) -> Result<(), String> {
-        let snapshot = self.authorize(&target.process, &target.caller).await?;
+        let snapshot = self
+            .authorize(&target.process, &target.caller, &target.checkout)
+            .await?;
         let current = self.service.snapshot(&target.app).await;
         let Some(current) = current.iter().find(|s| s.source_id == target.source) else {
             return Ok(());
@@ -507,11 +562,17 @@ impl ProcessSourceAdapter {
         }
         let provenance = state.provenance.entry(target.app.clone()).or_default();
         // Retain references even for unobserved local-only bytes; expiry must never erase taint.
-        provenance
-            .processes
-            .insert(target.process.clone(), target.caller.clone());
+        provenance.processes.insert(
+            target.process.clone(),
+            (target.caller.clone(), target.checkout.clone()),
+        );
         let observation = self
-            .capture(provenance, &target.process, &target.caller)
+            .capture(
+                provenance,
+                &target.process,
+                &target.caller,
+                &target.checkout,
+            )
             .await;
         let observation_status = match &observation {
             Ok(()) => "observed",
@@ -673,6 +734,7 @@ mod tests {
         store.publish("monitor", &created.revision).await.unwrap();
         let app_id = created.manifest.app_id.to_string();
         let gcx = crate::global_context::tests::make_test_gcx().await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![root.clone()];
         let mut owner = crate::chat::types::ChatSession::new("owner".into());
         owner.work_project_root = Some(root.clone());
         gcx.chat_sessions
@@ -834,6 +896,27 @@ mod tests {
             service.snapshot(&app_id).await[0].data.is_none(),
             "changed policy reused trusted process registration"
         );
+        // A moved owner cannot adopt the previously authorized process stream.
+        adapter
+            .authorize(&process.meta.process_id, "owner", &adapter.root)
+            .await
+            .expect("original pinned owner must be authorized before movement");
+        let other = tempfile::tempdir().unwrap();
+        {
+            let owner = gcx
+                .chat_sessions
+                .read()
+                .await
+                .get("owner")
+                .cloned()
+                .unwrap();
+            owner.lock().await.work_project_root = Some(other.path().to_path_buf());
+        }
+        assert!(adapter
+            .authorize(&process.meta.process_id, "owner", &adapter.root)
+            .await
+            .is_err());
+        assert!(adapter.known_records(&app_id).await.is_err());
         let mut task = adapter.start();
         tokio::task::yield_now().await;
         assert!(

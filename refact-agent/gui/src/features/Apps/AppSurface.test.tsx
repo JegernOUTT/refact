@@ -615,3 +615,37 @@ it("contains fill CSS so the iframe never falls back to 300px", () => {
   expect(block("root")).toContain("align-self: stretch");
   expect(block("frame")).toContain("background: var(--rf-bg)");
 });
+
+const UUID_V4_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
+it("action.request sends a valid uuid v4 request_id without crypto.randomUUID", async () => {
+  const original = crypto.randomUUID; // eslint-disable-line @typescript-eslint/unbound-method
+  Object.defineProperty(crypto, "randomUUID", {
+    value: undefined,
+    configurable: true,
+    writable: true,
+  });
+  try {
+    const commands: Record<string, unknown>[] = [];
+    mockApp((command) => commands.push(command));
+    render(<AppSurface appId="board" bindingId="binding" chatId="owner" />, {
+      store: surfaceStore(),
+    });
+    const { send, response } = await readySurface();
+    send({ id: "c10", method: "action.request", params: { name: "deploy" } });
+    await response("c10");
+    const action = commands.find((c) => c.action === "action_request");
+    expect(action).toBeDefined();
+    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+    expect(action!.action_id).toBe("deploy");
+    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+    expect(action!.request_id).toMatch(UUID_V4_RE);
+  } finally {
+    Object.defineProperty(crypto, "randomUUID", {
+      value: original,
+      configurable: true,
+      writable: true,
+    });
+  }
+});

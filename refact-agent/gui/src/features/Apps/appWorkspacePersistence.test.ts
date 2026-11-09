@@ -1,6 +1,6 @@
 /* eslint-disable @typescript-eslint/no-non-null-assertion */
 import { configureStore, type UnknownAction } from "@reduxjs/toolkit";
-import { afterEach, describe, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import {
   appWorkspacePersistenceMiddleware,
   openRequestedApp,
@@ -1083,4 +1083,152 @@ test("rail click before initial snapshot waits and reuses authoritative revision
     expected_revision: number;
   };
   expect(sent.expected_revision).toBe(7);
+});
+
+const UUID_V4_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
+describe("HTTP-compat: works without crypto.randomUUID", () => {
+  let savedRandomUUID: typeof crypto.randomUUID;
+
+  beforeEach(() => {
+    savedRandomUUID = crypto.randomUUID; // eslint-disable-line @typescript-eslint/unbound-method
+    Object.defineProperty(crypto, "randomUUID", {
+      value: undefined,
+      configurable: true,
+      writable: true,
+    });
+  });
+
+  afterEach(() => {
+    Object.defineProperty(crypto, "randomUUID", {
+      value: savedRandomUUID,
+      configurable: true,
+      writable: true,
+    });
+  });
+
+  test("attach generates a valid uuid v4 binding_id and client_request_id", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation((_url, options) => {
+        const body = JSON.parse(String(options?.body)) as {
+          workspace: AppWorkspace;
+          expected_revision: number;
+        };
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              app_workspace: {
+                ...body.workspace,
+                revision: body.expected_revision + 1,
+              },
+            }),
+          ),
+        );
+      });
+    const store = setup();
+    store.dispatch(openRailApp({ appId, name: "App" }));
+    await vi.advanceTimersByTimeAsync(200);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const body = JSON.parse(String(fetchMock.mock.calls[0][1]?.body)) as {
+      workspace: AppWorkspace;
+      client_request_id: string;
+    };
+    expect(body.workspace.bindings).toHaveLength(1);
+    expect(body.workspace.bindings[0].binding_id).toMatch(UUID_V4_RE);
+    expect(body.client_request_id).toMatch(UUID_V4_RE);
+  });
+
+  test("saved close then fresh store reload restores app and removes closed app", async () => {
+    vi.useFakeTimers();
+    let savedWorkspace: AppWorkspace | undefined;
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation((_url, options) => {
+        const body = JSON.parse(String(options?.body)) as {
+          workspace: AppWorkspace;
+          expected_revision: number;
+        };
+        savedWorkspace = {
+          ...body.workspace,
+          revision: body.expected_revision + 1,
+        };
+        return Promise.resolve(
+          new Response(JSON.stringify({ app_workspace: savedWorkspace })),
+        );
+      });
+    const store1 = setup();
+    store1.dispatch(openRailApp({ appId, name: "App" }));
+    await vi.advanceTimersByTimeAsync(200);
+    expect(fetchMock).toHaveBeenCalled();
+    expect(savedWorkspace).toBeDefined();
+    const newBindingId = savedWorkspace!.bindings[0].binding_id;
+    expect(newBindingId).toMatch(UUID_V4_RE);
+
+    const group1 = store1.getState().workspace.groups["chat:a"]!;
+    const appKey = collectTabIds(group1.root).find((k) =>
+      k.startsWith("app:"),
+    )!;
+    const leaf =
+      group1.root.kind === "split" ? group1.root.children[1] : group1.root;
+    store1.dispatch(
+      closePaneTab({ tabId: "chat:a", leafId: leaf.id, surfaceKey: appKey }),
+    );
+    await vi.advanceTimersByTimeAsync(200);
+    const closedLayout = JSON.parse(
+      String(fetchMock.mock.calls.at(-1)?.[1]?.body),
+    ) as { workspace: AppWorkspace };
+    savedWorkspace = {
+      ...closedLayout.workspace,
+      revision: (savedWorkspace?.revision ?? 0) + 1,
+    };
+
+    fetchMock.mockClear();
+    const store2 = setup();
+    store2.dispatch({ type: "test/snapshot", payload: savedWorkspace });
+    await vi.advanceTimersByTimeAsync(200);
+    expect(fetchMock).not.toHaveBeenCalled();
+    const layout2 = paneToAppLayout(
+      store2.getState().workspace.groups["chat:a"]!.root,
+      "a",
+    );
+    expect(layout2).toMatchObject({
+      kind: "leaf",
+      tabs: [{ kind: "chat" }],
+    });
+  });
+
+  test("openRequestedApp creates a valid uuid v4 binding without crypto.randomUUID", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation((_url, options) => {
+        const body = JSON.parse(String(options?.body)) as {
+          workspace: AppWorkspace;
+          expected_revision: number;
+        };
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              app_workspace: {
+                ...body.workspace,
+                revision: body.expected_revision + 1,
+              },
+            }),
+          ),
+        );
+      });
+    const store = setup();
+    store.dispatch(openRequestedApp({ appId, name: "App", chatId: "a" }));
+    await vi.advanceTimersByTimeAsync(200);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const body = JSON.parse(String(fetchMock.mock.calls[0][1]?.body)) as {
+      workspace: AppWorkspace;
+      client_request_id: string;
+    };
+    expect(body.workspace.bindings[0].binding_id).toMatch(UUID_V4_RE);
+    expect(body.client_request_id).toMatch(UUID_V4_RE);
+  });
 });

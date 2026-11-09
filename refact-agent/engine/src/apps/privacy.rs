@@ -53,6 +53,13 @@ async fn preflight_mode(
     let scope = crate::coordination::scope::model_caller(app, chat_id, &model)
         .await
         .map_err(|e| e.message)?;
+    if tokio::fs::canonicalize(&scope.source_root)
+        .await
+        .map_err(|_| "caller project unavailable")?
+        != runtime.root
+    {
+        return Err("caller project changed".into());
+    }
     let policy = app
         .gcx
         .privacy_policy_load

@@ -28,6 +28,7 @@ import {
   retryAppWorkspaceSave,
 } from "./appsSlice";
 import { isAppWorkspace, type AppWorkspace } from "./appWorkspace";
+import { v4 as uuidv4 } from "uuid";
 
 export type WorkspaceSaveStatus = "saving" | "saved" | "error" | "readonly";
 export const openRequestedApp = createAction<{
@@ -207,7 +208,7 @@ export const appWorkspacePersistenceMiddleware: Middleware = (api) => {
             type: "set_app_workspace",
             expected_revision: sent.revision,
             workspace: sent,
-            client_request_id: crypto.randomUUID(),
+            client_request_id: uuidv4(),
           }),
         },
       );
@@ -468,7 +469,7 @@ export const appWorkspacePersistenceMiddleware: Middleware = (api) => {
         }
         if (!binding) {
           binding = {
-            binding_id: crypto.randomUUID(),
+            binding_id: uuidv4(),
             app_id: action.payload.appId,
             params: {},
             state: {},

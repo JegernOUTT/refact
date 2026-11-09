@@ -162,17 +162,14 @@ impl AppRuntimes {
     }
 }
 
-pub async fn runtime(
+pub(crate) async fn work_caller(
     app: &crate::app_state::AppState,
     caller: &Caller,
-) -> Result<Arc<AppRuntime>, String> {
-    let root = match caller {
-        Caller::Host => {
-            crate::coordination::scope::operator_caller(app)
-                .await
-                .map_err(|e| e.message)?
-                .checkout_root
-        }
+) -> Result<crate::coordination::scope::WorkCaller, String> {
+    let caller = match caller {
+        Caller::Host => crate::coordination::scope::operator_caller(app)
+            .await
+            .map_err(|e| e.message)?,
         Caller::HostChat {
             chat_id,
         } => {
@@ -188,7 +185,6 @@ pub async fn runtime(
             crate::coordination::scope::model_caller(app, chat_id, &model)
                 .await
                 .map_err(|e| e.message)?
-                .checkout_root
         }
         Caller::Tool {
             chat_id,
@@ -212,10 +208,17 @@ pub async fn runtime(
             crate::coordination::scope::model_caller(app, chat_id, &model)
                 .await
                 .map_err(|e| e.message)?
-                .checkout_root
         }
     };
-    app.gcx.apps.get(root, app.gcx.clone()).await
+    Ok(caller)
+}
+
+pub async fn runtime(
+    app: &crate::app_state::AppState,
+    caller: &Caller,
+) -> Result<Arc<AppRuntime>, String> {
+    let caller = work_caller(app, caller).await?;
+    app.gcx.apps.get(caller.source_root, app.gcx.clone()).await
 }
 
 pub async fn validate_binding(
@@ -245,19 +248,17 @@ pub async fn validate_binding(
                 .cloned()
                 .ok_or("unsupported or missing app workspace")?;
             workspace.validate()?;
-            let root = session
-                .thread
-                .worktree
-                .as_ref()
-                .map(|w| w.root.clone())
-                .or_else(|| session.work_project_root.clone())
-                .ok_or("binding has no project")?;
+            let model = session.thread.model.clone();
             drop(session);
-            let root = tokio::fs::canonicalize(root)
+            let scope = crate::coordination::scope::model_caller(app, chat_id, &model)
                 .await
-                .map_err(|_| "binding root unavailable")?;
-            if root != runtime.root {
-                return Err("binding belongs to another checkout".into());
+                .map_err(|e| e.message)?;
+            if tokio::fs::canonicalize(&scope.source_root)
+                .await
+                .map_err(|_| "binding root unavailable")?
+                != runtime.root
+            {
+                return Err("binding belongs to another project".into());
             }
             if !workspace
                 .bindings

@@ -150,7 +150,11 @@ fn read_metadata(
     serde_json::from_slice(&bytes).map_err(|_| "malformed trajectory metadata".into())
 }
 
-fn persisted(root: &Path, app_id: Uuid) -> (BTreeMap<String, Chat>, Coverage) {
+fn persisted(
+    root: &Path,
+    app_id: Uuid,
+    registered: &std::collections::HashMap<String, PathBuf>,
+) -> (BTreeMap<String, Chat>, Coverage) {
     let mut coverage = Coverage::default();
     let mut chats = BTreeMap::new();
     let base = PathBuf::from(".refact/trajectories");
@@ -242,19 +246,18 @@ fn persisted(root: &Path, app_id: Uuid) -> (BTreeMap<String, Chat>, Coverage) {
                 coverage.excluded += 1;
                 continue;
             }
-            // A normal trajectory stored here belongs to this checkout unless it explicitly
-            // declares a different worktree. Never follow that untrusted path to read data.
+            // Metadata is untrusted: compare only against registry paths; never read it.
             if let Some(worktree) = &data.worktree {
-                match std::fs::canonicalize(&worktree.root) {
-                    Ok(worktree_root) if worktree_root == root => {}
-                    Ok(_) => {
-                        coverage.excluded += 1;
-                        continue;
-                    }
-                    Err(_) => {
-                        coverage.errors += 1;
-                        continue;
-                    }
+                let valid = registered.get(&worktree.id).is_some_and(|path| {
+                    std::fs::canonicalize(&worktree.root).ok().as_ref() == Some(path)
+                        && std::fs::canonicalize(&worktree.source_workspace_root)
+                            .ok()
+                            .as_deref()
+                            == Some(root)
+                });
+                if !valid {
+                    coverage.excluded += 1;
+                    continue;
                 }
             }
             match chat_metadata(&data.id, &data.title, data.app_workspace.as_ref(), app_id) {
@@ -290,9 +293,20 @@ pub async fn get(app: &AppState, runtime: &AppRuntime, app_id: Uuid) -> Result<V
         })
         .collect();
     let root = runtime.root.clone();
-    let (mut chats, mut coverage) = tokio::task::spawn_blocking(move || persisted(&root, app_id))
-        .await
-        .map_err(|_| "details inventory task failed")?;
+    let roots = crate::coordination::roots::load_project_roots(app.gcx.clone(), root.clone()).await;
+    let registered = roots
+        .by_id
+        .into_iter()
+        .filter_map(|(id, entry)| {
+            entry
+                .path
+                .and_then(|path| std::fs::canonicalize(path).ok().map(|path| (id, path)))
+        })
+        .collect();
+    let (mut chats, mut coverage) =
+        tokio::task::spawn_blocking(move || persisted(&root, app_id, &registered))
+            .await
+            .map_err(|_| "details inventory task failed")?;
     // Clone Arcs while holding the registry guard, never hold it across session awaits.
     let sessions = {
         let sessions = app.chat.sessions.read().await;
@@ -307,18 +321,13 @@ pub async fn get(app: &AppState, runtime: &AppRuntime, app_id: Uuid) -> Result<V
     };
     for session in sessions {
         coverage.live_scanned += 1;
-        let (id, title, workspace, root, visible) = {
+        let (id, title, workspace, model, visible) = {
             let session = session.lock().await;
             (
                 session.chat_id.clone(),
                 session.thread.title.clone(),
                 session.thread.app_workspace.clone(),
-                session
-                    .thread
-                    .worktree
-                    .as_ref()
-                    .map(|w| w.root.clone())
-                    .or_else(|| session.work_project_root.clone()),
+                session.thread.model.clone(),
                 displayable(
                     &session.thread.mode,
                     session.thread.parent_id.as_deref(),
@@ -331,17 +340,11 @@ pub async fn get(app: &AppState, runtime: &AppRuntime, app_id: Uuid) -> Result<V
             chats.remove(&id);
             continue;
         }
-        let Some(root) = root else {
-            if workspace.is_some() {
-                coverage.errors += 1;
-            }
-            continue;
-        };
-        let Ok(root) = tokio::fs::canonicalize(root).await else {
-            coverage.errors += 1;
-            continue;
-        };
-        if root != runtime.root {
+        let scope = crate::coordination::scope::model_caller(app, &id, &model).await;
+        if !scope.is_ok_and(|scope| {
+            crate::exec::types::normalize_workspace_path(&scope.source_root)
+                == crate::exec::types::normalize_workspace_path(&runtime.root)
+        }) {
             chats.remove(&id);
             continue;
         }
@@ -388,14 +391,14 @@ mod tests {
         let binding_id = Uuid::new_v4();
         let mut value = trajectory(app_id, binding_id);
         write(temp.path(), &value);
-        let (chats, coverage) = persisted(temp.path(), app_id);
+        let (chats, coverage) = persisted(temp.path(), app_id, &Default::default());
         assert_eq!(coverage.errors, 0);
         let projected = serde_json::to_value(chats).unwrap();
         assert_eq!(projected["closed-chat"]["binding_ids"], json!([binding_id]));
         assert!(!projected.to_string().contains("SECRET"));
         value["app_workspace"]["schema_version"] = json!(999);
         write(temp.path(), &value);
-        let (chats, coverage) = persisted(temp.path(), app_id);
+        let (chats, coverage) = persisted(temp.path(), app_id, &Default::default());
         assert!(chats.is_empty());
         assert_eq!(coverage.errors, 1);
     }
@@ -407,9 +410,11 @@ mod tests {
         let mut value = trajectory(app_id, Uuid::new_v4());
         value["link_type"] = json!("internal:tool-trace");
         write(temp.path(), &value);
-        assert!(persisted(temp.path(), app_id).0.is_empty());
+        assert!(persisted(temp.path(), app_id, &Default::default())
+            .0
+            .is_empty());
         std::fs::write(temp.path().join(".refact/trajectories/broken.json"), b"{").unwrap();
-        let (chats, coverage) = persisted(temp.path(), app_id);
+        let (chats, coverage) = persisted(temp.path(), app_id, &Default::default());
         assert!(chats.is_empty());
         assert_eq!(coverage.errors, 1);
     }
@@ -430,7 +435,7 @@ mod tests {
         let mut value = trajectory(app_id, Uuid::new_v4());
         value["worktree"] = json!({"id":"foreign","kind":"chat","root":"/other-checkout", "source_workspace_root":"/other-checkout","repo_root":"/other-checkout"});
         write(temp.path(), &value);
-        let (chats, coverage) = persisted(temp.path(), app_id);
+        let (chats, coverage) = persisted(temp.path(), app_id, &Default::default());
         assert!(chats.is_empty());
         assert!(coverage.excluded > 0 || coverage.errors > 0);
     }
@@ -449,7 +454,7 @@ mod tests {
             temp.path().join(".refact/trajectories"),
         )
         .unwrap();
-        let (chats, coverage) = persisted(temp.path(), app_id);
+        let (chats, coverage) = persisted(temp.path(), app_id, &Default::default());
         assert!(chats.is_empty());
         assert_eq!(coverage.bytes_read, 0);
         assert_eq!(coverage.errors, 1);
@@ -462,7 +467,7 @@ mod tests {
             temp.path().join(".refact/trajectories/closed-chat.json"),
         )
         .unwrap();
-        let (chats, coverage) = persisted(temp.path(), app_id);
+        let (chats, coverage) = persisted(temp.path(), app_id, &Default::default());
         assert!(chats.is_empty());
         assert_eq!(coverage.bytes_read, 0);
         assert_eq!(coverage.errors, 1);
