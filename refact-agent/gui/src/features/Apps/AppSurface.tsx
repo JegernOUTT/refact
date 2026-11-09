@@ -23,7 +23,6 @@ import {
 } from "./appTheme";
 import styles from "./AppSurface.module.css";
 import { closeTab, setActiveTab } from "../Workspace/workspaceSlice";
-import { HostAuthorization } from "../HostAuthorization/HostAuthorization";
 
 type Props = {
   appId: string;
@@ -87,7 +86,6 @@ function AppSurfaceView({
   const iframe = useRef<HTMLIFrameElement>(null);
   const [identity, setIdentity] = useState<AppViewIdentity | null>(null);
   const [failure, setFailure] = useState<string | null>(null);
-  const [unauthorized, setUnauthorized] = useState(false);
   const apiKey = useAppSelector((state) => state.config.apiKey);
   const [notice, setNotice] = useState<{
     text: string;
@@ -144,7 +142,6 @@ function AppSurfaceView({
     let registered: AppViewIdentity | null = null;
     setIdentity(null);
     setFailure(null);
-    setUnauthorized(false);
     setNotice(null);
     void command({
       action: "view_register",
@@ -167,9 +164,8 @@ function AppSurfaceView({
           });
         else setIdentity(response);
       })
-      .catch((cause: unknown) => {
+      .catch(() => {
         if (!disposed) {
-          setUnauthorized(isAppRecord(cause) && cause.status === 401);
           setFailure("App view registration failed.");
         }
       });
@@ -577,12 +573,7 @@ function AppSurfaceView({
     refetch,
   ]);
   let content;
-  if (
-    unauthorized ||
-    (error !== undefined && "status" in error && error.status === 401)
-  )
-    content = <HostAuthorization resource="apps" />;
-  else if (error !== undefined || failure !== null)
+  if (error !== undefined || failure !== null)
     content = (
       <div role="alert" className={styles.feedback}>
         <Text>

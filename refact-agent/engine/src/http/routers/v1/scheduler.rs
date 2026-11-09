@@ -1,7 +1,6 @@
-use std::net::SocketAddr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use axum::extract::{ConnectInfo, Path, State};
+use axum::extract::{Path, State};
 use axum::Json;
 use chrono::Utc;
 use hyper::StatusCode;
@@ -32,34 +31,20 @@ fn automation_error(error: String) -> ScratchError {
     ScratchError::new(code, error)
 }
 
-fn automation_mutation_origin(headers: &axum::http::HeaderMap) -> Result<(), ScratchError> {
+fn automation_authorize(headers: &axum::http::HeaderMap) -> Result<(), ScratchError> {
     if !super::work::protected_origin_allowed(headers) {
         return Err(ScratchError::new(
             StatusCode::FORBIDDEN,
-            "cross-origin automation mutation refused".into(),
+            "cross-origin automation request refused".into(),
         ));
     }
     Ok(())
 }
-fn automation_authorize(
-    app: &AppState,
-    headers: &axum::http::HeaderMap,
-    peer: Option<ConnectInfo<SocketAddr>>,
-) -> Result<(), ScratchError> {
-    super::work::authorize(app, headers, peer.map(|p| p.0)).map_err(|_| {
-        ScratchError::new(
-            StatusCode::UNAUTHORIZED,
-            "host authorization required".into(),
-        )
-    })?;
-    automation_mutation_origin(headers)
-}
 pub async fn handle_v1_scheduler_automation_get(
     State(app): State<AppState>,
-    peer: Option<ConnectInfo<SocketAddr>>,
     headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, ScratchError> {
-    automation_authorize(&app, &headers, peer)?;
+    automation_authorize(&headers)?;
     let rt = automation::active(&app).await.map_err(automation_error)?;
     automation::list(&rt, None)
         .await
@@ -68,11 +53,10 @@ pub async fn handle_v1_scheduler_automation_get(
 }
 pub async fn handle_v1_scheduler_automation_detail(
     State(app): State<AppState>,
-    peer: Option<ConnectInfo<SocketAddr>>,
     Path(id): Path<String>,
     headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, ScratchError> {
-    automation_authorize(&app, &headers, peer)?;
+    automation_authorize(&headers)?;
     let rt = automation::active(&app).await.map_err(automation_error)?;
     automation::list(&rt, Some(&id))
         .await
@@ -81,11 +65,10 @@ pub async fn handle_v1_scheduler_automation_detail(
 }
 pub async fn handle_v1_scheduler_automation_post(
     State(app): State<AppState>,
-    peer: Option<ConnectInfo<SocketAddr>>,
     headers: axum::http::HeaderMap,
     Json(request): Json<automation::DefinitionRequest>,
 ) -> Result<Json<serde_json::Value>, ScratchError> {
-    automation_authorize(&app, &headers, peer)?;
+    automation_authorize(&headers)?;
     let rt = automation::active(&app).await.map_err(automation_error)?;
     automation::save(&rt, None, request)
         .await
@@ -94,12 +77,11 @@ pub async fn handle_v1_scheduler_automation_post(
 }
 pub async fn handle_v1_scheduler_automation_put(
     State(app): State<AppState>,
-    peer: Option<ConnectInfo<SocketAddr>>,
     Path(id): Path<String>,
     headers: axum::http::HeaderMap,
     Json(request): Json<automation::DefinitionRequest>,
 ) -> Result<Json<serde_json::Value>, ScratchError> {
-    automation_authorize(&app, &headers, peer)?;
+    automation_authorize(&headers)?;
     let rt = automation::active(&app).await.map_err(automation_error)?;
     automation::save(&rt, Some(&id), request)
         .await
@@ -108,12 +90,11 @@ pub async fn handle_v1_scheduler_automation_put(
 }
 pub async fn handle_v1_scheduler_automation_delete(
     State(app): State<AppState>,
-    peer: Option<ConnectInfo<SocketAddr>>,
     Path(id): Path<String>,
     headers: axum::http::HeaderMap,
     Json(request): Json<automation::RevisionRequest>,
 ) -> Result<Json<serde_json::Value>, ScratchError> {
-    automation_authorize(&app, &headers, peer)?;
+    automation_authorize(&headers)?;
     let rt = automation::active(&app).await.map_err(automation_error)?;
     automation::delete(&rt, &id, request)
         .await
@@ -122,12 +103,11 @@ pub async fn handle_v1_scheduler_automation_delete(
 }
 pub async fn handle_v1_scheduler_automation_control(
     State(app): State<AppState>,
-    peer: Option<ConnectInfo<SocketAddr>>,
     Path(id): Path<String>,
     headers: axum::http::HeaderMap,
     Json(request): Json<automation::ControlRequest>,
 ) -> Result<Json<serde_json::Value>, ScratchError> {
-    automation_authorize(&app, &headers, peer)?;
+    automation_authorize(&headers)?;
     let rt = automation::active(&app).await.map_err(automation_error)?;
     automation::control(&rt, &id, request)
         .await
@@ -727,11 +707,11 @@ mod automation_origin_tests {
         let mut headers = axum::http::HeaderMap::new();
         headers.insert("host", "127.0.0.1:8001".parse().unwrap());
         headers.insert("origin", "null".parse().unwrap());
-        assert!(automation_mutation_origin(&headers).is_err());
+        assert!(automation_authorize(&headers).is_err());
         headers.insert("origin", "https://evil.example".parse().unwrap());
-        assert!(automation_mutation_origin(&headers).is_err());
+        assert!(automation_authorize(&headers).is_err());
         headers.insert("origin", "http://127.0.0.1:8001".parse().unwrap());
-        assert!(automation_mutation_origin(&headers).is_ok());
+        assert!(automation_authorize(&headers).is_ok());
     }
 }
 

@@ -1992,10 +1992,17 @@ mod router_tests {
                 control,
             ),
         ] {
-            let (status, body) =
-                automation_request(&router, method, uri, body, None, Some("127.0.0.1:7"), None)
-                    .await;
-            assert_eq!(status, StatusCode::UNAUTHORIZED, "{method} {uri}: {body}");
+            let (status, body) = automation_request(
+                &router,
+                method,
+                uri,
+                body,
+                None,
+                Some("127.0.0.1:7"),
+                Some("http://evil.example"),
+            )
+            .await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{method} {uri}: {body}");
             assert!(!body.to_string().contains("private-automation"));
             assert_eq!(
                 serde_json::to_value(runtime.list().unwrap()).unwrap(),
@@ -2012,7 +2019,7 @@ mod router_tests {
             None,
         )
         .await;
-        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(status, StatusCode::OK);
         for uri in [
             "/scheduler/automation",
             "/scheduler/automation/private-automation",
@@ -2022,7 +2029,7 @@ mod router_tests {
                 "GET",
                 uri,
                 serde_json::Value::Null,
-                Some("automation-router-token"),
+                None,
                 Some("192.0.2.1:7"),
                 None,
             )
@@ -2051,8 +2058,8 @@ mod router_tests {
             "DELETE",
             "/scheduler/automation/private-automation",
             revision,
-            Some("automation-router-token"),
-            Some("127.0.0.1:7"),
+            None,
+            None,
             Some("http://127.0.0.1:8001"),
         )
         .await;
@@ -2073,7 +2080,7 @@ mod router_tests {
         let app = AppState::from_gcx(gcx).await;
         let router = make_v1_router(app.clone()).with_state(app.clone());
         for (peer, origin, expected) in [
-            (None, None, StatusCode::UNAUTHORIZED),
+            (None, None, StatusCode::OK),
             (
                 Some("127.0.0.1:7"),
                 Some("http://127.0.0.1:8001"),

@@ -68,9 +68,6 @@ pub(super) fn protected_origin_allowed(headers: &HeaderMap) -> bool {
     let Ok(origin_url) = url::Url::parse(origin) else {
         return false;
     };
-    if crate::daemon::auth::origin_is_loopback(origin) {
-        return true;
-    }
     let mut hosts = headers.get_all(header::HOST).iter();
     let Some(host) = hosts.next() else {
         return false;
