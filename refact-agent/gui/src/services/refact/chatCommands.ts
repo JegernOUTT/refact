@@ -580,6 +580,7 @@ export async function submitQuestionResponse(
   clientRequestId: string,
   connection: PortOrConnection,
   apiKey?: string,
+  signal?: AbortSignal,
 ): Promise<void> {
   await sendRawChatCommand(
     chatId,
@@ -593,6 +594,7 @@ export async function submitQuestionResponse(
     },
     true,
     clientRequestId,
+    signal,
   );
 }
 

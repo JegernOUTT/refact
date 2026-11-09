@@ -597,6 +597,25 @@ describe("chatCommands", () => {
   });
 
   describe("submitQuestionResponse", () => {
+    it("forwards the question-specific abort signal to fetch", async () => {
+      mockFetch.mockResolvedValueOnce({ ok: true } as Response);
+      const controller = new AbortController();
+      await submitQuestionResponse(
+        "test-chat",
+        "call-questions",
+        123,
+        { answers: [], overall_comments: "" },
+        "request-id",
+        8001,
+        undefined,
+        controller.signal,
+      );
+      expect(mockFetch).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({ signal: controller.signal }),
+      );
+    });
+
     it("prioritizes native responses while preserving the retry request ID", async () => {
       mockFetch.mockResolvedValue({ ok: true } as Response);
       const response = {

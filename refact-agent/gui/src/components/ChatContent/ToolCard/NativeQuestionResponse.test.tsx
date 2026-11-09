@@ -268,6 +268,207 @@ function updateQuestion(
   });
 }
 
+function deferredPost() {
+  let resolve!: (response: Response) => void;
+  let reject!: (error: Error) => void;
+  const promise = new Promise<Response>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+function rejectResponse(store: ReturnType<typeof setup>["store"], id: string) {
+  act(() => {
+    store.dispatch(
+      applyChatEvent({
+        type: "ack",
+        chat_id: "questions-test",
+        seq: "2",
+        client_request_id: id,
+        accepted: false,
+        result: null,
+      }),
+    );
+  });
+}
+
+function postSignal(fetchMock: ReturnType<typeof vi.fn>, index = 0) {
+  return (fetchMock.mock.calls[index][1] as RequestInit).signal;
+}
+
+const yesQuestion = {
+  questions: [{ id: "yes", type: "yes_no" as const, text: "Continue?" }],
+};
+
+describe("question submission lifecycle", () => {
+  beforeEach(() => localStorage.clear());
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  test("shows immediate submitting feedback and suppresses duplicate clicks", async () => {
+    const fetchMock = vi.fn().mockReturnValue(new Promise(() => undefined));
+    vi.stubGlobal("fetch", fetchMock);
+    const { user, unmount } = setup(yesQuestion);
+    await user.click(screen.getByRole("radio", { name: "No" }));
+    const button = screen.getByRole("button", { name: "Submit response" });
+    await user.dblClick(button);
+    expect(screen.getByRole("button", { name: "Submitting…" })).toBeDisabled();
+    expect(screen.getByText("Submitting response…")).toBeVisible();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(postSignal(fetchMock)?.aborted).toBe(false);
+    unmount();
+    expect(postSignal(fetchMock)?.aborted).toBe(true);
+  });
+
+  test("a never-settling POST times out without resubmitting, keeps drafts and retries unchanged with the same ID", async () => {
+    const old = deferredPost();
+    const next = deferredPost();
+    const fetchMock = vi
+      .fn()
+      .mockReturnValueOnce(old.promise)
+      .mockReturnValueOnce(next.promise);
+    vi.stubGlobal("fetch", fetchMock);
+    const { user, container } = setup(yesQuestion, true);
+    await user.click(screen.getByRole("radio", { name: "No" }));
+    await user.type(
+      screen.getByRole("textbox", { name: /Overall comments/ }),
+      "Kept context",
+    );
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    act(() => {
+      screen.getByRole("button", { name: "Submit response" }).click();
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(30_000);
+    });
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "server outcome is unknown",
+    );
+    expect(container.querySelector("section")).toHaveAttribute(
+      "data-open",
+      "true",
+    );
+    expect(postSignal(fetchMock)?.aborted).toBe(true);
+    expect(screen.getByRole("radio", { name: "No" })).toBeChecked();
+    expect(screen.getByRole("radio", { name: "No" })).toBeEnabled();
+    expect(
+      screen.getByRole("textbox", { name: /Overall comments/ }),
+    ).toHaveValue("Kept context");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000);
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    vi.useRealTimers();
+    await user.click(screen.getByRole("button", { name: "Submit response" }));
+    expect(requestIds(fetchMock)[1]).toBe(requestIds(fetchMock)[0]);
+    await act(async () => {
+      old.resolve({ ok: true } as Response);
+      await Promise.resolve();
+    });
+    expect(screen.getByRole("button", { name: "Submitting…" })).toBeDisabled();
+    expect(
+      screen.queryByText("Response sent, awaiting confirmation."),
+    ).toBeNull();
+    await act(async () => {
+      next.resolve({ ok: true } as Response);
+      await Promise.resolve();
+    });
+    expect(
+      screen.getByText("Response sent, awaiting confirmation."),
+    ).toBeVisible();
+  });
+
+  test("a rejection ACK unlocks immediately and a late 2xx cannot resurrect sent", async () => {
+    const post = deferredPost();
+    const fetchMock = vi.fn().mockReturnValue(post.promise);
+    vi.stubGlobal("fetch", fetchMock);
+    const { user, store } = setup(yesQuestion);
+    await user.click(screen.getByRole("radio", { name: "No" }));
+    await user.click(screen.getByRole("button", { name: "Submit response" }));
+    rejectResponse(store, requestIds(fetchMock)[0]);
+    expect(
+      screen.getByRole("button", { name: "Submit response" }),
+    ).toBeEnabled();
+    expect(screen.getByRole("alert")).toHaveTextContent("server rejected");
+    expect(postSignal(fetchMock)?.aborted).toBe(true);
+    await act(async () => {
+      post.resolve({ ok: true } as Response);
+      await Promise.resolve();
+    });
+    expect(
+      screen.getByRole("button", { name: "Submit response" }),
+    ).toBeEnabled();
+    expect(screen.getByRole("alert")).toHaveTextContent("server rejected");
+    expect(
+      screen.queryByText("Response sent, awaiting confirmation."),
+    ).toBeNull();
+  });
+
+  test("cancellation unlocks before POST settles and stale catch/finally cannot unlock a new attempt", async () => {
+    const old = deferredPost();
+    const next = deferredPost();
+    const fetchMock = vi
+      .fn()
+      .mockReturnValueOnce(old.promise)
+      .mockReturnValueOnce(next.promise);
+    vi.stubGlobal("fetch", fetchMock);
+    const { user, store } = setup(yesQuestion);
+    await user.click(screen.getByRole("radio", { name: "No" }));
+    await user.click(screen.getByRole("button", { name: "Submit response" }));
+    act(() => {
+      store.dispatch(
+        markQueuedCommandCancelled({
+          chatId: "questions-test",
+          clientRequestId: requestIds(fetchMock)[0],
+        }),
+      );
+    });
+    expect(
+      screen.getByRole("button", { name: "Submit response" }),
+    ).toBeEnabled();
+    expect(screen.getByRole("radio", { name: "No" })).toBeChecked();
+    expect(postSignal(fetchMock)?.aborted).toBe(true);
+    await user.click(screen.getByRole("button", { name: "Submit response" }));
+    expect(requestIds(fetchMock)[1]).not.toBe(requestIds(fetchMock)[0]);
+    await act(async () => {
+      old.reject(new Error("stale failure"));
+      await Promise.resolve();
+    });
+    expect(screen.getByRole("button", { name: "Submitting…" })).toBeDisabled();
+    expect(screen.getByRole("radio", { name: "No" })).toBeDisabled();
+    expect(screen.queryByRole("alert")).toBeNull();
+    await act(async () => {
+      next.resolve({ ok: true } as Response);
+      await Promise.resolve();
+    });
+    expect(
+      screen.getByText("Response sent, awaiting confirmation."),
+    ).toBeVisible();
+  });
+
+  test("authoritative answered SSE supersedes a late network error", async () => {
+    const post = deferredPost();
+    vi.stubGlobal("fetch", vi.fn().mockReturnValue(post.promise));
+    const { user, store } = setup(yesQuestion);
+    await user.click(screen.getByRole("radio", { name: "No" }));
+    await user.click(screen.getByRole("button", { name: "Submit response" }));
+    updateQuestion(store, { status: "answered" });
+    await act(async () => {
+      post.reject(new Error("offline"));
+      await Promise.resolve();
+    });
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: "Submit response" }),
+    ).toBeNull();
+    expect(headerState(false)).toHaveTextContent("answered");
+  });
+});
+
 describe("compact protocol-v2 question responses", () => {
   beforeEach(() => localStorage.clear());
   afterEach(() => {

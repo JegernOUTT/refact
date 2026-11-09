@@ -38,6 +38,8 @@ import {
   type QuestionState,
 } from "./QuestionTranscript";
 
+const QUESTION_RESPONSE_WAIT_MS = 30_000;
+
 export function NativeQuestionResponse({
   set,
   threadId,
@@ -89,7 +91,19 @@ function ResponseInstance({
   const [requestId, setRequestId] = useState<string | null>(null);
   const lock = useRef(false);
   const retry = useRef<{ id: string; payload: string } | null>(null);
-  const cancelledId = useRef<string | null>(null);
+  const active = useRef<{
+    controller: AbortController;
+    timer: ReturnType<typeof setTimeout>;
+  } | null>(null);
+  const stopWaiting = useCallback(() => {
+    const attempt = active.current;
+    active.current = null;
+    if (!attempt) return;
+    clearTimeout(attempt.timer);
+    attempt.controller.abort();
+  }, []);
+
+  useEffect(() => stopWaiting, [stopWaiting]);
   const ack = useAppSelector((s) =>
     selectCommandAckByThreadAndId(s, threadId, requestId),
   );
@@ -107,7 +121,17 @@ function ResponseInstance({
   }, [comments, drafts, instance, pending]);
 
   useEffect(() => {
-    if (!ack || ack.accepted) return;
+    if (pending) return;
+    stopWaiting();
+    setSending(false);
+    setError(null);
+  }, [pending, stopWaiting]);
+
+  useEffect(() => {
+    if (!pending || !ack || ack.accepted) return;
+    stopWaiting();
+    setSending(false);
+    setRequestId(null);
     lock.current = false;
     setSent(false);
     setError(
@@ -115,17 +139,18 @@ function ResponseInstance({
     );
     retry.current = null;
     dispatch(requestSseRefresh({ chatId: threadId }));
-  }, [ack, dispatch, threadId]);
+  }, [ack, dispatch, pending, stopWaiting, threadId]);
 
   useEffect(() => {
-    if (!cancelled) return;
-    cancelledId.current = requestId;
+    if (!pending || !cancelled) return;
+    stopWaiting();
+    setSending(false);
     lock.current = false;
     retry.current = null;
     setSent(false);
     setError(null);
     setRequestId(null);
-  }, [cancelled, requestId]);
+  }, [cancelled, pending, stopWaiting]);
 
   const submit = useCallback(
     async (response: QuestionResponse) => {
@@ -138,6 +163,22 @@ function ResponseInstance({
         retry.current = { id: uuidv4(), payload };
       const id = retry.current.id;
       setRequestId(id);
+      const controller = new AbortController();
+      const attempt = {
+        controller,
+        timer: setTimeout(() => {
+          if (active.current !== attempt) return;
+          stopWaiting();
+          lock.current = false;
+          setSending(false);
+          setSent(false);
+          setError(
+            "Timed out waiting for confirmation. The server outcome is unknown. Your draft is kept; check status before retrying.",
+          );
+          dispatch(requestSseRefresh({ chatId: threadId }));
+        }, QUESTION_RESPONSE_WAIT_MS),
+      };
+      active.current = attempt;
       try {
         await submitQuestionResponse(
           threadId,
@@ -147,20 +188,25 @@ function ResponseInstance({
           id,
           config,
           apiKey ?? undefined,
+          controller.signal,
         );
-        if (cancelledId.current === id) return;
+        if (active.current !== attempt) return;
         setSent(true);
         dispatch(requestSseRefresh({ chatId: threadId }));
       } catch (e) {
+        if (active.current !== attempt) return;
         lock.current = false;
-        if (cancelledId.current === id) return;
         setError(
           e instanceof Error
             ? e.message
             : "Unable to send response. Your draft is kept.",
         );
       } finally {
-        setSending(false);
+        if (active.current === attempt) {
+          clearTimeout(attempt.timer);
+          active.current = null;
+          setSending(false);
+        }
       }
     },
     [
@@ -170,6 +216,7 @@ function ResponseInstance({
       pending,
       set.asked_at_ms,
       set.tool_call_id,
+      stopWaiting,
       threadId,
     ],
   );
@@ -245,6 +292,7 @@ function ResponseInstance({
               onDrafts={setDrafts}
               onComments={setComments}
               disabled={sending || sent}
+              submitting={sending}
               approval={set.tool_call_id.startsWith("agent-approval:")}
               onSubmit={(r) => void submit(r)}
             />

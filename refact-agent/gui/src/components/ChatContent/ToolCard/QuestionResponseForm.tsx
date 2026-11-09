@@ -22,6 +22,7 @@ type Props = {
   onComments: (comments: string) => void;
   onSubmit: (response: QuestionResponse) => void;
   disabled: boolean;
+  submitting?: boolean;
   approval?: boolean;
 };
 
@@ -34,6 +35,7 @@ export function QuestionResponseForm({
   onComments,
   onSubmit,
   disabled,
+  submitting = false,
   approval = false,
 }: Props) {
   const responses = questions.map((q) =>
@@ -115,7 +117,7 @@ export function QuestionResponseForm({
             });
           }}
         >
-          Submit response
+          {submitting ? "Submitting…" : "Submit response"}
         </Button>
       </div>
       <p className={styles.muted}>
