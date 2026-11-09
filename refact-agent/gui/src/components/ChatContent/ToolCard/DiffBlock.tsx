@@ -6,6 +6,11 @@ import { DiffChunk } from "../../../services/refact/types";
 import { basename } from "./utils";
 import { getDiffStats } from "./DiffBlockStats";
 import { extractCodeLines } from "./editToolHighlight";
+import {
+  downloadOriginalDiff,
+  isOversizedDiff,
+  limitDiffPreview,
+} from "./diffPreview";
 import styles from "./EditTool.module.css";
 
 const EXTENSION_LANGUAGE_MAP: Partial<Record<string, string>> = {
@@ -50,6 +55,13 @@ function languageForFile(fileName: string | undefined): string {
 const CONTEXT_LINES = 1;
 const MAX_VISIBLE_DIFF_LINES = 240;
 const MAX_HIGHLIGHT_CHARS = 50_000;
+
+const EXCERPT_FIELDS = [
+  ["lines_before", "Before-context excerpt"],
+  ["lines_remove", "Original text excerpt"],
+  ["lines_add", "Updated text excerpt"],
+  ["lines_after", "After-context excerpt"],
+] as const;
 
 type DiffLineKind = "context" | "remove" | "add";
 
@@ -354,9 +366,18 @@ export const DiffBlock: React.FC<{
   uncapped = false,
 }) => {
   const [showAll, setShowAll] = useState(uncapped);
-  const hunk = useMemo(() => buildRenderedHunk(diff), [diff]);
+  const limited = useMemo(() => isOversizedDiff(diff), [diff]);
+  const preview = useMemo(
+    () => (limited ? limitDiffPreview(diff) : null),
+    [diff, limited],
+  );
+  const hunk = useMemo(
+    () => (limited ? { header: "", lines: [] } : buildRenderedHunk(diff)),
+    [diff, limited],
+  );
   const stats = useMemo(() => getDiffStats([diff]), [diff]);
-  const isLarge = !uncapped && hunk.lines.length > MAX_VISIBLE_DIFF_LINES;
+  const isLarge =
+    !limited && !uncapped && hunk.lines.length > MAX_VISIBLE_DIFF_LINES;
   const visibleLines = useMemo(
     () => (showAll ? hunk.lines : hunk.lines.slice(0, MAX_VISIBLE_DIFF_LINES)),
     [hunk.lines, showAll],
@@ -386,9 +407,10 @@ export const DiffBlock: React.FC<{
           </span>
         )}
         <Text size="1" className={styles.hunkTitle}>
-          {hunk.header}
+          {limited ? "Large diff · partial preview" : hunk.header}
         </Text>
         <Text size="1" className={styles.statsInline}>
+          {stats.limited && "Line counts omitted"}
           {stats.added > 0 && (
             <span className={styles.added}>+{stats.added}</span>
           )}
@@ -414,6 +436,31 @@ export const DiffBlock: React.FC<{
           </Flex>
         )}
       </Flex>
+      {limited && (
+        <Box>
+          <Text as="p" size="1">
+            Preview limited for this large diff. Original diff data is
+            unchanged. Excerpts are not an inferred line-by-line diff.
+          </Text>
+          <button
+            type="button"
+            className={styles.showMoreButton}
+            onClick={() => downloadOriginalDiff(diff)}
+          >
+            Download complete original diff chunk (JSON)
+          </button>
+          {EXCERPT_FIELDS.map(([field, label]) =>
+            preview?.[field] ? (
+              <Box key={field}>
+                <Text as="p" size="1">
+                  {label}
+                </Text>
+                <code className={styles.lineContent}>{preview[field]}</code>
+              </Box>
+            ) : null,
+          )}
+        </Box>
+      )}
       {visibleLines.map((line, i) => (
         <DiffLine
           key={`${line.kind}-${line.oldLineNumber ?? ""}-${

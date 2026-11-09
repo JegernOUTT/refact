@@ -91,6 +91,26 @@ describe("diff message transcript item", () => {
     expect(screen.getAllByTestId("transcript-toggle")).toHaveLength(1);
   });
 
+  test("omits expensive oversized counts and renders only a safe preview", () => {
+    const diff = {
+      ...STUB_DIFFS_1["/emergency_frog_situation/frog.py"][0],
+      lines_remove: "deleted\n".repeat(100_000),
+    };
+    const { container } = render(
+      <DiffContent diffs={{ [diff.file_name]: [diff] }} />,
+    );
+    expect(screen.getByTestId("transcript-meta")).toHaveTextContent(
+      "Large diff · line counts omitted",
+    );
+    expect(screen.getByText(/Preview limited/)).toBeInTheDocument();
+    expect(container.querySelectorAll("code").length).toBeLessThanOrEqual(240);
+    expect(
+      screen.getByRole("button", {
+        name: /Download complete original diff chunk/,
+      }),
+    ).toBeInTheDocument();
+  });
+
   test("collapses and reopens from the row", async () => {
     const { user } = render(<DiffContent diffs={STUB_DIFFS_1} />);
     const toggle = screen.getByTestId("transcript-toggle");

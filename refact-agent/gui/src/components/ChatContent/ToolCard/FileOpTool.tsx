@@ -100,7 +100,7 @@ export const FileOpTool: React.FC<FileOpToolProps> = ({
   const path = args.path ?? "";
   const source = args.source ?? "";
   const destination = args.destination ?? "";
-  const removed = getDiffStats(allDiffs).removed;
+  const { removed, limited } = getDiffStats(allDiffs);
 
   const row =
     toolType === "mv"
@@ -121,8 +121,9 @@ export const FileOpTool: React.FC<FileOpToolProps> = ({
             icon: <Trash2 />,
             verb: "Delete",
             target: basename(path),
-            meta:
-              removed > 0
+            meta: limited
+              ? "Large diff · line counts omitted"
+              : removed > 0
                 ? `−${removed}`
                 : args.recursive
                   ? "recursive"

@@ -345,6 +345,154 @@ describe("chatSubscription", () => {
       );
     });
 
+    it("preserves a fragmented multi-megabyte diff snapshot without repeated full splits", async () => {
+      const diff = "-old line\n+new 猫 line\n".repeat(80_000);
+      const message = {
+        role: "diff",
+        content: [
+          { file_name: "large.txt", lines_remove: diff, lines_add: diff },
+        ],
+      };
+      const payload = {
+        type: "snapshot",
+        seq: 42,
+        chat_id: "test",
+        messages: [message],
+        background_agents: [],
+      };
+      const bytes = new TextEncoder().encode(
+        `data: ${JSON.stringify(payload)}\r\n\r\n`,
+      );
+      expect(bytes.length).toBeGreaterThan(1_000_000);
+      const onEvent = vi.fn();
+      const onError = vi.fn();
+      let offset = 0;
+      let finish!: () => void;
+      const finished = new Promise<void>((resolve) => {
+        finish = resolve;
+      });
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        body: {
+          getReader: () => ({
+            read: async () => {
+              if (offset >= bytes.length) return { done: true };
+              const value = bytes.subarray(offset, offset + 4093);
+              offset += value.length;
+              return { done: false, value };
+            },
+          }),
+        },
+      });
+      const split = vi.spyOn(String.prototype, "split");
+      const unsubscribe = subscribeToChatEvents(
+        "test",
+        { host: "vscode", lspPort: 8001 },
+        { onEvent, onError, onDisconnected: finish },
+      );
+      await finished;
+      const largeSplits = split.mock.contexts.flatMap((input, index) =>
+        typeof input === "string" && input.length > 1_000_000
+          ? [split.mock.calls[index][0]]
+          : [],
+      );
+      split.mockRestore();
+      unsubscribe();
+      expect(largeSplits).toEqual(["\n"]);
+      expect(onError).not.toHaveBeenCalled();
+      expect(onEvent).toHaveBeenCalledExactlyOnceWith({
+        ...payload,
+        seq: "42",
+      });
+    });
+
+    it("parses fragmented multiline data, comments, no-data and multiple events", async () => {
+      const input =
+        ': heartbeat\r\n\r\nevent: ignored\r\rdata: {"type":"snapshot",\r\ndata: "seq":"1","chat_id":"test"}\r\n\r\ndata: [DONE]\n\ndata: {"type":"stream_started","seq":"2","chat_id":"test","message_id":"m"}\n\n';
+      const bytes = new TextEncoder().encode(input);
+      let offset = 0;
+      let finish!: () => void;
+      const finished = new Promise<void>((resolve) => {
+        finish = resolve;
+      });
+      const onEvent = vi.fn<(event: ChatEventEnvelope) => void>();
+      const onError = vi.fn();
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        body: {
+          getReader: () => ({
+            read: async () =>
+              offset < bytes.length
+                ? { done: false, value: bytes.subarray(offset, ++offset) }
+                : { done: true },
+          }),
+        },
+      });
+      subscribeToChatEvents(
+        "test",
+        { lspPort: 8001 },
+        {
+          onEvent,
+          onError,
+          onDisconnected: finish,
+        },
+      );
+      await finished;
+      expect(onError).not.toHaveBeenCalled();
+      expect(
+        onEvent.mock.calls.map(([event]: [ChatEventEnvelope]) => event.type),
+      ).toEqual(["snapshot", "stream_started"]);
+    });
+
+    it("does not publish a pending fragmented frame after unsubscribe", async () => {
+      vi.useFakeTimers();
+      let resolveRead!: (value: { done: boolean; value: Uint8Array }) => void;
+      const pending = new Promise<{ done: boolean; value: Uint8Array }>(
+        (resolve) => {
+          resolveRead = resolve;
+        },
+      );
+      const read = vi
+        .fn()
+        .mockResolvedValueOnce({
+          done: false,
+          value: new TextEncoder().encode('data: {"type":"snapshot",'),
+        })
+        .mockImplementation(() => pending);
+      const callbacks = {
+        onEvent: vi.fn(),
+        onError: vi.fn(),
+        onConnected: vi.fn(),
+        onActivity: vi.fn(),
+        onDisconnected: vi.fn(),
+      };
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        body: { getReader: () => ({ read }) },
+      });
+      const unsubscribe = subscribeToChatEvents(
+        "test",
+        { lspPort: 8001 },
+        callbacks,
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      expect(read).toHaveBeenCalledTimes(2);
+      expect(callbacks.onActivity).toHaveBeenCalledOnce();
+      unsubscribe();
+      resolveRead({
+        done: false,
+        value: new TextEncoder().encode('"seq":"1","chat_id":"test"}\n\n'),
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(callbacks.onEvent).not.toHaveBeenCalled();
+      expect(callbacks.onError).not.toHaveBeenCalled();
+      expect(callbacks.onDisconnected).not.toHaveBeenCalled();
+      expect(callbacks.onActivity).toHaveBeenCalledOnce();
+      expect(callbacks.onConnected).toHaveBeenCalledOnce();
+      expect(vi.getTimerCount()).toBe(0);
+      vi.useRealTimers();
+    });
+
     it("reassembles chunked snapshots before publishing them", async () => {
       const onEvent = vi.fn<(event: ChatEventEnvelope) => void>();
       const encoder = new TextEncoder();

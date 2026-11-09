@@ -1,4 +1,5 @@
 import { buildApiUrl, type EngineApiConfig } from "./apiUrl";
+import { SseFramer } from "./sseFramer";
 import type {
   BackgroundAgentSummary,
   ChatMessage,
@@ -751,7 +752,7 @@ function subscribeToEvents(
 
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
-      let buffer = "";
+      const framer = new SseFramer();
 
       for (;;) {
         const { done, value } = await reader.read();
@@ -760,16 +761,9 @@ function subscribeToEvents(
 
         armIdleTimer();
         callbacks.onActivity?.();
-        const chunk = decoder
-          .decode(value, { stream: true })
-          .replace(/\r\n/g, "\n")
-          .replace(/\r/g, "\n");
-        buffer += chunk;
+        const chunk = decoder.decode(value, { stream: true });
 
-        const blocks = buffer.split("\n\n");
-        buffer = blocks.pop() ?? "";
-
-        for (const block of blocks) {
+        for (const block of framer.push(chunk)) {
           if (isAborted()) return;
           const trimmed = block.trim();
           if (!trimmed) continue;

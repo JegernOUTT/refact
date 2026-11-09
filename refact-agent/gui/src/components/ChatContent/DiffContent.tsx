@@ -6,6 +6,7 @@ import { filename } from "../../utils";
 import { useOpenFileInApp } from "../../hooks/useOpenFileInApp";
 import { Icon } from "../ui";
 import { DiffBlock } from "./ToolCard/DiffBlock";
+import { isOversizedDiff } from "./ToolCard/diffPreview";
 import { TranscriptClamp, TranscriptItem } from "./TranscriptItem";
 import styles from "./DiffContent.module.css";
 
@@ -24,13 +25,18 @@ function countDiffLines(text: string): number {
 function diffStats(diffs: Record<string, DiffChunk[]>) {
   let addCount = 0;
   let removeCount = 0;
+  let limited = false;
   for (const chunks of Object.values(diffs)) {
     for (const chunk of chunks) {
+      if (isOversizedDiff(chunk)) {
+        limited = true;
+        continue;
+      }
       addCount += countDiffLines(chunk.lines_add);
       removeCount += countDiffLines(chunk.lines_remove);
     }
   }
-  return { addCount, removeCount };
+  return { addCount, removeCount, limited };
 }
 
 function diffTarget(diffs: Record<string, DiffChunk[]>): string {
@@ -83,7 +89,10 @@ export const DiffContent: React.FC<{
   openKey?: string;
   onOpenChange?: (open: boolean) => void;
 }> = ({ diffs, openKey, onOpenChange }) => {
-  const { addCount, removeCount } = useMemo(() => diffStats(diffs), [diffs]);
+  const { addCount, removeCount, limited } = useMemo(
+    () => diffStats(diffs),
+    [diffs],
+  );
   const blocks = <DiffBlocks diffs={diffs} />;
   const long = addCount + removeCount > CLAMP_LINE_THRESHOLD;
 
@@ -93,7 +102,11 @@ export const DiffContent: React.FC<{
       icon={<Icon icon={FileDiff} size="sm" />}
       verb="Changes"
       target={diffTarget(diffs)}
-      meta={diffMeta(addCount, removeCount)}
+      meta={
+        limited
+          ? "Large diff · line counts omitted"
+          : diffMeta(addCount, removeCount)
+      }
       defaultOpen
       openKey={openKey}
       onOpenChange={onOpenChange}

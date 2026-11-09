@@ -1,5 +1,6 @@
 import type { DiffChunk } from "../../../services/refact/types";
 import { basename } from "./utils";
+import { isOversizedDiff } from "./diffPreview";
 
 function countNonEmptyLines(text: string): number {
   let count = 0;
@@ -20,14 +21,20 @@ function countNonEmptyLines(text: string): number {
 export function getDiffStats(diffs: DiffChunk[]): {
   added: number;
   removed: number;
+  limited?: boolean;
 } {
   let added = 0;
   let removed = 0;
+  let limited = false;
   for (const diff of diffs) {
+    if (isOversizedDiff(diff)) {
+      limited = true;
+      continue;
+    }
     added += countNonEmptyLines(diff.lines_add);
     removed += countNonEmptyLines(diff.lines_remove);
   }
-  return { added, removed };
+  return limited ? { added, removed, limited } : { added, removed };
 }
 
 export function fileListTarget(paths: string[]): string {
@@ -38,7 +45,8 @@ export function fileListTarget(paths: string[]): string {
 
 export function diffStatsMeta(diffs: DiffChunk[]): string | undefined {
   if (diffs.length === 0) return undefined;
-  const { added, removed } = getDiffStats(diffs);
+  const { added, removed, limited } = getDiffStats(diffs);
+  if (limited) return "Large diff · line counts omitted";
   return `+${added} −${removed}`;
 }
 
