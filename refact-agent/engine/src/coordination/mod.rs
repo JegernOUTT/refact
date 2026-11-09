@@ -13,6 +13,9 @@ mod capsule_render;
 #[cfg(test)]
 mod capsule_tests;
 pub mod catalog;
+pub mod catalog_cache;
+#[cfg(test)]
+mod catalog_cache_tests;
 pub mod causal;
 pub mod causal_view;
 pub mod deadlock;
@@ -47,6 +50,8 @@ pub mod scope;
 pub mod service;
 #[cfg(test)]
 mod service_tests;
+#[cfg(test)]
+mod shared_context_tests;
 #[cfg(test)]
 mod team_config_tests;
 #[cfg(test)]

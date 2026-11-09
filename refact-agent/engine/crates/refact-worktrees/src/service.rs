@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
@@ -58,8 +58,72 @@ fn list_cache_generation() -> u64 {
     LIST_CACHE_GENERATION.load(Ordering::SeqCst)
 }
 
+#[derive(Clone, Debug)]
+pub struct RegistryRevision {
+    generation: Arc<AtomicU64>,
+    value: u64,
+}
+
+impl PartialEq for RegistryRevision {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.generation, &other.generation) && self.value == other.value
+    }
+}
+
+impl Eq for RegistryRevision {}
+
+fn registry_generation(cache_dir: &Path) -> Arc<AtomicU64> {
+    static GENERATIONS: OnceLock<Mutex<HashMap<PathBuf, Weak<AtomicU64>>>> = OnceLock::new();
+    let mut generations = GENERATIONS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(generation) = generations.get(cache_dir).and_then(Weak::upgrade) {
+        return generation;
+    }
+    let key = normalize_existing_or_parent(cache_dir);
+    if let Some(generation) = generations.get(&key).and_then(Weak::upgrade) {
+        generations.insert(cache_dir.to_path_buf(), Arc::downgrade(&generation));
+        return generation;
+    }
+    generations.retain(|_, generation| generation.strong_count() > 0);
+    let generation = Arc::new(AtomicU64::new(0));
+    generations.insert(key, Arc::downgrade(&generation));
+    generations.insert(cache_dir.to_path_buf(), Arc::downgrade(&generation));
+    generation
+}
+
+pub fn registry_revision(cache_dir: &Path) -> RegistryRevision {
+    let generation = registry_generation(cache_dir);
+    let value = generation.load(Ordering::SeqCst);
+    RegistryRevision {
+        generation,
+        value,
+    }
+}
+
 fn invalidate_list_cache() {
     LIST_CACHE_GENERATION.fetch_add(1, Ordering::SeqCst);
+}
+
+struct RegistryPublicationInvalidation(Arc<AtomicU64>);
+
+impl Drop for RegistryPublicationInvalidation {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        invalidate_list_cache();
+    }
+}
+
+#[cfg(test)]
+struct RegistryPublicationPause {
+    entered: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    release: Mutex<std::sync::mpsc::Receiver<()>>,
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    static REGISTRY_PUBLICATION_PAUSE: Arc<RegistryPublicationPause>;
 }
 
 fn list_cache_slot(registry_path: &Path) -> ListCacheSlot {
@@ -199,6 +263,11 @@ impl WorktreeService {
             merge_authority: None,
             sync_actor: None,
         }
+    }
+
+    fn invalidate_registry_cache(&self) {
+        registry_generation(&self.cache_dir).fetch_add(1, Ordering::SeqCst);
+        invalidate_list_cache();
     }
 
     pub fn source_workspace_root(&self) -> &Path {
@@ -825,7 +894,7 @@ impl WorktreeService {
         .await
         .unwrap_or_else(|_| crate::cache::degraded(crate::types::CacheReason::IoFailure));
         drop(cancellation);
-        invalidate_list_cache();
+        self.invalidate_registry_cache();
 
         let mut warnings = Vec::new();
         if created.dirty_source {
@@ -1214,7 +1283,7 @@ impl WorktreeService {
                 Ok::<_, String>((response, registry_changed.then_some(registry)))
             })
             .await;
-            invalidate_list_cache();
+            service.invalidate_registry_cache();
             let (response, updated_registry) =
                 merged.map_err(|e| format!("Worktree merge blocking task failed: {}", e))??;
             service.checkpoint_merge_phase().await?;
@@ -1826,7 +1895,7 @@ impl WorktreeService {
             })
         }
         .await;
-        invalidate_list_cache();
+        self.invalidate_registry_cache();
         let (stale_path, mut warnings, branch_result, still_present) = removed
             .map_err(|e| format!("Worktree '{}' removal task failed: {}", record.meta.id, e))??;
         if still_present {
@@ -1924,7 +1993,7 @@ impl WorktreeService {
                 Ok::<_, String>((result, registry_changed.then_some(registry)))
             })
             .await;
-            invalidate_list_cache();
+            service.invalidate_registry_cache();
             let (result, updated_registry) =
                 cleaned.map_err(|e| format!("Worktree cleanup blocking task failed: {}", e))??;
             if let Some(registry) = updated_registry {
@@ -2592,8 +2661,17 @@ impl WorktreeService {
         let path = self.registry_path();
         let registry = registry.clone();
         let guard = guard.clone();
+        let generation = registry_generation(&self.cache_dir);
+        #[cfg(test)]
+        let pause = REGISTRY_PUBLICATION_PAUSE.try_with(Arc::clone).ok();
         let published = tokio::task::spawn_blocking(move || {
             let _guard = guard;
+            let _invalidation = RegistryPublicationInvalidation(generation);
+            #[cfg(test)]
+            if let Some(pause) = pause {
+                pause.entered.lock().unwrap().take().unwrap().send(()).unwrap();
+                pause.release.lock().unwrap().recv_timeout(Duration::from_secs(10)).unwrap();
+            }
             use std::io::Write;
             let dir = path.parent().ok_or("Registry directory missing")?;
             std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
@@ -2614,7 +2692,6 @@ impl WorktreeService {
                 .map_err(|e| format!("Registry published but directory durability unknown; inspect before retrying: {e}"))?;
             Ok(())
         }).await;
-        invalidate_list_cache();
         published.map_err(|e| format!("Registry publication task failed: {e}"))?
     }
 
@@ -3278,6 +3355,46 @@ mod worktree_registry_tests {
         std::fs::write(root.join("file.txt"), "hello\n").unwrap();
         run_git(root, &["add", "file.txt"]);
         run_git(root, &["commit", "-m", "initial"]);
+    }
+
+    #[tokio::test]
+    async fn canceled_registry_publication_still_invalidates_retained_revision() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        std::fs::create_dir(&source).unwrap();
+        let service = WorktreeService::new(temp.path().join("cache"), source).unwrap();
+        let registry = service.load_registry().await.unwrap();
+        assert!(!service.registry_path().exists());
+        let before = registry_revision(&service.cache_dir);
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let pause = Arc::new(RegistryPublicationPause {
+            entered: Mutex::new(Some(entered_tx)),
+            release: Mutex::new(release_rx),
+        });
+        let publisher = service.clone();
+        let expected = registry.clone();
+        let publication = tokio::spawn(REGISTRY_PUBLICATION_PAUSE.scope(pause, async move {
+            publisher
+                .compare_and_save_registry(&registry, &registry)
+                .await
+        }));
+        tokio::time::timeout(Duration::from_secs(10), entered_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        publication.abort();
+        assert!(publication.await.unwrap_err().is_cancelled());
+        assert_eq!(before, registry_revision(&service.cache_dir));
+        release_tx.send(()).unwrap();
+        let _published =
+            tokio::time::timeout(Duration::from_secs(10), service.registry_write_lock())
+                .await
+                .unwrap()
+                .unwrap();
+        assert!(service.registry_path().is_file());
+        assert_eq!(service.load_registry().await.unwrap(), expected);
+        assert_ne!(before, registry_revision(&service.cache_dir));
     }
 
     #[tokio::test]

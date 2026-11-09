@@ -168,21 +168,29 @@ impl ProvenanceBudget {
     fn roots<'a>(
         &mut self,
         app: &AppState,
+        batch: Option<&mut crate::privacy::records::BatchDeclaredRecords>,
         roots: impl IntoIterator<Item = &'a WorkRootRef>,
     ) -> Result<(), WorkError> {
         let paths = roots
             .into_iter()
             .flat_map(|root| root.path.iter().chain(root.source_path.iter()))
             .map(PathBuf::from);
-        self.extend(
-            crate::privacy::records::declared_file_records(&app.gcx, paths)
+        let records = match batch {
+            Some(batch) => batch.classify_declared_paths(&app.gcx, paths),
+            None => crate::privacy::records::declared_file_records(&app.gcx, paths)
                 .map_err(|_| WorkError::policy_unavailable())?,
-        )
+        };
+        self.extend(records)
     }
 
-    fn row(&mut self, app: &AppState, row: &WorkRow) -> Result<(), WorkError> {
+    fn row(
+        &mut self,
+        app: &AppState,
+        batch: Option<&mut crate::privacy::records::BatchDeclaredRecords>,
+        row: &WorkRow,
+    ) -> Result<(), WorkError> {
         self.extend(row.source_records.iter().cloned())?;
-        self.roots(app, [&row.root])
+        self.roots(app, batch, [&row.root])
     }
 }
 
@@ -192,6 +200,30 @@ pub(super) fn budget_page(
     offset: usize,
     requested_end: usize,
 ) -> Result<(usize, Vec<refact_privacy::FileRecord>), WorkError> {
+    #[cfg(windows)]
+    {
+        budget_page_with_batch(app, snapshot, offset, requested_end, None)
+    }
+    #[cfg(not(windows))]
+    {
+        let mut batch = crate::privacy::records::BatchDeclaredRecords::new(&app.gcx)
+            .map_err(|_| WorkError::policy_unavailable())?;
+        let result = budget_page_with_batch(app, snapshot, offset, requested_end, Some(&mut batch));
+        let finished = batch
+            .finish(&app.gcx)
+            .map_err(|_| WorkError::policy_unavailable());
+        finished?;
+        result
+    }
+}
+
+fn budget_page_with_batch(
+    app: &AppState,
+    snapshot: &WorkSnapshot,
+    offset: usize,
+    requested_end: usize,
+    mut batch: Option<&mut crate::privacy::records::BatchDeclaredRecords>,
+) -> Result<(usize, Vec<refact_privacy::FileRecord>), WorkError> {
     let mut budget = ProvenanceBudget::new();
     let paths = snapshot.selected_paths.iter().cloned().chain(
         snapshot
@@ -199,12 +231,14 @@ pub(super) fn budget_page(
             .iter()
             .map(|entry| PathBuf::from(&entry.path)),
     );
-    budget.extend(
-        crate::privacy::records::declared_file_records(&app.gcx, paths)
+    let records = match batch.as_deref_mut() {
+        Some(batch) => batch.classify_declared_paths(&app.gcx, paths),
+        None => crate::privacy::records::declared_file_records(&app.gcx, paths)
             .map_err(|_| WorkError::policy_unavailable())?,
-    )?;
+    };
+    budget.extend(records)?;
     for row in snapshot.detail.iter().chain(snapshot.guard_rows.iter()) {
-        budget.row(app, row)?;
+        budget.row(app, batch.as_deref_mut(), row)?;
     }
     let roots_by_id: HashMap<_, _> = snapshot.roots.iter().map(|root| (&root.id, root)).collect();
     let mut end = offset;
@@ -212,12 +246,16 @@ pub(super) fn budget_page(
         let count = budget.records.len();
         let bytes = budget.bytes;
         let result = if snapshot.rows.is_empty() {
-            budget.roots(app, [&snapshot.roots[index]])
+            budget.roots(app, batch.as_deref_mut(), [&snapshot.roots[index]])
         } else {
             let row = &snapshot.rows[index];
-            budget
-                .row(app, row)
-                .and_then(|_| budget.roots(app, roots_by_id.get(&row.root.id).copied()))
+            budget.row(app, batch.as_deref_mut(), row).and_then(|_| {
+                budget.roots(
+                    app,
+                    batch.as_deref_mut(),
+                    roots_by_id.get(&row.root.id).copied(),
+                )
+            })
         };
         if let Err(error) = result {
             if error.cause != Some(WorkFailureCause::ProvenanceCapacity) || index == offset {
@@ -238,6 +276,21 @@ pub async fn visible_projection(
     app: &AppState,
     caller: &WorkCaller,
 ) -> Result<(Arc<WorkCatalog>, String), WorkError> {
+    projection(app, caller, false).await
+}
+
+pub(super) async fn context_projection(
+    app: &AppState,
+    caller: &WorkCaller,
+) -> Result<(Arc<WorkCatalog>, String), WorkError> {
+    projection(app, caller, true).await
+}
+
+async fn projection(
+    app: &AppState,
+    caller: &WorkCaller,
+    shared: bool,
+) -> Result<(Arc<WorkCatalog>, String), WorkError> {
     #[cfg(test)]
     let _ = PROJECTION_BUILDS.try_with(|count| count.set(count.get() + 1));
     let before = match &caller.model {
@@ -248,15 +301,38 @@ pub async fn visible_projection(
         .source_root
         .to_str()
         .ok_or_else(WorkError::scope_denied)?;
-    let mut catalog = build_catalog_for_destination(app, Some(source), caller.model.is_some())
-        .await
-        .map_err(|_| {
-            if caller.model.is_some() {
-                WorkError::unavailable()
-            } else {
-                WorkError::projection_failure(WorkFailureCause::ScopedSourceUnavailable)
-            }
-        })?;
+    let base = if shared {
+        Some(super::catalog_cache::neutral(app, caller).await?)
+    } else {
+        None
+    };
+    let privacy = if shared {
+        Some(
+            crate::privacy::classification_cache::privacy_key(&app.gcx)
+                .map_err(|_| WorkError::policy_unavailable())?,
+        )
+    } else {
+        None
+    };
+    if let Some(base) = &base {
+        if let Some(visible) = super::catalog_cache::visible(app, base, &before) {
+            check_disclosure(app, caller, &before)?;
+            return Ok((visible, before));
+        }
+    }
+    let mut catalog = if let Some(base) = &base {
+        (**base).clone()
+    } else {
+        build_catalog_for_destination(app, Some(source), caller.model.is_some())
+            .await
+            .map_err(|_| {
+                if caller.model.is_some() {
+                    WorkError::unavailable()
+                } else {
+                    WorkError::projection_failure(WorkFailureCause::ScopedSourceUnavailable)
+                }
+            })?
+    };
     let app_owned = app.clone();
     let caller_owned = caller.clone();
     let expected_disclosure = before.clone();
@@ -269,20 +345,28 @@ pub async fn visible_projection(
             {
                 return Err(WorkError::unavailable());
             }
-            catalog.retain_visible(privacy_guard::clear_rows(
-                &app_owned.gcx,
-                catalog.all_rows(),
-                model,
-            )?);
-            let roots = privacy_guard::clear_roots(&app_owned.gcx, catalog.roots.all(), model)?;
-            catalog.roots.by_id = roots.into_iter().map(|r| (r.id.clone(), r)).collect();
-            catalog.degraded.clear();
+            privacy_guard::with_clearance(&app_owned.gcx, model, |clearance| {
+                catalog.retain_visible(clearance.clear_rows(catalog.all_rows())?);
+                let roots = clearance.clear_roots(catalog.roots.all())?;
+                catalog.roots.by_id = roots.into_iter().map(|r| (r.id.clone(), r)).collect();
+                catalog.degraded.clear();
+                Ok(())
+            })?;
             check_disclosure(&app_owned, &caller_owned, &expected_disclosure)?;
         }
         Ok(Arc::new(catalog))
     })
     .await?;
     check_disclosure(app, caller, &before)?;
+    if let (Some(base), Some(privacy)) = (base, privacy) {
+        if crate::privacy::classification_cache::privacy_key(&app.gcx)
+            .map_err(|_| WorkError::policy_unavailable())?
+            != privacy
+        {
+            return Err(WorkError::policy_unavailable());
+        }
+        super::catalog_cache::save_visible(app, base, before.clone(), privacy, catalog.clone());
+    }
     Ok((catalog, before))
 }
 
@@ -590,16 +674,21 @@ fn revalidate_snapshot(
                 .extend(row.source_records.iter().map(|r| r.path.clone()));
         }
         let expected = audit.len();
-        if privacy_guard::clear_rows(&app.gcx, audit, model)?.len() != expected
-            || privacy_guard::clear_roots(&app.gcx, snapshot.roots.clone(), model)?.len()
-                != snapshot.roots.len()
-            || super::file_provenance::clear_for_model(
-                &app.gcx,
-                Some(model),
-                snapshot.file_provenance.clone(),
-            )?
-            .len()
-                != snapshot.file_provenance.len()
+        privacy_guard::with_clearance(&app.gcx, model, |clearance| {
+            if clearance.clear_rows(audit)?.len() != expected
+                || clearance.clear_roots(snapshot.roots.clone())?.len() != snapshot.roots.len()
+            {
+                return Err(WorkError::cursor_expired());
+            }
+            Ok(())
+        })?;
+        if super::file_provenance::clear_for_model(
+            &app.gcx,
+            Some(model),
+            snapshot.file_provenance.clone(),
+        )?
+        .len()
+            != snapshot.file_provenance.len()
         {
             return Err(WorkError::cursor_expired());
         }
@@ -1011,9 +1100,133 @@ pub fn attach_provenance(
     let mut budget = ProvenanceBudget::new();
     budget.extend(page.source_records.iter().cloned())?;
     for row in page.rows.iter().chain(detail) {
-        budget.row(app, row)?;
+        budget.row(app, None, row)?;
     }
-    budget.roots(app, &page.roots)?;
+    budget.roots(app, None, &page.roots)?;
     crate::privacy::records::merge_records(message, budget.records);
     Ok(())
+}
+
+#[cfg(all(test, not(windows)))]
+mod batching_tests {
+    use super::*;
+    use crate::privacy::records::BatchDeclaredRecords;
+
+    fn root(id: usize, path: PathBuf) -> WorkRootRef {
+        WorkRootRef {
+            id: id.to_string(),
+            kind: super::super::types::WorkRootKind::Project,
+            path: Some(path.to_string_lossy().into_owned()),
+            branch: None,
+            project: "batching".into(),
+            source_path: None,
+            presence: Default::default(),
+        }
+    }
+
+    async fn fixture() -> (AppState, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
+            dir.path().join("cache"),
+            dir.path().join("config"),
+        )
+        .await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![dir.path().into()];
+        (AppState::from_gcx(gcx).await, dir)
+    }
+
+    #[tokio::test]
+    async fn budget_batch_matches_independent_order_and_capacity_rollback() {
+        let (app, dir) = fixture().await;
+        let mut snapshot = WorkSnapshot {
+            selected_paths: vec![dir.path().join("selected"), dir.path().join("selected")],
+            roots: (0..260)
+                .map(|id| root(id, dir.path().join(format!("root-{id}"))))
+                .collect(),
+            ..Default::default()
+        };
+        let independent = budget_page_with_batch(&app, &snapshot, 0, 260, None).unwrap();
+        let batched = budget_page(&app, &snapshot, 0, 260).unwrap();
+        assert_eq!(batched, independent);
+        assert_eq!(batched.0, 255);
+        assert_eq!(batched.1.len(), PROVENANCE_RECORD_CAP);
+        assert!(batched.1[0].path.ends_with("selected"));
+        assert!(batched.1[255].path.ends_with("root-254"));
+        assert!(!batched
+            .1
+            .iter()
+            .any(|record| record.path.ends_with("root-255")));
+        let next = budget_page(&app, &snapshot, 255, 260).unwrap();
+        assert_eq!(
+            next,
+            budget_page_with_batch(&app, &snapshot, 255, 260, None).unwrap()
+        );
+        assert!(next.1[1].path.ends_with("root-255"));
+        snapshot.selected_paths = (0..256)
+            .map(|id| dir.path().join(format!("selected-{id}")))
+            .collect();
+        assert_eq!(
+            budget_page(&app, &snapshot, 0, 1).unwrap_err().cause,
+            Some(WorkFailureCause::ProvenanceCapacity)
+        );
+        assert_eq!(
+            budget_page_with_batch(&app, &snapshot, 0, 1, None)
+                .unwrap_err()
+                .cause,
+            Some(WorkFailureCause::ProvenanceCapacity)
+        );
+        snapshot.selected_paths.clear();
+        snapshot.roots.clear();
+        assert_eq!(budget_page(&app, &snapshot, 0, 0).unwrap(), (0, Vec::new()));
+        app.gcx.privacy_policy_load.write().unwrap().policy =
+            Arc::new(refact_privacy::PrivacyPolicy {
+                blocked: vec!["[".into()],
+                ..Default::default()
+            });
+        assert_eq!(
+            budget_page(&app, &snapshot, 0, 0).unwrap_err().code,
+            "policy_unavailable"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn budget_batch_reuses_symlink_classification_until_explicit_invalidation() {
+        let (app, dir) = fixture().await;
+        let allowed = dir.path().join("allowed");
+        let guarded = dir.path().join("guarded");
+        let link = dir.path().join("link");
+        std::fs::write(&allowed, "allowed").unwrap();
+        std::fs::write(&guarded, "guarded").unwrap();
+        std::os::unix::fs::symlink(&allowed, &link).unwrap();
+        app.gcx.privacy_policy_load.write().unwrap().policy =
+            Arc::new(refact_privacy::PrivacyPolicy {
+                blocked: vec![guarded.to_string_lossy().into_owned()],
+                ..Default::default()
+            });
+        let root = root(0, link.clone());
+        let snapshot = WorkSnapshot {
+            roots: vec![root.clone()],
+            ..Default::default()
+        };
+        let before = budget_page(&app, &snapshot, 0, 1).unwrap();
+        assert!(before.1.iter().all(|record| record.zone != "blocked"));
+        let mut batch = BatchDeclaredRecords::new(&app.gcx).unwrap();
+        let mut budget = ProvenanceBudget::new();
+        budget.roots(&app, Some(&mut batch), [&root]).unwrap();
+        assert_ne!(budget.records.last().unwrap().zone, "blocked");
+        std::fs::remove_file(&link).unwrap();
+        std::os::unix::fs::symlink(&guarded, &link).unwrap();
+        budget.roots(&app, Some(&mut batch), [&root]).unwrap();
+        assert_eq!(budget.records.len(), 1);
+        assert_ne!(budget.records.last().unwrap().zone, "blocked");
+        batch.finish(&app.gcx).unwrap();
+        assert_eq!(budget_page(&app, &snapshot, 0, 1).unwrap(), before);
+        crate::privacy::classification_cache::invalidate(&app.gcx);
+        assert!(batch.finish(&app.gcx).is_err());
+        let after = budget_page(&app, &snapshot, 0, 1).unwrap();
+        assert_eq!(after.0, before.0);
+        assert_eq!(after.1.len(), before.1.len());
+        assert!(after.1.iter().all(|record| record.zone == "blocked"));
+    }
 }

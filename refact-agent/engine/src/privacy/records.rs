@@ -106,7 +106,8 @@ pub fn shell_observation_reason_for_session(
                     .zones
                     .iter()
                     .find(|zone| zone.name == **name)
-                    .is_some_and(|zone| !destination.matches_send_to(&zone.send_to))
+                    .map(|zone| !destination.matches_send_to(&zone.send_to))
+                    .unwrap_or(true)
         })
         .count();
     reason
@@ -227,6 +228,15 @@ fn zone_for_record_path(
     let candidates = record_path_candidates(gcx, path, mappings);
     let static_zone =
         compiled.strictest_zone_for_paths_with_roots(&candidates, privacy_roots(gcx, mappings));
+    finish_record_zone(compiled, &candidates, static_zone, derived_zones)
+}
+
+fn finish_record_zone(
+    compiled: &refact_privacy::CompiledPolicy,
+    candidates: &[PathBuf],
+    static_zone: refact_privacy::Zone,
+    derived_zones: &DerivedPrivacyZones,
+) -> String {
     let derived_zone_name = {
         let derived_zones = derived_zones
             .read()
@@ -281,7 +291,7 @@ fn derived_zone_for_path_with(
         .find_map(|candidate| derived_zones.get(candidate).cloned())
 }
 
-fn record_path_candidates(
+pub(crate) fn record_path_candidates(
     gcx: &Arc<GlobalContext>,
     path: &Path,
     mappings: &[crate::files_correction::RegisteredWorktreePathMapping],
@@ -308,7 +318,7 @@ fn record_path_candidates(
     candidates
 }
 
-fn privacy_roots(
+pub(crate) fn privacy_roots(
     gcx: &Arc<GlobalContext>,
     mappings: &[crate::files_correction::RegisteredWorktreePathMapping],
 ) -> Vec<PathBuf> {
@@ -459,7 +469,8 @@ pub async fn apply_shell_observation(
             classify_observed_access(gcx, &policy, access, derived_zones).await?
         }
         ObservationStatus::Unavailable(reason) => {
-            let compiled = policy.compile().map_err(|error| error.to_string())?;
+            let snapshot = super::classification_cache::snapshot(gcx)?;
+            let compiled = &snapshot.compiled;
             let heuristic =
                 crate::privacy::heuristic::attribute_shell_command(command, cwd, &compiled);
             crate::privacy::warn_observation_degraded_once(gcx.clone(), &reason).await;
@@ -478,18 +489,18 @@ pub async fn apply_shell_observation(
     };
     merge_records(message, records.clone());
 
+    let current = super::classification_cache::snapshot(gcx)?;
     let offending: Vec<(&FileRecord, ShellBehavior)> = records
         .iter()
         .filter_map(|record| {
             if record.zone == "blocked" {
                 return Some((record, ShellBehavior::Deny));
             }
-            policy
-                .zones
-                .iter()
-                .find(|zone| zone.name == record.zone)
-                .filter(|zone| !destination.matches_send_to(&zone.send_to))
-                .map(|zone| (record, zone.on_shell_read))
+            match current.compiled.zone_named(&record.zone) {
+                Some(zone) => (!destination.matches_send_to(&zone.send_to))
+                    .then_some((record, zone.on_shell_read)),
+                None => Some((record, ShellBehavior::Withhold)),
+            }
         })
         .collect();
     let behavior =
@@ -833,32 +844,20 @@ fn file_record(
     attribution: Attribution,
     derived_zones: &DerivedPrivacyZones,
 ) -> Result<FileRecord, String> {
-    let policy = gcx.privacy_policy_load.read().unwrap().policy.clone();
-    let compiled = policy.compile().map_err(|error| error.to_string())?;
-    let mappings = registered_worktree_path_mappings(gcx.cache_dir.as_path());
-    Ok(file_record_with(
-        gcx,
-        &compiled,
-        &mappings,
-        path,
-        attribution,
-        derived_zones,
-    ))
-}
-
-fn file_record_with(
-    gcx: &Arc<GlobalContext>,
-    compiled: &refact_privacy::CompiledPolicy,
-    mappings: &[crate::files_correction::RegisteredWorktreePathMapping],
-    path: &Path,
-    attribution: Attribution,
-    derived_zones: &DerivedPrivacyZones,
-) -> FileRecord {
-    FileRecord {
+    let snapshot = super::classification_cache::snapshot(gcx)?;
+    let classified = snapshot.classify(gcx, path);
+    let record = FileRecord {
         path: refact_core::chat_types::normalize_file_name(path.to_string_lossy().into_owned()),
-        zone: zone_for_record_path(gcx, compiled, path, mappings, derived_zones),
+        zone: finish_record_zone(
+            &snapshot.compiled,
+            &classified.candidates,
+            classified.zone,
+            derived_zones,
+        ),
         attribution,
-    }
+    };
+    snapshot.finish(gcx)?;
+    Ok(record)
 }
 
 pub fn declared_file_record(gcx: &Arc<GlobalContext>, path: &Path) -> Result<FileRecord, String> {
@@ -871,48 +870,37 @@ pub fn declared_file_record(gcx: &Arc<GlobalContext>, path: &Path) -> Result<Fil
 }
 
 pub(crate) struct BatchDeclaredRecords {
-    policy: Arc<refact_privacy::PrivacyPolicy>,
-    pub(crate) compiled: refact_privacy::CompiledPolicy,
+    snapshot: Arc<super::classification_cache::Snapshot>,
+    pub(crate) compiled: Arc<refact_privacy::CompiledPolicy>,
     mappings: crate::files_correction::WorktreePathMappings,
 }
 
 impl BatchDeclaredRecords {
     pub(crate) fn new(gcx: &Arc<GlobalContext>) -> Result<Self, String> {
-        let load = gcx
-            .privacy_policy_load
-            .read()
-            .map_err(|_| "privacy batch unavailable")?;
-        if load.error.is_some() {
-            return Err("privacy batch unavailable".into());
-        }
-        let policy = load.policy.clone();
-        drop(load);
-        let compiled = policy.compile().map_err(|_| "privacy batch unavailable")?;
-        let mappings = registered_worktree_path_mappings(gcx.cache_dir.as_path());
+        let snapshot = super::classification_cache::snapshot(gcx)?;
         Ok(Self {
-            policy,
-            compiled,
-            mappings,
+            compiled: snapshot.compiled.clone(),
+            mappings: snapshot.mappings.clone(),
+            snapshot,
         })
     }
 
     pub(crate) fn classify_declared_paths(
-        &self,
+        &mut self,
         gcx: &Arc<GlobalContext>,
         paths: impl IntoIterator<Item = PathBuf>,
     ) -> Vec<FileRecord> {
-        let derived_zones = new_derived_privacy_zones();
         let mut records = Vec::new();
         let mut seen = HashSet::new();
         for path in paths {
-            let record = file_record_with(
-                gcx,
-                &self.compiled,
-                &self.mappings,
-                &path,
-                Attribution::Declared,
-                &derived_zones,
-            );
+            let classified = self.snapshot.classify(gcx, &path);
+            let record = FileRecord {
+                path: refact_core::chat_types::normalize_file_name(
+                    path.to_string_lossy().into_owned(),
+                ),
+                zone: classified.zone.name,
+                attribution: Attribution::Declared,
+            };
             if seen.insert(record.clone()) {
                 records.push(record);
             }
@@ -921,18 +909,10 @@ impl BatchDeclaredRecords {
     }
 
     pub(crate) fn finish(&self, gcx: &Arc<GlobalContext>) -> Result<(), String> {
-        let mappings = registered_worktree_path_mappings(gcx.cache_dir.as_path());
-        let load = gcx
-            .privacy_policy_load
-            .read()
-            .map_err(|_| "privacy batch changed")?;
-        if load.error.is_some()
-            || !Arc::ptr_eq(&load.policy, &self.policy)
-            || *mappings != *self.mappings
-        {
-            return Err("privacy batch changed".into());
+        if *self.mappings != *self.snapshot.mappings {
+            return Err("privacy mappings changed".into());
         }
-        Ok(())
+        self.snapshot.finish(gcx)
     }
 }
 
@@ -940,25 +920,9 @@ pub fn declared_file_records(
     gcx: &Arc<GlobalContext>,
     paths: impl IntoIterator<Item = PathBuf>,
 ) -> Result<Vec<FileRecord>, String> {
-    let policy = gcx.privacy_policy_load.read().unwrap().policy.clone();
-    let compiled = policy.compile().map_err(|error| error.to_string())?;
-    let mappings = registered_worktree_path_mappings(gcx.cache_dir.as_path());
-    let derived_zones = new_derived_privacy_zones();
-    let mut records = Vec::new();
-    let mut seen = HashSet::new();
-    for path in paths {
-        let record = file_record_with(
-            gcx,
-            &compiled,
-            &mappings,
-            &path,
-            Attribution::Declared,
-            &derived_zones,
-        );
-        if seen.insert(record.clone()) {
-            records.push(record);
-        }
-    }
+    let mut batch = BatchDeclaredRecords::new(gcx)?;
+    let records = batch.classify_declared_paths(gcx, paths);
+    batch.finish(gcx)?;
     Ok(records)
 }
 
@@ -974,24 +938,26 @@ fn observed_file_records_with_derived(
     paths: impl IntoIterator<Item = PathBuf>,
     derived_zones: &DerivedPrivacyZones,
 ) -> Result<Vec<FileRecord>, String> {
-    let policy = gcx.privacy_policy_load.read().unwrap().policy.clone();
-    let compiled = policy.compile().map_err(|error| error.to_string())?;
-    let mappings = registered_worktree_path_mappings(gcx.cache_dir.as_path());
+    let snapshot = super::classification_cache::snapshot(gcx)?;
     let mut records = Vec::new();
     let mut seen = HashSet::new();
     for path in paths {
-        let record = file_record_with(
-            gcx,
-            &compiled,
-            &mappings,
-            &path,
-            Attribution::Observed,
-            derived_zones,
-        );
+        let classified = snapshot.classify(gcx, &path);
+        let record = FileRecord {
+            path: refact_core::chat_types::normalize_file_name(path.to_string_lossy().into_owned()),
+            zone: finish_record_zone(
+                &snapshot.compiled,
+                &classified.candidates,
+                classified.zone,
+                derived_zones,
+            ),
+            attribution: Attribution::Observed,
+        };
         if seen.insert(record.clone()) {
             records.push(record);
         }
     }
+    snapshot.finish(gcx)?;
     Ok(records)
 }
 
@@ -1022,12 +988,13 @@ fn is_vcs_metadata_churn(path: &Path) -> bool {
 
 fn inherit_observed_write_zones(
     gcx: &Arc<GlobalContext>,
-    policy: &refact_privacy::PrivacyPolicy,
+    _policy: &refact_privacy::PrivacyPolicy,
     reads: &[FileRecord],
     writes: impl IntoIterator<Item = PathBuf>,
     derived_zones: &DerivedPrivacyZones,
 ) -> Result<(), String> {
-    let compiled = policy.compile().map_err(|error| error.to_string())?;
+    let snapshot = super::classification_cache::snapshot(gcx)?;
+    let compiled = &snapshot.compiled;
     let Some(zone_name) = strictest_named_zone(
         &compiled,
         reads
@@ -1109,6 +1076,44 @@ mod tests {
     use refact_privacy::{PrivacyPolicy, SubagentPolicy, Zone};
 
     #[tokio::test]
+    async fn removed_session_label_still_requires_observation_and_withholds() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("derived.txt");
+        std::fs::write(&path, "fixture").unwrap();
+        let gcx = gcx_with_zones(temp.path(), Vec::new()).await;
+        let derived = new_derived_privacy_zones();
+        derived.write().unwrap().insert(
+            path.clone(),
+            DerivedZone {
+                zone: "removed-guarded-zone".into(),
+                origin: None,
+            },
+        );
+        let destination = provider_destination("other/model");
+        assert!(shell_observation_needed_for_session(
+            &gcx,
+            &destination,
+            &derived
+        ));
+        let mut message = tool_message("guarded derived output");
+        apply_shell_observation(
+            &gcx,
+            "cat derived.txt",
+            temp.path(),
+            &destination,
+            ObservationStatus::Observed(ObservedAccess {
+                reads: vec![path],
+                writes: Vec::new(),
+            }),
+            &derived,
+            &mut message,
+        )
+        .await
+        .unwrap();
+        assert_eq!(message.extra["privacy_shell"]["withheld"], true);
+    }
+
+    #[tokio::test]
     async fn declared_batch_matches_sequential_and_finish_revokes_policy_swap() {
         let temp = tempfile::tempdir().unwrap();
         let paths = ["normal.txt", "guarded.txt", "blocked.txt", "normal.txt"]
@@ -1142,8 +1147,9 @@ mod tests {
             zones,
             ..Default::default()
         });
-        let batch = BatchDeclaredRecords::new(&gcx).unwrap();
+        let mut batch = BatchDeclaredRecords::new(&gcx).unwrap();
         let expected = declared_file_records(&gcx, paths.clone()).unwrap();
+        assert_eq!(batch.classify_declared_paths(&gcx, paths.clone()), expected);
         assert_eq!(batch.classify_declared_paths(&gcx, paths.clone()), expected);
         batch.finish(&gcx).unwrap();
         let old = gcx.privacy_policy_load.read().unwrap().policy.clone();
@@ -1161,6 +1167,38 @@ mod tests {
             BatchDeclaredRecords::new(&gcx).is_err(),
             "invalid policy must fail closed"
         );
+    }
+
+    #[tokio::test]
+    async fn declared_batch_finish_rejects_load_error_poison_and_mapping_snapshot_difference() {
+        let temp = tempfile::tempdir().unwrap();
+        let gcx = gcx_with_zones(temp.path(), Vec::new()).await;
+        let mut batch = BatchDeclaredRecords::new(&gcx).unwrap();
+        batch.classify_declared_paths(&gcx, [temp.path().join("fixture")]);
+        batch.finish(&gcx).unwrap();
+        // Exercise the mapping fence without relying on the registry TTL or sleeps.
+        batch.mappings = Arc::new(vec![
+            crate::files_correction::RegisteredWorktreePathMapping {
+                root: temp.path().join("different-root"),
+                source_root: temp.path().join("different-source"),
+            },
+        ]);
+        assert!(batch.finish(&gcx).is_err());
+        let batch = BatchDeclaredRecords::new(&gcx).unwrap();
+        gcx.privacy_policy_load.write().unwrap().error = Some("fixture load failure".into());
+        assert!(batch.finish(&gcx).is_err());
+        assert!(BatchDeclaredRecords::new(&gcx).is_err());
+        gcx.privacy_policy_load.write().unwrap().error = None;
+        let batch = BatchDeclaredRecords::new(&gcx).unwrap();
+        let poisoned = gcx.clone();
+        assert!(std::thread::spawn(move || {
+            let _guard = poisoned.privacy_policy_load.write().unwrap();
+            panic!("fixture poison");
+        })
+        .join()
+        .is_err());
+        assert!(batch.finish(&gcx).is_err());
+        assert!(BatchDeclaredRecords::new(&gcx).is_err());
     }
 
     async fn gcx_with_policy(

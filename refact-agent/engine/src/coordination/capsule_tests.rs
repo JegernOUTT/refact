@@ -38,7 +38,7 @@ async fn blocking_projection_does_not_starve_current_thread_executor() {
         .expect("projection returned error");
 }
 
-async fn fixture() -> (AppState, tempfile::TempDir, Arc<Mutex<ChatSession>>) {
+pub(super) async fn fixture() -> (AppState, tempfile::TempDir, Arc<Mutex<ChatSession>>) {
     let dir = tempfile::tempdir_in(dunce::canonicalize(std::env::temp_dir()).unwrap()).unwrap();
     let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
         dir.path().join("cache"),
@@ -560,4 +560,51 @@ async fn benchmark_provenance_rich_capsule_omission_inventory() {
         assert_eq!(page.total, count + 2);
         eprintln!("capsule synthetic rows={count} records={} capsule_stage_ms={} inventory_stage_ms={} inventory_page_rows={}", page.source_records.len(), elapsed.as_millis(), inventory_elapsed.as_millis(), page.rows.len());
     }
+}
+
+#[serial_test::serial(runtime_settings)]
+#[tokio::test]
+async fn warm_skip_still_checks_caller_and_does_not_starve_pending_state() {
+    let (app, _dir, caller) = fixture().await;
+    super::capsule::ROW_DERIVATIONS
+        .scope(std::cell::Cell::new(0), async {
+            let mut state = CapsuleState::default();
+            assert!(
+                prepare_work_context(&app, &mut state, "capsule-caller", "trusted/model")
+                    .await
+                    .is_some()
+            );
+            assert_eq!(super::capsule::ROW_DERIVATIONS.with(|count| count.get()), 1);
+            assert!(
+                prepare_work_context(&app, &mut state, "capsule-caller", "trusted/model")
+                    .await
+                    .is_none()
+            );
+            assert_eq!(super::capsule::ROW_DERIVATIONS.with(|count| count.get()), 1);
+            state.pending_fingerprint = state.last_fingerprint;
+            state.pending_since_ms = Some(0);
+            assert!(
+                prepare_work_context(&app, &mut state, "capsule-caller", "trusted/model")
+                    .await
+                    .is_none()
+            );
+            assert_eq!(super::capsule::ROW_DERIVATIONS.with(|count| count.get()), 2);
+            assert!(state.pending_fingerprint.is_none());
+            assert!(state.pending_since_ms.is_none());
+            caller.lock().await.thread.model = "other/model".into();
+            let before = state.clone();
+            assert!(
+                prepare_work_context(&app, &mut state, "capsule-caller", "trusted/model")
+                    .await
+                    .is_none()
+            );
+            assert_eq!(state, before, "a stale caller must not reach the memo");
+            assert!(
+                prepare_work_context(&app, &mut state, "capsule-caller", "other/model")
+                    .await
+                    .is_some()
+            );
+            assert_eq!(super::capsule::ROW_DERIVATIONS.with(|count| count.get()), 3);
+        })
+        .await;
 }

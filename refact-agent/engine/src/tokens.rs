@@ -2,7 +2,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{Mutex as AMutex, Semaphore};
+use tokio::sync::{OwnedMutexGuard, Semaphore};
 use tokenizers::Tokenizer;
 use reqwest::header::AUTHORIZATION;
 use crate::files_correction::canonical_path;
@@ -16,6 +16,11 @@ const TOKENIZER_DOWNLOAD_ATTEMPTS: usize = 3;
 const TOKENIZER_RETRY_DELAY: Duration = Duration::from_millis(200);
 const TOKENIZER_MAX_BYTES: usize = 32 * 1024 * 1024;
 static TOKENIZER_PARSE_PERMITS: Semaphore = Semaphore::const_new(1);
+
+struct TokenizerLoadLease {
+    _model: Arc<OwnedMutexGuard<()>>,
+    _cache: OwnedMutexGuard<()>,
+}
 
 async fn tokenizer_blocking<F>(work: F) -> Result<Tokenizer, String>
 where
@@ -40,9 +45,13 @@ fn parse_tokenizer(bytes: &[u8]) -> Result<Tokenizer, String> {
     Tokenizer::from_bytes(bytes).map_err(|_| "invalid tokenizer file".to_string())
 }
 
-async fn open_tokenizer(path: &Path) -> Result<Tokenizer, String> {
+async fn open_tokenizer(
+    path: &Path,
+    lease: Option<Arc<TokenizerLoadLease>>,
+) -> Result<Tokenizer, String> {
     let path = path.to_path_buf();
     tokenizer_blocking(move || {
+        let _lease = lease;
         let metadata =
             std::fs::metadata(&path).map_err(|_| "failed to inspect tokenizer file".to_string())?;
         if !metadata.is_file() || metadata.len() > TOKENIZER_MAX_BYTES as u64 {
@@ -106,13 +115,31 @@ fn tokenizer_load_is_disabled(tokenizer: &str) -> bool {
     tokenizer.starts_with("fake") || is_predefined_cloud_tokenizer(tokenizer)
 }
 
+#[cfg(test)]
 async fn try_download_tokenizer_file_and_open(
     http_client: &reqwest::Client,
     http_path: &str,
     tokenizer_api_token: &str,
     path: &Path,
 ) -> Result<Tokenizer, String> {
-    if let Ok(tokenizer) = open_tokenizer(path).await {
+    try_download_tokenizer_file_and_open_with_lease(
+        http_client,
+        http_path,
+        tokenizer_api_token,
+        path,
+        None,
+    )
+    .await
+}
+
+async fn try_download_tokenizer_file_and_open_with_lease(
+    http_client: &reqwest::Client,
+    http_path: &str,
+    tokenizer_api_token: &str,
+    path: &Path,
+    lease: Option<Arc<TokenizerLoadLease>>,
+) -> Result<Tokenizer, String> {
+    if let Ok(tokenizer) = open_tokenizer(path, lease.clone()).await {
         return Ok(tokenizer);
     }
     let deadline = tokio::time::Instant::now() + TOKENIZER_DOWNLOAD_TIMEOUT;
@@ -133,7 +160,9 @@ async fn try_download_tokenizer_file_and_open(
             Err(_) => return Err("tokenizer download deadline exceeded".to_string()),
         };
         let path = path.to_path_buf();
+        let worker_lease = lease.clone();
         match tokenizer_blocking(move || {
+            let _lease = worker_lease;
             let tokenizer = parse_tokenizer(&bytes)?;
             let parent = path
                 .parent()
@@ -170,9 +199,8 @@ pub async fn cached_tokenizer(
     if tokenizer_load_is_disabled(&model_rec.tokenizer) {
         return Ok(None);
     }
-    let tokenizer_download_lock: Arc<AMutex<bool>> =
-        tokenizer_state.read().unwrap().download_lock.clone();
-    let _tokenizer_download_locked = tokenizer_download_lock.lock().await;
+    let tokenizer_download_lock = tokenizer_state.read().unwrap().download_lock(&model_id);
+    let model_lease = Arc::new(tokenizer_download_lock.lock_owned().await);
     if let Some(tokenizer) = tokenizer_state.read().unwrap().map.get(&model_id).cloned() {
         return Ok(tokenizer);
     }
@@ -222,7 +250,8 @@ pub async fn cached_tokenizer(
         }
     };
 
-    let mut tokenizer = if tok_file_path.as_os_str().is_empty() {
+    let remote = tok_file_path.as_os_str().is_empty();
+    if remote {
         let tokenizer_cache_dir = std::path::PathBuf::from(cache_dir).join("tokenizers");
         let sanitized_tok_key = tok_url
             .chars()
@@ -232,16 +261,28 @@ pub async fn cached_tokenizer(
         tok_file_path = tokenizer_cache_dir
             .join(&sanitized_tok_key)
             .join("tokenizer.json");
+    }
+    #[cfg(target_os = "linux")]
+    let cache_key = crate::files_correction::canonicalize_normalized_path(tok_file_path.clone());
+    #[cfg(not(target_os = "linux"))]
+    let cache_key = PathBuf::new();
+    let cache_lock = tokenizer_state.read().unwrap().cache_lock(&cache_key);
+    let lease = Arc::new(TokenizerLoadLease {
+        _model: model_lease,
+        _cache: cache_lock.lock_owned().await,
+    });
 
-        try_download_tokenizer_file_and_open(
+    let mut tokenizer = if remote {
+        try_download_tokenizer_file_and_open_with_lease(
             &client2,
             &tok_url,
             &model_rec.tokenizer_api_key,
             &tok_file_path,
+            Some(lease.clone()),
         )
         .await?
     } else {
-        open_tokenizer(&tok_file_path).await?
+        open_tokenizer(&tok_file_path, Some(lease.clone())).await?
     };
     let _ = tokenizer.with_truncation(None);
     tokenizer.with_padding(None);
@@ -327,7 +368,7 @@ mod tests {
             .unwrap()
             .map
             .insert(model.id.clone(), Some(tokenizer.clone()));
-        let lock = gcx.tokenizer_state.read().unwrap().download_lock.clone();
+        let lock = gcx.tokenizer_state.read().unwrap().download_lock(&model.id);
         let guard = lock.lock().await;
         let mut future = Box::pin(cached_tokenizer(gcx.clone(), &model));
         let ready = match futures::poll!(future.as_mut()) {
@@ -345,6 +386,12 @@ mod tests {
             .unwrap()
             .map
             .insert(absent.id.clone(), None);
+        let absent_lock = gcx
+            .tokenizer_state
+            .read()
+            .unwrap()
+            .download_lock(&absent.id);
+        let absent_guard = absent_lock.lock().await;
         let mut absent_future = Box::pin(cached_tokenizer(gcx.clone(), &absent));
         match futures::poll!(absent_future.as_mut()) {
             std::task::Poll::Ready(result) => assert!(result.unwrap().is_none()),
@@ -355,11 +402,19 @@ mod tests {
             tokenizer: "fake".into(),
             ..Default::default()
         };
+        let disabled_lock = gcx
+            .tokenizer_state
+            .read()
+            .unwrap()
+            .download_lock(&disabled.id);
+        let disabled_guard = disabled_lock.lock().await;
         let mut disabled_future = Box::pin(cached_tokenizer(gcx, &disabled));
         match futures::poll!(disabled_future.as_mut()) {
             std::task::Poll::Ready(result) => assert!(result.unwrap().is_none()),
             std::task::Poll::Pending => panic!("disabled tokenizer waited for download lock"),
         }
+        drop(disabled_guard);
+        drop(absent_guard);
         drop(guard);
     }
 
@@ -451,6 +506,217 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    #[serial_test::serial(tokenizer_blocking)]
+    async fn stalled_download_for_one_model_does_not_block_another_model() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/tokenizer.json", listener.local_addr().unwrap());
+        let (headers_tx, headers_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let body = small_tokenizer().to_string(false).unwrap().into_bytes();
+        let body_len = body.len();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0; 4096];
+            let _ = stream.read(&mut request).await.unwrap();
+            stream
+                .write_all(
+                    format!("HTTP/1.1 200 OK\r\nContent-Length: {body_len}\r\nConnection: close\r\n\r\n")
+                        .as_bytes(),
+                )
+                .await
+                .unwrap();
+            let _ = headers_tx.send(());
+            let _ = release_rx.await;
+            let _ = stream.write_all(&body).await;
+        });
+
+        let model_a = BaseModelRecord {
+            id: "stalled-model-a".into(),
+            tokenizer: url,
+            ..Default::default()
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let tokenizer_path = dir.path().join("tokenizer.json");
+        std::fs::write(&tokenizer_path, small_tokenizer().to_string(false).unwrap()).unwrap();
+        let model_b = BaseModelRecord {
+            id: "local-model-b".into(),
+            tokenizer: tokenizer_path.to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+
+        let download_gcx = gcx.clone();
+        let download = tokio::spawn(async move { cached_tokenizer(download_gcx, &model_a).await });
+        tokio::time::timeout(Duration::from_secs(2), headers_rx)
+            .await
+            .expect("server did not send response headers")
+            .expect("header notification dropped");
+
+        let local_gcx = gcx;
+        let mut local = tokio::spawn(async move { cached_tokenizer(local_gcx, &model_b).await });
+        let local_result = tokio::time::timeout(Duration::from_secs(2), &mut local).await;
+        let local_completed_before_release = local_result.is_ok();
+
+        let _ = release_tx.send(());
+        server.await.expect("server task failed");
+        let download_result = tokio::time::timeout(Duration::from_secs(2), download)
+            .await
+            .expect("download task did not finish after body release")
+            .expect("download task panicked");
+        let local_result = match local_result {
+            Ok(joined) => joined,
+            Err(_) => tokio::time::timeout(Duration::from_secs(2), &mut local)
+                .await
+                .expect("local tokenizer task did not finish after cleanup"),
+        };
+
+        let loaded = local_result
+            .expect("local tokenizer task panicked")
+            .expect("local tokenizer failed")
+            .expect("local tokenizer unexpectedly absent");
+        assert!(
+            download_result.is_ok(),
+            "valid tokenizer body failed to load"
+        );
+        assert!(loaded.encode("hello", false).is_ok());
+        assert!(
+            local_completed_before_release,
+            "local tokenizer load was blocked by another model's stalled download"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(tokenizer_blocking)]
+    async fn concurrent_loads_of_same_model_share_one_download_and_arc() {
+        assert_concurrent_loads_share_one_download(true).await;
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(tokenizer_blocking)]
+    async fn different_models_sharing_a_cache_path_download_once() {
+        assert_concurrent_loads_share_one_download(false).await;
+    }
+
+    async fn assert_concurrent_loads_share_one_download(same_model: bool) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let body = small_tokenizer().to_string(false).unwrap().into_bytes();
+        let body_len = body.len();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/tokenizer.json", listener.local_addr().unwrap());
+        let (headers_tx, headers_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0; 4096];
+            let _ = stream.read(&mut request).await.unwrap();
+            stream
+                .write_all(
+                    format!("HTTP/1.1 200 OK\r\nContent-Length: {body_len}\r\nConnection: close\r\n\r\n")
+                        .as_bytes(),
+                )
+                .await
+                .unwrap();
+            let _ = headers_tx.send(());
+            let mut release_rx = release_rx;
+            let mut duplicate = tokio::select! {
+                _ = &mut release_rx => None,
+                result = listener.accept() => {
+                    let duplicate = result.unwrap().0;
+                    let _ = release_rx.await;
+                    Some(duplicate)
+                }
+            };
+            let _ = stream.write_all(&body).await;
+            if duplicate.is_none() {
+                duplicate = tokio::time::timeout(Duration::from_millis(200), listener.accept())
+                    .await
+                    .ok()
+                    .and_then(Result::ok)
+                    .map(|(stream, _)| stream);
+            }
+            if let Some(mut duplicate) = duplicate {
+                let _ = tokio::time::timeout(Duration::from_secs(2), duplicate.read(&mut request))
+                    .await;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {body_len}\r\nConnection: close\r\n\r\n"
+                );
+                let _ = duplicate.write_all(response.as_bytes()).await;
+                let _ = duplicate.write_all(&body).await;
+                true
+            } else {
+                false
+            }
+        });
+
+        let model = BaseModelRecord {
+            id: "same-model".into(),
+            tokenizer: url,
+            ..Default::default()
+        };
+        let first_gcx = gcx.clone();
+        let first_model = model.clone();
+        let mut first =
+            tokio::spawn(async move { cached_tokenizer(first_gcx, &first_model).await });
+        tokio::time::timeout(Duration::from_secs(2), headers_rx)
+            .await
+            .expect("server did not receive the first request")
+            .expect("header notification dropped");
+        let mut second_model = model.clone();
+        if !same_model {
+            second_model.id = "another-model".into();
+        }
+        let mut second = Box::pin(cached_tokenizer(gcx, &second_model));
+        let second_pending = futures::poll!(second.as_mut()).is_pending();
+        let before_release = tokio::time::timeout(Duration::from_millis(200), &mut second).await;
+        let waited_for_release = before_release.is_err();
+        let _ = release_tx.send(());
+        let extra_request = server.await.expect("server task failed");
+        let first_result = tokio::time::timeout(Duration::from_secs(2), &mut first)
+            .await
+            .expect("first caller timed out")
+            .expect("first caller panicked");
+        let second_result = match before_release {
+            Ok(result) => result,
+            Err(_) => tokio::time::timeout(Duration::from_secs(2), &mut second)
+                .await
+                .expect("second caller timed out"),
+        }
+        .expect("second load failed");
+
+        let first = first_result
+            .expect("first load failed")
+            .expect("first tokenizer absent");
+        let second = second_result.expect("second tokenizer absent");
+        assert!(
+            second_pending,
+            "second caller did not wait for the gated load"
+        );
+        assert!(
+            waited_for_release,
+            "second load completed before the gated response was released"
+        );
+        assert!(
+            !extra_request,
+            "more than one HTTP request was received for the same model"
+        );
+        if same_model {
+            assert!(
+                Arc::ptr_eq(&first, &second),
+                "same model produced distinct tokenizer Arcs"
+            );
+        }
+        assert_eq!(
+            first.encode("hello", false).unwrap().get_ids(),
+            second.encode("hello", false).unwrap().get_ids()
+        );
+    }
+
     #[tokio::test(start_paused = true)]
     async fn tokenizer_request_timeout_covers_stalled_response_body() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -529,6 +795,60 @@ mod tests {
             permit_retained,
             "cancelling the waiter released the worker's permit"
         );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(tokenizer_blocking)]
+    async fn cancelled_tokenizer_worker_keeps_model_lease_until_worker_exits() {
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+        let model_id = "cancelled-open/model";
+        let state = crate::global_context::tests::make_test_gcx()
+            .await
+            .tokenizer_state
+            .clone();
+        let lock = state.read().unwrap().download_lock(model_id);
+        let lease = Arc::new(lock.clone().lock_owned().await);
+        let worker_lease = lease;
+        let waiter = tokio::spawn(async move {
+            tokenizer_blocking(move || {
+                let _lease = worker_lease;
+                started_tx.send(()).unwrap();
+                release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                finished_tx.send(()).unwrap();
+                Ok(small_tokenizer())
+            })
+            .await
+        });
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            tokio::task::spawn_blocking(move || started_rx.recv().unwrap()),
+        )
+        .await
+        .expect("blocking worker did not start")
+        .unwrap();
+        waiter.abort();
+        assert!(waiter.await.unwrap_err().is_cancelled());
+        let same_lock = state.read().unwrap().download_lock(model_id);
+        assert!(Arc::ptr_eq(&lock, &same_lock));
+        assert!(
+            lock.try_lock().is_err(),
+            "worker released model lease too soon"
+        );
+        release_tx.send(()).unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            tokio::task::spawn_blocking(move || finished_rx.recv().unwrap()),
+        )
+        .await
+        .expect("blocking worker did not exit")
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), lock.lock())
+            .await
+            .expect("model lease remained locked after worker exit");
+        drop(lock);
+        drop(same_lock);
     }
 
     #[test]

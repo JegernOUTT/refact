@@ -758,11 +758,9 @@ mod tests {
         let secret = config.path().join("secret.env");
         let parsed: PrivacyPolicy =
             serde_json::from_value(policy(&secret.to_string_lossy())).unwrap();
-        *app.gcx.privacy_policy_load.write().unwrap() = refact_privacy::PolicyLoad {
-            policy: Arc::new(parsed),
-            error: None,
-            source_paths: Vec::new(),
-        };
+        crate::privacy::save_privacy_policy(app.gcx.clone(), parsed)
+            .await
+            .unwrap();
         let mut message = ChatMessage::new("user".to_string(), "x".repeat(1024 * 1024));
         crate::privacy::records::attach_record(
             &mut message,

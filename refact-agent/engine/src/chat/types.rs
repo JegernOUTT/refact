@@ -355,6 +355,9 @@ pub struct ChatSession {
     pub(crate) work_project_root: Option<std::path::PathBuf>,
     pub(crate) work_provenance: crate::coordination::provenance::WorkProvenance,
     pub work_capsule_state: crate::coordination::capsule::CapsuleState,
+    pub(crate) work_catalog_signature: String,
+    pub(crate) work_catalog_publisher:
+        std::sync::Weak<crate::coordination::catalog_cache::SessionPublications>,
     pub last_stream_delta_at: Option<Instant>,
     pub command_enqueued_at: HashMap<String, Instant>,
     pub(crate) live_diagnostics: super::live_diagnostics::RuntimeDiagnostics,

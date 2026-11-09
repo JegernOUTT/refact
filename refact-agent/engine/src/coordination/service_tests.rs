@@ -679,7 +679,7 @@ async fn denied_titles_paths_counts_and_changes_do_not_affect_visible_pages() {
 #[cfg(unix)]
 #[serial(coordination_work_overview)]
 #[tokio::test]
-async fn frozen_source_paths_are_reclassified_even_when_policy_and_recorded_zones_are_unchanged() {
+async fn frozen_source_paths_reuse_classification_until_explicit_invalidation() {
     let (app, dir, caller) = fixture().await;
     let allowed = dir.path().join("allowed.rs");
     let denied = dir.path().join("private.rs");
@@ -723,11 +723,25 @@ async fn frozen_source_paths_are_reclassified_even_when_policy_and_recorded_zone
     assert_eq!(first.total, 3);
     std::fs::remove_file(&alias).unwrap();
     std::os::unix::fs::symlink(&denied, &alias).unwrap();
+    let next_cursor = first.next_cursor.unwrap();
+    let reused = overview(
+        &app,
+        &caller,
+        WorkOverviewRequest {
+            cursor: Some(next_cursor.clone()),
+            ..request.clone()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(reused.total, first.total);
+    assert!(reused.rows.iter().all(|row| row.provenance_complete));
+    crate::privacy::classification_cache::invalidate(&app.gcx);
     let error = overview(
         &app,
         &caller,
         WorkOverviewRequest {
-            cursor: first.next_cursor,
+            cursor: Some(next_cursor),
             ..request
         },
     )

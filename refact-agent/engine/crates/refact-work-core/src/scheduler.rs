@@ -4,6 +4,7 @@ use crate::settings::{CoordinationSettings, SettingsError};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fmt;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use tokio::sync::oneshot;
 
@@ -393,9 +394,15 @@ impl State {
 
 struct Inner {
     state: Mutex<State>,
+    revision: AtomicU64,
 }
 
 impl Inner {
+    // Call only after a visible transition and before releasing the state lock.
+    fn publish(&self) {
+        self.revision.fetch_add(1, Ordering::Release);
+    }
+
     fn lock(&self) -> MutexGuard<'_, State> {
         self.state
             .lock()
@@ -431,6 +438,7 @@ impl Inner {
         }
         state.queue.insert((seq, id));
         state.pump();
+        self.publish();
         Ok(rx)
     }
 
@@ -438,6 +446,7 @@ impl Inner {
         let mut state = self.lock();
         if state.remove(id).is_some() {
             state.pump();
+            self.publish();
         }
     }
 
@@ -467,6 +476,7 @@ impl Inner {
         state.discharge(&scope);
         state.evict_parked_over_residency();
         state.pump();
+        self.publish();
         Ok(())
     }
 
@@ -478,6 +488,7 @@ impl Inner {
                     return false;
                 }
                 entry.cancel_requested = true;
+                self.publish();
                 return true;
             }
         }
@@ -488,6 +499,7 @@ impl Inner {
                     let _ = tx.send(Err(AdmissionError::Cancelled));
                 }
                 state.pump();
+                self.publish();
                 true
             }
         }
@@ -518,6 +530,7 @@ impl AdmissionScheduler {
     pub fn new(settings: CoordinationSettings) -> Self {
         AdmissionScheduler {
             inner: Arc::new(Inner {
+                revision: AtomicU64::new(0),
                 state: Mutex::new(State {
                     settings,
                     next_id: 1,
@@ -544,6 +557,11 @@ impl AdmissionScheduler {
         }
     }
 
+    /// Cheap per-instance cache hint, not an admission or execution token.
+    pub fn revision(&self) -> u64 {
+        self.inner.revision.load(Ordering::Acquire)
+    }
+
     pub fn settings(&self) -> CoordinationSettings {
         self.inner.lock().settings.clone()
     }
@@ -562,6 +580,7 @@ impl AdmissionScheduler {
         // never terminates anything, running or parked.
         state.evict_parked_over_residency();
         state.pump();
+        self.inner.publish();
         Ok(())
     }
 
@@ -627,6 +646,7 @@ impl AdmissionScheduler {
             state.roots.push_back(request.scope.root.clone());
         }
         state.by_run.insert(run.clone(), id);
+        self.inner.publish();
         drop(state);
 
         Ok(Ticket {
@@ -702,6 +722,10 @@ pub struct AdmissionSchedulerHandle {
 }
 
 impl AdmissionSchedulerHandle {
+    pub fn revision(&self) -> u64 {
+        self.inner.revision.load(Ordering::Acquire)
+    }
+
     pub fn cancel(&self, run: &RunKey) -> bool {
         let id = { self.inner.lock().by_run.get(run).copied() };
         match id {
@@ -893,5 +917,59 @@ impl Drop for Permit {
             self.armed = false;
             self.inner.release(self.id);
         }
+    }
+}
+
+#[cfg(test)]
+mod revision_tests {
+    use super::*;
+    use crate::identity::WorkKey;
+
+    fn request(id: &str) -> AdmissionRequest {
+        AdmissionRequest::new(
+            WorkKey::background_agent(id).run(1),
+            WorkScope::single("project"),
+        )
+    }
+
+    #[tokio::test]
+    async fn revision_tracks_transitions_and_preserves_authority_on_failure() {
+        let scheduler = AdmissionScheduler::default();
+        let handle = scheduler.handle();
+        assert_eq!(scheduler.revision(), 0);
+        let ticket = scheduler.reserve(request("one")).unwrap();
+        let reserved = scheduler.revision();
+        assert!(reserved > 0);
+        scheduler.snapshot();
+        scheduler.settings();
+        ticket.state();
+        assert!(handle.is_tracked(ticket.run()));
+        assert_eq!(handle.revision(), reserved);
+        assert!(scheduler.reserve(request("one")).is_err());
+        assert_eq!(scheduler.revision(), reserved);
+        let permit = ticket.acquire().await.unwrap();
+        let active = scheduler.revision();
+        assert!(active > reserved);
+        let ticket = permit.park().unwrap();
+        assert!(scheduler.revision() > active);
+        let permit = ticket.acquire().await.unwrap();
+        let active = scheduler.revision();
+        assert!(handle.cancel(permit.run()));
+        let cancelled = scheduler.revision();
+        assert!(cancelled > active);
+        assert_eq!(handle.active_count(), 1);
+        assert!(!handle.cancel(permit.run()));
+        assert_eq!(scheduler.revision(), cancelled);
+        permit.release();
+        assert!(scheduler.revision() > cancelled);
+        assert_eq!(handle.active_count(), 0);
+        let before_configure = scheduler.revision();
+        scheduler.configure(scheduler.settings()).unwrap();
+        assert!(scheduler.revision() > before_configure);
+        let ticket = scheduler.reserve(request("two")).unwrap();
+        let before_drop = scheduler.revision();
+        drop(ticket);
+        assert!(scheduler.revision() > before_drop);
+        assert_eq!(AdmissionScheduler::default().revision(), 0);
     }
 }

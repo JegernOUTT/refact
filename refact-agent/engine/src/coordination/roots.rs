@@ -168,6 +168,7 @@ pub fn worktree_root_ref(meta: &WorktreeMeta) -> WorkRootRef {
 ///
 /// Reads the on-disk worktree registry once. Registry problems are reported as
 /// a degradation string instead of failing the whole catalog.
+#[derive(Clone)]
 pub struct ProjectRoots {
     pub project: String,
     pub source_workspace_root: PathBuf,

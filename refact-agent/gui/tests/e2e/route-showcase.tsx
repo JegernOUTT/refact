@@ -60,6 +60,7 @@ import {
 } from "../../src/features/MarketplaceHub";
 import { setBackendStatus } from "../../src/features/Connection";
 import { applyChatEvent } from "../../src/features/Chat/Thread/actions";
+import * as threadSelectors from "../../src/features/Chat/Thread/selectors";
 import { selectMessagesById } from "../../src/features/Chat/Thread/selectors";
 import type { EventEnvelope } from "../../src/services/refact/chatSubscription";
 import { isPushMode } from "../../src/services/refact/chatSubscription";
@@ -2845,11 +2846,46 @@ Object.assign(window, {
   },
 });
 if (performanceRoute) {
+  store.dispatch(
+    applyChatEvent({ chat_id: "perf-0", type: "thread_updated", seq: "0" }),
+  );
   const sequences = new Map<string, number>();
+  let deltaDispatchCalls = 0;
+  let subscriberNotifications = 0;
+  store.subscribe(() => {
+    subscriberNotifications++;
+  });
+  const selectorCounters = () =>
+    Object.fromEntries(
+      Object.entries(threadSelectors)
+        .filter(([, value]) => typeof value === "function")
+        .map(([name, value]) => {
+          const diagnostic = value as unknown as {
+            recomputations?: () => number;
+            dependencyRecomputations?: () => number;
+            dependencies?: unknown[];
+          };
+          return [
+            name,
+            {
+              recomputations: diagnostic.recomputations?.() ?? null,
+              dependencyRecomputations:
+                diagnostic.dependencyRecomputations?.() ?? null,
+              inputCount: diagnostic.dependencies?.length ?? null,
+            },
+          ];
+        }),
+    );
   Object.assign(window, {
     __uiPerformance: {
       store,
+      diagnostics: () => ({
+        deltaDispatchCalls,
+        subscriberNotifications,
+        selectors: selectorCounters(),
+      }),
       delta: (id: string, text: string) => {
+        deltaDispatchCalls++;
         const seq = (sequences.get(id) ?? 0) + 1;
         sequences.set(id, seq);
         store.dispatch(

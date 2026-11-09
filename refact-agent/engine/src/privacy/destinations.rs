@@ -35,18 +35,46 @@ pub(crate) fn clear_for_model<T: PrivacyAudited>(
     model_rec: &BaseModelRecord,
 ) -> Result<Cleared<T>, refact_privacy::Refusal> {
     let destination = Destination::from_model_record(model_rec);
-    let policy = gcx
-        .privacy_policy_load
-        .read()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .policy
-        .clone();
-    let compiled = policy.compile().map_err(|error| refact_privacy::Refusal {
+    clear_current(gcx, value, &destination)
+}
+
+fn clear_current<T: PrivacyAudited>(
+    gcx: &SharedGlobalContext,
+    value: T,
+    destination: &Destination,
+) -> Result<Cleared<T>, refact_privacy::Refusal> {
+    let refuse = |message: String| refact_privacy::Refusal {
         destination: destination.clone(),
         offending: Vec::new(),
-        message: format!("privacy policy failed to compile: {error}"),
-    })?;
-    refact_privacy::clear(value, &destination, &compiled)
+        message,
+    };
+    let snapshot = super::classification_cache::snapshot(gcx).map_err(&refuse)?;
+    let mut records = value
+        .privacy_records()
+        .map_err(|error| refuse(error.message))?;
+    let mut refreshed = Vec::with_capacity(records.len());
+    for (index, record) in &records {
+        if record.path.is_empty() || record.path.contains('\0') {
+            return Err(refuse("malformed privacy record path".into()));
+        }
+        let classified = snapshot.classify(gcx, std::path::Path::new(&record.path));
+        let mut current = record.clone();
+        current.zone = classified.zone.name;
+        refreshed.push((*index, current));
+    }
+    records.extend(refreshed);
+    struct Audit(Vec<(usize, refact_privacy::FileRecord)>);
+    impl PrivacyAudited for Audit {
+        fn privacy_records(
+            &self,
+        ) -> Result<Vec<(usize, refact_privacy::FileRecord)>, refact_privacy::PrivacyAuditError>
+        {
+            Ok(self.0.clone())
+        }
+    }
+    refact_privacy::clear(Audit(records), destination, &snapshot.compiled)?;
+    snapshot.finish(gcx).map_err(&refuse)?;
+    refact_privacy::clear(value, destination, &snapshot.compiled)
 }
 
 pub(crate) fn clear_for_mcp<T: PrivacyAudited>(
@@ -59,23 +87,59 @@ pub(crate) fn clear_for_mcp<T: PrivacyAudited>(
         kind: DestinationKind::Mcp,
         display_name: server_name.to_string(),
     };
-    let policy = gcx
-        .privacy_policy_load
-        .read()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .policy
-        .clone();
-    let compiled = policy.compile().map_err(|error| refact_privacy::Refusal {
-        destination: destination.clone(),
-        offending: Vec::new(),
-        message: format!("privacy policy failed to compile: {error}"),
-    })?;
-    refact_privacy::clear(value, &destination, &compiled)
+    clear_current(gcx, value, &destination)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct Records(Vec<refact_privacy::FileRecord>);
+    impl PrivacyAudited for Records {
+        fn privacy_records(
+            &self,
+        ) -> Result<Vec<(usize, refact_privacy::FileRecord)>, refact_privacy::PrivacyAuditError>
+        {
+            Ok(self.0.iter().cloned().enumerate().collect())
+        }
+    }
+
+    #[tokio::test]
+    async fn egress_refreshes_patterns_and_keeps_carried_obligations() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let path = gcx.cache_dir.join("sensitive.txt");
+        std::fs::write(&path, "fixture").unwrap();
+        let record = crate::privacy::records::declared_file_record(&gcx, &path).unwrap();
+        let trusted = BaseModelRecord {
+            id: "trusted/model".into(),
+            ..Default::default()
+        };
+        let other = BaseModelRecord {
+            id: "other/model".into(),
+            ..Default::default()
+        };
+        assert!(clear_for_model(&gcx, Records(vec![record.clone()]), &other).is_ok());
+        gcx.privacy_policy_load.write().unwrap().policy =
+            std::sync::Arc::new(refact_privacy::PrivacyPolicy {
+                zones: vec![refact_privacy::Zone {
+                    name: "secrets".into(),
+                    patterns: vec!["sensitive.txt".into()],
+                    send_to: vec!["trusted".into()],
+                    on_shell_read: refact_privacy::ShellBehavior::Withhold,
+                }],
+                ..Default::default()
+            });
+        assert!(clear_for_model(&gcx, Records(vec![record.clone()]), &trusted).is_ok());
+        assert!(clear_for_model(&gcx, Records(vec![record.clone()]), &other).is_err());
+        let mut carried = record.clone();
+        carried.zone = "effective:secrets+removed".into();
+        assert!(clear_for_model(&gcx, Records(vec![carried]), &trusted).is_err());
+        let mut malformed = record.clone();
+        malformed.path.clear();
+        assert!(clear_for_model(&gcx, Records(vec![malformed]), &trusted).is_err());
+        gcx.privacy_policy_load.write().unwrap().error = Some("fixture failure".into());
+        assert!(clear_for_model(&gcx, Records(vec![record]), &trusted).is_err());
+    }
 
     struct EmptyAudit;
 
@@ -150,6 +214,6 @@ mod tests {
         };
 
         assert!(refusal.offending.is_empty());
-        assert!(refusal.message.contains("privacy policy failed to compile"));
+        assert!(refusal.message.contains("privacy policy unavailable"));
     }
 }

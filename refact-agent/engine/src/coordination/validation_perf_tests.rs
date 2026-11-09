@@ -145,15 +145,22 @@ async fn realistic_provenance_scale_and_first_row_capacity_failure() {
                 .insert(format!("load-{count}-{index}"), Arc::new(Mutex::new(peer)));
         }
         let build_start = std::time::Instant::now();
-        let message = prepare_work_context(
-            &app,
-            &mut CapsuleState::default(),
-            "load-caller",
-            "trusted/model",
-        )
-        .await
-        .expect("capsule generated");
+        let mut capsule_state = CapsuleState::default();
+        let message =
+            prepare_work_context(&app, &mut capsule_state, "load-caller", "trusted/model")
+                .await
+                .expect("capsule generated");
         let build = build_start.elapsed();
+        let capsule_state_after_build = capsule_state.clone();
+        let warm_start = std::time::Instant::now();
+        let warm =
+            prepare_work_context(&app, &mut capsule_state, "load-caller", "trusted/model").await;
+        let warm_unchanged_capsule = warm_start.elapsed();
+        assert!(
+            warm.is_none(),
+            "unchanged capsule input must not generate a capsule"
+        );
+        assert_eq!(capsule_state, capsule_state_after_build);
         let text = message.content.content_text_only();
         let cursor = text
             .split("work_overview(cursor=\"")
@@ -183,7 +190,7 @@ async fn realistic_provenance_scale_and_first_row_capacity_failure() {
         assert!(page.rows.iter().all(|row| row.provenance_complete));
         assert!(page.source_records.len() > 100);
         let setup = build_start.duration_since(started);
-        eprintln!("realistic_load rows={count} policy_zones=20 worktree_mappings=50 records_per_row=10 record_inputs={} page_rows={} setup_ms={} capsule_ms={} overview_ms={} result=success", count * 10, page.rows.len(), setup.as_millis(), build.as_millis(), page_time.as_millis());
+        eprintln!("realistic_load rows={count} policy_zones=20 worktree_mappings=50 records_per_row=10 record_inputs={} page_rows={} setup_ms={} capsule_ms={} warm_unchanged_capsule_ms={} overview_ms={} result=success", count * 10, page.rows.len(), setup.as_millis(), build.as_millis(), warm_unchanged_capsule.as_millis(), page_time.as_millis());
         app.chat
             .sessions
             .write()

@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -6,6 +6,21 @@ use glob::Pattern;
 use unicode_normalization::UnicodeNormalization;
 
 use crate::policy::{PrivacyPolicy, ShellBehavior, Zone};
+
+#[cfg(test)]
+thread_local! {
+    static MATCH_WORK: std::cell::Cell<Option<[usize; 4]>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+fn count_work(index: usize) {
+    MATCH_WORK.with(|counts| {
+        if let Some(mut values) = counts.get() {
+            values[index] += 1;
+            counts.set(Some(values));
+        }
+    });
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PolicyError {
@@ -33,14 +48,102 @@ impl fmt::Display for PolicyError {
 
 impl std::error::Error for PolicyError {}
 
+struct PrefixedPattern {
+    pattern: Pattern,
+    literal_end: usize,
+}
+
+impl PrefixedPattern {
+    fn new(pattern: Pattern) -> Self {
+        let literal_end = pattern
+            .as_str()
+            .find(['*', '?', '['])
+            .unwrap_or(pattern.as_str().len());
+        Self {
+            pattern,
+            literal_end,
+        }
+    }
+
+    fn matches(&self, candidate: &str) -> bool {
+        #[cfg(test)]
+        count_work(2);
+        candidate.starts_with(&self.pattern.as_str()[..self.literal_end])
+            && self.pattern.matches(candidate)
+    }
+}
+
+fn compile_zone_patterns(patterns: &[String]) -> Result<Vec<PrefixedPattern>, PolicyError> {
+    compile_patterns(patterns)
+        .map(|patterns| patterns.into_iter().map(PrefixedPattern::new).collect())
+}
+
 struct CompiledZone {
     zone: Zone,
-    patterns: Vec<Pattern>,
+    patterns: Vec<PrefixedPattern>,
 }
 
 pub struct CompiledPolicy {
     zones: Vec<CompiledZone>,
     normal_index: usize,
+}
+
+/// An operation-local owner of one immutable policy and its pure lexical memo.
+///
+/// Every call still observes roots and each lazily consumed path afresh. Only
+/// string-to-earliest-pattern-match work is reused, never filesystem observations
+/// or path-to-zone verdicts. The combined maps retain at most 4096 entries and
+/// 1 MiB of key bytes; this is not a bound on total heap allocation.
+pub struct ClassificationBatch {
+    compiled: CompiledPolicy,
+    memo: LexicalMemo,
+}
+
+impl ClassificationBatch {
+    pub fn new(compiled: CompiledPolicy) -> Self {
+        Self {
+            compiled,
+            memo: LexicalMemo::new(4096, 1024 * 1024),
+        }
+    }
+
+    pub fn strictest_zone_for_paths_with_roots<I, P, R, Q>(&mut self, paths: I, roots: R) -> Zone
+    where
+        I: IntoIterator<Item = P>,
+        P: AsRef<Path>,
+        R: IntoIterator<Item = Q>,
+        Q: AsRef<Path>,
+    {
+        self.memo.reset_after_admission_failure();
+        let roots = roots
+            .into_iter()
+            .map(|root| absolute_path(root.as_ref()))
+            .collect::<Vec<_>>();
+        let canonical_roots = canonical_roots_of(&roots);
+        let root_index = PreparedRootIndex::new(&roots, &canonical_roots);
+        let indices = self
+            .compiled
+            .zone_indices_with_memo(paths, &root_index, &mut self.memo);
+        let zones = indices
+            .into_iter()
+            .map(|index| {
+                let zone = &self.compiled.zones[index].zone;
+                // Keep matched permissions, but FIRST name index for ordering.
+                (self.compiled.zone_index_named(&zone.name).unwrap(), zone)
+            })
+            .collect::<Vec<_>>();
+        effective_zone(&zones)
+            .unwrap_or_else(|| self.compiled.zones[self.compiled.normal_index].zone.clone())
+    }
+}
+
+// Deliberately no DerefMut: replacing the policy must never retain its memo.
+impl std::ops::Deref for ClassificationBatch {
+    type Target = CompiledPolicy;
+
+    fn deref(&self) -> &Self::Target {
+        &self.compiled
+    }
 }
 
 pub fn compile_patterns(patterns: &[String]) -> Result<Vec<Pattern>, PolicyError> {
@@ -101,7 +204,7 @@ impl PrivacyPolicy {
                     send_to: Vec::new(),
                     on_shell_read: ShellBehavior::Deny,
                 },
-                patterns: compile_patterns(&self.blocked)?,
+                patterns: compile_zone_patterns(&self.blocked)?,
             });
         }
 
@@ -113,7 +216,7 @@ impl PrivacyPolicy {
             }
             zones.push(CompiledZone {
                 zone: zone.clone(),
-                patterns: compile_patterns(&zone.patterns)?,
+                patterns: compile_zone_patterns(&zone.patterns)?,
             });
         }
 
@@ -131,7 +234,7 @@ impl PrivacyPolicy {
                 };
                 let index = zones.len();
                 zones.push(CompiledZone {
-                    patterns: compile_patterns(&zone.patterns)?,
+                    patterns: compile_zone_patterns(&zone.patterns)?,
                     zone,
                 });
                 index
@@ -178,12 +281,7 @@ impl CompiledPolicy {
     }
 
     fn zone_for_path_prepared(&self, path: &Path, root_index: &PreparedRootIndex) -> &Zone {
-        let canonical_path = canonicalize_or_original(&absolute_path(path));
-
-        let mut candidate_paths = vec![path.to_path_buf(), absolute_path(path), canonical_path];
-        append_relative_candidates(&mut candidate_paths, root_index);
-
-        let candidates = normalized_candidates(&candidate_paths);
+        let candidates = normalized_candidates(&path_candidates(path, root_index));
         if let Some((index, _)) = self.zones.iter().enumerate().find(|(_, compiled)| {
             compiled.patterns.iter().any(|pattern| {
                 candidates
@@ -218,17 +316,180 @@ impl CompiledPolicy {
             .collect::<Vec<_>>();
         let canonical_roots = canonical_roots_of(&roots);
         let root_index = PreparedRootIndex::new(&roots, &canonical_roots);
-        let zones = paths
+        let paths = paths.into_iter();
+        if paths.size_hint().1.is_some_and(|upper| upper <= 1) {
+            let zones = paths
+                .map(|path| {
+                    let zone = self.zone_for_path_prepared(path.as_ref(), &root_index);
+                    (self.zone_index_named(&zone.name).unwrap(), zone)
+                })
+                .collect::<Vec<_>>();
+            return effective_zone(&zones)
+                .unwrap_or_else(|| self.zones[self.normal_index].zone.clone());
+        }
+        let indices = self.zone_indices_for_paths(paths, &root_index);
+        let zones = indices
             .into_iter()
-            .map(|path| {
-                let zone = self.zone_for_path_prepared(path.as_ref(), &root_index);
-                let index = self
-                    .zone_index_named(&zone.name)
-                    .expect("matched zones should belong to the compiled policy");
-                (index, zone)
+            .map(|index| {
+                let zone = &self.zones[index].zone;
+                (self.zone_index_named(&zone.name).unwrap(), zone)
             })
             .collect::<Vec<_>>();
         effective_zone(&zones).unwrap_or_else(|| self.zones[self.normal_index].zone.clone())
+    }
+
+    fn zone_indices_for_paths<I, P>(&self, paths: I, root_index: &PreparedRootIndex) -> Vec<usize>
+    where
+        I: IntoIterator<Item = P>,
+        P: AsRef<Path>,
+    {
+        self.zone_indices_with_budget(paths, root_index, 4096, 1024 * 1024)
+    }
+
+    fn zone_indices_with_budget<I, P>(
+        &self,
+        paths: I,
+        root_index: &PreparedRootIndex,
+        entries: usize,
+        bytes: usize,
+    ) -> Vec<usize>
+    where
+        I: IntoIterator<Item = P>,
+        P: AsRef<Path>,
+    {
+        self.zone_indices_with_memo(paths, root_index, &mut LexicalMemo::new(entries, bytes))
+    }
+
+    fn zone_indices_with_memo<I, P>(
+        &self,
+        paths: I,
+        root_index: &PreparedRootIndex,
+        memo: &mut LexicalMemo,
+    ) -> Vec<usize>
+    where
+        I: IntoIterator<Item = P>,
+        P: AsRef<Path>,
+    {
+        let LexicalMemo {
+            raw_matches,
+            normalized_matches,
+            budget,
+            admission_failed,
+            ..
+        } = memo;
+        let mut indices = Vec::new();
+        for path in paths {
+            let mut index = self.zones.len();
+            for candidate in path_candidates(path.as_ref(), root_index) {
+                let raw = candidate.to_string_lossy();
+                let matched = if let Some(matched) = raw_matches.get(raw.as_ref()) {
+                    *matched
+                } else {
+                    let normalized = normalize(&raw);
+                    let mut matched = self.zones.len();
+                    if !normalized.is_empty() {
+                        let basename = normalized.rsplit('/').find(|part| !part.is_empty());
+                        for candidate in [basename, Some(normalized.as_str())].into_iter().flatten()
+                        {
+                            let index = if let Some(index) = normalized_matches.get(candidate) {
+                                *index
+                            } else {
+                                let index = self
+                                    .zones
+                                    .iter()
+                                    .position(|zone| {
+                                        zone.patterns
+                                            .iter()
+                                            .any(|pattern| pattern.matches(candidate))
+                                    })
+                                    .unwrap_or(self.zones.len());
+                                if budget.reserve(candidate.len()) {
+                                    normalized_matches.insert(candidate.to_owned(), index);
+                                } else {
+                                    *admission_failed = true;
+                                }
+                                index
+                            };
+                            matched = matched.min(index);
+                            if matched == 0 {
+                                break;
+                            }
+                        }
+                    }
+                    if budget.reserve(raw.len()) {
+                        raw_matches.insert(raw.into_owned(), matched);
+                    } else {
+                        *admission_failed = true;
+                    }
+                    matched
+                };
+                index = index.min(matched);
+                if index == 0 {
+                    break;
+                }
+            }
+            indices.push(if index == self.zones.len() {
+                self.normal_index
+            } else {
+                index
+            });
+        }
+        indices
+    }
+}
+
+// Values are earliest enum indices, or zones.len() for NO match. In particular,
+// the sentinel is not normal_index: another representation may match later.
+struct LexicalMemo {
+    raw_matches: HashMap<String, usize>,
+    normalized_matches: HashMap<String, usize>,
+    budget: MemoBudget,
+    capacity: MemoBudget,
+    admission_failed: bool,
+}
+
+impl LexicalMemo {
+    fn new(entries: usize, bytes: usize) -> Self {
+        Self {
+            raw_matches: HashMap::new(),
+            normalized_matches: HashMap::new(),
+            budget: MemoBudget {
+                entries,
+                bytes,
+            },
+            capacity: MemoBudget {
+                entries,
+                bytes,
+            },
+            admission_failed: false,
+        }
+    }
+
+    fn reset_after_admission_failure(&mut self) {
+        // Reset only between calls; a full memo with no rejected miss stays warm.
+        if self.admission_failed {
+            self.raw_matches.clear();
+            self.normalized_matches.clear();
+            self.budget = self.capacity;
+            self.admission_failed = false;
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct MemoBudget {
+    entries: usize,
+    bytes: usize,
+}
+
+impl MemoBudget {
+    fn reserve(&mut self, bytes: usize) -> bool {
+        if self.entries == 0 || bytes > self.bytes {
+            return false;
+        }
+        self.entries -= 1;
+        self.bytes -= bytes;
+        true
     }
 }
 
@@ -319,6 +580,8 @@ fn strictest_shell_behavior(left: ShellBehavior, right: ShellBehavior) -> ShellB
 }
 
 fn normalize(value: &str) -> String {
+    #[cfg(test)]
+    count_work(1);
     let slashed = value.replace('\\', "/");
     if slashed.is_ascii() {
         return slashed.to_ascii_lowercase();
@@ -344,6 +607,8 @@ fn canonical_roots_of(roots: &[PathBuf]) -> Vec<PathBuf> {
 }
 
 fn canonicalize_or_original(path: &Path) -> PathBuf {
+    #[cfg(test)]
+    count_work(0);
     dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
@@ -363,6 +628,22 @@ impl PreparedRootIndex {
     }
 }
 
+fn path_candidates(path: &Path, root_index: &PreparedRootIndex) -> Vec<PathBuf> {
+    let absolute = absolute_path(path);
+    let canonical = canonicalize_or_original(&absolute);
+    let mut candidates = vec![path.to_path_buf()];
+    for representation in [absolute, canonical] {
+        if !candidates
+            .iter()
+            .any(|candidate| candidate.as_os_str() == representation.as_os_str())
+        {
+            candidates.push(representation);
+        }
+    }
+    append_relative_candidates(&mut candidates, root_index);
+    candidates
+}
+
 fn append_relative_candidates(candidate_paths: &mut Vec<PathBuf>, root_index: &PreparedRootIndex) {
     if root_index.roots.is_empty() {
         return;
@@ -379,6 +660,8 @@ fn append_relative_candidates(candidate_paths: &mut Vec<PathBuf>, root_index: &P
             }
         }));
         for prefix in prefixes {
+            #[cfg(test)]
+            count_work(3);
             if let Some(root) = root_index.roots.get(prefix) {
                 if let Ok(relative) = path.strip_prefix(root) {
                     candidate_paths.push(relative.to_path_buf());
@@ -415,6 +698,808 @@ mod tests {
     use super::*;
     use crate::destination::{Destination, DestinationId, DestinationKind};
     use crate::policy::{ShellBehavior, SubagentPolicy};
+
+    fn owner_oracle(batch: &mut ClassificationBatch, paths: &[PathBuf], roots: &[PathBuf]) {
+        let absolute_roots = roots
+            .iter()
+            .map(|root| absolute_path(root))
+            .collect::<Vec<_>>();
+        let indices = original_indices(&batch.compiled, paths, &absolute_roots);
+        let expected = {
+            let zones = indices
+                .iter()
+                .map(|index| {
+                    let zone = &batch.compiled.zones[*index].zone;
+                    (batch.compiled.zone_index_named(&zone.name).unwrap(), zone)
+                })
+                .collect::<Vec<_>>();
+            effective_zone(&zones).unwrap_or_else(|| {
+                batch.compiled.zones[batch.compiled.normal_index]
+                    .zone
+                    .clone()
+            })
+        };
+        assert_eq!(
+            batch.strictest_zone_for_paths_with_roots(paths, roots),
+            expected
+        );
+    }
+
+    #[test]
+    fn owner_memo_reuses_strings_across_calls_and_keeps_policy_namespace() {
+        let temp = tempfile::tempdir().unwrap();
+        let roots = vec![temp.path().to_path_buf()];
+        let paths = [
+            "late.txt",
+            "other.txt",
+            "missing.txt",
+            "cafe\u{301}.txt",
+            "",
+        ]
+        .map(|name| temp.path().join(name));
+        for normal_patterns in [vec!["never"], vec!["**"]] {
+            for (entries, bytes) in [(0, 0), (1, 1), (3, 32), (4096, 1024 * 1024)] {
+                for reversed in [false, true] {
+                    let mut zones = vec![
+                        zone("duplicate", &["early.txt"], &["a", "b"]),
+                        zone("normal", &normal_patterns, &["*"]),
+                        zone_with_shell_behavior(
+                            "other",
+                            &["other.txt"],
+                            &["b"],
+                            ShellBehavior::Deny,
+                        ),
+                        zone_with_shell_behavior(
+                            "duplicate",
+                            &["late.txt", "café.txt"],
+                            &["b"],
+                            ShellBehavior::Deny,
+                        ),
+                    ];
+                    if reversed {
+                        zones.reverse();
+                    }
+                    let mut batch = ClassificationBatch::new(policy(zones).compile().unwrap());
+                    batch.memo = LexicalMemo::new(entries, bytes);
+                    for round in 0..8 {
+                        for len in 0..=paths.len() {
+                            owner_oracle(&mut batch, &paths[..len], &roots);
+                        }
+                        let unique = vec![temp.path().join(format!("unique-{round}.txt"))];
+                        owner_oracle(&mut batch, &unique, &roots);
+                        let count =
+                            batch.memo.raw_matches.len() + batch.memo.normalized_matches.len();
+                        let key_bytes = batch
+                            .memo
+                            .raw_matches
+                            .keys()
+                            .chain(batch.memo.normalized_matches.keys())
+                            .map(String::len)
+                            .sum::<usize>();
+                        assert_eq!(
+                            count + batch.memo.budget.entries,
+                            batch.memo.capacity.entries
+                        );
+                        assert_eq!(
+                            key_bytes + batch.memo.budget.bytes,
+                            batch.memo.capacity.bytes
+                        );
+                    }
+                }
+            }
+        }
+        // Warm hits remain useful even after insertion is disabled.
+        let mut batch = ClassificationBatch::new(
+            policy(vec![zone("late", &["late.txt"], &[])])
+                .compile()
+                .unwrap(),
+        );
+        owner_oracle(&mut batch, &paths, &roots);
+        batch.memo.budget = MemoBudget {
+            entries: 0,
+            bytes: 0,
+        };
+        MATCH_WORK.with(|counts| counts.set(Some([0; 4])));
+        batch.strictest_zone_for_paths_with_roots(&paths, &roots);
+        let work = MATCH_WORK.with(|counts| counts.replace(None).unwrap());
+        assert_eq!(
+            work[0],
+            roots.len() + paths.len(),
+            "fresh root AND each path canonicalization"
+        );
+        assert_eq!(work[1], 0, "raw memo hits skip normalization");
+        assert_eq!(
+            work[2], 0,
+            "warm hits skip pattern probes despite full budget"
+        );
+        let mut different = ClassificationBatch::new(
+            policy(vec![zone("different", &["late.txt"], &["x"])])
+                .compile()
+                .unwrap(),
+        );
+        assert_eq!(
+            different
+                .strictest_zone_for_paths_with_roots(&paths[..1], &roots)
+                .name,
+            "different"
+        );
+    }
+
+    #[test]
+    fn owner_memo_recovers_on_call_after_admission_failure() {
+        let temp = tempfile::tempdir().unwrap();
+        let compiled = policy(vec![
+            zone("first", &["never-first"], &[]),
+            zone("second", &["never-second"], &[]),
+            zone("normal", &["never-normal"], &["*"]),
+        ])
+        .compile()
+        .unwrap();
+        let mut batch = ClassificationBatch::new(compiled);
+        batch.memo = LexicalMemo::new(3, 1024 * 1024);
+        let mut work = Vec::new();
+        for (name, repeats) in [("owner-a", 1), ("owner-b", 50), ("owner-c", 50)] {
+            let paths = vec![temp.path().join(name); repeats];
+            let expected = batch.compiled.strictest_zone_for_paths(&paths);
+            MATCH_WORK.with(|counts| counts.set(Some([0; 4])));
+            let actual = batch.strictest_zone_for_paths_with_roots(&paths, [] as [&Path; 0]);
+            let counts = MATCH_WORK.with(|counts| counts.replace(None).unwrap());
+            assert_eq!(actual, expected);
+            assert_eq!(counts[0], repeats, "every path is freshly canonicalized");
+            work.push(counts);
+        }
+        assert_eq!(work[0][2], 6);
+        assert_eq!(
+            work[1][2], 300,
+            "no mid-call reset rescues first saturation"
+        );
+        assert_eq!(work[2][2], 6, "next record recovers bounded lexical reuse");
+        assert_eq!(work[2][1], 1);
+    }
+
+    #[test]
+    fn owner_exact_full_warm_hits_do_not_reset() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = [temp.path().join("missing")];
+        let mut batch = ClassificationBatch::new(
+            policy(vec![zone("normal", &["never"], &["*"])])
+                .compile()
+                .unwrap(),
+        );
+        let raw_len = paths[0].to_string_lossy().len();
+        let key_bytes = "missing".len() + raw_len * 2;
+        batch.memo = LexicalMemo::new(3, key_bytes);
+        owner_oracle(&mut batch, &paths, &[]);
+        assert_eq!((batch.memo.budget.entries, batch.memo.budget.bytes), (0, 0));
+        for _ in 0..5 {
+            assert!(!batch.memo.admission_failed);
+            MATCH_WORK.with(|counts| counts.set(Some([0; 4])));
+            let result = batch.strictest_zone_for_paths_with_roots(&paths, [] as [&Path; 0]);
+            let work = MATCH_WORK.with(|counts| counts.replace(None).unwrap());
+            assert_eq!(result.name, "normal");
+            assert_eq!(work, [1, 0, 0, 0]);
+            assert_eq!(batch.memo.raw_matches.len(), 1);
+            assert_eq!(batch.memo.normalized_matches.len(), 2);
+            assert_eq!((batch.memo.budget.entries, batch.memo.budget.bytes), (0, 0));
+        }
+    }
+
+    #[test]
+    fn owner_rejected_oversized_zero_and_tiny_budgets_reset_exactly() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = [temp.path().join("missing-long-key")];
+        for (entries, bytes) in [(0, 0), (0, 1024), (3, 0), (1, 1), (3, 16)] {
+            let mut batch = ClassificationBatch::new(
+                policy(vec![zone("normal", &["never"], &["*"])])
+                    .compile()
+                    .unwrap(),
+            );
+            batch.memo = LexicalMemo::new(entries, bytes);
+            for _ in 0..3 {
+                owner_oracle(&mut batch, &paths, &[]);
+                assert!(batch.memo.admission_failed);
+                let count = batch.memo.raw_matches.len() + batch.memo.normalized_matches.len();
+                let key_bytes = batch
+                    .memo
+                    .raw_matches
+                    .keys()
+                    .chain(batch.memo.normalized_matches.keys())
+                    .map(String::len)
+                    .sum::<usize>();
+                assert_eq!(count + batch.memo.budget.entries, entries);
+                assert_eq!(key_bytes + batch.memo.budget.bytes, bytes);
+                owner_oracle(&mut batch, &[], &[]);
+                assert!(!batch.memo.admission_failed);
+                assert!(batch.memo.raw_matches.is_empty());
+                assert!(batch.memo.normalized_matches.is_empty());
+                assert_eq!(
+                    (batch.memo.budget.entries, batch.memo.budget.bytes),
+                    (entries, bytes)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn owner_single_alias_matches_existing_fast_path_with_duplicate_permissions() {
+        let temp = tempfile::tempdir().unwrap();
+        let compiled = policy(vec![
+            zone("duplicate", &["early.txt"], &["a", "b"]),
+            zone_with_shell_behavior("duplicate", &["late.txt"], &["b"], ShellBehavior::Deny),
+            zone("normal", &["never"], &["*"]),
+        ])
+        .compile()
+        .unwrap();
+        let mut batch = ClassificationBatch::new(compiled);
+        for (entries, bytes) in [(0, 0), (1, 1), (4096, 1024 * 1024)] {
+            batch.memo = LexicalMemo::new(entries, bytes);
+            for name in ["late.txt", "early.txt", "absent.txt", "late.txt"] {
+                let paths = [temp.path().join(name)];
+                let expected = batch
+                    .compiled
+                    .strictest_zone_for_paths_with_roots(&paths, [temp.path()]);
+                assert_eq!(
+                    batch.strictest_zone_for_paths_with_roots(&paths, [temp.path()]),
+                    expected
+                );
+                if name == "late.txt" {
+                    assert_eq!(expected.send_to, ["b"]);
+                    assert_eq!(expected.on_shell_read, ShellBehavior::Deny);
+                }
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn owner_memo_reobserves_file_and_root_symlinks_a_b_a_and_lazy_aliases() {
+        use std::os::unix::fs::symlink;
+        let temp = tempfile::tempdir().unwrap();
+        let first = temp.path().join("first");
+        let second = temp.path().join("second");
+        for dir in [&first, &second] {
+            std::fs::create_dir(dir).unwrap();
+            std::fs::create_dir(dir.join("private")).unwrap();
+            std::fs::write(dir.join("private/x.txt"), "fixture").unwrap();
+        }
+        let alias = temp.path().join("alias");
+        let root_alias = temp.path().join("root_alias");
+        symlink(first.join("private/x.txt"), &alias).unwrap();
+        symlink(&first, &root_alias).unwrap();
+        let mut files = ClassificationBatch::new(
+            policy(vec![
+                zone("normal", &["never"], &["*"]),
+                zone("first", &["first/private/*"], &["a"]),
+                zone("second", &["second/private/*"], &["b"]),
+            ])
+            .compile()
+            .unwrap(),
+        );
+        let mut roots = ClassificationBatch::new(
+            policy(vec![
+                zone("normal", &["never"], &["*"]),
+                zone("private", &["private/*"], &[]),
+            ])
+            .compile()
+            .unwrap(),
+        );
+        for (target, name, root_name) in [
+            (&first, "first", "private"),
+            (&second, "second", "normal"),
+            (&first, "first", "private"),
+        ] {
+            std::fs::remove_file(&alias).unwrap();
+            std::fs::remove_file(&root_alias).unwrap();
+            symlink(target.join("private/x.txt"), &alias).unwrap();
+            symlink(target, &root_alias).unwrap();
+            owner_oracle(&mut files, &[alias.clone()], &[temp.path().to_path_buf()]);
+            assert_eq!(
+                files
+                    .strictest_zone_for_paths_with_roots([&alias], [temp.path()])
+                    .name,
+                name
+            );
+            // Lexical alias itself has no match; canonical representation does.
+            assert_eq!(
+                files.memo.raw_matches.get(alias.to_string_lossy().as_ref()),
+                Some(&files.compiled.zones.len())
+            );
+            let physical = first.join("private/x.txt");
+            owner_oracle(&mut roots, &[physical.clone()], &[root_alias.clone()]);
+            assert_eq!(
+                roots
+                    .strictest_zone_for_paths_with_roots([&physical], [&root_alias])
+                    .name,
+                root_name
+            );
+        }
+        let lazy = (0..2).map(|index| {
+            if index == 1 {
+                std::fs::remove_file(&alias).unwrap();
+                symlink(second.join("private/x.txt"), &alias).unwrap();
+            }
+            alias.clone()
+        });
+        let result = files.strictest_zone_for_paths_with_roots(lazy, [temp.path()]);
+        assert_eq!(result.name, "effective:first+second");
+        assert!(result.send_to.is_empty());
+    }
+
+    fn original_indices(
+        compiled: &CompiledPolicy,
+        paths: &[PathBuf],
+        roots: &[PathBuf],
+    ) -> Vec<usize> {
+        let canonical = canonical_roots_of(roots);
+        paths
+            .iter()
+            .map(|path| {
+                let base = [
+                    path.clone(),
+                    absolute_path(path),
+                    canonicalize_or_original(&absolute_path(path)),
+                ];
+                let mut candidates = BTreeSet::new();
+                for candidate in &base {
+                    let mut values = vec![candidate.clone()];
+                    for (root, canonical) in roots.iter().zip(&canonical) {
+                        for prefix in [root, canonical] {
+                            if let Ok(relative) = candidate.strip_prefix(prefix) {
+                                values.push(relative.to_path_buf());
+                            }
+                        }
+                    }
+                    for value in values {
+                        let value = value
+                            .to_string_lossy()
+                            .replace('\\', "/")
+                            .nfc()
+                            .collect::<String>()
+                            .to_lowercase();
+                        if !value.is_empty() {
+                            if let Some(basename) = value.rsplit('/').find(|part| !part.is_empty())
+                            {
+                                candidates.insert(basename.to_string());
+                            }
+                            candidates.insert(value);
+                        }
+                    }
+                }
+                compiled
+                    .zones
+                    .iter()
+                    .position(|zone| {
+                        zone.patterns.iter().any(|pattern| {
+                            candidates
+                                .iter()
+                                .any(|candidate| pattern.pattern.matches(candidate))
+                        })
+                    })
+                    .unwrap_or(compiled.normal_index)
+            })
+            .collect()
+    }
+
+    fn assert_batch_oracle(compiled: &CompiledPolicy, paths: &[PathBuf], roots: &[PathBuf]) {
+        let roots = roots
+            .iter()
+            .map(|root| absolute_path(root))
+            .collect::<Vec<_>>();
+        let expected = original_indices(compiled, paths, &roots);
+        let index = PreparedRootIndex::new(&roots, &canonical_roots_of(&roots));
+        assert_eq!(
+            compiled.zone_indices_for_paths(paths, &index),
+            expected,
+            "paths={paths:?}"
+        );
+        for (entries, bytes) in [(0, 0), (1, 1), (3, 32), (4096, 1024 * 1024)] {
+            let actual = compiled.zone_indices_with_budget(paths, &index, entries, bytes);
+            assert_eq!(actual, expected, "budget={entries}/{bytes}");
+        }
+        let zones = expected
+            .iter()
+            .map(|index| {
+                let zone = &compiled.zones[*index].zone;
+                (compiled.zone_index_named(&zone.name).unwrap(), zone)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            compiled.strictest_zone_for_paths_with_roots(paths, &roots),
+            effective_zone(&zones)
+                .unwrap_or_else(|| compiled.zones[compiled.normal_index].zone.clone())
+        );
+    }
+
+    #[test]
+    fn shared_candidates_preserve_each_alias_first_zone_and_fallback() {
+        let temp = tempfile::tempdir().unwrap();
+        let roots = vec![temp.path().to_path_buf(), temp.path().join("nested")];
+        let mut paths = vec![
+            temp.path().join("first/x.txt"),
+            temp.path().join("second/x.txt"),
+            temp.path().join("nested/second/x.txt"),
+            temp.path().join("missing/./cafe\u{301}.txt"),
+            PathBuf::from("second/x.txt"),
+            PathBuf::from(""),
+            PathBuf::from(r"second\x.txt"),
+        ];
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt;
+            paths.push(PathBuf::from(std::ffi::OsString::from_vec(vec![
+                b'x', 0xff,
+            ])));
+            paths.push(PathBuf::from("x\u{fffd}"));
+        }
+        for normal_patterns in [vec!["never-matches"], vec!["first/*"], vec!["**"]] {
+            let compiled = policy(vec![
+                zone_with_shell_behavior("first", &["first/*"], &["a", "b"], ShellBehavior::Ask),
+                zone("normal", &normal_patterns, &["*"]),
+                zone_with_shell_behavior(
+                    "second",
+                    &["second/*", "café.txt"],
+                    &["b", "c"],
+                    ShellBehavior::Deny,
+                ),
+                zone("duplicate", &["x.txt"], &["a"]),
+                zone("duplicate", &["never"], &[]),
+            ])
+            .compile()
+            .unwrap();
+            for len in 0..=paths.len() {
+                assert_batch_oracle(&compiled, &paths[..len], &roots);
+            }
+            paths.reverse();
+            let mut reversed_roots = roots.clone();
+            reversed_roots.reverse();
+            assert_batch_oracle(&compiled, &paths, &reversed_roots);
+        }
+        let compiled = policy(vec![
+            zone_with_shell_behavior("first", &["first/*"], &["a", "b"], ShellBehavior::Ask),
+            zone_with_shell_behavior("second", &["second/*"], &["b", "c"], ShellBehavior::Deny),
+        ])
+        .compile()
+        .unwrap();
+        let result = compiled.strictest_zone_for_paths_with_roots(
+            [
+                temp.path().join("first/x.txt"),
+                temp.path().join("second/x.txt"),
+            ],
+            &roots,
+        );
+        assert_eq!(result.name, "effective:first+second");
+        assert_eq!(result.send_to, ["b"]);
+        assert_eq!(result.on_shell_read, ShellBehavior::Deny);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shared_candidates_reobserve_symlinks_and_keep_hardlink_aliases() {
+        let temp = tempfile::tempdir().unwrap();
+        for name in ["first", "second"] {
+            std::fs::create_dir(temp.path().join(name)).unwrap();
+            std::fs::write(temp.path().join(name).join("x.txt"), name).unwrap();
+        }
+        let alias = temp.path().join("alias");
+        let root_alias = temp.path().join("root_alias");
+        std::os::unix::fs::symlink(temp.path().join("first/x.txt"), &alias).unwrap();
+        std::os::unix::fs::symlink(temp.path().join("first"), &root_alias).unwrap();
+        let hardlink = temp.path().join("hardlink");
+        std::fs::hard_link(temp.path().join("second/x.txt"), &hardlink).unwrap();
+        let compiled = policy(vec![
+            zone("first", &["first/*"], &["a"]),
+            zone("second", &["second/*"], &["b"]),
+        ])
+        .compile()
+        .unwrap();
+        let paths = vec![
+            alias.clone(),
+            alias.clone(),
+            hardlink,
+            temp.path().join("second/x.txt"),
+        ];
+        let roots = vec![temp.path().to_path_buf(), root_alias.clone()];
+        assert_batch_oracle(&compiled, &paths, &roots);
+        std::fs::remove_file(&alias).unwrap();
+        std::fs::remove_file(&root_alias).unwrap();
+        std::os::unix::fs::symlink(temp.path().join("second/x.txt"), &alias).unwrap();
+        std::os::unix::fs::symlink(temp.path().join("second"), &root_alias).unwrap();
+        assert_batch_oracle(&compiled, &paths, &roots);
+        assert_eq!(
+            compiled
+                .strictest_zone_for_paths_with_roots(&paths, &roots)
+                .name,
+            "second"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lazy_alias_iterator_retargets_between_fresh_observations() {
+        let temp = tempfile::tempdir().unwrap();
+        let first = temp.path().join("first.txt");
+        let second = temp.path().join("second.txt");
+        let alias = temp.path().join("alias");
+        std::fs::write(&first, "first").unwrap();
+        std::fs::write(&second, "second").unwrap();
+        std::os::unix::fs::symlink(&first, &alias).unwrap();
+        let compiled = policy(vec![
+            zone("first", &["first.txt"], &["a"]),
+            zone("second", &["second.txt"], &["b"]),
+        ])
+        .compile()
+        .unwrap();
+        let paths = (0..2).map(|index| {
+            if index == 1 {
+                std::fs::remove_file(&alias).unwrap();
+                std::os::unix::fs::symlink(&second, &alias).unwrap();
+            }
+            alias.clone()
+        });
+        let effective = compiled.strictest_zone_for_paths_with_roots(paths, [temp.path()]);
+        assert_eq!(effective.name, "effective:first+second");
+        assert!(effective.send_to.is_empty());
+    }
+
+    #[test]
+    fn later_duplicate_name_keeps_matched_zone_and_first_name_order() {
+        let compiled = policy(vec![
+            zone_with_shell_behavior(
+                "duplicate",
+                &["early.txt"],
+                &["a", "b"],
+                ShellBehavior::Withhold,
+            ),
+            zone_with_shell_behavior("other", &["other.txt"], &["b"], ShellBehavior::Deny),
+            zone_with_shell_behavior("duplicate", &["late.txt"], &["b"], ShellBehavior::Deny),
+        ])
+        .compile()
+        .unwrap();
+        let paths = vec![PathBuf::from("late.txt"), PathBuf::from("other.txt")];
+        assert_batch_oracle(&compiled, &paths, &[]);
+        let actual = compiled.strictest_zone_for_paths(&paths);
+        assert_eq!(
+            actual,
+            Zone {
+                name: "duplicate".into(),
+                patterns: Vec::new(),
+                send_to: vec!["b".into()],
+                on_shell_read: ShellBehavior::Deny,
+            }
+        );
+        assert_eq!(compiled.zone_for_path(Path::new("late.txt")).send_to, ["b"]);
+        assert_eq!(
+            compiled.zone_named("duplicate").unwrap().send_to,
+            ["a", "b"]
+        );
+    }
+
+    #[test]
+    fn memo_budget_caps_entries_and_key_bytes_without_saturation() {
+        let mut budget = MemoBudget {
+            entries: 2,
+            bytes: 3,
+        };
+        assert!(!budget.reserve(4));
+        assert!(budget.reserve(2));
+        assert!(!budget.reserve(2));
+        assert!(budget.reserve(1));
+        assert!(!budget.reserve(0));
+        assert_eq!((budget.entries, budget.bytes), (0, 0));
+    }
+
+    #[test]
+    fn thousands_of_missing_aliases_match_independent_oracle() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = (0..3000)
+            .map(|index| temp.path().join(format!("alias-{index}/second/x.txt")))
+            .collect::<Vec<_>>();
+        let compiled = policy(vec![
+            zone("first", &["alias-1/*"], &["a"]),
+            zone("second", &["*/second/*"], &["b"]),
+        ])
+        .compile()
+        .unwrap();
+        assert_batch_oracle(&compiled, &paths, &[temp.path().to_path_buf()]);
+    }
+
+    #[test]
+    fn literal_prefix_matches_glob_oracle() {
+        let prefixes = [
+            "",
+            "/repo/",
+            "c:/repo/",
+            "café/",
+            "cafe\u{301}/",
+            "δ/",
+            "a]",
+            "a!",
+            "a/./",
+        ];
+        let tails = [
+            "", "*", "?", "[ab]", "[!a]", "[[]", "[]]", "[?]", "[*]", "**/x", "literal",
+        ];
+        let mut candidates = vec![String::new(), "a".into(), "café/x".into(), "δ/x".into()];
+        for prefix in prefixes {
+            for suffix in ["", "a", "b", "x", "?", "*", "[", "]", "nested/x", "literal"] {
+                candidates.push(format!("{prefix}{suffix}"));
+            }
+        }
+        for prefix in prefixes {
+            for tail in tails {
+                let source = format!("{prefix}{tail}");
+                let Ok(pattern) = Pattern::new(&source) else {
+                    continue;
+                };
+                let fast = PrefixedPattern::new(pattern);
+                for candidate in &candidates {
+                    assert_eq!(
+                        fast.matches(candidate),
+                        fast.pattern.matches(candidate),
+                        "pattern={source:?} candidate={candidate:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn alias_pipeline_benchmark() {
+        use std::{hint::black_box, time::Instant};
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        std::fs::create_dir(&source).unwrap();
+        let baseline = |compiled: &CompiledPolicy, paths: &[PathBuf], roots: &[PathBuf]| {
+            let roots = roots
+                .iter()
+                .map(|root| absolute_path(root))
+                .collect::<Vec<_>>();
+            let canonical = canonical_roots_of(&roots);
+            let root_index = PreparedRootIndex::new(&roots, &canonical);
+            let zones = paths
+                .iter()
+                .map(|path| {
+                    let mut candidates = vec![
+                        path.clone(),
+                        absolute_path(path),
+                        canonicalize_or_original(&absolute_path(path)),
+                    ];
+                    append_relative_candidates(&mut candidates, &root_index);
+                    let candidates = normalized_candidates(&candidates);
+                    let index = compiled
+                        .zones
+                        .iter()
+                        .position(|zone| {
+                            zone.patterns.iter().any(|pattern| {
+                                candidates
+                                    .iter()
+                                    .any(|candidate| pattern.matches(candidate))
+                            })
+                        })
+                        .unwrap_or(compiled.normal_index);
+                    let zone = &compiled.zones[index].zone;
+                    (compiled.zone_index_named(&zone.name).unwrap(), zone)
+                })
+                .collect::<Vec<_>>();
+            effective_zone(&zones)
+                .unwrap_or_else(|| compiled.zones[compiled.normal_index].zone.clone())
+        };
+        for mappings in [0, 50] {
+            let mut roots = vec![source.clone()];
+            for mapping in 0..mappings {
+                roots.push(temp.path().join(format!("worktree-{mapping}")));
+            }
+            let mut paths = roots
+                .iter()
+                .map(|root| root.join("src/public.rs"))
+                .collect::<Vec<_>>();
+            paths.push(PathBuf::from("src/public.rs"));
+            if mappings != 0 {
+                paths.extend(roots.iter().map(|root| root.join("../relative/public.rs")));
+            }
+            for case in ["early", "late", "none"] {
+                let mut zones = (0..20)
+                    .map(|index| {
+                        zone(
+                            &format!("zone-{index}"),
+                            &[&format!("private-{index}/**")],
+                            &["provider"],
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                match case {
+                    "early" => zones[0].patterns = vec!["public.rs".into()],
+                    "late" => zones[19].patterns = vec!["public.rs".into()],
+                    _ => (),
+                }
+                zones.push(zone("normal", &["**"], &["*"]));
+                let compiled = policy(zones).compile().unwrap();
+                assert_eq!(
+                    baseline(&compiled, &paths, &roots),
+                    compiled.strictest_zone_for_paths_with_roots(&paths, &roots)
+                );
+                for optimized in [false, true] {
+                    MATCH_WORK.with(|counts| counts.set(Some([0; 4])));
+                    if optimized {
+                        black_box(compiled.strictest_zone_for_paths_with_roots(&paths, &roots));
+                    } else {
+                        black_box(baseline(&compiled, &paths, &roots));
+                    }
+                    let counts = MATCH_WORK.with(|counts| counts.replace(None).unwrap());
+                    eprintln!("alias_work mappings={mappings} case={case} optimized={optimized} canonical={} normalize={} prefix_compare={} ancestor_visit={}", counts[0], counts[1], counts[2], counts[3]);
+                }
+                for records in [100, 5000] {
+                    for round in 0..3 {
+                        for optimized in if round % 2 == 0 {
+                            [false, true]
+                        } else {
+                            [true, false]
+                        } {
+                            let start = Instant::now();
+                            for _ in 0..records {
+                                black_box(if optimized {
+                                    compiled.strictest_zone_for_paths_with_roots(
+                                        black_box(&paths),
+                                        black_box(&roots),
+                                    )
+                                } else {
+                                    baseline(&compiled, black_box(&paths), black_box(&roots))
+                                });
+                            }
+                            eprintln!("alias_pipeline mappings={mappings} aliases={} case={case} records={records} round={round} optimized={optimized} elapsed_us={}", paths.len(), start.elapsed().as_micros());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn literal_prefix_microbench() {
+        use std::{hint::black_box, time::Instant};
+        let absolute: Vec<_> = (0..20)
+            .map(|i| format!("/workspace/private-{i}/**"))
+            .collect();
+        let wildcard: Vec<_> = (0..20).map(|i| format!("*private-{i}*")).collect();
+        for (name, sources) in [("absolute", absolute), ("wildcard", wildcard)] {
+            let patterns: Vec<_> = sources
+                .iter()
+                .map(|s| PrefixedPattern::new(Pattern::new(s).unwrap()))
+                .collect();
+            let candidates = [
+                "/workspace/public/src/main.rs",
+                "src/main.rs",
+                "main.rs",
+                "/workspace/private-4/key",
+                "café/main.rs",
+            ];
+            for round in 0..4 {
+                for fast in if round % 2 == 0 {
+                    [false, true]
+                } else {
+                    [true, false]
+                } {
+                    let start = Instant::now();
+                    let mut hits = 0usize;
+                    for _ in 0..20_000 {
+                        for p in &patterns {
+                            for candidate in candidates {
+                                hits += usize::from(if fast {
+                                    black_box(p).matches(black_box(candidate))
+                                } else {
+                                    black_box(&p.pattern).matches(black_box(candidate))
+                                });
+                            }
+                        }
+                    }
+                    eprintln!("prefix_microbench case={name} round={round} fast={fast} elapsed_us={} hits={}",
+                        start.elapsed().as_micros(), black_box(hits));
+                }
+            }
+        }
+    }
 
     fn zone_with_shell_behavior(
         name: &str,
@@ -1003,7 +2088,7 @@ mod tests {
                     compiled_zone.patterns.iter().any(|pattern| {
                         reference_candidates
                             .iter()
-                            .any(|candidate| pattern.matches(candidate))
+                            .any(|candidate| pattern.pattern.matches(candidate))
                     })
                 })
                 .map(|compiled_zone| &compiled_zone.zone)

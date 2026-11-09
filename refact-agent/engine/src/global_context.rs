@@ -396,6 +396,7 @@ pub struct GlobalContext {
     pub at_commands_preview_cache: Arc<AMutex<AtCommandsPreviewCache>>,
     pub privacy_settings: Arc<StdRwLock<Arc<PrivacySettings>>>,
     pub privacy_policy_load: Arc<StdRwLock<refact_privacy::PolicyLoad>>,
+    pub privacy_classification: crate::privacy::classification_cache::ClassificationCache,
     pub file_index: Arc<crate::file_index::FileIndex>,
     pub privacy_match_counts: Arc<StdRwLock<crate::privacy::PrivacyMatchCounts>>,
     pub privacy_observation_runtime: Arc<StdRwLock<PrivacyObservationRuntimeState>>,
@@ -980,7 +981,7 @@ pub async fn create_global_context(
         caps_config_probe: Arc::new(StdMutex::new(None)),
         tokenizer_state: Arc::new(StdRwLock::new(TokenizerState {
             map: HashMap::new(),
-            download_lock: Arc::new(AMutex::<bool>::new(false)),
+            download_locks: Arc::new(StdMutex::new(HashMap::new())),
         })),
         completions_cache: Arc::new(StdRwLock::new(CompletionCache::new())),
         vec_db: Arc::new(AMutex::new(None)),
@@ -992,6 +993,7 @@ pub async fn create_global_context(
         at_commands_preview_cache: Arc::new(AMutex::new(AtCommandsPreviewCache::new())),
         privacy_settings: Arc::new(StdRwLock::new(Arc::new(PrivacySettings::default()))),
         privacy_policy_load: Arc::new(StdRwLock::new(refact_privacy::PolicyLoad::default())),
+        privacy_classification: Default::default(),
         file_index: Arc::new(crate::file_index::FileIndex::default()),
         privacy_match_counts: Arc::new(StdRwLock::new(Default::default())),
         privacy_observation_runtime: Arc::new(StdRwLock::new(
@@ -1156,6 +1158,84 @@ pub mod tests {
         make_test_gcx_with_dirs(cache_dir, config_dir).await
     }
 
+    async fn create_test_privacy_policy(path: &std::path::Path) -> std::io::Result<bool> {
+        use tokio::io::AsyncWriteExt;
+
+        let content = serde_yaml::to_string(&std::collections::BTreeMap::from([(
+            "privacy_rules",
+            refact_privacy::PrivacyPolicy::default(),
+        )]))
+        .map_err(std::io::Error::other)?;
+        let mut file = match tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .await
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        file.write_all(content.as_bytes()).await?;
+        file.flush().await?;
+        Ok(true)
+    }
+
+    #[tokio::test]
+    async fn test_policy_creation_preserves_a_path_created_after_the_absence_check() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("privacy.yaml");
+        assert_eq!(
+            tokio::fs::symlink_metadata(&path).await.unwrap_err().kind(),
+            std::io::ErrorKind::NotFound
+        );
+        let invalid = b"zones: [invalid: yaml";
+        tokio::fs::write(&path, invalid).await.unwrap();
+        assert!(!create_test_privacy_policy(&path).await.unwrap());
+        assert_eq!(tokio::fs::read(&path).await.unwrap(), invalid);
+        tokio::fs::remove_file(&path).await.unwrap();
+        tokio::fs::create_dir(&path).await.unwrap();
+        assert!(!create_test_privacy_policy(&path).await.unwrap());
+        assert!(path.is_dir());
+        #[cfg(unix)]
+        {
+            tokio::fs::remove_dir(&path).await.unwrap();
+            let target = dir.path().join("absent-target");
+            std::os::unix::fs::symlink(&target, &path).unwrap();
+            assert!(!create_test_privacy_policy(&path).await.unwrap());
+            assert_eq!(tokio::fs::read_link(&path).await.unwrap(), target);
+            assert!(!target.exists());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_context_bootstraps_missing_policy_without_repairing_existing_invalid_policy() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("cache");
+        let config = dir.path().join("config");
+        let gcx = make_test_gcx_with_dirs(cache.clone(), config.clone()).await;
+        assert!(config.join("privacy.yaml").is_file());
+        let initial = tokio::fs::read_to_string(config.join("privacy.yaml"))
+            .await
+            .unwrap();
+        refact_privacy::parse_policy_yaml(&initial)
+            .unwrap()
+            .compile()
+            .unwrap();
+        assert!(gcx.privacy_policy_load.read().unwrap().error.is_none());
+        let invalid = b"zones: [invalid: yaml";
+        tokio::fs::write(config.join("privacy.yaml"), invalid)
+            .await
+            .unwrap();
+        let gcx = make_test_gcx_with_dirs(cache, config.clone()).await;
+        assert_eq!(
+            tokio::fs::read(config.join("privacy.yaml")).await.unwrap(),
+            invalid
+        );
+        crate::privacy::load_privacy_if_needed(gcx.clone()).await;
+        assert!(gcx.privacy_policy_load.read().unwrap().error.is_some());
+    }
+
     pub async fn make_test_gcx_with_dirs(
         cache_dir: PathBuf,
         config_dir: PathBuf,
@@ -1240,7 +1320,7 @@ pub mod tests {
             caps_config_probe: Arc::new(StdMutex::new(None)),
             tokenizer_state: Arc::new(StdRwLock::new(TokenizerState {
                 map: HashMap::new(),
-                download_lock: Arc::new(AMutex::<bool>::new(false)),
+                download_locks: Arc::new(StdMutex::new(HashMap::new())),
             })),
             completions_cache: Arc::new(StdRwLock::new(CompletionCache::new())),
             vec_db: Arc::new(AMutex::new(None)),
@@ -1252,6 +1332,7 @@ pub mod tests {
             at_commands_preview_cache: Arc::new(AMutex::new(AtCommandsPreviewCache::new())),
             privacy_settings: Arc::new(StdRwLock::new(Arc::new(PrivacySettings::default()))),
             privacy_policy_load: Arc::new(StdRwLock::new(refact_privacy::PolicyLoad::default())),
+            privacy_classification: Default::default(),
             file_index: Arc::new(crate::file_index::FileIndex::default()),
             privacy_match_counts: Arc::new(StdRwLock::new(Default::default())),
             privacy_observation_runtime: Arc::new(StdRwLock::new(
@@ -1310,6 +1391,16 @@ pub mod tests {
             terminal_security_config: TerminalSecurityConfig::default(),
             workspace_leases: Arc::new(StdMutex::new(Default::default())),
         };
-        Arc::new(cx)
+        let gcx = Arc::new(cx);
+        let policy_path = gcx.config_dir.join("privacy.yaml");
+        if tokio::fs::symlink_metadata(&policy_path)
+            .await
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+        {
+            create_test_privacy_policy(&policy_path)
+                .await
+                .expect("initialize isolated test privacy policy");
+        }
+        gcx
     }
 }

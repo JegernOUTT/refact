@@ -96,6 +96,7 @@ impl WorkBoardIndex {
     }
 
     pub(crate) fn publish(&self, task_dir: &Path, board: Option<(&TaskBoard, &BoardProvenance)>) {
+        super::catalog_cache::invalidate_sources();
         let Some(root) = project_root(task_dir) else {
             return;
         };

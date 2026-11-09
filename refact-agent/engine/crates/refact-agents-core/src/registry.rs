@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -224,8 +224,9 @@ struct RunnerDeliveryState {
 }
 
 pub struct BackgroundAgentRegistry {
-    records: RwLock<AgentRecords>,
-    runtime: RwLock<HashMap<String, AgentRuntime>>,
+    revision: Arc<AtomicU64>,
+    records: RevisionRwLock<AgentRecords>,
+    runtime: RevisionRwLock<HashMap<String, AgentRuntime>>,
     storage_root: PathBuf,
     write_state: Mutex<RegistryWriteState>,
     storage_write: Mutex<()>,
@@ -233,6 +234,68 @@ pub struct BackgroundAgentRegistry {
     quarantine: Option<storage::QuarantineReport>,
     #[cfg(any(test, feature = "test-support"))]
     list_all_calls: std::sync::atomic::AtomicUsize,
+}
+
+// Publish after mutable access, while the original write lock is still held.
+// Immutable access through a write guard (validation, for example) is free of
+// invalidations. This is a cache hint, not an execution-authority token.
+struct RevisionRwLock<T> {
+    lock: RwLock<T>,
+    revision: Arc<AtomicU64>,
+}
+
+impl<T> RevisionRwLock<T> {
+    fn new(value: T, revision: Arc<AtomicU64>) -> Self {
+        Self {
+            lock: RwLock::new(value),
+            revision,
+        }
+    }
+
+    async fn read(&self) -> tokio::sync::RwLockReadGuard<'_, T> {
+        self.lock.read().await
+    }
+
+    fn try_read(&self) -> Result<tokio::sync::RwLockReadGuard<'_, T>, tokio::sync::TryLockError> {
+        self.lock.try_read()
+    }
+
+    async fn write(&self) -> RevisionWriteGuard<'_, T> {
+        RevisionWriteGuard {
+            guard: self.lock.write().await,
+            revision: &self.revision,
+            dirty: false,
+        }
+    }
+}
+
+struct RevisionWriteGuard<'a, T> {
+    guard: tokio::sync::RwLockWriteGuard<'a, T>,
+    revision: &'a AtomicU64,
+    dirty: bool,
+}
+
+impl<T> std::ops::Deref for RevisionWriteGuard<'_, T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        &self.guard
+    }
+}
+
+impl<T> std::ops::DerefMut for RevisionWriteGuard<'_, T> {
+    fn deref_mut(&mut self) -> &mut T {
+        self.dirty = true;
+        &mut self.guard
+    }
+}
+
+impl<T> Drop for RevisionWriteGuard<'_, T> {
+    fn drop(&mut self) {
+        if self.dirty {
+            self.revision.fetch_add(1, Ordering::Release);
+        }
+    }
 }
 
 #[derive(Default)]
@@ -323,9 +386,11 @@ impl BackgroundAgentRegistry {
         for (agent_id, record) in records {
             indexed.insert(agent_id, record);
         }
+        let revision = Arc::new(AtomicU64::new(0));
         Ok(Arc::new(Self {
-            records: RwLock::new(indexed),
-            runtime: RwLock::new(HashMap::new()),
+            records: RevisionRwLock::new(indexed, revision.clone()),
+            runtime: RevisionRwLock::new(HashMap::new(), revision.clone()),
+            revision,
             storage_root,
             write_state: Mutex::new(RegistryWriteState::default()),
             storage_write: Mutex::new(()),
@@ -334,6 +399,12 @@ impl BackgroundAgentRegistry {
             #[cfg(any(test, feature = "test-support"))]
             list_all_calls: std::sync::atomic::AtomicUsize::new(0),
         }))
+    }
+
+    /// Per-instance cache revision for published records and runtime membership.
+    /// Mutable access can conservatively invalidate even if validation fails.
+    pub fn revision(&self) -> u64 {
+        self.revision.load(Ordering::Acquire)
     }
 
     pub fn quarantine_report(&self) -> Option<&storage::QuarantineReport> {
@@ -1721,7 +1792,10 @@ impl BackgroundAgentRegistry {
     pub async fn records_write_guard_for_test(
         &self,
     ) -> tokio::sync::RwLockMappedWriteGuard<'_, HashMap<String, BackgroundAgent>> {
-        tokio::sync::RwLockWriteGuard::map(self.records.write().await, |records| &mut records.by_id)
+        let guard = self.records.lock.write().await;
+        // This test-only raw guard cannot carry the publication-on-drop wrapper.
+        self.revision.fetch_add(1, Ordering::Release);
+        tokio::sync::RwLockWriteGuard::map(guard, |records| &mut records.by_id)
     }
 
     pub async fn list_descendants(&self, agent_id: &str) -> Vec<BackgroundAgent> {
@@ -3245,6 +3319,50 @@ mod tests {
             worktree_id: None,
             worktree_branch: None,
         }
+    }
+
+    #[tokio::test]
+    async fn revision_tracks_publication_not_reads_or_validation() {
+        let (_temp, registry) = registry().await;
+        assert_eq!(registry.revision(), 0);
+        let record = registry.create(request("parent")).await.unwrap().0;
+        let created = registry.revision();
+        assert!(created > 0);
+        registry.list_all().await;
+        registry.child_chat_status("missing").await;
+        registry.abort_flag(&record.agent_id).await;
+        assert_eq!(registry.revision(), created);
+        assert!(registry
+            .create_with_id(request("parent"), &record.agent_id)
+            .await
+            .is_err());
+        assert_eq!(registry.revision(), created);
+        assert!(!registry
+            .abort_flag(&record.agent_id)
+            .await
+            .unwrap()
+            .load(Ordering::SeqCst));
+        registry
+            .mark_running(&record.agent_id, "child".into())
+            .await
+            .unwrap();
+        let running = registry.revision();
+        assert!(running > created);
+        {
+            let mut records = registry.records.write().await;
+            records.get_mut(&record.agent_id).unwrap().title = "changed".into();
+            assert_eq!(registry.revision(), running);
+        }
+        let edited = registry.revision();
+        assert!(edited > running);
+        {
+            let mut runtime = registry.runtime.write().await;
+            runtime.remove(&record.agent_id);
+            assert_eq!(registry.revision(), edited);
+        }
+        assert!(registry.revision() > edited);
+        let (_other_temp, other) = self::registry().await;
+        assert_eq!(other.revision(), 0);
     }
 
     #[tokio::test]

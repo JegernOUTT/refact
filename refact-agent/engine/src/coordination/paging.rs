@@ -48,7 +48,11 @@ struct State {
 }
 
 #[derive(Default)]
-pub struct WorkViews(Mutex<State>, std::sync::OnceLock<(std::time::Instant, u64)>);
+pub struct WorkViews(
+    Mutex<State>,
+    std::sync::OnceLock<(std::time::Instant, u64)>,
+    pub(super) super::catalog_cache::CatalogCache,
+);
 
 pub struct PageWindow {
     pub snapshot_id: String,

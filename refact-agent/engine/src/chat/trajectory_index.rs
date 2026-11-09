@@ -1656,6 +1656,7 @@ impl TrajectoryIndexCoordinator {
             entry_counts_as_displayable_chat(&entry),
         );
         self.sync_generation_verified_at(&state_guard);
+        crate::coordination::catalog_cache::publish_session(&entry.id);
         push_pending_mutation(&mut state_guard, TrajectoryIndexMutation::Upsert(entry));
         Ok(())
     }
@@ -1667,6 +1668,7 @@ impl TrajectoryIndexCoordinator {
         let state = self.directory_state(dir).await?;
         let mut state_guard = state.lock().await;
         state_guard.apply_mutation(&TrajectoryIndexMutation::Remove(chat_ids.clone()))?;
+        crate::coordination::catalog_cache::invalidate_sources();
         state_guard.generation = None;
         state_guard.generation_verified_at = None;
         {
@@ -1734,6 +1736,7 @@ impl TrajectoryIndexCoordinator {
         self.sync_entry_locations(&state_guard.key, &index.entries);
         state_guard.set_index(index.clone());
         if reconciled.1 {
+            crate::coordination::catalog_cache::invalidate_sources();
             push_pending_mutation(
                 &mut state_guard,
                 TrajectoryIndexMutation::Reconcile(source_hint),
@@ -3477,7 +3480,11 @@ pub async fn write_trajectory_index_atomic(
     dir: &Path,
     index: &TrajectoryIndex,
 ) -> Result<(), String> {
-    write_trajectory_index_atomic_owned(dir, index.clone()).await
+    let result = write_trajectory_index_atomic_owned(dir, index.clone()).await;
+    if result.is_ok() {
+        crate::coordination::catalog_cache::invalidate_sources();
+    }
+    result
 }
 
 async fn write_trajectory_index_atomic_owned(
@@ -3715,6 +3722,7 @@ pub async fn upsert_trajectory_index_entry(
             }
         }
     };
+    crate::coordination::catalog_cache::publish_session(&entry.id);
     index.entries.retain(|existing| existing.id != entry.id);
     index
         .skipped_files

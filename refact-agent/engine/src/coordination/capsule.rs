@@ -16,6 +16,7 @@
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use std::sync::{Arc, Weak};
 
 use refact_work_core::settings::CoordinationSettings;
 
@@ -24,6 +25,59 @@ use crate::call_validation::ChatMessage;
 use super::types::WorkRow;
 
 pub const CAPSULE_MARKER_KEY: &str = "work_context_capsule";
+
+#[cfg(test)]
+tokio::task_local! {
+    pub(crate) static ROW_DERIVATIONS: std::cell::Cell<usize>;
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ProjectionIdentity(Weak<super::catalog::WorkCatalog>);
+
+impl PartialEq for ProjectionIdentity {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.ptr_eq(&other.0)
+    }
+}
+
+impl Eq for ProjectionIdentity {}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CapsuleObservation {
+    projection: ProjectionIdentity,
+    chat_id: String,
+    source_root: std::path::PathBuf,
+    checkout_root: std::path::PathBuf,
+    root_chat_id: Option<String>,
+    principal: String,
+    // Only capsule settings: unrelated scheduler maps need not be compared.
+    settings: (u64, u64, u64, usize, usize),
+    fingerprint: u64,
+    observed_at_ms: u64,
+    expires_at_ms: u64,
+}
+
+fn capsule_settings(settings: &CoordinationSettings) -> (u64, u64, u64, usize, usize) {
+    (
+        settings.recent_window_secs,
+        settings.min_interval_secs,
+        settings.debounce_secs,
+        settings.capsule_token_budget,
+        settings.capsule_max_rows,
+    )
+}
+
+fn terminal_expiry(rows: &[WorkRow], recent_window_secs: u64) -> u64 {
+    rows.iter()
+        .filter(|row| row.state.is_terminal())
+        .map(|row| {
+            row.updated_at_ms
+                .saturating_add(recent_window_secs.saturating_mul(1000))
+                .saturating_add(1)
+        })
+        .min()
+        .unwrap_or(u64::MAX)
+}
 
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
@@ -74,9 +128,39 @@ pub struct CapsuleState {
     pub last_shown_at_ms: Option<u64>,
     pub pending_fingerprint: Option<u64>,
     pub pending_since_ms: Option<u64>,
+    pub(crate) observation: Option<CapsuleObservation>,
 }
 
 impl CapsuleState {
+    fn unchanged_projection(
+        &self,
+        catalog: &Arc<super::catalog::WorkCatalog>,
+        caller: &super::scope::WorkCaller,
+        chat_id: &str,
+        settings: &CoordinationSettings,
+        now: u64,
+    ) -> bool {
+        let Some(memo) = &self.observation else {
+            return false;
+        };
+        self.last_fingerprint == Some(memo.fingerprint)
+            && self.pending_fingerprint.is_none()
+            && self.pending_since_ms.is_none()
+            && memo
+                .projection
+                .0
+                .upgrade()
+                .is_some_and(|prior| Arc::ptr_eq(&prior, catalog))
+            && memo.chat_id == chat_id
+            && memo.source_root == caller.source_root
+            && memo.checkout_root == caller.checkout_root
+            && memo.root_chat_id == caller.root_chat_id
+            && memo.principal == caller.principal
+            && memo.settings == capsule_settings(settings)
+            && now >= memo.observed_at_ms
+            && now < memo.expires_at_ms
+    }
+
     pub fn reconcile(&mut self, messages: &[ChatMessage]) {
         let latest = messages
             .iter()
@@ -187,10 +271,31 @@ pub async fn prepare_work_context(
         .ok()?;
     caller_span.finish(PerfOutcome::Success, None, None, None, None);
     let projection_span = perf_diagnostics::span(PerfComponent::WorkContextProjection, None, None);
-    let (catalog, disclosure) = super::service::visible_projection(app, &caller)
+    let (catalog, disclosure) = super::service::context_projection(app, &caller)
         .await
         .ok()?;
     projection_span.finish(PerfOutcome::Success, None, None, None, None);
+    let observed_at = now_ms();
+    let policy_key = format!(
+        "{}:{}:{}",
+        catalog.project,
+        caller.checkout_root.display(),
+        disclosure
+    );
+    if state.model_id != model_id || state.policy_key != policy_key {
+        *state = CapsuleState {
+            model_id: model_id.to_string(),
+            policy_key,
+            ..Default::default()
+        };
+    }
+    // The current caller and privacy-cleared projection are always resolved above.
+    // A weak receipt cannot keep stale catalogs alive or suffer pointer-reuse ABA.
+    if state.unchanged_projection(&catalog, &caller, chat_id, &settings, observed_at) {
+        return None;
+    }
+    #[cfg(test)]
+    let _ = ROW_DERIVATIONS.try_with(|count| count.set(count.get() + 1));
     let own = catalog
         .all_rows()
         .into_iter()
@@ -210,7 +315,6 @@ pub async fn prepare_work_context(
         ancestor = parent;
     }
     lineage_span.finish(PerfOutcome::Success, None, None, None, None);
-    let observed_at = now_ms();
     let recent = observed_at.saturating_sub(settings.recent_window_secs.saturating_mul(1000));
     let visible_rows = catalog
         .sorted_rows()
@@ -218,19 +322,6 @@ pub async fn prepare_work_context(
         .filter(|row| row.chat_id.as_ref().is_none_or(|id| !lineage.contains(id)))
         .filter(|row| !row.state.is_terminal() || row.updated_at_ms >= recent)
         .collect::<Vec<_>>();
-    let policy_key = format!(
-        "{}:{}:{}",
-        catalog.project,
-        caller.checkout_root.display(),
-        disclosure
-    );
-    if state.model_id != model_id || state.policy_key != policy_key {
-        *state = CapsuleState {
-            model_id: model_id.to_string(),
-            policy_key,
-            ..Default::default()
-        };
-    }
     let mut hasher = DefaultHasher::new();
     significant_fingerprint(&visible_rows).hash(&mut hasher);
     let overlap_span = perf_diagnostics::span(PerfComponent::WorkContextOverlap, None, None);
@@ -241,6 +332,18 @@ pub async fn prepare_work_context(
     overlap_span.finish(PerfOutcome::Success, None, None, None, None);
     let fingerprint = hasher.finish();
     let mut candidate = state.clone();
+    candidate.observation = Some(CapsuleObservation {
+        projection: ProjectionIdentity(Arc::downgrade(&catalog)),
+        chat_id: chat_id.to_string(),
+        source_root: caller.source_root.clone(),
+        checkout_root: caller.checkout_root.clone(),
+        root_chat_id: caller.root_chat_id.clone(),
+        principal: caller.principal.clone(),
+        settings: capsule_settings(&settings),
+        fingerprint,
+        observed_at_ms: observed_at,
+        expires_at_ms: terminal_expiry(&visible_rows, settings.recent_window_secs),
+    });
     if decide(&mut candidate, fingerprint, &settings, observed_at) == CapsuleDecision::Skip {
         *state = candidate;
         return None;
@@ -395,6 +498,61 @@ mod tests {
             debounce_secs: debounce,
             ..CoordinationSettings::default()
         }
+    }
+
+    #[serial_test::serial(runtime_settings)]
+    #[tokio::test]
+    async fn observation_expires_at_terminal_boundary_and_rejects_changed_inputs() {
+        let (app, _dir, _) = super::super::capsule_tests::fixture().await;
+        let mut state = CapsuleState::default();
+        assert!(
+            prepare_work_context(&app, &mut state, "capsule-caller", "trusted/model")
+                .await
+                .is_some()
+        );
+        let caller = super::super::scope::model_caller(&app, "capsule-caller", "trusted/model")
+            .await
+            .unwrap();
+        let (catalog, _) = super::super::service::context_projection(&app, &caller)
+            .await
+            .unwrap();
+        let settings = crate::file_activity::settings();
+        let mut terminal = row("terminal", WorkStateTag::Completed, false);
+        terminal.updated_at_ms = 1_000;
+        let expiry = terminal_expiry(&[terminal], 2);
+        assert_eq!(
+            expiry, 3_001,
+            "terminal row is included at the exact window boundary"
+        );
+        let memo = state.observation.as_mut().unwrap();
+        memo.observed_at_ms = 1_000;
+        memo.expires_at_ms = expiry;
+        assert!(state.unchanged_projection(&catalog, &caller, "capsule-caller", &settings, 3_000));
+        assert!(!state.unchanged_projection(&catalog, &caller, "capsule-caller", &settings, 3_001));
+        assert!(!state.unchanged_projection(&catalog, &caller, "capsule-caller", &settings, 999));
+        assert!(!state.unchanged_projection(&catalog, &caller, "another-chat", &settings, 2_000));
+        let mut changed = settings.clone();
+        changed.recent_window_secs += 1;
+        assert!(!state.unchanged_projection(&catalog, &caller, "capsule-caller", &changed, 2_000));
+        let different_arc = Arc::new((*catalog).clone());
+        assert!(!state.unchanged_projection(
+            &different_arc,
+            &caller,
+            "capsule-caller",
+            &settings,
+            2_000
+        ));
+        let mut changed_caller = caller.clone();
+        changed_caller.checkout_root.push("other");
+        assert!(!state.unchanged_projection(
+            &catalog,
+            &changed_caller,
+            "capsule-caller",
+            &settings,
+            2_000
+        ));
+        state.last_fingerprint = Some(state.last_fingerprint.unwrap().wrapping_add(1));
+        assert!(!state.unchanged_projection(&catalog, &caller, "capsule-caller", &settings, 2_000));
     }
 
     #[test]

@@ -254,6 +254,7 @@ export type ChatThreadRuntime = {
 };
 
 export type Chat = {
+  metadata?: import("./metadata").ThreadMetadata;
   current_thread_id: string;
   open_thread_ids: string[];
   threads: Record<string, ChatThreadRuntime | undefined>;

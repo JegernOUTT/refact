@@ -17,6 +17,10 @@ import type { Config } from "../features/Config/configSlice";
 import { render, waitFor, createDefaultChatState } from "../utils/test-utils";
 import { ChatContent } from "../components/ChatContent";
 import { ToolCallTooltip } from "../components/ChatContent/ToolCard/ToolCallTooltip";
+import {
+  MAX_DIFF_PREVIEW_CHARS,
+  MAX_DIFF_PREVIEW_LINES,
+} from "../components/ChatContent/ToolCard/diffPreview";
 import { Chat } from "../components/Chat";
 import { InnerApp } from "../features/App";
 import { MARKDOWN_ISSUE } from "../__fixtures__";
@@ -889,7 +893,7 @@ describe("chat rendering regressions", () => {
       },
     ];
     const streamingState = createThreadState(messages);
-    streamingState.chat.threads[MARKDOWN_ISSUE.id].streaming = false;
+    streamingState.chat.threads[MARKDOWN_ISSUE.id].streaming = true;
     streamingState.chat.threads[MARKDOWN_ISSUE.id].waiting_for_response = true;
 
     const { container, store } = render(
@@ -918,8 +922,11 @@ describe("chat rendering regressions", () => {
 
     await waitFor(() => {
       expect(container.textContent).toContain("generated.ts");
-      expect(container.textContent).toContain("+2000");
-      expect(container.textContent).toContain("−2000");
+      expect(container.textContent).not.toContain("Line counts omitted");
+      expect(container.textContent).not.toContain("Original text excerpt");
+      expect(container.textContent).not.toContain("Updated text excerpt");
+      expect(container.textContent).not.toContain("Download complete original");
+      expect(container.querySelector("code")).toBeNull();
     });
 
     store.dispatch(
@@ -932,9 +939,26 @@ describe("chat rendering regressions", () => {
     );
 
     await waitFor(() => {
-      expect(container.textContent).toContain("+2000");
-      expect(container.textContent).toContain("−2000");
+      expect(container.textContent).toContain(
+        "Large diff · line counts omitted",
+      );
+      expect(container.textContent).toContain("Original text excerpt");
+      expect(container.textContent).toContain("Updated text excerpt");
+      expect(container.textContent).toContain(
+        "Download complete original diff chunk (JSON)",
+      );
+      expect(container.textContent).not.toContain("+2000");
+      expect(container.textContent).not.toContain("−2000");
     });
+    const excerpts = Array.from(container.querySelectorAll("code"));
+    expect(excerpts).toHaveLength(2);
+    expect(excerpts[0].textContent).toContain("old line");
+    expect(excerpts[1].textContent).toContain("new line");
+    const excerptText = excerpts.map((code) => code.textContent ?? "").join("");
+    expect(excerptText.length).toBeLessThanOrEqual(MAX_DIFF_PREVIEW_CHARS);
+    expect(excerptText.match(/\n/g)?.length ?? 0).toBeLessThanOrEqual(
+      MAX_DIFF_PREVIEW_LINES,
+    );
   });
 
   it("keeps completed diff-only tools stable while a later assistant streams", async () => {

@@ -21,11 +21,13 @@ use super::roots::{self, ProjectRoots};
 use super::types::{Disclosure, WorkKindTag, WorkRow, WorkStateTag, WorkMetadata, Freshness};
 
 /// Everything discovered for one project, before filtering/paging/privacy.
+#[derive(Clone)]
 pub struct WorkCatalog {
     pub project: String,
     pub roots: ProjectRoots,
     /// Deduped rows keyed by [`WorkKey`].
     rows: BTreeMap<String, WorkRow>,
+    pub(super) child_agents: HashMap<String, String>,
     pub degraded: Vec<String>,
 }
 
@@ -95,7 +97,11 @@ fn session_kind(session: &ChatSession) -> WorkKindTag {
 }
 
 /// Build the row for one live chat session.
-fn row_from_session(session: &ChatSession, roots: &ProjectRoots, stale: bool) -> WorkRow {
+pub(super) fn row_from_session(
+    session: &ChatSession,
+    roots: &ProjectRoots,
+    stale: bool,
+) -> WorkRow {
     let root = match session.thread.worktree.as_ref() {
         Some(meta) => roots
             .get(&meta.id)
@@ -247,7 +253,8 @@ async fn collect_session_rows(
     let mut contended = 0usize;
     for (_chat_id, session_arc) in sessions {
         match session_arc.try_lock() {
-            Ok(session) => {
+            Ok(mut session) => {
+                session.work_catalog_publisher = Arc::downgrade(&app.chat.sessions.1);
                 let Some(source) = super::scope::session_source_root(&session) else {
                     continue;
                 };
@@ -326,45 +333,8 @@ pub(super) async fn build_catalog_for_destination(
             .child_chat_id
             .as_ref()
             .and_then(|id| rows.get(&WorkKey::trajectory(id).to_string()));
-        let owned_scope = app.agent_executions.saved_scope(&agent.agent_id);
-        let in_scope = owned_scope
-            .as_ref()
-            .is_some_and(|source| roots::project_identity(source) == roots.project)
-            || child_row.is_some()
-            || agent
-                .worktree_id
-                .as_ref()
-                .is_some_and(|id| roots.get(id).is_some());
-        if !in_scope {
+        let Some(row) = project_agent(app, agent, &roots, child_row).await else {
             continue;
-        }
-        let mut row = row_from_agent(agent, &roots);
-        if row.state == WorkStateTag::Queued {
-            if let Some((records, complete)) =
-                app.agent_executions.launch_provenance(&agent.agent_id)
-            {
-                row.source_records = records;
-                row.provenance_complete = complete;
-            }
-        }
-        if let Some(child) = child_row {
-            row.root = child.root.clone();
-        }
-        let live = app.agents.has_runtime(&agent.agent_id).await;
-        if !live && !row.state.is_terminal() {
-            row.state = WorkStateTag::Interrupted;
-            row.stale = true;
-        }
-        row.metadata.freshness = if live {
-            Freshness::Live
-        } else if now_ms().saturating_sub(row.updated_at_ms)
-            <= crate::file_activity::settings()
-                .recent_window_secs
-                .saturating_mul(1000)
-        {
-            Freshness::Recent
-        } else {
-            Freshness::Stale
         };
         if let Some(child) = &agent.child_chat_id {
             child_chat_ids.insert(child.clone());
@@ -405,15 +375,7 @@ pub(super) async fn build_catalog_for_destination(
             continue;
         };
         if let Some(agent_row) = rows.get_mut(agent_key) {
-            if agent_row.queue_size == 0 {
-                agent_row.queue_size = session_row.queue_size;
-            }
-            if agent_row.title.is_none() {
-                agent_row.title = session_row.title.clone();
-            }
-            agent_row.stale |= session_row.stale;
-            agent_row.source_records = session_row.source_records;
-            agent_row.provenance_complete = session_row.provenance_complete;
+            fold_child(agent_row, session_row);
         }
     }
 
@@ -472,25 +434,7 @@ pub(super) async fn build_catalog_for_destination(
     // Both adapters use the same admission source. A parked runner can still
     // have ExecutingTools as its raw session state; never call that running.
     for row in rows.values_mut() {
-        if let Some(ticket) = tickets.iter().find(|t| t.run.work == row.key) {
-            row.metadata.run = Some(ticket.run.clone());
-            row.metadata.priority = Some(ticket.priority);
-            row.metadata.freshness = Freshness::Live;
-            row.stale = false;
-            row.root_chat_id = Some(ticket.scope.root.to_string());
-            if !matches!(
-                row.state,
-                WorkStateTag::WaitingApproval | WorkStateTag::Interrupted
-            ) {
-                row.state = match ticket.state {
-                    refact_work_core::TicketState::Reserved
-                    | refact_work_core::TicketState::Pending => WorkStateTag::Queued,
-                    refact_work_core::TicketState::Parked
-                    | refact_work_core::TicketState::Evicted => WorkStateTag::Parked,
-                    refact_work_core::TicketState::Active => WorkStateTag::Running,
-                };
-            }
-        }
+        apply_ticket(row, &tickets);
     }
 
     // Work this engine does not own is only as live as the engine that could be
@@ -508,8 +452,102 @@ pub(super) async fn build_catalog_for_destination(
         project,
         roots,
         rows,
+        child_agents: agents
+            .iter()
+            .filter_map(|agent| {
+                agent
+                    .child_chat_id
+                    .clone()
+                    .map(|id| (id, agent.agent_id.clone()))
+            })
+            .collect(),
         degraded,
     })
+}
+
+async fn project_agent(
+    app: &AppState,
+    agent: &BackgroundAgent,
+    roots: &ProjectRoots,
+    child: Option<&WorkRow>,
+) -> Option<WorkRow> {
+    let owned_scope = app.agent_executions.saved_scope(&agent.agent_id);
+    let in_scope = owned_scope
+        .as_ref()
+        .is_some_and(|source| roots::project_identity(source) == roots.project)
+        || child.is_some()
+        || agent
+            .worktree_id
+            .as_ref()
+            .is_some_and(|id| roots.get(id).is_some());
+    if !in_scope {
+        return None;
+    }
+    let mut row = row_from_agent(agent, roots);
+    if row.state == WorkStateTag::Queued {
+        if let Some((records, complete)) = app.agent_executions.launch_provenance(&agent.agent_id) {
+            row.source_records = records;
+            row.provenance_complete = complete;
+        }
+    }
+    if let Some(child) = child {
+        row.root = child.root.clone();
+    }
+    let live = app.agents.has_runtime(&agent.agent_id).await;
+    if !live && !row.state.is_terminal() {
+        row.state = WorkStateTag::Interrupted;
+        row.stale = true;
+    }
+    row.metadata.freshness = if live {
+        Freshness::Live
+    } else if now_ms().saturating_sub(row.updated_at_ms)
+        <= crate::file_activity::settings()
+            .recent_window_secs
+            .saturating_mul(1000)
+    {
+        Freshness::Recent
+    } else {
+        Freshness::Stale
+    };
+    Some(row)
+}
+
+fn fold_child(agent: &mut WorkRow, child: WorkRow) {
+    if agent.queue_size == 0 {
+        agent.queue_size = child.queue_size;
+    }
+    if agent.title.is_none() {
+        agent.title = child.title;
+    }
+    agent.stale |= child.stale;
+    agent.source_records = child.source_records;
+    agent.provenance_complete = child.provenance_complete;
+}
+
+pub(super) fn apply_ticket(
+    row: &mut WorkRow,
+    tickets: &[refact_work_core::scheduler::TicketSnapshot],
+) {
+    if let Some(ticket) = tickets.iter().find(|t| t.run.work == row.key) {
+        row.metadata.run = Some(ticket.run.clone());
+        row.metadata.priority = Some(ticket.priority);
+        row.metadata.freshness = Freshness::Live;
+        row.stale = false;
+        row.root_chat_id = Some(ticket.scope.root.to_string());
+        if !matches!(
+            row.state,
+            WorkStateTag::WaitingApproval | WorkStateTag::Interrupted
+        ) {
+            row.state = match ticket.state {
+                refact_work_core::TicketState::Reserved
+                | refact_work_core::TicketState::Pending => WorkStateTag::Queued,
+                refact_work_core::TicketState::Parked | refact_work_core::TicketState::Evicted => {
+                    WorkStateTag::Parked
+                }
+                refact_work_core::TicketState::Active => WorkStateTag::Running,
+            };
+        }
+    }
 }
 
 fn apply_observations(
@@ -552,6 +590,60 @@ fn apply_observations(
 }
 
 impl WorkCatalog {
+    pub(super) async fn refresh_session(
+        &mut self,
+        app: &AppState,
+        id: &str,
+        row: Option<WorkRow>,
+        tickets: &[refact_work_core::scheduler::TicketSnapshot],
+    ) -> Result<(), super::error::WorkError> {
+        let key = WorkKey::trajectory(id).to_string();
+        if let Some(agent_id) = self.child_agents.get(id) {
+            let agent = app
+                .agents
+                .get_any(agent_id)
+                .await
+                .map_err(|_| super::error::WorkError::unavailable())?;
+            let agent_key = WorkKey::background_agent(agent_id).to_string();
+            if let Some(mut agent_row) = project_agent(app, &agent, &self.roots, row.as_ref()).await
+            {
+                if let Some(child) = row {
+                    fold_child(&mut agent_row, child);
+                }
+                if let Some(previous) = self.rows.get(&agent_key) {
+                    agent_row.observed_files = previous.observed_files.clone();
+                    agent_row.metadata.observed_reads = previous.metadata.observed_reads.clone();
+                }
+                apply_ticket(&mut agent_row, tickets);
+                if let Some(liveness) = super::presence::project_liveness(&self.project) {
+                    if agent_row.metadata.freshness != Freshness::Live {
+                        agent_row.metadata.freshness = super::presence::apply_to_freshness(
+                            agent_row.metadata.freshness.clone(),
+                            liveness,
+                        );
+                    }
+                }
+                if agent_row.root.project == self.project {
+                    self.rows.insert(agent_key, agent_row);
+                } else {
+                    self.rows.remove(&agent_key);
+                }
+            } else {
+                self.rows.remove(&agent_key);
+            }
+        } else if let Some(mut row) = row {
+            if let Some(previous) = self.rows.get(&key) {
+                row.observed_files = previous.observed_files.clone();
+                row.metadata.observed_reads = previous.metadata.observed_reads.clone();
+            }
+            apply_ticket(&mut row, tickets);
+            self.rows.insert(key, row);
+        } else {
+            self.rows.remove(&key);
+        }
+        Ok(())
+    }
+
     pub fn retain_visible(&mut self, rows: Vec<WorkRow>) {
         self.rows = rows
             .into_iter()

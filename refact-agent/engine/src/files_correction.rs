@@ -59,18 +59,28 @@ const WORKTREE_MAPPINGS_TTL: std::time::Duration = std::time::Duration::from_sec
 pub type WorktreePathMappings = Arc<Vec<RegisteredWorktreePathMapping>>;
 
 static WORKTREE_MAPPINGS_CACHE: std::sync::OnceLock<
-    std::sync::Mutex<std::collections::HashMap<PathBuf, (Instant, WorktreePathMappings)>>,
+    std::sync::Mutex<
+        std::collections::HashMap<
+            PathBuf,
+            (
+                Instant,
+                refact_worktrees::service::RegistryRevision,
+                WorktreePathMappings,
+            ),
+        >,
+    >,
 > = std::sync::OnceLock::new();
 
 pub fn registered_worktree_path_mappings(cache_dir: &Path) -> WorktreePathMappings {
+    let revision = refact_worktrees::service::registry_revision(cache_dir);
     let cache = WORKTREE_MAPPINGS_CACHE
         .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
     {
         let guard = cache
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some((stamped_at, mappings)) = guard.get(cache_dir) {
-            if stamped_at.elapsed() < WORKTREE_MAPPINGS_TTL {
+        if let Some((stamped_at, cached_revision, mappings)) = guard.get(cache_dir) {
+            if *cached_revision == revision && stamped_at.elapsed() < WORKTREE_MAPPINGS_TTL {
                 return Arc::clone(mappings);
             }
         }
@@ -81,7 +91,7 @@ pub fn registered_worktree_path_mappings(cache_dir: &Path) -> WorktreePathMappin
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .insert(
             cache_dir.to_path_buf(),
-            (Instant::now(), Arc::clone(&mappings)),
+            (Instant::now(), revision, Arc::clone(&mappings)),
         );
     mappings
 }

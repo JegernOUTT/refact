@@ -8,7 +8,7 @@ pub mod testing;
 
 pub use destination::{Destination, DestinationId, DestinationKind};
 pub use gate::{clear, records_from_messages, Cleared, PrivacyAuditError, PrivacyAudited, Refusal};
-pub use matching::{compile_patterns, CompiledPolicy, PolicyError};
+pub use matching::{compile_patterns, ClassificationBatch, CompiledPolicy, PolicyError};
 pub use policy::{
     load_policy, merge_project, migrate_legacy, parse_policy_yaml, LegacyPrivacyPolicy, PolicyLoad,
     PrivacyPolicy, ProviderToolAccess, ShellBehavior, SubagentPolicy, ToolAccess, Zone,

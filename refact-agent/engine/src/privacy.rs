@@ -11,6 +11,7 @@ use uuid::Uuid;
 use crate::files_correction::{canonical_path, get_project_dirs};
 use crate::global_context::GlobalContext;
 
+pub mod classification_cache;
 pub mod destinations;
 pub mod heuristic;
 pub mod records;
@@ -373,6 +374,10 @@ mod tests {
     async fn policy_install_compares_current_state_and_preserves_failed_load_diagnostics() {
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let first = gcx.privacy_policy_load.read().unwrap().clone();
+        let generation = gcx
+            .tool_catalog_generations
+            .privacy
+            .load(std::sync::atomic::Ordering::SeqCst);
         let changed = PolicyLoad {
             policy: Arc::new(PrivacyPolicy {
                 blocked: vec!["private.txt".into()],
@@ -426,7 +431,7 @@ mod tests {
             gcx.tool_catalog_generations
                 .privacy
                 .load(std::sync::atomic::Ordering::SeqCst),
-            2
+            generation + 2
         );
     }
 

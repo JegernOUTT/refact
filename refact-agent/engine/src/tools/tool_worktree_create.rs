@@ -609,7 +609,12 @@ mod tests {
             .tool_execute(context.clone(), &"privacy".into(), &HashMap::new())
             .await
             .unwrap_err();
-        assert!(error.starts_with(&expected_error), "wrong failure: {error}");
+        assert!(
+            error.starts_with(&format!(
+                "privacy policy failed to compile: {expected_error}"
+            )),
+            "wrong failure: {error}"
+        );
         let registry = service.load_registry().await.unwrap();
         assert_eq!(
             registry.records.len(),

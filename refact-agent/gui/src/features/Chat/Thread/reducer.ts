@@ -4,7 +4,7 @@ import {
   removeSseConnection,
   clearAllSseConnections,
 } from "../../Connection";
-import { createReducer, Draft } from "@reduxjs/toolkit";
+import { createReducer, Draft, type UnknownAction } from "@reduxjs/toolkit";
 import {
   Chat,
   ChatThread,
@@ -115,6 +115,8 @@ import {
   DiffChunk,
 } from "../../../services/refact";
 import { capsApi } from "../../../services/refact";
+
+import { createThreadMetadata, refreshThreadMetadata } from "./metadata";
 
 const createChatThread = (
   tool_use: ToolUse,
@@ -260,6 +262,7 @@ const createInitialState = (): Chat => {
     current_thread_id: currentThreadId,
     open_thread_ids: openThreadIds,
     threads,
+    metadata: createThreadMetadata(threads),
     system_prompt: {},
     tool_use: "agent",
     checkpoints_enabled: true,
@@ -622,6 +625,82 @@ function applyRestoredThread(
   rt.task_goal_expanded = rt.task_goal_expanded ?? false;
   rt.message_index_by_id = rebuildMessageIndexById(messages);
 }
+
+const metadataActions = new Set<string>([
+  hydratePersistedChatTabs.type,
+  setToolUse.type,
+  setThreadMode.type,
+  setThreadWorktree.type,
+  setPreventSend.type,
+  enableSend.type,
+  setAreFollowUpsEnabled.type,
+  clearChatError.type,
+  setChatModel.type,
+  setSystemPrompt.type,
+  newChatAction.type,
+  createChatWithId.type,
+  backUpMessages.type,
+  setAutoApproveEditingTools.type,
+  setAutoApproveDangerousCommands.type,
+  setIsNewChatSuggested.type,
+  setIsNewChatSuggestionRejected.type,
+  setEnabledCheckpoints.type,
+  setBoostReasoning.type,
+  setReasoningEffort.type,
+  setThinkingBudget.type,
+  setTemperature.type,
+  setFrequencyPenalty.type,
+  setMaxTokens.type,
+  setAutoCompressionCap.type,
+  setContextTokensCap.type,
+  setParallelToolCalls.type,
+  setTaskWidgetExpanded.type,
+  setTaskGoalExpanded.type,
+  openBuddyChat.type,
+  newBuddyChatAction.type,
+  setAutoEnrichmentEnabled.type,
+  setAutoCompactEnabled.type,
+  markMemoryEnrichmentUserTouched.type,
+  setManualPreviewItems.type,
+  removeManualPreviewItem.type,
+  clearManualPreviewItems.type,
+  setLastUserMessageId.type,
+  removeChatFromCache.type,
+  closeThread.type,
+  reorderOpenThreads.type,
+  restoreChat.type,
+  switchToThread.type,
+  updateOpenThread.type,
+  updateChatRuntimeFromSessionState.type,
+  saveTitle.type,
+  newIntegrationChat.type,
+  setSendImmediately.type,
+  setChatMode.type,
+  setIntegrationData.type,
+  setIsWaitingForResponse.type,
+  markThreadSseError.type,
+  setMaxNewTokens.type,
+  fixBrokenToolMessages.type,
+  upsertToolCall.type,
+  setIncreaseMaxTokens.type,
+  setIncludeProjectInfo.type,
+  setThreadPauseReasons.type,
+  clearThreadPauseReasons.type,
+  setThreadConfirmationStatus.type,
+  addThreadImage.type,
+  removeThreadImageByIndex.type,
+  resetThreadImages.type,
+  addThreadTextFile.type,
+  removeThreadTextFileByIndex.type,
+  resetThreadTextFiles.type,
+  setSseStatus.type,
+  removeSseConnection.type,
+  clearAllSseConnections.type,
+  applyChatEvent.type,
+  requestSseRefresh.type,
+  markQueuedCommandCancelled.type,
+  clearSseRefreshRequest.type,
+]);
 
 export const chatReducer = createReducer(initialState, (builder) => {
   builder.addCase(hydratePersistedChatTabs, (state) => {
@@ -2368,6 +2447,48 @@ export const chatReducer = createReducer(initialState, (builder) => {
         rt.thread.currentMaximumContextTokens = action.payload.number_context;
         rt.thread.currentMessageContextTokens = action.payload.current_context;
       }
+    },
+  );
+  builder.addMatcher(
+    (action: UnknownAction) => metadataActions.has(action.type),
+    (state, action) => {
+      if (markQueuedCommandCancelled.match(action)) return;
+      if (
+        setToolUse.match(action) ||
+        setAreFollowUpsEnabled.match(action) ||
+        setSystemPrompt.match(action) ||
+        setMaxNewTokens.match(action) ||
+        setSseStatus.match(action) ||
+        removeSseConnection.match(action) ||
+        clearAllSseConnections.match(action) ||
+        requestSseRefresh.match(action) ||
+        clearSseRefreshRequest.match(action) ||
+        reorderOpenThreads.match(action)
+      )
+        return;
+      if (hydratePersistedChatTabs.match(action)) {
+        refreshThreadMetadata(state);
+        return;
+      }
+      const payload: unknown = "payload" in action ? action.payload : undefined;
+      let targetId = state.current_thread_id;
+      if (
+        !newChatAction.match(action) &&
+        !newIntegrationChat.match(action) &&
+        payload &&
+        typeof payload === "object"
+      ) {
+        for (const key of ["chat_id", "chatId", "id"] as const) {
+          if (key in payload) {
+            const value: unknown = Reflect.get(payload, key);
+            if (typeof value === "string") {
+              targetId = value;
+              break;
+            }
+          }
+        }
+      }
+      refreshThreadMetadata(state, targetId);
     },
   );
 });

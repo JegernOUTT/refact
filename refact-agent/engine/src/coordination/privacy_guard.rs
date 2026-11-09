@@ -25,20 +25,9 @@ pub fn policy_key(
     if model.id.trim().is_empty() {
         return Err(super::error::WorkError::policy_unavailable());
     }
-    let load = gcx
-        .privacy_policy_load
-        .read()
+    let policy = crate::privacy::classification_cache::policy_fingerprint(gcx)
         .map_err(|_| super::error::WorkError::policy_unavailable())?;
-    if load.error.is_some() || load.policy.compile().is_err() {
-        return Err(super::error::WorkError::policy_unavailable());
-    }
-    let policy = serde_json::to_string(load.policy.as_ref())
-        .map_err(|_| super::error::WorkError::policy_unavailable())?;
-    Ok(format!(
-        "{}:{}",
-        model.id,
-        crate::file_activity::digest_of(&policy)
-    ))
+    Ok(format!("{}:{}", model.id, policy))
 }
 
 pub fn clear_rows(
@@ -47,14 +36,29 @@ pub fn clear_rows(
     model: &BaseModelRecord,
 ) -> Result<Vec<WorkRow>, super::error::WorkError> {
     let before = policy_key(gcx, model)?;
-    let batch = BatchDeclaredRecords::new(gcx)
+    let mut batch = BatchDeclaredRecords::new(gcx)
         .map_err(|_| super::error::WorkError::policy_unavailable())?;
-    let destination = refact_privacy::Destination::from_model_record(model);
     if model.id.trim().is_empty() {
         return Err(super::error::WorkError::policy_unavailable());
     }
-    let visible = rows
-        .into_iter()
+    let visible = clear_rows_with_batch(gcx, rows, model, &mut batch);
+    batch
+        .finish(gcx)
+        .map_err(|_| super::error::WorkError::policy_unavailable())?;
+    if policy_key(gcx, model)? != before {
+        return Err(super::error::WorkError::policy_unavailable());
+    }
+    Ok(visible)
+}
+
+fn clear_rows_with_batch(
+    gcx: &Arc<GlobalContext>,
+    rows: Vec<WorkRow>,
+    model: &BaseModelRecord,
+    batch: &mut BatchDeclaredRecords,
+) -> Vec<WorkRow> {
+    let destination = refact_privacy::Destination::from_model_record(model);
+    rows.into_iter()
         .filter_map(|mut row| {
             if !row.provenance_complete {
                 return None;
@@ -86,14 +90,7 @@ pub fn clear_rows(
             });
             Some(row)
         })
-        .collect();
-    batch
-        .finish(gcx)
-        .map_err(|_| super::error::WorkError::policy_unavailable())?;
-    if policy_key(gcx, model)? != before {
-        return Err(super::error::WorkError::policy_unavailable());
-    }
-    Ok(visible)
+        .collect()
 }
 
 pub fn clear_roots(
@@ -102,10 +99,26 @@ pub fn clear_roots(
     model: &BaseModelRecord,
 ) -> Result<Vec<super::types::WorkRootRef>, super::error::WorkError> {
     let before = policy_key(gcx, model)?;
-    let batch = BatchDeclaredRecords::new(gcx)
+    let mut batch = BatchDeclaredRecords::new(gcx)
         .map_err(|_| super::error::WorkError::policy_unavailable())?;
+    let roots = clear_roots_with_batch(gcx, roots, model, &mut batch);
+    batch
+        .finish(gcx)
+        .map_err(|_| super::error::WorkError::policy_unavailable())?;
+    if policy_key(gcx, model)? != before {
+        return Err(super::error::WorkError::policy_unavailable());
+    }
+    Ok(roots)
+}
+
+fn clear_roots_with_batch(
+    gcx: &Arc<GlobalContext>,
+    roots: Vec<super::types::WorkRootRef>,
+    model: &BaseModelRecord,
+    batch: &mut BatchDeclaredRecords,
+) -> Vec<super::types::WorkRootRef> {
     let destination = refact_privacy::Destination::from_model_record(model);
-    let roots = roots
+    roots
         .into_iter()
         .filter(|root| {
             let paths = root
@@ -123,14 +136,89 @@ pub fn clear_roots(
             )
             .is_ok()
         })
-        .collect();
-    batch
-        .finish(gcx)
-        .map_err(|_| super::error::WorkError::policy_unavailable())?;
-    if policy_key(gcx, model)? != before {
-        return Err(super::error::WorkError::policy_unavailable());
+        .collect()
+}
+
+pub(super) struct ScopedClearance<'a> {
+    gcx: &'a Arc<GlobalContext>,
+    model: &'a BaseModelRecord,
+    #[cfg(not(windows))]
+    batch: BatchDeclaredRecords,
+}
+
+impl ScopedClearance<'_> {
+    pub(super) fn clear_rows(
+        &mut self,
+        rows: Vec<WorkRow>,
+    ) -> Result<Vec<WorkRow>, super::error::WorkError> {
+        #[cfg(windows)]
+        {
+            clear_rows(self.gcx, rows, self.model)
+        }
+        #[cfg(not(windows))]
+        {
+            Ok(clear_rows_with_batch(
+                self.gcx,
+                rows,
+                self.model,
+                &mut self.batch,
+            ))
+        }
     }
-    Ok(roots)
+
+    pub(super) fn clear_roots(
+        &mut self,
+        roots: Vec<super::types::WorkRootRef>,
+    ) -> Result<Vec<super::types::WorkRootRef>, super::error::WorkError> {
+        #[cfg(windows)]
+        {
+            clear_roots(self.gcx, roots, self.model)
+        }
+        #[cfg(not(windows))]
+        {
+            Ok(clear_roots_with_batch(
+                self.gcx,
+                roots,
+                self.model,
+                &mut self.batch,
+            ))
+        }
+    }
+}
+
+pub(super) fn with_clearance<T>(
+    gcx: &Arc<GlobalContext>,
+    model: &BaseModelRecord,
+    work: impl FnOnce(&mut ScopedClearance<'_>) -> Result<T, super::error::WorkError>,
+) -> Result<T, super::error::WorkError> {
+    #[cfg(windows)]
+    {
+        work(&mut ScopedClearance {
+            gcx,
+            model,
+        })
+    }
+    #[cfg(not(windows))]
+    {
+        let before = policy_key(gcx, model)?;
+        let batch = BatchDeclaredRecords::new(gcx)
+            .map_err(|_| super::error::WorkError::policy_unavailable())?;
+        let mut clearance = ScopedClearance {
+            gcx,
+            model,
+            batch,
+        };
+        let result = work(&mut clearance);
+        let finished = clearance
+            .batch
+            .finish(gcx)
+            .map_err(|_| super::error::WorkError::policy_unavailable());
+        finished?;
+        if policy_key(gcx, model)? != before {
+            return Err(super::error::WorkError::policy_unavailable());
+        }
+        result
+    }
 }
 
 #[cfg(test)]
@@ -269,5 +357,141 @@ mod tests {
             records: rows[0].source_records.iter().cloned().enumerate().collect(),
         };
         assert!(clear_for_model(&gcx, audit, &other).is_err());
+    }
+
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn scoped_clearance_revokes_equal_policy_identity_swap_and_load_error() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let model = BaseModelRecord {
+            id: "trusted/model".into(),
+            ..Default::default()
+        };
+        let error = with_clearance(&gcx, &model, |clearance| {
+            assert_eq!(clearance.clear_rows(vec![row()])?.len(), 1);
+            let policy = gcx.privacy_policy_load.read().unwrap().policy.clone();
+            gcx.privacy_policy_load.write().unwrap().policy = Arc::new((*policy).clone());
+            Ok(())
+        })
+        .unwrap_err();
+        assert_eq!(error.code, "policy_unavailable");
+        let error = with_clearance(&gcx, &model, |clearance| {
+            assert!(clearance.clear_roots(Vec::new())?.is_empty());
+            gcx.privacy_policy_load.write().unwrap().error = Some("fixture load failure".into());
+            Ok(())
+        })
+        .unwrap_err();
+        assert_eq!(error.code, "policy_unavailable");
+        assert_eq!(
+            with_clearance(&gcx, &model, |_| Ok(())).unwrap_err().code,
+            "policy_unavailable"
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn scoped_clearance_finish_failure_precedes_closure_error() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let model = BaseModelRecord {
+            id: "trusted/model".into(),
+            ..Default::default()
+        };
+        let stable = with_clearance(&gcx, &model, |_| {
+            Err::<(), _>(super::super::error::WorkError::cursor_expired())
+        })
+        .unwrap_err();
+        assert_eq!(
+            stable.code,
+            super::super::error::WorkError::cursor_expired().code
+        );
+        for load_error in [false, true] {
+            let error = with_clearance(&gcx, &model, |clearance| {
+                clearance.clear_rows(Vec::new())?;
+                if load_error {
+                    gcx.privacy_policy_load.write().unwrap().error =
+                        Some("fixture load failure".into());
+                } else {
+                    let policy = gcx.privacy_policy_load.read().unwrap().policy.clone();
+                    gcx.privacy_policy_load.write().unwrap().policy = Arc::new((*policy).clone());
+                }
+                Err::<(), _>(super::super::error::WorkError::cursor_expired())
+            })
+            .unwrap_err();
+            assert_eq!(error.code, "policy_unavailable");
+        }
+    }
+
+    #[tokio::test]
+    async fn scoped_clearance_matches_wrappers_and_preserves_inherited_denial() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        gcx.privacy_policy_load.write().unwrap().policy = Arc::new(PrivacyPolicy {
+            zones: vec![Zone {
+                name: "guarded".into(),
+                patterns: vec!["**/secret/**".into()],
+                send_to: vec!["trusted".into()],
+                on_shell_read: ShellBehavior::Withhold,
+            }],
+            ..Default::default()
+        });
+        let mut inherited = row();
+        inherited.source_records.push(FileRecord {
+            path: "/secret/a".into(),
+            zone: "guarded".into(),
+            attribution: Attribution::Declared,
+        });
+        let mut root = row().root;
+        root.path = Some("/secret/a".into());
+        for id in ["trusted/model", "other/model"] {
+            let model = BaseModelRecord {
+                id: id.into(),
+                ..Default::default()
+            };
+            let expected_rows = clear_rows(&gcx, vec![inherited.clone()], &model).unwrap();
+            let expected_roots = clear_roots(&gcx, vec![root.clone()], &model).unwrap();
+            let (rows, roots) = with_clearance(&gcx, &model, |clearance| {
+                Ok((
+                    clearance.clear_rows(vec![inherited.clone()])?,
+                    clearance.clear_roots(vec![root.clone()])?,
+                ))
+            })
+            .unwrap();
+            assert_eq!(
+                serde_json::to_value(&rows).unwrap(),
+                serde_json::to_value(&expected_rows).unwrap()
+            );
+            assert_eq!(
+                rows.iter()
+                    .map(|row| &row.source_records)
+                    .collect::<Vec<_>>(),
+                expected_rows
+                    .iter()
+                    .map(|row| &row.source_records)
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(
+                serde_json::to_value(&roots).unwrap(),
+                serde_json::to_value(&expected_roots).unwrap()
+            );
+            assert_eq!(rows.len(), usize::from(id == "trusted/model"));
+            assert_eq!(roots.len(), usize::from(id == "trusted/model"));
+        }
+        let model = BaseModelRecord {
+            id: "trusted/model".into(),
+            ..Default::default()
+        };
+        gcx.privacy_policy_load.write().unwrap().policy = Arc::new(PrivacyPolicy {
+            blocked: vec!["[".into()],
+            ..Default::default()
+        });
+        assert_eq!(
+            with_clearance(&gcx, &model, |clearance| {
+                clearance.clear_rows(Vec::new())?;
+                clearance.clear_roots(Vec::new())?;
+                Ok(())
+            })
+            .unwrap_err()
+            .code,
+            "policy_unavailable"
+        );
     }
 }

@@ -93,6 +93,12 @@ fn registry() -> &'static RwLock<Registry> {
     SLOT.get_or_init(|| RwLock::new(Registry::default()))
 }
 
+static OBSERVATIONS_REVISION: AtomicU64 = AtomicU64::new(0);
+
+pub fn observations_revision() -> u64 {
+    OBSERVATIONS_REVISION.load(Ordering::Acquire)
+}
+
 fn read_registry<R>(f: impl FnOnce(&Registry) -> R) -> R {
     let guard = registry()
         .read()
@@ -798,6 +804,7 @@ impl WriteGuard {
                 reg.writes.remove(0);
                 reg.writes_dropped = reg.writes_dropped.saturating_add(1);
             }
+            OBSERVATIONS_REVISION.fetch_add(1, Ordering::Release);
         });
     }
 }
@@ -1014,6 +1021,7 @@ pub fn record_read(
             reg.reads.remove(0);
             reg.reads_dropped = reg.reads_dropped.saturating_add(1);
         }
+        OBSERVATIONS_REVISION.fetch_add(1, Ordering::Release);
     });
     observation
 }
@@ -1085,11 +1093,28 @@ pub fn observations(project: Option<&str>) -> Observations {
 pub fn reset_for_tests() {
     write_registry(|reg| {
         *reg = Registry::default();
+        OBSERVATIONS_REVISION.fetch_add(1, Ordering::Release);
     });
 }
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn read_and_write_observations_publish_revisions() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("observed.txt");
+        std::fs::write(&path, "fixture").unwrap();
+        let before = observations_revision();
+        record_read(Some("revision-reader"), &path, "fixture", 1, 1, 1, None);
+        assert!(observations_revision() > before);
+        let guard = begin_write(None, &path, WriteIntent::Contextual, "revision-writer")
+            .await
+            .unwrap();
+        let before_write = observations_revision();
+        guard.commit(WriteKind::Modified, Some("fixture"));
+        assert!(observations_revision() > before_write);
+    }
+
     #[tokio::test]
     async fn directory_mutation_excludes_descendant_writes_but_siblings_can_proceed() {
         let dir = tempfile::tempdir().unwrap();

@@ -26,6 +26,10 @@ impl Default for WorkProvenance {
 }
 
 impl WorkProvenance {
+    pub(crate) fn signature(&self) -> (&[FileRecord], bool) {
+        (&self.records, self.complete)
+    }
+
     pub fn matches_message_count(&self, count: usize) -> bool {
         self.message_count == count
     }

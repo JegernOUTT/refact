@@ -58,3 +58,83 @@ describe("chatReducer persisted startup", () => {
     });
   });
 });
+
+it("reorders duplicate-agent tie winners with persisted runtime membership", async () => {
+  vi.resetModules();
+  let order = ["a", "b"];
+  vi.doMock(persistenceModulePath, async () => {
+    const actual = await vi.importActual<
+      typeof import("../../../utils/chatUiPersistence")
+    >(persistenceModulePath);
+    return {
+      ...actual,
+      loadPersistedChatTabs: () => ({
+        openThreadIds: order,
+        currentThreadId: order[0],
+        tabs: order.map((id) => ({ id, title: id })),
+      }),
+    };
+  });
+  try {
+    const { chatReducer } = await import("./reducer");
+    const { applyChatEvent, hydratePersistedChatTabs, closeThread } =
+      await import("./actions");
+    const { selectBackgroundAgentPool } = await import("./selectors");
+    let state = chatReducer(undefined, { type: "@@INIT" });
+    const agent = {
+      agent_id: "shared",
+      parent_chat_id: "a",
+      child_chat_id: "child",
+      kind: "subagent",
+      status: "running",
+      title: "a",
+      progress: null,
+      step_count: 0,
+      last_activity: null,
+      target_files: [],
+      edited_files: [],
+      diff_summary: null,
+      conflict_summary: null,
+      result_summary: null,
+      error: null,
+      started_at: null,
+      finished_at: null,
+      change_seq: 1,
+      model_type: null,
+      current_tool: null,
+      goal_summary: null,
+      plan_present: false,
+      worktree_branch: null,
+      merge_status: null,
+      pending_questions: 0,
+      questions: [],
+      tokens_used: 0,
+      cost_usd: null,
+    } satisfies import("../../../services/refact/types").BackgroundAgentSummary;
+    for (const id of order)
+      state = chatReducer(
+        state,
+        applyChatEvent({
+          chat_id: id,
+          seq: "1",
+          type: "background_agent_updated",
+          agent: { ...agent, title: id },
+        }),
+      );
+    const pool = () =>
+      selectBackgroundAgentPool({
+        chat: state,
+      } as import("../../../app/store").RootState);
+    expect(pool().shared.title).toBe("a");
+    order = ["b", "a"];
+    state = chatReducer(state, hydratePersistedChatTabs());
+    expect(Object.keys(state.threads)).toEqual(order);
+    expect(state.metadata?.ids).toEqual(order);
+    expect(pool().shared.title).toBe("b");
+    state = chatReducer(state, closeThread({ id: "b", force: true }));
+    expect(pool().shared.title).toBe("a");
+  } finally {
+    vi.doUnmock(persistenceModulePath);
+    vi.resetModules();
+  }
+});

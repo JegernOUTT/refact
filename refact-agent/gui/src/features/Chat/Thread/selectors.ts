@@ -1,3 +1,4 @@
+import { createThreadMetadata } from "./metadata";
 import type { RootState } from "../../../app/store";
 import { createSelector } from "@reduxjs/toolkit";
 import { isToolName } from "../../../utils/toolNameAliases";
@@ -38,7 +39,6 @@ import {
   getChatActivity,
   type ChatActivity,
 } from "../../../utils/chatActivity";
-import type { SessionState } from "../../../utils/sessionStatus";
 import type { WorktreeMeta } from "../../../services/refact/worktrees";
 import type {
   AgentQuestion,
@@ -124,22 +124,6 @@ function sameTaskProgress(left: TaskProgress, right: TaskProgress): boolean {
   );
 }
 
-function deriveSessionStateFromRuntime(
-  rt: ChatThreadRuntime | undefined,
-): SessionState | undefined {
-  if (!rt) return undefined;
-  // Use stored session_state if available (for waiting_user_input, completed, etc.)
-  if (rt.session_state) {
-    return rt.session_state as SessionState;
-  }
-  // Fallback to derived state from booleans
-  if (rt.error) return "error";
-  if (rt.confirmation.pause) return "paused";
-  if (rt.streaming) return "generating";
-  if (rt.waiting_for_response) return "executing_tools";
-  return "idle";
-}
-
 export const selectCurrentThreadId = (state: RootState) =>
   state.chat.current_thread_id;
 export const selectOpenThreadIds = (state: RootState) =>
@@ -148,9 +132,19 @@ export const selectAllThreads = (
   state: RootState,
 ): Record<string, ChatThreadRuntime | undefined> => state.chat.threads;
 
-export const selectThreadIds = createSelector(
+const selectLegacyMetadata = createSelector(
   [selectAllThreads],
-  (threads) => Object.keys(threads).filter((id) => threads[id] !== undefined),
+  createThreadMetadata,
+);
+const selectMetadata = (state: RootState) =>
+  state.chat.metadata ?? selectLegacyMetadata(state);
+const selectDisplayMetadata = (state: RootState) =>
+  selectMetadata(state).display;
+const selectAgentMaps = (state: RootState) => selectMetadata(state).agents;
+
+export const selectThreadIds = createSelector(
+  [(state: RootState) => selectMetadata(state).ids],
+  (ids) => ids.slice(),
   { memoizeOptions: { resultEqualityCheck: sameRefArray } },
 );
 
@@ -170,7 +164,7 @@ export const selectTabsDisplayData = (() => {
   return createSelector(
     [
       selectOpenThreadIds,
-      selectAllThreads,
+      selectDisplayMetadata,
       (state: RootState) => state.history.chats,
       (state: RootState) => state.notifications.pendingByThread,
       (state: RootState) => state.notifications.lastSeenByThread,
@@ -188,17 +182,19 @@ export const selectTabsDisplayData = (() => {
         const historyItem = historyChats[id] as
           | (typeof historyChats)[string]
           | undefined;
-        const liveSessionState = deriveSessionStateFromRuntime(runtime);
+        const liveSessionState = runtime?.session_state;
         const pendingNotifications = pendingByThread[id];
         const lastSeen = lastSeenByThread[id] ?? 0;
         const tab: TabDisplayData = {
           id,
-          title: runtime?.thread.title ?? historyItem?.title ?? "New Chat",
+          title: runtime?.title ?? historyItem?.title ?? "New Chat",
           session_state: liveSessionState ?? historyItem?.session_state,
-          activity: getChatActivity(runtime, historyItem?.session_state),
-          mode: runtime?.thread.mode ?? historyItem?.mode,
-          is_buddy_chat: Boolean(runtime?.thread.buddy_meta?.is_buddy_chat),
-          is_task_chat: Boolean(runtime?.thread.is_task_chat),
+          activity:
+            runtime?.activity ??
+            getChatActivity(undefined, historyItem?.session_state),
+          mode: runtime?.mode ?? historyItem?.mode,
+          is_buddy_chat: Boolean(runtime?.is_buddy_chat),
+          is_task_chat: Boolean(runtime?.is_task_chat),
           unreadNotificationCount:
             pendingNotifications?.filter(
               (notification) => notification.receivedAt > lastSeen,
@@ -385,12 +381,13 @@ export function reconcileBackgroundAgents(
 }
 
 export const selectBackgroundAgentPool = createSelector(
-  [selectAllThreads],
-  (threads): Record<string, BackgroundAgentSummary> => {
+  [selectAgentMaps, selectThreadIds],
+  (threads, ids): Record<string, BackgroundAgentSummary> => {
     const agents: Record<string, BackgroundAgentSummary> = {};
-    for (const runtime of Object.values(threads)) {
+    for (const id of ids) {
+      const runtime = threads[id];
       if (!runtime) continue;
-      for (const agent of Object.values(runtime.background_agents)) {
+      for (const agent of Object.values(runtime)) {
         if (shouldKeepBackgroundAgent(agents[agent.agent_id], agent)) {
           agents[agent.agent_id] = agent;
         }

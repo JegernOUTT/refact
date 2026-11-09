@@ -468,7 +468,69 @@ pub(super) fn should_replace_background_agent(
     }
 }
 
-pub type SessionsMap = Arc<ARwLock<HashMap<String, Arc<AMutex<ChatSession>>>>>;
+pub type SessionsMap = Arc<SessionStore>;
+
+#[derive(Default)]
+pub struct SessionStore(
+    ARwLock<HashMap<String, Arc<AMutex<ChatSession>>>>,
+    pub(crate) Arc<crate::coordination::catalog_cache::SessionPublications>,
+);
+
+impl SessionStore {
+    pub fn try_read(
+        &self,
+    ) -> Result<
+        tokio::sync::RwLockReadGuard<'_, HashMap<String, Arc<AMutex<ChatSession>>>>,
+        tokio::sync::TryLockError,
+    > {
+        self.0.try_read()
+    }
+
+    pub fn try_write(&self) -> Result<SessionStoreWrite<'_>, tokio::sync::TryLockError> {
+        self.0
+            .try_write()
+            .map(|guard| SessionStoreWrite(guard, self.1.clone()))
+    }
+
+    pub async fn read(
+        &self,
+    ) -> tokio::sync::RwLockReadGuard<'_, HashMap<String, Arc<AMutex<ChatSession>>>> {
+        self.0.read().await
+    }
+
+    pub async fn write(&self) -> SessionStoreWrite<'_> {
+        SessionStoreWrite(self.0.write().await, self.1.clone())
+    }
+}
+
+pub struct SessionStoreWrite<'a>(
+    tokio::sync::RwLockWriteGuard<'a, HashMap<String, Arc<AMutex<ChatSession>>>>,
+    Arc<crate::coordination::catalog_cache::SessionPublications>,
+);
+
+impl std::ops::Deref for SessionStoreWrite<'_> {
+    type Target = HashMap<String, Arc<AMutex<ChatSession>>>;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for SessionStoreWrite<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl Drop for SessionStoreWrite<'_> {
+    fn drop(&mut self) {
+        for session in self.0.values() {
+            if let Ok(mut session) = session.try_lock() {
+                session.work_catalog_publisher = Arc::downgrade(&self.1);
+            }
+        }
+        self.1.invalidate();
+    }
+}
 
 pub(crate) struct NativeMutationGuard(Arc<std::sync::atomic::AtomicUsize>);
 
@@ -494,7 +556,7 @@ impl Drop for NativeMutationGuard {
 }
 
 pub fn create_sessions_map() -> SessionsMap {
-    Arc::new(ARwLock::new(HashMap::new()))
+    Arc::new(SessionStore::default())
 }
 
 pub struct ToolDecisionOutcome {
@@ -891,6 +953,8 @@ impl ChatSession {
             work_project_root: None,
             work_provenance: Default::default(),
             work_capsule_state: Default::default(),
+            work_catalog_signature: String::new(),
+            work_catalog_publisher: Default::default(),
             last_stream_delta_at: None,
             live_diagnostics: Default::default(),
             command_enqueued_at: HashMap::new(),
@@ -1049,6 +1113,8 @@ impl ChatSession {
             work_project_root: None,
             work_provenance,
             work_capsule_state: Default::default(),
+            work_catalog_signature: String::new(),
+            work_catalog_publisher: Default::default(),
             last_stream_delta_at: None,
             live_diagnostics: Default::default(),
             command_enqueued_at: HashMap::new(),
@@ -1113,7 +1179,37 @@ impl ChatSession {
         }
     }
 
+    fn publish_work_metadata(&mut self) {
+        let signature = serde_json::json!([
+            self.work_project_root,
+            self.thread.worktree,
+            self.thread.title,
+            self.thread.task_meta,
+            self.thread.parent_id,
+            self.thread.root_chat_id,
+            self.thread.link_type,
+            self.thread.mode,
+            self.thread.model,
+            format!("{:?}", self.runtime.state),
+            self.runtime.pause_reasons.is_empty(),
+            self.runtime.queue_size.max(self.command_queue.len()),
+            self.closed,
+            self.waiting_for_card_ids,
+            self.pending_questions,
+            self.goal.as_ref().map(|goal| format!("{:?}", goal.status)),
+            self.work_provenance.signature()
+        ])
+        .to_string();
+        if signature != self.work_catalog_signature {
+            self.work_catalog_signature = signature;
+            if let Some(publisher) = self.work_catalog_publisher.upgrade() {
+                publisher.publish(&self.chat_id);
+            }
+        }
+    }
+
     pub fn increment_version(&mut self) {
+        self.publish_work_metadata();
         self.trajectory_version += 1;
         self.trajectory_dirty = true;
         if self.trajectory_save_in_flight {
@@ -2127,6 +2223,7 @@ impl ChatSession {
         self.clear_stream_and_confirmation_timestamps();
         self.release_turn_only_state();
         self.closed = true;
+        self.publish_work_metadata();
         self.runtime.interruption = None;
         self.closed_flag.store(true, Ordering::Relaxed);
         for handle in self.post_turn_task_handles.drain(..) {
@@ -2190,6 +2287,9 @@ impl ChatSession {
                 self.refresh_work_provenance();
             }
             _ => {}
+        }
+        if !matches!(&event, ChatEvent::StreamDelta { .. }) {
+            self.publish_work_metadata();
         }
         if self.event_tx.receiver_count() == 0 {
             if perf_diagnostics::is_enabled() {

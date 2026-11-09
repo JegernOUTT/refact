@@ -114,6 +114,9 @@ pub(super) async fn app_with_workspace() -> (crate::app_state::AppState, tempfil
     let workspace = temp.path().join("workspace");
     std::fs::create_dir_all(&workspace).unwrap();
     let gcx = crate::global_context::tests::make_test_gcx_with_dirs(cache, config).await;
+    crate::privacy::save_privacy_policy(gcx.clone(), refact_privacy::PrivacyPolicy::default())
+        .await
+        .unwrap();
     *gcx.documents_state.workspace_folders.lock().unwrap() = vec![workspace.clone()];
     let (project_root, _) = crate::caps::project_model_defaults_state(gcx.clone()).await;
     let mut caps = crate::caps::CodeAssistantCaps::default();
@@ -239,15 +242,22 @@ async fn background_agent_waiting_on_its_own_child_is_tracked() {
         }))
     };
     let (app, _temp) = app_with_workspace().await;
-    let handle = crate::agents::spawn::spawn_background_agent(
+    let mut handle = crate::agents::spawn::spawn_background_agent(
         app.clone(),
         spawn_request("wait-root", "X", 0),
     )
     .await
     .expect("spawn parent X");
-    tokio::time::timeout(Duration::from_secs(30), parent_started.notified())
-        .await
-        .expect("X runner starts");
+    tokio::time::timeout(Duration::from_secs(30), async {
+        tokio::select! {
+            _ = parent_started.notified() => {},
+            result = &mut handle.completion_rx => {
+                panic!("X completed before runner startup: {result:?}");
+            }
+        }
+    })
+    .await
+    .expect("X runner starts");
     let (graph_app, waiter, target) =
         tokio::time::timeout(Duration::from_secs(30), identity_rx.recv())
             .await
