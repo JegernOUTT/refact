@@ -82,6 +82,12 @@ export const server = setupServer(
     }),
   ),
   http.get("*/v1/chats/activity", () => HttpResponse.json({ chats: [] })),
+  http.get("*/v1/apps", () => HttpResponse.json({ apps: [], diagnostics: [] })),
+  http.get("*/v1/apps/subscribe", () =>
+    HttpResponse.text("", {
+      headers: { "Content-Type": "text/event-stream" },
+    }),
+  ),
   http.get("*/v1/buddy/approvals/current", () =>
     HttpResponse.json({
       schema_version: 1,

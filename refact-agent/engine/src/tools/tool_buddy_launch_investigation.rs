@@ -202,6 +202,7 @@ impl Tool for ToolBuddyLaunchInvestigation {
             native_decision_receipts: Vec::new(),
             pending_deliveries: Vec::new(),
             dropped_deliveries: Vec::new(),
+            app_workspace: None,
         };
 
         chat_facade

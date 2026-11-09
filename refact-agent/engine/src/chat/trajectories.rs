@@ -2746,6 +2746,7 @@ fn is_known_trajectory_top_level_key(key: &str) -> bool {
             | "goal_ledger"
             | "goal_verification_blocked_until_ms"
             | "browser_meta"
+            | "app_workspace"
     )
 }
 
@@ -3648,6 +3649,9 @@ async fn load_trajectory_candidate(
         auto_compact_enabled: t.get("auto_compact_enabled").and_then(|v| v.as_bool()),
         frozen_request_prefix,
         claude_code_identity,
+        app_workspace: super::app_workspace::stored_app_workspace_from_value(
+            t.get("app_workspace"),
+        ),
         // Runtime-only: saves strip this key and loads ignore injected values
         // (pinned by `reactive_compact_attempts_is_runtime_only_not_persisted`),
         // so a stale in-flight retry counter can never survive a reload.
@@ -4125,6 +4129,7 @@ I'm your **Task Planner**. I handle the complete task lifecycle - from investiga
         waiting_for_card_ids: Vec::new(),
         pending_questions: Vec::new(),
         native_decision_receipts: Vec::new(),
+        app_workspace: None,
     };
 
     save_trajectory_snapshot(gcx, snapshot).await
@@ -4233,6 +4238,7 @@ pub async fn save_trajectory_as_with_intent_checked(
         waiting_for_card_ids: Vec::new(),
         pending_questions,
         native_decision_receipts,
+        app_workspace: thread.app_workspace.clone(),
     };
     persist_trajectory_snapshot_with_intent(gcx, snapshot, intent).await
 }
@@ -4331,8 +4337,10 @@ fn preservable_trajectory_metadata(
         .iter()
         .filter(|(key, _)| {
             // `created_at` is a known key but must survive re-saves, so it is cached too.
-            matches!(key.as_str(), "browser_meta" | "created_at")
-                || !is_known_trajectory_top_level_key(key)
+            matches!(
+                key.as_str(),
+                "browser_meta" | "created_at" | "app_workspace"
+            ) || !is_known_trajectory_top_level_key(key)
         })
         .map(|(key, value)| (key.clone(), value.clone()))
         .collect()
@@ -5022,6 +5030,10 @@ fn trajectory_value_from_snapshot(
     if let Some(ref worktree) = snapshot.worktree {
         trajectory["worktree"] = serde_json::to_value(worktree).unwrap_or_default();
     }
+    if let Some(ref app_workspace) = snapshot.app_workspace {
+        trajectory["app_workspace"] = serde_json::to_value(app_workspace)
+            .map_err(|error| format!("failed to serialize app workspace: {error}"))?;
+    }
 
     if let Some(ref parent_id) = snapshot.parent_id {
         trajectory["parent_id"] = serde_json::Value::String(parent_id.clone());
@@ -5256,6 +5268,12 @@ async fn persist_trajectory_snapshot_file(
     {
         trajectory["created_at"] = serde_json::Value::String(existing_created_at.to_string());
     }
+    super::app_workspace::keep_newest_app_workspace_in_trajectory(
+        &mut trajectory,
+        existing_trajectory
+            .as_ref()
+            .and_then(|existing| existing.get(super::app_workspace::APP_WORKSPACE_KEY)),
+    );
     preserve_existing_trajectory_metadata(&mut trajectory, existing_trajectory);
 
     let tmp_path = unique_trajectory_tmp_path(&file_path);
@@ -5565,6 +5583,7 @@ async fn save_trajectory_snapshot_inner_options(
         && snapshot.task_meta.is_none()
         && snapshot.buddy_meta.is_none()
         && snapshot.frozen_request_prefix.is_none()
+        && snapshot.app_workspace.is_none()
         && snapshot.goal.is_none()
         && snapshot.auto_compression_cap.is_none()
         && !snapshot.auto_compression_cap_pending
@@ -6187,6 +6206,7 @@ fn external_delete_matches_session(
 
 fn can_apply_external_reload(session: &ChatSession) -> bool {
     session.runtime.state == SessionState::Idle
+        && session.app_workspace_mutation_lock.try_lock().is_ok()
         && !session.trajectory_dirty
         && session.pending_deliveries.is_empty()
         && session.runner_pending_deliveries.is_empty()
@@ -12760,6 +12780,7 @@ mod tests {
             reactive_compact_attempts: None,
             wake_up_at: None,
             waiting_for_card_ids: Vec::new(),
+            app_workspace: None,
         }
     }
 
@@ -13684,6 +13705,75 @@ mod tests {
             "investigation"
         );
         assert_eq!(loaded.messages.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn empty_chat_workspace_only_snapshot_is_durable() {
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, _) = make_app_with_workspace(dir.path()).await;
+        let binding_id = "6f1c1d2e-0000-4000-8000-0000000000b1";
+        let populated = refact_chat_api::StoredAppWorkspace::from_value(json!({
+            "schema_version": 1,
+            "revision": 1,
+            "bindings": [{
+                "binding_id": binding_id,
+                "app_id": "6f1c1d2e-0000-4000-8000-000000000001",
+                "params": {"query": "workspace-only"},
+                "state": {"page": 2}
+            }],
+            "layout": {"kind": "leaf", "tabs": [
+                {"kind": "chat", "ref": "self"},
+                {"kind": "app", "binding_id": binding_id}
+            ], "active": 1}
+        }));
+        populated.supported().unwrap().validate().unwrap();
+        let mut cleared = refact_chat_api::AppWorkspace::empty();
+        cleared.revision = 2;
+        for (chat_id, workspace) in [
+            ("empty-no-workspace", None),
+            ("empty-with-workspace", Some(populated)),
+            (
+                "empty-cleared-workspace",
+                Some(refact_chat_api::StoredAppWorkspace::Supported(cleared)),
+            ),
+            (
+                "empty-unsupported-workspace",
+                Some(refact_chat_api::StoredAppWorkspace::from_value(
+                    json!({"schema_version": 99, "revision": 3, "future_layout": ["opaque"]}),
+                )),
+            ),
+        ] {
+            let mut snapshot = test_snapshot(chat_id, "", Vec::new());
+            snapshot.app_workspace = workspace.clone();
+            save_trajectory_snapshot(gcx.clone(), snapshot)
+                .await
+                .unwrap();
+            let path = dir
+                .path()
+                .join(".refact/trajectories")
+                .join(chat_id)
+                .join(format!("{chat_id}.json"));
+            let Some(workspace) = workspace else {
+                assert!(!path.exists(), "a fresh default chat must still be skipped");
+                continue;
+            };
+            assert!(
+                path.is_file(),
+                "workspace-only snapshot must reach disk: {chat_id}"
+            );
+            let persisted: serde_json::Value =
+                serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
+            assert_eq!(
+                persisted["app_workspace"],
+                serde_json::to_value(&workspace).unwrap()
+            );
+            assert_eq!(persisted["messages"], json!([]));
+            let loaded = load_trajectory_for_chat(gcx.clone(), chat_id)
+                .await
+                .unwrap();
+            assert_eq!(loaded.thread.app_workspace, Some(workspace));
+            assert!(loaded.messages.is_empty());
+        }
     }
 
     #[tokio::test]
@@ -18037,6 +18127,7 @@ mod tests {
                 frozen_request_prefix: None,
                 claude_code_identity: None,
                 reactive_compact_attempts: None,
+                app_workspace: None,
             },
             messages: vec![ChatMessage::new("user".to_string(), "Hello".to_string())],
             runtime: super::super::types::RuntimeState::default(),
@@ -18085,6 +18176,9 @@ mod tests {
             stream_started_at: None,
             confirmation_paused_at: None,
             approval_wrapper_calls: Default::default(),
+            app_mutation_receipts: Default::default(),
+            automation_approval_receipts: Default::default(),
+            app_workspace_mutation_lock: Default::default(),
             last_tool_started_at: None,
             last_tool_progress_at: None,
             trajectory_dirty: false,
@@ -18236,6 +18330,9 @@ mod tests {
             stream_started_at: None,
             confirmation_paused_at: None,
             approval_wrapper_calls: Default::default(),
+            app_mutation_receipts: Default::default(),
+            automation_approval_receipts: Default::default(),
+            app_workspace_mutation_lock: Default::default(),
             last_tool_started_at: None,
             last_tool_progress_at: None,
             trajectory_dirty: false,
@@ -19089,6 +19186,7 @@ mod tests {
             reactive_compact_attempts: None,
             wake_up_at: None,
             waiting_for_card_ids: Vec::new(),
+            app_workspace: None,
         };
 
         save_trajectory_snapshot(gcx.clone(), snapshot)

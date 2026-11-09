@@ -1,6 +1,6 @@
 use refact_chat_api::{
     BuddyThreadMeta, ClaudeCodeIdentity, FrozenRequestPrefix, GoalLedgerEntry, GoalSnapshot,
-    TaskMeta, ThreadParams, WorktreeMeta,
+    StoredAppWorkspace, TaskMeta, ThreadParams, WorktreeMeta,
 };
 use refact_core::chat_types::{ChatMessage, DeliveryStatusRecord, PendingDelivery};
 use serde::{Deserialize, Serialize};
@@ -82,6 +82,8 @@ pub struct TrajectorySnapshot {
     pub goal_verification_blocked_until_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_browser_decision: Option<PendingBrowserDecisionSnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_workspace: Option<StoredAppWorkspace>,
 }
 
 fn tolerant_goal_ledger<'de, D>(deserializer: D) -> Result<Vec<GoalLedgerEntry>, D::Error>
@@ -153,6 +155,7 @@ impl TrajectorySnapshot {
             goal_ledger: Vec::new(),
             goal_verification_blocked_until_ms: None,
             pending_browser_decision: None,
+            app_workspace: thread.app_workspace.clone(),
         }
     }
 }

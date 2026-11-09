@@ -1,0 +1,107 @@
+.tray {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--rf-space-1);
+  min-width: 0;
+}
+
+.chip {
+  position: relative;
+  display: inline-flex;
+  min-width: 0;
+  max-width: 100%;
+  height: var(--rf-control-h-icon-sm);
+  align-items: center;
+  gap: var(--rf-space-2);
+  padding: 0 var(--rf-space-2);
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-ctl);
+  background: var(--rf-surface-1);
+  color: var(--rf-color-fg);
+  font: var(--rf-weight-regular) var(--rf-text-2) / var(--rf-line-2)
+    var(--rf-font-ui);
+}
+
+.chip[data-deferred="true"] {
+  border-style: dashed;
+  color: var(--rf-color-muted);
+}
+
+.chip:hover,
+.chip:focus-within {
+  background: var(--rf-surface-2);
+}
+
+.trigger {
+  display: inline-flex;
+  min-width: 0;
+  height: 100%;
+  align-items: center;
+  gap: var(--rf-space-2);
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.trigger:focus-visible {
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
+  outline-offset: var(--rf-hairline);
+  border-radius: var(--rf-radius-chip);
+}
+
+.icon {
+  width: var(--rf-icon-sm);
+  height: var(--rf-icon-sm);
+  flex: none;
+  color: var(--rf-color-muted);
+}
+
+.label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.meta {
+  flex: none;
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-1);
+  white-space: nowrap;
+}
+
+.actions {
+  display: inline-flex;
+  flex: none;
+  margin-right: calc(-1 * var(--rf-space-1));
+}
+
+.attribution {
+  margin: 0 0 var(--rf-space-2);
+  padding-left: var(--rf-space-4);
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-2);
+  overflow-wrap: anywhere;
+}
+
+.preview {
+  max-height: 50dvh;
+  margin: 0;
+  padding: var(--rf-panel-pad-compact);
+  overflow: auto;
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-ctl);
+  background: var(--rf-surface-1);
+  font-size: var(--rf-text-2);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.note {
+  margin: var(--rf-space-2) 0 0;
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-1);
+}

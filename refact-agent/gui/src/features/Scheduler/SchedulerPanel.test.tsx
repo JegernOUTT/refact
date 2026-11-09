@@ -1,5 +1,5 @@
 import { http, HttpResponse, delay } from "msw";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { screen, render, waitFor } from "../../utils/test-utils";
 import { server } from "../../utils/mockServer";
 import { SchedulerPanel } from "./SchedulerPanel";
@@ -60,6 +60,31 @@ const webhookTask: CronTask = {
 };
 
 describe("SchedulerPanel", () => {
+  beforeEach(() => {
+    server.use(
+      http.get("*/v1/scheduler/automation", () =>
+        HttpResponse.json({ catalog_revision: 0, definitions: [] }),
+      ),
+    );
+  });
+  it("locks view changes while a definition draft is open and retains its text", async () => {
+    server.use(http.get("*/v1/scheduler/cron", () => HttpResponse.json([])));
+    const { user } = render(<SchedulerPanel onBack={vi.fn()} embedded />);
+    await user.click(
+      await screen.findByRole("button", { name: "New definition" }),
+    );
+    const draft = screen.getByRole("textbox", { name: "Definition JSON" });
+    await user.clear(draft);
+    await user.type(draft, "unfinished draft");
+    expect(screen.getByRole("radio", { name: "Continuous" })).toBeDisabled();
+    await user.click(screen.getByRole("radio", { name: "Continuous" }));
+    expect(draft).toHaveValue("unfinished draft");
+    await user.click(screen.getByRole("button", { name: "Cancel definition" }));
+    expect(
+      screen.getByRole("radio", { name: "Continuous" }),
+    ).not.toBeDisabled();
+  });
+
   it("renders webhook management from listed webhook trigger jobs", async () => {
     server.use(
       http.get("*/v1/scheduler/cron", () => HttpResponse.json([webhookTask])),

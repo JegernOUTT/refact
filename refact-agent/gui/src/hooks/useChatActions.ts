@@ -1,4 +1,13 @@
 import { useCallback } from "react";
+import { useStore } from "react-redux";
+import type { AppStore } from "../app/store";
+import { appContextsConsumed } from "../features/Apps/appsSlice";
+import {
+  markAppContextsInFlight,
+  selectStagedAppContextsById,
+  sentAppContextIds,
+  takeAppContextSubmission,
+} from "../components/ChatForm/appContext";
 import { useAppSelector } from "./useAppSelector";
 import { useAppDispatch } from "./useAppDispatch";
 import { selectConfig, selectApiKey } from "../features/Config/configSlice";
@@ -82,8 +91,11 @@ function convertUserMessageContent(
   return mapped.length > 0 ? mapped : "";
 }
 
+const useAppStore = useStore.withTypes<AppStore>();
+
 export function useChatActions(explicitChatId?: string) {
   const dispatch = useAppDispatch();
+  const store = useAppStore();
   const config = useAppSelector(selectConfig);
   const apiKey = useAppSelector(selectApiKey);
   const contextId = useThreadId();
@@ -145,39 +157,63 @@ export function useChatActions(explicitChatId?: string) {
         throw new Error("Rebuild context before sending.");
       if (!chatId) return;
 
+      const frozenAppContexts = takeAppContextSubmission(chatId);
       const content = buildMessageContent(question);
       const isEmpty =
         typeof content === "string"
           ? content.trim().length === 0
           : content.length === 0;
-      if (isEmpty) return;
+      if (isEmpty && frozenAppContexts.length === 0) return;
+      const appContextIds =
+        frozenAppContexts.length > 0
+          ? frozenAppContexts.map((item) => item.id)
+          : undefined;
 
-      if (thread) {
-        const patch = buildThreadParamsPatch(thread, messages.length === 0);
-        if (Object.keys(patch).length > 0) {
-          await updateChatParams(chatId, patch, config, apiKey ?? undefined);
+      const releaseAppContexts = markAppContextsInFlight(
+        chatId,
+        frozenAppContexts,
+      );
+      try {
+        if (thread) {
+          const patch = buildThreadParamsPatch(thread, messages.length === 0);
+          if (Object.keys(patch).length > 0) {
+            await updateChatParams(chatId, patch, config, apiKey ?? undefined);
+          }
         }
+
+        const contextFiles =
+          manualPreviewItems.length > 0
+            ? manualPreviewItems.map((item) => item.context_file)
+            : undefined;
+        const shouldSuppressAutoEnrichment =
+          manualPreviewRan &&
+          contextFiles !== undefined &&
+          contextFiles.length > 0;
+
+        const shouldPrioritize = priority ?? sendImmediately;
+        const sendArgs = [
+          chatId,
+          content,
+          config,
+          apiKey ?? undefined,
+          shouldPrioritize,
+          contextFiles,
+          shouldSuppressAutoEnrichment,
+        ] as const;
+        await (appContextIds
+          ? sendUserMessage(...sendArgs, appContextIds)
+          : sendUserMessage(...sendArgs));
+      } finally {
+        releaseAppContexts();
       }
 
-      const contextFiles =
-        manualPreviewItems.length > 0
-          ? manualPreviewItems.map((item) => item.context_file)
-          : undefined;
-      const shouldSuppressAutoEnrichment =
-        manualPreviewRan &&
-        contextFiles !== undefined &&
-        contextFiles.length > 0;
-
-      const shouldPrioritize = priority ?? sendImmediately;
-      await sendUserMessage(
-        chatId,
-        content,
-        config,
-        apiKey ?? undefined,
-        shouldPrioritize,
-        contextFiles,
-        shouldSuppressAutoEnrichment,
+      const consumedIds = sentAppContextIds(
+        selectStagedAppContextsById(store.getState(), chatId),
+        frozenAppContexts,
       );
+      if (consumedIds.length > 0) {
+        dispatch(appContextsConsumed({ chatId, ids: consumedIds }));
+      }
 
       dispatch(clearManualPreviewItems({ chatId }));
 
@@ -191,6 +227,7 @@ export function useChatActions(explicitChatId?: string) {
       contextRebuildRequired,
       buildMessageContent,
       dispatch,
+      store,
       sendImmediately,
       messages,
       thread,

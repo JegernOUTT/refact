@@ -1,10 +1,16 @@
+pub mod automation_api;
+pub mod automation_approval;
+pub(crate) mod automation_runtime;
+pub mod credentials;
 pub mod cron_expr;
 pub mod delivery;
 pub mod exec_action;
+pub mod generic_runtime;
 pub mod jitter;
 pub mod retry;
 pub mod runner;
 pub mod schedule;
+pub mod source_authorization;
 pub mod store;
 pub mod types;
 
@@ -117,3 +123,5 @@ pub(crate) mod tests {
         );
     }
 }
+
+pub use refact_scheduler_core::sources;

@@ -102,6 +102,11 @@ fn tool_timestamp_ms() -> Option<u64> {
 pub(crate) const SHELL_PRIVACY_APPROVAL_RULE: &str =
     "Privacy approval required: command read guarded files";
 
+pub(crate) fn requires_actual_human_approval(reason: &str) -> bool {
+    reason == crate::tools::tool_app::HUMAN_APP_APPROVAL
+        || reason == crate::scheduler::automation_approval::HUMAN_AUTOMATION_APPROVAL
+}
+
 pub(crate) fn is_shell_privacy_approval(reason: &PauseReason) -> bool {
     reason.rule == SHELL_PRIVACY_APPROVAL_RULE
 }
@@ -1273,6 +1278,7 @@ mod tests {
     #[tokio::test]
     async fn catalog_aliases_remain_stable_when_tool_descriptors_change_mid_batch() {
         let initial = ToolCatalogSnapshot {
+            intent: refact_runtime_api::ToolCatalogIntent::Policy,
             index: refact_runtime_api::ToolRegistryIndex {
                 tools: vec![deterministic_tool_desc(
                     "very_long_tool_name_that_exceeds_the_64_character_limit_for_provider_apis",
@@ -1301,6 +1307,7 @@ mod tests {
     #[test]
     fn runner_wait_recognition_requires_builtin_identity() {
         let mut catalog = ToolCatalogSnapshot {
+            intent: refact_runtime_api::ToolCatalogIntent::Policy,
             index: refact_runtime_api::ToolRegistryIndex {
                 tools: vec![
                     deterministic_tool_desc("wait"),
@@ -1985,11 +1992,12 @@ pub async fn process_tool_calls_once(
         let session = session_arc.lock().await;
         session.tool_catalog.clone()
     };
-    let catalog = match session_catalog {
+    let intent = super::generation::tool_catalog_intent_for_thread(&app, &thread).await;
+    let catalog = match session_catalog.filter(|catalog| catalog.intent == intent) {
         Some(catalog) => catalog,
         None => {
             app.tool_registry
-                .acquire_tool_catalog(
+                .acquire_tool_catalog_with_intent(
                     mode_id,
                     model_id,
                     thread
@@ -1997,6 +2005,7 @@ pub async fn process_tool_calls_once(
                         .as_ref()
                         .map(|worktree| worktree.root.to_string_lossy().into_owned())
                         .as_deref(),
+                    intent,
                 )
                 .await
         }
@@ -2133,7 +2142,8 @@ pub async fn process_tool_calls_once(
             crate::agents::approval::dangerous_confirmation_enabled(&app, &thread.id).await;
         let (auto_approved, remaining): (Vec<_>, Vec<_>) =
             confirmations.into_iter().partition(|confirmation| {
-                should_auto_approve_confirmation(&current_thread, &confirmation.tool_name)
+                !requires_actual_human_approval(&confirmation.rule)
+                    && should_auto_approve_confirmation(&current_thread, &confirmation.tool_name)
             });
 
         for confirmation in &auto_approved {
@@ -2816,12 +2826,53 @@ async fn check_tools_confirmation_with_pool(
                         ) && !allowed_tools.is_empty()
                             && (allowed_tools.contains(&tool_call.function.name)
                                 || allowed_tools.contains(&resolved_tool_name)));
+                let forced_app_confirmation =
+                    match crate::tools::tool_app::inspect_mutation(&ccx, tool_call).await {
+                        Ok(forced) => forced,
+                        Err(error) => {
+                            denials.push(PauseReason {
+                                reason_type: "denial".into(),
+                                tool_name: tool_call.function.name.clone(),
+                                command: result.result.command,
+                                rule: error,
+                                tool_call_id: tool_call.id.clone(),
+                                integr_config_path,
+                            });
+                            continue;
+                        }
+                    };
+                let forced_automation_confirmation =
+                    match crate::scheduler::automation_approval::inspect_automation_approval(
+                        &ccx,
+                        tool_call,
+                        &tool_call.function.parse_args().unwrap_or_default(),
+                    )
+                    .await
+                    {
+                        Ok(forced) => forced,
+                        Err(error) => {
+                            denials.push(PauseReason {
+                                reason_type: "denial".into(),
+                                tool_name: tool_call.function.name.clone(),
+                                command: result.result.command,
+                                rule: error,
+                                tool_call_id: tool_call.id.clone(),
+                                integr_config_path,
+                            });
+                            continue;
+                        }
+                    };
                 let mut final_action = compute_final_action(
                     &result.result.result,
                     mode_action.as_deref(),
                     is_auto_approved,
                     &resolved_tool_name,
                 );
+                if (forced_app_confirmation || forced_automation_confirmation)
+                    && final_action != "deny"
+                {
+                    final_action = "ask";
+                }
                 if final_action != "deny"
                     && !is_auto_approved
                     && result.result.result == MatchConfirmDenyResult::CONFIRMATION
@@ -2834,9 +2885,15 @@ async fn check_tools_confirmation_with_pool(
                     final_action = "ask";
                 }
 
-                let rule_text = match mode_action.as_deref() {
-                    Some(action) => format!("mode policy: {}", action),
-                    None => result.result.rule.clone(),
+                let rule_text = if forced_automation_confirmation {
+                    crate::scheduler::automation_approval::HUMAN_AUTOMATION_APPROVAL.into()
+                } else if forced_app_confirmation {
+                    crate::tools::tool_app::HUMAN_APP_APPROVAL.into()
+                } else {
+                    match mode_action.as_deref() {
+                        Some(action) => format!("mode policy: {}", action),
+                        None => result.result.rule.clone(),
+                    }
                 };
 
                 match final_action {
@@ -2924,11 +2981,17 @@ pub async fn execute_tools_with_session(
     if options.allowed_tools.is_empty() {
         options.allowed_tools = session_allowed_tools;
     }
-    let catalog = match options.catalog.clone().or(session_catalog) {
+    let intent = super::generation::tool_catalog_intent_for_thread(&app, thread).await;
+    let catalog = match options
+        .catalog
+        .clone()
+        .or(session_catalog)
+        .filter(|catalog| catalog.intent == intent)
+    {
         Some(catalog) => catalog,
         None => {
             app.tool_registry
-                .acquire_tool_catalog(
+                .acquire_tool_catalog_with_intent(
                     mode_id,
                     model_id,
                     thread
@@ -2936,6 +2999,7 @@ pub async fn execute_tools_with_session(
                         .as_ref()
                         .map(|worktree| worktree.root.to_string_lossy().into_owned())
                         .as_deref(),
+                    intent,
                 )
                 .await
         }
@@ -4051,11 +4115,16 @@ pub async fn execute_tools(
         Ok(operation) => operation,
         Err(error) => return context_error_results(tool_calls, error),
     };
-    let catalog = match options.catalog.clone() {
+    let intent = super::generation::tool_catalog_intent_for_thread(&app, thread).await;
+    let catalog = match options
+        .catalog
+        .clone()
+        .filter(|catalog| catalog.intent == intent)
+    {
         Some(catalog) => catalog,
         None => {
             app.tool_registry
-                .acquire_tool_catalog(
+                .acquire_tool_catalog_with_intent(
                     mode_id,
                     model_id,
                     thread
@@ -4063,6 +4132,7 @@ pub async fn execute_tools(
                         .as_ref()
                         .map(|worktree| worktree.root.to_string_lossy().into_owned())
                         .as_deref(),
+                    intent,
                 )
                 .await
         }
@@ -4264,6 +4334,7 @@ mod interruptible_wait_tests {
             }
             .tool_description();
             let catalog = Arc::new(ToolCatalogSnapshot {
+                intent: refact_runtime_api::ToolCatalogIntent::Policy,
                 index: refact_runtime_api::ToolRegistryIndex {
                     tools: vec![desc],
                     mcp_lazy_mode: false,

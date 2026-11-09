@@ -1144,9 +1144,13 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn goal_monitor_does_not_fire_when_user_message_queued() {
-        let (mut session, now) = old_idle_session();
+    #[tokio::test]
+    async fn goal_monitor_does_not_fire_when_user_message_queued() {
+        let (app, _workspace) = goal_app().await;
+        let chat_id = unique_chat_id("queued-user");
+        let session_arc = stalled_goal_session(&app, &chat_id).await;
+        let mut session = session_arc.lock().await;
+        let ledger_before = session.goal_ledger.clone();
         session.command_queue.push_back(CommandRequest {
             native_approval_guard: None,
             supervision_guard: None,
@@ -1158,14 +1162,56 @@ mod tests {
                 context_files: vec![],
                 suppress_auto_enrichment: false,
                 client_message_id: None,
+                app_context_ids: Vec::new(),
             },
         });
 
+        drop(session);
+
+        let blocked = handle_goal_turn_end(app.clone(), session_arc.clone()).await;
+        let mut session = session_arc.lock().await;
+        let nudge_count = |session: &ChatSession| {
+            session
+                .messages
+                .iter()
+                .filter(|message| {
+                    message.role == "event"
+                        && event_payload(message).get("kind") == Some(&json!("nudge"))
+                })
+                .count()
+        };
         assert_eq!(
-            apply_monitor(&mut session, 10_000, now),
+            nudge_count(&session),
+            0,
+            "queued user must suppress actual nudge delivery"
+        );
+        assert!(!blocked);
+        assert!(session.delivery_wake_sources.is_empty());
+        assert!(session.pending_deliveries.is_empty());
+        assert_eq!(session.goal_ledger, ledger_before);
+        assert_eq!(
+            session.command_queue.front().unwrap().client_request_id,
+            "queued-user"
+        );
+        assert!(matches!(
+            session.command_queue.front().unwrap().command,
+            ChatCommand::UserMessage { .. }
+        ));
+        assert!(!session.has_runner_lease());
+
+        assert_eq!(
+            apply_monitor(&mut session, epoch_ms_now(), Instant::now()),
             GoalNudgeOutcome::Skipped(GoalNudgeSkip::UserMessageQueued)
         );
         assert_eq!(session.command_queue.len(), 1);
+
+        session.command_queue.clear();
+        drop(session);
+        assert!(handle_goal_turn_end(app.clone(), session_arc.clone()).await);
+        let session = session_arc.lock().await;
+        assert_eq!(nudge_count(&session), 1);
+        assert!(session.delivery_wake_sources.contains("goal"));
+        assert!(session.goal.as_ref().unwrap().progress.last_nudge_at_ms > 0);
     }
 
     #[test]

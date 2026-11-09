@@ -349,6 +349,7 @@ pub(super) async fn handle_queue_command(
             context_files,
             suppress_auto_enrichment,
             client_message_id,
+            app_context_ids,
         } => {
             Box::pin(handle_user_message(
                 &context,
@@ -357,6 +358,7 @@ pub(super) async fn handle_queue_command(
                 context_files,
                 suppress_auto_enrichment,
                 client_message_id,
+                app_context_ids,
             ))
             .await
         }
@@ -376,6 +378,31 @@ pub(super) async fn handle_queue_command(
         ChatCommand::SetParams {
             patch,
         } => Box::pin(handle_set_params(&context, patch)).await,
+        ChatCommand::SetAppWorkspace {
+            expected_revision,
+            workspace,
+        } => {
+            match crate::chat::app_workspace::set_app_workspace_in_session(
+                context.app.clone(),
+                context.session_arc.clone(),
+                expected_revision,
+                workspace,
+            )
+            .await
+            {
+                Ok(stored) => context.session_arc.lock().await.emit(ChatEvent::Ack {
+                    client_request_id: context.request_id.clone(),
+                    accepted: true,
+                    result: Some(serde_json::json!({"revision": stored.revision})),
+                }),
+                Err(error) => context.session_arc.lock().await.emit(ChatEvent::Ack {
+                    client_request_id: context.request_id.clone(),
+                    accepted: false,
+                    result: Some(error.to_json()),
+                }),
+            }
+            QueueCommandOutcome::Finished
+        }
         ChatCommand::Abort {} => Box::pin(handle_abort(&context)).await,
         ChatCommand::AnswerQuestions {
             tool_call_id,
@@ -1630,6 +1657,9 @@ async fn handle_branch_from_chat(
         }
     }
     {
+        let _app_workspace_lease =
+            crate::chat::app_workspace::AppWorkspaceMutationLease::acquire(session_arc.clone())
+                .await;
         let mut session = session_arc.lock().await;
         let sessions = app.chat.sessions.try_read();
         if !sessions.as_ref().is_ok_and(|sessions| {
@@ -1673,6 +1703,19 @@ async fn handle_branch_from_chat(
         session.thread.link_type = target_thread.link_type;
         session.thread.root_chat_id = target_thread.root_chat_id;
         session.thread.worktree = target_thread.worktree;
+        if let Some(forked) = session
+            .thread
+            .app_workspace
+            .is_none()
+            .then(|| {
+                crate::chat::app_workspace::fork_app_workspace_for_new_chat(
+                    source_before.app_workspace.as_ref(),
+                )
+            })
+            .flatten()
+        {
+            crate::chat::app_workspace::install_forked_app_workspace(&mut session, forked);
+        }
         for msg in messages_to_copy {
             session.add_message(msg);
         }
@@ -1911,6 +1954,7 @@ struct PreparedUserMessage {
     context_files: Vec<serde_json::Value>,
     suppress_auto_enrichment: bool,
     client_message_id: Option<String>,
+    app_context_ids: Vec<String>,
     checkpoints: Vec<crate::git::checkpoints::Checkpoint>,
     skill_activation_name: Option<String>,
     skill_context_msg: Option<ChatMessage>,
@@ -1926,13 +1970,16 @@ async fn handle_user_message(
     context_files: Vec<serde_json::Value>,
     suppress_auto_enrichment: bool,
     client_message_id: Option<String>,
+    app_context_ids: Vec<String>,
 ) -> QueueCommandOutcome {
     let is_companion = {
         let session = context.session_arc.lock().await;
         crate::buddy::companion::is_companion(&session.thread)
     };
+    let chat_id = context.session_arc.lock().await.chat_id.clone();
     if is_companion {
-        if !attachments.is_empty() || !context_files.is_empty() {
+        if !attachments.is_empty() || !context_files.is_empty() || !app_context_ids.is_empty() {
+            crate::chat::app_context::release(&chat_id, &context.request_id);
             reject_guard(
                 &mut *context.session_arc.lock().await,
                 &context.request_id,
@@ -2021,8 +2068,8 @@ async fn handle_user_message(
         start_generation(context.app.clone(), context.session_arc.clone()).await;
         return QueueCommandOutcome::Finished;
     }
-    let chat_id = context.session_arc.lock().await.chat_id.clone();
     if let Some(reason) = crate::agents::seal::seal_reason(&context.app, &chat_id).await {
+        crate::chat::app_context::release(&chat_id, &context.request_id);
         let mut session = context.session_arc.lock().await;
         reject_guard(&mut session, &context.request_id, reason.message());
         return QueueCommandOutcome::Continue;
@@ -2034,11 +2081,27 @@ async fn handle_user_message(
         context_files,
         suppress_auto_enrichment,
         client_message_id,
+        app_context_ids,
     ))
     .await;
     let Some(prepared) = prepared else {
+        crate::chat::app_context::release(&chat_id, &context.request_id);
         return QueueCommandOutcome::Continue;
     };
+    if !prepared.app_context_ids.is_empty()
+        && prepared
+            .browser_ctx_result
+            .as_ref()
+            .is_some_and(|(_, oversized)| *oversized)
+    {
+        crate::chat::app_context::release(&chat_id, &context.request_id);
+        reject_guard(
+            &mut *context.session_arc.lock().await,
+            &context.request_id,
+            "App context cannot be sent while browser context is oversized; detach browser context and resend".into(),
+        );
+        return QueueCommandOutcome::Continue;
+    }
     if !Box::pin(handle_oversized_browser_context(context, &prepared)).await {
         return QueueCommandOutcome::Continue;
     }
@@ -2089,6 +2152,7 @@ async fn prepare_user_message(
     context_files: Vec<serde_json::Value>,
     suppress_auto_enrichment: bool,
     client_message_id: Option<String>,
+    app_context_ids: Vec<String>,
 ) -> Option<PreparedUserMessage> {
     let app = context.app.clone();
     let session_arc = context.session_arc.clone();
@@ -2225,6 +2289,7 @@ async fn prepare_user_message(
             session
                 .queued_user_merge_targets
                 .remove(&additional.client_request_id);
+            crate::chat::app_context::release(&session.chat_id, &additional.client_request_id);
         }
         let compression_phase = session.compression_phase;
         let compression_reason = session.compression_reason;
@@ -2274,6 +2339,8 @@ async fn prepare_user_message(
                     .await
                     .queued_user_merge_targets
                     .remove(&additional.client_request_id);
+                let chat_id = session_arc.lock().await.chat_id.clone();
+                crate::chat::app_context::release(&chat_id, &additional.client_request_id);
             }
         }
         approved
@@ -2284,6 +2351,7 @@ async fn prepare_user_message(
         context_files,
         suppress_auto_enrichment,
         client_message_id,
+        app_context_ids,
         checkpoints,
         skill_activation_name,
         skill_context_msg,
@@ -2399,6 +2467,7 @@ async fn add_user_messages(context: &QueueCommandContext, prepared: PreparedUser
         context_files,
         suppress_auto_enrichment,
         client_message_id,
+        app_context_ids,
         checkpoints,
         skill_activation_name,
         skill_context_msg,
@@ -2407,6 +2476,19 @@ async fn add_user_messages(context: &QueueCommandContext, prepared: PreparedUser
         additional_messages,
     } = prepared;
     let request_id = &context.request_id;
+    let chat_id_for_context = session_arc.lock().await.chat_id.clone();
+    let app_context_msgs = match crate::chat::app_context::messages_for(
+        &chat_id_for_context,
+        request_id,
+        &app_context_ids,
+    ) {
+        Ok(messages) => messages,
+        Err(error) => {
+            crate::chat::app_context::release(&chat_id_for_context, request_id);
+            reject_guard(&mut *session_arc.lock().await, request_id, error);
+            return false;
+        }
+    };
     let mut accepted_user_messages = Vec::new();
     let questions_cancelled;
     let attention_questions;
@@ -2436,12 +2518,24 @@ async fn add_user_messages(context: &QueueCommandContext, prepared: PreparedUser
             thread: session.thread.clone(),
             content: parsed_content.clone(),
         });
-        let user_message = user_message_with_client_message_id(
+        let mut user_message = user_message_with_client_message_id(
             parsed_content.clone(),
             checkpoints,
             client_message_id,
         );
+        for message in app_context_msgs {
+            if let Ok(records) =
+                refact_privacy::records_from_messages(std::slice::from_ref(&message))
+            {
+                crate::privacy::records::merge_records(
+                    &mut user_message,
+                    records.into_iter().map(|(_, record)| record),
+                );
+            }
+            session.add_queued_user_context(request_id, message);
+        }
         session.add_or_merge_queued_user_message(request_id, user_message);
+        crate::chat::app_context::commit(&session.chat_id, request_id);
         session.live_diagnostics.accept(std::time::Instant::now());
         note_user_turn_resets_goal_pursuit(&mut session);
         if session.messages.iter().filter(|m| m.role == "user").count() == 1 {
@@ -2479,8 +2573,24 @@ async fn add_user_messages(context: &QueueCommandContext, prepared: PreparedUser
                 context_files: add_ctx_files,
                 suppress_auto_enrichment: add_suppress_auto_enrichment,
                 client_message_id: add_client_message_id,
+                app_context_ids: add_app_context_ids,
             } = additional.command
             {
+                let add_context_msgs = match crate::chat::app_context::messages_for(
+                    &session.chat_id,
+                    &additional.client_request_id,
+                    &add_app_context_ids,
+                ) {
+                    Ok(messages) => messages,
+                    Err(error) => {
+                        crate::chat::app_context::release(
+                            &session.chat_id,
+                            &additional.client_request_id,
+                        );
+                        reject_guard(&mut session, &additional.client_request_id, error);
+                        continue;
+                    }
+                };
                 if !add_ctx_files.is_empty() {
                     apply_manual_context_files(
                         &mut session,
@@ -2497,13 +2607,25 @@ async fn add_user_messages(context: &QueueCommandContext, prepared: PreparedUser
                     thread: session.thread.clone(),
                     content: add_parsed.clone(),
                 });
-                let add_message = user_message_with_client_message_id(
+                let mut add_message = user_message_with_client_message_id(
                     add_parsed,
                     Vec::new(),
                     add_client_message_id,
                 );
+                for message in add_context_msgs {
+                    if let Ok(records) =
+                        refact_privacy::records_from_messages(std::slice::from_ref(&message))
+                    {
+                        crate::privacy::records::merge_records(
+                            &mut add_message,
+                            records.into_iter().map(|(_, record)| record),
+                        );
+                    }
+                    session.add_queued_user_context(&additional.client_request_id, message);
+                }
                 session
                     .add_or_merge_queued_user_message(&additional.client_request_id, add_message);
+                crate::chat::app_context::commit(&session.chat_id, &additional.client_request_id);
                 session.live_diagnostics.accept(std::time::Instant::now());
                 note_user_turn_resets_goal_pursuit(&mut session);
             }
@@ -2778,6 +2900,7 @@ mod queued_browser_tests {
             context_files,
             suppress_auto_enrichment,
             client_message_id,
+            ..
         } = third.command
         else {
             panic!("third request changed")
@@ -2789,6 +2912,7 @@ mod queued_browser_tests {
             context_files,
             suppress_auto_enrichment,
             client_message_id,
+            Vec::new(),
         )
         .await
         .unwrap();
@@ -2846,6 +2970,7 @@ mod queued_browser_tests {
             context_files: vec![],
             suppress_auto_enrichment: false,
             client_message_id: None,
+            app_context_ids: Vec::new(),
             checkpoints: vec![],
             skill_activation_name: None,
             skill_context_msg: None,

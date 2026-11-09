@@ -583,6 +583,11 @@ pub async fn handle_v1_chat_command(
         tracing::warn!(%chat_id, %error, "runner delivery recovery failed");
     }
     spawn_pending_background_agent_flush(app.clone(), chat_id.clone());
+    let _app_workspace_lease = if matches!(request.command, ChatCommand::SetAppWorkspace { .. }) {
+        Some(super::app_workspace::AppWorkspaceMutationLease::acquire(session_arc.clone()).await)
+    } else {
+        None
+    };
     let mut session = session_arc.lock().await;
     let _native_mutation =
         super::session::NativeMutationGuard::enter_locked(&session_arc, &mut session)
@@ -874,6 +879,52 @@ pub async fn handle_v1_chat_command(
             .unwrap());
     }
 
+    if let ChatCommand::SetAppWorkspace {
+        expected_revision,
+        ref workspace,
+    } = request.command
+    {
+        let result = super::app_workspace::apply_set_app_workspace_locked(
+            &mut session,
+            expected_revision,
+            workspace.clone(),
+        );
+        let (status, payload) = match &result {
+            Ok(stored) => {
+                session.remember_accepted_request(&request.client_request_id);
+                (
+                    StatusCode::OK,
+                    serde_json::json!({"revision": stored.revision, "app_workspace": stored}),
+                )
+            }
+            Err(
+                error @ refact_chat_api::AppWorkspaceSetError::Conflict {
+                    ..
+                },
+            ) => (StatusCode::CONFLICT, error.to_json()),
+            Err(error) => (StatusCode::BAD_REQUEST, error.to_json()),
+        };
+        session.emit(ChatEvent::Ack {
+            client_request_id: request.client_request_id,
+            accepted: result.is_ok(),
+            result: Some(payload.clone()),
+        });
+        drop(session);
+        if result.is_ok() {
+            super::trajectories::maybe_save_trajectory_with_intent(
+                app.clone(),
+                session_arc.clone(),
+                TrajectoryCommitIntent::Required,
+            )
+            .await;
+        }
+        return Ok(Response::builder()
+            .status(status)
+            .header("Content-Type", "application/json")
+            .body(Body::from(payload.to_string()))
+            .unwrap());
+    }
+
     if let ChatCommand::SetParams {
         ref patch,
     } = request.command
@@ -1141,12 +1192,14 @@ pub async fn handle_v1_chat_command(
             context_files,
             client_message_id,
             suppress_auto_enrichment: _,
+            app_context_ids: _,
         } => validate_content_with_attachments(content, attachments)
             .err()
             .or_else(|| validate_context_files(context_files).err())
             .or_else(|| {
                 refact_chat_api::validate_client_message_id(client_message_id.as_deref()).err()
-            }),
+            })
+            .or_else(|| super::app_context::admit(&chat_id, &request).err()),
         ChatCommand::RetryFromIndex {
             content,
             attachments,
@@ -1188,6 +1241,12 @@ pub async fn handle_v1_chat_command(
     };
     let client_request_id_for_ack = request.client_request_id.clone();
     let enqueue_outcome = session.enqueue_accepted_command(request);
+    if matches!(
+        enqueue_outcome,
+        EnqueueCommandOutcome::Full | EnqueueCommandOutcome::Rejected
+    ) {
+        super::app_context::release(&chat_id, &client_request_id_for_ack);
+    }
     if enqueue_outcome == EnqueueCommandOutcome::Rejected {
         return Ok(Response::builder()
             .status(StatusCode::CONFLICT)
@@ -1261,6 +1320,7 @@ pub async fn handle_v1_chat_cancel_queued(
     session.queued_user_merge_targets.remove(&client_request_id);
 
     if session.command_queue.len() < initial_len {
+        super::app_context::release(&chat_id, &client_request_id);
         session.touch();
         session.emit_queue_update();
         session.queue_notify.notify_one();
@@ -1754,6 +1814,7 @@ mod tests {
                     ],
                     suppress_auto_enrichment: true,
                     client_message_id: None,
+                    app_context_ids: Vec::new(),
                 },
             });
             session

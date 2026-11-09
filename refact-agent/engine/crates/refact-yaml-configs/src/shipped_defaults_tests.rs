@@ -9,6 +9,52 @@ const BOOTSTRAP_KINDS: [&str; 4] = ["modes", "subagents", "toolbox_commands", "c
 
 type ShippedDefaults = HashMap<String, Vec<(u32, String)>>;
 
+#[test]
+fn ordinary_mode_defaults_include_all_app_tools() {
+    let modes = embedded_defaults("modes");
+    let names = [
+        "agent",
+        "ask",
+        "brainstorming",
+        "debug",
+        "design",
+        "learn",
+        "past_work",
+        "plan",
+        "setup",
+        "shell",
+        "solo",
+        "task_agent",
+        "task_planner",
+    ];
+    let app_tools = [
+        "app",
+        "app_build",
+        "app_state",
+        "app_binding",
+        "app_layout",
+        "app_view",
+        "app_source",
+        "app_event",
+        "app_inspect",
+        "app_screenshot",
+    ];
+    for name in names {
+        let (_, yaml) = modes
+            .iter()
+            .find(|(file, _)| file == &format!("{name}.yaml"))
+            .unwrap();
+        let mode: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
+        let tools = mode["tools"].as_sequence().unwrap();
+        for tool in app_tools {
+            assert!(
+                tools.iter().any(|entry| entry.as_str() == Some(tool)),
+                "{name} lacks {tool}"
+            );
+        }
+    }
+}
+
 #[derive(Deserialize)]
 struct SchemaVersion {
     schema_version: u32,
@@ -49,13 +95,18 @@ fn every_embedded_default_is_recorded_in_the_manifest() {
 }
 
 #[test]
-fn manifest_versions_are_unique_and_increasing() {
+fn manifest_revisions_are_unique_and_versions_are_nondecreasing() {
     for (key, entries) in shipped_defaults() {
         let mut previous = None;
-        for (version, _) in entries {
+        let mut revisions = std::collections::HashSet::new();
+        for (version, checksum) in entries {
             assert!(
-                previous.map_or(true, |previous| version > previous),
-                "{key} manifest schema versions must be unique and strictly increasing"
+                previous.map_or(true, |previous| version >= previous),
+                "{key} manifest schema versions must be nondecreasing"
+            );
+            assert!(
+                revisions.insert((version, checksum)),
+                "{key} manifest must not repeat a shipped revision"
             );
             previous = Some(version);
         }
@@ -304,6 +355,9 @@ fn audit_modes_preserve_baselines_and_record_current_revision() {
         let key = format!("modes/{name}.yaml");
         let entries = &manifest[&key];
         assert!(entries.iter().any(|(version, _)| *version == old_version));
+        assert!(entries
+            .iter()
+            .any(|(version, _)| *version == old_version + 1));
         let previous_max = entries[..entries.len() - 1]
             .iter()
             .map(|(v, _)| *v)

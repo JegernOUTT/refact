@@ -960,6 +960,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "cap-fs-ext"
+version = "3.4.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "476f0d0003a760918ed4b1e039a59e11769030416f79c8222551d22785f7f70d"
+dependencies = [
+ "cap-primitives",
+ "cap-std",
+ "io-lifetimes",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
 name = "cap-primitives"
 version = "3.4.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4492,6 +4504,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "refact-apps-core"
+version = "0.1.0"
+dependencies = [
+ "cap-fs-ext",
+ "cap-std",
+ "fd-lock",
+ "hex",
+ "libc",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "refact-at-web"
 version = "0.1.0"
 dependencies = [
@@ -4870,6 +4899,7 @@ dependencies = [
  "axum",
  "backtrace",
  "base64 0.22.1",
+ "cap-fs-ext",
  "cap-std",
  "cc",
  "chrono",
@@ -4917,6 +4947,7 @@ dependencies = [
  "rayon",
  "refact-agentic",
  "refact-agents-core",
+ "refact-apps-core",
  "refact-at-web",
  "refact-browser",
  "refact-buddy-core",
@@ -5094,16 +5125,25 @@ name = "refact-scheduler-core"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "cap-fs-ext",
+ "cap-primitives",
+ "cap-std",
  "chrono",
  "chrono-tz",
  "cron",
- "fs2",
+ "futures-util",
+ "libc",
+ "refact-apps-core",
  "refact-core",
  "regex",
+ "reqwest",
+ "rusqlite",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "tokio",
+ "tokio-tungstenite",
  "tracing",
  "uuid",
 ]

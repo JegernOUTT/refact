@@ -11,7 +11,7 @@ use crate::app_state::AppState;
 use crate::chat::trajectories::is_internal_trace_link_type;
 use crate::chat::types::{ChatSession, SessionState};
 use crate::custom_error::ScratchError;
-use crate::scheduler::{active_durable_cron_store, session_cron_store, Job, Trigger};
+use crate::scheduler::{session_cron_store, Job, Trigger};
 
 #[derive(Debug, Serialize)]
 pub struct ChatActivity {
@@ -241,9 +241,7 @@ async fn activity(app: AppState) -> Result<ChatActivityResponse, String> {
         );
     }
     let mut jobs = session_cron_store().list().await;
-    if let Some(store) = active_durable_cron_store(app.gcx.clone()).await? {
-        jobs.extend(store.list().await);
-    }
+    jobs.extend(crate::scheduler::store::read_durable_jobs(&root)?);
     add_schedules(&mut chats, jobs);
     let mut chats: Vec<_> = chats
         .into_values()

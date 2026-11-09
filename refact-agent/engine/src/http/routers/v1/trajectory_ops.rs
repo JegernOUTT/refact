@@ -942,6 +942,9 @@ pub async fn handle_mode_transition_apply(
         waiting_for_card_ids: Vec::new(),
         pending_questions: Vec::new(),
         native_decision_receipts: Vec::new(),
+        app_workspace: crate::chat::app_workspace::fork_app_workspace_for_new_chat(
+            thread.app_workspace.as_ref(),
+        ),
     };
     reset_transition_snapshot_identity(&mut snapshot);
 
@@ -1175,6 +1178,9 @@ pub async fn handle_planner_from_transition(
         waiting_for_card_ids: Vec::new(),
         pending_questions: Vec::new(),
         native_decision_receipts: Vec::new(),
+        app_workspace: crate::chat::app_workspace::fork_app_workspace_for_new_chat(
+            thread.app_workspace.as_ref(),
+        ),
     };
     reset_transition_snapshot_identity(&mut snapshot);
 
@@ -1962,6 +1968,7 @@ mod tests {
             waiting_for_card_ids: Vec::new(),
             pending_questions: Vec::new(),
             native_decision_receipts: Vec::new(),
+            app_workspace: None,
         };
         reset_transition_snapshot_identity(&mut snapshot);
         snapshot
@@ -2340,6 +2347,7 @@ mod tests {
             waiting_for_card_ids: Vec::new(),
             pending_questions: Vec::new(),
             native_decision_receipts: Vec::new(),
+            app_workspace: None,
         };
 
         save_trajectory_snapshot_with_parent(gcx, snapshot, "source-chat", "mode_transition")

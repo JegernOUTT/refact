@@ -75,7 +75,7 @@ impl Tool for ToolAgentApproval {
         Ok(MatchConfirmDeny {
             result: if !denials.is_empty() {
                 MatchConfirmDenyResult::DENY
-            } else if !asks.is_empty() {
+            } else if pending.requires_human || !asks.is_empty() {
                 MatchConfirmDenyResult::CONFIRMATION
             } else {
                 MatchConfirmDenyResult::PASS
@@ -172,7 +172,7 @@ impl Tool for ToolAgentApproval {
                 if !denials.is_empty() {
                     return Err("parent policy denies this command".into());
                 }
-                if !asks.is_empty() {
+                if pending.requires_human || !asks.is_empty() {
                     app.agent_approvals.consume_user_once(
                         &chat_id, id, pending.run_generation, tool_call_id, crate::agents::approval::now_ms(),
                     ).map_err(|_| "This command requires explicit user approval; the parent cannot approve beyond its delegated command authority.".to_string())?;
@@ -239,7 +239,10 @@ impl Tool for ToolAgentApproval {
                 let thread = session.lock().await.thread.clone();
                 let (asks, denials) =
                     crate::agents::approval::parent_command_policy(&app, &thread, &pending).await?;
-                if !denials.is_empty() || (!asks.is_empty() && approval_source != "user_once") {
+                if !denials.is_empty()
+                    || ((pending.requires_human || !asks.is_empty())
+                        && approval_source != "user_once")
+                {
                     return Err("parent command approval policy changed before decision".into());
                 }
             }

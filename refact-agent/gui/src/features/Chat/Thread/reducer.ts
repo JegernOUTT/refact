@@ -1,3 +1,4 @@
+import { isAppWorkspace } from "../../Apps/appWorkspace";
 import {
   setSseStatus,
   removeSseConnection,
@@ -1512,6 +1513,10 @@ export const chatReducer = createReducer(initialState, (builder) => {
         const snapshotBuddyMeta =
           (event.thread as { buddy_meta?: ChatThread["buddy_meta"] })
             .buddy_meta ?? existing?.buddy_meta;
+        const snapshotAppWorkspace =
+          "app_workspace" in event.thread
+            ? event.thread.app_workspace
+            : event.app_workspace;
 
         const snapshotTitle = event.thread.title;
         const existingTitle = existingRuntime?.thread.title;
@@ -1604,6 +1609,10 @@ export const chatReducer = createReducer(initialState, (builder) => {
           link_type: event.thread.link_type ?? existing?.link_type,
           root_chat_id: event.thread.root_chat_id ?? existing?.root_chat_id,
           buddy_meta: snapshotBuddyMeta,
+          app_workspace_raw: snapshotAppWorkspace,
+          app_workspace: isAppWorkspace(snapshotAppWorkspace)
+            ? snapshotAppWorkspace
+            : null,
           goal: event.goal ?? null,
           pending_questions: event.pending_questions,
         };
@@ -1729,6 +1738,14 @@ export const chatReducer = createReducer(initialState, (builder) => {
           break;
         }
         const { type: _, ...params } = event;
+        if ("app_workspace" in params)
+          rt.thread.app_workspace_raw = params.app_workspace;
+        if (
+          "app_workspace" in params &&
+          (params.app_workspace === null ||
+            isAppWorkspace(params.app_workspace))
+        )
+          rt.thread.app_workspace = params.app_workspace;
         if (
           "recovery_policy" in params &&
           (params.recovery_policy === null ||

@@ -51,6 +51,8 @@ import {
   CompressReportTool,
 } from "./ToolCard";
 import { MultiModalTool } from "./ToolCard/MultiModalTool";
+import { AppTool } from "./ToolCard/AppTool";
+import { isAppToolName } from "./ToolCard/appToolModel";
 import { AgentStatusView } from "./AgentStatusView";
 import { AgentPulseView } from "./AgentPulseView";
 import { AgentDiffView } from "./AgentDiffView";
@@ -456,6 +458,28 @@ function processToolCalls(
         key={`privacy-tool-result-${head.id}`}
         threadId={threadId}
         toolCallId={head.id}
+        result={result}
+      />
+    );
+    return processToolCalls(
+      tail,
+      toolResults,
+      features,
+      [...processed, elem],
+      contextFilesByToolId,
+      diffsByToolId,
+      activeToolCallId,
+      onOpenTrajectory,
+      threadId,
+    );
+  }
+
+  // Privacy must win before family routing, including multimodal App captures.
+  if (isAppToolName(headName)) {
+    const elem = (
+      <AppTool
+        key={`app-tool-${head.id ?? processed.length}`}
+        toolCall={normalizedHead}
         result={result}
       />
     );

@@ -1260,6 +1260,7 @@ pub(crate) fn build_agent_thread_params(
         frozen_request_prefix: None,
         claude_code_identity: None,
         reactive_compact_attempts: None,
+        app_workspace: None,
     }
 }
 

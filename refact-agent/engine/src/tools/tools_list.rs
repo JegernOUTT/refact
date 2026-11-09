@@ -885,6 +885,31 @@ async fn get_builtin_tools(
 
     let mut tool_groups = vec![
         ToolGroup {
+            name: "Apps".into(),
+            description: "App authoring, state, bindings and supervised viewers".into(),
+            category: ToolGroupCategory::Builtin,
+            tools: [
+                crate::tools::tool_app::Family::App,
+                crate::tools::tool_app::Family::Build,
+                crate::tools::tool_app::Family::State,
+                crate::tools::tool_app::Family::Binding,
+                crate::tools::tool_app::Family::Layout,
+                crate::tools::tool_app::Family::View,
+                crate::tools::tool_app::Family::Source,
+                crate::tools::tool_app::Family::Event,
+                crate::tools::tool_app::Family::Inspect,
+                crate::tools::tool_app::Family::Screenshot,
+            ]
+            .into_iter()
+            .map(|family| {
+                Box::new(crate::tools::tool_app::ToolApp {
+                    config_path: config_path.clone(),
+                    family,
+                }) as Box<dyn Tool + Send>
+            })
+            .collect(),
+        },
+        ToolGroup {
             name: "Codebase Search".to_string(),
             description: "Codebase search tools".to_string(),
             category: ToolGroupCategory::Builtin,
@@ -2623,6 +2648,58 @@ mod tests {
             .map(|tool| tool.tool_description().name)
             .collect()
     }
+
+    #[tokio::test]
+    async fn user_facing_apps_respect_mode_and_legacy_boundaries() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let mut registry = ProjectRegistry::default();
+        for (id, tools) in [
+            ("agent", "[cat]"),
+            ("empty_custom", "[]"),
+            ("explore", "[cat, app]"),
+        ] {
+            let mode =
+                serde_yaml::from_str(&format!("schema_version: 1\nid: {id}\ntools: {tools}\n"))
+                    .unwrap();
+            registry.modes.insert(id.to_string(), mode);
+        }
+        insert_registry(&gcx, registry);
+        for mode in ["agent", "empty_custom"] {
+            let names = selected_names(
+                get_tools_for_mode_with_intent(
+                    gcx.clone(),
+                    mode,
+                    None,
+                    ToolCatalogIntent::UserFacing,
+                )
+                .await,
+            );
+            assert_eq!(
+                names.iter().filter(|name| is_app_tool_name(name)).count(),
+                10,
+                "{mode}: {names:?}"
+            );
+            let policy = selected_names(get_tools_for_mode(gcx.clone(), mode, None).await);
+            assert!(
+                !policy.iter().any(|name| is_app_tool_name(name)),
+                "{mode}: {policy:?}"
+            );
+        }
+        for intent in [ToolCatalogIntent::Policy, ToolCatalogIntent::UserFacing] {
+            let names = selected_names(
+                get_tools_for_mode_with_intent(gcx.clone(), "NO_TOOLS", None, intent).await,
+            );
+            assert!(
+                !names.iter().any(|name| is_app_tool_name(name)),
+                "{names:?}"
+            );
+            assert!(
+                get_tools_for_mode_with_intent(gcx.clone(), "missing-mode", None, intent)
+                    .await
+                    .is_empty()
+            );
+        }
+    }
 }
 
 pub async fn get_available_tool_groups(gcx: Arc<GlobalContext>) -> Vec<ToolGroup> {
@@ -2758,9 +2835,29 @@ pub async fn get_tools_for_mode(
     mode_id: &str,
     model_id: Option<&str>,
 ) -> Vec<Box<dyn Tool + Send>> {
+    get_tools_for_mode_with_intent(gcx, mode_id, model_id, ToolCatalogIntent::Policy).await
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) enum ToolCatalogIntent {
+    Policy,
+    UserFacing,
+}
+
+/// Build a catalog for a user-facing chat when explicitly requested by its caller.
+/// Policy/authority callers must use `get_tools_for_mode` instead. This is an
+/// availability addition only: command allowlists and child ceilings still apply.
+pub(crate) async fn get_tools_for_mode_with_intent(
+    gcx: Arc<GlobalContext>,
+    mode_id: &str,
+    model_id: Option<&str>,
+    intent: ToolCatalogIntent,
+) -> Vec<Box<dyn Tool + Send>> {
+    let user_facing = intent == ToolCatalogIntent::UserFacing;
     use crate::yaml_configs::customization_registry::{get_mode_config, map_legacy_mode_to_id};
     use std::collections::HashSet;
 
+    let raw_no_tools = mode_id.eq_ignore_ascii_case("NO_TOOLS");
     let mode_id = map_legacy_mode_to_id(mode_id);
 
     let span = perf_diagnostics::span(PerfComponent::ToolModeConfig, None, None);
@@ -2774,7 +2871,7 @@ pub async fn get_tools_for_mode(
         }
     };
 
-    if mode_config.tools.is_empty() {
+    if mode_config.tools.is_empty() && !user_facing {
         return vec![];
     }
 
@@ -2793,7 +2890,7 @@ pub async fn get_tools_for_mode(
     span.finish_tool(PerfOutcome::Success, 1, 1, None);
     let availability = ToolAvailability::from_gcx(gcx.clone()).await;
     let mut gated_tools = HashMap::new();
-    let described_tools: Vec<DescribedTool> = get_available_tool_groups_with_availability(
+    let mut described_tools: Vec<DescribedTool> = get_available_tool_groups_with_availability(
         gcx.clone(),
         &availability,
         Some(&mut gated_tools),
@@ -2836,9 +2933,24 @@ pub async fn get_tools_for_mode(
         None => None,
     };
 
+    let mut effective_tools = mode_config.tools.clone();
+    if user_facing && !raw_no_tools {
+        // Select only the actual built-in App group, not similarly named
+        // integration tools, and retain normal enablement/availability checks.
+        for (_, desc, _) in &described_tools {
+            if is_builtin_app_tool(desc) && !effective_tools.contains(&desc.name) {
+                effective_tools.push(desc.name.clone());
+            }
+        }
+    }
+    if raw_no_tools {
+        effective_tools.retain(|name| !is_app_tool_name(name));
+        described_tools.retain(|(_, desc, _)| !is_builtin_app_tool(desc));
+    }
+
     select_and_order_mode_tools(
         described_tools,
-        &mode_config.tools,
+        &effective_tools,
         mode_config.allow_integrations,
         mode_config.allow_mcp,
         mode_config.allow_subagents,
@@ -2847,4 +2959,24 @@ pub async fn get_tools_for_mode(
             .as_ref()
             .map(|(policy, provider)| (policy.as_ref(), provider.as_str())),
     )
+}
+
+fn is_app_tool_name(name: &str) -> bool {
+    matches!(
+        name,
+        "app"
+            | "app_build"
+            | "app_state"
+            | "app_binding"
+            | "app_layout"
+            | "app_view"
+            | "app_source"
+            | "app_event"
+            | "app_inspect"
+            | "app_screenshot"
+    )
+}
+
+fn is_builtin_app_tool(desc: &ToolDesc) -> bool {
+    matches!(desc.source.source_type, ToolSourceType::Builtin) && is_app_tool_name(&desc.name)
 }

@@ -4,7 +4,13 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-fs2 = "0.4.3"
+cap-std.workspace = true
+cap-fs-ext = "3"
+libc.workspace = true
+refact-apps-core = { path = "../refact-apps-core" }
+reqwest.workspace = true
+futures-util = "0.3"
+tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
 refact-core = { path = "../refact-core" }
 async-trait.workspace = true
 chrono.workspace = true
@@ -13,9 +19,14 @@ cron = "0.12"
 regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+rusqlite.workspace = true
+sha2.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 uuid.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+cap-primitives = "=3.4.6"
 
 [dev-dependencies]
 tempfile.workspace = true

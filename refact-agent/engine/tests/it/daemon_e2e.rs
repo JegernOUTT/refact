@@ -7,7 +7,7 @@
 //! returns before spawning the daemon. The tests set `REFACT_DAEMON_DIR` and `HOME` per process so
 //! daemon state, config, worker logs, and engine user dirs stay inside a temp directory.
 
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use chrono::{Datelike, Timelike, Utc};
 use crate::e2e_helpers::{e2e_enabled, make_project, print_skip, wait_for, DaemonProcess, E2eDirs};
@@ -187,6 +187,64 @@ async fn real_worker_smoke_lifecycle_through_daemon() {
     daemon.shutdown().await;
 }
 
+// Only control-plane reads are allowed until the restarted daemon proves cron wake.
+async fn wait_for_cold_cron_worker(
+    daemon: &DaemonProcess,
+    project_id: &str,
+    old_pid: u64,
+    task_id: &str,
+    timeout: Duration,
+) {
+    wait_for(timeout, || async {
+        let response = daemon.get("/daemon/v1/events").await;
+        let text = response.text().await.ok()?;
+        // A restarted daemon has a fresh in-memory event bus; disk history is not replayed.
+        let woke = text
+            .lines()
+            .filter_map(|line| line.strip_prefix("data:").map(str::trim_start))
+            .filter_map(|data| serde_json::from_str::<Value>(data).ok())
+            .any(|event| {
+                event["kind"] == "cron_wake"
+                    && event["project_id"] == project_id
+                    && event["payload"]["task_id"] == task_id
+            });
+        if !woke {
+            return None;
+        }
+        let rows = daemon
+            .get("/daemon/v1/workers")
+            .await
+            .json::<Vec<Value>>()
+            .await
+            .ok()?;
+        rows.iter()
+            .any(|row| {
+                row["project_id"] == project_id
+                    && row["state"] == "ready"
+                    && row["pid"].as_u64().is_some_and(|pid| pid != old_pid)
+            })
+            .then_some(())
+    })
+    .await;
+    let project = daemon
+        .get(&format!("/daemon/v1/projects/{project_id}"))
+        .await
+        .json::<Value>()
+        .await
+        .unwrap();
+    assert_eq!(project["automation_suspended"], false);
+}
+
+async fn ready_worker_cron_rows(daemon: &DaemonProcess, project_id: &str) -> Vec<Value> {
+    // This public projection opens the durable store, not a strict read-only observer.
+    // Call only while readiness is already independently proven; never use it to wake.
+    let response = daemon
+        .get(&format!("/p/{project_id}/v1/scheduler/cron"))
+        .await;
+    assert!(response.status().is_success());
+    response.json().await.unwrap()
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn durable_cron_fires_without_clients_attached() {
     if !e2e_enabled() {
@@ -202,65 +260,69 @@ async fn durable_cron_fires_without_clients_attached() {
     let created_at_ms = (Utc::now() - chrono::Duration::minutes(1)).timestamp_millis() as u64;
     let tasks_path =
         write_durable_task(project.path(), &durable_task(&cron, created_at_ms, chat_id));
-    let mtime_before = std::fs::metadata(&tasks_path).unwrap().modified().unwrap();
-
+    let fixture_bytes = std::fs::read(&tasks_path).unwrap();
     let daemon = DaemonProcess::start(&dirs).await;
     let opened = open_project(&daemon, project.path()).await;
+    assert_eq!(opened["worker"]["state"], "ready");
     let project_id = opened["project_id"].as_str().unwrap().to_string();
-    let stop = daemon
-        .post_json(&format!("/daemon/v1/projects/{project_id}/stop"), json!({}))
-        .await;
+    let old_pid = opened["worker"]["pid"].as_u64().unwrap();
+    let baseline = ready_worker_cron_rows(&daemon, &project_id).await;
+    let baseline = baseline
+        .iter()
+        .find(|row| row["id"] == "cron_e2e_once")
+        .expect("known migrated fixture must exist before firing");
+    assert_eq!(baseline["fire_count"], 0);
+    assert!(baseline["last_fired_at_ms"].is_null());
+    let backup = tasks_path.with_file_name("scheduled_tasks.migrated.json");
     assert!(
-        stop.status().is_success(),
-        "stop returned {}",
-        stop.status()
+        !tasks_path.exists(),
+        "real worker retires legacy JSON authority"
     );
+    assert_eq!(std::fs::read(&backup).unwrap(), fixture_bytes);
 
-    wait_for(Duration::from_secs(30), || {
-        let daemon = &daemon;
-        async move {
-            let status = daemon.status().await;
-            (status["workers"].as_u64() == Some(0)).then_some(())
-        }
-    })
-    .await;
-    assert_eq!(
-        std::fs::metadata(&tasks_path).unwrap().modified().unwrap(),
-        mtime_before
-    );
-
-    let worker_started = wait_for(Duration::from_secs(120), || {
-        let daemon = &daemon;
-        async move {
-            let status = daemon.status().await;
-            (status["workers"].as_u64().unwrap_or_default() > 0).then_some(status)
-        }
-    })
-    .await;
+    // Daemon shutdown kills its workers but does NOT persist an explicit project-stop fence.
+    daemon.shutdown().await;
     assert!(
-        worker_started["cron_pending"].get(&project_id).is_some()
-            || Utc::now().timestamp_millis() as u64 >= target_ms
+        (Utc::now().timestamp_millis() as u64) < target_ms,
+        "setup missed scheduled occurrence"
     );
+    let daemon = DaemonProcess::start(&dirs).await;
+    wait_for_cold_cron_worker(
+        &daemon,
+        &project_id,
+        old_pid,
+        "automation",
+        Duration::from_secs(120),
+    )
+    .await;
 
-    wait_for(Duration::from_secs(150), || {
-        let tasks_path = tasks_path.clone();
-        async move {
-            let content = tokio::fs::read_to_string(&tasks_path).await.ok()?;
-            let tasks: Vec<Value> = serde_json::from_str(&content).ok()?;
-            if tasks.is_empty()
-                || tasks.iter().any(|task| {
-                    task["id"] == "cron_e2e_once"
-                        && task["fire_count"].as_u64().unwrap_or_default() >= 1
-                })
-            {
-                return Some(());
-            }
-            None
-        }
+    // One-shot rows are removed on fire. Empty schedules alone are NEVER evidence of firing:
+    // require the exact delivered cron event from the persisted fixture trajectory as well.
+    let trajectory = project
+        .path()
+        .join(".refact/trajectories")
+        .join(format!("{chat_id}.json"));
+    wait_for(Duration::from_secs(150), || async {
+        let bytes = tokio::fs::read(&trajectory).await.ok()?;
+        let saved: Value = serde_json::from_slice(&bytes).ok()?;
+        let delivered = saved["messages"].as_array()?.iter().any(|message| {
+            let event = &message["event"];
+            event["subkind"] == "cron_fire"
+                && event["payload"]["task_id"] == "cron_e2e_once"
+                && event["payload"]["recurring"] == false
+        });
+        (delivered && Utc::now().timestamp_millis() as u64 >= target_ms).then_some(())
     })
     .await;
-    assert!(std::fs::metadata(&tasks_path).unwrap().modified().unwrap() > mtime_before);
-
+    let rows = ready_worker_cron_rows(&daemon, &project_id).await;
+    assert!(
+        rows.iter()
+            .find(|row| row["id"] == "cron_e2e_once")
+            .map(|row| row["fire_count"].as_u64().unwrap_or_default() >= 1)
+            .unwrap_or(true),
+        "known job must have fired or been removed after exact delivery"
+    );
+    assert_eq!(std::fs::read(&backup).unwrap(), fixture_bytes);
     daemon.shutdown().await;
 }
 
@@ -283,64 +345,43 @@ async fn past_due_durable_cron_wakes_dead_worker_without_clients() {
     assert!(target_ms < Utc::now().timestamp_millis() as u64);
     let tasks_path =
         write_durable_task(project.path(), &durable_task(&cron, created_at_ms, chat_id));
+    let fixture_bytes = std::fs::read(&tasks_path).unwrap();
     let mtime_before = std::fs::metadata(&tasks_path).unwrap().modified().unwrap();
-
-    let daemon = DaemonProcess::start_with_extra_env(
-        &dirs,
-        &[
-            ("REFACT_DAEMON_WORKER_CMD", worker_cmd.as_str()),
-            ("REFACT_DAEMON_SUPERVISOR_BACKOFF_MS", "1"),
-        ],
+    let env = [
+        ("REFACT_DAEMON_WORKER_CMD", worker_cmd.as_str()),
+        ("REFACT_DAEMON_SUPERVISOR_BACKOFF_MS", "1"),
+    ];
+    let daemon = DaemonProcess::start_with_extra_env(&dirs, &env).await;
+    let opened = open_project(&daemon, project.path()).await;
+    assert_eq!(opened["worker"]["state"], "ready");
+    let project_id = opened["project_id"].as_str().unwrap().to_string();
+    let old_pid = opened["worker"]["pid"].as_u64().unwrap();
+    daemon.shutdown().await;
+    let daemon = DaemonProcess::start_with_extra_env(&dirs, &env).await;
+    wait_for_cold_cron_worker(
+        &daemon,
+        &project_id,
+        old_pid,
+        "cron_e2e_once",
+        Duration::from_secs(75),
     )
     .await;
-    let opened = open_project(&daemon, project.path()).await;
-    let project_id = opened["project_id"].as_str().unwrap().to_string();
-    let stop = daemon
-        .post_json(&format!("/daemon/v1/projects/{project_id}/stop"), json!({}))
-        .await;
-    assert!(
-        stop.status().is_success(),
-        "stop returned {}",
-        stop.status()
+    let status = daemon.status().await;
+    assert_eq!(status["workers"], 1);
+    assert!(status["cron_pending"].get(&project_id).is_some());
+    assert_eq!(
+        std::fs::read(&tasks_path).unwrap(),
+        fixture_bytes,
+        "fake-worker e2e proves wake only; real worker owns migration and firing"
     );
-
-    wait_for(Duration::from_secs(30), || {
-        let daemon = &daemon;
-        async move {
-            let status = daemon.status().await;
-            (status["workers"].as_u64() == Some(0)).then_some(())
-        }
-    })
-    .await;
     assert_eq!(
         std::fs::metadata(&tasks_path).unwrap().modified().unwrap(),
         mtime_before
     );
-
-    let (status, events_text) = wait_for(Duration::from_secs(75), || {
-        let daemon = &daemon;
-        let project_id = project_id.clone();
-        async move {
-            let status = daemon.status().await;
-            if status["workers"].as_u64().unwrap_or_default() == 0 {
-                return None;
-            }
-            let response = daemon.get("/daemon/v1/events").await;
-            let events_text = response.text().await.ok()?;
-            (events_text.contains("\"kind\":\"cron_wake\"") && events_text.contains(&project_id))
-                .then_some((status, events_text))
-        }
-    })
-    .await;
-    assert_eq!(status["workers"], json!(1));
-    assert!(status["cron_pending"].get(&project_id).is_some());
-    assert!(events_text.contains("cron_e2e_once"));
-    assert_eq!(
-        std::fs::metadata(&tasks_path).unwrap().modified().unwrap(),
-        mtime_before,
-        "fake-worker e2e proves wake; real worker owns task firing"
-    );
-
+    let rows: Vec<Value> = serde_json::from_slice(&fixture_bytes).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["id"], "cron_e2e_once");
+    assert_eq!(rows[0]["fire_count"], 0);
     daemon.shutdown().await;
 }
 

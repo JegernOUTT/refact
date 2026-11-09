@@ -2193,6 +2193,7 @@ mod tests {
             tool_call_id: "dangerous-old-call".into(),
             tool_name: "shell".into(),
             args: json!({"command":"delete-sentinel"}),
+            requires_human: false,
             digest: None,
             created_at: 1,
             expires_at: u64::MAX,

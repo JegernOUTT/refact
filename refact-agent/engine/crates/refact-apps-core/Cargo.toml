@@ -1,0 +1,19 @@
+[package]
+name = "refact-apps-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+sha2.workspace = true
+hex.workspace = true
+tokio.workspace = true
+fd-lock.workspace = true
+libc.workspace = true
+cap-std = "3"
+cap-fs-ext = "3"
+
+[dev-dependencies]
+tempfile.workspace = true

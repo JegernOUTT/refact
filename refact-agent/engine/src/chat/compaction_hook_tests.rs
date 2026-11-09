@@ -395,6 +395,7 @@ async fn blocked_postcompact_cannot_let_new_delivery_or_user_command_overtake_he
             context_files: vec![],
             suppress_auto_enrichment: true,
             client_message_id: None,
+            app_context_ids: Vec::new(),
         },
     });
     let session = Arc::new(Mutex::new(s));

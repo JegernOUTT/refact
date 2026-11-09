@@ -286,6 +286,7 @@ mod tests {
             slug: "p".into(),
             root: dir.path().canonicalize().unwrap(),
             pinned: false,
+            automation_suspended: false,
             last_active_ms: 0,
             settings: Default::default(),
         };

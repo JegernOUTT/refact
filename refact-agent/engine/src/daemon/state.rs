@@ -468,10 +468,15 @@ impl DaemonState {
             }
         }
         let registry = crate::daemon::projects::ProjectRegistry::load(path).await;
+        let mut projects = self.projects.write().await;
         for entry in registry.list() {
+            // Only registry restoration and explicit routes change desired state;
+            // general liveness refreshes may carry stale entries.
+            self.supervisor
+                .set_automation_suspended(&entry.id, entry.automation_suspended);
             self.sync_project_liveness(&entry).await;
         }
-        *self.projects.write().await = registry;
+        *projects = registry;
     }
 
     pub(crate) async fn buddy_wake_grant(
@@ -756,13 +761,11 @@ impl DaemonState {
         } else {
             None
         };
-        Some(worker_idle_snapshot_from(
-            &entry,
-            &info,
-            status,
-            &activity,
-            cron_next_fire_ms,
-        ))
+        let mut snapshot =
+            worker_idle_snapshot_from(&entry, &info, status, &activity, cron_next_fire_ms);
+        snapshot.automation_background_active =
+            self.automation_background_active(&entry.root).await;
+        Some(snapshot)
     }
 
     pub(crate) async fn worker_idle_snapshots(&self) -> Vec<(String, WorkerIdleSnapshot)> {
@@ -788,18 +791,33 @@ impl DaemonState {
                 None
             };
             let activity = activity.get(&entry.id).cloned().unwrap_or_default();
-            snapshots.push((
-                entry.id.clone(),
-                worker_idle_snapshot_from(
-                    &entry,
-                    &info,
-                    status,
-                    &activity,
-                    cron_pending.get(&entry.id).copied(),
-                ),
-            ));
+            let mut snapshot = worker_idle_snapshot_from(
+                &entry,
+                &info,
+                status,
+                &activity,
+                cron_pending.get(&entry.id).copied(),
+            );
+            snapshot.automation_background_active =
+                self.automation_background_active(&entry.root).await;
+            snapshots.push((entry.id.clone(), snapshot));
         }
         snapshots
+    }
+
+    async fn automation_background_active(&self, root: &Path) -> Option<bool> {
+        if !crate::scheduler::runner::runner_enabled(&self.config.scheduler) {
+            return Some(false);
+        }
+        // Re-observe in the stop predicate, not just on the coarse wake tick.
+        // Live residency includes session-only leases; restart eligibility does not.
+        // Unknown observation keeps a live worker but is never wake authority.
+        crate::daemon::cron_clock::observe_automation(root, now_ms())
+            .await
+            .map(|observation| {
+                observation.is_some_and(|observation| observation.summary.background_active)
+            })
+            .ok()
     }
 
     pub(crate) async fn stop_worker_if_idle(
@@ -869,7 +887,7 @@ impl DaemonState {
                         .map(|status| status.report.last_activity_ts)
                         .unwrap_or(0),
                 );
-            let idle_deadline_ms = idle_deadline_ms(
+            let mut idle_deadline_ms = idle_deadline_ms(
                 now,
                 &entry,
                 worker.as_ref(),
@@ -878,6 +896,9 @@ impl DaemonState {
                 cron_pending.get(&entry.id).copied(),
                 self.config.idle_timeout_secs,
             );
+            if self.automation_background_active(&entry.root).await != Some(false) {
+                idle_deadline_ms = None;
+            }
             rows.push(WorkerRow {
                 project_id: entry.id.clone(),
                 slug: entry.slug.clone(),
@@ -981,6 +1002,7 @@ fn worker_idle_snapshot_from(
             .unwrap_or(0),
         last_status_report_ms: status.map(|status| status.received_ms).unwrap_or(0),
         cron_next_fire_ms,
+        automation_background_active: Some(false),
     }
 }
 
@@ -1250,6 +1272,7 @@ mod tests {
             root: PathBuf::from("/tmp/project"),
             pinned: false,
             last_active_ms: 100,
+            automation_suspended: false,
             settings: ProjectSettings::default(),
         }
     }

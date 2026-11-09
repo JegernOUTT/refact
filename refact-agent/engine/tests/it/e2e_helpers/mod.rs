@@ -64,6 +64,8 @@ impl DaemonProcess {
             .arg("--foreground")
             .env("REFACT_DAEMON_DIR", &dirs.daemon_dir)
             .env("HOME", &dirs.home_dir)
+            .env("XDG_CACHE_HOME", dirs.home_dir.join(".cache"))
+            .env("REFACT_DISABLE_SCHEDULER", "0")
             .env("NO_COLOR", "1")
             // Poll idle workers sub-second so idle-stop is detected quickly and
             // deterministically instead of on the coarse 60s production cadence.
@@ -129,7 +131,10 @@ impl DaemonProcess {
         let _ = self
             .post_json("/daemon/v1/shutdown", json!({"reason": "test"}))
             .await;
-        let _ = tokio::time::timeout(Duration::from_secs(10), self.child.wait()).await;
+        tokio::time::timeout(Duration::from_secs(10), self.child.wait())
+            .await
+            .expect("owned daemon must finish graceful shutdown before restart")
+            .expect("reap owned daemon");
     }
 
     async fn wait_for_status(&self) {

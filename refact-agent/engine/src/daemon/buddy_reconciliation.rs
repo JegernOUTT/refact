@@ -297,6 +297,7 @@ mod tests {
             root,
             slug: id.into(),
             pinned: false,
+            automation_suspended: false,
             last_active_ms: 0,
             settings: Default::default(),
         }

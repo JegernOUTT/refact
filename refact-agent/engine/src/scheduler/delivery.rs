@@ -115,12 +115,15 @@ pub(crate) async fn deliver_scheduled_turn(
     chat_id: &str,
     job: &Job,
     fired_at_ms: u64,
+    occurrence: Option<&str>,
     messages: Vec<ChatMessage>,
 ) -> Result<DeliveryOutcome, String> {
     // Fire count advances only after acceptance; retries (including restart
     // recovery) therefore reuse the same id independently of wall clock time.
     let mut delivery = PendingDelivery::with_id(
-        format!("cron-{}-{}-turn", job.id, job.fire_count),
+        occurrence
+            .map(|id| format!("cron-{}-{id}-turn", job.id))
+            .unwrap_or_else(|| format!("cron-{}-{}-turn", job.id, job.fire_count)),
         messages,
         job.push,
         "scheduler.cron".to_string(),

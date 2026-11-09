@@ -962,6 +962,9 @@ async fn finalize_handoff_inner(
         // A handoff opens a fresh destination trajectory: nothing has been
         // dropped in it yet, and the source's drop ledger stays with the source.
         dropped_deliveries: Vec::new(),
+        app_workspace: crate::chat::app_workspace::fork_app_workspace_for_new_chat(
+            thread.app_workspace.as_ref(),
+        ),
     };
 
     persist_transition(gcx.clone(), &mut source, &snapshot, &transferred_goal).await?;

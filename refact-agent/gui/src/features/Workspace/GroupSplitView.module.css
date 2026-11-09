@@ -10,6 +10,23 @@
   color: var(--rf-color-fg);
 }
 
+/* Keep resize input in this workspace, including across nested iframe panes. */
+.layout:has([data-resizing]) {
+  user-select: none;
+}
+
+.layout:has([data-resizing]) iframe {
+  pointer-events: none;
+}
+
+.layout:has([data-resizing][data-pane-split-dir="row"]) {
+  cursor: col-resize;
+}
+
+.layout:has([data-resizing][data-pane-split-dir="col"]) {
+  cursor: row-resize;
+}
+
 .tree {
   display: flex;
   flex: 1 1 auto;
@@ -204,6 +221,7 @@
 }
 
 .divider {
+  touch-action: none;
   position: absolute;
   z-index: var(--rf-z-dropdown);
   display: flex;

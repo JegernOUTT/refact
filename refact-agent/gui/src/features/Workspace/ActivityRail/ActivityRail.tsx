@@ -1,3 +1,4 @@
+import { AppRail } from "../../Apps/AppRail";
 import classNames from "classnames";
 import {
   Activity,
@@ -267,6 +268,7 @@ export function ActivityRail() {
           </div>
         );
       })}
+      <AppRail className={styles.button} />
       <BuddyRailButton className={styles.bottomSlot} />
     </nav>
   );

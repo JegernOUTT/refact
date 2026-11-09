@@ -618,6 +618,35 @@ pub fn ensure_session_preamble(
     })
 }
 
+/// Only call with metadata copied from a live, trusted session. Stateless callers
+/// retain the registry's Policy default; a mode name is never evidence of authority.
+pub(crate) async fn tool_catalog_intent_for_thread(
+    app: &AppState,
+    thread: &ThreadParams,
+) -> refact_runtime_api::ToolCatalogIntent {
+    use refact_runtime_api::ToolCatalogIntent;
+    let user_lineage = match thread.link_type.as_deref() {
+        Some("handoff" | "mode_transition" | "branch") => true,
+        None => thread.parent_id.is_none(),
+        Some(_) => false,
+    };
+    if !user_lineage
+        || thread
+            .task_meta
+            .as_ref()
+            .is_some_and(|meta| matches!(meta.role.as_str(), "agent" | "agents"))
+        || app
+            .agents
+            .find_agent_id_by_child_chat_id(&thread.id)
+            .await
+            .is_some()
+    {
+        ToolCatalogIntent::Policy
+    } else {
+        ToolCatalogIntent::UserFacing
+    }
+}
+
 async fn ensure_session_preamble_inner(app: AppState, session_arc: Arc<AMutex<ChatSession>>) {
     let gcx = app.gcx.clone();
     let (thread, chat_id, has_system, has_project_context) = {
@@ -673,13 +702,15 @@ async fn ensure_session_preamble_inner(app: AppState, session_arc: Arc<AMutex<Ch
             .worktree
             .as_ref()
             .map(|worktree| worktree.root.to_string_lossy().into_owned());
+        let intent = tool_catalog_intent_for_thread(&app, &thread).await;
         let catalog_span = perf_diagnostics::span(PerfComponent::PreambleCatalog, None, None);
         let tools_for_mode = app
             .tool_registry
-            .acquire_tool_catalog(
+            .acquire_tool_catalog_with_intent(
                 &thread.mode,
                 Some(&model_rec.base.id),
                 execution_scope.as_deref(),
+                intent,
             )
             .await;
         let tools_for_mode =
@@ -2587,19 +2618,24 @@ pub async fn run_llm_generation(
         .worktree
         .as_ref()
         .map(|worktree| worktree.root.to_string_lossy().into_owned());
+    let intent = tool_catalog_intent_for_thread(&app, &thread).await;
     let existing_catalog = {
         let session = session_arc.lock().await;
-        session.tool_catalog.clone()
+        session
+            .tool_catalog
+            .clone()
+            .filter(|catalog| catalog.intent == intent)
     };
     let catalog = match existing_catalog {
         Some(catalog) => catalog,
         None => {
             let catalog = app
                 .tool_registry
-                .acquire_tool_catalog(
+                .acquire_tool_catalog_with_intent(
                     &thread.mode,
                     Some(&model_rec.base.id),
                     execution_scope.as_deref(),
+                    intent,
                 )
                 .await;
             crate::tools::tools_list::filter_tool_catalog_for_chat(&app, &thread.id, catalog).await

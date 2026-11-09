@@ -695,7 +695,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::scheduler::{scheduled_tasks_path, InMemoryCronStore};
+    use crate::scheduler::InMemoryCronStore;
 
     fn fixed_now_ms() -> u64 {
         Utc.with_ymd_and_hms(2026, 3, 1, 0, 0, 0)
@@ -979,7 +979,21 @@ mod tests {
 
         assert!(outcome.task.durable);
         assert!(session_store.list().await.is_empty());
-        assert!(scheduled_tasks_path(temp.path()).is_file());
+        let catalog = refact_scheduler_core::automation::AutomationCatalog::open(temp.path())
+            .unwrap()
+            .read()
+            .unwrap();
+        assert_eq!(catalog.legacy_jobs, vec![outcome.task.clone()]);
+        assert!(refact_scheduler_core::automation::journal_path(temp.path())
+            .unwrap()
+            .is_file());
+        assert_eq!(
+            refact_scheduler_core::automation::AutomationJournal::open_observer(temp.path())
+                .unwrap()
+                .load_legacy_jobs()
+                .unwrap(),
+            vec![outcome.task.clone()]
+        );
         let reloaded = JsonFileCronStore::new(temp.path()).unwrap();
         assert_eq!(reloaded.list().await, vec![outcome.task]);
     }

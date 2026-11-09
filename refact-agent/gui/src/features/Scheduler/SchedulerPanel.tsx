@@ -1,6 +1,6 @@
 import React, { useMemo, useState } from "react";
 import { ArrowLeft, RefreshCw } from "lucide-react";
-import { Button, FieldError } from "../../components/ui";
+import { Button, FieldError, SegmentedControl } from "../../components/ui";
 import { useAppSelector } from "../../hooks";
 import {
   type CreateCronRequest,
@@ -9,6 +9,7 @@ import {
   useCreateCronMutation,
   useDeleteCronMutation,
   useGetCronTasksQuery,
+  useGetAutomationsQuery,
   useRunCronMutation,
   useUpdateCronMutation,
 } from "../../services/refact/schedulerApi";
@@ -21,6 +22,9 @@ import { CronCreateForm } from "./CronCreateForm";
 import { selectLastCronFireAt } from "./schedulerSlice";
 import { CronList } from "./CronList";
 import styles from "./Scheduler.module.css";
+import { AutomationDefinitions } from "./AutomationDefinitions";
+import { AutomationCredentials } from "./AutomationCredentials";
+import type { AutomationView } from "./automationTypes";
 
 type SchedulerPanelProps = {
   onBack: () => void;
@@ -33,6 +37,9 @@ export const SchedulerPanel: React.FC<SchedulerPanelProps> = ({
   onBack,
   embedded,
 }) => {
+  const [viewLocked, setViewLocked] = useState(false);
+  const automationQuery = useGetAutomationsQuery(undefined);
+  const [view, setView] = useState<AutomationView>("schedule");
   const {
     data: tasks = [],
     isFetching,
@@ -145,7 +152,10 @@ export const SchedulerPanel: React.FC<SchedulerPanelProps> = ({
       )}
       <Button
         variant="soft"
-        onClick={() => void refetch()}
+        onClick={() => {
+          void refetch();
+          void automationQuery.refetch();
+        }}
         leftIcon={RefreshCw}
       >
         Refresh
@@ -166,43 +176,71 @@ export const SchedulerPanel: React.FC<SchedulerPanelProps> = ({
 
   return (
     <SettingsSection
-      title="Scheduler"
-      description="Create, review, and manage scheduled prompts for the current chat."
+      title="Automation"
+      description="Manage scheduled, continuous and event-driven automation in this project."
       actions={actions}
       subNav={summary}
     >
       <div className={styles.panel}>
-        <CronCreateForm
-          onSubmit={handleCreate}
-          isLoading={createState.isLoading}
-          error={createState.error}
-          taskCount={tasks.length}
+        <SegmentedControl
+          aria-label="Automation view"
+          name="automation-view"
+          value={view}
+          options={[
+            { value: "schedule", label: "Scheduled", disabled: viewLocked },
+            { value: "continuous", label: "Continuous", disabled: viewLocked },
+            {
+              value: "channel_event",
+              label: "Event-driven",
+              disabled: viewLocked,
+            },
+          ]}
+          onValueChange={(value) => {
+            if (
+              value === "schedule" ||
+              value === "continuous" ||
+              value === "channel_event"
+            )
+              setView(value);
+          }}
         />
+        <AutomationDefinitions view={view} onLockChange={setViewLocked} />
+        <AutomationCredentials />
+        {view === "schedule" ? (
+          <>
+            <CronCreateForm
+              onSubmit={handleCreate}
+              isLoading={createState.isLoading}
+              error={createState.error}
+              taskCount={tasks.length}
+            />
 
-        <SettingsGroup
-          title="Scheduled prompts"
-          description="Review lifecycle status, fire times, schedule scope, recurrence, and prompt description."
-        >
-          {error ? (
-            <FieldError>{schedulerErrorMessage(error)}</FieldError>
-          ) : null}
-          {renderedMutationError ? (
-            <FieldError>
-              {schedulerErrorMessage(renderedMutationError)}
-            </FieldError>
-          ) : null}
-          <CronList
-            tasks={sortedTasks}
-            isLoading={isFetching}
-            deletingId={deletingId}
-            updatingId={updatingId}
-            runningId={runningId}
-            onDelete={deleteTask}
-            onToggleEnabled={toggleEnabled}
-            onRunNow={runNow}
-            onUpdate={updateTask}
-          />
-        </SettingsGroup>
+            <SettingsGroup
+              title="Scheduled prompts"
+              description="Review lifecycle status, fire times, schedule scope, recurrence, and prompt description."
+            >
+              {error ? (
+                <FieldError>{schedulerErrorMessage(error)}</FieldError>
+              ) : null}
+              {renderedMutationError ? (
+                <FieldError>
+                  {schedulerErrorMessage(renderedMutationError)}
+                </FieldError>
+              ) : null}
+              <CronList
+                tasks={sortedTasks}
+                isLoading={isFetching}
+                deletingId={deletingId}
+                updatingId={updatingId}
+                runningId={runningId}
+                onDelete={deleteTask}
+                onToggleEnabled={toggleEnabled}
+                onRunNow={runNow}
+                onUpdate={updateTask}
+              />
+            </SettingsGroup>
+          </>
+        ) : null}
       </div>
     </SettingsSection>
   );

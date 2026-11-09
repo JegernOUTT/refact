@@ -1,6 +1,7 @@
 import { displayInfoForSurface } from "./tabDisplay";
 import classNames from "classnames";
 import {
+  AppWindow,
   FileDiff,
   GitBranch,
   FileText,
@@ -106,6 +107,7 @@ function tabDragPayloadForSurface(surfaceKey: SurfaceKey): {
     const parsed = parseSurfaceKey(surfaceKey);
     if (
       parsed.kind === "dashboard" ||
+      parsed.kind === "app" ||
       parsed.kind === "design" ||
       parsed.kind === "gitdiff" ||
       isMainSurfaceKind(parsed.kind)
@@ -272,6 +274,7 @@ export function TabBar({ placement = "workspace" }: TabBarProps) {
         return;
       }
       if (
+        parsed.kind === "app" ||
         parsed.kind === "design" ||
         parsed.kind === "file" ||
         parsed.kind === "gitdiff" ||
@@ -715,6 +718,8 @@ export function TabBar({ placement = "workspace" }: TabBarProps) {
                       <Icon icon={FileDiff} size="sm" tone="muted" />
                     ) : tab.kind === "git" ? (
                       <Icon icon={GitBranch} size="sm" tone="muted" />
+                    ) : tab.kind === "app" ? (
+                      <Icon icon={AppWindow} size="sm" tone="muted" />
                     ) : tab.kind === "design" ? (
                       <Icon icon={Palette} size="sm" tone="muted" />
                     ) : (

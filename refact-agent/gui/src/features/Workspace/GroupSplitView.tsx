@@ -2,7 +2,8 @@ import classNames from "classnames";
 import {
   type CSSProperties,
   type DragEvent,
-  type MouseEvent as ReactMouseEvent,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type PointerEvent as ReactPointerEvent,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -80,7 +81,11 @@ type PaneSlotStyle = CSSProperties & {
 type DividerProps = {
   dir: SplitNode["dir"];
   dragging: boolean;
-  onMouseDown: (event: ReactMouseEvent<HTMLDivElement>) => void;
+  value: number;
+  onPointerDown: (event: ReactPointerEvent<HTMLDivElement>) => void;
+  onPointerMove: (event: ReactPointerEvent<HTMLDivElement>) => void;
+  onPointerEnd: (event: ReactPointerEvent<HTMLDivElement>) => void;
+  onKeyDown: (event: ReactKeyboardEvent<HTMLDivElement>) => void;
 };
 
 type SplitViewProps = {
@@ -135,7 +140,15 @@ function resizeAtDivider(
   return normalizedSizes(next, next.length);
 }
 
-function PaneDivider({ dir, dragging, onMouseDown }: DividerProps) {
+function PaneDivider({
+  dir,
+  dragging,
+  value,
+  onPointerDown,
+  onPointerMove,
+  onPointerEnd,
+  onKeyDown,
+}: DividerProps) {
   const vertical = dir === "row";
 
   return (
@@ -150,7 +163,17 @@ function PaneDivider({ dir, dragging, onMouseDown }: DividerProps) {
       data-dragging={dragging || undefined}
       role="separator"
       aria-orientation={vertical ? "vertical" : "horizontal"}
-      onMouseDown={onMouseDown}
+      aria-label="Resize workspace panes"
+      aria-valuenow={Math.round(value * 100)}
+      aria-valuemin={0}
+      aria-valuemax={100}
+      tabIndex={0}
+      onPointerDown={onPointerDown}
+      onPointerMove={onPointerMove}
+      onPointerUp={onPointerEnd}
+      onPointerCancel={onPointerEnd}
+      onLostPointerCapture={onPointerEnd}
+      onKeyDown={onKeyDown}
     >
       <div className={styles.dividerHandle} />
     </div>
@@ -512,49 +535,106 @@ function SplitView({
   const [draggingDivider, setDraggingDivider] = useState<number | null>(null);
   const sizes = normalizedSizes(node.sizes, node.children.length);
 
-  const handleDividerMouseDown = useCallback(
-    (dividerIndex: number, event: ReactMouseEvent<HTMLDivElement>) => {
-      event.preventDefault();
-      const container = containerRef.current;
-      if (!container) return;
+  const resizeSession = useRef<{
+    pointerId: number;
+    dividerIndex: number;
+    element: HTMLDivElement;
+    sizes: number[];
+  } | null>(null);
 
-      setDraggingDivider(dividerIndex);
-      document.body.style.cursor =
-        node.dir === "row" ? "col-resize" : "row-resize";
-      document.body.style.userSelect = "none";
+  const endResize = useCallback(() => {
+    const session = resizeSession.current;
+    resizeSession.current = null;
+    setDraggingDivider(null);
+    if (session?.element.hasPointerCapture(session.pointerId)) {
+      session.element.releasePointerCapture(session.pointerId);
+    }
+  }, []);
 
-      const handleMouseMove = (moveEvent: MouseEvent) => {
-        const rect = container.getBoundingClientRect();
-        const length = node.dir === "row" ? rect.width : rect.height;
-        if (!Number.isFinite(length) || length <= 0) return;
+  useEffect(() => {
+    window.addEventListener("blur", endResize);
+    return () => {
+      window.removeEventListener("blur", endResize);
+      endResize();
+    };
+  }, [endResize, node.dir, stacked]);
 
-        const start = node.dir === "row" ? rect.left : rect.top;
-        const pointer =
-          node.dir === "row" ? moveEvent.clientX : moveEvent.clientY;
-        const nextSizes = resizeAtDivider(
-          sizes,
-          dividerIndex,
+  const handleDividerPointerDown = (
+    dividerIndex: number,
+    event: ReactPointerEvent<HTMLDivElement>,
+  ) => {
+    if (event.button !== 0 || resizeSession.current) return;
+    event.preventDefault();
+    event.stopPropagation();
+    event.currentTarget.focus();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    resizeSession.current = {
+      pointerId: event.pointerId,
+      dividerIndex,
+      element: event.currentTarget,
+      sizes,
+    };
+    setDraggingDivider(dividerIndex);
+  };
+
+  const handleDividerPointerMove = (
+    event: ReactPointerEvent<HTMLDivElement>,
+  ) => {
+    const session = resizeSession.current;
+    const container = containerRef.current;
+    if (!session || session.pointerId !== event.pointerId || !container) return;
+    const rect = container.getBoundingClientRect();
+    const length = node.dir === "row" ? rect.width : rect.height;
+    if (!Number.isFinite(length) || length <= 0) return;
+    const start = node.dir === "row" ? rect.left : rect.top;
+    const pointer = node.dir === "row" ? event.clientX : event.clientY;
+    dispatch(
+      resizeGroupSplit({
+        tabId,
+        splitId: node.id,
+        sizes: resizeAtDivider(
+          session.sizes,
+          session.dividerIndex,
           (pointer - start) / length,
-        );
+        ),
+      }),
+    );
+  };
 
-        dispatch(
-          resizeGroupSplit({ tabId, splitId: node.id, sizes: nextSizes }),
-        );
-      };
+  const handleDividerPointerEnd = (
+    event: ReactPointerEvent<HTMLDivElement>,
+  ) => {
+    if (resizeSession.current?.pointerId === event.pointerId) endResize();
+  };
 
-      const handleMouseUp = () => {
-        setDraggingDivider(null);
-        document.body.style.cursor = "";
-        document.body.style.userSelect = "";
-        window.removeEventListener("mousemove", handleMouseMove);
-        window.removeEventListener("mouseup", handleMouseUp);
-      };
-
-      window.addEventListener("mousemove", handleMouseMove);
-      window.addEventListener("mouseup", handleMouseUp);
-    },
-    [dispatch, node.dir, node.id, sizes, tabId],
-  );
+  const handleDividerKeyDown = (
+    dividerIndex: number,
+    event: ReactKeyboardEvent<HTMLDivElement>,
+  ) => {
+    const decrease = node.dir === "row" ? "ArrowLeft" : "ArrowUp";
+    const increase = node.dir === "row" ? "ArrowRight" : "ArrowDown";
+    const boundary = sizes
+      .slice(0, dividerIndex + 1)
+      .reduce((sum, size) => sum + size, 0);
+    let next: number;
+    if (event.key === decrease) next = boundary - 0.02;
+    else if (event.key === increase) next = boundary + 0.02;
+    else if (event.key === "Home") next = 0;
+    else if (event.key === "End") next = 1;
+    else if (event.key === "Escape" && resizeSession.current) {
+      event.preventDefault();
+      endResize();
+      return;
+    } else return;
+    event.preventDefault();
+    dispatch(
+      resizeGroupSplit({
+        tabId,
+        splitId: node.id,
+        sizes: resizeAtDivider(sizes, dividerIndex, next),
+      }),
+    );
+  };
 
   return (
     <div
@@ -564,6 +644,7 @@ function SplitView({
         node.dir === "row" ? styles.row : styles.col,
         stacked && styles.stackedSplit,
       )}
+      data-resizing={draggingDivider !== null || undefined}
       data-pane-split-id={node.id}
       data-pane-split-dir={node.dir}
     >
@@ -585,7 +666,13 @@ function SplitView({
             <PaneDivider
               dir={node.dir}
               dragging={draggingDivider === index}
-              onMouseDown={(event) => handleDividerMouseDown(index, event)}
+              value={sizes
+                .slice(0, index + 1)
+                .reduce((sum, size) => sum + size, 0)}
+              onPointerDown={(event) => handleDividerPointerDown(index, event)}
+              onPointerMove={handleDividerPointerMove}
+              onPointerEnd={handleDividerPointerEnd}
+              onKeyDown={(event) => handleDividerKeyDown(index, event)}
             />
           ) : null}
         </div>

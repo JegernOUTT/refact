@@ -19,6 +19,87 @@ describe("Chat Thread Reducer - Event-based (Stateless Trajectory UI)", () => {
   });
 
   describe("applyChatEvent - snapshot", () => {
+    test("restores app workspace from shipping nested snapshots and preserves unsupported versions", () => {
+      const workspace: NonNullable<
+        Chat["threads"][string]
+      >["thread"]["app_workspace"] = {
+        schema_version: 1,
+        revision: 8,
+        bindings: [
+          {
+            binding_id: "11111111-1111-4111-8111-111111111111",
+            app_id: "22222222-2222-4222-8222-222222222222",
+            params: {},
+            state: {},
+          },
+        ],
+        layout: {
+          kind: "leaf",
+          tabs: [
+            { kind: "chat", ref: "self" },
+            {
+              kind: "app",
+              binding_id: "11111111-1111-4111-8111-111111111111",
+            },
+          ],
+          active: 1,
+        },
+      };
+      const event: ChatEventEnvelope = {
+        chat_id: chatId,
+        seq: "1",
+        type: "snapshot",
+        thread: {
+          id: chatId,
+          title: "App chat",
+          model: "gpt-4",
+          mode: "agent",
+          tool_use: "agent",
+          boost_reasoning: false,
+          context_tokens_cap: null,
+          include_project_info: true,
+          checkpoints_enabled: true,
+          is_title_generated: false,
+          app_workspace: workspace,
+        },
+        runtime: {
+          state: "idle",
+          paused: false,
+          error: null,
+          queue_size: 0,
+          pause_reasons: [],
+          queued_items: [],
+        },
+        background_agents: [],
+        messages: [],
+      };
+      let state = chatReducer(initialState, applyChatEvent(event));
+      expect(state.threads[chatId]!.thread.app_workspace).toEqual(workspace);
+      const future = { schema_version: 9, revision: 10, layout: "future" };
+      state = chatReducer(
+        state,
+        applyChatEvent({
+          ...event,
+          seq: "2",
+          app_workspace: null,
+          thread: { ...event.thread, app_workspace: future },
+        }),
+      );
+      expect(state.threads[chatId]!.thread.app_workspace).toBeNull();
+      expect(state.threads[chatId]!.thread.app_workspace_raw).toEqual(future);
+      const { app_workspace: _nested, ...legacyThread } = event.thread;
+      state = chatReducer(
+        state,
+        applyChatEvent({
+          ...event,
+          seq: "3",
+          thread: legacyThread,
+          app_workspace: workspace,
+        }),
+      );
+      expect(state.threads[chatId]!.thread.app_workspace).toEqual(workspace);
+    });
+
     test("recovery events track server state and reject stale updates", () => {
       const recovery = {
         operation_id: "op",

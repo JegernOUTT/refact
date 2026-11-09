@@ -145,6 +145,13 @@ impl BackgroundTasksHolder {
                 ABORT_TIMEOUT
             );
         }
+        // Runner cancellation may enqueue owned source-demand cleanup. Join it only
+        // after producers have unwound, so shutdown cannot miss a late finalizer.
+        if close_admission {
+            if let Some(gcx) = &self.gcx {
+                gcx.apps.shutdown().await;
+            }
+        }
         // Aborting callers may have queued rollback finalizers after the first
         // drain; creation admission is already closed when shutting down.
         crate::agents::spawn::drain_spawn_owners(close_admission).await;

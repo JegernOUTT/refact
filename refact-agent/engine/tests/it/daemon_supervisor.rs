@@ -103,6 +103,7 @@ fn project_entry(root: PathBuf, id: &str) -> ProjectEntry {
         slug: id.to_string(),
         root,
         pinned: false,
+        automation_suspended: false,
         last_active_ms: 0,
         settings: ProjectSettings::default(),
     }
@@ -355,7 +356,7 @@ async fn crash_loop_reaches_crashed() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
-async fn crashed_worker_recovers_on_subsequent_ensure() {
+async fn crashed_worker_requires_explicit_restart_after_crash_cap() {
     let Some(_env) = EnvGuard::set(true) else {
         return;
     };
@@ -363,9 +364,29 @@ async fn crashed_worker_recovers_on_subsequent_ensure() {
     let root = dir.path().join("project");
     std::fs::create_dir_all(&root).unwrap();
     let entry = project_entry(root, "recover-crash-project");
-    let supervisor = supervisor(&dir);
+    let events = EventBus::new(dir.path().join("events.jsonl"));
+    let supervisor = Supervisor::new(events.clone(), dir.path().join("daemon"), 8488);
 
+    let mut event_rx = events.subscribe();
     let _ = supervisor.ensure_worker(&entry).await.unwrap();
+    let terminal = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let event = event_rx.recv().await?;
+            if event.project_id.as_deref() == Some(entry.id.as_str())
+                && event.kind == "worker_crashed"
+                && event.payload["restarting"] == false
+            {
+                break Ok::<_, tokio::sync::broadcast::error::RecvError>(());
+            }
+        }
+    })
+    .await;
+    if !matches!(terminal, Ok(Ok(()))) {
+        supervisor.stop_all().await;
+    }
+    terminal
+        .expect("terminal crash accounting event was not published")
+        .expect("crash-loop events lost");
     let crashed = wait_for_state_with_timeout(
         &supervisor,
         &entry.id,
@@ -374,12 +395,106 @@ async fn crashed_worker_recovers_on_subsequent_ensure() {
     )
     .await;
     assert_eq!(crashed.state, WorkerState::Crashed);
+    assert_eq!(crashed.pid, None);
+    let crash_loop_events = events
+        .snapshot()
+        .await
+        .into_iter()
+        .filter(|event| event.project_id.as_deref() == Some(entry.id.as_str()))
+        .collect::<Vec<_>>();
+    let crashes = crash_loop_events
+        .iter()
+        .filter(|event| event.kind == "worker_crashed")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        crashes.len(),
+        6,
+        "unexpected exits must exhaust exactly six crashes"
+    );
+    for (index, event) in crashes.iter().enumerate() {
+        assert_eq!(event.payload["exit_code"], 1);
+        assert_eq!(event.payload["restarting"], index < 5);
+        assert_eq!(event.payload["during_startup"], true);
+    }
+    assert!(!crash_loop_events
+        .iter()
+        .any(|event| event.kind == "worker_ready"));
+    let mut pending_start = false;
+    let mut port_retries = 0;
+    let mut unexpected_exits = 0;
+    let mut pending_crash = false;
+    for event in &crash_loop_events {
+        match event.kind.as_str() {
+            "worker_starting" => {
+                assert!(!pending_crash, "restart before matching crash event");
+                assert!(
+                    !pending_start,
+                    "a second process started before the previous exit"
+                );
+                pending_start = true;
+            }
+            "worker_exited" => {
+                assert!(pending_start, "exit without a corresponding process start");
+                pending_start = false;
+                if event.payload["reason"] == "foreign_responder"
+                    || (event.payload["during_startup"] == true
+                        && matches!(event.payload["exit_code"].as_i64(), Some(48 | 98 | 10048)))
+                {
+                    assert_eq!(event.payload["retrying_ports"], true);
+                    port_retries += 1;
+                } else {
+                    assert_eq!(event.payload["exit_code"], 1);
+                    assert_eq!(event.payload["during_startup"], true);
+                    unexpected_exits += 1;
+                    pending_crash = true;
+                    assert_eq!(event.payload["will_restart"], unexpected_exits < 6);
+                }
+            }
+            "worker_crashed" => {
+                assert!(
+                    pending_crash,
+                    "crash without a corresponding unexpected exit"
+                );
+                assert!(!pending_start, "crash before process exit");
+                pending_crash = false;
+                assert_eq!(event.payload["restarting"], unexpected_exits < 6);
+            }
+            _ => {}
+        }
+    }
+    assert!(
+        !pending_start,
+        "crash cap left an unaccounted running process"
+    );
+    assert!(
+        !pending_crash,
+        "unexpected exit without matching crash event"
+    );
+    assert_eq!(unexpected_exits, 6);
+    let crashed_pids = crash_loop_events
+        .iter()
+        .filter(|event| event.kind == "worker_starting")
+        .map(|event| event.payload["pid"].as_u64().unwrap() as u32)
+        .collect::<Vec<_>>();
+    assert_eq!(crashed_pids.len(), 6 + port_retries);
 
     std::env::remove_var("FAKE_WORKER_CRASH");
-    let recovered = supervisor.ensure_worker(&entry).await.unwrap();
+    for _ in 0..3 {
+        assert_eq!(supervisor.ensure_worker(&entry).await.unwrap(), crashed);
+    }
+    assert_eq!(
+        events
+            .snapshot()
+            .await
+            .into_iter()
+            .filter(|event| event.kind == "worker_starting")
+            .count(),
+        crashed_pids.len()
+    );
+    let recovered = supervisor.restart_worker(&entry).await.unwrap();
 
     assert_eq!(recovered.state, WorkerState::Ready);
-    assert!(recovered.pid.is_some());
+    assert!(!crashed_pids.contains(&recovered.pid.unwrap()));
     supervisor.stop_all().await;
 }
 

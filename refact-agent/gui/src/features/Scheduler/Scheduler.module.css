@@ -340,3 +340,19 @@
     justify-content: flex-start;
   }
 }
+
+.jsonPreview {
+  min-width: 0;
+  max-height: 40dvh;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: var(--rf-font-mono);
+  font-size: var(--rf-text-1);
+  line-height: var(--rf-line-1);
+}
+
+.jobActions {
+  flex-wrap: wrap;
+  gap: var(--rf-space-2);
+}

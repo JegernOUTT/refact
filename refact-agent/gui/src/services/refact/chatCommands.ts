@@ -35,6 +35,11 @@ export type GoalBudgetCommand = {
 
 export type ChatCommandBase =
   | {
+      type: "set_app_workspace";
+      expected_revision: number;
+      workspace: import("../../features/Apps/appWorkspace").AppWorkspace;
+    }
+  | {
       type: "recovery_retry";
       run_id: string;
       expected_revision: number;
@@ -44,6 +49,7 @@ export type ChatCommandBase =
   | { type: "recovery_retry_now"; run_id: string; expected_revision: number }
   | {
       type: "user_message";
+      app_context_ids?: string[];
       content: MessageContent;
       attachments?: unknown[];
     }
@@ -402,8 +408,10 @@ export async function sendUserMessage(
   priority?: boolean,
   contextFiles?: unknown[],
   suppressAutoEnrichment?: boolean,
+  appContextIds?: string[],
 ): Promise<void> {
   const cmd: Record<string, unknown> = { type: "user_message", content };
+  if (appContextIds?.length) cmd.app_context_ids = appContextIds;
   if (contextFiles && contextFiles.length > 0) {
     cmd.context_files = contextFiles;
   }

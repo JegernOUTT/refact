@@ -454,6 +454,7 @@ async fn role_grant_requires_confirmation() {
     }
     .tool_description();
     let catalog = Arc::new(refact_runtime_api::ToolCatalogSnapshot {
+        intent: refact_runtime_api::ToolCatalogIntent::Policy,
         index: refact_runtime_api::ToolRegistryIndex {
             tools: vec![desc],
             mcp_lazy_mode: false,

@@ -170,6 +170,7 @@ export function isRecoveryRecord(value: unknown): value is RecoveryRecord {
 
 export type ThreadParams = {
   recovery_policy?: RecoveryPolicyOverrides | null;
+  app_workspace?: unknown;
   id: string;
   title: string;
   model: string;
@@ -382,6 +383,9 @@ export type EventEnvelope =
       chunk_count?: number;
       message_count?: number;
       pending_questions?: PendingQuestionSet[];
+      app_workspace?:
+        | import("../../features/Apps/appWorkspace").AppWorkspace
+        | null;
       goal?: GoalSnapshot | null;
       browser?: {
         runtime_id: string;

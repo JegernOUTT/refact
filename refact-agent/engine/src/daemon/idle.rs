@@ -29,6 +29,9 @@ pub struct WorkerIdleSnapshot {
     pub exec_running: u32,
     pub last_status_report_ms: u64,
     pub cron_next_fire_ms: Option<u64>,
+    /// Authorized, unexpired live leases count even when restart resume is off.
+    /// Unknown observation keeps an already-running worker, never grants wake authority.
+    pub automation_background_active: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,6 +54,9 @@ pub fn idle_decision(now: u64, worker: &WorkerIdleSnapshot, config: &DaemonConfi
         return IdleDecision::Keep;
     }
     if worker.lsp_clients > 0 || worker.busy_chats > 0 || worker.exec_running > 0 {
+        return IdleDecision::Keep;
+    }
+    if worker.automation_background_active != Some(false) {
         return IdleDecision::Keep;
     }
     if now.saturating_sub(worker.last_status_report_ms) >= STATUS_FRESH_MS {
@@ -222,6 +228,7 @@ mod tests {
             exec_running: 0,
             last_status_report_ms: now - 1_000,
             cron_next_fire_ms: None,
+            automation_background_active: Some(false),
         }
     }
 
@@ -305,6 +312,29 @@ mod tests {
         assert!(cron_pending_blocks_idle_stop(now, now));
         assert!(cron_pending_blocks_idle_stop(now + CRON_SOON_MS, now));
         assert!(!cron_pending_blocks_idle_stop(now + CRON_SOON_MS + 1, now));
+    }
+
+    #[test]
+    fn continuous_authorized_and_unknown_observation_prevent_idle_stop() {
+        let now = 120_000;
+        let mut snapshot = stoppable_snapshot(now);
+        snapshot.automation_background_active = Some(true);
+        assert_eq!(
+            idle_decision(now, &snapshot, &config(2)),
+            IdleDecision::Keep
+        );
+        snapshot.automation_background_active = None;
+        assert_eq!(
+            idle_decision(now, &snapshot, &config(2)),
+            IdleDecision::Keep
+        );
+        // Revocation/expiry resolves to false; an unapproved manifest alone is
+        // never supplied as a residency assertion by the observer.
+        snapshot.automation_background_active = Some(false);
+        assert_eq!(
+            idle_decision(now, &snapshot, &config(2)),
+            IdleDecision::Stop
+        );
     }
 
     async fn wait_for_stopped(state: &DaemonState, project_id: &str) {

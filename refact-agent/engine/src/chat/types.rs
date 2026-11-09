@@ -361,6 +361,10 @@ pub struct ChatSession {
     pub stream_started_at: Option<Instant>,
     pub confirmation_paused_at: Option<(Instant, HashSet<String>)>,
     pub(crate) approval_wrapper_calls: HashMap<String, crate::call_validation::ChatToolCall>,
+    pub(crate) app_mutation_receipts: HashMap<String, crate::tools::tool_app::AppMutationReceipt>,
+    pub(crate) automation_approval_receipts:
+        HashMap<String, crate::scheduler::automation_approval::AutomationApprovalReceipt>,
+    pub(crate) app_workspace_mutation_lock: Arc<AMutex<()>>,
     pub last_tool_started_at: Option<Instant>,
     pub last_tool_progress_at: Option<Instant>,
     pub trajectory_dirty: bool,

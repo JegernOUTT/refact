@@ -93,8 +93,17 @@ pub struct ToolRegistryIndex {
     pub mcp_tool_index: Vec<(String, String)>,
 }
 
+/// Catalog authority is selected by a trusted caller, never inferred from a mode name.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+pub enum ToolCatalogIntent {
+    #[default]
+    Policy,
+    UserFacing,
+}
+
 #[derive(Clone)]
 pub struct ToolCatalogSnapshot {
+    pub intent: ToolCatalogIntent,
     pub index: ToolRegistryIndex,
     pub policy: Vec<ToolPolicyInfo>,
     pub aliases: ToolAliasRegistry,
@@ -196,10 +205,22 @@ pub trait ToolRegistry: Send + Sync {
             .collect::<Vec<_>>();
         let policy = self.get_tool_policy_info(mode, model_id).await;
         std::sync::Arc::new(ToolCatalogSnapshot {
+            intent: ToolCatalogIntent::Policy,
             index,
             policy,
             aliases: build_registry_from_names(&names),
         })
+    }
+    /// Registries that do not support user-facing catalogs retain their policy ceiling.
+    async fn acquire_tool_catalog_with_intent(
+        &self,
+        mode: &str,
+        model_id: Option<&str>,
+        execution_scope: Option<&str>,
+        _intent: ToolCatalogIntent,
+    ) -> Arc<ToolCatalogSnapshot> {
+        self.acquire_tool_catalog(mode, model_id, execution_scope)
+            .await
     }
     async fn acquire_turn_tool_pool(
         &self,

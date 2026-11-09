@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use chrono::Utc;
 use serde_json::{json, Value};
-use tokio::sync::{Notify, Semaphore};
+use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 use tokio::time::Instant as TokioInstant;
 
@@ -54,7 +54,7 @@ pub struct CronRunner {
     pub shutdown_flag: Arc<AtomicBool>,
     pub change_notify: Arc<Notify>,
     pub jitter_cfg: JitterConfig,
-    run_semaphore: Arc<Semaphore>,
+    request_id: Option<String>,
     deferred_until_ms: HashMap<String, u64>,
 }
 
@@ -62,14 +62,13 @@ impl CronRunner {
     pub fn new(store: Arc<dyn CronStore>, gcx: SharedGlobalContext) -> Self {
         let shutdown_flag = gcx.shutdown_flag.clone();
         let change_notify = store.change_notify();
-        let max_concurrent_runs = gcx.scheduler_config.max_concurrent_runs.max(1);
         Self {
             store,
             gcx,
             shutdown_flag,
             change_notify,
             jitter_cfg: JitterConfig::default(),
-            run_semaphore: Arc::new(Semaphore::new(max_concurrent_runs)),
+            request_id: None,
             deferred_until_ms: HashMap::new(),
         }
     }
@@ -78,6 +77,62 @@ impl CronRunner {
         tokio::spawn(async move {
             self.run().await;
         })
+    }
+
+    pub(crate) fn validate_definition_legacy(task: &Job) -> Result<(), String> {
+        if task.command_spec().is_some() {
+            runnable_command_job(task).map_err(str::to_string)
+        } else if job_is_isolated(task) {
+            runnable_isolated_job(task).map_err(str::to_string)
+        } else {
+            runnable_chat_id(task).map(|_| ()).map_err(str::to_string)
+        }
+    }
+
+    /// The generic runtime already holds exact-definition durable admission and capacity.
+    pub(crate) async fn execute_definition_legacy(
+        gcx: SharedGlobalContext,
+        task: &Job,
+        occurrence: &str,
+    ) -> Result<Value, String> {
+        let app = AppState::from_gcx(gcx.clone()).await;
+        if let Some(cmd) = task.command_spec() {
+            runnable_command_job(task).map_err(str::to_string)?;
+            let result = run_command(&app, task, &cmd).await;
+            if result.status != "fired" {
+                return Err(command_error_summary(&result));
+            }
+            return Ok(
+                json!({"stdout":result.stdout.chars().take(32768).collect::<String>(),"exit_code":result.exit_code}),
+            );
+        }
+        let mut runner = Self::new(session_cron_store(), gcx);
+        runner.request_id = Some(occurrence.into());
+        let now = now_ms();
+        if job_is_isolated(task) {
+            let mut task = task.clone();
+            task.id = format!("{}_{}", task.id, uuid::Uuid::new_v4());
+            return runner
+                .fire_isolated_with_missed(&task, false, now, false)
+                .await
+                .map(|accepted| json!({"accepted":accepted}));
+        }
+        let chat = runnable_chat_id(task).map_err(str::to_string)?;
+        let outcome = deliver_scheduled_turn(
+            &app,
+            chat,
+            task,
+            now,
+            Some(occurrence),
+            vec![
+                cron_fire_message(task, false),
+                scheduled_prompt_message(task.prompt().unwrap_or_default().into()),
+            ],
+        )
+        .await?;
+        Ok(
+            json!({"accepted":matches!(outcome,DeliveryOutcome::Delivered|DeliveryOutcome::Queued|DeliveryOutcome::Duplicate)}),
+        )
     }
 
     pub async fn fire_manual_job(
@@ -90,7 +145,9 @@ impl CronRunner {
         }
         task.trigger_at_ms = Some(now);
         let store = Arc::new(InMemoryCronStore::new());
-        let runner = Self::new(store, gcx);
+        store.add(task.clone()).await?;
+        let mut runner = Self::new(store, gcx);
+        runner.request_id = Some(uuid::Uuid::new_v4().to_string());
         runner.fire_with_missed(&task, false, now, false).await
     }
 
@@ -114,6 +171,7 @@ impl CronRunner {
             .await?
             .ok_or_else(|| format!("Scheduled task {job_id} not found"))?;
         let mut runner = Self::new(store.clone(), gcx);
+        runner.request_id = Some(uuid::Uuid::new_v4().to_string());
         let fired = runner.handle_due_task(task, now).await;
         Ok(fired)
     }
@@ -122,13 +180,50 @@ impl CronRunner {
         if !self.enabled() {
             return;
         }
-        self.catch_up().await;
+        let shutdown = self.shutdown_flag.clone();
+        tokio::select! {
+            biased;
+            _ = wait_for_shutdown(shutdown.clone()) => return,
+            _ = self.catch_up() => {}
+        }
+        let generic = tokio::select! {
+            biased;
+            _ = wait_for_shutdown(shutdown.clone()) => return,
+            generic = async {
+                if let Some(root) = get_active_project_path(self.gcx.clone()).await {
+                    match super::generic_runtime::runtime(self.gcx.clone(), root).await {
+                        Ok(runtime) => Some(runtime),
+                        Err(error) => {
+                            tracing::warn!("generic automation startup failed: {error}");
+                            None
+                        }
+                    }
+                } else {
+                    None
+                }
+            } => generic,
+        };
 
         loop {
             if self.shutdown_flag.load(Ordering::Relaxed) {
                 break;
             }
 
+            if let Some(generic) = &generic {
+                tokio::select! {
+                    biased;
+                    _ = wait_for_shutdown(shutdown.clone()) => break,
+                    result = generic.dispatch_due() => {
+                        if let Err(error) = result {
+                            tracing::warn!("automation reconcile failed: {error}");
+                        }
+                    }
+                }
+            }
+            let notify = self.change_notify.clone();
+            let changed = notify.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
             let now = now_ms();
             let tasks = self.store.list().await;
             let next = tasks
@@ -137,13 +232,18 @@ impl CronRunner {
                 .min()
                 .unwrap_or(now + DEFAULT_SLEEP_MS)
                 .min(now + DEFAULT_SLEEP_MS);
+            let next = if generic.is_some() {
+                next.min(now + 1000)
+            } else {
+                next
+            };
             let sleep_until = TokioInstant::now() + Duration::from_millis(next.saturating_sub(now));
 
             let global_change = runner_change_notify();
             tokio::select! {
                 _ = global_change.notified() => continue,
                 _ = tokio::time::sleep_until(sleep_until) => {}
-                _ = self.change_notify.notified() => continue,
+                _ = &mut changed => continue,
                 _ = wait_for_shutdown(self.shutdown_flag.clone()) => break,
             }
 
@@ -264,7 +364,17 @@ impl CronRunner {
             })
             .collect::<Vec<_>>();
 
-        let mut handles = Vec::new();
+        let owner = match super::automation_runtime::execution_owner(&self.gcx).await {
+            Ok(owner) => owner,
+            Err(error) => {
+                tracing::warn!("scheduler admission unavailable: {error}");
+                return;
+            }
+        };
+        owner.retry_deliveries(&self.gcx).await;
+        // Own children for the entire dispatch future: cancelling/recycling
+        // the parent must abort its runs rather than detach their effects.
+        let mut handles = tokio::task::JoinSet::new();
         let max_concurrent_runs = self.gcx.scheduler_config.max_concurrent_runs.max(1);
         for selected in due_tasks {
             let Some(task) = self.store.get(&selected.id).await else {
@@ -292,7 +402,7 @@ impl CronRunner {
                 self.defer_for_backpressure(&task, now).await;
                 continue;
             }
-            if task_can_use_cron_lane(&task) && self.run_semaphore.available_permits() == 0 {
+            if task_can_use_cron_lane(&task) && owner.capacity.available_permits() == 0 {
                 self.defer_for_backpressure(&task, now).await;
                 continue;
             }
@@ -300,33 +410,28 @@ impl CronRunner {
                 self.handle_due_task(task, now).await;
                 continue;
             }
-            let Ok(permit) = self.run_semaphore.clone().try_acquire_owned() else {
-                self.defer_for_backpressure(&task, now).await;
-                continue;
-            };
             let store = self.store.clone();
             let gcx = self.gcx.clone();
             let shutdown_flag = self.shutdown_flag.clone();
             let change_notify = self.change_notify.clone();
             let jitter_cfg = self.jitter_cfg.clone();
             let task_id = task.id.clone();
-            handles.push(tokio::spawn(async move {
-                let _permit = permit;
+            handles.spawn(async move {
                 let mut runner = CronRunner {
                     store,
                     gcx,
                     shutdown_flag,
                     change_notify,
                     jitter_cfg,
-                    run_semaphore: Arc::new(Semaphore::new(1)),
+                    request_id: None,
                     deferred_until_ms: HashMap::new(),
                 };
                 runner.handle_due_task(task, now).await;
                 (task_id, runner.deferred_until_ms)
-            }));
+            });
         }
-        for handle in handles {
-            if let Ok((task_id, deferred)) = handle.await {
+        while let Some(result) = handles.join_next().await {
+            if let Ok((task_id, deferred)) = result {
                 if deferred.contains_key(&task_id) {
                     self.deferred_until_ms.extend(deferred);
                 } else {
@@ -1026,15 +1131,33 @@ impl CronRunner {
         missed: bool,
     ) -> Result<bool, String> {
         if let Some(cmd) = task.command_spec() {
-            let _ = self
+            let result = self
                 .fire_command_with_missed(task, &cmd, final_fire, fired_at_ms, missed)
                 .await?;
+            return Ok(result.status == "fired");
+        }
+        let owner = super::automation_runtime::execution_owner(&self.gcx).await?;
+        let occurrence = self
+            .request_id
+            .clone()
+            .unwrap_or_else(|| occurrence_key(task));
+        if owner.agent_enqueue_accepted(task, &occurrence)? {
             return Ok(true);
         }
+        let admission = owner.admit(task, &occurrence)?;
+        admission.started()?;
         if job_is_isolated(&task) {
-            return self
+            let result = self
                 .fire_isolated_with_missed(task, final_fire, fired_at_ms, missed)
                 .await;
+            match result.as_ref() {
+                Ok(accepted) => admission.finish(*accepted, None)?,
+                Err(error) if error == "chat delivery queue is full" => {
+                    admission.rejected_agent_enqueue()?;
+                }
+                Err(_) => {}
+            }
+            return result;
         }
 
         let chat_id = runnable_chat_id(task).map_err(|reason| {
@@ -1060,13 +1183,25 @@ impl CronRunner {
             chat_id,
             task,
             fired_at_ms,
+            self.request_id.as_deref(),
             vec![event_message, scheduled_prompt_message(prompt)],
         )
-        .await?;
-        Ok(matches!(
+        .await;
+        // This exact queue refusal is a known non-effect. All other errors
+        // remain ambiguous and Admission::drop holds them for review.
+        let outcome = match outcome {
+            Err(error) if error == "chat delivery queue is full" => {
+                admission.rejected_agent_enqueue()?;
+                return Err(error);
+            }
+            result => result?,
+        };
+        let accepted = matches!(
             outcome,
             DeliveryOutcome::Delivered | DeliveryOutcome::Queued | DeliveryOutcome::Duplicate
-        ))
+        );
+        admission.finish(accepted, None)?;
+        Ok(accepted)
     }
 
     async fn fire_command_with_missed(
@@ -1084,7 +1219,42 @@ impl CronRunner {
             )
         })?;
         let app = AppState::from_gcx(self.gcx.clone()).await;
+        let owner = super::automation_runtime::execution_owner(&self.gcx).await?;
+        let admission = owner.admit(
+            task,
+            &self
+                .request_id
+                .clone()
+                .unwrap_or_else(|| occurrence_key(task)),
+        )?;
+        admission.started()?;
         let result = run_command(&app, task, cmd).await;
+        let mut delivery_snapshot = task.clone();
+        if let Delivery::Webhook {
+            token, ..
+        } = &mut delivery_snapshot.delivery
+        {
+            *token = None;
+        }
+        let delivery_payload = json!({
+            "job": delivery_snapshot,
+            "job_id": task.id,
+            "run_id": admission.claim.as_ref().map(|claim| claim.run_id.as_str()),
+            "config_digest": refact_scheduler_core::automation::legacy_job_digest(task)?,
+            "status": result.status,
+            "output": if result.status == "error" { command_error_summary(&result) } else { result.stdout.chars().take(32_768).collect::<String>() },
+            "exit_code": result.exit_code,
+            "fired_at_ms": fired_at_ms,
+        });
+        let run_status = if result.stderr.to_ascii_lowercase().contains("timed out") {
+            refact_scheduler_core::automation::RunStatus::Unknown
+        } else if result.status == "fired" {
+            refact_scheduler_core::automation::RunStatus::Succeeded
+        } else {
+            refact_scheduler_core::automation::RunStatus::Failed
+        };
+        let _delivery_guard = owner.delivery_lock.lock().await;
+        let delivery_seq = admission.complete_with_delivery(run_status, &delivery_payload)?;
         if let Err(error) = self
             .deliver_command_result(&app, task, cmd, final_fire, fired_at_ms, missed, &result)
             .await
@@ -1096,12 +1266,15 @@ impl CronRunner {
                     store_error
                 );
             }
-        } else if let Err(store_error) = self.clear_delivery_error(&task.id).await {
-            tracing::warn!(
-                "failed to clear delivery error for scheduled task {}: {}",
-                task.id,
-                store_error
-            );
+        } else {
+            admission.delivered(delivery_seq)?;
+            if let Err(store_error) = self.clear_delivery_error(&task.id).await {
+                tracing::warn!(
+                    "failed to clear delivery error for scheduled task {}: {}",
+                    task.id,
+                    store_error
+                );
+            }
         }
         Ok(result)
     }
@@ -1188,6 +1361,7 @@ impl CronRunner {
             &chat_id,
             task,
             fired_at_ms,
+            self.request_id.as_deref(),
             vec![event_message, scheduled_prompt_message(prompt)],
         )
         .await?;
@@ -1236,6 +1410,17 @@ impl CronRunner {
                 task.id
             );
         }
+    }
+}
+
+fn occurrence_key(task: &Job) -> String {
+    match task.trigger_at_ms {
+        Some(at) => format!("request:{at}:{}", task.fire_count),
+        None => format!(
+            "slot:{}:{}",
+            task.last_fired_at_ms.unwrap_or(task.created_at_ms),
+            task.fire_count
+        ),
     }
 }
 
@@ -1573,8 +1758,8 @@ fn command_record_error(result: &CommandRunResult) -> String {
     command_error_summary(result)
 }
 
-fn command_failure_can_retry(result: &CommandRunResult) -> bool {
-    classify(&command_retry_text(result)).is_some()
+fn command_failure_can_retry(_result: &CommandRunResult) -> bool {
+    false
 }
 
 fn command_retry_text(result: &CommandRunResult) -> String {
@@ -1996,8 +2181,8 @@ mod tests {
         ]
     }
 
-    #[test]
-    fn command_timeout_failure_is_retryable() {
+    #[tokio::test]
+    async fn command_timeout_failure_is_not_replayed() {
         let result = CommandRunResult {
             status: "error".to_string(),
             stdout: String::new(),
@@ -2005,7 +2190,151 @@ mod tests {
             exit_code: None,
         };
 
-        assert!(command_failure_can_retry(&result));
+        assert!(!command_failure_can_retry(&result));
+        #[cfg(unix)]
+        {
+            let now = now_ms();
+            let store = Arc::new(InMemoryCronStore::new());
+            let (workspace, gcx) = gcx_with_session(SessionState::Idle).await;
+            let app = AppState::from_gcx(gcx.clone()).await;
+            let attempts = workspace.path().join("timeout-attempts");
+            let argv = vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                r#"printf 'attempt\n' >> "$1"; printf '429 Too Many Requests\n'; exec sleep 60"#
+                    .to_string(),
+                "timeout-fixture".to_string(),
+                attempts.to_string_lossy().into_owned(),
+            ];
+            let mut job = one_shot_command_due_task("actual_pending_timeout", now, argv);
+            if let Action::Command {
+                timeout_secs, ..
+            } = &mut job.action
+            {
+                *timeout_secs = Some(2);
+            }
+            store.add(job).await.unwrap();
+            let mut runner = CronRunner::new(store.clone(), gcx);
+            let mut running = tokio::spawn(async move {
+                runner.fire_due_tasks(now).await;
+                runner
+            });
+            let mut joined = false;
+            let outcome: Result<CronRunner, String> = async {
+                tokio::time::timeout(Duration::from_secs(20), async {
+                    loop {
+                        if running.is_finished() {
+                            return Err(
+                                "runner completed before pending child was observed".to_string()
+                            );
+                        }
+                        if tokio::fs::read_to_string(&attempts)
+                            .await
+                            .unwrap_or_default()
+                            == "attempt\n"
+                        {
+                            return if running.is_finished() {
+                                Err("child handshake did not observe pending runner".to_string())
+                            } else {
+                                Ok(())
+                            };
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .map_err(|error| format!("child handshake: {error}"))??;
+                let result = tokio::time::timeout(Duration::from_secs(20), &mut running)
+                    .await
+                    .map_err(|error| format!("configured timeout: {error}"))?;
+                joined = true;
+                result.map_err(|error| format!("runner task: {error}"))
+            }
+            .await;
+            if !joined {
+                running.abort();
+                let _ = (&mut running).await;
+            }
+            let processes = app.runtime.exec_registry.list(Default::default()).await;
+            let owned: Vec<_> = processes
+                .into_iter()
+                .filter(|process| {
+                    process.meta.owner.tool_call_id.as_deref()
+                        == Some("cron:actual_pending_timeout")
+                })
+                .collect();
+            let timed_out =
+                owned.len() == 1 && matches!(owned[0].status, crate::exec::ExecStatus::TimedOut);
+            let mut cleanup_errors = Vec::new();
+            for process in owned {
+                if let Err(error) = app
+                    .runtime
+                    .exec_registry
+                    .remove(&process.meta.process_id)
+                    .await
+                {
+                    cleanup_errors.push(error);
+                }
+            }
+            let absent_after_timeout = store.get("actual_pending_timeout").await.is_none();
+            let mut first_error = None;
+            let mut second_error = None;
+            if let Ok(mut runner) = outcome {
+                let mut second = tokio::spawn(async move {
+                    runner.fire_due_tasks(now + 600_000).await;
+                });
+                match tokio::time::timeout(Duration::from_secs(20), &mut second).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => second_error = Some(format!("second runner task: {error}")),
+                    Err(error) => {
+                        second.abort();
+                        let _ = (&mut second).await;
+                        second_error = Some(format!("second runner timeout: {error}"));
+                    }
+                }
+            } else if let Err(error) = outcome {
+                first_error = Some(error);
+            }
+            for process in app.runtime.exec_registry.list(Default::default()).await {
+                if process.meta.owner.tool_call_id.as_deref() == Some("cron:actual_pending_timeout")
+                {
+                    if let Err(error) = app
+                        .runtime
+                        .exec_registry
+                        .remove(&process.meta.process_id)
+                        .await
+                    {
+                        cleanup_errors.push(error);
+                    }
+                }
+            }
+            let attempts_result = tokio::fs::read_to_string(&attempts).await;
+            assert!(
+                cleanup_errors.is_empty(),
+                "fixture cleanup failed: {cleanup_errors:?}"
+            );
+            assert!(
+                first_error.is_none(),
+                "actual child handshake and configured timeout must finish: {first_error:?}"
+            );
+            assert!(
+                second_error.is_none(),
+                "second runner drive must finish: {second_error:?}"
+            );
+            assert!(
+                timed_out,
+                "configured deadline must produce an actual timeout, not early exit"
+            );
+            assert!(
+                absent_after_timeout,
+                "timed-out started command must not be scheduled for replay"
+            );
+            assert_eq!(
+                attempts_result.unwrap(),
+                "attempt\n",
+                "second runner drive must not replay timed-out command"
+            );
+        }
     }
 
     fn timezone_cron_task(id: &str, created_at_ms: u64) -> Job {
@@ -2267,10 +2596,10 @@ mod tests {
     async fn one_shot_remains_when_enqueue_is_rejected() {
         let now = now_ms();
         let store = Arc::new(InMemoryCronStore::new());
-        store
-            .add(one_shot_task("cron_one_shot_queue_full", now))
-            .await
-            .unwrap();
+        let mut job = one_shot_task("cron_one_shot_queue_full", now);
+        job.set_mode(Some("explore".into()));
+        set_job_model(&mut job, Some("scheduled-model".into()));
+        store.add(job).await.unwrap();
         let (_workspace, gcx) = gcx_with_session(SessionState::Idle).await;
         {
             let session_arc = session(&gcx).await;
@@ -2308,10 +2637,14 @@ mod tests {
         {
             let mut session = arc.lock().await;
             assert!(session.messages.iter().all(|m| m.role != EVENT_ROLE));
+            assert_ne!(session.thread.mode, "explore");
+            assert_ne!(session.thread.model, "scheduled-model");
             session.pending_deliveries.clear();
         }
         runner.fire_due_tasks(now + IDLE_DEFER_MS).await;
         assert!(store.get("cron_one_shot_queue_full").await.is_none());
+        assert_eq!(arc.lock().await.thread.mode, "explore");
+        assert_eq!(arc.lock().await.thread.model, "scheduled-model");
         assert_eq!(
             arc.lock()
                 .await
@@ -2605,6 +2938,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn independent_manual_and_store_entrypoints_share_project_capacity() {
+        let now = now_ms();
+        let (_workspace, gcx) =
+            gcx_with_session_and_config(SessionState::Idle, |c| c.max_concurrent_runs = 1).await;
+        let owner = super::super::automation_runtime::execution_owner(&gcx)
+            .await
+            .unwrap();
+        let held = owner.capacity.clone().try_acquire_owned().unwrap();
+        let first = command_due_task("manual_capacity_a", now, empty_command());
+        let second = command_due_task("manual_capacity_b", now, empty_command());
+        assert!(CronRunner::fire_manual_job(gcx.clone(), first, now)
+            .await
+            .is_err());
+        assert!(
+            CronRunner::fire_manual_job(gcx.clone(), second.clone(), now)
+                .await
+                .is_err()
+        );
+        let store: Arc<dyn CronStore> = Arc::new(InMemoryCronStore::new());
+        store.add(second.clone()).await.unwrap();
+        assert!(
+            !CronRunner::fire_store_job_now(store.clone(), gcx.clone(), &second.id, now)
+                .await
+                .unwrap()
+        );
+        assert_eq!(store.get(&second.id).await.unwrap().fire_count, 0);
+        drop(held);
+        assert!(CronRunner::fire_manual_job(gcx, second, now).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn interrupted_effect_holds_even_a_new_manual_request() {
+        let now = now_ms();
+        let (_workspace, gcx) = gcx_with_session(SessionState::Idle).await;
+        let owner = super::super::automation_runtime::execution_owner(&gcx)
+            .await
+            .unwrap();
+        let job = command_due_task("interrupted_effect", now, empty_command());
+        let admission = owner.admit(&job, "manual:before-crash").unwrap();
+        admission.started().unwrap();
+        drop(admission);
+        assert!(owner.admit(&job, "manual:new-request").is_err());
+        assert_eq!(
+            owner.capacity.available_permits(),
+            gcx.scheduler_config.max_concurrent_runs.max(1)
+        );
+    }
+
+    #[tokio::test]
+    async fn duplicate_job_admission_does_not_consume_remaining_capacity() {
+        let now = now_ms();
+        let (_workspace, gcx) =
+            gcx_with_session_and_config(SessionState::Idle, |c| c.max_concurrent_runs = 2).await;
+        let owner = super::super::automation_runtime::execution_owner(&gcx)
+            .await
+            .unwrap();
+        let job = command_due_task("duplicate_manual", now, empty_command());
+        let admission = owner.admit(&job, "manual:first").unwrap();
+        assert!(owner.admit(&job, "manual:second").is_err());
+        assert_eq!(owner.capacity.available_permits(), 1);
+        let other = command_due_task("different_manual", now, empty_command());
+        let _other = owner.admit(&other, "manual:third").unwrap();
+        drop(admission);
+        assert_eq!(owner.capacity.available_permits(), 1);
+    }
+
+    #[tokio::test]
     async fn concurrency_cap_defers_over_limit_command_runs() {
         let now = now_ms();
         let store = Arc::new(InMemoryCronStore::new());
@@ -2672,7 +3072,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn transient_command_failure_retries_until_max_then_gives_up() {
+    async fn started_command_failure_is_not_automatically_replayed() {
         let now = now_ms();
         let store = Arc::new(InMemoryCronStore::new());
         store
@@ -2684,31 +3084,17 @@ mod tests {
             .await
             .unwrap();
         let (_workspace, gcx) = gcx_with_session(SessionState::Idle).await;
+        let owner = super::super::automation_runtime::execution_owner(&gcx)
+            .await
+            .unwrap();
         let mut runner = CronRunner::new(store.clone(), gcx);
-
         runner.fire_due_tasks(now).await;
-        let stored = store.get("command_transient_retry").await.unwrap();
-        assert_eq!(stored.last_status.as_deref(), Some("error"));
-        assert_eq!(stored.fire_count, 1);
-        assert_eq!(stored.retry_attempts, 1);
-        assert_eq!(stored.trigger_at_ms, Some(now + 60_000));
-        assert!(!runner.task_is_due(&stored, now + 59_999));
-
-        runner.fire_due_tasks(now + 60_000).await;
-        let stored = store.get("command_transient_retry").await.unwrap();
-        assert_eq!(stored.fire_count, 2);
-        assert_eq!(stored.retry_attempts, 2);
-        assert_eq!(stored.trigger_at_ms, Some(now + 180_000));
-
-        runner.fire_due_tasks(now + 180_000).await;
-        let stored = store.get("command_transient_retry").await.unwrap();
-        assert_eq!(stored.fire_count, 3);
-        assert_eq!(stored.retry_attempts, 3);
-        assert_eq!(stored.trigger_at_ms, Some(now + 480_000));
-
-        runner.fire_due_tasks(now + 480_000).await;
-
         assert!(store.get("command_transient_retry").await.is_none());
+        runner.fire_due_tasks(now + 480_000).await;
+        assert_eq!(
+            owner.capacity.available_permits(),
+            runner.gcx.scheduler_config.max_concurrent_runs.max(1)
+        );
     }
 
     /// Cron-lane backpressure holds a retry back without touching its backoff
@@ -2738,17 +3124,22 @@ mod tests {
         .await;
         let mut runner = CronRunner::new(store.clone(), gcx);
 
-        runner.fire_due_tasks(now).await;
+        let mut pending = store.get("command_saturated_retry").await.unwrap();
+        pending.retry_attempts = 1;
+        pending.trigger_at_ms = Some(now + 60_000);
+        store.replace(pending).await.unwrap();
         let after_first_fire = store.get("command_saturated_retry").await.unwrap();
-        assert_eq!(after_first_fire.fire_count, 1);
-        assert_eq!(after_first_fire.retry_attempts, 1);
-        assert_eq!(after_first_fire.trigger_at_ms, Some(now + 60_000));
-
-        let permit = runner.run_semaphore.clone().try_acquire_owned().unwrap();
+        let permit = super::super::automation_runtime::execution_owner(&runner.gcx)
+            .await
+            .unwrap()
+            .capacity
+            .clone()
+            .try_acquire_owned()
+            .unwrap();
         runner.fire_due_tasks(now + 60_000).await;
 
         let deferred = store.get("command_saturated_retry").await.unwrap();
-        assert_eq!(deferred.fire_count, 1);
+        assert_eq!(deferred.fire_count, 0);
         assert_eq!(deferred.retry_attempts, 1);
         assert_eq!(deferred.trigger_at_ms, Some(now + 60_000));
         assert_eq!(deferred.last_status.as_deref(), Some("deferred"));
@@ -2769,13 +3160,7 @@ mod tests {
         drop(permit);
         runner.fire_due_tasks(now + 60_000 + IDLE_DEFER_MS).await;
 
-        let fired = store.get("command_saturated_retry").await.unwrap();
-        assert_eq!(fired.fire_count, 2);
-        assert_eq!(fired.retry_attempts, 2);
-        assert_eq!(
-            fired.trigger_at_ms,
-            Some(now + 60_000 + IDLE_DEFER_MS + 120_000)
-        );
+        assert!(store.get("command_saturated_retry").await.is_none());
     }
 
     /// The spin is ruled out by a *count*, never by a duration: a wall-clock
@@ -2804,13 +3189,17 @@ mod tests {
         .await;
         let mut runner = CronRunner::new(store.clone(), gcx);
 
-        runner.fire_due_tasks(now).await;
-        let after_first_fire = store.get("command_spin_guard").await.unwrap();
-        assert_eq!(after_first_fire.last_status.as_deref(), Some("error"));
-        assert_eq!(after_first_fire.retry_attempts, 1);
-        assert_eq!(after_first_fire.trigger_at_ms, Some(now + 60_000));
-
-        let _permit = runner.run_semaphore.clone().try_acquire_owned().unwrap();
+        let mut pending = store.get("command_spin_guard").await.unwrap();
+        pending.retry_attempts = 1;
+        pending.trigger_at_ms = Some(now + 60_000);
+        store.replace(pending).await.unwrap();
+        let _permit = super::super::automation_runtime::execution_owner(&runner.gcx)
+            .await
+            .unwrap()
+            .capacity
+            .clone()
+            .try_acquire_owned()
+            .unwrap();
         let mut clock = now;
         let mut wakeups = 0u64;
         while clock < now + WINDOW_MS {
@@ -2833,7 +3222,7 @@ mod tests {
 
         let throttled = store.get("command_spin_guard").await.unwrap();
         assert_eq!(throttled.last_status.as_deref(), Some("deferred"));
-        assert_eq!(throttled.fire_count, 1);
+        assert_eq!(throttled.fire_count, 0);
         assert_eq!(throttled.retry_attempts, 1);
         assert_eq!(throttled.trigger_at_ms, Some(now + 60_000));
     }
@@ -3490,11 +3879,152 @@ mod tests {
         let (_workspace, gcx) = gcx_with_session(SessionState::Idle).await;
         gcx.shutdown_flag.store(true, Ordering::Relaxed);
 
-        let handle = spawn(store, gcx);
+        let handle = spawn(store, gcx.clone());
         tokio::time::advance(Duration::from_millis(200)).await;
 
         assert!(handle.is_finished());
         handle.await.unwrap();
+
+        // Exercise cancellation while shipping startup is actually waiting on
+        // store I/O, rather than relying only on an already-set shutdown flag.
+        struct WaitingStore {
+            entered: Arc<tokio::sync::Notify>,
+        }
+        #[async_trait::async_trait]
+        impl CronStore for WaitingStore {
+            async fn add(&self, _: Job) -> Result<(), String> {
+                unreachable!()
+            }
+            async fn mutate(
+                &self,
+                _: &str,
+                _: refact_scheduler_core::store::JobMutation,
+            ) -> Result<Option<Job>, String> {
+                unreachable!()
+            }
+            async fn remove_if(
+                &self,
+                _: &str,
+                _: refact_scheduler_core::store::JobPredicate,
+            ) -> Result<bool, String> {
+                unreachable!()
+            }
+            async fn get(&self, _: &str) -> Option<Job> {
+                unreachable!()
+            }
+            async fn replace(&self, _: Job) -> Result<bool, String> {
+                unreachable!()
+            }
+            async fn remove(&self, _: &str) -> Result<bool, String> {
+                unreachable!()
+            }
+            async fn update_fired(&self, _: &str, _: u64, _: u32) -> Result<(), String> {
+                unreachable!()
+            }
+            fn change_notify(&self) -> Arc<tokio::sync::Notify> {
+                Arc::new(tokio::sync::Notify::new())
+            }
+            async fn list(&self) -> Vec<Job> {
+                self.entered.notify_one();
+                std::future::pending().await
+            }
+        }
+        gcx.shutdown_flag.store(false, Ordering::Relaxed);
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let handle = spawn(
+            Arc::new(WaitingStore {
+                entered: entered.clone(),
+            }),
+            gcx.clone(),
+        );
+        entered.notified().await;
+        gcx.shutdown_flag.store(true, Ordering::Relaxed);
+        // Advancing the paused clock wakes the shutdown timer but does not
+        // guarantee its task has been polled to completion. Join it within the
+        // same 200 ms virtual-time bound instead of inspecting that race.
+        // Without cancellation of catch_up, list() never resolves and this
+        // timeout must fail; no store notification can accidentally release it.
+        tokio::time::timeout(Duration::from_millis(200), handle)
+            .await
+            .expect("runner must cancel pending startup I/O within 200 ms")
+            .unwrap();
+
+        // A recycled dispatch owner must not detach its command children.
+        // Block the real command child's missing-target bookkeeping before any
+        // external command runs, then observe that its future is dropped.
+        struct ChildStore {
+            job: Job,
+            entered: Arc<tokio::sync::Notify>,
+            dropped: Arc<tokio::sync::Notify>,
+        }
+        struct ChildDrop(Arc<tokio::sync::Notify>);
+        impl Drop for ChildDrop {
+            fn drop(&mut self) {
+                self.0.notify_one();
+            }
+        }
+        #[async_trait::async_trait]
+        impl CronStore for ChildStore {
+            async fn add(&self, _: Job) -> Result<(), String> {
+                unreachable!()
+            }
+            async fn mutate(
+                &self,
+                _: &str,
+                _: refact_scheduler_core::store::JobMutation,
+            ) -> Result<Option<Job>, String> {
+                let _drop = ChildDrop(self.dropped.clone());
+                self.entered.notify_one();
+                std::future::pending().await
+            }
+            async fn remove_if(
+                &self,
+                _: &str,
+                _: refact_scheduler_core::store::JobPredicate,
+            ) -> Result<bool, String> {
+                unreachable!()
+            }
+            async fn get(&self, _: &str) -> Option<Job> {
+                let _drop = ChildDrop(self.dropped.clone());
+                self.entered.notify_one();
+                std::future::pending().await
+            }
+            async fn replace(&self, _: Job) -> Result<bool, String> {
+                unreachable!()
+            }
+            async fn remove(&self, _: &str) -> Result<bool, String> {
+                unreachable!()
+            }
+            async fn update_fired(&self, _: &str, _: u64, _: u32) -> Result<(), String> {
+                unreachable!()
+            }
+            fn change_notify(&self) -> Arc<tokio::sync::Notify> {
+                Arc::new(tokio::sync::Notify::new())
+            }
+            async fn list(&self) -> Vec<Job> {
+                vec![self.job.clone()]
+            }
+        }
+        gcx.shutdown_flag.store(false, Ordering::Relaxed);
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let dropped = Arc::new(tokio::sync::Notify::new());
+        let mut job = command_due_task("cancel_owned_command", now, empty_command());
+        job.set_existing_chat(Some("missing-command-target".into()));
+        let store = Arc::new(ChildStore {
+            job,
+            entered: entered.clone(),
+            dropped: dropped.clone(),
+        });
+        let mut runner = CronRunner::new(store, gcx.clone());
+        let handle = tokio::spawn(async move { runner.fire_due_tasks(now).await });
+        tokio::time::timeout(Duration::from_secs(1), entered.notified())
+            .await
+            .expect("real command child must reach controlled store wait");
+        handle.abort();
+        assert!(handle.await.unwrap_err().is_cancelled());
+        tokio::time::timeout(Duration::from_millis(200), dropped.notified())
+            .await
+            .expect("aborting dispatch must drop its blocked command child");
     }
 
     #[tokio::test]
@@ -3581,6 +4111,11 @@ mod tests {
             .await
             .insert("catch-up-chat".to_string(), Arc::new(AMutex::new(session)));
 
+        let durable_job = store.get("cron_catch_up_missed").await.unwrap();
+        refact_scheduler_core::automation::AutomationJournal::open(workspace.path())
+            .unwrap()
+            .put_legacy_job(&durable_job)
+            .unwrap();
         let mut runner = CronRunner::new(store.clone(), gcx.clone());
         runner.catch_up().await;
 

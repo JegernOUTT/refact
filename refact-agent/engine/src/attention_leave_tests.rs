@@ -296,6 +296,7 @@ async fn a_new_user_message_also_releases_its_cancelled_questions() {
                 context_files: vec![],
                 suppress_auto_enrichment: true,
                 client_message_id: None,
+                app_context_ids: Vec::new(),
             },
             "new-user-message",
         )

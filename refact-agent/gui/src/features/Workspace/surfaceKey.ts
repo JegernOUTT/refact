@@ -10,6 +10,7 @@ export type WorkspaceCapabilities = Record<
 >;
 export type MainSurfaceKind = "git";
 export type PrefixedSurfaceKind =
+  | "app"
   | "chat"
   | "task"
   | "buddy"
@@ -21,12 +22,14 @@ export type SurfaceKey = string;
 export type TaskSurfaceKey = `task:${string}`;
 export type BuddySurfaceKey = "buddy:home";
 export type PaneSurfaceKey =
+  | AppSurfaceKey
   | ChatSurfaceKey
   | FileSurfaceKey
   | TaskSurfaceKey
   | BuddySurfaceKey
   | DesignSurfaceKey
   | MainSurfaceKey;
+export type AppSurfaceKey = `app:${string}`;
 export type ChatSurfaceKey = `chat:${string}`;
 export type DesignSurfaceKey = `design:${string}`;
 export type FileSurfaceKey = `file:${string}`;
@@ -43,6 +46,7 @@ export type ParsedSurfaceKey =
   | { kind: "dashboard"; id: null };
 
 const isPrefixedSurfaceKind = (kind: string): kind is PrefixedSurfaceKind =>
+  kind === "app" ||
   kind === "chat" ||
   kind === "task" ||
   kind === "buddy" ||
@@ -180,3 +184,6 @@ export const isMainSurfaceEnabled = (
   const { kind } = parseSurfaceKey(key);
   return kind === "git" && capabilities.gitPanel;
 };
+
+export const isAppSurface = (key: SurfaceKey): key is AppSurfaceKey =>
+  key.startsWith("app:") && key.length > "app:".length;

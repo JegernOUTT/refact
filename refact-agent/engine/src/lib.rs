@@ -55,6 +55,7 @@ pub mod fuzzy_search;
 
 pub mod agents;
 pub mod app_state;
+pub mod apps;
 pub mod background_tasks;
 pub mod buddy;
 pub mod cache_maintenance;

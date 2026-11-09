@@ -97,6 +97,8 @@ export function isReasoningEffort(v: unknown): v is ReasoningEffort {
 }
 
 export type ChatThread = {
+  app_workspace_raw?: unknown;
+  app_workspace?: import("../../Apps/appWorkspace").AppWorkspace | null;
   recovery_policy?:
     | import("../../../services/refact/chatSubscription").RecoveryPolicyOverrides
     | null;

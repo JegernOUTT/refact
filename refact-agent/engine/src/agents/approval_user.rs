@@ -395,6 +395,8 @@ pub(super) async fn wait(
         question = app.questions().wait(question_id, chrono::Utc::now()) => {
             matches!(question, Ok(QuestionSettlement::Answered(ref answer)) if answer == "approve")
         }
+        // Protected Approved decisions require a consumed exact user grant
+        // at the registry boundary, never merely a parent model decision.
         _ = app.agent_approvals.wait(&pending.id, super::now_ms()) => return Ok(()),
     };
     let context = crate::at_commands::at_commands::AtCommandsContext::new_from_app(

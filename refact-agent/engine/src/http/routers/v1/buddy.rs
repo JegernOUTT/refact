@@ -947,6 +947,7 @@ pub async fn handle_v1_buddy_conversations_create(
         waiting_for_card_ids: Vec::new(),
         pending_questions: Vec::new(),
         native_decision_receipts: Vec::new(),
+        app_workspace: None,
     };
 
     crate::chat::trajectories::save_trajectory_snapshot(gcx.clone(), snapshot)
@@ -1118,6 +1119,7 @@ pub async fn handle_v1_buddy_conversations_create_setup(
         waiting_for_card_ids: Vec::new(),
         pending_questions: Vec::new(),
         native_decision_receipts: Vec::new(),
+        app_workspace: None,
     };
     crate::chat::trajectories::save_trajectory_snapshot(app.gcx.clone(), snapshot)
         .await

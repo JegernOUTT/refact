@@ -1,3 +1,5 @@
+import { AppWorkspaceControls } from "../Apps/AppWorkspaceControls";
+import { useAppWorkspaceRestore } from "../Apps/useAppWorkspaceRestore";
 import classNames from "classnames";
 import { type DragEvent, useCallback, useEffect, useState } from "react";
 
@@ -19,7 +21,11 @@ import {
 } from "../ChatPanes/usePointerDrag";
 import { GroupSplitView } from "./GroupSplitView";
 import { SurfacePane } from "./SurfacePane";
-import { isSplittableSurface, makeSurfaceKey } from "./surfaceKey";
+import {
+  isAppSurface,
+  isSplittableSurface,
+  makeSurfaceKey,
+} from "./surfaceKey";
 import {
   consolidateWorkspaceTabs,
   openTab,
@@ -33,6 +39,7 @@ import {
 import styles from "./WorkspaceView.module.css";
 
 export function WorkspaceView() {
+  useAppWorkspaceRestore();
   const dispatch = useAppDispatch();
   const [unsplitDragActive, setUnsplitDragActive] = useState(false);
   const activeTabId = useAppSelector(selectActiveTabId);
@@ -64,7 +71,19 @@ export function WorkspaceView() {
     : false;
 
   useEffect(() => {
-    const workspaceTabs = tabs.filter(isSplittableSurface);
+    const workspaceTabs = tabs.filter(
+      (key) =>
+        isSplittableSurface(key) &&
+        !isAppSurface(key) &&
+        !collectTabIds(
+          groups[key]?.root ?? {
+            kind: "leaf",
+            id: "check",
+            tabIds: [],
+            activeTabId: null,
+          },
+        ).some(isAppSurface),
+    );
     if (
       workspaceTabs.length > 1 ||
       (workspaceTabs[0] && !groups[workspaceTabs[0]])
@@ -198,6 +217,7 @@ export function WorkspaceView() {
   return (
     <div className={styles.workspaceView}>
       <div className={styles.mainColumn}>
+        <AppWorkspaceControls />
         <div
           className={classNames(
             styles.body,

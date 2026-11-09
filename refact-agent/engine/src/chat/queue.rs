@@ -445,6 +445,7 @@ pub async fn inject_priority_messages_if_any(
             context_files,
             suppress_auto_enrichment,
             client_message_id,
+            app_context_ids,
         } = request.command
         {
             let (session_id, project_dir) = {
@@ -466,8 +467,28 @@ pub async fn inject_priority_messages_if_any(
             )
             .await;
             if matches!(hook_verdict, ControlVerdict::Deny(_)) {
+                let chat_id = session_arc.lock().await.chat_id.clone();
+                super::app_context::release(&chat_id, &request.client_request_id);
                 continue;
             }
+            let chat_id_for_context = session_arc.lock().await.chat_id.clone();
+            let context_msgs = super::app_context::messages_for(
+                &chat_id_for_context,
+                &request.client_request_id,
+                &app_context_ids,
+            );
+            let context_msgs = match context_msgs {
+                Ok(messages) => messages,
+                Err(error) => {
+                    super::app_context::release(&chat_id_for_context, &request.client_request_id);
+                    reject_guard(
+                        &mut *session_arc.lock().await,
+                        &request.client_request_id,
+                        error,
+                    );
+                    continue;
+                }
+            };
 
             let (checkpoints_enabled, chat_id, latest_checkpoint, worktree) = {
                 let session = session_arc.lock().await;
@@ -509,12 +530,24 @@ pub async fn inject_priority_messages_if_any(
                     thread: session.thread.clone(),
                     content: parsed_content.clone(),
                 };
-                let user_message = user_message_with_client_message_id(
+                let mut user_message = user_message_with_client_message_id(
                     parsed_content,
                     checkpoints,
                     client_message_id,
                 );
+                for message in context_msgs {
+                    if let Ok(records) =
+                        refact_privacy::records_from_messages(std::slice::from_ref(&message))
+                    {
+                        crate::privacy::records::merge_records(
+                            &mut user_message,
+                            records.into_iter().map(|(_, record)| record),
+                        );
+                    }
+                    session.add_message(message);
+                }
                 session.add_message(user_message);
+                super::app_context::commit(&session.chat_id, &request.client_request_id);
                 session.live_diagnostics.accept(std::time::Instant::now());
                 note_user_turn_resets_goal_pursuit(&mut session);
                 accepted
@@ -2361,6 +2394,8 @@ async fn handle_regular_tool_decisions(
         let any_rejected = !outcome.denied_ids.is_empty();
 
         for id in &outcome.denied_ids {
+            session.app_mutation_receipts.remove(id);
+            session.automation_approval_receipts.remove(id);
             if let Some(call) = session.approval_wrapper_calls.remove(id) {
                 if let Ok(args) =
                     serde_json::from_str::<serde_json::Value>(&call.function.arguments)
@@ -2388,6 +2423,15 @@ async fn handle_regular_tool_decisions(
         }
 
         for id in &outcome.accepted_ids {
+            if let Err(error) =
+                crate::scheduler::automation_approval::accept_automation_approval(&mut session, id)
+            {
+                session.automation_approval_receipts.remove(id);
+                tracing::warn!(tool_call_id = %id, "automation human approval refused: {error}");
+            }
+            if let Some(receipt) = session.app_mutation_receipts.get_mut(id) {
+                receipt.accepted = true;
+            }
             if !session.runtime.accepted_tool_ids.contains(id) {
                 session.runtime.accepted_tool_ids.push(id.clone());
             }
@@ -3249,6 +3293,7 @@ mod tests {
                 context_files: Vec::new(),
                 suppress_auto_enrichment: false,
                 client_message_id: None,
+                app_context_ids: Vec::new(),
             },
         ] {
             command_handlers::handle_queue_command(
@@ -4000,6 +4045,7 @@ mod tests {
             context_files: vec![],
             suppress_auto_enrichment: false,
             client_message_id: client_message_id.map(str::to_string),
+            app_context_ids: Vec::new(),
         }
     }
 
@@ -5491,6 +5537,7 @@ mod tests {
                     context_files: vec![],
                     suppress_auto_enrichment: false,
                     client_message_id: None,
+                    app_context_ids: Vec::new(),
                 },
             });
             assert!(session.reprioritize_queued_command("multimodal-user", true));

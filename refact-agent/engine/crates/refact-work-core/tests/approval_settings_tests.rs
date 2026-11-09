@@ -20,6 +20,7 @@ fn request(id: &str) -> PendingApproval {
         tool_call_id: id.into(),
         tool_name: "shell".into(),
         args: serde_json::json!({"command":"echo accepted"}),
+        requires_human: false,
         digest: None,
         created_at: 0,
         expires_at: 100,

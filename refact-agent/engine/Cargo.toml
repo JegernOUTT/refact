@@ -3,6 +3,7 @@ members = [
     "vendor/headless_chrome",
     ".",
     "crates/refact-core",
+    "crates/refact-apps-core",
     "crates/refact-scheduler-core",
     "crates/refact-claude-cloud",
     "crates/refact-chat-api",
@@ -288,6 +289,7 @@ pnet_datalink = "0.35.0"
 [dependencies]
 clap.workspace = true
 cap-std.workspace = true
+cap-fs-ext = "3.4"
 
 # Pinned transitive dep (via rustls -> aws-lc-rs): aws-lc-sys 0.42.0's build script
 # aborts with a false-positive "COMPILER BUG DETECTED" (gcc bug 95189) on the CI
@@ -296,6 +298,7 @@ cap-std.workspace = true
 aws-lc-sys = "=0.38.0"
 
 refact-core = { path = "crates/refact-core" }
+refact-apps-core = { path = "crates/refact-apps-core" }
 refact-scheduler-core = { path = "crates/refact-scheduler-core" }
 refact-claude-cloud = { path = "crates/refact-claude-cloud" }
 refact-chat-api = { path = "crates/refact-chat-api" }

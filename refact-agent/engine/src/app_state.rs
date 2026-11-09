@@ -626,6 +626,7 @@ impl AppTurnToolPool {
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct ToolCatalogKey {
+    intent: refact_runtime_api::ToolCatalogIntent,
     workspace_scope: String,
     execution_scope: Option<String>,
     mode: String,
@@ -713,6 +714,7 @@ impl AppToolRegistry {
         gcx: SharedGlobalContext,
         mode: &str,
         model_id: Option<&str>,
+        intent: refact_runtime_api::ToolCatalogIntent,
     ) -> Vec<Box<dyn crate::tools::tools_description::Tool + Send>> {
         #[cfg(any(test, feature = "bench"))]
         if let Some(fixture_tool_factory) = &self.fixture_tool_factory {
@@ -721,7 +723,20 @@ impl AppToolRegistry {
             tokio::task::yield_now().await;
             return fixture_tool_factory();
         }
-        crate::tools::tools_list::get_tools_for_mode(gcx, mode, model_id).await
+        crate::tools::tools_list::get_tools_for_mode_with_intent(
+            gcx,
+            mode,
+            model_id,
+            match intent {
+                refact_runtime_api::ToolCatalogIntent::Policy => {
+                    crate::tools::tools_list::ToolCatalogIntent::Policy
+                }
+                refact_runtime_api::ToolCatalogIntent::UserFacing => {
+                    crate::tools::tools_list::ToolCatalogIntent::UserFacing
+                }
+            },
+        )
+        .await
     }
 
     fn snapshot_cache_enabled() -> bool {
@@ -734,6 +749,7 @@ impl AppToolRegistry {
         mode: &str,
         model_id: Option<&str>,
         execution_scope: Option<String>,
+        intent: refact_runtime_api::ToolCatalogIntent,
     ) -> ToolCatalogKey {
         let workspace_scope = crate::files_correction::get_active_project_path(gcx.clone())
             .await
@@ -742,6 +758,7 @@ impl AppToolRegistry {
             .to_string();
         let generations = &gcx.tool_catalog_generations;
         ToolCatalogKey {
+            intent,
             workspace_scope,
             execution_scope,
             mode: mode.to_string(),
@@ -760,9 +777,10 @@ impl AppToolRegistry {
         gcx: SharedGlobalContext,
         mode: &str,
         model_id: Option<&str>,
+        intent: refact_runtime_api::ToolCatalogIntent,
     ) -> ToolCatalogSnapshot {
         let tools = crate::tools::tools_list::apply_mcp_lazy_filter(
-            self.tools_for_mode(gcx, mode, model_id).await,
+            self.tools_for_mode(gcx, mode, model_id, intent).await,
         );
         let policy = crate::tools::tools_list::catalog_policy_for_tools(&tools.tools);
         let descriptions = tools
@@ -775,6 +793,7 @@ impl AppToolRegistry {
             .map(|tool| tool.name.clone())
             .collect::<Vec<_>>();
         ToolCatalogSnapshot {
+            intent,
             index: ToolRegistryIndex {
                 tools: descriptions,
                 mcp_lazy_mode: tools.mcp_lazy_mode,
@@ -792,8 +811,14 @@ impl AppToolRegistry {
         mode: &str,
         model_id: Option<&str>,
     ) -> Arc<ToolCatalogSnapshot> {
-        self.snapshot_for_mode_with_scope(gcx, mode, model_id, None)
-            .await
+        self.snapshot_for_mode_with_scope(
+            gcx,
+            mode,
+            model_id,
+            None,
+            refact_runtime_api::ToolCatalogIntent::Policy,
+        )
+        .await
     }
 
     async fn execution_scope_from_ccx(
@@ -816,7 +841,8 @@ impl AppToolRegistry {
     ) -> Vec<Box<dyn crate::tools::tools_description::Tool + Send>> {
         let span = perf_diagnostics::span(component, None, None);
         let tools = crate::tools::tools_list::apply_mcp_lazy_filter(
-            self.tools_for_mode(gcx, mode, model_id).await,
+            self.tools_for_mode(gcx, mode, model_id, catalog.intent)
+                .await,
         )
         .tools;
         span.finish_tool(
@@ -966,10 +992,11 @@ impl AppToolRegistry {
         mode: &str,
         model_id: Option<&str>,
         execution_scope: Option<String>,
+        intent: refact_runtime_api::ToolCatalogIntent,
     ) -> Arc<ToolCatalogSnapshot> {
         if !Self::snapshot_cache_enabled() {
             let span = perf_diagnostics::span(PerfComponent::ToolCatalogBuild, None, None);
-            let snapshot = Arc::new(self.build_snapshot(gcx, mode, model_id).await);
+            let snapshot = Arc::new(self.build_snapshot(gcx, mode, model_id, intent).await);
             span.finish_tool(
                 PerfOutcome::Success,
                 1,
@@ -979,7 +1006,7 @@ impl AppToolRegistry {
             return snapshot;
         }
         let key = self
-            .catalog_key_with_scope(gcx.clone(), mode, model_id, execution_scope)
+            .catalog_key_with_scope(gcx.clone(), mode, model_id, execution_scope, intent)
             .await;
         if let Some(snapshot) = gcx.tool_catalog_cache.get(&key).await {
             return snapshot;
@@ -990,7 +1017,10 @@ impl AppToolRegistry {
             return snapshot;
         }
         let span = perf_diagnostics::span(PerfComponent::ToolCatalogBuild, None, None);
-        let snapshot = Arc::new(self.build_snapshot(gcx.clone(), mode, model_id).await);
+        let snapshot = Arc::new(
+            self.build_snapshot(gcx.clone(), mode, model_id, intent)
+                .await,
+        );
         span.finish_tool(
             PerfOutcome::Success,
             1,
@@ -1023,8 +1053,14 @@ impl AppToolRegistry {
         model_id: Option<&str>,
         execution_scope: Option<String>,
     ) -> Arc<ToolCatalogSnapshot> {
-        self.snapshot_for_mode_with_scope(self.gcx.clone(), mode, model_id, execution_scope)
-            .await
+        self.snapshot_for_mode_with_scope(
+            self.gcx.clone(),
+            mode,
+            model_id,
+            execution_scope,
+            refact_runtime_api::ToolCatalogIntent::Policy,
+        )
+        .await
     }
 }
 
@@ -1090,6 +1126,7 @@ impl ToolRegistry for AppToolRegistry {
             mode,
             model_id,
             execution_scope.map(str::to_string),
+            refact_runtime_api::ToolCatalogIntent::Policy,
         )
         .await
         .index
@@ -1107,6 +1144,24 @@ impl ToolRegistry for AppToolRegistry {
             mode,
             model_id,
             execution_scope.map(str::to_string),
+            refact_runtime_api::ToolCatalogIntent::Policy,
+        )
+        .await
+    }
+
+    async fn acquire_tool_catalog_with_intent(
+        &self,
+        mode: &str,
+        model_id: Option<&str>,
+        execution_scope: Option<&str>,
+        intent: refact_runtime_api::ToolCatalogIntent,
+    ) -> Arc<ToolCatalogSnapshot> {
+        self.snapshot_for_mode_with_scope(
+            self.gcx.clone(),
+            mode,
+            model_id,
+            execution_scope.map(str::to_string),
+            intent,
         )
         .await
     }
@@ -1800,6 +1855,97 @@ mod tests {
     use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
     use serial_test::serial;
 
+    #[tokio::test]
+    #[serial(runtime_settings)]
+    async fn user_facing_catalog_intent_isolates_cache_and_materialization() {
+        use refact_runtime_api::ToolCatalogIntent;
+        use crate::yaml_configs::customization_registry::RegistryCache;
+        use crate::yaml_configs::customization_types::ProjectRegistry;
+        let _env = ToolCatalogSnapshotsEnvGuard::enable();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let mut modes = ProjectRegistry::default();
+        for (id, tools) in [("agent", "[cat]"), ("empty_custom", "[]")] {
+            modes.modes.insert(
+                id.into(),
+                serde_yaml::from_str(&format!("schema_version: 1\nid: {id}\ntools: {tools}\n"))
+                    .unwrap(),
+            );
+        }
+        gcx.project_registry_cache.write().unwrap().cache.insert(
+            gcx.config_dir.clone(),
+            RegistryCache {
+                project_root: gcx.config_dir.clone(),
+                registry: modes,
+                last_scan: std::time::SystemTime::now(),
+            },
+        );
+        let app = AppState::from_gcx(gcx.clone()).await;
+        let registry = AppToolRegistry::new(gcx.clone());
+        // Availability can bootstrap capabilities and advance the catalog generation.
+        // Complete that initialization before testing reuse of a stable snapshot.
+        let _ = crate::tools::tools_list::get_available_tool_groups(gcx.clone()).await;
+        for mode in ["agent", "empty_custom"] {
+            let mut session = crate::chat::types::ChatSession::new(format!("intent-{mode}"));
+            session.thread.mode = mode.into();
+            let intent = crate::chat::tool_catalog_intent_for_thread(&app, &session.thread).await;
+            assert_eq!(intent, ToolCatalogIntent::UserFacing);
+            let user = registry
+                .acquire_tool_catalog_with_intent(mode, None, None, intent)
+                .await;
+            let policy = registry.acquire_tool_catalog(mode, None, None).await;
+            assert!(!Arc::ptr_eq(&user, &policy));
+            assert_eq!(
+                user.index
+                    .tools
+                    .iter()
+                    .filter(|t| (t.name == "app" || t.name.starts_with("app_")))
+                    .count(),
+                10
+            );
+            assert!(!policy
+                .index
+                .tools
+                .iter()
+                .any(|t| (t.name == "app" || t.name.starts_with("app_"))));
+            let mutable = registry
+                .fresh_mutable_tools(
+                    gcx.clone(),
+                    mode,
+                    None,
+                    &user,
+                    PerfComponent::ToolMutableVectorBuild,
+                )
+                .await;
+            assert_eq!(
+                mutable
+                    .iter()
+                    .filter(|t| {
+                        let name = t.tool_description().name;
+                        name == "app" || name.starts_with("app_")
+                    })
+                    .count(),
+                10
+            );
+            let cached = registry
+                .acquire_tool_catalog_with_intent(mode, None, None, intent)
+                .await;
+            assert!(Arc::ptr_eq(&cached, &user));
+            for link in ["internal:fixture", "subagent", "fork"] {
+                session.thread.link_type = Some(link.into());
+                assert_eq!(
+                    crate::chat::tool_catalog_intent_for_thread(&app, &session.thread).await,
+                    ToolCatalogIntent::Policy
+                );
+            }
+            session.thread.parent_id = Some("parent".into());
+            session.thread.link_type = Some("mode_transition".into());
+            assert_eq!(
+                crate::chat::tool_catalog_intent_for_thread(&app, &session.thread).await,
+                ToolCatalogIntent::UserFacing
+            );
+        }
+    }
+
     struct ToolCatalogSnapshotsEnvGuard(Option<std::ffi::OsString>);
 
     impl ToolCatalogSnapshotsEnvGuard {
@@ -1962,6 +2108,7 @@ mod tests {
     #[serial(runtime_settings)]
     #[tokio::test]
     async fn tool_catalog_key_isolates_mode_and_model_and_keeps_mutable_instances_fresh() {
+        use refact_runtime_api::ToolCatalogIntent;
         let _env = ToolCatalogSnapshotsEnvGuard::enable();
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let builds = Arc::new(AtomicUsize::new(0));
@@ -1976,10 +2123,20 @@ mod tests {
             .snapshot_for_mode_for_test("agent", Some("provider/model-b"))
             .await;
         let mutable_a = registry
-            .tools_for_mode(gcx.clone(), "agent", Some("provider/model-a"))
+            .tools_for_mode(
+                gcx.clone(),
+                "agent",
+                Some("provider/model-a"),
+                ToolCatalogIntent::Policy,
+            )
             .await;
         let mutable_b = registry
-            .tools_for_mode(gcx.clone(), "agent", Some("provider/model-a"))
+            .tools_for_mode(
+                gcx.clone(),
+                "agent",
+                Some("provider/model-a"),
+                ToolCatalogIntent::Policy,
+            )
             .await;
 
         assert!(!Arc::ptr_eq(&first, &second));

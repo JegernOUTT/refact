@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 pub use refact_core::recovery::{RecoveryPolicy, RecoveryPolicyOverrides, RecoveryRecord};
 
+pub mod app_workspace;
 pub mod chat_local_types;
 pub mod code_lens;
 pub mod deliverable;
@@ -36,6 +37,11 @@ pub use chat_local_types::{
     max_queue_size, session_cleanup_interval, session_idle_timeout, stream_heartbeat,
     stream_idle_timeout, stream_total_timeout, install_runtime_timeouts, EnqueueCommandOutcome,
     PendingBrowserMessage, RuntimeChatTimeouts, TrajectorySourceIdentity,
+};
+pub use app_workspace::{
+    app_workspace_revision, apply_app_workspace_cas, newest_app_workspace, AppBinding,
+    AppLayoutNode, AppTab, AppWorkspace, AppWorkspaceSetError, ChatTabRef, SplitDirection,
+    StoredAppWorkspace, APP_WORKSPACE_SCHEMA_VERSION,
 };
 pub use notification_event::{NotificationEvent, NotificationQuestion};
 pub use seal::SealReason;
@@ -684,6 +690,8 @@ pub struct ThreadParams {
     pub claude_code_identity: Option<ClaudeCodeIdentity>,
     #[serde(default, skip_serializing_if = "Option::is_none", skip_deserializing)]
     pub reactive_compact_attempts: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_workspace: Option<StoredAppWorkspace>,
 }
 
 impl refact_core::worktree_meta::WorktreeThread for ThreadParams {
@@ -781,6 +789,7 @@ impl Default for ThreadParams {
             frozen_request_prefix: None,
             claude_code_identity: None,
             reactive_compact_attempts: None,
+            app_workspace: None,
         }
     }
 }
@@ -1263,6 +1272,8 @@ pub enum ChatCommand {
         suppress_auto_enrichment: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         client_message_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        app_context_ids: Vec<String>,
     },
     RetryFromIndex {
         index: usize,
@@ -1272,6 +1283,10 @@ pub enum ChatCommand {
     },
     SetParams {
         patch: serde_json::Value,
+    },
+    SetAppWorkspace {
+        expected_revision: u64,
+        workspace: AppWorkspace,
     },
     SetGoal {
         content: String,
@@ -1626,6 +1641,13 @@ impl CommandRequest {
                     String::new(),
                 )
             }
+            ChatCommand::SetAppWorkspace {
+                expected_revision, ..
+            } => (
+                "set_app_workspace".to_string(),
+                format!("expected_revision={expected_revision}"),
+                String::new(),
+            ),
             ChatCommand::SetGoal {
                 content, ..
             } => ("set_goal".to_string(), content.clone(), content.clone()),
@@ -2321,6 +2343,7 @@ mod tests {
                 context_files,
                 client_message_id,
                 suppress_auto_enrichment: _,
+                ..
             } => {
                 assert_eq!(content, json!("hello"));
                 assert!(attachments.is_empty());

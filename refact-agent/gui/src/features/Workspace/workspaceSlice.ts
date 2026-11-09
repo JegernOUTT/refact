@@ -12,6 +12,7 @@ import {
   type SplitNode,
 } from "../ChatPanes/panesTree";
 import {
+  isAppSurface,
   isChatSurface,
   isSplittableSurface,
   isDesignSurface,
@@ -47,7 +48,12 @@ export type WorkspaceState = {
   drawer?: WorkspaceDrawerState;
 };
 
-export type WorkspaceDockSection = "files" | "git" | "agents" | "activity";
+export type WorkspaceDockSection =
+  | "files"
+  | "git"
+  | "agents"
+  | "activity"
+  | "apps";
 
 export const normalizeWorkspaceDockSection = (
   section: unknown,
@@ -56,7 +62,8 @@ export const normalizeWorkspaceDockSection = (
     section === "files" ||
     section === "git" ||
     section === "agents" ||
-    section === "activity"
+    section === "activity" ||
+    section === "apps"
   ) {
     return section;
   }
@@ -1053,7 +1060,14 @@ const workspaceStatesEqual = (
 export const ensureSingleWorkspaceLayout = (
   state: WorkspaceState,
 ): WorkspaceState => {
-  const candidates: SurfaceKey[] = state.tabs.filter(isSplittableSurface);
+  const candidates: SurfaceKey[] = state.tabs.filter(
+    (key) =>
+      isSplittableSurface(key) &&
+      !isAppSurface(key) &&
+      !collectTabIds(state.groups[key]?.root ?? createLeaf("check", [])).some(
+        isAppSurface,
+      ),
+  );
   if (candidates.length === 0) return state;
   const primary = candidates.includes(state.activeTabId ?? "")
     ? state.activeTabId ?? candidates[0]
@@ -1205,13 +1219,20 @@ export const sanitizeWorkspaceSurfaceUniqueness = (
 };
 
 const openLocalSurface = (state: WorkspaceState, key: SurfaceKey): void => {
+  if (isAppSurface(key)) {
+    if (!state.tabs.includes(key)) state.tabs.push(key);
+    state.activeTabId = key;
+    return;
+  }
   Object.assign(state, ensureSingleWorkspaceLayout(state));
   if (isFileSurface(key) && !(key in (state.contextChatByTab ?? {})))
     state.contextChatByTab = {
       ...state.contextChatByTab,
       [key]: focusedWorkspaceChatId(state) ?? "",
     };
-  const tabId = state.tabs.find(isSplittableSurface);
+  const tabId = state.tabs.find(
+    (surface) => isSplittableSurface(surface) && !isAppSurface(surface),
+  );
   const group = tabId ? state.groups[tabId] : undefined;
   if (!tabId || !group) {
     state.tabs.push(key);
@@ -1339,6 +1360,26 @@ export const workspaceSlice = createSlice({
   reducerPath: "workspace",
   initialState,
   reducers: {
+    restoreAppWorkspace: (
+      state,
+      action: PayloadAction<{
+        chatId: string;
+        root: PaneNode;
+        focusedLeafId: string;
+      }>,
+    ) => {
+      const key = `chat:${action.payload.chatId}`;
+      for (const surface of collectTabIds(action.payload.root)) {
+        detachSurfaceForGroup(state, key, surface);
+        removeSurfaceFromGroups(state, surface);
+      }
+      if (!state.tabs.includes(key)) state.tabs.push(key);
+      state.groups[key] = {
+        root: action.payload.root,
+        focusedLeafId: action.payload.focusedLeafId,
+      };
+      state.activeTabId = key;
+    },
     setContentTaskView: (
       state,
       action: PayloadAction<{
@@ -2095,6 +2136,7 @@ export const workspaceSlice = createSlice({
 });
 
 export const {
+  restoreAppWorkspace,
   setContentTaskView,
   setContentCard,
   clearWorkspaceChatState,

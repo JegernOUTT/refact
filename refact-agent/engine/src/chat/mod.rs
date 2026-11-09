@@ -1,3 +1,5 @@
+pub mod app_context;
+pub mod app_workspace;
 pub mod browser_context;
 pub(crate) mod browser_decisions;
 pub mod cache_diagnostics;
@@ -19,7 +21,8 @@ pub mod diagnostics;
 mod generation;
 pub mod live_diagnostics;
 pub(crate) use generation::{
-    length_stop_continue_instruction, normalize_stop_reason, LengthStopKind, NormalizedStopReason,
+    length_stop_continue_instruction, normalize_stop_reason, tool_catalog_intent_for_thread,
+    LengthStopKind, NormalizedStopReason,
 };
 #[cfg(test)]
 mod generation_pressure_retry_tests;
@@ -128,6 +131,7 @@ pub use handlers::{
     handle_v1_chats_subscribe_many, handle_v1_chat_subscribe, handle_v1_chat_command,
     handle_v1_chat_cancel_queued, handle_v1_chat_reprioritize_queued,
 };
+pub use app_workspace::{get_app_workspace, set_app_workspace};
 pub use goal_monitor::start_goal_monitor;
 pub use task_agent_monitor::start_agent_monitor;
 

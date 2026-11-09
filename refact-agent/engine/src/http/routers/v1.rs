@@ -143,10 +143,12 @@ use crate::http::routers::v1::background_agents::{
     handle_v1_background_agents_message,
 };
 
+mod apps;
 mod ast;
 pub mod at_commands;
 pub mod at_tools;
 mod attention;
+pub mod automation_credentials;
 mod background_agents;
 pub mod browser_settings;
 pub mod buddy;
@@ -340,6 +342,7 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
         .merge(project_information_routes())
         .merge(exec_routes())
         .merge(scheduler_routes())
+        .nest("/scheduler/credentials", automation_credentials::router())
         .merge(browser_routes())
         .merge(stats_routes())
         .merge(extensions_routes())
@@ -411,6 +414,13 @@ fn core_routes() -> Router<AppState> {
 
 fn coordination_routes() -> Router<AppState> {
     Router::new()
+        .route("/apps", get(apps::list))
+        .route("/apps/:app_id/document", get(apps::document))
+        .route(
+            "/apps/commands",
+            post(apps::commands).layer(axum::extract::DefaultBodyLimit::max(9 * 1024 * 1024)),
+        )
+        .route("/apps/subscribe", get(apps::subscribe))
         .route("/work", get(work::list))
         .route("/work/subscribe", get(work::subscribe))
         .route("/work/wait-graph", get(work::wait_graph))
@@ -995,6 +1005,21 @@ fn exec_routes() -> Router<AppState> {
 
 fn scheduler_routes() -> Router<AppState> {
     Router::new()
+        .route(
+            "/scheduler/automation",
+            get(scheduler::handle_v1_scheduler_automation_get)
+                .post(scheduler::handle_v1_scheduler_automation_post),
+        )
+        .route(
+            "/scheduler/automation/:id",
+            get(scheduler::handle_v1_scheduler_automation_detail)
+                .put(scheduler::handle_v1_scheduler_automation_put)
+                .delete(scheduler::handle_v1_scheduler_automation_delete),
+        )
+        .route(
+            "/scheduler/automation/:id/control",
+            post(scheduler::handle_v1_scheduler_automation_control),
+        )
         .route(
             "/scheduler/cron",
             get(handle_v1_scheduler_cron_get).post(handle_v1_scheduler_cron_post),
@@ -1840,6 +1865,11 @@ mod router_tests {
             ("GET", "/project-information"),
             ("GET", "/exec/list"),
             ("GET", "/scheduler/cron"),
+            ("GET", "/scheduler/automation"),
+            ("POST", "/scheduler/automation"),
+            ("PUT", "/scheduler/automation/test"),
+            ("DELETE", "/scheduler/automation/test"),
+            ("POST", "/scheduler/automation/test/control"),
             ("POST", "/browser/status"),
             ("GET", "/stats/llm/summary"),
             ("GET", "/ext/registry"),
@@ -1910,5 +1940,194 @@ mod router_tests {
         }
         let limited = router.oneshot(frontend_error_request()).await.unwrap();
         assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut gcx = crate::global_context::tests::make_test_gcx_with_dirs(
+            dir.path().join("cache"),
+            dir.path().join("config"),
+        )
+        .await;
+        let cmdline = &mut std::sync::Arc::get_mut(&mut gcx).unwrap().cmdline;
+        cmdline.daemon_auth_token = Some("automation-router-token".into());
+        cmdline.http_host = Some("127.0.0.1".into());
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![dir.path().into()];
+        let app = AppState::from_gcx(gcx).await;
+        let runtime = crate::scheduler::automation_api::active(&app)
+            .await
+            .unwrap();
+        let definition = serde_json::json!({"schema_version":1,"id":"private-automation","revision":1,
+            "owner":{"kind":"project"},"description":"private automation","enabled":false,
+            "trigger":{"kind":"continuous"},"action":{"kind":"collect","driver":{"type":"manual"}},
+            "deliveries":[],"lifecycle":{"kind":"on_demand"},
+            "policy":{"idempotent":false,"max_pending_events":10,"max_event_bytes":1024}});
+        let initial = runtime
+            .save(0, vec![serde_json::from_value(definition.clone()).unwrap()])
+            .await
+            .unwrap();
+        assert_eq!(initial.definitions.len(), 1);
+        let revision =
+            serde_json::json!({"expected_catalog_revision":initial.revision,"expected_revision":1});
+        let save = serde_json::json!({"expected_catalog_revision":initial.revision,
+            "expected_revision":1,"definition":definition});
+        let control = serde_json::json!({"expected_catalog_revision":initial.revision,
+            "expected_revision":1,"operation":"enable"});
+        let router = make_v1_router(app.clone()).with_state(app.clone());
+        for (method, uri, body) in [
+            ("GET", "/scheduler/automation", serde_json::Value::Null),
+            (
+                "GET",
+                "/scheduler/automation/private-automation",
+                serde_json::Value::Null,
+            ),
+            ("POST", "/scheduler/automation", save.clone()),
+            ("PUT", "/scheduler/automation/private-automation", save),
+            (
+                "DELETE",
+                "/scheduler/automation/private-automation",
+                revision.clone(),
+            ),
+            (
+                "POST",
+                "/scheduler/automation/private-automation/control",
+                control,
+            ),
+        ] {
+            let (status, body) =
+                automation_request(&router, method, uri, body, None, Some("127.0.0.1:7"), None)
+                    .await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{method} {uri}: {body}");
+            assert!(!body.to_string().contains("private-automation"));
+            assert_eq!(
+                serde_json::to_value(runtime.list().unwrap()).unwrap(),
+                serde_json::to_value(&initial).unwrap()
+            );
+        }
+        let (status, _) = automation_request(
+            &router,
+            "GET",
+            "/scheduler/automation",
+            serde_json::Value::Null,
+            Some("wrong-token"),
+            Some("127.0.0.1:7"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        for uri in [
+            "/scheduler/automation",
+            "/scheduler/automation/private-automation",
+        ] {
+            let (status, body) = automation_request(
+                &router,
+                "GET",
+                uri,
+                serde_json::Value::Null,
+                Some("automation-router-token"),
+                Some("192.0.2.1:7"),
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(body["definitions"].as_array().unwrap().len(), 1);
+            assert_eq!(
+                body["definitions"][0]["definition"]["id"],
+                "private-automation"
+            );
+        }
+        let (status, _) = automation_request(
+            &router,
+            "DELETE",
+            "/scheduler/automation/private-automation",
+            revision.clone(),
+            Some("automation-router-token"),
+            Some("127.0.0.1:7"),
+            Some("http://evil.example"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(runtime.list().unwrap().definitions.len(), 1);
+        let (status, body) = automation_request(
+            &router,
+            "DELETE",
+            "/scheduler/automation/private-automation",
+            revision,
+            Some("automation-router-token"),
+            Some("127.0.0.1:7"),
+            Some("http://127.0.0.1:8001"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["removed"], true);
+        assert!(runtime.list().unwrap().definitions.is_empty());
+        runtime.shutdown().await;
+        runtime.sources.shutdown().await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut gcx = crate::global_context::tests::make_test_gcx_with_dirs(
+            dir.path().join("local-cache"),
+            dir.path().join("local-config"),
+        )
+        .await;
+        std::sync::Arc::get_mut(&mut gcx).unwrap().cmdline.http_host = Some("127.0.0.1".into());
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![dir.path().into()];
+        let app = AppState::from_gcx(gcx).await;
+        let router = make_v1_router(app.clone()).with_state(app.clone());
+        for (peer, origin, expected) in [
+            (None, None, StatusCode::UNAUTHORIZED),
+            (
+                Some("127.0.0.1:7"),
+                Some("http://127.0.0.1:8001"),
+                StatusCode::OK,
+            ),
+        ] {
+            let (status, _) = automation_request(
+                &router,
+                "GET",
+                "/scheduler/automation",
+                serde_json::Value::Null,
+                None,
+                peer,
+                origin,
+            )
+            .await;
+            assert_eq!(status, expected, "peer={peer:?} origin={origin:?}");
+        }
+        let runtime = crate::scheduler::automation_api::active(&app)
+            .await
+            .unwrap();
+        runtime.shutdown().await;
+        runtime.sources.shutdown().await;
+    }
+
+    async fn automation_request(
+        router: &axum::Router,
+        method: &str,
+        uri: &str,
+        body: serde_json::Value,
+        token: Option<&str>,
+        peer: Option<&str>,
+        origin: Option<&str>,
+    ) -> (StatusCode, serde_json::Value) {
+        let mut request = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("host", "127.0.0.1:8001")
+            .header("content-type", "application/json");
+        if let Some(token) = token {
+            request = request.header("authorization", format!("Bearer {token}"));
+        }
+        if let Some(origin) = origin {
+            request = request.header("origin", origin);
+        }
+        let mut request = request.body(Body::from(body.to_string())).unwrap();
+        if let Some(peer) = peer {
+            request.extensions_mut().insert(axum::extract::ConnectInfo(
+                peer.parse::<std::net::SocketAddr>().unwrap(),
+            ));
+        }
+        let response = router.clone().oneshot(request).await.unwrap();
+        let status = response.status();
+        let body = hyper::body::to_bytes(response.into_body()).await.unwrap();
+        (status, serde_json::from_slice(&body).unwrap())
     }
 }

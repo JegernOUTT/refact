@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use chrono_tz::Tz;
+use refact_scheduler_core::automation::{AutomationJournal, WakeSummary};
 use serde::Serialize;
 use serde_json::json;
 use tokio::task::JoinHandle;
@@ -13,14 +14,15 @@ use crate::daemon::projects::ProjectEntry;
 use crate::daemon::state::{now_ms, DaemonState};
 use crate::daemon::supervisor::WorkerState;
 use crate::scheduler::{
-    next_run_ms, recurring_missed_grace_state, scheduled_tasks_path, scheduler_timezone, Action,
-    AgentTarget, Delivery, Job, MissedRunGraceConfig, Trigger,
+    next_run_ms, recurring_missed_grace_state, scheduled_tasks_path, scheduler_timezone, Job,
+    MissedRunGraceConfig,
 };
 
 pub(crate) const WAKE_LEAD_MS: u64 = 90_000;
 pub const CRON_PENDING_HORIZON_MS: u64 = crate::daemon::idle::CRON_SOON_MS;
 const TICK_INTERVAL: Duration = Duration::from_secs(30);
 const REPARSE_SOON_MS: u64 = 120_000;
+const OBSERVER_RETRY_MS: u64 = 5 * 60_000;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct PendingCron {
@@ -41,12 +43,18 @@ struct ProjectScheduleCache {
     pending: Option<PendingCron>,
     parse_failed: bool,
     warned_mtime: Option<SystemTime>,
+    observer_retry_ms: u64,
 }
 
 #[derive(Debug, Eq, PartialEq)]
 struct ProjectScan {
     pending: Option<PendingCron>,
     parsed: bool,
+}
+
+pub(crate) struct AutomationObservation {
+    pub summary: WakeSummary,
+    pub legacy_authority_retired: bool,
 }
 
 pub fn spawn(state: Arc<DaemonState>) -> JoinHandle<()> {
@@ -103,6 +111,9 @@ impl CronClock {
     }
 
     pub(crate) async fn tick_at(&mut self, now: u64) {
+        if self.state.is_shutting_down() {
+            return;
+        }
         // Bounded observation only: retained supervision is never cron authority.
         self.state.reconcile_buddy_batch(now).await;
         self.state.tick_buddy_wakes(now).await;
@@ -125,7 +136,45 @@ impl CronClock {
 
     async fn tick_project(&mut self, entry: ProjectEntry, now: u64) {
         let cache = self.cache.entry(entry.id.clone()).or_default();
-        let scan = scan_project_file(&entry, cache, now).await;
+        if now < cache.observer_retry_ms {
+            return;
+        }
+        let scan = match observe_automation(&entry.root, now).await {
+            Ok(Some(observation)) => {
+                let mut pending = automation_pending(&observation.summary, now);
+                if !observation.legacy_authority_retired {
+                    let legacy = scan_project_file(&entry, cache, now).await.pending;
+                    pending = match (pending, legacy) {
+                        (Some(a), Some(b)) => Some(if a.next_fire_ms <= b.next_fire_ms {
+                            a
+                        } else {
+                            b
+                        }),
+                        (a, b) => a.or(b),
+                    };
+                }
+                ProjectScan {
+                    pending,
+                    parsed: true,
+                }
+            }
+            Ok(None) => scan_project_file(&entry, cache, now).await,
+            Err(error) => {
+                cache.observer_retry_ms = now.saturating_add(OBSERVER_RETRY_MS);
+                self.state.set_cron_pending(&entry.id, None).await;
+                tracing::warn!(project_id = %entry.id, "automation wake observation unavailable: {error}");
+                let _ = self
+                    .state
+                    .events
+                    .emit(
+                        "automation_observer_error",
+                        Some(entry.id),
+                        json!({"error":error,"retry_at_ms":cache.observer_retry_ms}),
+                    )
+                    .await;
+                return;
+            }
+        };
         self.state
             .set_cron_pending(
                 &entry.id,
@@ -155,7 +204,7 @@ impl CronClock {
         if worker_ready_or_starting {
             return;
         }
-        match self.state.supervisor.ensure_worker(&entry).await {
+        match self.state.supervisor.ensure_worker_auto(&entry).await {
             Ok(worker) => {
                 let worker_state = worker.state.clone();
                 let _ = self
@@ -202,6 +251,46 @@ impl CronClock {
             }
         }
     }
+}
+
+/// Observation never creates a journal, takes the executor lease, or mutates SQL.
+/// `None` is the pre-migration legacy project, not a failed/empty journal.
+pub(crate) async fn observe_automation(
+    root: &std::path::Path,
+    now: u64,
+) -> Result<Option<AutomationObservation>, String> {
+    let root = root.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        // The authoritative journal is in the private, canonical-root keyed
+        // cache, never in the untrusted project tree. Missing observation does
+        // not create storage; observer validates private-path ownership/links.
+        let path = refact_scheduler_core::automation::journal_path(&root)?;
+        match std::fs::symlink_metadata(&path) {
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.to_string()),
+            Ok(_) => {}
+        }
+        let observer = AutomationJournal::open_observer(&root)?;
+        Ok(Some(AutomationObservation {
+            summary: observer.wake_summary_at_in_timezone(now, scheduler_timezone())?,
+            legacy_authority_retired: observer.legacy_authority_retired()?,
+        }))
+    })
+    .await
+    .map_err(|error| format!("automation observer task failed: {error}"))?
+}
+
+fn automation_pending(summary: &WakeSummary, now: u64) -> Option<PendingCron> {
+    // Only restart-opted-in leases may wake a stopped worker without a timer.
+    let next_fire_ms = if summary.background_restart {
+        Some(now)
+    } else {
+        summary.next_wake_ms
+    }?;
+    Some(PendingCron {
+        task_id: "automation".into(),
+        next_fire_ms,
+    })
 }
 
 async fn scan_project_file(
@@ -311,22 +400,19 @@ fn next_pending_task(tasks: &[Job], now: u64, tz: Tz) -> Option<PendingCron> {
 }
 
 fn next_fire_for_task(task: &Job, now: u64, tz: Tz) -> Option<u64> {
-    if !task.durable {
+    if !task.durable || task.is_paused() {
         return None;
     }
-    if !is_supported_chat_job(task) {
-        tracing::warn!(
-            "skipping unsupported scheduled task {} in daemon cron clock",
-            task.id
-        );
+    if task.recurring
+        && task.auto_expire_after_ms > 0
+        && task.created_at_ms.saturating_add(task.auto_expire_after_ms) <= now
+    {
         return None;
+    }
+    if let Some(trigger_at_ms) = task.trigger_at_ms {
+        return Some(trigger_at_ms.max(now));
     }
     if task.recurring {
-        if task.auto_expire_after_ms > 0
-            && task.created_at_ms.saturating_add(task.auto_expire_after_ms) <= now
-        {
-            return None;
-        }
         let from_ms = task.last_fired_at_ms.unwrap_or(task.created_at_ms);
         let state =
             recurring_missed_grace_state(task, from_ms, now, tz, MissedRunGraceConfig::default())?;
@@ -346,20 +432,6 @@ fn next_fire_for_task(task: &Job, now: u64, tz: Tz) -> Option<u64> {
     })
 }
 
-fn is_supported_chat_job(task: &Job) -> bool {
-    matches!(task.trigger, Trigger::Cron { .. })
-        && matches!(
-            (&task.action, &task.delivery),
-            (
-                Action::AgentTurn {
-                    target: AgentTarget::ExistingChat { .. },
-                    ..
-                },
-                Delivery::Chat,
-            )
-        )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -372,6 +444,22 @@ mod tests {
     use crate::daemon::events::EventBus;
     use crate::daemon::projects::ProjectSettings;
     use crate::scheduler::DEFAULT_RECURRING_AUTO_EXPIRE_AFTER_MS;
+
+    /// Removes only cache storage created for a unique temporary project root.
+    struct TestJournalStorage(std::path::PathBuf);
+    impl TestJournalStorage {
+        fn create(root: &std::path::Path) -> Self {
+            let path = refact_scheduler_core::automation::journal_path(root).unwrap();
+            assert!(!path.exists(), "test journal must not preexist");
+            drop(AutomationJournal::open(root).unwrap());
+            Self(path)
+        }
+    }
+    impl Drop for TestJournalStorage {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(self.0.parent().unwrap());
+        }
+    }
 
     struct EnvGuard {
         keys: Vec<(&'static str, Option<String>)>,
@@ -454,6 +542,7 @@ mod tests {
             root,
             pinned: false,
             last_active_ms: 0,
+            automation_suspended: false,
             settings: ProjectSettings::default(),
         }
     }
@@ -516,6 +605,343 @@ mod tests {
 
         assert_eq!(pending.task_id, "active");
         assert_eq!(pending.next_fire_ms, utc_ms(2026, 1, 1, 0, 5));
+    }
+
+    #[test]
+    fn automation_wake_summary_does_not_confuse_review_counts_with_authority() {
+        let now = 100_000;
+        let old_summary: WakeSummary = serde_json::from_value(json!({
+            "next_wake_ms": null,
+            "background_active": true,
+            "pending_delivery": 0,
+            "recovery": 0
+        }))
+        .unwrap();
+        assert!(old_summary.background_active);
+        assert!(!old_summary.background_restart);
+        assert!(automation_pending(&old_summary, now).is_none());
+        let mut summary = WakeSummary::default();
+        summary.recovery = 5;
+        summary.pending_delivery = 5;
+        assert!(automation_pending(&summary, now).is_none());
+        summary.next_wake_ms = Some(now + WAKE_LEAD_MS);
+        assert_eq!(
+            automation_pending(&summary, now).unwrap().next_fire_ms,
+            now + WAKE_LEAD_MS
+        );
+        summary.background_active = true;
+        summary.next_wake_ms = None;
+        assert!(automation_pending(&summary, now).is_none());
+        summary.background_restart = true;
+        assert_eq!(automation_pending(&summary, now).unwrap().next_fire_ms, now);
+    }
+
+    #[test]
+    fn legacy_transition_observes_each_meaningful_trigger_and_disable_gate() {
+        use crate::scheduler::Trigger;
+        let now = utc_ms(2026, 1, 1, 0, 0);
+        let cron = task("cron", "*/1 * * * *", now);
+        let mut interval = cron.clone();
+        interval.id = "interval".into();
+        interval.trigger = Trigger::Interval {
+            every_ms: 60_000,
+        };
+        let mut once = cron.clone();
+        once.id = "once".into();
+        once.recurring = false;
+        once.trigger = Trigger::Once {
+            at_ms: now + 1_000,
+        };
+        let mut manual = cron.clone();
+        manual.id = "manual".into();
+        manual.trigger = Trigger::Manual;
+        manual.trigger_at_ms = Some(now);
+        let mut retry = cron.clone();
+        retry.id = "retry".into();
+        retry.trigger_at_ms = Some(now + 5_000);
+        retry.retry_attempts = 1;
+        for row in [cron, interval, once, manual, retry] {
+            assert!(
+                next_fire_for_task(&row, now, chrono_tz::UTC).is_some(),
+                "{}",
+                row.id
+            );
+            let mut disabled = row;
+            disabled.enabled = false;
+            assert_eq!(next_fire_for_task(&disabled, now, chrono_tz::UTC), None);
+        }
+    }
+
+    #[tokio::test]
+    async fn observer_missing_project_does_not_create_storage() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("project");
+        tokio::fs::create_dir(&root).await.unwrap();
+        assert!(observe_automation(&root, 100).await.unwrap().is_none());
+        assert!(!root.join(".refact").exists());
+    }
+
+    #[tokio::test]
+    async fn observer_background_lease_requires_approval_and_expires_at_boundary() {
+        use crate::daemon::idle::{idle_decision, IdleDecision, WorkerIdleSnapshot};
+        use refact_scheduler_core::automation::{GrantRecord, SourceControl};
+        let dir = tempdir().unwrap();
+        let _storage = TestJournalStorage::create(dir.path());
+        let journal = AutomationJournal::open(dir.path()).unwrap();
+        journal
+            .reconcile_app_source("app", "stream", "digest", &json!({}))
+            .unwrap();
+        // Merely declaring an automation is never a keepalive lease.
+        assert!(
+            !observe_automation(dir.path(), 100)
+                .await
+                .unwrap()
+                .unwrap()
+                .summary
+                .background_active
+        );
+        journal
+            .grant_source(&GrantRecord {
+                app_id: "app".into(),
+                source_id: "stream".into(),
+                config_digest: "digest".into(),
+                endpoint_grant: None,
+                credential_refs: vec![],
+                granted: true,
+            })
+            .unwrap();
+        journal
+            .set_source_control(
+                "app",
+                "stream",
+                &SourceControl {
+                    background: true,
+                    resume_after_restart: false,
+                    expires_at_ms: Some(200),
+                    next_wake_ms: Some(150),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let live = observe_automation(dir.path(), 199)
+            .await
+            .unwrap()
+            .unwrap()
+            .summary;
+        assert!(live.background_active);
+        assert!(!live.background_restart);
+        assert!(automation_pending(&live, 199).is_none());
+        // Use an otherwise stoppable live snapshot to isolate residency from the
+        // independent policy clock/timeout; no process or wall-clock wait needed.
+        let policy_now = 120_000;
+        let mut snapshot = WorkerIdleSnapshot {
+            state: WorkerState::Ready,
+            pinned: false,
+            live_proxy_streams: 0,
+            last_proxy_activity_ms: 0,
+            lsp_clients: 0,
+            busy_chats: 0,
+            exec_running: 0,
+            last_status_report_ms: policy_now,
+            cron_next_fire_ms: None,
+            automation_background_active: Some(live.background_active),
+        };
+        let config = DaemonConfig {
+            idle_timeout_secs: 1,
+            ..Default::default()
+        };
+        assert_eq!(
+            idle_decision(policy_now, &snapshot, &config),
+            IdleDecision::Keep
+        );
+        let expired = observe_automation(dir.path(), 200)
+            .await
+            .unwrap()
+            .unwrap()
+            .summary;
+        assert!(!expired.background_active);
+        assert!(!expired.background_restart);
+        assert!(automation_pending(&expired, 200).is_none());
+        snapshot.automation_background_active = Some(expired.background_active);
+        assert_eq!(
+            idle_decision(policy_now, &snapshot, &config),
+            IdleDecision::Stop
+        );
+        journal
+            .set_source_control(
+                "app",
+                "stream",
+                &SourceControl {
+                    background: true,
+                    resume_after_restart: true,
+                    expires_at_ms: Some(200),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let resumable = observe_automation(dir.path(), 199)
+            .await
+            .unwrap()
+            .unwrap()
+            .summary;
+        assert!(resumable.background_active);
+        assert!(resumable.background_restart);
+        assert_eq!(
+            automation_pending(&resumable, 199).unwrap().next_fire_ms,
+            199
+        );
+        assert!(
+            !observe_automation(dir.path(), 200)
+                .await
+                .unwrap()
+                .unwrap()
+                .summary
+                .background_restart
+        );
+        journal
+            .set_source_control(
+                "app",
+                "stream",
+                &SourceControl {
+                    background: true,
+                    paused: true,
+                    resume_after_restart: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let paused = observe_automation(dir.path(), 199)
+            .await
+            .unwrap()
+            .unwrap()
+            .summary;
+        assert!(!paused.background_active);
+        assert!(!paused.background_restart);
+        assert!(automation_pending(&paused, 199).is_none());
+        journal
+            .set_source_control(
+                "app",
+                "stream",
+                &SourceControl {
+                    background: true,
+                    resume_after_restart: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        // Approval is still checked even for both requested lease authorities.
+        journal
+            .reconcile_app_source("app", "stream", "changed", &json!({}))
+            .unwrap();
+        let unapproved = observe_automation(dir.path(), 199)
+            .await
+            .unwrap()
+            .unwrap()
+            .summary;
+        assert!(!unapproved.background_active);
+        assert!(!unapproved.background_restart);
+        assert!(automation_pending(&unapproved, 199).is_none());
+    }
+
+    #[tokio::test]
+    async fn corrupt_journal_is_error_not_legacy_or_wake_authority() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("project");
+        tokio::fs::create_dir(&root).await.unwrap();
+        let storage = TestJournalStorage::create(&root);
+        tokio::fs::write(&storage.0, b"corrupt").await.unwrap();
+        assert!(observe_automation(&root, 100).await.is_err());
+        assert!(!storage.0.with_file_name("runtime.sqlite-wal").exists());
+        assert!(!storage.0.with_file_name("runtime.sqlite-shm").exists());
+
+        let binding_root = dir.path().join("binding-project");
+        tokio::fs::create_dir(&binding_root).await.unwrap();
+        let binding_storage = TestJournalStorage::create(&binding_root);
+        {
+            let setup = rusqlite::Connection::open(&binding_storage.0).unwrap();
+            setup
+                .execute_batch(
+                    "UPDATE metadata SET value='wrong-project-root' WHERE key='project_root';
+                     DROP INDEX runs_status;",
+                )
+                .unwrap();
+        }
+        let before = tokio::fs::read(&binding_storage.0).await.unwrap();
+        assert_eq!(
+            observe_automation(&binding_root, 100).await.err().unwrap(),
+            "runtime journal project binding mismatch"
+        );
+        assert_eq!(tokio::fs::read(&binding_storage.0).await.unwrap(), before);
+        assert!(!binding_storage
+            .0
+            .with_file_name("runtime.sqlite-wal")
+            .exists());
+        assert!(!binding_storage
+            .0
+            .with_file_name("runtime.sqlite-shm")
+            .exists());
+    }
+
+    #[tokio::test]
+    async fn corrupt_observer_retries_coarsely_without_starting_worker() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("project");
+        tokio::fs::create_dir(&root).await.unwrap();
+        let storage = TestJournalStorage::create(&root);
+        tokio::fs::write(&storage.0, b"corrupt").await.unwrap();
+        let state = DaemonState::new_with_daemon_dir(
+            DaemonConfig::default(),
+            EventBus::new(dir.path().join("events.jsonl")),
+            None,
+            dir.path().join("daemon"),
+            0,
+        );
+        let entry = state.projects.write().await.open(root).await.unwrap();
+        let mut clock = CronClock::new(state.clone());
+        clock.tick_at(100).await;
+        clock.tick_at(101).await;
+        assert_eq!(state.supervisor.worker_count().await, 0);
+        assert_eq!(
+            state
+                .events
+                .snapshot()
+                .await
+                .iter()
+                .filter(|event| event.kind == "automation_observer_error")
+                .count(),
+            1
+        );
+        clock.tick_at(100 + OBSERVER_RETRY_MS).await;
+        assert_eq!(
+            state
+                .events
+                .snapshot()
+                .await
+                .iter()
+                .filter(|event| event.kind == "automation_observer_error")
+                .count(),
+            2
+        );
+        assert_eq!(state.cron_pending(&entry.id).await, None);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn observer_ignores_project_local_symlink_and_seeded_database() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("project");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join(".refact")).unwrap();
+        let seeded = outside.join("automation/runtime.sqlite");
+        std::fs::create_dir(outside.join("automation")).unwrap();
+        std::fs::write(&seeded, b"untrusted project-seeded database").unwrap();
+        assert!(observe_automation(&root, 100).await.unwrap().is_none());
+        assert_eq!(
+            std::fs::read(&seeded).unwrap(),
+            b"untrusted project-seeded database"
+        );
     }
 
     #[test]
@@ -652,7 +1078,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[serial(daemon, scheduler_env)]
-    async fn tick_recovers_crashed_worker_for_due_task() {
+    async fn tick_does_not_bypass_supervisor_crash_budget_for_due_task() {
         let Some(_env) = EnvGuard::fake_worker() else {
             return;
         };
@@ -690,7 +1116,7 @@ mod tests {
         clock.tick_at(now).await;
 
         let worker = state.supervisor.worker_info(&project_id).await.unwrap();
-        assert_eq!(worker.state, WorkerState::Ready);
+        assert_eq!(worker.state, WorkerState::Crashed);
         assert_eq!(state.cron_pending(&project_id).await, Some(now));
         state.supervisor.stop_all().await;
     }

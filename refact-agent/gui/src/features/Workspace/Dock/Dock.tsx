@@ -33,6 +33,7 @@ import {
   type WorkspaceDockSection,
 } from "../workspaceSlice";
 import styles from "./Dock.module.css";
+import { AppsDockPanel } from "../../Apps/AppsCatalog";
 import { ActiveChatsSection } from "./ActiveChatsSection";
 
 type DockStyle = CSSProperties & {
@@ -63,7 +64,7 @@ export function Dock({ enteringNarrow = false }: { enteringNarrow?: boolean }) {
     const result: WorkspaceDockSection[] = [];
     if (capabilities.filesPanel || panelsForced) result.push("files");
     if (capabilities.gitPanel || panelsForced) result.push("git");
-    result.push("agents", "activity");
+    result.push("agents", "activity", "apps");
     return result;
   }, [capabilities.filesPanel, capabilities.gitPanel, panelsForced]);
   const activeSection = availableSections.includes(dock.section)
@@ -173,6 +174,7 @@ export function Dock({ enteringNarrow = false }: { enteringNarrow?: boolean }) {
           <div role="status">Opening linked target...</div>
         )}
         {navigation.error && <div role="alert">{navigation.error}</div>}
+        {activeSection === "apps" ? <AppsDockPanel /> : null}
         {activeSection === "files" ? <FilesPanel /> : null}
         {activeSection === "git" ? <GitDock /> : null}
         {activeSection === "agents" ? (

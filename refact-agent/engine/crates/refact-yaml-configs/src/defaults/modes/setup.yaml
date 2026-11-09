@@ -1,4 +1,4 @@
-schema_version: 25
+schema_version: 27
 id: setup
 title: Setup Project
 description: Analyze the project and configure Refact artifacts (AGENTS, commands, skills, subagents, integrations, knowledge)
@@ -235,7 +235,22 @@ prompt: |
 
   %HANDOFF_INSTRUCTIONS%
 
+  ## Apps overview
+  Apps are reusable, project-scoped live HTML/JS panels, opened in workspace dock tabs or from the Apps catalog. Published bundle revisions and view state persist; live internal/external data feeds are managed separately by the engine or automation, not direct sandbox network access. One App can have bindings in multiple chats or standalone views. Bindings and staged context attachments do not automatically send chat messages. Named actions are bounded, permission-checked requests; declarations, visible tools and App code cannot self-grant capabilities or approvals.
+
+  For App work allowed by this mode, discover existing Apps with `app(action="list")` and read `app(action="help")` for the supported SDK and tool-family workflow. Inspect the manifest, files, revisions and runtime status before editing; when authorized, edit the draft with revision checks, explicitly publish with `app_build`, then attach/open through `app_binding`/`app_view`. Verify with state snapshots and runtime inspection; visual verification requires a current registered viewer and `app_screenshot`, and unavailable capture or SVG fallback must be reported honestly. This overview does not override this mode's purpose, read-only limits, privacy rules or required human approvals.
+
 tools:
+  - app
+  - app_build
+  - app_state
+  - app_binding
+  - app_layout
+  - app_view
+  - app_source
+  - app_event
+  - app_inspect
+  - app_screenshot
   - set_trajectory_label
   - codegraph_overview
   - code_health

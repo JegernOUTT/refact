@@ -1,5 +1,12 @@
 import { createApi, fetchBaseQuery } from "@reduxjs/toolkit/query/react";
 import type { FetchBaseQueryError } from "@reduxjs/toolkit/query";
+import {
+  isAutomationCatalog,
+  isRecord,
+  isRevision,
+  type AutomationCatalog,
+  type AutomationDefinition,
+} from "../../features/Scheduler/automationTypes";
 import type { RootState } from "../../app/store";
 import { isDetailMessage } from "./commands";
 import { buildApiUrlFromState } from "./apiUrl";
@@ -165,8 +172,99 @@ export const schedulerApi = createApi({
       return headers;
     },
   }),
-  tagTypes: ["CronTasks"],
+  tagTypes: ["CronTasks", "Automations"],
   endpoints: (builder) => ({
+    getAutomations: builder.query<AutomationCatalog, undefined>({
+      queryFn: async (_args, api, _opts, baseQuery) => {
+        const result = await baseQuery({
+          url: buildApiUrlFromState(
+            api.getState() as RootState,
+            "/v1/scheduler/automation",
+          ),
+        });
+        if (result.error) return { error: result.error };
+        if (!isAutomationCatalog(result.data))
+          return {
+            error: {
+              status: "CUSTOM_ERROR",
+              error:
+                "Unsupported Automation response. Refresh or update the engine.",
+            },
+          };
+        return { data: result.data };
+      },
+      providesTags: ["Automations"],
+    }),
+    saveAutomation: builder.mutation<
+      { catalog_revision: number },
+      {
+        id?: string;
+        expected_catalog_revision: number;
+        expected_revision?: number;
+        definition: AutomationDefinition;
+      }
+    >({
+      queryFn: async ({ id, ...body }, api, _opts, baseQuery) => {
+        const result = await baseQuery({
+          url: buildApiUrlFromState(
+            api.getState() as RootState,
+            `/v1/scheduler/automation${id ? `/${encodeURIComponent(id)}` : ""}`,
+          ),
+          method: id ? "PUT" : "POST",
+          body,
+        });
+        if (result.error) return { error: result.error };
+        if (!isRecord(result.data) || !isRevision(result.data.catalog_revision))
+          return {
+            error: {
+              status: "CUSTOM_ERROR",
+              error:
+                "Unsupported Automation mutation response. Refresh before trying again.",
+            },
+          };
+        return { data: { catalog_revision: result.data.catalog_revision } };
+      },
+      invalidatesTags: ["Automations"],
+    }),
+    controlAutomation: builder.mutation<
+      { catalog_revision: number },
+      {
+        id: string;
+        expected_catalog_revision: number;
+        expected_revision: number;
+        operation: "enable" | "disable" | "run_now" | "revoke" | "delete";
+      }
+    >({
+      queryFn: async (
+        { id, operation, ...revisions },
+        api,
+        _opts,
+        baseQuery,
+      ) => {
+        const result = await baseQuery({
+          url: buildApiUrlFromState(
+            api.getState() as RootState,
+            `/v1/scheduler/automation/${encodeURIComponent(id)}${
+              operation === "delete" ? "" : "/control"
+            }`,
+          ),
+          method: operation === "delete" ? "DELETE" : "POST",
+          body:
+            operation === "delete" ? revisions : { ...revisions, operation },
+        });
+        if (result.error) return { error: result.error };
+        if (!isRecord(result.data) || !isRevision(result.data.catalog_revision))
+          return {
+            error: {
+              status: "CUSTOM_ERROR",
+              error:
+                "Unsupported Automation mutation response. Refresh before trying again.",
+            },
+          };
+        return { data: { catalog_revision: result.data.catalog_revision } };
+      },
+      invalidatesTags: ["Automations"],
+    }),
     getCronTasks: builder.query<CronTask[], undefined>({
       queryFn: async (_args, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
@@ -243,6 +341,9 @@ export const schedulerApi = createApi({
 });
 
 export const {
+  useGetAutomationsQuery,
+  useSaveAutomationMutation,
+  useControlAutomationMutation,
   useGetCronTasksQuery,
   useCreateCronMutation,
   useUpdateCronMutation,

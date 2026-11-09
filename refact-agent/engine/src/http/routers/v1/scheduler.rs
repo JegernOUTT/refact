@@ -1,6 +1,7 @@
+use std::net::SocketAddr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use axum::extract::{Path, State};
+use axum::extract::{ConnectInfo, Path, State};
 use axum::Json;
 use chrono::Utc;
 use hyper::StatusCode;
@@ -17,6 +18,137 @@ use crate::scheduler::{
 };
 use refact_core::chat_types::PushMode;
 use crate::tools::tool_cron_create::MAX_CRON_JOBS;
+
+use crate::scheduler::automation_api as automation;
+
+fn automation_error(error: String) -> ScratchError {
+    let code = if error.contains("revision conflict") {
+        StatusCode::CONFLICT
+    } else if error.contains("not found") {
+        StatusCode::NOT_FOUND
+    } else {
+        StatusCode::BAD_REQUEST
+    };
+    ScratchError::new(code, error)
+}
+
+// The permissive read CORS policy is not mutation authority. Opaque iframe origins
+// and cross-origin browser requests cannot edit desired project configuration.
+fn automation_mutation_origin(headers: &axum::http::HeaderMap) -> Result<(), ScratchError> {
+    if let Some(origin) = headers.get("origin") {
+        let origin = origin.to_str().ok().and_then(|s| url::Url::parse(s).ok());
+        let host = headers.get("host").and_then(|s| s.to_str().ok());
+        let authority = origin.as_ref().and_then(|u| {
+            u.host_str().map(|h| match u.port() {
+                Some(p) => format!("{h}:{p}"),
+                None => h.to_owned(),
+            })
+        });
+        if authority.as_deref() != host || origin.is_none() {
+            return Err(ScratchError::new(
+                StatusCode::FORBIDDEN,
+                "cross-origin automation mutation refused".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+fn automation_authorize(
+    app: &AppState,
+    headers: &axum::http::HeaderMap,
+    peer: Option<ConnectInfo<SocketAddr>>,
+) -> Result<(), ScratchError> {
+    super::work::authorize(app, headers, peer.map(|p| p.0)).map_err(|_| {
+        ScratchError::new(
+            StatusCode::UNAUTHORIZED,
+            "host authorization required".into(),
+        )
+    })
+}
+pub async fn handle_v1_scheduler_automation_get(
+    State(app): State<AppState>,
+    peer: Option<ConnectInfo<SocketAddr>>,
+    headers: axum::http::HeaderMap,
+) -> Result<Json<serde_json::Value>, ScratchError> {
+    automation_authorize(&app, &headers, peer)?;
+    let rt = automation::active(&app).await.map_err(automation_error)?;
+    automation::list(&rt, None)
+        .await
+        .map(Json)
+        .map_err(automation_error)
+}
+pub async fn handle_v1_scheduler_automation_detail(
+    State(app): State<AppState>,
+    peer: Option<ConnectInfo<SocketAddr>>,
+    Path(id): Path<String>,
+    headers: axum::http::HeaderMap,
+) -> Result<Json<serde_json::Value>, ScratchError> {
+    automation_authorize(&app, &headers, peer)?;
+    let rt = automation::active(&app).await.map_err(automation_error)?;
+    automation::list(&rt, Some(&id))
+        .await
+        .map(Json)
+        .map_err(automation_error)
+}
+pub async fn handle_v1_scheduler_automation_post(
+    State(app): State<AppState>,
+    peer: Option<ConnectInfo<SocketAddr>>,
+    headers: axum::http::HeaderMap,
+    Json(request): Json<automation::DefinitionRequest>,
+) -> Result<Json<serde_json::Value>, ScratchError> {
+    automation_authorize(&app, &headers, peer)?;
+    automation_mutation_origin(&headers)?;
+    let rt = automation::active(&app).await.map_err(automation_error)?;
+    automation::save(&rt, None, request)
+        .await
+        .map(Json)
+        .map_err(automation_error)
+}
+pub async fn handle_v1_scheduler_automation_put(
+    State(app): State<AppState>,
+    peer: Option<ConnectInfo<SocketAddr>>,
+    Path(id): Path<String>,
+    headers: axum::http::HeaderMap,
+    Json(request): Json<automation::DefinitionRequest>,
+) -> Result<Json<serde_json::Value>, ScratchError> {
+    automation_authorize(&app, &headers, peer)?;
+    automation_mutation_origin(&headers)?;
+    let rt = automation::active(&app).await.map_err(automation_error)?;
+    automation::save(&rt, Some(&id), request)
+        .await
+        .map(Json)
+        .map_err(automation_error)
+}
+pub async fn handle_v1_scheduler_automation_delete(
+    State(app): State<AppState>,
+    peer: Option<ConnectInfo<SocketAddr>>,
+    Path(id): Path<String>,
+    headers: axum::http::HeaderMap,
+    Json(request): Json<automation::RevisionRequest>,
+) -> Result<Json<serde_json::Value>, ScratchError> {
+    automation_authorize(&app, &headers, peer)?;
+    automation_mutation_origin(&headers)?;
+    let rt = automation::active(&app).await.map_err(automation_error)?;
+    automation::delete(&rt, &id, request)
+        .await
+        .map(Json)
+        .map_err(automation_error)
+}
+pub async fn handle_v1_scheduler_automation_control(
+    State(app): State<AppState>,
+    peer: Option<ConnectInfo<SocketAddr>>,
+    Path(id): Path<String>,
+    headers: axum::http::HeaderMap,
+    Json(request): Json<automation::ControlRequest>,
+) -> Result<Json<serde_json::Value>, ScratchError> {
+    automation_authorize(&app, &headers, peer)?;
+    automation_mutation_origin(&headers)?;
+    let rt = automation::active(&app).await.map_err(automation_error)?;
+    automation::control(&rt, &id, request)
+        .await
+        .map(Json)
+        .map_err(automation_error)
+}
 
 const ONE_YEAR_MS: u64 = 365 * 24 * 60 * 60 * 1000;
 
@@ -600,6 +732,22 @@ fn unix_now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis() as u64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod automation_origin_tests {
+    use super::*;
+    #[test]
+    fn opaque_and_cross_origin_mutations_are_refused() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("host", "127.0.0.1:8001".parse().unwrap());
+        headers.insert("origin", "null".parse().unwrap());
+        assert!(automation_mutation_origin(&headers).is_err());
+        headers.insert("origin", "https://evil.example".parse().unwrap());
+        assert!(automation_mutation_origin(&headers).is_err());
+        headers.insert("origin", "http://127.0.0.1:8001".parse().unwrap());
+        assert!(automation_mutation_origin(&headers).is_ok());
+    }
 }
 
 #[cfg(test)]

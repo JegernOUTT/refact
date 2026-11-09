@@ -18,6 +18,9 @@ pub struct PendingApproval {
     pub tool_call_id: String,
     pub tool_name: String,
     pub args: Value,
+    /// Set by the trusted request producer, never by tool arguments.
+    #[serde(default)]
+    pub requires_human: bool,
     pub digest: Option<String>,
     pub created_at: u64,
     pub expires_at: u64,
@@ -67,6 +70,7 @@ struct UserOnceGrant {
 struct Entry {
     pending: PendingApproval,
     decision: Option<ApprovalDecision>,
+    approved_by_user: bool,
     denial_reason: Option<String>,
     user_once: Option<UserOnceGrant>,
     consumed: bool,
@@ -130,6 +134,7 @@ impl ApprovalRegistry {
             Entry {
                 pending,
                 decision: None,
+                approved_by_user: false,
                 denial_reason: None,
                 user_once: None,
                 consumed: false,
@@ -270,6 +275,14 @@ impl ApprovalRegistry {
                 Err(ApprovalError::AlreadyDecided)
             };
         }
+        let approved_by_user = entry
+            .user_once
+            .as_ref()
+            .is_some_and(|grant| grant.consumed && grant.pending == entry.pending);
+        if approve && entry.pending.requires_human && !approved_by_user {
+            return Err(ApprovalError::NotApproved);
+        }
+        entry.approved_by_user = approve && approved_by_user;
         entry.decision = Some(wanted);
         entry.denial_reason = if wanted == ApprovalDecision::Rejected {
             denial_reason
@@ -366,6 +379,11 @@ impl ApprovalRegistry {
                 None => ApprovalError::NotApproved,
                 Some(ApprovalDecision::Approved) => unreachable!(),
             });
+        }
+        // Defense in depth at the actual effect boundary: an approved flag alone
+        // must never confer mandatory human authority.
+        if entry.pending.requires_human && !entry.approved_by_user {
+            return Err(ApprovalError::NotApproved);
         }
         if entry.pending.tool_call_id != tool_call_id || entry.pending.args != *args {
             return Err(ApprovalError::BindingMismatch);
@@ -475,6 +493,7 @@ mod user_grant_tests {
                     tool_call_id: "command".into(),
                     tool_name: "shell".into(),
                     args: serde_json::json!({"command":"echo hello"}),
+                    requires_human: false,
                     digest: Some("checkout".into()),
                     created_at: 0,
                     expires_at: 100,

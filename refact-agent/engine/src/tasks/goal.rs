@@ -2814,6 +2814,7 @@ mod tests {
                             context_files: vec![],
                             suppress_auto_enrichment: false,
                             client_message_id: None,
+                            app_context_ids: Vec::new(),
                         },
                     });
                 assert!(session

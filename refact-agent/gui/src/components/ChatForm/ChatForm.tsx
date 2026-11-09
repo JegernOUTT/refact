@@ -109,6 +109,14 @@ import { useComposerActivity } from "./useComposerActivity";
 import { ComposerToolbar } from "./ComposerToolbar";
 import { ComposerSkillsControl } from "./ComposerSkillsControl";
 import { useSkillsStatus } from "../../hooks/useSkillsStatus";
+import { AppContextTray } from "./AppContextTray";
+import {
+  inFlightAppContextKeys,
+  planAppContexts,
+  runWithArmedAppContexts,
+  selectStagedAppContextsById,
+} from "./appContext";
+import { appContextRemoved } from "../../features/Apps/appsSlice";
 type ComposerHelpProps = {
   children: React.ReactNode;
 };
@@ -224,6 +232,15 @@ export const ChatForm: React.FC<ChatFormProps> = ({
   );
   const manualPreviewItems = useAppSelector((state) =>
     selectManualPreviewItemsById(state, chatId),
+  );
+  const stagedAppContexts = useAppSelector((state) =>
+    selectStagedAppContextsById(state, chatId),
+  );
+  const stagedAppContextsRef = React.useRef(stagedAppContexts);
+  stagedAppContextsRef.current = stagedAppContexts;
+  const hasAppContexts = useMemo(
+    () => planAppContexts(stagedAppContexts).included.length > 0,
+    [stagedAppContexts],
   );
   const { activeSkill } = useSkillsStatus(chatId);
   const autoFocusOnce = useAutoFocusOnce();
@@ -395,8 +412,17 @@ export const ChatForm: React.FC<ChatFormProps> = ({
       ).trim();
       const hasImages = attachedImages.length > 0;
       const hasTextFiles = textFiles.length > 0;
+      const appContextPlan = planAppContexts(
+        stagedAppContextsRef.current,
+        inFlightAppContextKeys(),
+        chatId,
+      );
+      const hasStagedAppContexts = appContextPlan.included.length > 0;
       const canSubmit =
-        (trimmedValue.length > 0 || hasImages || hasTextFiles) &&
+        (trimmedValue.length > 0 ||
+          hasImages ||
+          hasTextFiles ||
+          hasStagedAppContexts) &&
         isOnline &&
         (isCompanionChat || !allDisabled) &&
         !contextRebuildRequired;
@@ -412,7 +438,9 @@ export const ChatForm: React.FC<ChatFormProps> = ({
           checkboxes,
         );
         setLineSelectionInteracted(false);
-        onSubmit(valueIncludingChecks, sendPolicy);
+        runWithArmedAppContexts(chatId, appContextPlan.included, () =>
+          onSubmit(valueIncludingChecks, sendPolicy),
+        );
         argumentPlaceholdersRef.current = [];
         setValue("");
         setInputResetKey((k) => k + 1);
@@ -423,6 +451,7 @@ export const ChatForm: React.FC<ChatFormProps> = ({
     },
     [
       value,
+      chatId,
       contextRebuildRequired,
       isCompanionChat,
       allDisabled,
@@ -646,7 +675,8 @@ export const ChatForm: React.FC<ChatFormProps> = ({
     attachedImages.length > 0 ||
     textFiles.length > 0 ||
     attachedFiles.files.length > 0 ||
-    manualPreviewItems.length > 0;
+    manualPreviewItems.length > 0 ||
+    stagedAppContexts.length > 0;
   const isComposerExpanded =
     heldExpanded ??
     (focusWithin ||
@@ -817,6 +847,12 @@ export const ChatForm: React.FC<ChatFormProps> = ({
                             : undefined
                         }
                         onOpenFile={queryPathThenOpenFile}
+                      />
+                      <AppContextTray
+                        staged={stagedAppContexts}
+                        onRemove={(id) =>
+                          dispatch(appContextRemoved({ chatId, id }))
+                        }
                       />
                     </div>
 
@@ -1110,7 +1146,8 @@ export const ChatForm: React.FC<ChatFormProps> = ({
                         hasText={
                           value.trim().length > 0 ||
                           attachedImages.length > 0 ||
-                          textFiles.length > 0
+                          textFiles.length > 0 ||
+                          hasAppContexts
                         }
                         hasMessages={hasMessages && !isCompanionChat}
                         onSend={() => handleSubmit("after_flow")}

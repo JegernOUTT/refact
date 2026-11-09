@@ -1,3 +1,4 @@
+import { WorkspaceAppSurface } from "../Apps/AppSurface";
 import classNames from "classnames";
 import { MessageSquare } from "lucide-react";
 import { lazy, Suspense, useCallback } from "react";
@@ -115,6 +116,13 @@ export function SurfacePane({
         </div>
       );
     }
+
+    if (parsed.kind === "app")
+      return (
+        <div className={styles.surfacePane} data-surface-key={surfaceKey}>
+          <WorkspaceAppSurface surfaceKey={surfaceKey} />
+        </div>
+      );
 
     if (parsed.kind === "file") {
       if (!capabilities.filesPanel && !panelsForced) return null;

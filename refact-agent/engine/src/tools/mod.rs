@@ -40,6 +40,9 @@ pub(crate) mod tool_agent_lifecycle;
 pub(crate) mod tool_agent_planner_qna;
 mod tool_agent_pulse;
 mod tool_agent_steer;
+pub(crate) mod tool_app;
+#[cfg(test)]
+mod tool_app_source;
 mod tool_ast_definition;
 pub mod tool_background_agents;
 mod tool_card_comment;

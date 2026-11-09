@@ -1568,6 +1568,7 @@ async fn create_investigation_chat(
         waiting_for_card_ids: Vec::new(),
         pending_questions: Vec::new(),
         native_decision_receipts: Vec::new(),
+        app_workspace: None,
     };
 
     crate::chat::trajectories::save_trajectory_snapshot(gcx, snapshot)

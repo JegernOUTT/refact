@@ -897,6 +897,9 @@ impl ChatSession {
             stream_started_at: None,
             confirmation_paused_at: None,
             approval_wrapper_calls: HashMap::new(),
+            app_mutation_receipts: HashMap::new(),
+            automation_approval_receipts: HashMap::new(),
+            app_workspace_mutation_lock: Arc::new(AMutex::new(())),
             last_tool_started_at: None,
             last_tool_progress_at: None,
             trajectory_dirty: false,
@@ -1052,6 +1055,9 @@ impl ChatSession {
             stream_started_at: None,
             confirmation_paused_at: None,
             approval_wrapper_calls: HashMap::new(),
+            app_mutation_receipts: HashMap::new(),
+            automation_approval_receipts: HashMap::new(),
+            app_workspace_mutation_lock: Arc::new(AMutex::new(())),
             last_tool_started_at: None,
             last_tool_progress_at: None,
             external_reload_pending: None,
@@ -2142,6 +2148,8 @@ impl ChatSession {
         self.tool_catalog = None;
         self.turn_tool_pool = None;
         self.approval_wrapper_calls.clear();
+        self.app_mutation_receipts.clear();
+        self.automation_approval_receipts.clear();
         self.post_turn_task_handles
             .retain(|task| !task.is_finished());
     }
@@ -5040,6 +5048,7 @@ mod tests {
                 context_files: vec![],
                 suppress_auto_enrichment: false,
                 client_message_id: None,
+                app_context_ids: Vec::new(),
             },
             native_approval_guard: None,
             supervision_guard: None,
@@ -5627,6 +5636,7 @@ mod tests {
             .map(|tool| tool.name.clone())
             .collect::<Vec<_>>();
         Arc::new(refact_runtime_api::ToolCatalogSnapshot {
+            intent: refact_runtime_api::ToolCatalogIntent::Policy,
             index: refact_runtime_api::ToolRegistryIndex {
                 tools,
                 mcp_lazy_mode: false,
@@ -6837,6 +6847,7 @@ mod tests {
                 context_files: context_files.clone(),
                 suppress_auto_enrichment: true,
                 client_message_id: None,
+                app_context_ids: Vec::new(),
             },
         });
 
@@ -8991,6 +9002,7 @@ mod tests {
                 context_files: vec![],
                 suppress_auto_enrichment: false,
                 client_message_id: None,
+                app_context_ids: Vec::new(),
             },
         });
 
@@ -9661,6 +9673,7 @@ mod tests {
                 context_files: vec![],
                 suppress_auto_enrichment: false,
                 client_message_id: None,
+                app_context_ids: Vec::new(),
             },
         });
         session.command_queue.push_back(CommandRequest {
@@ -9694,6 +9707,7 @@ mod tests {
                 context_files: vec![],
                 suppress_auto_enrichment: false,
                 client_message_id: None,
+                app_context_ids: Vec::new(),
             },
         });
         let snap = session.snapshot();

@@ -1881,3 +1881,6 @@ export const selectChatActivityById = (
         | undefined
     )?.session_state,
   );
+
+export const selectAppWorkspaceById = (state: RootState, chatId: string) =>
+  selectAllThreads(state)[chatId]?.thread.app_workspace ?? null;

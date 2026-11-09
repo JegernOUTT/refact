@@ -86,6 +86,7 @@ async fn create_warning_chat(gcx: Arc<GlobalContext>, reason: &str) -> Result<St
         waiting_for_card_ids: Vec::new(),
         pending_questions: Vec::new(),
         native_decision_receipts: Vec::new(),
+        app_workspace: None,
     };
     crate::chat::trajectories::save_trajectory_snapshot(gcx, snapshot).await?;
     Ok(chat_id)

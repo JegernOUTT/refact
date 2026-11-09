@@ -576,6 +576,7 @@ mod tests {
             native_decision_receipts: Vec::new(),
             pending_deliveries: Default::default(),
             dropped_deliveries: Default::default(),
+            app_workspace: None,
         }
     }
 

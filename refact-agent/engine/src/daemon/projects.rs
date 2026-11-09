@@ -53,6 +53,9 @@ pub struct ProjectEntry {
     pub slug: String,
     pub root: PathBuf,
     pub pinned: bool,
+    /// Durable explicit-stop intent; idle stops and crashes do not change it.
+    #[serde(default)]
+    pub automation_suspended: bool,
     pub last_active_ms: u64,
     pub settings: ProjectSettings,
 }
@@ -147,6 +150,7 @@ impl ProjectRegistry {
             slug,
             root,
             pinned: false,
+            automation_suspended: false,
             last_active_ms: now,
             settings: settings.unwrap_or_default(),
         };
@@ -163,6 +167,22 @@ impl ProjectRegistry {
 
     pub fn get(&self, id: &str) -> Option<&ProjectEntry> {
         self.entries.get(id)
+    }
+
+    pub async fn set_automation_suspended(
+        &mut self,
+        id: &str,
+        suspended: bool,
+    ) -> Result<Option<ProjectEntry>, String> {
+        let mut entries = self.entries.clone();
+        let Some(entry) = entries.get_mut(id) else {
+            return Ok(None);
+        };
+        entry.automation_suspended = suspended;
+        let entry = entry.clone();
+        self.save_entries(&entries).await?;
+        self.entries = entries;
+        Ok(Some(entry))
     }
 
     #[cfg(test)]
@@ -302,7 +322,20 @@ pub async fn open_project(
             .open_with_settings(root, request.settings.clone())
             .await
         {
-            Ok(entry) => entry,
+            Ok(entry) => match registry.set_automation_suspended(&entry.id, false).await {
+                Ok(Some(entry)) => {
+                    state.supervisor.set_automation_suspended(&entry.id, false);
+                    entry
+                }
+                Ok(None) => unreachable!("just opened project missing"),
+                Err(error) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({"error": error})),
+                    )
+                        .into_response()
+                }
+            },
             Err(error) => {
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -389,12 +422,22 @@ pub async fn restart_project_worker(
     AxumPath(id): AxumPath<String>,
 ) -> impl IntoResponse {
     let entry = {
-        let registry = state.projects.read().await;
-        match registry.get(&id) {
-            Some(entry) => entry.clone(),
-            None => {
+        let mut registry = state.projects.write().await;
+        match registry.set_automation_suspended(&id, false).await {
+            Ok(Some(entry)) => {
+                state.supervisor.set_automation_suspended(&id, false);
+                entry
+            }
+            Ok(None) => {
                 return (StatusCode::NOT_FOUND, Json(json!({"error": "not found"})))
                     .into_response();
+            }
+            Err(error) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": error})),
+                )
+                    .into_response()
             }
         }
     };
@@ -412,19 +455,24 @@ pub async fn stop_project_worker(
     State((state, _)): State<(Arc<DaemonState>, u16)>,
     AxumPath(id): AxumPath<String>,
 ) -> impl IntoResponse {
-    {
-        let registry = state.projects.read().await;
-        if registry.get(&id).is_none() {
-            return (StatusCode::NOT_FOUND, Json(json!({"error": "not found"}))).into_response();
+    // Serialize intent changes with open/restart through the actual stop.
+    let mut registry = state.projects.write().await;
+    match registry.set_automation_suspended(&id, true).await {
+        Ok(Some(_)) => state.supervisor.set_automation_suspended(&id, true),
+        Ok(None) => {
+            return (StatusCode::NOT_FOUND, Json(json!({"error": "not found"}))).into_response()
+        }
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": error})),
+            )
+                .into_response()
         }
     }
     match state.supervisor.stop_worker(&id).await {
         Ok(Some(worker)) => Json(worker).into_response(),
-        Ok(None) => (
-            StatusCode::NOT_FOUND,
-            Json(json!({"error": "worker not found"})),
-        )
-            .into_response(),
+        Ok(None) => Json(json!({"project_id": id, "state": "stopped"})).into_response(),
         Err(error) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": error})),
@@ -587,6 +635,7 @@ mod tests {
                 slug: "b".to_string(),
                 root: root_b,
                 pinned: false,
+                automation_suspended: false,
                 last_active_ms: 0,
                 settings: ProjectSettings::default(),
             },
@@ -612,6 +661,54 @@ mod tests {
         let list = reg2.list();
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].root, root);
+    }
+
+    #[tokio::test]
+    async fn explicit_stop_survives_reload_and_operator_resume_clears_it() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("projects.json");
+        let mut registry = ProjectRegistry::empty(path.clone());
+        let entry = registry.open(dir.path().to_path_buf()).await.unwrap();
+        registry.set_pinned(&entry.id, true).await.unwrap();
+        registry
+            .set_automation_suspended(&entry.id, true)
+            .await
+            .unwrap();
+        let mut reloaded = ProjectRegistry::load(path.clone()).await;
+        let held = reloaded.open(entry.root.clone()).await.unwrap();
+        let supervisor = crate::daemon::supervisor::Supervisor::new(
+            crate::daemon::events::EventBus::new(dir.path().join("events.jsonl")),
+            dir.path().join("daemon"),
+            0,
+        );
+        supervisor.set_automation_suspended(&held.id, held.automation_suspended);
+        assert!(supervisor.ensure_worker_auto(&held).await.is_err());
+        assert!(held.pinned);
+        let resumed = reloaded
+            .set_automation_suspended(&entry.id, false)
+            .await
+            .unwrap()
+            .unwrap();
+        supervisor.set_automation_suspended(&entry.id, false);
+        assert!(!resumed.automation_suspended);
+        assert!(
+            !ProjectRegistry::load(path)
+                .await
+                .get(&entry.id)
+                .unwrap()
+                .automation_suspended
+        );
+    }
+
+    #[test]
+    fn legacy_project_registry_defaults_to_unsuspended() {
+        let row: ProjectEntry = serde_json::from_value(json!({
+            "id": "legacy", "slug": "legacy", "root": "/legacy", "pinned": true,
+            "last_active_ms": 0, "settings": ProjectSettings::default()
+        }))
+        .unwrap();
+        assert!(!row.automation_suspended);
+        assert!(row.pinned);
     }
 
     #[cfg(unix)]
@@ -805,6 +902,48 @@ mod tests {
         let bytes = hyper::body::to_bytes(stop_resp.into_body()).await.unwrap();
         let stopped: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(stopped["state"], "stopped");
+        let held = state
+            .projects
+            .read()
+            .await
+            .get(&project_id)
+            .unwrap()
+            .clone();
+        assert!(held.automation_suspended);
+        assert!(state.supervisor.ensure_worker_auto(&held).await.is_err());
+        let persisted = ProjectRegistry::load(dir.path().join("projects.json")).await;
+        assert!(persisted.get(&project_id).unwrap().automation_suspended);
+
+        let resumed = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/daemon/v1/projects/{project_id}/restart"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resumed.status(), StatusCode::OK);
+        assert!(
+            !state
+                .projects
+                .read()
+                .await
+                .get(&project_id)
+                .unwrap()
+                .automation_suspended
+        );
+        assert_eq!(
+            state
+                .supervisor
+                .worker_info(&project_id)
+                .await
+                .unwrap()
+                .state,
+            crate::daemon::supervisor::WorkerState::Ready
+        );
 
         let forget_resp = router
             .clone()

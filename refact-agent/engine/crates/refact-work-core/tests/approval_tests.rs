@@ -10,6 +10,7 @@ fn pending(id: &str) -> PendingApproval {
         tool_call_id: "call".into(),
         tool_name: "shell".into(),
         args: json!({"x": 1}),
+        requires_human: false,
         digest: None,
         created_at: 0,
         expires_at: 10,
@@ -77,6 +78,49 @@ fn consume_is_once() {
     assert_eq!(
         r.consume("a", "call", &json!({"x": 1}), 2),
         Err(ApprovalError::Consumed)
+    );
+}
+
+#[test]
+fn mandatory_human_approval_rejects_model_decisions_and_binds_user_receipt_once() {
+    let r = ApprovalRegistry::new(4);
+    let mut request = pending("human");
+    request.requires_human = true;
+    r.register(request.clone(), 0).unwrap();
+    assert_eq!(
+        r.decide("parent", 7, "human", true, 1),
+        Err(ApprovalError::NotApproved)
+    );
+    r.grant_user_once("parent", "human", 7, "exact-wrapper", 1)
+        .unwrap();
+    // A grant alone is not a decision; a different wrapper cannot consume it.
+    assert_eq!(
+        r.decide("parent", 7, "human", true, 2),
+        Err(ApprovalError::NotApproved)
+    );
+    assert_eq!(
+        r.consume_user_once("parent", "human", 7, "model-wrapper", 2),
+        Err(ApprovalError::BindingMismatch)
+    );
+    r.consume_user_once("parent", "human", 7, "exact-wrapper", 2)
+        .unwrap();
+    r.decide("parent", 7, "human", true, 3).unwrap();
+    assert_eq!(
+        r.consume("human", "call", &json!({"x":2}), 4),
+        Err(ApprovalError::BindingMismatch)
+    );
+    r.consume("human", "call", &request.args, 4).unwrap();
+    assert_eq!(
+        r.consume("human", "call", &request.args, 5),
+        Err(ApprovalError::Consumed)
+    );
+    assert_eq!(
+        r.grant_user_once("parent", "human", 7, "exact-wrapper", 5),
+        Err(ApprovalError::AlreadyDecided)
+    );
+    assert_eq!(
+        r.consume("human", "call", &request.args, 10),
+        Err(ApprovalError::Expired)
     );
 }
 

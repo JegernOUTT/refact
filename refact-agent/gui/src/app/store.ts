@@ -1,3 +1,6 @@
+import { appWorkspacePersistenceMiddleware } from "../features/Apps/appWorkspacePersistence";
+import { appsSlice } from "../features/Apps/appsSlice";
+import { appsApi } from "../services/refact/apps";
 import { surfaceSessionMiddleware } from "../features/Workspace/surfaceSessionState";
 import { combineSlices, configureStore } from "@reduxjs/toolkit";
 import { storage } from "./storage";
@@ -163,6 +166,7 @@ const rootReducer = combineSlices(
     sidebar: sidebarReducer,
     selected_snippet: selectedSnippetReducer,
     chat: chatReducer,
+    [appsApi.reducerPath]: appsApi.reducer,
     [organizationApi.reducerPath]: organizationApi.reducer,
     [statsApi.reducerPath]: statsApi.reducer,
     [codeIntelApi.reducerPath]: codeIntelApi.reducer,
@@ -217,6 +221,7 @@ const rootReducer = combineSlices(
     [skillsSettingsApi.reducerPath]: skillsSettingsApi.reducer,
     [backgroundAgentsApi.reducerPath]: backgroundAgentsApi.reducer,
   },
+  appsSlice,
   historySlice,
   buddySlice,
   errorSlice,
@@ -315,6 +320,7 @@ export function setUpStore(preloadedState?: Partial<RootState>) {
 
       return middleware
         .prepend(
+          appsApi.middleware,
           pingApi.middleware,
           organizationApi.middleware,
           statsApi.middleware,
@@ -371,7 +377,11 @@ export function setUpStore(preloadedState?: Partial<RootState>) {
           backgroundAgentsApi.middleware,
         )
         .prepend(historyMiddleware.middleware)
-        .prepend(surfaceSessionMiddleware, listenerMiddleware.middleware);
+        .prepend(
+          appWorkspacePersistenceMiddleware,
+          surfaceSessionMiddleware,
+          listenerMiddleware.middleware,
+        );
     },
   });
 

@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use async_trait::async_trait;
 use tokio::sync::{Notify, RwLock};
@@ -150,16 +149,42 @@ impl CronStore for InMemoryCronStore {
 
 pub struct JsonFileCronStore {
     path: PathBuf,
+    journal: crate::automation::AutomationJournal,
     change_notify: Arc<Notify>,
+    mutation: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl JsonFileCronStore {
     pub fn new(project_root: impl AsRef<Path>) -> Result<Self, String> {
-        let path = scheduled_tasks_path(project_root.as_ref());
-        read_jobs(&path)?;
+        let root = project_root.as_ref();
+        let journal = crate::automation::AutomationJournal::open(root)?;
+        let lease = crate::automation::ProjectAutomationLease::acquire(root)?;
+        journal.activate_owner(&lease)?;
+        journal.migrate_legacy_jobs(root, &lease)?;
+        // Opening the projection performs the single legacy import/catalog reconciliation.
+        journal.load_legacy_jobs()?;
+        let path = scheduled_tasks_path(root);
+        type Shared = (Arc<Notify>, Arc<tokio::sync::Mutex<()>>);
+        static STORES: OnceLock<Mutex<HashMap<PathBuf, Shared>>> = OnceLock::new();
+        let key = std::fs::canonicalize(root).map_err(|e| e.to_string())?;
+        let mut stores = STORES
+            .get_or_init(Default::default)
+            .lock()
+            .map_err(|e| e.to_string())?;
+        let (change_notify, mutation) = stores
+            .entry(key)
+            .or_insert_with(|| {
+                (
+                    Arc::new(Notify::new()),
+                    Arc::new(tokio::sync::Mutex::new(())),
+                )
+            })
+            .clone();
         Ok(Self {
             path,
-            change_notify: Arc::new(Notify::new()),
+            journal,
+            change_notify,
+            mutation,
         })
     }
 
@@ -170,77 +195,31 @@ impl JsonFileCronStore {
     async fn transaction<T: Send + 'static>(
         &self,
         write: bool,
-        operation: impl FnOnce(&mut Vec<Job>) -> Result<T, String> + Send + 'static,
+        operation: impl FnOnce(&crate::automation::AutomationJournal) -> Result<T, String>
+            + Send
+            + 'static,
     ) -> Result<T, String> {
-        let path = self.path.clone();
-        let result = tokio::task::spawn_blocking(move || {
-            if !write
-                && !path
-                    .try_exists()
-                    .map_err(|error| format!("Failed to inspect scheduler storage: {error}"))?
-            {
-                return operation(&mut Vec::new());
+        let guard = self.mutation.clone().lock_owned().await;
+        let journal = self.journal.clone();
+        let notify = self.change_notify.clone();
+        tokio::task::spawn_blocking(move || {
+            let _guard = guard;
+            let result = operation(&journal);
+            if write && result.is_ok() {
+                notify.notify_waiters();
             }
-            let _lock = lock_store(&path)?;
-            let mut jobs = read_jobs(&path)?;
-            let result = operation(&mut jobs)?;
-            if write {
-                write_jobs(&path, &jobs)?;
-            }
-            Ok(result)
+            result
         })
         .await
-        .map_err(|error| format!("Scheduler storage task failed: {error}"))?;
-        if write && result.is_ok() {
-            self.change_notify.notify_waiters();
-        }
-        result
-    }
-}
-
-struct StoreLock(std::fs::File);
-
-impl Drop for StoreLock {
-    fn drop(&mut self) {
-        let _ = fs2::FileExt::unlock(&self.0);
-    }
-}
-
-fn lock_store(path: &Path) -> Result<StoreLock, String> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|error| format!("Failed to create scheduler storage directory: {error}"))?;
-    }
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(path.with_extension("json.lock"))
-        .map_err(|error| format!("Failed to open scheduler lock: {error}"))?;
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        match fs2::FileExt::try_lock_exclusive(&file) {
-            Ok(()) => return Ok(StoreLock(file)),
-            Err(error)
-                if error.kind() == std::io::ErrorKind::WouldBlock && Instant::now() < deadline =>
-            {
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            Err(error) => return Err(format!("Failed to lock scheduler storage: {error}")),
-        }
+        .map_err(|error| format!("Scheduler storage task failed: {error}"))?
     }
 }
 
 #[async_trait]
 impl CronStore for JsonFileCronStore {
     async fn add(&self, job: Job) -> Result<(), String> {
-        self.transaction(true, move |jobs| {
-            jobs.retain(|existing| existing.id != job.id);
-            jobs.push(job);
-            Ok(())
-        })
-        .await
+        self.transaction(true, move |journal| journal.put_legacy_job(&job))
+            .await
     }
 
     async fn get(&self, id: &str) -> Option<Job> {
@@ -252,23 +231,24 @@ impl CronStore for JsonFileCronStore {
 
     async fn try_get(&self, id: &str) -> Result<Option<Job>, String> {
         let id = id.to_string();
-        self.transaction(false, move |jobs| {
-            Ok(jobs.iter().find(|job| job.id == id).cloned())
+        self.transaction(false, move |journal| {
+            Ok(journal
+                .load_legacy_jobs()?
+                .into_iter()
+                .find(|job| job.id == id))
         })
         .await
     }
 
     async fn remove_if(&self, id: &str, predicate: JobPredicate) -> Result<bool, String> {
         let id = id.to_string();
-        self.transaction(true, move |jobs| {
-            let Some(index) = jobs.iter().position(|job| job.id == id) else {
-                return Ok(false);
-            };
-            if !predicate(&jobs[index]) {
-                return Ok(false);
-            }
-            jobs.remove(index);
-            Ok(true)
+        self.transaction(true, move |journal| {
+            let mut removed = false;
+            journal.mutate_legacy_job(&id, |job| {
+                removed = predicate(job);
+                Ok(!removed)
+            })?;
+            Ok(removed)
         })
         .await
     }
@@ -289,24 +269,17 @@ impl CronStore for JsonFileCronStore {
 
     async fn mutate(&self, id: &str, mutation: JobMutation) -> Result<Option<Job>, String> {
         let id = id.to_string();
-        self.transaction(true, move |jobs| {
-            let Some(job) = jobs.iter_mut().find(|job| job.id == id) else {
-                return Ok(None);
-            };
-            mutation(job)?;
-            Ok(Some(job.clone()))
+        self.transaction(true, move |journal| {
+            journal.mutate_legacy_job(&id, |job| {
+                mutation(job)?;
+                Ok(true)
+            })
         })
         .await
     }
 
     async fn remove(&self, id: &str) -> Result<bool, String> {
-        let id = id.to_string();
-        self.transaction(true, move |jobs| {
-            let before = jobs.len();
-            jobs.retain(|job| job.id != id);
-            Ok(jobs.len() != before)
-        })
-        .await
+        self.remove_if(id, Box::new(|_| true)).await
     }
 
     async fn list(&self) -> Vec<Job> {
@@ -317,11 +290,8 @@ impl CronStore for JsonFileCronStore {
     }
 
     async fn try_list(&self) -> Result<Vec<Job>, String> {
-        self.transaction(false, |jobs| {
-            jobs.sort_by(|left, right| left.id.cmp(&right.id));
-            Ok(jobs.clone())
-        })
-        .await
+        self.transaction(false, |journal| journal.load_legacy_jobs())
+            .await
     }
 
     async fn update_fired(
@@ -352,28 +322,67 @@ pub fn scheduled_tasks_path(project_root: &Path) -> PathBuf {
     project_root.join(".refact").join("scheduled_tasks.json")
 }
 
-fn read_jobs(path: &Path) -> Result<Vec<Job>, String> {
-    if !path.exists() {
-        return Ok(Vec::new());
-    }
-    let content = std::fs::read_to_string(path)
-        .map_err(|error| format!("Failed to read scheduled tasks: {error}"))?;
-    serde_json::from_str(&content)
-        .map_err(|error| format!("Failed to parse scheduled tasks: {error}"))
-}
+/// Observe committed schedules without acquiring ownership, creating storage, or migrating JSON.
+pub fn read_durable_jobs(project_root: impl AsRef<Path>) -> Result<Vec<Job>, String> {
+    use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
+    use std::io::Read;
 
-fn write_jobs(path: &Path, jobs: &[Job]) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|error| format!("Failed to create scheduler storage directory: {error}"))?;
+    let root = project_root.as_ref();
+    // Validates every project-root component without following symlinks; does not create storage.
+    let journal_path = crate::automation::journal_path(root)?;
+    let directory = cap_std::fs::Dir::open_ambient_dir(root, cap_std::ambient_authority())
+        .map_err(|e| e.to_string())?;
+    match directory.symlink_metadata(".refact") {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e.to_string()),
+        Ok(_) => {}
     }
-    let content = serde_json::to_string_pretty(jobs)
-        .map_err(|error| format!("Failed to serialize scheduled tasks: {error}"))?;
-    let tmp_path = path.with_extension("json.tmp");
-    std::fs::write(&tmp_path, content)
-        .map_err(|error| format!("Failed to write scheduled tasks: {error}"))?;
-    std::fs::rename(&tmp_path, path)
-        .map_err(|error| format!("Failed to persist scheduled tasks: {error}"))
+    let storage = directory
+        .open_dir_nofollow(".refact")
+        .map_err(|e| e.to_string())?;
+    match std::fs::symlink_metadata(&journal_path) {
+        Ok(_) => {
+            return crate::automation::AutomationJournal::open_observer(root)?.load_legacy_jobs()
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e.to_string()),
+    }
+    // Unmigrated projects remain readable, but reads must never perform the import.
+    match storage.symlink_metadata("scheduled_tasks.json") {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e.to_string()),
+        Ok(_) => {}
+    }
+    let mut options = cap_std::fs::OpenOptions::new();
+    options.read(true).follow(FollowSymlinks::No);
+    #[cfg(unix)]
+    {
+        use cap_std::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NONBLOCK);
+    }
+    let file = storage
+        .open_with("scheduled_tasks.json", &options)
+        .map_err(|e| e.to_string())?;
+    let metadata = file.metadata().map_err(|e| e.to_string())?;
+    if !metadata.is_file() {
+        return Err("Scheduled tasks storage must be a regular file".into());
+    }
+    #[cfg(unix)]
+    {
+        use cap_std::fs::MetadataExt;
+        if metadata.nlink() != 1 {
+            return Err("Hard-linked scheduled tasks storage refused".into());
+        }
+    }
+    const LIMIT: u64 = 4 * 1024 * 1024;
+    let mut bytes = Vec::new();
+    file.take(LIMIT + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| e.to_string())?;
+    if bytes.len() as u64 > LIMIT {
+        return Err("Scheduled tasks size limit".into());
+    }
+    serde_json::from_slice(&bytes).map_err(|e| format!("Failed to parse scheduled tasks: {e}"))
 }
 
 #[cfg(test)]
@@ -381,6 +390,62 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn durable_observation_never_creates_or_migrates_storage() {
+        let temp = tempfile::tempdir().unwrap();
+        assert!(read_durable_jobs(temp.path()).unwrap().is_empty());
+        assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 0);
+        let path = scheduled_tasks_path(temp.path());
+        std::fs::create_dir(path.parent().unwrap()).unwrap();
+        let jobs = vec![test_job("legacy")];
+        let bytes = serde_json::to_vec(&jobs).unwrap();
+        std::fs::write(&path, &bytes).unwrap();
+        assert_eq!(read_durable_jobs(temp.path()).unwrap(), jobs);
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        assert_eq!(
+            std::fs::read_dir(path.parent().unwrap()).unwrap().count(),
+            1
+        );
+        std::fs::write(&path, b"not json").unwrap();
+        assert!(read_durable_jobs(temp.path())
+            .unwrap_err()
+            .contains("Failed to parse scheduled tasks"));
+    }
+
+    #[tokio::test]
+    async fn durable_observation_reads_committed_journal_and_reports_corruption() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = JsonFileCronStore::new(temp.path()).unwrap();
+        store.add(test_job("committed")).await.unwrap();
+        assert_eq!(
+            read_durable_jobs(temp.path()).unwrap(),
+            vec![test_job("committed")]
+        );
+        drop(store);
+        let path = crate::automation::journal_path(temp.path()).unwrap();
+        std::fs::write(path, b"not sqlite").unwrap();
+        assert!(read_durable_jobs(temp.path()).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn durable_observation_rejects_symlink_storage() {
+        let temp = tempfile::tempdir().unwrap();
+        let external = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(external.path(), temp.path().join(".refact")).unwrap();
+        assert!(read_durable_jobs(temp.path()).is_err());
+        std::fs::remove_file(temp.path().join(".refact")).unwrap();
+        std::fs::create_dir(temp.path().join(".refact")).unwrap();
+        std::fs::write(external.path().join("jobs.json"), b"[]").unwrap();
+        std::os::unix::fs::symlink(
+            external.path().join("jobs.json"),
+            scheduled_tasks_path(temp.path()),
+        )
+        .unwrap();
+        assert!(read_durable_jobs(temp.path()).is_err());
+        assert_eq!(std::fs::read_dir(external.path()).unwrap().count(), 1);
+    }
 
     fn test_job(id: &str) -> Job {
         let mut job = Job::new_cron_agent_chat(
@@ -398,13 +463,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn durable_handles_share_notifications_and_committed_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let runner = JsonFileCronStore::new(temp.path()).unwrap();
+        let writer = JsonFileCronStore::new(temp.path().join(".")).unwrap();
+        let notify = runner.change_notify();
+        let notified = notify.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        writer.add(test_job("cron_shared")).await.unwrap();
+        assert_eq!(runner.list().await, vec![test_job("cron_shared")]);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), notified)
+                .await
+                .is_ok()
+        );
+        runner.update_fired("cron_shared", 456, 1).await.unwrap();
+        writer.add(test_job("cron_second")).await.unwrap();
+        let persisted = crate::automation::AutomationJournal::open(temp.path())
+            .unwrap()
+            .load_legacy_jobs()
+            .unwrap();
+        assert_eq!(persisted.len(), 2);
+        let fired = persisted
+            .iter()
+            .find(|job| job.id == "cron_shared")
+            .unwrap();
+        assert_eq!(fired.last_fired_at_ms, Some(456));
+        assert_eq!(fired.fire_count, 1);
+    }
+
+    #[tokio::test]
     async fn independent_handles_observe_controls_and_preserve_unrelated_jobs() {
         let temp = tempfile::tempdir().unwrap();
         let runner = JsonFileCronStore::new(temp.path()).unwrap();
         let controls = JsonFileCronStore::new(temp.path()).unwrap();
         assert!(runner.try_list().await.unwrap().is_empty());
         assert!(runner.try_get("first").await.unwrap().is_none());
-        assert!(!temp.path().join(".refact").exists());
+        assert!(!scheduled_tasks_path(temp.path()).exists());
         controls.add(test_job("first")).await.unwrap();
         assert_eq!(runner.get("first").await, Some(test_job("first")));
         runner.add(test_job("second")).await.unwrap();
@@ -503,7 +599,7 @@ mod tests {
             .await
             .unwrap());
         assert!(controls.try_get("conditional").await.unwrap().is_none());
-        std::fs::write(controls.path(), "invalid").unwrap();
+        std::fs::write(temp.path().join(".refact/automations.json"), "invalid").unwrap();
         assert!(runner.try_list().await.is_err());
         assert!(runner.try_get("conditional").await.is_err());
     }
@@ -524,11 +620,44 @@ mod tests {
             .await
             .is_err());
         assert_eq!(store.get("original").await, Some(test_job("original")));
-        std::fs::write(store.path(), "broken json").unwrap();
+        std::fs::write(temp.path().join(".refact/automations.json"), "broken json").unwrap();
         assert!(store.add(test_job("new")).await.is_err());
         assert_eq!(
-            std::fs::read_to_string(store.path()).unwrap(),
+            std::fs::read_to_string(temp.path().join(".refact/automations.json")).unwrap(),
             "broken json"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelled_caller_still_notifies_after_committed_blocking_write() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Arc::new(JsonFileCronStore::new(temp.path()).unwrap());
+        let notify = store.change_notify();
+        let notified = notify.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let writer = store.clone();
+        let task = tokio::spawn(async move {
+            writer
+                .transaction(true, move |journal| {
+                    entered_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    journal.put_legacy_job(&test_job("cancelled_writer"))
+                })
+                .await
+        });
+        entered_rx.await.unwrap();
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        release_tx.send(()).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), notified)
+            .await
+            .expect("committed write must notify even after its caller is cancelled");
+        assert_eq!(
+            store.get("cancelled_writer").await,
+            Some(test_job("cancelled_writer"))
         );
     }
 
@@ -565,7 +694,19 @@ mod tests {
             .build()
             .unwrap();
         runtime.block_on(async {
-            let store = JsonFileCronStore::new(root).unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            let store = loop {
+                match JsonFileCronStore::new(&root) {
+                    Ok(store) => break store,
+                    Err(error)
+                        if error.contains("execution owner already active")
+                            && std::time::Instant::now() < deadline =>
+                    {
+                        std::thread::yield_now();
+                    }
+                    Err(error) => panic!("scheduler writer could not acquire ownership: {error}"),
+                }
+            };
             for n in 0..16 {
                 store
                     .add(test_job(&format!("{prefix}_{n:02}")))
@@ -593,7 +734,7 @@ mod tests {
         for mut child in children {
             assert!(child.wait().unwrap().success());
         }
-        let jobs = read_jobs(&scheduled_tasks_path(temp.path())).unwrap();
+        let jobs = read_durable_jobs(temp.path()).unwrap();
         let mut ids = jobs.into_iter().map(|job| job.id).collect::<Vec<_>>();
         ids.sort();
         let expected = ["left", "right"]
@@ -651,8 +792,14 @@ mod tests {
         assert_eq!(loaded[0].prompt(), Some("Check the frogs"));
 
         store.add(test_job("cron_new")).await.unwrap();
-        let rewritten: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let rewritten: serde_json::Value = serde_json::to_value(
+            crate::automation::AutomationCatalog::open(temp.path())
+                .unwrap()
+                .read()
+                .unwrap()
+                .legacy_jobs,
+        )
+        .unwrap();
         assert!(rewritten[0].get("trigger").is_some());
         assert!(rewritten[0].get("action").is_some());
         assert!(rewritten[0].get("delivery").is_some());
@@ -673,8 +820,14 @@ mod tests {
 
         let listed = store.list().await;
         assert_eq!(listed, vec![job.clone()]);
-        let serialized: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(store.path()).unwrap()).unwrap();
+        let serialized: serde_json::Value = serde_json::to_value(
+            crate::automation::AutomationCatalog::open(temp.path())
+                .unwrap()
+                .read()
+                .unwrap()
+                .legacy_jobs,
+        )
+        .unwrap();
         assert_eq!(serialized.as_array().unwrap().len(), 1);
         assert_eq!(serialized[0]["description"], json!(job.description));
     }

@@ -178,7 +178,11 @@ pub async fn request(
         .ok_or("parent session unavailable for approval")?;
     let (parent_thread, escalate) = {
         let parent = parent_session.lock().await;
-        (parent.thread.clone(), !user::parent_can_answer(&parent))
+        (
+            parent.thread.clone(),
+            crate::chat::tools::requires_actual_human_approval(reason)
+                || !user::parent_can_answer(&parent),
+        )
     };
     let request_id = uuid::Uuid::new_v4().to_string();
     let args = serde_json::from_str(&call.function.arguments)
@@ -202,6 +206,7 @@ pub async fn request(
         tool_call_id: call.id.clone(),
         tool_name: call.function.name.clone(),
         args,
+        requires_human: crate::chat::tools::requires_actual_human_approval(reason),
         digest: child_worktree
             .as_ref()
             .map(|worktree| worktree.root.to_string_lossy().into_owned()),
@@ -213,7 +218,9 @@ pub async fn request(
         ),
         execution,
     };
-    let instructions = if escalate {
+    let instructions = if pending.requires_human {
+        "This operation requires exact human approval. Parent model policy or automatic approval cannot authorize it. Waiting for the user; nothing has been approved.".to_string()
+    } else if escalate {
         "Escalated to the user because the parent session cannot answer: agent_approval is absent from its effective tool list. Waiting for user approval; nothing has been approved.".to_string()
     } else {
         format!("Use agent_approval with request_id {request_id} and action approve or reject.")
@@ -380,6 +387,24 @@ pub async fn request(
         app.agent_approvals
             .consume(&request_id, &call.id, &pending.args, now_ms())
             .map_err(|e| format!("approval binding: {e:?}"))?;
+        if crate::chat::tools::requires_actual_human_approval(reason) {
+            let session = app
+                .chat
+                .sessions
+                .read()
+                .await
+                .get(&child_chat_id)
+                .cloned()
+                .ok_or("child chat unavailable")?;
+            let mut session = session.lock().await;
+            crate::scheduler::automation_approval::accept_automation_approval(
+                &mut session,
+                &call.id,
+            )?;
+            if let Some(receipt) = session.app_mutation_receipts.get_mut(&call.id) {
+                receipt.accepted = true;
+            }
+        }
         if let Some(execution) = pending.execution {
             ccx.lock().await.approved_executions.insert(
                 call.id.clone(),
@@ -611,6 +636,7 @@ pub(crate) mod tests {
                         tool_call_id: "call".into(),
                         tool_name: "shell".into(),
                         args: serde_json::json!({}),
+                        requires_human: false,
                         digest: None,
                         created_at: now,
                         expires_at: now + 60_000,
@@ -973,6 +999,174 @@ pub(crate) mod tests {
             .err()
             .unwrap()
             .contains("already exists"));
+    }
+
+    #[tokio::test]
+    async fn mandatory_app_human_approval_blocks_pinned_auto_parent_then_accepts_exact_user_once() {
+        let fixture = fixture().await;
+        let mut config = fixture
+            .app
+            .agent_executions
+            .saved_config(&fixture.agent_id)
+            .unwrap();
+        config.tools = crate::subchat::ToolsPolicy::Only(vec!["app".into()]);
+        fixture
+            .app
+            .agent_executions
+            .remember_config(&fixture.agent_id, config);
+        // The context captured the original shell-only ceiling at construction.
+        fixture.ccx.lock().await.child_tool_ceiling =
+            Some(crate::subchat::ToolsPolicy::Only(vec!["app".into()]));
+        // Parent policy must independently allow the App; user-facing catalog
+        // augmentation does not grant authority to a child.
+        let gcx = fixture.app.gcx.clone();
+        let mut modes =
+            crate::yaml_configs::customization_registry::get_project_registry(gcx.clone())
+                .await
+                .unwrap();
+        modes.modes.insert(
+            "agent".into(),
+            serde_yaml::from_str("schema_version: 1\nid: agent\ntools: [shell, process_start, app, agent_approval]\n").unwrap(),
+        );
+        gcx.project_registry_cache
+            .write()
+            .unwrap()
+            .insert(fixture.dir.path().to_path_buf(), modes);
+        let created = crate::apps::execute(
+            &fixture.app,
+            crate::apps::Caller::Host,
+            crate::apps::Command::Create {
+                slug: "human-child".into(),
+                name: "Human child".into(),
+            },
+        )
+        .await
+        .unwrap();
+        let app_id: uuid::Uuid =
+            serde_json::from_value(created["manifest"]["app_id"].clone()).unwrap();
+        let parent = fixture.app.chat.sessions.read().await["parent"].clone();
+        let mut workspace = refact_chat_api::AppWorkspace::empty();
+        workspace.bindings.push(refact_chat_api::AppBinding {
+            binding_id: uuid::Uuid::new_v4(),
+            app_id,
+            params: serde_json::Map::new(),
+            state: serde_json::Map::new(),
+        });
+        {
+            let mut parent = parent.lock().await;
+            parent.thread.auto_approve_dangerous_commands = true;
+            parent.thread.app_workspace =
+                Some(refact_chat_api::StoredAppWorkspace::Supported(workspace));
+        }
+        let call: ChatToolCall = serde_json::from_value(serde_json::json!({
+            "id":"app-write", "type":"function", "function":{"name":"app", "arguments":serde_json::json!({
+                "action":"write_file", "app_id":app_id, "path":"ui/index.html", "content":"human approved",
+                "expected_revision":created["revision"]
+            }).to_string()}
+        })).unwrap();
+        assert!(
+            crate::tools::tool_app::inspect_mutation(&fixture.ccx, &call)
+                .await
+                .unwrap()
+        );
+        let mut future = Box::pin(request(
+            &fixture.app,
+            &fixture.ccx,
+            &call,
+            crate::tools::tool_app::HUMAN_APP_APPROVAL,
+        ));
+        let pending = fixture.waiting(future.as_mut()).await;
+        // Finish publishing the human question before attempting the public model tool.
+        tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            loop {
+                assert!(futures::poll!(future.as_mut()).is_pending());
+                if !parent.lock().await.pending_questions.is_empty() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("human approval question was not published");
+        assert!(pending.requires_human);
+        let thread = parent.lock().await.thread.clone();
+        let (asks, denials) = parent_command_policy(&fixture.app, &thread, &pending)
+            .await
+            .unwrap();
+        assert!(asks.is_empty(), "parent pinned the App: {asks:?}");
+        assert!(denials.is_empty(), "{denials:?}");
+        let context = Arc::new(Mutex::new(
+            AtCommandsContext::new_from_app(
+                fixture.app.clone(),
+                4096,
+                10,
+                false,
+                vec![],
+                "parent".into(),
+                None,
+                "test/model".into(),
+                None,
+                None,
+            )
+            .await,
+        ));
+        let error = fixture
+            .app
+            .tool_registry
+            .execute_tool(
+                &context,
+                "agent",
+                Some("test/model"),
+                "model-approve",
+                "agent_approval",
+                serde_json::json!({"action":"approve", "request_id":pending.id})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            )
+            .await
+            .err()
+            .expect("parent model bypassed exact human approval");
+        assert!(error.contains("explicit user approval"), "{error}");
+        assert_eq!(
+            fixture.app.agent_approvals.decide(
+                "parent",
+                pending.run_generation,
+                &pending.id,
+                true,
+                now_ms()
+            ),
+            Err(refact_work_core::ApprovalError::NotApproved)
+        );
+        assert!(futures::poll!(future.as_mut()).is_pending());
+        let set = parent.lock().await.pending_questions[0].clone();
+        let response = crate::chat::handle_v1_chat_command(
+            axum::extract::State(fixture.app.clone()),
+            axum::extract::Path("parent".into()),
+            hyper::body::Bytes::from(
+                serde_json::json!({"client_request_id":"actual-human", "type":"answer_questions",
+                "tool_call_id":set.tool_call_id,"asked_at_ms":set.asked_at_ms,
+                "answers":[{"id":pending.id,"answer":"approve"}]})
+                .to_string(),
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        assert!(future.await.unwrap());
+        let result = fixture.execute(&call).await.unwrap();
+        assert!(
+            result
+                .messages
+                .iter()
+                .all(|message| message.tool_failed != Some(true)),
+            "approved child App write failed"
+        );
+        assert!(
+            fixture.execute(&call).await.is_err(),
+            "human receipt replay executed"
+        );
+        fixture.app.gcx.apps.shutdown().await;
     }
 
     #[tokio::test]

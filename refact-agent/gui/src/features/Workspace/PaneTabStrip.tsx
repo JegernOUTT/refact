@@ -15,6 +15,7 @@ import {
   FileDiff,
   FileText,
   GitBranch,
+  AppWindow,
   Palette,
 } from "lucide-react";
 import { useMemo, useEffect, useLayoutEffect, useRef, useState } from "react";
@@ -85,9 +86,11 @@ function TabDisplayContent({
         ? FileDiff
         : display.kind === "git"
           ? GitBranch
-          : display.kind === "design"
-            ? Palette
-            : null;
+          : display.kind === "app"
+            ? AppWindow
+            : display.kind === "design"
+              ? Palette
+              : null;
   return (
     <>
       {icon ? (

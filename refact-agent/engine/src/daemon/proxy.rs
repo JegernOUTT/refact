@@ -175,6 +175,20 @@ fn worker_request(
 }
 
 fn requires_worker_authorization(method: &reqwest::Method, path: &str) -> bool {
+    if [
+        "/v1/apps",
+        "/v1/scheduler/automation",
+        "/v1/scheduler/credentials",
+    ]
+    .iter()
+    .any(|prefix| {
+        path == *prefix
+            || path
+                .strip_prefix(prefix)
+                .is_some_and(|tail| tail.starts_with('/'))
+    }) {
+        return true;
+    }
     match method.as_str() {
         "GET" | "HEAD" => {
             matches!(
@@ -742,6 +756,17 @@ mod tests {
                 (Method::GET, "/v1/metrics", true),
                 (Method::GET, "/v1/hooks", true),
                 (Method::HEAD, "/v1/hooks", true),
+                (Method::GET, "/v1/scheduler/automation", true),
+                (Method::GET, "/v1/scheduler/automation/job-1", true),
+                (Method::POST, "/v1/scheduler/automation", true),
+                (Method::PUT, "/v1/scheduler/automation/job-1", true),
+                (Method::DELETE, "/v1/scheduler/automation/job-1", true),
+                (Method::POST, "/v1/scheduler/automation/job-1/control", true),
+                (Method::GET, "/v1/scheduler/credentials", true),
+                (Method::POST, "/v1/scheduler/credentials", true),
+                (Method::DELETE, "/v1/scheduler/credentials/key-1", true),
+                (Method::GET, "/v1/scheduler/automation-extra", false),
+                (Method::POST, "/v1/scheduler/credentials-extra", false),
                 (Method::GET, "/v1/worktrees", false),
                 (Method::GET, "/v1/hooks-evil", false),
                 (Method::POST, "/v1/hooks/fire", false),

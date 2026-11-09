@@ -20,6 +20,7 @@ import {
 } from "./GitPanel/diff/gitDiffDescriptor";
 
 type TabSurfaceKind =
+  | "app"
   | "chat"
   | "task"
   | "buddy"
@@ -107,6 +108,9 @@ export function displayInfoForSurface(
       unreadNotificationCount: 0,
     };
   }
+
+  if (parsed.kind === "app")
+    return { title: "App", kind: "app", unreadNotificationCount: 0 };
 
   if (parsed.kind === "task") {
     const task = tasksById.get(parsed.id);
@@ -218,11 +222,18 @@ export function displayInfoForSurface(
 export type TabDisplayInput = TabDisplayInfo;
 
 export function useTabDisplay() {
+  const views = useAppSelector((state) => state.apps.views);
   const tabs = useAppSelector(selectTabsDisplayData);
   const threads = useAppSelector(selectAllThreads);
   const tasks = useAppSelector(selectOpenTasksFromRoot);
   const tabsById = new Map(tabs.map((tab) => [tab.id, tab]));
   const tasksById = new Map(tasks.map((task) => [task.id, task]));
   return (key: SurfaceKey) =>
-    displayInfoForSurface(key, tabsById, threads, tasksById);
+    views[key]
+      ? {
+          title: views[key].name,
+          kind: "app" as const,
+          unreadNotificationCount: 0,
+        }
+      : displayInfoForSurface(key, tabsById, threads, tasksById);
 }

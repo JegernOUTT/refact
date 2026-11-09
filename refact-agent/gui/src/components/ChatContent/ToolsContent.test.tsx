@@ -1357,3 +1357,82 @@ describe("removed review tool history", () => {
     },
   );
 });
+
+describe("App family routing", () => {
+  it("routes all ten families and t aliases before generic fallback", () => {
+    for (const name of [
+      "app",
+      "app_build",
+      "app_state",
+      "app_binding",
+      "app_layout",
+      "app_view",
+      "app_source",
+      "app_event",
+      "app_inspect",
+      "app_screenshot",
+    ]) {
+      for (const alias of [name, `t_${name}`]) {
+        const { unmount } = renderToolContent(alias, '{"revision":"r"}', {
+          args: { action: "get" },
+        });
+        expect(screen.getByTestId("app-tool")).toBeInTheDocument();
+        expect(screen.queryByTestId("generic-tool")).toBeNull();
+        unmount();
+      }
+    }
+  });
+  it("keeps withheld privacy responses ahead of App presentation", () => {
+    renderToolContent(
+      "app",
+      "Output withheld by user privacy policy: DO_NOT_SHOW",
+      { args: { action: "read_file", password: "ARG_SECRET" } },
+    );
+    expect(screen.queryByTestId("app-tool")).toBeNull();
+    expect(screen.queryByTestId("generic-tool")).toBeNull();
+    expect(screen.queryByText("DO_NOT_SHOW")).toBeNull();
+  });
+  it("keeps App multimodal capture in its specialized card and missing results neutral", () => {
+    const id = "app-png";
+    const chat = createDefaultChatState();
+    chat.threads[chat.current_thread_id].thread.messages = [
+      {
+        role: "tool",
+        tool_call_id: id,
+        content: [
+          {
+            m_type: "text",
+            m_content: '{"revision":"r","trust":"app_reported"}',
+          },
+          { m_type: "image/png", m_content: "iVBORw0KGgo=" },
+        ],
+        tool_failed: false,
+      },
+    ];
+    const { unmount } = render(
+      <ToolContent
+        toolCalls={[
+          makeToolCall("t_app_screenshot", id, { action: "capture" }),
+        ]}
+      />,
+      { preloadedState: { chat } },
+    );
+    expect(screen.getByTestId("app-tool")).toBeInTheDocument();
+    expect(screen.queryByTestId("multimodal-tool")).toBeNull();
+    openToolCard();
+    expect(
+      screen.getByTestId("app-tool-images").querySelector("img"),
+    ).toHaveAttribute("src", "data:image/png;base64,iVBORw0KGgo=");
+    unmount();
+    renderToolContent("app", "", { missing: true });
+    expect(screen.getByTestId("transcript-status-pill")).toHaveTextContent(
+      "No result",
+    );
+  });
+  it("shows Pending only for the owning active call", () => {
+    renderToolContent("app", "", { missing: true, busy: true });
+    expect(screen.getByTestId("transcript-status-pill")).toHaveTextContent(
+      "Pending",
+    );
+  });
+});

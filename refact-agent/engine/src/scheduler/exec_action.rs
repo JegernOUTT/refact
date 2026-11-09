@@ -77,6 +77,7 @@ async fn run_command_inner(
     .with_tty(false);
     let result = app.runtime.exec_registry.spawn(request).await?;
     let process_id = result.snapshot.meta.process_id.clone();
+    let completed = app.runtime.exec_registry.wait(&process_id).await?;
     let read = app.runtime.exec_registry.read(&process_id, 0, None).await;
     let raw_output = app
         .runtime
@@ -103,11 +104,11 @@ async fn run_command_inner(
             ));
         }
     }
-    let exit_code = exec_exit_code(&result.snapshot.status);
-    let status = if command_status_is_success(&result.snapshot.status) {
+    let exit_code = exec_exit_code(&completed.status);
+    let status = if command_status_is_success(&completed.status) {
         "fired"
     } else {
-        append_status_summary(&mut stderr, &result.snapshot.status, timeout_secs);
+        append_status_summary(&mut stderr, &completed.status, timeout_secs);
         "error"
     };
     Ok(CommandRunResult {
