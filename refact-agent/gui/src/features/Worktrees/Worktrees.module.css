@@ -26,7 +26,6 @@ button.triggerActive {
 }
 
 .triggerText,
-.itemName,
 .path {
   min-width: 0;
   overflow: hidden;
@@ -39,7 +38,6 @@ button.triggerActive {
 }
 
 .labelText,
-.itemName,
 .errorTitle {
   font-family: var(--rf-font-ui);
   font-size: var(--rf-text-2);
@@ -75,8 +73,7 @@ button.triggerActive {
 .field,
 .fieldLabelGroup,
 .fieldControl,
-.dialogOverlayText,
-.itemTitle {
+.dialogOverlayText {
   display: flex;
   flex-direction: column;
   min-width: 0;
@@ -87,7 +84,6 @@ button.triggerActive {
 }
 
 .field,
-.itemTitle,
 .dialogOverlayText {
   gap: var(--rf-space-1);
 }
@@ -203,10 +199,6 @@ button.triggerActive {
   gap: var(--rf-space-3);
 }
 
-.diffDialog {
-  max-width: min(900px, calc(100vw - 2 * var(--rf-space-3)));
-}
-
 .badgeRow,
 .inlineActions,
 .loadingRow {
@@ -218,7 +210,6 @@ button.triggerActive {
   padding: var(--rf-space-1) var(--rf-space-2);
 }
 
-.diffFileList,
 .warningBox,
 .errorBox {
   border: var(--rf-hairline) solid var(--rf-border);
@@ -236,81 +227,6 @@ button.triggerActive {
   color: var(--rf-color-warning);
 }
 
-.diffFileList {
-  composes: scrollbarThin from "../../components/shared/scrollbar.module.css";
-  display: flex;
-  flex-direction: column;
-  gap: var(--rf-space-1);
-  max-height: min(220px, calc(100dvh - var(--rf-space-6) * 4));
-  overflow-y: auto;
-}
-
-.diffFileItem {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  min-width: 0;
-  gap: var(--rf-space-2);
-  padding: var(--rf-space-2);
-  border-radius: var(--rf-radius-ctl);
-  background: transparent;
-}
-
-.diffFileItem:hover {
-  background: var(--rf-surface-1);
-}
-
-.patchScroller {
-  composes: scrollbarThin from "../../components/shared/scrollbar.module.css";
-  max-height: min(360px, calc(100dvh - var(--rf-space-6) * 4));
-  overflow-y: auto;
-  border: var(--rf-hairline) solid var(--rf-border);
-  border-radius: var(--rf-radius-card);
-  background: transparent;
-}
-
-.patchPreview {
-  width: max-content;
-  min-width: 100%;
-  margin: 0;
-  padding: var(--rf-space-2) 0;
-  font-family: var(--rf-font-mono);
-  font-size: var(--rf-text-1);
-  line-height: var(--rf-line-1);
-  white-space: pre;
-}
-
-.patchLine {
-  display: block;
-  padding: 0 var(--rf-space-3);
-  white-space: pre;
-}
-
-.patchLineMeta,
-.patchLineFile {
-  color: var(--rf-color-accent);
-  background: var(--rf-color-accent-soft);
-}
-
-.patchLineHunk {
-  color: var(--rf-color-info);
-  background: var(--rf-color-accent-soft);
-}
-
-.patchLineAdd {
-  color: var(--rf-color-success);
-  background: color-mix(in oklab, var(--rf-color-success) 10%, transparent);
-}
-
-.patchLineRemove {
-  color: var(--rf-color-danger);
-  background: color-mix(in oklab, var(--rf-color-danger) 10%, transparent);
-}
-
-.patchLineContext {
-  color: var(--rf-color-muted);
-}
-
 .spinner {
   width: var(--rf-icon);
   height: var(--rf-icon);
@@ -321,11 +237,6 @@ button.triggerActive {
 }
 
 @media (width <= 680px) {
-  .diffFileItem {
-    align-items: flex-start;
-    flex-direction: column;
-  }
-
   .modalActions,
   .inlineActions {
     justify-content: stretch;
@@ -368,49 +279,13 @@ button.triggerActive {
   flex: 1 1 auto;
   flex-direction: column;
   overflow-y: auto;
-}
-
-.recordRow {
-  position: relative;
-  display: flex;
-  min-width: 0;
-  align-items: center;
-  border-radius: var(--rf-radius-ctl);
-}
-
-.recordRow:has([aria-current="true"]) {
-  background: var(--rf-surface-2);
-}
-
-.recordActions {
-  display: inline-flex;
-  flex: none;
-  gap: var(--rf-space-2xs);
-  padding-right: var(--rf-space-1);
-  opacity: var(--rf-motion-opacity-soft);
-  transition: opacity var(--rf-dur-fast) var(--rf-ease-standard);
-}
-
-.recordRow:hover .recordActions,
-.recordActions:focus-within {
-  opacity: var(--rf-motion-opacity-visible);
-}
-
-.recordAction.recordAction {
-  height: var(--rf-space-5);
-  padding: 0 var(--rf-space-xs);
-  border-color: transparent;
-  background: var(--rf-surface-3);
-  font-size: var(--rf-text-1);
+  gap: var(--rf-space-2);
+  padding: var(--rf-space-2);
 }
 
 @media (prefers-reduced-motion: reduce) {
   .spinner {
     transition: none;
     animation: none;
-  }
-
-  .recordActions {
-    transition: none;
   }
 }

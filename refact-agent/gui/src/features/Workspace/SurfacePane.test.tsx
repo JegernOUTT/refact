@@ -6,7 +6,11 @@ import { server } from "../../utils/mockServer";
 import * as ChatModule from "../Chat/Chat";
 import * as DesignModule from "../Design";
 import { SurfacePane } from "./SurfacePane";
-import { makeSurfaceKey, parseSurfaceKey } from "./surfaceKey";
+import {
+  makeSurfaceKey,
+  makeWorktreeDiffSurfaceKey,
+  parseSurfaceKey,
+} from "./surfaceKey";
 
 vi.spyOn(ChatModule, "Chat").mockImplementation(({ chatId }) => (
   <section data-testid="chat-surface" data-chat-id={chatId ?? ""}>
@@ -55,6 +59,57 @@ describe("SurfacePane", () => {
       screen.getByText("Open or drag a workspace tab into this pane."),
     ).toBeInTheDocument();
   });
+
+  it.each(["vscode", "jetbrains", "ide"] as const)(
+    "renders dedicated worktree reviews on %s without Git panel capability",
+    async (host) => {
+      server.use(
+        http.get("*/v1/worktrees/:id/diff", () =>
+          HttpResponse.json({
+            id: "review-wt",
+            status: {},
+            files: [],
+            stats: {
+              files_changed: 0,
+              committed_files: 0,
+              staged_files: 0,
+              unstaged_files: 0,
+              untracked_files: 0,
+            },
+            patch: "",
+            patch_truncated: false,
+          }),
+        ),
+      );
+      render(
+        <SurfacePane
+          surfaceKey={makeWorktreeDiffSurfaceKey({
+            worktreeId: "review-wt",
+            sourceWorkspaceRoot: "/repo",
+            root: "/repo/wt",
+          })}
+        />,
+        {
+          preloadedState: {
+            config: {
+              host,
+              lspPort: 8001,
+              apiKey: null,
+              features: {},
+              themeProps: { appearance: "dark" },
+            },
+          },
+        },
+      );
+      expect(
+        await screen.findByRole("region", { name: "Worktree diff" }),
+      ).toBeInTheDocument();
+      expect(
+        await screen.findByText("No changed files reported."),
+      ).toBeInTheDocument();
+      expect(screen.queryByTestId("git-main-panel")).not.toBeInTheDocument();
+    },
+  );
 
   it("renders a chat surface for chat surface keys", () => {
     const surfaceKey = makeSurfaceKey("chat", "chat-a");

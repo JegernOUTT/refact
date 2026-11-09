@@ -7,6 +7,7 @@ import {
 import { selectOpenTasksFromRoot, type OpenTask } from "../Tasks/tasksSlice";
 import { getChatActivity, type ChatActivity } from "../../utils/chatActivity";
 import {
+  worktreeDiffDescriptorFromSurfaceKey,
   gitDiffDescriptorFromSurfaceKey,
   isMainSurfaceKind,
   parseSurfaceKey,
@@ -27,6 +28,7 @@ type TabSurfaceKind =
   | "dashboard"
   | "design"
   | "file"
+  | "worktreediff"
   | "gitdiff"
   | MainSurfaceKind;
 
@@ -164,6 +166,17 @@ export function displayInfoForSurface(
       tooltip: parsed.id,
       filePath: parsed.id,
       kind: "file",
+      unreadNotificationCount: 0,
+    };
+  }
+
+  if (parsed.kind === "worktreediff") {
+    const descriptor = worktreeDiffDescriptorFromSurfaceKey(surfaceKey);
+    return {
+      title: `Diff · ${descriptor?.label ?? "Worktree"}`,
+      tooltip: descriptor?.root ?? descriptor?.worktreeId,
+      root: descriptor?.root,
+      kind: "worktreediff",
       unreadNotificationCount: 0,
     };
   }

@@ -110,6 +110,7 @@ function tabDragPayloadForSurface(surfaceKey: SurfaceKey): {
       parsed.kind === "app" ||
       parsed.kind === "design" ||
       parsed.kind === "gitdiff" ||
+      parsed.kind === "worktreediff" ||
       isMainSurfaceKind(parsed.kind)
     ) {
       return { type: "surface", id: surfaceKey };
@@ -278,6 +279,7 @@ export function TabBar({ placement = "workspace" }: TabBarProps) {
         parsed.kind === "design" ||
         parsed.kind === "file" ||
         parsed.kind === "gitdiff" ||
+        parsed.kind === "worktreediff" ||
         isMainSurfaceKind(parsed.kind)
       ) {
         dispatch(setActiveTab(tabId));
@@ -714,7 +716,8 @@ export function TabBar({ placement = "workspace" }: TabBarProps) {
                   <span className={styles.tabStatus}>
                     {tab.kind === "file" ? (
                       <Icon icon={FileText} size="sm" tone="muted" />
-                    ) : tab.kind === "gitdiff" ? (
+                    ) : tab.kind === "gitdiff" ||
+                      tab.kind === "worktreediff" ? (
                       <Icon icon={FileDiff} size="sm" tone="muted" />
                     ) : tab.kind === "git" ? (
                       <Icon icon={GitBranch} size="sm" tone="muted" />

@@ -597,6 +597,8 @@ pub struct OpenWorktreeResponse {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorktreeDiffFile {
     pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub old_path: Option<String>,
     pub status: String,
     pub source: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -621,6 +623,8 @@ pub struct WorktreeDiffStats {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorktreeDiffResponse {
     pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_base_commit: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

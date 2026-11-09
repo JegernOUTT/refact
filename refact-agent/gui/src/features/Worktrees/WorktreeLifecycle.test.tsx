@@ -14,6 +14,7 @@ import type {
   WorktreeRecordView,
 } from "../../services/refact";
 import type { TaskBoard, TaskMeta } from "../../services/refact/tasks";
+import { WorktreeDiffSurface } from "./WorktreeDiffSurface";
 import { WorktreeDiffPanel } from "./WorktreeDiffPanel";
 import { MergeWorktreeModal } from "./MergeWorktreeModal";
 import { WorktreeMenu } from "./WorktreeMenu";
@@ -36,7 +37,7 @@ function configState(host: Host = "web") {
 function makeMeta(id = "wt-1", branch = "refact/task/T-1"): WorktreeMeta {
   return {
     id,
-    kind: "task_agent",
+    kind: "chat",
     root: `/tmp/refact/${id}`,
     source_workspace_root: "/repo",
     repo_root: "/repo",
@@ -284,48 +285,63 @@ beforeEach(() => {
 });
 
 describe("Worktree lifecycle GUI", () => {
-  test("diff panel renders file list and patch", async () => {
+  test("legacy diff panel opens an ephemeral review tab without changing chat scope", async () => {
     const record = makeRecord();
-    server.use(diffHandler());
-
+    const store = setUpStore({
+      config: configState(),
+      chat: makeChatState("chat-1", record.meta),
+    });
+    const onOpenChange = vi.fn();
     render(
-      <WorktreeDiffPanel
-        open
-        worktreeId={record.meta.id}
-        record={record}
-        onOpenChange={() => undefined}
-      />,
-      { preloadedState: { config: configState() } },
+      <WorktreeDiffPanel open record={record} onOpenChange={onOpenChange} />,
+      { store },
     );
-
-    expect(await screen.findByText("src/lib.rs")).toBeInTheDocument();
-    expect(screen.getByText("committed · modified")).toBeInTheDocument();
-    expect(screen.getByText(/diff --git/)).toBeInTheDocument();
-    expect(screen.getByText("+new line")).toBeInTheDocument();
-    expect(
-      screen.getByText("Patch preview was truncated by the backend."),
-    ).toBeInTheDocument();
+    await waitFor(() => expect(onOpenChange).toHaveBeenCalledWith(false));
+    const serialized = JSON.stringify(store.getState().workspace);
+    expect(serialized).toContain("worktreediff:");
+    expect(store.getState().chat).toEqual(
+      expect.objectContaining({ current_thread_id: "chat-1" }),
+    );
   });
 
-  test("diff panel queries when only a worktree id is provided", async () => {
+  test("diff surface queries an id, shows layers and truncation independently of the viewer", async () => {
     const requestedIds: string[] = [];
+    server.use(
+      http.get("*/v1/git/file", () =>
+        HttpResponse.json({
+          content: "",
+          exists: true,
+          binary: false,
+          truncated: false,
+          size_bytes: 0,
+        }),
+      ),
+    );
     server.use(
       http.get("*/v1/worktrees/:id/diff", ({ params }) => {
         requestedIds.push(String(params.id));
         return HttpResponse.json(makeDiff("wt-id-only"));
       }),
     );
-
     render(
-      <WorktreeDiffPanel
-        open
-        worktreeId="wt-id-only"
-        onOpenChange={() => undefined}
+      <WorktreeDiffSurface
+        descriptor={{
+          worktreeId: "wt-id-only",
+          sourceWorkspaceRoot: "/repo",
+          root: "/tmp/refact/wt-id-only",
+        }}
       />,
       { preloadedState: { config: configState() } },
     );
-
-    expect(await screen.findByText("src/lib.rs")).toBeInTheDocument();
+    expect(
+      await screen.findByRole("navigation", {
+        name: "All changed files and layers",
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /src\/lib.rs committed/ }),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/Summary patch truncated/)).toBeInTheDocument();
     expect(requestedIds).toEqual(["wt-id-only"]);
   });
 
@@ -1033,26 +1049,14 @@ describe("Worktree lifecycle GUI", () => {
     const diffButton = screen.getByRole("button", {
       name: "View worktree diff",
     });
-    expect(diffButton).toHaveTextContent("Diff");
+    expect(diffButton).not.toHaveTextContent("Diff");
     await user.click(diffButton);
-    expect(await screen.findByText("src/lib.rs")).toBeInTheDocument();
-    const patchLine = screen.getByText("+new line");
     expect(
-      fireEvent.pointerDown(patchLine, { button: 0, cancelable: true }),
-    ).toBe(true);
-    await user.pointer([
-      { target: patchLine, offset: 0, keys: "[MouseLeft>]" },
-      { target: patchLine, offset: patchLine.textContent?.length },
-      { keys: "[/MouseLeft]" },
-    ]);
-    expect(window.getSelection()?.toString()).toBe("+new line");
-    expect(
-      screen.getByRole("dialog", { name: "Worktree diff" }),
-    ).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "Close" }));
+      screen.queryByRole("dialog", { name: "Worktree diff" }),
+    ).not.toBeInTheDocument();
 
     const mergeButton = screen.getByRole("button", { name: "Merge worktree" });
-    expect(mergeButton).toHaveTextContent("Merge");
+    expect(mergeButton).not.toHaveTextContent("Merge");
     await user.click(mergeButton);
     await user.click(await screen.findByRole("button", { name: "Merge" }));
 

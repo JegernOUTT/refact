@@ -1954,10 +1954,14 @@ const TaskWorkspaceContent: React.FC<TaskWorkspaceProps> = ({
     );
   }, [dispatch, taskId]);
 
-  const handleViewCardDiff = useCallback((worktree: CardWorktreeTarget) => {
-    if (!isActionableWorktree(worktree)) return;
-    setDiffTarget(worktree);
-  }, []);
+  const handleViewCardDiff = useCallback(
+    (worktree: CardWorktreeTarget) => {
+      if (!isActionableWorktree(worktree)) return;
+      setSelectedCardId(null);
+      setDiffTarget(worktree);
+    },
+    [setSelectedCardId],
+  );
 
   const handleMergeCardWorktree = useCallback(
     (worktree: CardWorktreeTarget) => {

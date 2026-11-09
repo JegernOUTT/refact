@@ -12,6 +12,7 @@ import { DesignSurface } from "../Design";
 import { FileViewer } from "./FilesPanel";
 import { GitPanel } from "./GitPanel";
 import {
+  worktreeDiffDescriptorFromSurfaceKey,
   gitDiffDescriptorFromSurfaceKey,
   isGitSurface,
   parseSurfaceKey,
@@ -30,6 +31,12 @@ const TaskWorkspace = lazy(() =>
 const BuddyHome = lazy(() =>
   import("../Buddy/BuddyHome").then((module) => ({
     default: module.BuddyHome,
+  })),
+);
+
+const WorktreeDiffSurface = lazy(() =>
+  import("../Worktrees/WorktreeDiffSurface").then((module) => ({
+    default: module.WorktreeDiffSurface,
   })),
 );
 
@@ -143,6 +150,25 @@ export function SurfacePane({
           data-surface-key={surfaceKey}
         >
           <DesignSurface surfaceId={parsed.id} />
+        </div>
+      );
+    }
+
+    if (parsed.kind === "worktreediff") {
+      const descriptor = worktreeDiffDescriptorFromSurfaceKey(surfaceKey);
+      if (!descriptor) return null;
+      return (
+        <div
+          className={classNames(styles.surfacePane, styles.panelSurface)}
+          data-surface-key={surfaceKey}
+        >
+          <Suspense fallback={<Spinner label="Loading worktree diff" />}>
+            <WorktreeDiffSurface
+              key={surfaceKey}
+              descriptor={descriptor}
+              surfaceKey={surfaceKey}
+            />
+          </Suspense>
         </div>
       );
     }

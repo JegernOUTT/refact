@@ -15,7 +15,10 @@ import { GitPanel } from "./GitPanel";
 import { selectGitDiffTargetForChat, setActiveGitRoot } from "./gitPanelSlice";
 import { createChatWithId } from "../../Chat/Thread/actions";
 import { openTab, setActiveTab } from "../workspaceSlice";
-import { gitDiffDescriptorFromSurfaceKey } from "../surfaceKey";
+import {
+  worktreeDiffDescriptorFromSurfaceKey,
+  gitDiffDescriptorFromSurfaceKey,
+} from "../surfaceKey";
 import type { WorktreeMeta } from "../../../services/refact/worktrees";
 
 const APP_CHANGE: GitFileChange = {
@@ -304,6 +307,14 @@ function installHandlers(options?: {
         options?.generatedMessage ?? "Generated commit message",
       );
     }),
+    http.get("*/v1/worktrees/summary", ({ request }) =>
+      HttpResponse.json({
+        source_workspace_root: new URL(request.url).searchParams.get(
+          "source_workspace_root",
+        ),
+        worktrees: [],
+      }),
+    ),
     http.get("*/v1/worktrees", ({ request }) => {
       options?.worktreeCalls?.push(new URL(request.url).searchParams);
       return HttpResponse.json({
@@ -311,7 +322,18 @@ function installHandlers(options?: {
         source_workspace_root: "/repo",
         source_current_branch: "main",
         source_branches: ["main"],
-        worktrees: [record],
+        worktrees: [
+          {
+            ...record,
+            meta: {
+              ...record.meta,
+              source_workspace_root:
+                new URL(request.url).searchParams.get(
+                  "source_workspace_root",
+                ) ?? "/repo",
+            },
+          },
+        ],
       });
     }),
     http.get("*/v1/worktrees/:id/diff", () =>
@@ -868,7 +890,8 @@ describe("GitDock commit tool window", () => {
       sourceWorkspaceRoot: string | null;
     }[] = [];
     installHandlers({ openCalls, deleteCalls });
-    const { user } = renderPanel();
+    const { store, user } = renderPanel();
+    const scopeBefore = store.getState().chat;
     await openWorktreesTab(user);
 
     const section = await screen.findByRole("heading", { name: "Worktrees" });
@@ -877,22 +900,43 @@ describe("GitDock commit tool window", () => {
     if (!worktreesSection) return;
 
     await user.click(
-      within(worktreesSection).getByRole("button", { name: "Diff" }),
+      within(worktreesSection).getByRole("button", {
+        name: "View worktree diff refact/wt-1",
+      }),
     );
-    expect(await screen.findByText("Worktree diff")).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "Close" }));
+    expect(
+      worktreeDiffDescriptorFromSurfaceKey(
+        store.getState().workspace.activeTabId ?? "",
+      ),
+    ).toEqual({
+      worktreeId: "wt-1",
+      sourceWorkspaceRoot: "/repo",
+      root: "/tmp/wt-1",
+      label: "refact/wt-1",
+    });
+    expect(
+      screen.queryByRole("dialog", { name: "Worktree diff" }),
+    ).not.toBeInTheDocument();
+    expect(store.getState().chat).toEqual(scopeBefore);
     await user.click(
-      within(worktreesSection).getByRole("button", { name: "Open" }),
+      within(worktreesSection).getByRole("button", {
+        name: "Copy folder path refact/wt-1",
+      }),
     );
     await waitFor(() => expect(openCalls).toEqual(["wt-1"]));
     await user.click(
-      within(worktreesSection).getByRole("button", { name: "Cleanup" }),
+      within(worktreesSection).getByRole("button", {
+        name: "Delete or discard worktree refact/wt-1",
+      }),
     );
+    expect(deleteCalls).toEqual([]);
+    await user.click(screen.getByRole("button", { name: "Delete worktree" }));
     await waitFor(() =>
       expect(deleteCalls).toEqual([
         { id: "wt-1", sourceWorkspaceRoot: "/repo" },
       ]),
     );
+    expect(store.getState().chat).toEqual(scopeBefore);
   });
 
   test("drives git requests with status-provided roots for subdirectory workspaces", async () => {
@@ -952,6 +996,7 @@ describe("GitDock commit tool window", () => {
       }),
     );
     store.dispatch(openTab("chat:chat-b"));
+    const scopeBefore = store.getState().chat;
     await openWorktreesTab(user);
 
     const worktreesHeading = await screen.findByRole("heading", {
@@ -966,13 +1011,18 @@ describe("GitDock commit tool window", () => {
     );
 
     await user.click(
-      within(worktreesSection).getByRole("button", { name: "Cleanup" }),
+      within(worktreesSection).getByRole("button", {
+        name: "Delete or discard worktree refact/wt-1",
+      }),
     );
+    expect(deleteCalls).toEqual([]);
+    await user.click(screen.getByRole("button", { name: "Delete worktree" }));
     await waitFor(() =>
       expect(deleteCalls).toEqual([
         { id: "wt-1", sourceWorkspaceRoot: "/repo/packages/b" },
       ]),
     );
+    expect(store.getState().chat).toEqual(scopeBefore);
   });
 
   test("shows a no-repository empty state when status returns zero roots", async () => {

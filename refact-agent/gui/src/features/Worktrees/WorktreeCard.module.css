@@ -1,0 +1,88 @@
+.card {
+  min-width: 0;
+  flex: none;
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-card);
+  background: var(--rf-surface-1);
+  overflow: hidden;
+}
+.card[data-selected] {
+  border-color: var(--rf-color-accent);
+  background: var(--rf-color-accent-soft);
+}
+.identity {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-1);
+  width: 100%;
+  min-width: 0;
+  padding: var(--rf-space-2) var(--rf-space-3);
+  border: 0;
+  background: transparent;
+  color: var(--rf-color-fg);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.identity:disabled {
+  cursor: default;
+}
+.identity:focus-visible {
+  outline: var(--rf-hairline) solid var(--rf-color-accent);
+  outline-offset: calc(-1 * var(--rf-space-1));
+}
+.heading {
+  display: flex;
+  align-items: center;
+  gap: var(--rf-space-2);
+  width: 100%;
+  min-width: 0;
+}
+.name {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-weight: var(--rf-weight-semibold);
+  font-size: var(--rf-text-2);
+  line-height: var(--rf-line-2);
+}
+.selected {
+  color: var(--rf-color-accent);
+  font-size: var(--rf-text-1);
+  line-height: var(--rf-line-1);
+  flex: none;
+}
+.path {
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--rf-color-muted);
+  font-family: var(--rf-font-mono);
+  font-size: var(--rf-text-1);
+  line-height: var(--rf-line-1);
+}
+.metadata {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--rf-space-1) var(--rf-space-2);
+  padding: 0 var(--rf-space-3) var(--rf-space-2);
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-1);
+  line-height: var(--rf-line-1);
+}
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--rf-space-1);
+  padding: var(--rf-space-1) var(--rf-space-2);
+  border-top: var(--rf-hairline) solid var(--rf-border);
+}
+.action.action {
+  width: var(--rf-control-h-icon-sm);
+  height: var(--rf-control-h-icon-sm);
+  min-width: var(--rf-control-h-icon-sm);
+  min-height: var(--rf-control-h-icon-sm);
+}

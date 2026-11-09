@@ -82,7 +82,7 @@ function TabDisplayContent({
   const icon =
     display.kind === "file"
       ? FileText
-      : display.kind === "gitdiff"
+      : display.kind === "gitdiff" || display.kind === "worktreediff"
         ? FileDiff
         : display.kind === "git"
           ? GitBranch

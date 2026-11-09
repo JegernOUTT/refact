@@ -3,7 +3,11 @@ import { act } from "react-dom/test-utils";
 import { http, HttpResponse } from "msw";
 import { fireEvent, screen, waitFor, render } from "../../utils/test-utils";
 import type { Chat } from "../Chat/Thread/types";
-import { ChatThreadProvider, selectThreadWorktreeById } from "../Chat/Thread";
+import {
+  ChatThreadProvider,
+  selectThreadWorktreeById,
+  setThreadWorktree,
+} from "../Chat/Thread";
 import { worktreesApi } from "../../services/refact/worktrees";
 import { updateConfig } from "../Config/configSlice";
 import type {
@@ -297,10 +301,163 @@ function renderControl(
 
 beforeEach(() => {
   resetChatParamsSyncState();
-  server.use(worktreesList([]), worktreeDiff(), chatModes());
+  server.use(
+    worktreesList([]),
+    worktreeDiff(),
+    chatModes(),
+    http.get("*/v1/worktrees/summary", () =>
+      HttpResponse.json({ source_workspace_root: "/repo", worktrees: [] }),
+    ),
+  );
 });
 
 describe("WorktreeControl", () => {
+  test("summary is lazy and cards place the attached checkout first", async () => {
+    const other = makeWorktreeRecord("wt-other", "feature/other");
+    const selected = makeWorktreeRecord("wt-selected", "feature/selected");
+    const requests: string[] = [];
+    server.use(
+      http.get("*/v1/worktrees/summary", ({ request }) => {
+        requests.push(request.url);
+        return HttpResponse.json({
+          source_workspace_root: "/repo",
+          worktrees: [
+            { id: selected.meta.id, disk_usage_bytes: 0, branch_merged: false },
+          ],
+        });
+      }),
+    );
+    const { user } = renderControl([other, selected], selected.meta);
+    await screen.findByTestId("worktree-control-trigger");
+    expect(requests).toHaveLength(0);
+    await user.click(screen.getByTestId("worktree-control-trigger"));
+    expect(await screen.findByText("0 B")).toBeInTheDocument();
+    expect(screen.getByText("Not in base")).toBeInTheDocument();
+    const cards = screen.getAllByRole("article");
+    expect(cards[0]).toHaveAttribute("aria-label", "feature/selected");
+    expect(
+      screen.getByRole("button", { name: "Select worktree feature/selected" }),
+    ).toHaveFocus();
+    expect(requests).toHaveLength(1);
+  });
+
+  test.each([
+    [true, 2],
+    [false, 2],
+    [true, 1],
+  ])(
+    "deleting another card targets it without detaching selected checkout, deleted=%s refs=%s",
+    async (deleted, refs) => {
+      const other = makeWorktreeRecord(
+        "wt-other",
+        "feature/other",
+        Number(refs),
+      );
+      const selected = makeWorktreeRecord("wt-selected", "feature/selected");
+      const deleteCalls: string[] = [];
+      const commands: JsonObject[] = [];
+      server.use(
+        commandCapture(commands),
+        http.delete("*/v1/worktrees/:id", ({ params }) => {
+          deleteCalls.push(String(params.id));
+          return HttpResponse.json({
+            deleted,
+            branch_deleted: false,
+            stale_path: false,
+            affected_references: [],
+            affected_reference_count: 0,
+            warnings: [],
+          });
+        }),
+      );
+      const { user, store } = renderControl([other, selected], selected.meta);
+      await user.click(screen.getByTestId("worktree-control-trigger"));
+      await user.click(
+        await screen.findByRole("button", {
+          name: "Delete or discard worktree feature/other",
+        }),
+      );
+      expect(
+        screen.getByText(
+          refs === 1 ? /has 1 reference/i : /shared by 2 references/i,
+        ),
+      ).toBeInTheDocument();
+      await user.click(screen.getByRole("button", { name: "Delete worktree" }));
+      await waitFor(() => expect(deleteCalls).toEqual(["wt-other"]));
+      if (!deleted)
+        expect(
+          await screen.findByText(/Delete not confirmed/),
+        ).toBeInTheDocument();
+      expect(selectThreadWorktreeById(store.getState(), "chat-1")).toEqual(
+        selected.meta,
+      );
+      expect(commands).toEqual([]);
+    },
+  );
+
+  test("main workspace is selected first without attachment", async () => {
+    const record = makeWorktreeRecord("wt-other", "feature/other");
+    const { user } = renderControl([record]);
+    await user.click(screen.getByTestId("worktree-control-trigger"));
+    await screen.findByRole("button", {
+      name: "Select worktree feature/other",
+    });
+    const cards = screen.getAllByRole("article");
+    expect(cards[0]).toHaveAttribute("aria-label", "Main workspace");
+    expect(cards[0]).toHaveTextContent("Selected");
+  });
+
+  test("late deletion never detaches a different attachment", async () => {
+    const selected = makeWorktreeRecord("wt-selected", "feature/selected");
+    const replacement = makeWorktreeRecord("wt-newer", "feature/newer");
+    const commands: JsonObject[] = [];
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    server.use(
+      commandCapture(commands),
+      http.delete("*/v1/worktrees/:id", async () => {
+        await gate;
+        return HttpResponse.json({
+          deleted: true,
+          branch_deleted: false,
+          stale_path: false,
+          affected_references: [],
+          affected_reference_count: 0,
+          warnings: [],
+        });
+      }),
+    );
+    const { user, store } = renderControl(
+      [selected, replacement],
+      selected.meta,
+    );
+    await user.click(screen.getByTestId("worktree-control-trigger"));
+    await user.click(
+      await screen.findByRole("button", { name: "Delete or discard worktree" }),
+    );
+    await user.click(screen.getByRole("button", { name: "Delete worktree" }));
+    act(() => {
+      store.dispatch(
+        setThreadWorktree({ chatId: "chat-1", worktree: replacement.meta }),
+      );
+    });
+    await act(async () => {
+      release();
+      await gate;
+    });
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("dialog", { name: "Delete worktree" }),
+      ).not.toBeInTheDocument(),
+    );
+    expect(selectThreadWorktreeById(store.getState(), "chat-1")).toEqual(
+      replacement.meta,
+    );
+    expect(commands).toEqual([]);
+  });
+
   test("fetches the list once without branches and loads branches only for create", async () => {
     const requests: string[] = [];
     server.use(worktreesList([], "dev", ["dev", "feature/base"], requests));
@@ -1210,7 +1367,7 @@ describe("WorktreeControl", () => {
     await user.click(screen.getByTestId("worktree-control-trigger"));
     await user.click(
       await screen.findByRole("button", {
-        name: "Open worktree in new window",
+        name: "Copy folder path",
       }),
     );
 

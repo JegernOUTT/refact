@@ -33,6 +33,7 @@ import {
   useCreateWorktreeMutation,
   useDeleteWorktreeMutation,
   useGetWorktreeDiffQuery,
+  useGetWorktreesSummaryQuery,
   useListWorktreesQuery,
   useOpenWorktreeMutation,
   type WorktreeMeta,
@@ -206,10 +207,21 @@ const WorktreeControlInstance: React.FC<
   const [deleteWorktree] = useDeleteWorktreeMutation();
   const [openWorktree] = useOpenWorktreeMutation();
 
+  const { data: inventory } = useGetWorktreesSummaryQuery(
+    menuOpen
+      ? { source_workspace_root: data?.source_workspace_root }
+      : skipToken,
+  );
   const records = data?.worktrees ?? EMPTY_WORKTREE_RECORDS;
   const currentRecord = useMemo(
-    () => records.find((record) => record.meta.id === currentWorktree?.id),
-    [currentWorktree?.id, records],
+    () =>
+      records.find(
+        (record) =>
+          record.meta.id === currentWorktree?.id &&
+          record.meta.source_workspace_root ===
+            currentWorktree.source_workspace_root,
+      ),
+    [currentWorktree?.id, currentWorktree?.source_workspace_root, records],
   );
   const inventoryNotice = isError
     ? currentWorktree
@@ -482,46 +494,52 @@ const WorktreeControlInstance: React.FC<
     ],
   );
 
-  const handleCopyPath = useCallback(() => {
-    if (!copyPath) {
-      setFeedback("No path is available to copy.");
-      return;
-    }
-    copyToClipboard(copyPath);
-    setFeedback("Path copied to clipboard.");
-  }, [copyPath, copyToClipboard]);
-
-  const handleOpenInNewWindow = useCallback(async () => {
-    if (!currentWorktree) {
-      handleCopyPath();
-      return;
-    }
-    try {
-      const response = await openWorktree({
-        id: currentWorktree.id,
-        source_workspace_root: currentWorktree.source_workspace_root,
-      }).unwrap();
-      if (!sourceIsCurrent()) return;
-      if (response.can_open_folder && hostCanOpenFolder) {
-        openFolderInNewWindow(response.path);
-        setFeedback("Opening worktree in a new window.");
-      } else {
-        copyToClipboard(response.path);
-        setFeedback("Path copied to clipboard.");
+  const handleCopyPath = useCallback(
+    (target?: WorktreeMeta) => {
+      const path = target?.root ?? mainWorkspacePath;
+      if (!path) {
+        setFeedback("No path is available to copy.");
+        return;
       }
-    } catch (error) {
-      if (sourceIsCurrent())
-        setFeedback(`Open failed: ${worktreeErrorText(error)}`);
-    }
-  }, [
-    copyToClipboard,
-    currentWorktree,
-    handleCopyPath,
-    hostCanOpenFolder,
-    openFolderInNewWindow,
-    openWorktree,
-    sourceIsCurrent,
-  ]);
+      copyToClipboard(path);
+      setFeedback("Path copied to clipboard.");
+    },
+    [mainWorkspacePath, copyToClipboard],
+  );
+
+  const handleOpenInNewWindow = useCallback(
+    async (target?: WorktreeMeta) => {
+      if (!target) {
+        handleCopyPath();
+        return;
+      }
+      try {
+        const response = await openWorktree({
+          id: target.id,
+          source_workspace_root: target.source_workspace_root,
+        }).unwrap();
+        if (!sourceIsCurrent()) return;
+        if (response.can_open_folder && hostCanOpenFolder) {
+          openFolderInNewWindow(response.path);
+          setFeedback("Opening worktree in a new window.");
+        } else {
+          copyToClipboard(response.path);
+          setFeedback("Path copied to clipboard.");
+        }
+      } catch (error) {
+        if (sourceIsCurrent())
+          setFeedback(`Open failed: ${worktreeErrorText(error)}`);
+      }
+    },
+    [
+      copyToClipboard,
+      handleCopyPath,
+      hostCanOpenFolder,
+      openFolderInNewWindow,
+      openWorktree,
+      sourceIsCurrent,
+    ],
+  );
 
   return (
     <>
@@ -570,6 +588,21 @@ const WorktreeControlInstance: React.FC<
         </Popover.Trigger>
         {!scopeDisabled && (
           <WorktreeMenu
+            inventory={inventory}
+            mainPath={mainWorkspacePath}
+            mainBranch={sourceBranch}
+            onClose={() => handleMenuOpenChange(false)}
+            sourceIsCurrent={sourceIsCurrent}
+            isAttached={(meta) => {
+              const attached = selectThreadWorktreeById(
+                store.getState(),
+                chatId,
+              );
+              return (
+                attached?.id === meta.id &&
+                attached.source_workspace_root === meta.source_workspace_root
+              );
+            }}
             chatId={chatId}
             currentWorktree={currentWorktree}
             currentRecord={currentRecord}
@@ -594,7 +627,7 @@ const WorktreeControlInstance: React.FC<
             }}
             onSelect={handleSelect}
             onDetach={handleDetach}
-            onOpenInNewWindow={() => void handleOpenInNewWindow()}
+            onOpenInNewWindow={(target) => void handleOpenInNewWindow(target)}
             onCopyPath={handleCopyPath}
           />
         )}

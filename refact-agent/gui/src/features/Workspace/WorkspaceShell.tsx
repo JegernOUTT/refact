@@ -8,7 +8,12 @@ import { push, selectCurrentPage } from "../Pages/pagesSlice";
 import { ActivityRail } from "./ActivityRail";
 import { Dock } from "./Dock";
 import { selectEditPlayer } from "./FilesPanel/filesPanelSlice";
-import { isFileSurface, isGitDiffSurface, isGitSurface } from "./surfaceKey";
+import {
+  isFileSurface,
+  isGitDiffSurface,
+  isGitSurface,
+  isWorktreeDiffSurface,
+} from "./surfaceKey";
 import { useWorkspaceShortcuts } from "./useWorkspaceShortcuts";
 import { WORKSPACE_NARROW_QUERY } from "./workspaceBreakpoints";
 import {
@@ -29,7 +34,8 @@ import styles from "./WorkspaceShell.module.css";
 const opensInChatWorkspace = (surfaceKey: string): boolean =>
   isFileSurface(surfaceKey) ||
   isGitSurface(surfaceKey) ||
-  isGitDiffSurface(surfaceKey);
+  isGitDiffSurface(surfaceKey) ||
+  isWorktreeDiffSurface(surfaceKey);
 
 function useWorkspaceSurfaceNavigation() {
   const dispatch = useAppDispatch();

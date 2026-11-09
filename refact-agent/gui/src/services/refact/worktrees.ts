@@ -105,6 +105,7 @@ export type GetWorktreeRequest = {
 
 export type WorktreeDiffFile = {
   path: string;
+  old_path?: string | null;
   status: string;
   source: string;
   additions?: number | null;
@@ -123,6 +124,7 @@ export type WorktreeDiffStats = {
 
 export type WorktreeDiffResponse = {
   id: string;
+  resolved_base_commit?: string | null;
   branch?: string | null;
   base_branch?: string | null;
   base_commit?: string | null;

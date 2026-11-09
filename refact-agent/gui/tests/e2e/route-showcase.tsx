@@ -97,6 +97,12 @@ import type {
 } from "../../src/services/refact/privacy";
 import { BlockCard } from "../../src/features/Privacy/BlockCard";
 import { WithheldOutputCard } from "../../src/features/Privacy/WithheldOutputCard";
+import {
+  selectedWorktree,
+  worktreeFileContent,
+  worktreeFixtureResponse,
+  worktreeRecords,
+} from "./worktreesFixture";
 import "../../src/lib/render/web.css";
 
 const now = "2026-06-07T10:00:00Z";
@@ -558,6 +564,7 @@ const route =
   new URLSearchParams(window.location.search).get("route") ?? "dashboard";
 const performanceRoute = route === "ui-performance";
 const terminalDisabledRoute = route === "workspace-chrome-disabled";
+const worktreesRoute = route === "worktrees";
 const workspaceGitDiffRoute = route === "workspace-git-diff";
 const workspaceGitLogRoute = route === "workspace-git-log";
 const workspaceGitBranchesRoute = route === "workspace-git-branches";
@@ -566,6 +573,7 @@ const workspaceGitActionsRoute =
   workspaceGitBranchesRoute || workspaceGitPushRoute;
 const workspaceGitRoute =
   route === "workspace-git" ||
+  worktreesRoute ||
   workspaceGitDiffRoute ||
   workspaceGitLogRoute ||
   workspaceGitActionsRoute;
@@ -1498,6 +1506,10 @@ const splitChatRuntime: ChatThreadRuntime = {
   },
 };
 
+if (worktreesRoute) {
+  chatRuntime.thread.worktree = selectedWorktree.meta;
+}
+
 if (rebuildRoute) {
   splitChatRuntime.thread.title = "Legacy archive fixture";
   splitChatRuntime.thread.messages = [
@@ -2241,11 +2253,14 @@ window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
   if (path === "/v1/git/file") {
     const rev = url.searchParams.get("rev") ?? "HEAD";
     const filePath = url.searchParams.get("path") ?? "";
-    const content =
-      rev === "WORKTREE" ? showcaseDiffWorktree : showcaseDiffHead;
+    const content = worktreesRoute
+      ? worktreeFileContent(rev, filePath)
+      : rev === "WORKTREE"
+        ? showcaseDiffWorktree
+        : showcaseDiffHead;
     return Promise.resolve(
       jsonResponse({
-        root: "/workspace/refact",
+        root: url.searchParams.get("root") ?? "/workspace/refact",
         path: filePath,
         rev,
         exists: true,
@@ -2260,9 +2275,17 @@ window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
     return Promise.resolve(
       jsonResponse({
         roots: [
-          workspaceGitActionsRoute
-            ? showcaseGitActionsStatus
-            : showcaseGitStatus,
+          worktreesRoute
+            ? {
+                ...showcaseGitStatus,
+                root:
+                  url.searchParams.getAll("roots")[0] ??
+                  selectedWorktree.meta.root,
+                head_oid: selectedWorktree.status.head_commit,
+              }
+            : workspaceGitActionsRoute
+              ? showcaseGitActionsStatus
+              : showcaseGitStatus,
         ],
       }),
     );
@@ -2367,9 +2390,13 @@ window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
         source_workspace_root: "/workspace/refact",
         source_current_branch: "main",
         source_branches: ["main"],
-        worktrees: [],
+        worktrees: worktreesRoute ? worktreeRecords : [],
       }),
     );
+  }
+  if (worktreesRoute) {
+    const response = worktreeFixtureResponse(url);
+    if (response !== undefined) return jsonResponse(response);
   }
   if (path === "/v1/voice/status") {
     return Promise.resolve(
@@ -2554,7 +2581,7 @@ window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
   if (path === "/v1/privacy/inspect")
     return Promise.resolve(jsonResponse(privacyInspectResponse));
   if (rebuildRoute) return jsonResponse({});
-  if (performanceRoute) {
+  if (performanceRoute || worktreesRoute) {
     if (path.includes("subscribe")) {
       return new Response(new ReadableStream(), {
         headers: { "Content-Type": "text/event-stream" },
@@ -2837,7 +2864,18 @@ if (performanceRoute) {
     drawer: { open: false, height: 280 },
   };
 }
+if (worktreesRoute) {
+  preloadedState.workspace!.dock = {
+    open: false,
+    width: 280,
+    section: "git",
+  };
+  preloadedState.pages = [{ name: "chat" }];
+}
 const store = setUpStore(preloadedState);
+if (worktreesRoute) {
+  Object.assign(window, { __worktreesFixtureStore: store });
+}
 const appWorkspaceStatus = new URLSearchParams(window.location.search).get(
   "app_workspace_status",
 );
@@ -3713,7 +3751,13 @@ const ShowcaseSurface = () => {
     return (
       <>
         {queueRoute && <QueueDemoControls />}
-        <WorkspaceShell>
+        <WorkspaceShell
+          toolbar={
+            worktreesRoute ? (
+              <Toolbar activeTab={{ type: "chat", id: chatId }} />
+            ) : undefined
+          }
+        >
           <WorkspaceView />
         </WorkspaceShell>
       </>

@@ -1,15 +1,7 @@
-import React, { useCallback, useState } from "react";
-import {
-  CircleHelp,
-  Copy,
-  ExternalLink,
-  GitBranch,
-  LogOut,
-  Plus,
-} from "lucide-react";
+import React, { useCallback, useRef, useEffect, useState } from "react";
+import { CircleHelp, GitBranch, Plus } from "lucide-react";
 import { Button, Dialog, Popover } from "../../components/ui";
 import {
-  KitButton,
   KitDivider,
   KitHeader,
   KitNote,
@@ -27,10 +19,16 @@ import {
   type WorktreeRecordView,
 } from "../../services/refact";
 import { sendUserMessage } from "../../services/refact/chatCommands";
-import { useAppSelector } from "../../hooks";
-import { selectApiKey, selectConfig } from "../Config/configSlice";
-import { WorktreeStatusBadge } from "./WorktreeStatusBadge";
-import { WorktreeDiffPanel } from "./WorktreeDiffPanel";
+import { useAppDispatch, useAppSelector } from "../../hooks";
+import { selectApiKey, selectConfig, selectHost } from "../Config/configSlice";
+import { WorktreeCard } from "./WorktreeCard";
+import {
+  sameWorktree,
+  selectedFirst,
+  worktreeInspection,
+} from "./WorktreeCard.helpers";
+import { openWorktreeDiff } from "./worktreeDiffSlice";
+import type { WorktreeInventory } from "../../services/refact/worktrees";
 import {
   MergeWorktreeModal,
   type WorktreeConflictHandoff,
@@ -41,6 +39,12 @@ import styles from "./Worktrees.module.css";
 
 type WorktreeMenuProps = {
   chatId: string;
+  inventory?: WorktreeInventory;
+  mainPath?: string;
+  mainBranch?: string | null;
+  onClose?: () => void;
+  sourceIsCurrent?: () => boolean;
+  isAttached?: (meta: WorktreeMeta) => boolean;
   currentWorktree: WorktreeMeta | null;
   currentRecord?: WorktreeRecordView | null;
   records: WorktreeRecordView[];
@@ -55,8 +59,8 @@ type WorktreeMenuProps = {
   onCreate: () => void;
   onSelect: (record: WorktreeRecordView) => void;
   onDetach: () => void;
-  onOpenInNewWindow: () => void;
-  onCopyPath: () => void;
+  onOpenInNewWindow: (target?: WorktreeMeta) => void;
+  onCopyPath: (target?: WorktreeMeta) => void;
 };
 
 function compactPath(path: string): string {
@@ -73,21 +77,14 @@ function displayName(worktree: WorktreeMeta): string {
     : compactPath(worktree.root);
 }
 
-function referencesLabel(record: WorktreeRecordView): string {
-  if (record.reference_count === 0) return "unused";
-  if (record.reference_count === 1) return "1 ref";
-  return `${record.reference_count} refs`;
-}
-
-function referenceCount(
-  worktree: WorktreeMeta | null,
-  record?: WorktreeRecordView | null,
-): number {
-  return record?.reference_count ?? worktree?.reference_count ?? 0;
-}
-
 export const WorktreeMenu: React.FC<WorktreeMenuProps> = ({
   chatId,
+  inventory,
+  mainPath,
+  mainBranch,
+  onClose,
+  sourceIsCurrent,
+  isAttached,
   currentWorktree,
   currentRecord,
   records,
@@ -106,35 +103,53 @@ export const WorktreeMenu: React.FC<WorktreeMenuProps> = ({
   onCopyPath,
 }) => {
   const config = useAppSelector(selectConfig);
+  const host = useAppSelector(selectHost);
+  const openCopiesPath = !["vscode", "jetbrains", "ide"].includes(host);
   const apiKey = useAppSelector(selectApiKey) ?? undefined;
-  const [diffOpen, setDiffOpen] = useState(false);
+  const dispatch = useAppDispatch();
+  const alive = useRef(true);
+  useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+    };
+  }, []);
+  const valid = useCallback(
+    () => alive.current && (sourceIsCurrent?.() ?? true),
+    [sourceIsCurrent],
+  );
+  const [target, setTarget] = useState<{
+    meta: WorktreeMeta;
+    record?: WorktreeRecordView | null;
+  } | null>(null);
+  const targetMeta = target?.meta;
+  const targetRecord = target?.record;
+  const targetAttached =
+    targetMeta &&
+    (isAttached?.(targetMeta) ?? sameWorktree(targetMeta, currentWorktree));
   const [mergeOpen, setMergeOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [deleteBranch, setDeleteBranch] = useState(false);
   const [localFeedback, setLocalFeedback] = useState<string | null>(null);
   const [deleteWorktree, deleteState] = useDeleteWorktreeMutation();
-  const sharedCount = referenceCount(currentWorktree, currentRecord);
+  const sharedCount =
+    targetRecord?.reference_count ?? targetMeta?.reference_count ?? 0;
   const scopeChangeDisabled =
     Boolean(scopeChangeBlockedReason) || scopeChangePending === true;
   const hasFeedback =
     (feedback?.length ?? 0) > 0 || (localFeedback?.length ?? 0) > 0;
-  const detachLabel = currentWorktree ? "Back to main" : "Using main workspace";
-  const detachTitle = currentWorktree
-    ? "Detach worktree and use main workspace"
-    : "Already using main workspace";
-
   const handleAskRefact = useCallback(
     async (
       files: string[],
       response: MergeWorktreeResponse,
       handoff: WorktreeConflictHandoff,
     ) => {
-      if (!currentWorktree || !chatId) {
+      if (!targetMeta || !targetAttached || !chatId || !valid()) {
         throw new Error("No active worktree chat is available.");
       }
       const prompt = buildWorktreeConflictPrompt({
-        worktree: currentWorktree,
-        record: currentRecord,
+        worktree: targetMeta,
+        record: targetRecord,
         response,
         sync: handoff.sync,
         files,
@@ -142,38 +157,62 @@ export const WorktreeMenu: React.FC<WorktreeMenuProps> = ({
       await sendUserMessage(chatId, prompt, config, apiKey, true);
       setLocalFeedback("Conflict resolution request sent to Refact.");
     },
-    [apiKey, chatId, config, currentRecord, currentWorktree],
+    [apiKey, chatId, config, targetRecord, targetMeta, targetAttached, valid],
   );
 
   const handleDelete = useCallback(async () => {
-    if (!currentWorktree || scopeChangeDisabled) return;
+    if (
+      !targetMeta ||
+      scopeChangeDisabled ||
+      targetMeta.kind === "task_agent" ||
+      !valid()
+    )
+      return;
     setLocalFeedback(null);
     try {
-      await deleteWorktree({
-        id: currentWorktree.id,
-        source_workspace_root: currentWorktree.source_workspace_root,
+      const response = await deleteWorktree({
+        id: targetMeta.id,
+        source_workspace_root: targetMeta.source_workspace_root,
         delete_branch: deleteBranch,
         force_referenced: true,
       }).unwrap();
+      if (!valid()) return;
+      if (!response.deleted) {
+        setLocalFeedback(
+          "Delete not confirmed; worktree retained. Inspect it before retrying.",
+        );
+        return;
+      }
       setDeleteOpen(false);
-      setLocalFeedback("Worktree deleted.");
-      if (chatId && currentWorktree.id) {
+      setLocalFeedback(
+        response.warnings.length
+          ? `Worktree deleted. ${response.warnings.join(" ")}`
+          : "Worktree deleted.",
+      );
+      if (
+        isAttached?.(targetMeta) ??
+        sameWorktree(targetMeta, currentWorktree)
+      ) {
         onDetach();
       }
     } catch (error) {
+      if (!valid()) return;
       setLocalFeedback(`Delete failed: ${worktreeErrorText(error)}`);
     }
   }, [
-    chatId,
     currentWorktree,
+    targetMeta,
+    isAttached,
     deleteBranch,
     deleteWorktree,
     onDetach,
     scopeChangeDisabled,
+    valid,
   ]);
 
   const handleMerged = useCallback(
     (response: MergeWorktreeResponse) => {
+      if (!valid()) return;
       const cleanup = response.cleanup;
       const summary =
         response.merged === true ? "Worktree merged." : "Nothing to merge.";
@@ -189,39 +228,15 @@ export const WorktreeMenu: React.FC<WorktreeMenuProps> = ({
         (cleanup?.worktree_deleted ?? false) ||
         (cleanup?.registry_deleted ?? false)
       ) {
-        onDetach();
+        if (
+          targetMeta &&
+          (isAttached?.(targetMeta) ??
+            sameWorktree(targetMeta, currentWorktree))
+        )
+          onDetach();
       }
     },
-    [onDetach],
-  );
-
-  const recordActions = (
-    <span className={styles.recordActions}>
-      <KitButton
-        className={styles.recordAction}
-        aria-label="View worktree diff"
-        onClick={() => setDiffOpen(true)}
-      >
-        Diff
-      </KitButton>
-      <KitButton
-        className={styles.recordAction}
-        aria-label="Merge worktree"
-        disabled={scopeChangeDisabled}
-        onClick={() => setMergeOpen(true)}
-      >
-        Merge
-      </KitButton>
-      <KitButton
-        className={styles.recordAction}
-        variant="danger"
-        aria-label="Delete or discard worktree"
-        disabled={scopeChangeDisabled}
-        onClick={() => setDeleteOpen(true)}
-      >
-        Delete
-      </KitButton>
-    </span>
+    [onDetach, targetMeta, currentWorktree, isAttached, valid],
   );
 
   return (
@@ -231,17 +246,20 @@ export const WorktreeMenu: React.FC<WorktreeMenuProps> = ({
         side="top"
         align="start"
         sideOffset={8}
-        maxWidth="min(340px, calc(100vw - 2 * var(--rf-space-3)))"
+        maxWidth="min(400px, calc(100vw - 2 * var(--rf-space-3)))"
         scrollable={false}
         onOpenAutoFocus={(event) => {
           const content = event.currentTarget;
           const row =
             content instanceof HTMLElement
-              ? content.querySelector<HTMLElement>(`.${kit.row}:not(:disabled)`)
+              ? content.querySelector<HTMLElement>(
+                  "[data-worktree-selected]:not(:disabled)",
+                )
               : null;
           if (row) {
             event.preventDefault();
             row.focus();
+            row.scrollIntoView({ block: "nearest" });
           }
         }}
       >
@@ -300,87 +318,87 @@ export const WorktreeMenu: React.FC<WorktreeMenuProps> = ({
             onClick={onCreate}
             disabled={scopeChangeDisabled}
           />
-          <KitRow
-            icon={<LogOut aria-hidden="true" />}
-            label={detachLabel}
-            aria-label={detachTitle}
-            onClick={onDetach}
-            disabled={!currentWorktree || scopeChangeDisabled}
-          />
-          <KitRow
-            icon={<ExternalLink aria-hidden="true" />}
-            label="Open folder"
-            aria-label="Open worktree in new window"
-            onClick={onOpenInNewWindow}
-            disabled={!currentWorktree}
-          />
-          <KitRow
-            icon={<Copy aria-hidden="true" />}
-            label="Copy path"
-            aria-label="Copy workspace path"
-            onClick={onCopyPath}
-            disabled={!canCopyPath}
-          />
-
           <KitDivider />
-          <KitSection>Existing</KitSection>
+          <KitSection>Checkouts</KitSection>
           <div className={styles.recordList}>
-            {currentWorktree &&
-            !records.some((record) => record.meta.id === currentWorktree.id) ? (
-              <div className={styles.recordRow}>
-                <KitStaticRow
-                  icon={<GitBranch aria-hidden="true" />}
-                  label={displayName(currentWorktree)}
-                  strong
-                  sub="Attached · not in this list"
-                />
-                {recordActions}
-              </div>
-            ) : null}
+            {!currentWorktree && (
+              <WorktreeCard
+                selected
+                openCopiesPath
+                mainPath={mainPath}
+                mainBranch={mainBranch}
+                onSelect={onDetach}
+                selectionDisabled={scopeChangeDisabled}
+                onCopy={canCopyPath ? () => onCopyPath() : undefined}
+                onOpen={canCopyPath ? () => onOpenInNewWindow() : undefined}
+              />
+            )}
+            {[
+              ...(currentWorktree &&
+              !records.some((r) => sameWorktree(r.meta, currentWorktree))
+                ? [
+                    {
+                      meta: currentWorktree,
+                      record: currentRecord,
+                      unavailable: true,
+                    },
+                  ]
+                : []),
+              ...selectedFirst(records, currentWorktree).map((record) => ({
+                meta: record.meta,
+                record,
+                unavailable: false,
+              })),
+            ].map(({ meta, record, unavailable }) => (
+              <WorktreeCard
+                openCopiesPath={openCopiesPath}
+                key={`${meta.source_workspace_root}:${meta.id}`}
+                worktree={meta}
+                record={record}
+                inspection={worktreeInspection(inventory, meta)}
+                selected={sameWorktree(meta, currentWorktree)}
+                unavailable={unavailable}
+                selectionDisabled={scopeChangeDisabled}
+                managementDisabled={scopeChangeDisabled}
+                onSelect={record ? () => onSelect(record) : () => undefined}
+                onDiff={() => {
+                  dispatch(
+                    openWorktreeDiff({
+                      worktreeId: meta.id,
+                      sourceWorkspaceRoot: meta.source_workspace_root,
+                      root: meta.root,
+                      label: displayName(meta),
+                    }),
+                  );
+                  onClose?.();
+                }}
+                onMerge={() => {
+                  setTarget({ meta, record });
+                  setMergeOpen(true);
+                }}
+                onDelete={() => {
+                  setTarget({ meta, record });
+                  setDeleteBranch(false);
+                  setLocalFeedback(null);
+                  setDeleteOpen(true);
+                }}
+                onCopy={() => onCopyPath(meta)}
+                onOpen={() => onOpenInNewWindow(meta)}
+              />
+            ))}
+            {currentWorktree && (
+              <WorktreeCard
+                selected={false}
+                openCopiesPath
+                mainPath={mainPath}
+                mainBranch={mainBranch}
+                onSelect={onDetach}
+                selectionDisabled={scopeChangeDisabled}
+                onCopy={canCopyPath ? () => onCopyPath() : undefined}
+                onOpen={canCopyPath ? () => onOpenInNewWindow() : undefined}
+              />
+            )}
             {isLoading ? <KitStaticRow tone="muted" label="Loading…" /> : null}
-            {!isLoading && records.length === 0 ? (
-              <KitStaticRow tone="muted" label="None yet" />
-            ) : null}
-            {records.map((record) => {
-              const selected = currentWorktree?.id === record.meta.id;
-              const title = displayName(record.meta);
-              const usedBy = record.referencing_chat_ids?.length
-                ? record.referencing_chat_ids.join(", ")
-                : record.references
-                    .map((reference) => reference.chat_id)
-                    .filter((value): value is string => Boolean(value))
-                    .join(", ");
-              return (
-                <div key={record.meta.id} className={styles.recordRow}>
-                  <KitRow
-                    icon={<GitBranch aria-hidden="true" />}
-                    label={title}
-                    strong={selected}
-                    sub={`${referencesLabel(record)}${
-                      usedBy ? ` · used by ${usedBy}` : ""
-                    }`}
-                    badges={
-                      <WorktreeStatusBadge
-                        worktree={record.meta}
-                        record={record}
-                      />
-                    }
-                    onClick={() => onSelect(record)}
-                    aria-label={`Select worktree ${title}`}
-                    aria-current={selected ? "true" : undefined}
-                    title={
-                      record.meta.kind === "task_agent"
-                        ? "Managed by task lifecycle"
-                        : record.meta.root
-                    }
-                    disabled={
-                      scopeChangeDisabled || record.meta.kind === "task_agent"
-                    }
-                  />
-                  {selected ? recordActions : null}
-                </div>
-              );
-            })}
           </div>
 
           {sharedCount > 1 ? (
@@ -392,23 +410,15 @@ export const WorktreeMenu: React.FC<WorktreeMenuProps> = ({
         </KitPanel>
       </Popover.Content>
 
-      <WorktreeDiffPanel
-        open={diffOpen}
-        worktreeId={currentWorktree?.id}
-        worktree={currentWorktree}
-        record={currentRecord}
-        onOpenChange={setDiffOpen}
-      />
-
       <MergeWorktreeModal
         open={mergeOpen && !scopeChangeDisabled}
-        worktreeId={currentWorktree?.id}
-        worktree={currentWorktree}
-        record={currentRecord}
+        worktreeId={targetMeta?.id}
+        worktree={targetMeta}
+        record={targetRecord}
         onOpenChange={setMergeOpen}
         onMerged={handleMerged}
-        onAskRefact={handleAskRefact}
-        onOpenWorktree={onOpenInNewWindow}
+        onAskRefact={targetAttached ? handleAskRefact : undefined}
+        onOpenWorktree={() => onOpenInNewWindow(targetMeta)}
       />
 
       <Dialog
@@ -425,19 +435,19 @@ export const WorktreeMenu: React.FC<WorktreeMenuProps> = ({
             <div className={styles.modalFields}>
               <div className={styles.dialogOverlayText}>
                 <span className={styles.labelText}>
-                  {currentWorktree
-                    ? displayName(currentWorktree)
-                    : "No worktree"}
+                  {targetMeta ? displayName(targetMeta) : "No worktree"}
                 </span>
-                {currentWorktree && (
-                  <span className={styles.path}>{currentWorktree.root}</span>
+                {targetMeta && (
+                  <span className={styles.path}>{targetMeta.root}</span>
                 )}
               </div>
 
-              {sharedCount > 1 && (
+              {sharedCount > 0 && (
                 <p className={styles.warningBox}>
-                  This worktree is shared by {sharedCount} references. Deleting
-                  it may affect other chats that use the same worktree.
+                  {sharedCount === 1
+                    ? "This worktree has 1 reference."
+                    : `This worktree is shared by ${sharedCount} references.`}{" "}
+                  Deleting it may affect chats that use this worktree.
                 </p>
               )}
 
@@ -453,9 +463,11 @@ export const WorktreeMenu: React.FC<WorktreeMenuProps> = ({
                 Delete git branch too
               </label>
 
-              {localFeedback && localFeedback.startsWith("Delete failed") && (
-                <p className={styles.errorBox}>{localFeedback}</p>
-              )}
+              {localFeedback &&
+                (localFeedback.startsWith("Delete failed") ||
+                  localFeedback.startsWith("Delete not confirmed")) && (
+                  <p className={styles.errorBox}>{localFeedback}</p>
+                )}
             </div>
 
             <div className={styles.modalActions}>
@@ -468,9 +480,7 @@ export const WorktreeMenu: React.FC<WorktreeMenuProps> = ({
                 variant="danger"
                 onClick={() => void handleDelete()}
                 disabled={
-                  !currentWorktree ||
-                  deleteState.isLoading ||
-                  scopeChangeDisabled
+                  !targetMeta || deleteState.isLoading || scopeChangeDisabled
                 }
                 loading={deleteState.isLoading}
               >

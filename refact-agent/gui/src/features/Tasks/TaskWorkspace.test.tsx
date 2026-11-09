@@ -51,6 +51,8 @@ import { updateConfig } from "../Config/configSlice";
 import { change } from "../Pages/pagesSlice";
 import { openTab, setContentTaskView } from "../Workspace/workspaceSlice";
 import { selectContentRoute } from "../../utils/contentRoutes";
+import { collectTabIds } from "../ChatPanes/panesTree";
+import { worktreeDiffDescriptorFromSurfaceKey } from "../Workspace/surfaceKey";
 
 const TASK_ID = "task-1";
 const CARD_ID = "T-1";
@@ -1651,7 +1653,7 @@ describe("TaskWorkspace worktree actions", () => {
         ),
       );
 
-      const { user } = render(<TaskWorkspace taskId={TASK_ID} />, {
+      const { user, store } = render(<TaskWorkspace taskId={TASK_ID} />, {
         preloadedState: workspacePreloadedState(
           scenario.card.agent_chat_id ?? "agent-T-1",
           scenario.threadWorktree,
@@ -1680,17 +1682,27 @@ describe("TaskWorkspace worktree actions", () => {
       expect(openedIds(worktreeDiffPanelProps)).toEqual([]);
       await waitFor(() =>
         expect(
-          screen.getByText("No changed files reported."),
-        ).toBeInTheDocument(),
+          Object.values(store.getState().workspace.groups)
+            .flatMap((group) => (group ? collectTabIds(group.root) : []))
+            .map(worktreeDiffDescriptorFromSurfaceKey)
+            .filter(Boolean),
+        ).toEqual([
+          expect.objectContaining({ worktreeId: scenario.expectedId }),
+        ]),
       );
-      const diffRequest = encodeURIComponent(scenario.expectedId);
-      const legacyRequest = encodeURIComponent(LEGACY_PATH);
-      expect(document.body.innerHTML).toContain(diffRequest);
-      expect(document.body.innerHTML).not.toContain(legacyRequest);
-
-      await user.click(screen.getByRole("button", { name: "Close" }));
+      const reviewDescriptors = Object.values(store.getState().workspace.groups)
+        .flatMap((group) => (group ? collectTabIds(group.root) : []))
+        .map(worktreeDiffDescriptorFromSurfaceKey)
+        .filter(Boolean);
+      expect(reviewDescriptors).not.toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ worktreeId: LEGACY_PATH }),
+        ]),
+      );
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
       document.body.style.pointerEvents = "";
-      await user.click(merge);
+      await user.click(await openCardDetail(scenario.card));
+      await user.click(screen.getByRole("button", { name: "Merge" }));
       expect(openedIds(mergeWorktreeModalProps)).toEqual([]);
       const mergeDialog = screen.getByRole("dialog", {
         name: "Merge worktree",
@@ -1703,8 +1715,8 @@ describe("TaskWorkspace worktree actions", () => {
 
       await user.click(screen.getByRole("button", { name: "Close" }));
       document.body.style.pointerEvents = "";
-      await user.click(open);
-      await user.click(discard);
+      await user.click(screen.getByRole("button", { name: "Open" }));
+      await user.click(screen.getByRole("button", { name: "Discard/Delete" }));
       await user.click(
         await screen.findByRole("button", { name: "Delete worktree" }),
       );

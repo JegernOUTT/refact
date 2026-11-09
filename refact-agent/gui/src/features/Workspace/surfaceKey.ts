@@ -1,4 +1,9 @@
 import {
+  decodeWorktreeDiffDescriptor,
+  encodeWorktreeDiffDescriptor,
+  type WorktreeDiffDescriptor,
+} from "./worktreeDiffDescriptor";
+import {
   decodeGitDiffDescriptor,
   encodeGitDiffDescriptor,
   type GitDiffDescriptor,
@@ -16,7 +21,8 @@ export type PrefixedSurfaceKind =
   | "buddy"
   | "design"
   | "file"
-  | "gitdiff";
+  | "gitdiff"
+  | "worktreediff";
 export type SurfaceKind = PrefixedSurfaceKind | "dashboard" | MainSurfaceKind;
 export type SurfaceKey = string;
 export type TaskSurfaceKey = `task:${string}`;
@@ -38,7 +44,11 @@ export type GitDiffSurfaceKey = `gitdiff:${string}`;
  * Top-level, non-chat panel surfaces gated by the Git capability: the Git
  * tool surface itself and its diff editor tabs.
  */
-export type MainSurfaceKey = "git:main" | GitDiffSurfaceKey;
+export type WorktreeDiffSurfaceKey = `worktreediff:${string}`;
+export type MainSurfaceKey =
+  | "git:main"
+  | GitDiffSurfaceKey
+  | WorktreeDiffSurfaceKey;
 
 export type ParsedSurfaceKey =
   | { kind: PrefixedSurfaceKind; id: string }
@@ -52,7 +62,8 @@ const isPrefixedSurfaceKind = (kind: string): kind is PrefixedSurfaceKind =>
   kind === "buddy" ||
   kind === "design" ||
   kind === "file" ||
-  kind === "gitdiff";
+  kind === "gitdiff" ||
+  kind === "worktreediff";
 
 export const isMainSurfaceKind = (kind: string): kind is MainSurfaceKind =>
   kind === "git";
@@ -107,7 +118,8 @@ export function parseSurfaceKey(key: SurfaceKey): ParsedSurfaceKey {
 
   if (
     (kind === "buddy" && id !== "home") ||
-    (kind === "gitdiff" && !decodeGitDiffDescriptor(id))
+    (kind === "gitdiff" && !decodeGitDiffDescriptor(id)) ||
+    (kind === "worktreediff" && !decodeWorktreeDiffDescriptor(id))
   ) {
     throw new Error(`invalid surface key: ${key}`);
   }
@@ -147,7 +159,7 @@ export const isDesignSurface = (key: SurfaceKey): key is DesignSurfaceKey =>
   key.startsWith("design:") && key.length > "design:".length;
 
 export const isMainSurface = (key: SurfaceKey): key is MainSurfaceKey =>
-  key === "git:main" || isGitDiffSurface(key);
+  key === "git:main" || isGitDiffSurface(key) || isWorktreeDiffSurface(key);
 
 export const isFilesSurface = (key: SurfaceKey): boolean =>
   key === "files:main";
@@ -175,6 +187,7 @@ export const isMainSurfaceEnabled = (
   key: SurfaceKey,
   capabilities: WorkspaceCapabilities,
 ): key is MainSurfaceKey => {
+  if (isWorktreeDiffSurface(key)) return true;
   if (isGitDiffSurface(key)) {
     return (
       capabilities.gitPanel && gitDiffDescriptorFromSurfaceKey(key) !== null
@@ -187,3 +200,18 @@ export const isMainSurfaceEnabled = (
 
 export const isAppSurface = (key: SurfaceKey): key is AppSurfaceKey =>
   key.startsWith("app:") && key.length > "app:".length;
+
+export const makeWorktreeDiffSurfaceKey = (
+  descriptor: WorktreeDiffDescriptor,
+): WorktreeDiffSurfaceKey =>
+  `worktreediff:${encodeWorktreeDiffDescriptor(descriptor)}`;
+export const worktreeDiffDescriptorFromSurfaceKey = (
+  key: SurfaceKey,
+): WorktreeDiffDescriptor | null =>
+  key.startsWith("worktreediff:")
+    ? decodeWorktreeDiffDescriptor(key.slice("worktreediff:".length))
+    : null;
+export const isWorktreeDiffSurface = (
+  key: SurfaceKey,
+): key is WorktreeDiffSurfaceKey =>
+  worktreeDiffDescriptorFromSurfaceKey(key) !== null;

@@ -19,6 +19,7 @@ import {
   type WorkspaceState,
 } from "../features/Workspace/workspaceSlice";
 import {
+  isWorktreeDiffSurface,
   isChatSurface,
   isDesignSurface,
   isMainSurface,
@@ -522,6 +523,7 @@ function normalizePersistedWorkspaceNode(
     for (const rawSurfaceKey of value.tabIds) {
       const surfaceKey = normalizeSurfaceKey(rawSurfaceKey);
       if (!surfaceKey) return null;
+      if (isWorktreeDiffSurface(surfaceKey)) continue;
       if (!isSplittableSurface(surfaceKey)) return null;
       context.surfacePlacementCount.value += 1;
       if (context.surfacePlacementCount.value > MAX_WORKSPACE_SURFACES)
@@ -651,7 +653,8 @@ export function loadPersistedWorkspace(
       legacyTerminalTab = true;
       continue;
     }
-    if (isFilesSurface(surfaceKey)) continue;
+    if (isFilesSurface(surfaceKey) || isWorktreeDiffSurface(surfaceKey))
+      continue;
     if (
       !isOpenWorkspaceSurface(surfaceKey, openThreadIds) &&
       !(
@@ -774,12 +777,68 @@ export function savePersistedWorkspace(
   );
   if (!storageKey || !panelsKey) return;
 
+  const persistent = (key: string) => !isWorktreeDiffSurface(key);
+  const prune = (node: PaneNode): PaneNode | null => {
+    if (node.kind === "split") {
+      const retained = node.children.flatMap((child, index) => {
+        const value = prune(child);
+        return value ? [{ value, size: node.sizes[index] }] : [];
+      });
+      if (!retained.length) return null;
+      if (retained.length === 1) return retained[0].value;
+      const total = retained.reduce((sum, item) => sum + item.size, 0);
+      return {
+        ...node,
+        children: retained.map((item) => item.value),
+        sizes: retained.map((item) => item.size / total),
+      };
+    }
+    const tabIds = node.tabIds.filter(persistent);
+    if (!tabIds.length) return null;
+    return {
+      ...node,
+      tabIds,
+      activeTabId:
+        node.activeTabId && tabIds.includes(node.activeTabId)
+          ? node.activeTabId
+          : tabIds[0],
+    };
+  };
+  const remapped = new Map<string, string>();
+  const groups: WorkspaceGroups = {};
+  for (const [key, group] of Object.entries(workspace.groups)) {
+    if (!group) continue;
+    const root = prune(group.root);
+    if (!root) continue;
+    const newKey = persistent(key) ? key : collectTabIds(root)[0];
+    remapped.set(key, newKey);
+    const leaves = collectPaneLeafIds(root);
+    groups[newKey] = {
+      ...group,
+      root,
+      focusedLeafId: leaves.includes(group.focusedLeafId)
+        ? group.focusedLeafId
+        : leaves[0],
+    };
+  }
+  const tabs = workspace.tabs
+    .flatMap((key) => remapped.get(key) ?? (persistent(key) ? [key] : []))
+    .slice(0, MAX_WORKSPACE_TABS);
+  const active = workspace.activeTabId
+    ? remapped.get(workspace.activeTabId) ?? workspace.activeTabId
+    : null;
   writeRecord(storageKey, {
     version: 4,
-    tabs: workspace.tabs.slice(0, MAX_WORKSPACE_TABS),
-    activeTabId: workspace.activeTabId,
-    groups: workspace.groups,
-    contextChatByTab: workspace.contextChatByTab,
+    tabs,
+    activeTabId: active && tabs.includes(active) ? active : tabs[0] ?? null,
+    groups,
+    contextChatByTab: workspace.contextChatByTab
+      ? Object.fromEntries(
+          Object.entries(workspace.contextChatByTab).filter(([key]) =>
+            persistent(key),
+          ),
+        )
+      : undefined,
     liveEditsByChat: workspace.liveEditsByChat,
     liveEditsDefault: workspace.liveEditsDefault,
     dock: normalizeWorkspaceDock(workspace.dock),

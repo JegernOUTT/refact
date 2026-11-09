@@ -172,6 +172,9 @@ function installHandlers(options: Options = {}) {
         HISTORY.find((item) => item.oid === oid) ?? commit(oid, ["parent0"]);
       return HttpResponse.json((options.details ?? details)(entry));
     }),
+    http.get("*/v1/worktrees/summary", () =>
+      HttpResponse.json({ source_workspace_root: ROOT, worktrees: [] }),
+    ),
     http.get("*/v1/worktrees", () =>
       HttpResponse.json({
         project_hash: "project",
@@ -530,6 +533,9 @@ describe("Git log tool window", () => {
     expect(
       await screen.findByText("No registered worktrees."),
     ).toBeInTheDocument();
+    expect(
+      screen.getByRole("article", { name: "Main workspace" }),
+    ).toHaveTextContent("Selected");
     expect(screen.queryByRole("listbox", { name: "Commits" })).toBeNull();
   });
 });

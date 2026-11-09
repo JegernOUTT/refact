@@ -1153,6 +1153,7 @@ impl WorktreeService {
         .await
         .map_err(|e| format!("Worktree diff task failed: {}", e))??;
         Ok(WorktreeDiffResponse {
+            resolved_base_commit: diff.resolved_base_commit,
             id: id.to_string(),
             branch: record.meta.branch.clone(),
             base_branch: record.meta.base_branch.clone(),

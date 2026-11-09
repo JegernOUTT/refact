@@ -17,6 +17,7 @@ pub struct WorktreeCreateResult {
 }
 
 pub struct WorktreeDiffParts {
+    pub resolved_base_commit: Option<String>,
     pub files: Vec<WorktreeDiffFile>,
     pub stats: WorktreeDiffStats,
     pub patch: String,
@@ -673,6 +674,11 @@ fn parse_name_status(output: &str, numstat: &str, source: &str) -> Vec<WorktreeD
             let path = parts.last().unwrap_or(&parts[1]).to_string();
             let (additions, deletions) = stats.get(&path).cloned().unwrap_or((None, None));
             Some(WorktreeDiffFile {
+                old_path: if matches!(status.as_str(), "R" | "C") {
+                    Some(parts[1].to_string())
+                } else {
+                    None
+                },
                 path,
                 status,
                 source: source.to_string(),
@@ -703,6 +709,7 @@ fn list_untracked(path: &Path) -> Vec<WorktreeDiffFile> {
         .filter(|line| !line.trim().is_empty())
         .map(|line| WorktreeDiffFile {
             path: line.to_string(),
+            old_path: None,
             status: "A".to_string(),
             source: "untracked".to_string(),
             additions: count_file_lines(&path.join(line)),
@@ -863,7 +870,7 @@ pub fn diff_for_path(
     let mut patch = PatchAccumulator::new(max_patch_bytes);
 
     let committed_base = resolve_diff_base(root, base_commit, base_branch)?;
-    if let Some(base) = committed_base {
+    if let Some(base) = &committed_base {
         let range = format!("{}..HEAD", base);
         let committed_name_status = run_git(root, &["diff", "--name-status", &range])?;
         let committed_numstat = run_git(root, &["diff", "--numstat", &range])?;
@@ -910,6 +917,7 @@ pub fn diff_for_path(
     }
 
     Ok(WorktreeDiffParts {
+        resolved_base_commit: committed_base,
         files,
         stats,
         patch: patch_text,
@@ -1491,4 +1499,56 @@ pub fn diff_head_to_workdir_as_string(
     })
     .map_err(|e| format!("Failed to print diff: {}", e))?;
     Ok(diff_str)
+}
+
+#[cfg(test)]
+mod diff_metadata_tests {
+    use super::*;
+
+    fn git(root: &Path, args: &[&str]) -> String {
+        run_git(root, args).unwrap()
+    }
+
+    #[test]
+    fn detailed_diff_preserves_rename_and_resolved_fallback_base() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        git(root, &["init"]);
+        git(root, &["config", "user.email", "diff@example.test"]);
+        git(root, &["config", "user.name", "Diff Test"]);
+        std::fs::write(root.join("old name.txt"), "original content\n").unwrap();
+        git(root, &["add", "."]);
+        git(root, &["commit", "-m", "base"]);
+        git(root, &["branch", "diff-base"]);
+        let base = git(root, &["rev-parse", "HEAD"]).trim().to_string();
+        git(root, &["mv", "old name.txt", "new name.txt"]);
+        git(root, &["commit", "-m", "rename"]);
+        std::fs::write(root.join("new name.txt"), "staged content\n").unwrap();
+        git(root, &["add", "."]);
+        std::fs::write(root.join("new name.txt"), "unstaged content\n").unwrap();
+        std::fs::write(root.join("untracked.txt"), "new\n").unwrap();
+        let diff = diff_for_path(root, None, Some("diff-base"), 50_000).unwrap();
+        assert_eq!(diff.resolved_base_commit.as_deref(), Some(base.as_str()));
+        let renamed = diff
+            .files
+            .iter()
+            .find(|file| file.source == "committed")
+            .unwrap();
+        assert_eq!(renamed.path, "new name.txt");
+        assert_eq!(renamed.old_path.as_deref(), Some("old name.txt"));
+        assert_eq!(renamed.status, "R");
+        assert_eq!(
+            diff.files
+                .iter()
+                .map(|file| (file.source.as_str(), file.path.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("committed", "new name.txt"),
+                ("staged", "new name.txt"),
+                ("unstaged", "new name.txt"),
+                ("untracked", "untracked.txt")
+            ]
+        );
+        assert!(diff_for_path(root, Some("unknown-base"), None, 100).is_err());
+    }
 }
