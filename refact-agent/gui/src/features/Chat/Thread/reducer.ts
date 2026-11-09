@@ -20,6 +20,8 @@ import { v4 as uuidv4 } from "uuid";
 import { getLastThreadParams } from "../../../utils/threadStorage";
 import { MAX_ATTACHED_IMAGES } from "../../../utils/attachmentFiles";
 import { normalizeRecoveryErrorMetadata } from "../../../services/refact/recoveryPresentation";
+import { parseToolJobReceipt } from "../../../services/refact/toolJobs";
+import type { ReviewReadiness } from "../../../services/refact/chatSubscription";
 import {
   setToolUse,
   setThreadMode,
@@ -224,6 +226,20 @@ const getThreadMode = ({
 };
 
 const normalizeMessage = (msg: ChatMessages[number]): ChatMessages[number] => {
+  if ("tool_job" in msg) {
+    const { tool_job, ...rest } = msg;
+    // ChatMessage.extra is flattened by serde on the wire. Keep the canonical
+    // message (including its identity/content) and normalize metadata only.
+    const receipt = parseToolJobReceipt(tool_job);
+    msg = {
+      ...rest,
+      extra: { ...msg.extra, ...(receipt ? { tool_job: receipt } : {}) },
+    } as ChatMessages[number];
+  }
+  if ((msg.role === "assistant" || msg.role === "user") && "review" in msg) {
+    const { review, ...rest } = msg;
+    msg = { ...rest, extra: { ...msg.extra, review } };
+  }
   if (msg.role === "error") {
     return normalizeRecoveryErrorMetadata(msg);
   }
@@ -242,6 +258,30 @@ const normalizeMessage = (msg: ChatMessages[number]): ChatMessages[number] => {
   }
   return msg;
 };
+
+function normalizeReviewReadiness(
+  value: unknown,
+  chatId: string,
+  previous?: ReviewReadiness,
+): ReviewReadiness | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const fields = value as Record<string, unknown>;
+  if (typeof fields.turn_nonce !== "string" || !fields.turn_nonce)
+    return previous;
+  if (fields.status === "pending") {
+    const receipt = parseToolJobReceipt(fields.receipt);
+    return receipt?.chat_id === chatId &&
+      receipt.tool_name === "review_readiness" &&
+      receipt.turn_id === fields.turn_nonce
+      ? { status: "pending", turn_nonce: fields.turn_nonce, receipt }
+      : previous;
+  }
+  if (fields.status !== "ready" && fields.status !== "unavailable")
+    return previous;
+  // A completion for an older turn must not clear a newer preparation banner.
+  if (previous && previous.turn_nonce !== fields.turn_nonce) return previous;
+  return { status: fields.status, turn_nonce: fields.turn_nonce };
+}
 
 const createInitialState = (): Chat => {
   const persistedTabs = loadPersistedChatTabs();
@@ -617,6 +657,7 @@ function applyRestoredThread(
   rt.prevent_send = false;
   rt.error = null;
   rt.session_state = payload.session_state ?? "idle";
+  rt.review_readiness = undefined;
   rt.confirmation.pause = false;
   rt.confirmation.pause_reasons = [];
   rt.confirmation.status.wasInteracted = false;
@@ -798,7 +839,7 @@ export const chatReducer = createReducer(initialState, (builder) => {
 
   builder.addCase(newChatAction, (state, action) => {
     const currentRt = getCurrentRuntime(state);
-    const mode = getThreadMode({});
+    const mode = action.payload?.mode ?? getThreadMode({});
     const lastParams = getLastThreadParams(mode);
     const newRuntime = createThreadRuntime(state.tool_use, null, mode);
 
@@ -1159,6 +1200,7 @@ export const chatReducer = createReducer(initialState, (builder) => {
     const force = action.payload.force ?? false;
     state.open_thread_ids = state.open_thread_ids.filter((tid) => tid !== id);
     const rt = state.threads[id];
+    if (rt?.review_readiness !== undefined) rt.review_readiness = undefined;
     if (
       rt &&
       (force ||
@@ -1548,11 +1590,17 @@ export const chatReducer = createReducer(initialState, (builder) => {
   });
   builder.addCase(removeSseConnection, (state, action) => {
     const rt = getRuntime(state, action.payload.chatId);
-    if (rt) rt.sse_status_authoritative = false;
+    if (rt) {
+      rt.sse_status_authoritative = false;
+      rt.review_readiness = undefined;
+    }
   });
   builder.addCase(clearAllSseConnections, (state) => {
     for (const rt of Object.values(state.threads)) {
-      if (rt) rt.sse_status_authoritative = false;
+      if (rt) {
+        rt.sse_status_authoritative = false;
+        rt.review_readiness = undefined;
+      }
     }
   });
 
@@ -1721,6 +1769,11 @@ export const chatReducer = createReducer(initialState, (builder) => {
 
         const newRt: ChatThreadRuntime = {
           thread,
+          review_readiness: normalizeReviewReadiness(
+            event.thread.review_readiness,
+            chat_id,
+            existingRuntime?.review_readiness,
+          ),
           recovery: event.runtime.recovery ?? null,
           session_state: snapshotState,
           waiting_interruptible: event.runtime.waiting_interruptible === true,
@@ -1817,6 +1870,13 @@ export const chatReducer = createReducer(initialState, (builder) => {
           break;
         }
         const { type: _, ...params } = event;
+        if ("review_readiness" in params) {
+          rt.review_readiness = normalizeReviewReadiness(
+            params.review_readiness,
+            chat_id,
+            rt.review_readiness,
+          );
+        }
         if ("app_workspace" in params)
           rt.thread.app_workspace_raw = params.app_workspace;
         if (

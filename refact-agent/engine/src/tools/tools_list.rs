@@ -430,6 +430,9 @@ pub(crate) fn builtin_system_tools(config_path: String) -> Vec<Box<dyn Tool + Se
         Box::new(crate::tools::tool_process::ToolShellServiceAlias {
             config_path: config_path.clone(),
         }),
+        Box::new(crate::tools::tool_tool_job::ToolToolJob {
+            config_path: config_path.clone(),
+        }),
         Box::new(crate::tools::tool_wait::ToolWait {
             config_path: config_path.clone(),
         }),
@@ -883,6 +886,19 @@ async fn get_builtin_tools(
         Box::new(crate::tools::tool_worktree_merge::ToolWorktreeMerge::new()),
     ];
 
+    let review_tools: Vec<Box<dyn Tool + Send>> = [
+        super::tool_review::ReviewToolKind::Context,
+        super::tool_review::ReviewToolKind::Get,
+        super::tool_review::ReviewToolKind::Anchor,
+        super::tool_review::ReviewToolKind::Update,
+        super::tool_review::ReviewToolKind::Reply,
+        super::tool_review::ReviewToolKind::PrepareExecution,
+        super::tool_review::ReviewToolKind::RecordEvidence,
+    ]
+    .into_iter()
+    .map(|kind| Box::new(super::tool_review::ToolReview(kind)) as Box<dyn Tool + Send>)
+    .collect();
+
     let mut tool_groups = vec![
         ToolGroup {
             name: "Apps".into(),
@@ -974,6 +990,13 @@ async fn get_builtin_tools(
             description: "Worktree lifecycle tools".to_string(),
             category: ToolGroupCategory::Builtin,
             tools: worktree_tools,
+        },
+        ToolGroup {
+            name: "Review".to_string(),
+            description: "Durable chat-led review context, annotations, and discussions"
+                .to_string(),
+            category: ToolGroupCategory::Builtin,
+            tools: review_tools,
         },
     ];
 
@@ -1208,7 +1231,7 @@ mod tests {
         modes.sort_by(|a, b| a.id.cmp(&b.id));
         assert_eq!(
             modes.len(),
-            24,
+            25,
             "review contracts when shipped modes change"
         );
         assert_eq!(
@@ -1217,8 +1240,9 @@ mod tests {
                 .map(|mode| &mode.id)
                 .collect::<HashSet<_>>()
                 .len(),
-            24
+            25
         );
+        assert!(modes.iter().any(|mode| mode.id == "review"));
         modes
     }
 

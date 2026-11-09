@@ -60,6 +60,7 @@ const ENGINE_V1_ENDPOINT_SEGMENTS = new Set([
   "performance",
   "bug-report",
   "rag-status",
+  "reviews",
   "task",
   "tasks",
   "tools",

@@ -237,6 +237,9 @@ export const selectThreadById = (state: RootState, chatId: string) =>
 export const selectRecoveryById = (state: RootState, chatId: string) =>
   selectRuntimeById(state, chatId)?.recovery ?? null;
 
+export const selectReviewReadinessById = (state: RootState, chatId: string) =>
+  selectRuntimeById(state, chatId)?.review_readiness;
+
 const EMPTY_PENDING_QUESTION_SETS: PendingQuestionSet[] = [];
 
 export const selectPendingQuestionSetsById = (

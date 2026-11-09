@@ -1,0 +1,116 @@
+.step {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-2);
+  padding: var(--rf-space-2) var(--rf-space-3);
+  min-width: 0;
+}
+
+.nav {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--rf-space-1);
+}
+
+.heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--rf-space-2);
+}
+
+.title {
+  margin: 0;
+  font-size: var(--rf-text-3);
+  line-height: var(--rf-line-3);
+  font-weight: var(--rf-weight-semibold);
+}
+
+.meta {
+  margin: 0;
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-1);
+  line-height: var(--rf-line-1);
+}
+
+.anchors {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--rf-space-1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.anchorItem {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--rf-space-2xs);
+  min-width: 0;
+}
+
+.anchor {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--rf-space-1);
+  min-width: 0;
+  padding: var(--rf-space-2xs) var(--rf-space-2);
+  border: 1px solid var(--rf-border);
+  border-radius: var(--rf-radius-chip);
+  background: var(--rf-surface-2);
+  color: inherit;
+  font-family: var(--rf-font-mono);
+  font-size: var(--rf-text-1);
+  line-height: var(--rf-line-1);
+  cursor: pointer;
+}
+
+.anchor:focus-visible {
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
+  outline-offset: var(--rf-focus-ring-offset);
+}
+
+.anchor:disabled {
+  cursor: not-allowed;
+  color: var(--rf-color-muted);
+  border-style: dashed;
+}
+
+.anchor:hover:not(:disabled) {
+  border-color: var(--rf-selected-border);
+  background: var(--rf-selected-bg);
+}
+
+.anchor[data-status="stalled"] {
+  background: var(--rf-color-warning-soft);
+}
+
+.anchorPath {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.anchorRange {
+  color: var(--rf-color-accent);
+  white-space: nowrap;
+}
+
+.body {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .anchor {
+    transition:
+      background-color var(--rf-dur-fast) var(--rf-ease-standard),
+      border-color var(--rf-dur-fast) var(--rf-ease-standard);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .anchor {
+    transition: none;
+  }
+}

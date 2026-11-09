@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="icon" href="data:," />
+    <title>Review canvas browser fixture</title>
+    <script data-offline-env>
+      globalThis.process ??= {};
+      globalThis.process.env ??= {};
+      globalThis.process.env.NODE_ENV = "development";
+      globalThis.process.env.DEBUG = "";
+    </script>
+    <style>
+      html,
+      body,
+      #root,
+      #root > .radix-themes {
+        height: 100%;
+        min-height: 0;
+        margin: 0;
+      }
+      .fixture-chat {
+        display: flex;
+        flex-direction: column;
+        flex: 1 1 auto;
+        min-height: 0;
+        padding: 12px;
+        gap: 8px;
+        box-sizing: border-box;
+      }
+      .fixture-chat-log {
+        flex: 1 1 auto;
+        min-height: 0;
+        overflow-y: auto;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module">
+      globalThis.__REFACT_REVIEW_FIXTURE__ = { status: "loading" };
+      try {
+        await import("./review-canvas.tsx");
+        globalThis.__REFACT_REVIEW_FIXTURE__ = { status: "ready" };
+      } catch (error) {
+        globalThis.__REFACT_REVIEW_FIXTURE__ = {
+          status: "FAIL",
+          message: String(error?.message ?? error),
+          stack: error?.stack ?? null,
+        };
+        throw error;
+      }
+    </script>
+  </body>
+</html>

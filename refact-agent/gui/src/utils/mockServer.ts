@@ -30,6 +30,7 @@ export const resetApi = (store: Store) => {
 // Home always mounts the native safety surfaces, even with intelligence off.
 // Defaults model a real disabled rollout; tests can override each exact route.
 export const server = setupServer(
+  http.get("*/v1/reviews/by-chat/:chatId", () => HttpResponse.json(null)),
   http.get("*/v1/buddy/operator/status", () =>
     HttpResponse.json({
       schema_version: 1,

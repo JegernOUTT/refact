@@ -23,8 +23,8 @@ use crate::global_context::{get_app_searchable_id, GlobalContext};
 use crate::integrations::running_integrations::load_integrations;
 use crate::file_filter::{is_valid_file, SOURCE_FILE_EXTENSIONS};
 use crate::privacy::{
-    check_file_privacy, check_file_privacy_for_read_preparation, load_privacy_if_needed,
-    FilePrivacyLevel, PrivacySettings,
+    check_file_privacy, load_privacy_if_needed, LegacyPrivacyMatcher, FilePrivacyLevel,
+    PrivacySettings,
 };
 use crate::files_blocklist::{IndexingEverywhere, is_blocklisted, reload_indexing_everywhere_if_needed};
 use crate::files_in_jsonl::enqueue_all_docs_from_jsonl_but_read_first;
@@ -396,8 +396,35 @@ pub async fn get_file_text_from_memory_or_disk_for_model_context(
 }
 
 pub(crate) struct FileReadContext {
+    privacy_matcher: LegacyPrivacyMatcher,
     privacy_settings: Arc<PrivacySettings>,
     worktree_mappings: crate::files_correction::WorktreePathMappings,
+}
+
+impl FileReadContext {
+    pub(crate) fn refresh_review_mappings(&mut self, cache_dir: &Path) {
+        self.worktree_mappings = Arc::new(
+            crate::files_correction::registered_worktree_path_mappings_uncached(cache_dir),
+        );
+    }
+
+    /// Configuration identity only: never memoizes a path decision or filesystem fact.
+    pub(crate) fn same_inputs(&self, other: &Self) -> bool {
+        self.privacy_settings.privacy_rules.blocked == other.privacy_settings.privacy_rules.blocked
+            && self
+                .privacy_settings
+                .privacy_rules
+                .only_send_to_servers_I_control
+                == other
+                    .privacy_settings
+                    .privacy_rules
+                    .only_send_to_servers_I_control
+            && self.worktree_mappings == other.worktree_mappings
+    }
+
+    pub(crate) fn worktree_mappings(&self) -> &crate::files_correction::WorktreePathMappings {
+        &self.worktree_mappings
+    }
 }
 
 pub(crate) fn registered_alias_paths(
@@ -443,11 +470,9 @@ pub(crate) fn check_file_privacy_with_context(
     path: &Path,
 ) -> Result<(), String> {
     for alias in registered_alias_paths(path, &read_context.worktree_mappings) {
-        check_file_privacy(
-            read_context.privacy_settings.clone(),
-            &alias,
-            &FilePrivacyLevel::AllowToSendAnywhere,
-        )?;
+        read_context
+            .privacy_matcher
+            .check(&alias, &FilePrivacyLevel::AllowToSendAnywhere)?;
     }
     Ok(())
 }
@@ -457,7 +482,9 @@ pub(crate) fn check_file_privacy_for_read_preparation_with_context(
     path: &Path,
 ) -> Result<(), String> {
     for alias in registered_alias_paths(path, &read_context.worktree_mappings) {
-        check_file_privacy_for_read_preparation(read_context.privacy_settings.clone(), &alias)?;
+        read_context
+            .privacy_matcher
+            .check_for_read_preparation(&alias)?;
     }
     Ok(())
 }
@@ -465,8 +492,10 @@ pub(crate) fn check_file_privacy_for_read_preparation_with_context(
 pub(crate) async fn prepare_file_read_context(
     global_context: Arc<GlobalContext>,
 ) -> FileReadContext {
+    let privacy_settings = load_privacy_if_needed(global_context.clone()).await;
     FileReadContext {
-        privacy_settings: load_privacy_if_needed(global_context.clone()).await,
+        privacy_matcher: LegacyPrivacyMatcher::new(&privacy_settings),
+        privacy_settings,
         worktree_mappings: crate::files_correction::registered_worktree_path_mappings(
             global_context.cache_dir.as_path(),
         ),
@@ -3292,6 +3321,176 @@ mod tests {
         });
     }
 
+    #[tokio::test]
+    async fn review_inputs_refresh_mapping_values_without_waiting_for_cache_ttl() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        let file = source.join("src/lib.rs");
+        write_file(&file, "fn source() {}\n");
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        crate::privacy::save_privacy_policy(gcx.clone(), crate::privacy::PrivacyPolicy::default())
+            .await
+            .unwrap();
+        let inputs = crate::privacy::records::prepare_review_privacy_inputs(gcx.clone())
+            .await
+            .unwrap();
+        assert!(inputs.still_current(gcx.clone()).await);
+        let worktree = worktree_root(&gcx.cache_dir, &source, "wt");
+        write_file(&worktree.join("src/lib.rs"), "fn alias() {}\n");
+        write_worktree_registry(&gcx.cache_dir, &source, &worktree);
+        assert!(!inputs.still_current(gcx.clone()).await);
+        let fresh = crate::privacy::records::prepare_review_privacy_inputs(gcx.clone())
+            .await
+            .unwrap();
+        assert!(fresh.still_current(gcx).await);
+    }
+
+    #[tokio::test]
+    async fn read_context_compiles_once_and_preserves_repeated_alias_checks() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let source_file = source.join("src").join("lib.rs");
+        write_file(&source_file, "fn source() {}\n");
+        let worktree = worktree_root(&gcx.cache_dir, &source, "wt");
+        let worktree_file = worktree.join("src").join("lib.rs");
+        write_file(&worktree_file, "fn worktree() {}\n");
+        write_worktree_registry(&gcx.cache_dir, &source, &worktree);
+        let mut mappings =
+            crate::files_correction::registered_worktree_path_mappings(&gcx.cache_dir)
+                .as_ref()
+                .clone();
+        for index in 0..16 {
+            mappings.push(crate::files_correction::RegisteredWorktreePathMapping {
+                root: temp.path().join(format!("alias-{index}")),
+                source_root: normalized(&source),
+            });
+        }
+
+        for (blocked, controlled, send, read) in [
+            (Vec::new(), Vec::new(), Ok(()), Ok(())),
+            (
+                vec![worktree_file.to_string_lossy().to_string()],
+                Vec::new(),
+                Err("privacy level Blocked".to_string()),
+                Err("privacy level Blocked".to_string()),
+            ),
+            (
+                Vec::new(),
+                vec![worktree_file.to_string_lossy().to_string()],
+                Err("privacy level OnlySendToServersIControl".to_string()),
+                Ok(()),
+            ),
+            (
+                vec!["[".to_string()],
+                Vec::new(),
+                Err("privacy level Blocked".to_string()),
+                Err("privacy level Blocked".to_string()),
+            ),
+        ] {
+            let settings = Arc::new(PrivacySettings {
+                privacy_rules: crate::privacy::FilePrivacySettings {
+                    blocked,
+                    only_send_to_servers_I_control: controlled,
+                },
+                loaded_ts: u64::MAX / 2,
+            });
+            *gcx.privacy_settings.write().unwrap() = settings.clone();
+            let before = crate::privacy::LEGACY_PRIVACY_COMPILE_COUNT.with(|count| count.get());
+            let mut context = prepare_file_read_context(gcx.clone()).await;
+            context.worktree_mappings = Arc::new(mappings.clone());
+            let aliases = registered_alias_paths(&source_file, &context.worktree_mappings);
+            assert_eq!(aliases.len(), 18);
+            for _ in 0..4 {
+                for path in [&source_file, &worktree_file] {
+                    assert_eq!(check_file_privacy_with_context(&context, path), send);
+                    assert_eq!(
+                        check_file_privacy_for_read_preparation_with_context(&context, path),
+                        read
+                    );
+                }
+            }
+            assert_eq!(
+                crate::privacy::LEGACY_PRIVACY_COMPILE_COUNT.with(|count| count.get()),
+                before + 1
+            );
+            assert_eq!(
+                aliases.iter().try_for_each(|alias| check_file_privacy(
+                    settings.clone(),
+                    alias,
+                    &FilePrivacyLevel::AllowToSendAnywhere,
+                )),
+                send
+            );
+            assert_eq!(
+                aliases.iter().try_for_each(|alias| {
+                    crate::privacy::check_file_privacy_for_read_preparation(settings.clone(), alias)
+                }),
+                read
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn read_context_new_request_observes_changed_policy() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("lib.rs");
+        write_file(&file, "fn main() {}\n");
+        allow_all_privacy(&gcx);
+        let allowed = prepare_file_read_context(gcx.clone()).await;
+        assert_eq!(check_file_privacy_with_context(&allowed, &file), Ok(()));
+
+        set_blocked_privacy(&gcx, vec![file.to_string_lossy().to_string()]);
+        let blocked = prepare_file_read_context(gcx.clone()).await;
+        assert_eq!(
+            check_file_privacy_with_context(&blocked, &file),
+            Err("privacy level Blocked".to_string())
+        );
+        assert_eq!(check_file_privacy_with_context(&allowed, &file), Ok(()));
+
+        allow_all_privacy(&gcx);
+        let allowed_again = prepare_file_read_context(gcx).await;
+        assert_eq!(
+            check_file_privacy_with_context(&allowed_again, &file),
+            Ok(())
+        );
+        assert_eq!(
+            check_file_privacy_for_read_preparation_with_context(&blocked, &file),
+            Err("privacy level Blocked".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn read_context_new_request_reloads_changed_policy_file() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("lib.rs");
+        write_file(&file, "fn main() {}\n");
+        crate::privacy::save_privacy_policy(gcx.clone(), crate::privacy::PrivacyPolicy::default())
+            .await
+            .unwrap();
+        let allowed = prepare_file_read_context(gcx.clone()).await;
+        assert_eq!(check_file_privacy_with_context(&allowed, &file), Ok(()));
+        write_file(
+            &gcx.config_dir.join("privacy.yaml"),
+            "privacy_rules:\n  blocked: ['*.rs']\n",
+        );
+        *gcx.privacy_settings.write().unwrap() = Arc::new(PrivacySettings {
+            privacy_rules: crate::privacy::FilePrivacySettings {
+                blocked: Vec::new(),
+                only_send_to_servers_I_control: Vec::new(),
+            },
+            loaded_ts: 0,
+        });
+        let blocked = prepare_file_read_context(gcx).await;
+        assert_eq!(
+            check_file_privacy_with_context(&blocked, &file),
+            Err("privacy level Blocked".to_string())
+        );
+        assert_eq!(check_file_privacy_with_context(&allowed, &file), Ok(()));
+    }
+
     fn path_counts(paths: &[PathBuf]) -> HashMap<PathBuf, usize> {
         let mut counts = HashMap::new();
         for path in paths {
@@ -3709,6 +3908,7 @@ mod tests {
             loaded_ts: 0,
         });
         let controlled_context = FileReadContext {
+            privacy_matcher: LegacyPrivacyMatcher::new(&controlled_settings),
             privacy_settings: controlled_settings,
             worktree_mappings: mappings.clone(),
         };
@@ -3722,6 +3922,13 @@ mod tests {
 
         let blocked_alias_context = FileReadContext {
             privacy_settings: Arc::new(PrivacySettings {
+                privacy_rules: crate::privacy::FilePrivacySettings {
+                    only_send_to_servers_I_control: vec![source_file.to_string_lossy().to_string()],
+                    blocked: vec![worktree_file.to_string_lossy().to_string()],
+                },
+                loaded_ts: 0,
+            }),
+            privacy_matcher: LegacyPrivacyMatcher::new(&PrivacySettings {
                 privacy_rules: crate::privacy::FilePrivacySettings {
                     only_send_to_servers_I_control: vec![source_file.to_string_lossy().to_string()],
                     blocked: vec![worktree_file.to_string_lossy().to_string()],

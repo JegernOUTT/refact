@@ -2113,6 +2113,7 @@ async fn run_verifier_review(
     let model = resolve_verifier_model(gcx.clone()).await?;
     let config = crate::subchat::SubchatConfig {
         runner_lease_token: None,
+        native_job_fence: None,
         history_source_model: None,
         tool_name: "verifier".to_string(),
         stateful: false,
@@ -2227,6 +2228,52 @@ pub(crate) mod tests {
     use super::*;
     use crate::chat::evidence::{gate_outcome_for_verdicts, specs_from_card, EvidenceVerdict};
     use crate::tasks::types::{FinalReport, ScopeGuardMode, TaskBoard, TaskMeta, TaskStatus};
+
+    fn run_in_isolated_verifier_process(test_name: &str) -> bool {
+        const MARKER: &str = "REFACT_TEST_VERIFIER_REPORT_PROCESS";
+        if std::env::var(MARKER).ok().as_deref() == Some(test_name) {
+            return false;
+        }
+        let output = tempfile::NamedTempFile::new().expect("create isolated verifier output");
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", test_name, "--nocapture", "--test-threads=1"])
+            .env(MARKER, test_name)
+            .stdout(output.as_file().try_clone().unwrap())
+            .stderr(output.as_file().try_clone().unwrap())
+            .spawn()
+            .expect("spawn isolated verifier test");
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        loop {
+            let status = match child.try_wait() {
+                Ok(status) => status,
+                Err(error) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    panic!("poll isolated verifier test failed: {error}");
+                }
+            };
+            if let Some(status) = status {
+                let output =
+                    fs::read_to_string(output.path()).expect("read isolated verifier test");
+                assert!(
+                    status.success(),
+                    "isolated verifier test failed: {status}\n{output}"
+                );
+                assert!(
+                    output.contains("running 1 test")
+                        && output.contains("1 passed; 0 failed; 0 ignored;"),
+                    "isolated verifier test must run exactly one non-ignored test: {output}"
+                );
+                return true;
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("isolated verifier test exceeded 60 seconds: {test_name}");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
 
     pub(crate) async fn register_candidate(
         gcx: Arc<GlobalContext>,
@@ -2553,6 +2600,11 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn store_verifier_report_lands_when_expected_card_state_matches() {
+        if run_in_isolated_verifier_process(
+            "chat::verifier::tests::store_verifier_report_lands_when_expected_card_state_matches",
+        ) {
+            return;
+        }
         let temp = tempfile::tempdir().unwrap();
         init_repo(temp.path());
         let gcx = crate::global_context::tests::make_test_gcx().await;
@@ -2627,6 +2679,110 @@ pub(crate) mod tests {
             .status_updates
             .iter()
             .any(|update| update.message == "Verifier: PASS"));
+    }
+
+    #[tokio::test]
+    async fn store_verifier_report_rejects_runtime_settings_change_only() {
+        if run_in_isolated_verifier_process(
+            "chat::verifier::tests::store_verifier_report_rejects_runtime_settings_change_only",
+        ) {
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        init_repo(temp.path());
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let mut card = card("## Acceptance Criteria\n- Verify: `cargo test verifier`");
+        card.id = "T-1".into();
+        write_task(temp.path(), gcx.clone(), card).await;
+        let ccx = register_candidate(gcx.clone(), "task-1", "T-1", "model").await;
+        let candidate = command_checkout::resolve_planner_verifier(&ccx, "task-1", "T-1")
+            .await
+            .unwrap();
+        let mut expected = load_expected_card_state(gcx.clone(), "task-1", "T-1")
+            .await
+            .unwrap();
+        let board = storage::load_board(gcx.clone(), "task-1").await.unwrap();
+        let snapshot = VerificationSnapshot::capture(
+            &gcx,
+            temp.path().to_path_buf(),
+            &candidate,
+            "task-1",
+            "T-1",
+            &board,
+        )
+        .await
+        .unwrap();
+        let before = ConfigurationSnapshot::capture(&gcx).await.unwrap();
+        assert!(snapshot.matches(&gcx, &board, &before));
+        expected.verification = Some(snapshot.clone());
+        let board_path = temp.path().join(".refact/tasks/task-1/board.yaml");
+        let meta_path = temp.path().join(".refact/tasks/task-1/meta.yaml");
+        let board_bytes = fs::read(&board_path).unwrap();
+        let meta_bytes = fs::read(&meta_path).unwrap();
+
+        {
+            let _settings = crate::tools::settings_guard::SettingsGuard::install(|settings| {
+                settings.max_queue_size += 1;
+            });
+            let changed = ConfigurationSnapshot::capture(&gcx).await.unwrap();
+            assert_eq!(changed.content.caps, before.content.caps);
+            assert_eq!(changed.content.models, before.content.models);
+            assert_eq!(
+                changed.capabilities_generation,
+                before.capabilities_generation
+            );
+            assert_eq!(
+                changed.content.policy_settings[0],
+                before.content.policy_settings[0]
+            );
+            assert_eq!(
+                changed.content.policy_settings[1],
+                before.content.policy_settings[1]
+            );
+            assert_ne!(
+                changed.content.policy_settings[2],
+                before.content.policy_settings[2]
+            );
+            // Even the original configuration fails solely on the live settings
+            // fingerprint: every other input to matches is unchanged.
+            assert!(!snapshot.matches(&gcx, &board, &before));
+            assert!(!store_verifier_report(
+                gcx.clone(),
+                "task-1",
+                "T-1",
+                Some(&expected),
+                verifier_report(true),
+                Vec::new(),
+            )
+            .await
+            .unwrap());
+            assert_eq!(fs::read(&board_path).unwrap(), board_bytes);
+            assert_eq!(fs::read(&meta_path).unwrap(), meta_bytes);
+        }
+
+        let restored = ConfigurationSnapshot::capture(&gcx).await.unwrap();
+        assert_eq!(restored.content, before.content);
+        assert!(snapshot.matches(&gcx, &board, &restored));
+        assert!(store_verifier_report(
+            gcx.clone(),
+            "task-1",
+            "T-1",
+            Some(&expected),
+            verifier_report(true),
+            Vec::new(),
+        )
+        .await
+        .unwrap());
+        let board = storage::load_board(gcx, "task-1").await.unwrap();
+        assert!(
+            board
+                .get_card("T-1")
+                .unwrap()
+                .verifier_report
+                .as_ref()
+                .unwrap()
+                .passed
+        );
     }
 
     #[tokio::test]

@@ -794,10 +794,15 @@ mod tests {
 
     impl BarrierToolRegistry {
         fn tools(&self) -> Vec<Box<dyn crate::tools::tools_description::Tool + Send>> {
-            vec![Box::new(BarrierTool {
-                started: self.started.clone(),
-                barrier: self.barrier.clone(),
-            })]
+            vec![
+                Box::new(BarrierTool {
+                    started: self.started.clone(),
+                    barrier: self.barrier.clone(),
+                }),
+                Box::new(crate::tools::tool_tool_job::ToolToolJob {
+                    config_path: String::new(),
+                }),
+            ]
         }
     }
 
@@ -964,6 +969,555 @@ mod tests {
 
     fn recorded_components(sink: &MemoryPerfSink) -> Vec<&'static str> {
         sink.events().iter().map(|event| event.component).collect()
+    }
+
+    #[test]
+    fn job_policy_exempts_control_not_ordinary_work() {
+        for name in [
+            "ask_questions",
+            "tool_job",
+            "wait",
+            "worktree_merge",
+            "set_review_context",
+            "subagent",
+            "spawn_agent",
+            "merge_agent",
+            "agent_lifecycle",
+        ] {
+            assert!(tool_job_foreground_reason(name).is_some(), "{name}");
+        }
+        for name in [
+            "cat",
+            "code_health",
+            "web",
+            "apply_patch",
+            "parallel_barrier",
+        ] {
+            assert!(tool_job_foreground_reason(name).is_none(), "{name}");
+        }
+    }
+
+    #[tokio::test]
+    async fn actual_dispatch_review_activation_keeps_live_scope_and_does_not_replay() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("repo");
+        fs::create_dir(&source).unwrap();
+        let oid = {
+            let repo = git2::Repository::init(&source).unwrap();
+            let mut tree = repo.treebuilder(None).unwrap();
+            tree.insert(
+                "tracked.txt",
+                repo.blob(b"review input\n").unwrap(),
+                0o100644,
+            )
+            .unwrap();
+            let tree = repo.find_tree(tree.write().unwrap()).unwrap();
+            let sig = git2::Signature::now("Review", "review@localhost").unwrap();
+            let oid = repo
+                .commit(Some("HEAD"), &sig, &sig, "fixture", &tree, &[])
+                .unwrap();
+            repo.checkout_head(None).unwrap();
+            oid.to_string()
+        };
+        let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
+            temp.path().join("cache"),
+            temp.path().join("config"),
+        )
+        .await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![source.clone()];
+        let base = AppState::from_gcx(gcx).await;
+        let app = AppState {
+            tool_registry: Arc::new(
+                crate::app_state::AppToolRegistry::with_fixture_tool_factory(
+                    base.gcx.clone(),
+                    Arc::new(|| {
+                        vec![Box::new(crate::tools::tool_review::ToolReview(
+                            crate::tools::tool_review::ReviewToolKind::Context,
+                        ))]
+                    }),
+                ),
+            ),
+            ..base
+        };
+        let mut live = ChatSession::new("review-actual-dispatch".into());
+        live.thread.model = "model".into();
+        live.work_project_root = Some(source.clone());
+        live.set_runtime_state(SessionState::ExecutingTools, None);
+        let mut user = ChatMessage::new(
+            "user".into(),
+            "Review tracked.txt in this local comparison".into(),
+        );
+        user.message_id = "dispatch-review-user".into();
+        live.add_message(user);
+        let mut source_call = deterministic_tool_call("dispatch-source", "cat");
+        source_call.function.arguments =
+            serde_json::json!({"paths":source.join("tracked.txt")}).to_string();
+        let mut source_invocation = ChatMessage::new("assistant".into(), String::new());
+        source_invocation.tool_calls = Some(vec![source_call]);
+        live.add_message(source_invocation);
+        // Captured native IO fixture, with actual file content; intake validation stays real.
+        let mut source_result = ChatMessage::new(
+            "tool".into(),
+            fs::read_to_string(source.join("tracked.txt")).unwrap(),
+        );
+        source_result.tool_call_id = "dispatch-source".into();
+        source_result.tool_failed = Some(false);
+        live.add_message(source_result);
+        let thread = live.thread.clone();
+        let abort = live.abort_flag.clone();
+        let session = Arc::new(AMutex::new(live));
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert(thread.id.clone(), session.clone());
+        let context =
+            build_tool_execution_context(app.clone(), 4096, &[], &thread, Some(abort.clone()))
+                .await
+                .unwrap();
+        let mut call = deterministic_tool_call("review-activation", "set_review_context");
+        let gaps = ["mcp", "web", "messenger", "knowledge", "trajectories", "tasks", "memory"]
+            .map(|category| serde_json::json!({"category":category,"status":"unavailable","reason":"Not provided by this source-only dispatch fixture"}));
+        call.function.arguments = serde_json::json!({
+            "repository":session.lock().await.work_project_root,
+            "base_ref":oid,"candidate_ref":oid,"request_key":"dispatch-capture",
+            "context_intake":{"user_message_id":"dispatch-review-user","retrieval_tool_call_ids":["dispatch-source"],"gaps":gaps,"summary":"Inspect local fixture source, without external context or execution claims"}
+        })
+        .to_string();
+
+        let mut first = None;
+        let mut first_attachment = None;
+        for _ in 0..2 {
+            call.id = format!("review-activation-{}", uuid::Uuid::new_v4());
+            let mut invocation = ChatMessage::new("assistant".into(), String::new());
+            invocation.tool_calls = Some(vec![call.clone()]);
+            session.lock().await.add_message(invocation);
+            let thread = session.lock().await.thread.clone();
+            let (messages, corrections) = tokio::time::timeout(
+                std::time::Duration::from_secs(20),
+                execute_tools(
+                    app.clone(),
+                    &[call.clone()],
+                    &[],
+                    &thread,
+                    "agent",
+                    None,
+                    ExecuteToolsOptions {
+                        allowed_tools: vec!["set_review_context".into()],
+                        execution_context: Some(context.clone()),
+                        ..Default::default()
+                    },
+                ),
+            )
+            .await
+            .expect("scope writer must not wait for its own job lease");
+            assert!(!corrections, "{messages:?}");
+            assert_eq!(messages.len(), 1);
+            assert_eq!(messages[0].tool_call_id, call.id);
+            assert_eq!(messages[0].tool_failed, Some(false), "{messages:?}");
+            session.lock().await.add_message(messages[0].clone());
+            assert!(!messages[0].extra.contains_key("tool_job"));
+            assert_eq!(
+                messages[0].extra["tool_execution_policy"]["foreground_reason"],
+                "scope_writer"
+            );
+            let value: serde_json::Value =
+                serde_json::from_str(&messages[0].content.content_text_only()).unwrap();
+            let review_id = value["review"]["id"].as_str().unwrap();
+            let candidate_id = value["candidate_id"].as_str().unwrap();
+            assert!(!review_id.is_empty());
+            assert!(!candidate_id.is_empty());
+            let identity = (review_id.to_string(), candidate_id.to_string());
+            if let Some(first) = &first {
+                assert_eq!(first, &identity);
+            } else {
+                first = Some(identity);
+            }
+            let c = context.lock().await;
+            assert!(Arc::ptr_eq(&c.abort_flag, &abort));
+            let attached = session.lock().await.thread.worktree.clone().unwrap();
+            assert_eq!(attached.kind, "review");
+            assert_eq!(c.execution_scope_worktree(), Some(attached.clone()));
+            if let Some(first) = &first_attachment {
+                assert_eq!(first, &attached);
+            } else {
+                first_attachment = Some(attached);
+            }
+        }
+        app.runtime.tool_jobs.shutdown().await;
+    }
+    #[tokio::test]
+    async fn actual_dispatch_returns_receipt_then_retains_one_native_result() {
+        let started = Arc::new(AtomicUsize::new(0));
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let fixture = BarrierToolRegistry {
+            started: started.clone(),
+            barrier: barrier.clone(),
+        };
+        let base = AppState::from_gcx(crate::global_context::tests::make_test_gcx().await).await;
+        let app = AppState {
+            tool_registry: Arc::new(
+                crate::app_state::AppToolRegistry::with_fixture_tool_factory(
+                    base.gcx.clone(),
+                    Arc::new(move || fixture.tools()),
+                ),
+            ),
+            ..base
+        };
+        let thread = ThreadParams {
+            id: "owned-job-dispatch".into(),
+            model: "model".into(),
+            ..Default::default()
+        };
+        let call = deterministic_tool_call("owned-job-call", "parallel_barrier");
+        let (messages, corrections) = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            execute_tools(
+                app.clone(),
+                &[call],
+                &[],
+                &thread,
+                "agent",
+                None,
+                ExecuteToolsOptions::default(),
+            ),
+        )
+        .await
+        .unwrap();
+        assert!(!corrections);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            messages[0].tool_failed, None,
+            "acceptance must not claim execution success"
+        );
+        assert_eq!(messages[0].tool_call_id, "owned-job-call");
+        let id = messages[0].extra["tool_job"]["job_id"].as_str().unwrap();
+        assert_eq!(started.load(AtomicOrdering::SeqCst), 1);
+        barrier.wait().await;
+        let snapshot = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            app.runtime.tool_jobs.wait_terminal(&thread.id, id),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(snapshot.status, crate::tool_jobs::JobStatus::Succeeded);
+        assert_eq!(
+            snapshot.result.unwrap().messages[0]
+                .content
+                .content_text_only(),
+            "released"
+        );
+        assert_eq!(started.load(AtomicOrdering::SeqCst), 1);
+        assert!(app.runtime.tool_jobs.get("another-chat", id).is_none());
+        app.runtime.tool_jobs.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn custom_catalog_without_job_control_returns_receipt_and_auto_lands() {
+        let chat = "custom-no-control";
+        let (_temp, base, session, old_receipt) =
+            super::super::tool_job_delivery::tests::policy_race_fixture(chat).await;
+        session.lock().await.pending_deliveries.clear();
+        let old = base
+            .runtime
+            .tool_jobs
+            .wait_terminal(chat, &old_receipt.job_id)
+            .await
+            .unwrap();
+        base.runtime
+            .tool_jobs
+            .ack_delivered(chat, &old_receipt.job_id, old.revision)
+            .await
+            .unwrap();
+        let mode = "custom_no_job_control";
+        let mut registry =
+            crate::yaml_configs::customization_registry::get_project_registry(base.gcx.clone())
+                .await
+                .unwrap();
+        let mut custom = registry.modes.get("agent").unwrap().clone();
+        custom.id = mode.into();
+        custom.tools = vec!["parallel_barrier".into()];
+        custom.allow_integrations = false;
+        custom.allow_mcp = false;
+        custom.allow_subagents = false;
+        registry.modes.insert(mode.into(), custom);
+        let root = session.lock().await.work_project_root.clone().unwrap();
+        base.gcx
+            .project_registry_cache
+            .write()
+            .unwrap()
+            .insert(root, registry);
+        base.gcx.tool_catalog_generations.advance_customization();
+        session.lock().await.thread.mode = mode.into();
+        let started = Arc::new(AtomicUsize::new(0));
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let fixture = BarrierToolRegistry {
+            started: started.clone(),
+            barrier: barrier.clone(),
+        };
+        let app = AppState {
+            tool_registry: Arc::new(
+                crate::app_state::AppToolRegistry::with_fixture_tool_factory(
+                    base.gcx.clone(),
+                    Arc::new(move || {
+                        fixture
+                            .tools()
+                            .into_iter()
+                            .filter(|tool| tool.tool_description().name != "tool_job")
+                            .collect()
+                    }),
+                ),
+            ),
+            ..base
+        };
+        let thread = session.lock().await.thread.clone();
+        let catalog = app
+            .tool_registry
+            .acquire_tool_catalog(mode, Some("model"), None)
+            .await;
+        assert_eq!(catalog.index.tools.len(), 1);
+        assert_eq!(catalog.index.tools[0].name, "parallel_barrier");
+        assert!(!catalog
+            .index
+            .tools
+            .iter()
+            .any(|tool| tool.name == "tool_job"));
+        let (messages, _) = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            execute_tools(
+                app.clone(),
+                &[deterministic_tool_call("custom-call", "parallel_barrier")],
+                &[],
+                &thread,
+                mode,
+                Some("model"),
+                ExecuteToolsOptions {
+                    allowed_tools: vec!["parallel_barrier".into()],
+                    catalog: Some(catalog),
+                    ..Default::default()
+                },
+            ),
+        )
+        .await
+        .expect("receipt must arrive while tool remains behind barrier");
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].tool_failed, None);
+        assert_eq!(messages[0].tool_call_id, "custom-call");
+        assert_eq!(messages[0].extra["tool_job"]["status"], "accepted");
+        let text = messages[0].content.content_text_only();
+        assert!(text.contains("arrive automatically"));
+        assert!(!text.contains("Use tool_job"));
+        let id = messages[0].extra["tool_job"]["job_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(started.load(AtomicOrdering::SeqCst), 1);
+        session.lock().await.add_message(messages[0].clone());
+        barrier.wait().await;
+        let terminal = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            app.runtime.tool_jobs.wait_terminal(chat, &id),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(terminal.status, crate::tool_jobs::JobStatus::Succeeded);
+        assert_eq!(terminal.receipt.binding.chat_id, chat);
+        assert_eq!(terminal.receipt.binding.tool_call_id, "custom-call");
+        assert!(app.runtime.tool_jobs.get("another-chat", &id).is_none());
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let locked = session.lock().await;
+                if locked
+                    .messages
+                    .iter()
+                    .any(|message| message.content.content_text_only() == "released")
+                {
+                    assert_eq!(
+                        locked
+                            .messages
+                            .iter()
+                            .filter(|message| message.content.content_text_only() == "released")
+                            .count(),
+                        1
+                    );
+                    let landed = locked
+                        .messages
+                        .iter()
+                        .find(|message| message.content.content_text_only() == "released")
+                        .unwrap();
+                    assert_eq!(landed.role, "event");
+                    assert!(landed.tool_call_id.is_empty());
+                    assert_eq!(landed.extra["tool_job_result"]["job_id"], id);
+                    assert_eq!(
+                        landed.extra["tool_job_result"]["tool_call_id"],
+                        "custom-call"
+                    );
+                    assert_eq!(landed.extra["tool_job_result"]["original_role"], "tool");
+                    assert_eq!(landed.extra["tool_job_result"]["actor"], "tool_completion");
+                    assert_eq!(landed.extra["event"]["source"], "tool_job.completed");
+                    break;
+                }
+                drop(locked);
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("completion bridge automatically lands without a control tool");
+        let current = app
+            .tool_registry
+            .acquire_tool_catalog(mode, Some("model"), None)
+            .await;
+        assert!(!current
+            .index
+            .tools
+            .iter()
+            .any(|tool| tool.name == "tool_job"));
+        assert_eq!(started.load(AtomicOrdering::SeqCst), 1);
+        app.runtime.tool_jobs.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn native_owned_adapter_revocation_while_paused_is_unknown_without_tool_poll() {
+        for revoke in [false, true] {
+            let started = Arc::new(AtomicUsize::new(0));
+            let fixture = BarrierToolRegistry {
+                started: started.clone(),
+                barrier: Arc::new(tokio::sync::Barrier::new(2)),
+            };
+            let base =
+                AppState::from_gcx(crate::global_context::tests::make_test_gcx().await).await;
+            let app = AppState {
+                tool_registry: Arc::new(
+                    crate::app_state::AppToolRegistry::with_fixture_tool_factory(
+                        base.gcx.clone(),
+                        Arc::new(move || fixture.tools()),
+                    ),
+                ),
+                ..base
+            };
+            let child = format!("subchat-supervised-{}", Uuid::new_v4());
+            let (fence, _owner) =
+                crate::buddy::supervision_authority::test_native_job_owner(&child);
+            let thread = ThreadParams {
+                id: child.clone(),
+                model: "model".into(),
+                ..Default::default()
+            };
+            let context = build_tool_execution_context(app.clone(), 4096, &[], &thread, None)
+                .await
+                .unwrap();
+            context.lock().await.native_job_fence = Some(fence);
+            let gate = Arc::new(refact_agents_core::registry::PauseGate::default());
+            gate.request();
+            let abort = Arc::new(AtomicBool::new(false));
+            let (messages, _) = execute_tools(
+                app.clone(),
+                &[deterministic_tool_call("native-paused", "parallel_barrier")],
+                &[],
+                &thread,
+                "agent",
+                None,
+                ExecuteToolsOptions {
+                    execution_context: Some(context),
+                    native_pause: Some(gate.clone()),
+                    native_abort: Some(abort.clone()),
+                    ..Default::default()
+                },
+            )
+            .await;
+            let id = messages[0].extra["tool_job"]["job_id"]
+                .as_str()
+                .expect("opaque guard activates owned admission");
+            gate.quiesced().await;
+            if revoke {
+                crate::buddy::supervision_authority::invalidate_chat(&child).unwrap();
+            } else {
+                abort.store(true, Ordering::Release);
+                gate.wake_for_abort();
+            }
+            let snapshot = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                app.runtime.tool_jobs.wait_terminal(&child, id),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(snapshot.status, crate::tool_jobs::JobStatus::Unknown);
+            gate.release();
+            assert_eq!(
+                started.load(AtomicOrdering::SeqCst),
+                0,
+                "revoked parked tool must never be polled"
+            );
+            app.runtime.tool_jobs.shutdown().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn serial_job_receipt_does_not_release_serial_execution_barrier() {
+        let (base, thread, control, first_started, release_first) =
+            serial_pause_execute_fixture().await;
+        let fixture = SerialPauseToolRegistry {
+            control: control.clone(),
+        };
+        let app = AppState {
+            tool_registry: Arc::new(
+                crate::app_state::AppToolRegistry::with_fixture_tool_factory(
+                    base.gcx.clone(),
+                    Arc::new(move || {
+                        let mut tools = fixture.tools();
+                        tools.push(Box::new(crate::tools::tool_tool_job::ToolToolJob {
+                            config_path: String::new(),
+                        }));
+                        tools
+                    }),
+                ),
+            ),
+            ..base
+        };
+        let calls = [
+            deterministic_tool_call("fifo-first", "serial_pause"),
+            deterministic_tool_call("fifo-second", "serial_pause"),
+        ];
+        let (messages, _) = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            execute_tools(
+                app.clone(),
+                &calls,
+                &[],
+                &thread,
+                "agent",
+                None,
+                ExecuteToolsOptions::default(),
+            ),
+        )
+        .await
+        .unwrap();
+        first_started.await.unwrap();
+        assert_eq!(messages.len(), 2);
+        assert!(messages
+            .iter()
+            .all(|message| message.extra.contains_key("tool_job")));
+        assert_eq!(
+            control.invocations.load(AtomicOrdering::SeqCst),
+            1,
+            "receipt must not release serial gate"
+        );
+        release_first.send(()).unwrap();
+        for message in &messages {
+            let id = message.extra["tool_job"]["job_id"].as_str().unwrap();
+            tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                app.runtime.tool_jobs.wait_terminal(&thread.id, id),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        }
+        assert_eq!(control.invocations.load(AtomicOrdering::SeqCst), 2);
+        app.runtime.tool_jobs.shutdown().await;
     }
 
     #[tokio::test]
@@ -2269,7 +2823,9 @@ pub async fn process_tool_calls_once(
             ) {
                 Ok(args) => match serde_json::to_string(&serde_json::Value::Object(args)) {
                     Ok(encoded) => {
-                        pre_hook_rewrites.insert(tc.id.clone(), encoded);
+                        if encoded != tc.function.arguments {
+                            pre_hook_rewrites.insert(tc.id.clone(), encoded);
+                        }
                         None
                     }
                     Err(e) => Some(format!("hook rewrite could not be encoded: {e}")),
@@ -2304,6 +2860,7 @@ pub async fn process_tool_calls_once(
     if !pre_hook_blocked_ids.is_empty() {
         tools_to_execute.retain(|tc| !pre_hook_blocked_ids.contains(&tc.id));
     }
+    let rewritten_ids: std::collections::HashSet<_> = pre_hook_rewrites.keys().cloned().collect();
     if !pre_hook_rewrites.is_empty() {
         for tc in tools_to_execute.iter_mut() {
             if let Some(arguments) = pre_hook_rewrites.remove(&tc.id) {
@@ -2323,6 +2880,76 @@ pub async fn process_tool_calls_once(
             TrajectoryCommitIntent::Checkpoint,
         );
         return ToolStepOutcome::Continue;
+    }
+
+    if !rewritten_ids.is_empty() {
+        // Approval is bound to FINAL arguments, not to the call id alone. A hook
+        // rewrite invalidates earlier command approval and must pass policy again.
+        let rewritten: Vec<_> = tools_to_execute
+            .iter()
+            .filter(|call| rewritten_ids.contains(&call.id))
+            .cloned()
+            .collect();
+        if let Some(context) = approval_context.as_ref() {
+            let mut context = context.lock().await;
+            for id in &rewritten_ids {
+                context.approved_executions.remove(id);
+            }
+        }
+        {
+            let mut session = session_arc.lock().await;
+            if let Some(message) = session
+                .messages
+                .iter_mut()
+                .find(|message| message.message_id == tool_message_id)
+            {
+                if let Some(calls) = message.tool_calls.as_mut() {
+                    for call in calls {
+                        if let Some(final_call) =
+                            rewritten.iter().find(|final_call| final_call.id == call.id)
+                        {
+                            *call = final_call.clone();
+                        }
+                    }
+                }
+            }
+        }
+        let (confirmations, denials) = check_tools_confirmation_with_pool(
+            app.clone(),
+            &rewritten,
+            &messages,
+            &thread,
+            Some(&catalog),
+            mode_id,
+            model_id,
+            &allowed_tools,
+            &source_command,
+            turn_tool_pool.as_ref(),
+        )
+        .await;
+        if !confirmations.is_empty() {
+            let mut session = session_arc.lock().await;
+            let index = session
+                .messages
+                .iter()
+                .position(|message| message.message_id == tool_message_id);
+            session.set_paused_with_reasons_and_auto_approved(confirmations, Vec::new(), index);
+            return ToolStepOutcome::Paused;
+        }
+        let denied: std::collections::HashSet<_> = denials
+            .iter()
+            .map(|reason| reason.tool_call_id.clone())
+            .collect();
+        for denial in denials {
+            let mut message = ChatMessage::new(
+                "tool".into(),
+                format!("Rewritten invocation denied: {}", denial.rule),
+            );
+            message.tool_call_id = denial.tool_call_id;
+            message.tool_failed = Some(true);
+            session_arc.lock().await.add_message(message);
+        }
+        tools_to_execute.retain(|call| !denied.contains(&call.id));
     }
 
     {
@@ -2449,12 +3076,15 @@ pub async fn process_tool_calls_once(
     let chat_id = session_arc.lock().await.chat_id.clone();
     let sealed = crate::agents::seal::is_sealed(&app, &chat_id).await;
     let mut verify_completion = false;
+    let mut proposal_results = Vec::new();
     {
         let mut session = session_arc.lock().await;
         if !was_interrupted || tool_initiated_stop {
+            let start = session.messages.len();
             for result_msg in tool_results {
                 session.add_message(result_msg);
             }
+            proposal_results.extend_from_slice(&session.messages[start..]);
             session.drain_post_tool_side_effects();
         } else {
             session.drain_post_tool_side_effects();
@@ -2480,6 +3110,91 @@ pub async fn process_tool_calls_once(
         }
     }
     session_merge_span.finish_tool(PerfOutcome::Success, 1, tools_to_execute.len() as u64, None);
+
+    if !was_aborted && !was_interrupted && !tool_initiated_stop {
+        let proposal_call = tools_to_execute.iter().any(|call| {
+            call.function.name == "review_update"
+                && call
+                    .function
+                    .parse_args()
+                    .ok()
+                    .and_then(|args| args.get("operation").cloned())
+                    .is_some_and(|operation| operation["op"] == "propose_tour_revision")
+        });
+        if proposal_call {
+            crate::chat::delivery::drain_deliveries_at_boundary(app.clone(), session_arc.clone())
+                .await;
+        }
+        for call in tools_to_execute
+            .iter()
+            .filter(|c| c.function.name == "review_update")
+        {
+            let results = proposal_results
+                .iter()
+                .filter(|m| m.tool_call_id == call.id && m.tool_failed == Some(false))
+                .cloned()
+                .collect::<Vec<_>>();
+            if !results.is_empty()
+                && crate::chat::trajectories::try_save_trajectory_with_intent(
+                    app.clone(),
+                    session_arc.clone(),
+                    TrajectoryCommitIntent::Required,
+                )
+                .await
+                .unwrap_or(false)
+            {
+                let job = app.runtime.tool_jobs.proposal_job(&thread.id, &call.id);
+                if let Err(error) = crate::review::turn_completion::acknowledge(
+                    &app,
+                    &thread.id,
+                    &call.id,
+                    job.as_ref().map(|j| j.job_id.as_str()),
+                    &results,
+                )
+                .await
+                {
+                    tracing::warn!(%error, "proposal result acknowledgement pending");
+                }
+            }
+        }
+        if tools_to_execute.len() == 1 {
+            let call = &tools_to_execute[0];
+            let proposes = call.function.name == "review_update"
+                && call
+                    .function
+                    .parse_args()
+                    .ok()
+                    .and_then(|args| args.get("operation").cloned())
+                    .and_then(|value| {
+                        serde_json::from_value::<refact_review_core::Operation>(value).ok()
+                    })
+                    .is_some_and(|op| {
+                        matches!(
+                            op,
+                            refact_review_core::Operation::ProposeTourRevision { .. }
+                        )
+                    });
+            if proposes {
+                if let Some(job) = app.runtime.tool_jobs.proposal_job(&thread.id, &call.id) {
+                    let waiting = crate::review::turn_completion::await_proposal_result(
+                        &app,
+                        &session_arc,
+                        &job,
+                    );
+                    let interrupt = { session_arc.lock().await.user_interrupt_flag.clone() };
+                    tokio::select! {
+                        result = waiting => if let Err(error) = result { tracing::warn!(%error, "proposal result landing pending"); },
+                        _ = wait_for_tool_abort(session_arc.clone(), interrupt) => return ToolStepOutcome::Stop,
+                    }
+                }
+            }
+        }
+        match crate::review::turn_completion::stop_at_boundary(&app, &session_arc).await {
+            Ok(true) => return ToolStepOutcome::Stop,
+            Ok(false) => {}
+            Err(error) => tracing::warn!(%error, "proposal completion boundary unavailable"),
+        }
+    }
 
     if verify_completion {
         let trigger = completion_trigger.as_deref().unwrap_or("task_done");
@@ -3124,7 +3839,526 @@ impl Drop for InterruptibleWaitGuard {
 
 type SerialToolRegistry = std::collections::HashSet<String>;
 
+pub(crate) fn redact_tool_message_urls(message: &mut ChatMessage) {
+    fn scrub_value(value: &mut serde_json::Value) {
+        match value {
+            serde_json::Value::String(text) => {
+                *text = refact_core::string_utils::redact_url_credentials(text)
+            }
+            serde_json::Value::Array(items) => items.iter_mut().for_each(scrub_value),
+            serde_json::Value::Object(items) => {
+                let original = std::mem::take(items);
+                for (key, mut value) in original {
+                    scrub_value(&mut value);
+                    let base = refact_core::string_utils::redact_url_credentials(&key);
+                    let mut name = base.clone();
+                    let mut n = 2;
+                    while items.contains_key(&name) {
+                        name = format!("{base} [redacted key {n}]");
+                        n += 1;
+                    }
+                    items.insert(name, value);
+                }
+            }
+            _ => {}
+        }
+    }
+    fn scrub_text(text: &mut String) {
+        if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(text) {
+            let original = value.clone();
+            scrub_value(&mut value);
+            if value != original {
+                *text = value.to_string();
+            }
+        } else {
+            *text = refact_core::string_utils::redact_url_credentials(text);
+        }
+    }
+    let process_event = message.role == "event"
+        && message
+            .extra
+            .get("event")
+            .and_then(|event| event.get("source"))
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|source| source == "exec.subscribe" || source == "exec.process_completed");
+    if message.role != "tool" && !process_event {
+        return;
+    }
+    if process_event {
+        if let Some(event) = message.extra.get_mut("event") {
+            if let Some(payload) = event.get_mut("payload") {
+                scrub_value(payload);
+            }
+        }
+    }
+    match &mut message.content {
+        ChatContent::SimpleText(text) => scrub_text(text),
+        ChatContent::Multimodal(parts) => {
+            for part in parts {
+                if part.m_type == "text" {
+                    scrub_text(&mut part.m_content);
+                }
+            }
+        }
+        ChatContent::ContextFiles(_) => {}
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn tool_url_scrubbing_preserves_json_keys_and_metadata() {
+    let mut message = ChatMessage {
+        role: "tool".into(),
+        tool_call_id: "id".into(),
+        tool_failed: Some(true),
+        content: ChatContent::SimpleText(r#"{"https://key:FAKE@host/x":{"output":"https://user:FAKE@host/repo?q=1","path":"/home/test/x"},"https://host/x":"other"}"#.into()),
+        ..Default::default()
+    };
+    redact_tool_message_urls(&mut message);
+    let value: serde_json::Value =
+        serde_json::from_str(&message.content.content_text_only()).unwrap();
+    assert_eq!(value.as_object().unwrap().len(), 2);
+    assert!(!value.to_string().contains("FAKE"));
+    assert!(value.to_string().contains("/home/test/x"));
+    assert_eq!(message.tool_call_id, "id");
+    assert_eq!(message.tool_failed, Some(true));
+}
+
+/// Procedural/control tools must remain in the foreground: they can park the
+/// turn or change the very authority domain a job would hold. Everything else
+/// goes through owned admission; an unknown authority scope is an explicit error.
+fn tool_job_foreground_reason(name: &str) -> Option<&'static str> {
+    match name {
+        "ask_questions" | "task_done" | "handoff_to_mode" => Some("interactive_turn_control"),
+        "wait" | "tool_job" => Some("interruptible_job_control"),
+        "shell" | "shell_service" | "process_start" => Some("shell_privacy_confirmation"),
+        "set_goal" | "update_goal" | "get_goal" | "validate_goal" | "tasks_set" => {
+            Some("goal_control")
+        }
+        "pause" | "resume" | "agent_cancel" | "agent_lifecycle" | "agent_approval"
+        | "agent_peer_grant" | "team_role_grant" => Some("authority_writer"),
+        "worktree_create"
+        | "worktree_merge"
+        | "worktree_sync"
+        | "set_review_context"
+        | "add_workspace_folder"
+        | "task_update"
+        | "task_manage"
+        | "subagent"
+        | "spawn_agent"
+        | "spawn_agents_batch"
+        | "restart_agent"
+        | "merge_agent"
+        | "merge_ready_in_order"
+        | "task_start"
+        | "assign_agent"
+        | "agent_complete"
+        | "agent_fail"
+        | "agent_finish"
+        | "board_delete"
+        | "board_move"
+        | "board_claim"
+        | "task_board_authority" => Some("scope_writer"),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
 async fn execute_single_tool(
+    app: AppState,
+    ccx: Arc<AMutex<AtCommandsContext>>,
+    idx: usize,
+    tool_call: ChatToolCall,
+    catalog: Arc<ToolCatalogSnapshot>,
+    turn_tool_pool: Option<TurnToolPool>,
+    serial_registry: Arc<SerialToolRegistry>,
+    allow_parallel: bool,
+    batch_size: usize,
+    mode_id: &str,
+    model_id: Option<&str>,
+    native_pause: Option<Arc<refact_agents_core::registry::PauseGate>>,
+    native_abort: Option<Arc<AtomicBool>>,
+    expected_execution: Option<Arc<crate::agents::execution::RunExecution>>,
+) -> (usize, bool, Vec<ChatMessage>, Vec<ContextFile>) {
+    execute_admitted_tool(
+        app,
+        ccx,
+        idx,
+        tool_call,
+        catalog,
+        turn_tool_pool,
+        serial_registry,
+        allow_parallel,
+        batch_size,
+        mode_id,
+        model_id,
+        native_pause,
+        native_abort,
+        expected_execution,
+        Vec::new(),
+    )
+    .await
+}
+
+struct ShellOperationGuards(
+    std::sync::Mutex<Vec<Option<crate::agents::execution::OperationGuard>>>,
+);
+impl std::fmt::Debug for ShellOperationGuards {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ShellOperationGuards")
+    }
+}
+impl refact_exec::ExecLifecycleGuard for ShellOperationGuards {
+    fn settle(&self) {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    }
+}
+impl Drop for ShellOperationGuards {
+    fn drop(&mut self) {
+        // Unknown monitor ownership is not proof that native effects stopped.
+        for guard in self
+            .0
+            .get_mut()
+            .unwrap_or_else(|e| e.into_inner())
+            .drain(..)
+        {
+            std::mem::forget(guard);
+        }
+    }
+}
+
+async fn execute_admitted_tool(
+    app: AppState,
+    ccx: Arc<AMutex<AtCommandsContext>>,
+    idx: usize,
+    tool_call: ChatToolCall,
+    catalog: Arc<ToolCatalogSnapshot>,
+    turn_tool_pool: Option<TurnToolPool>,
+    serial_registry: Arc<SerialToolRegistry>,
+    allow_parallel: bool,
+    batch_size: usize,
+    mode_id: &str,
+    model_id: Option<&str>,
+    native_pause: Option<Arc<refact_agents_core::registry::PauseGate>>,
+    native_abort: Option<Arc<AtomicBool>>,
+    expected_execution: Option<Arc<crate::agents::execution::RunExecution>>,
+    operation_guards: Vec<Option<crate::agents::execution::OperationGuard>>,
+) -> (usize, bool, Vec<ChatMessage>, Vec<ContextFile>) {
+    let unsupported_scope = {
+        let context = ccx.lock().await;
+        context.tool_access_bypass
+            || (context.native_job_fence.is_none()
+                && (context.task_meta.is_some()
+                    || context.chat_id.starts_with("subchat-supervised-")
+                    || native_pause.is_some()))
+    };
+    let foreground_reason = tool_job_foreground_reason(&tool_call.function.name)
+        .or(unsupported_scope.then_some("authority_scope_not_async_fenced"));
+    if let Some(reason) = foreground_reason {
+        let guards = operation_guards;
+        let shell_binding = (tool_call.function.name == "shell").then(|| {
+            (
+                tool_call.id.clone(),
+                ccx.clone(),
+                app.runtime.exec_registry.clone(),
+            )
+        });
+        let mut result = execute_single_tool_owned(
+            app,
+            ccx,
+            idx,
+            tool_call,
+            catalog,
+            turn_tool_pool,
+            serial_registry,
+            allow_parallel,
+            batch_size,
+            mode_id,
+            model_id,
+            native_pause,
+            native_abort,
+            expected_execution,
+        )
+        .await;
+        if let Some((tool_id, context, registry)) = shell_binding {
+            let chat_id = context.lock().await.chat_id.clone();
+            let snapshots = registry
+                .list(refact_exec::ExecProcessFilter {
+                    chat_id: Some(chat_id),
+                    tool_call_id: Some(tool_id),
+                    ..Default::default()
+                })
+                .await;
+            if snapshots.len() == 1 {
+                let guard = Arc::new(ShellOperationGuards(std::sync::Mutex::new(guards)));
+                if let Some(handle) = registry.execution_handle(&snapshots[0].meta).await {
+                    if let Err(guard) = registry.attach_execution_guard(&handle, guard).await {
+                        std::mem::forget(guard);
+                    }
+                } else {
+                    std::mem::forget(guard);
+                }
+            } else if !snapshots.is_empty() {
+                std::mem::forget(guards);
+            }
+        }
+        for message in &mut result.2 {
+            message.extra.insert(
+                "tool_execution_policy".into(),
+                serde_json::json!({"foreground_reason":reason}),
+            );
+        }
+        return result;
+    }
+    let (chat_id, model, scope_keys, turn_id) = {
+        let context = ccx.lock().await;
+        let mut keys = vec![app.runtime.tool_jobs.chat_scope_key(&context.chat_id)];
+        if let Some(worktree) = context.execution_scope_worktree() {
+            keys.push(crate::tool_jobs::ScopeKey::Worktree {
+                project: worktree.source_workspace_root,
+                root: worktree.root,
+            });
+        } else {
+            // Freeze trusted configured primary workspace roots, not model path
+            // arguments. Canonical identity matches the central service fence.
+            let roots = context
+                .global_context
+                .documents_state
+                .workspace_folders
+                .lock()
+                .unwrap()
+                .clone();
+            for root in roots {
+                match std::fs::canonicalize(&root) {
+                    Ok(root) => {
+                        let root = dunce::simplified(&root).to_path_buf();
+                        keys.push(crate::tool_jobs::ScopeKey::Worktree {
+                            project: root.clone(),
+                            root,
+                        });
+                    }
+                    Err(_) => {
+                        return runner_capacity_error(
+                            idx,
+                            &tool_call,
+                            "primary workspace scope identity unavailable",
+                        )
+                    }
+                }
+            }
+        }
+        let turn_id = context
+            .messages
+            .iter()
+            .rev()
+            .find(|m| m.role == "assistant")
+            .map(|m| m.message_id.clone())
+            .filter(|id| !id.is_empty())
+            .unwrap_or_else(|| tool_call.id.clone());
+        (
+            context.chat_id.clone(),
+            context.current_model.clone(),
+            keys,
+            turn_id,
+        )
+    };
+    let dispatch_gate = {
+        type Gates =
+            std::collections::HashMap<(usize, String), std::sync::Weak<tokio::sync::RwLock<()>>>;
+        static GATES: std::sync::OnceLock<std::sync::Mutex<Gates>> = std::sync::OnceLock::new();
+        let mut gates = GATES
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        gates.retain(|_, gate| gate.strong_count() > 0);
+        gates
+            .entry((
+                Arc::as_ptr(&app.runtime.tool_jobs) as usize,
+                chat_id.clone(),
+            ))
+            .or_default()
+            .upgrade()
+            .unwrap_or_else(|| {
+                let gate = Arc::new(tokio::sync::RwLock::new(()));
+                gates.insert(
+                    (
+                        Arc::as_ptr(&app.runtime.tool_jobs) as usize,
+                        chat_id.clone(),
+                    ),
+                    Arc::downgrade(&gate),
+                );
+                gate
+            })
+    };
+    super::tool_job_delivery::ensure_bridge(&app);
+    let binding = crate::tool_jobs::JobBinding {
+        chat_id: chat_id.clone(),
+        tool_call_id: tool_call.id.clone(),
+        tool_name: tool_call.function.name.clone(),
+        model,
+        turn_id,
+        scope_keys,
+    };
+    let mode_id = mode_id.to_owned();
+    let model_id = model_id.map(str::to_owned);
+    let call_for_error = tool_call.clone();
+    let runtime = app.runtime.tool_jobs.clone();
+    let result = runtime
+        .submit(
+            binding,
+            std::time::Duration::from_millis(100),
+            move |cancel| async move {
+                // submit acquires the lifecycle lease before this future is created/polled.
+                let _guards = operation_guards;
+                let frozen = ccx
+                    .lock()
+                    .await
+                    .freeze_tool_job(&tool_call.id, cancel.clone());
+                let frozen = match frozen {
+                    Ok(context) => Arc::new(AMutex::new(context)),
+                    Err(error) => {
+                        let (_, _, messages, context_files) =
+                            runner_capacity_error(idx, &tool_call, &error);
+                        return (
+                            crate::tool_jobs::JobStatus::Failed,
+                            crate::tool_jobs::JobResult {
+                                had_corrections: false,
+                                messages,
+                                context_files,
+                            },
+                        );
+                    }
+                };
+                let (_parallel_guard, _serial_guard) = if allow_parallel {
+                    (Some(dispatch_gate.read_owned().await), None)
+                } else {
+                    (None, Some(dispatch_gate.write_owned().await))
+                };
+                let (n_ctx, pp, history) = {
+                    let context = frozen.lock().await;
+                    (
+                        context.n_ctx,
+                        context.postprocess_parameters.clone(),
+                        context.messages.clone(),
+                    )
+                };
+                let session = app.chat.sessions.read().await.get(&chat_id).cloned();
+                let bridge = session.map(|session| spawn_subchat_bridge(frozen.clone(), session));
+                let native_fence = frozen.lock().await.native_job_fence.clone();
+                let owner_abort = native_abort.clone().unwrap_or_else(|| cancel.clone());
+                let invocation = execute_single_tool_owned(
+                    app.clone(),
+                    frozen,
+                    idx,
+                    tool_call.clone(),
+                    catalog,
+                    turn_tool_pool,
+                    serial_registry,
+                    allow_parallel,
+                    batch_size,
+                    &mode_id,
+                    model_id.as_deref(),
+                    native_pause,
+                    native_abort,
+                    expected_execution,
+                );
+                let invocation_result = match native_fence {
+                    Some(fence) => {
+                        fence
+                            .run(&cancel, &owner_abort, async { Ok(invocation.await) })
+                            .await
+                    }
+                    None => Ok(invocation.await),
+                };
+                let (_, corrections, messages, files) = match invocation_result {
+                    Ok(result) => result,
+                    Err(error) => {
+                        if let Some(bridge) = bridge {
+                            bridge.shutdown().await;
+                        }
+                        let (_, _, messages, context_files) = runner_capacity_error(
+                            idx,
+                            &tool_call,
+                            &format!("{error}; effects unknown, never replay"),
+                        );
+                        return (
+                            crate::tool_jobs::JobStatus::Unknown,
+                            crate::tool_jobs::JobResult {
+                                had_corrections: false,
+                                messages,
+                                context_files,
+                            },
+                        );
+                    }
+                };
+                if let Some(bridge) = bridge {
+                    bridge.shutdown().await;
+                }
+                let mut exempt = std::collections::HashSet::new();
+                if is_tool_result_truncation_exempt(&tool_call.function.name) {
+                    exempt.insert(tool_call.id.clone());
+                }
+                let mut messages = match ToolBudget::try_from_n_ctx(n_ctx) {
+                    Ok(budget) => {
+                        crate::file_activity::TOOL_ACTOR
+                            .scope(
+                                chat_id,
+                                postprocess_tool_results(
+                                    app.gcx.clone(),
+                                    None,
+                                    messages,
+                                    files,
+                                    budget,
+                                    pp,
+                                    &history,
+                                    &exempt,
+                                ),
+                            )
+                            .await
+                    }
+                    Err(error) => runner_capacity_error(idx, &tool_call, &error).2,
+                };
+                for message in &mut messages {
+                    message
+                        .extra
+                        .insert("tool_job_postprocessed".into(), true.into());
+                }
+                let status = if messages.is_empty() || cancel.load(Ordering::Acquire) {
+                    crate::tool_jobs::JobStatus::Unknown
+                } else if messages.iter().any(|m| m.tool_failed == Some(true)) {
+                    crate::tool_jobs::JobStatus::Failed
+                } else {
+                    crate::tool_jobs::JobStatus::Succeeded
+                };
+                (
+                    status,
+                    crate::tool_jobs::JobResult {
+                        had_corrections: corrections,
+                        messages,
+                        context_files: Vec::new(),
+                    },
+                )
+            },
+        )
+        .await;
+    match result {
+        Ok(crate::tool_jobs::Submission::Inline(result)) => (
+            idx,
+            result.had_corrections,
+            result.messages,
+            result.context_files,
+        ),
+        Ok(crate::tool_jobs::Submission::Accepted(receipt)) => (
+            idx,
+            false,
+            vec![super::tool_job_delivery::receipt_message(&receipt)],
+            Vec::new(),
+        ),
+        Err(error) => runner_capacity_error(idx, &call_for_error, &error),
+    }
+}
+
+async fn execute_single_tool_owned(
     app: AppState,
     ccx: Arc<AMutex<AtCommandsContext>>,
     idx: usize,
@@ -3356,6 +4590,7 @@ async fn execute_single_tool(
             );
         }
         Err(e) => {
+            let e = refact_core::string_utils::redact_url_credentials(&e.to_string());
             info!("Tool execution failed: {}: {}", tool_call.function.name, e);
             return (
                 idx,
@@ -3393,6 +4628,7 @@ async fn execute_single_tool(
     };
 
     for msg in &mut msgs {
+        redact_tool_message_urls(msg);
         if msg.message_id.is_empty() {
             msg.message_id = Uuid::new_v4().to_string();
         }
@@ -3408,7 +4644,16 @@ async fn execute_single_tool(
         .collect::<Vec<_>>()
         .join("\n");
 
-    let project_dir = get_project_dir_string(app.clone()).await;
+    let frozen_project = ccx
+        .lock()
+        .await
+        .execution_scope
+        .as_ref()
+        .map(|scope| scope.effective_root().to_string_lossy().into_owned());
+    let project_dir = match frozen_project {
+        Some(project) => project,
+        None => get_project_dir_string(app.clone()).await,
+    };
     let args_value: Option<serde_json::Value> = tool_call
         .function
         .parse_args()
@@ -3580,6 +4825,8 @@ async fn execute_tools_inner(
     catalog: Arc<ToolCatalogSnapshot>,
     turn_tool_pool: Option<TurnToolPool>,
 ) -> (Vec<ChatMessage>, bool) {
+    ccx.lock().await.postprocess_parameters =
+        options.postprocess_settings.clone().unwrap_or_default();
     let policy_span = perf_diagnostics::span(PerfComponent::ToolPolicyLookup, None, None);
     let available_tools = &catalog.policy;
     policy_span.finish_tool(PerfOutcome::Success, 1, available_tools.len() as u64, None);
@@ -3700,7 +4947,7 @@ async fn execute_tools_inner(
                 Err(_) => break,
             };
             let is_wait = recognized_runner_wait(&catalog, tool_call);
-            let _operation_guards = if let Some(execution) = execution.as_ref() {
+            let operation_guards = if let Some(execution) = execution.as_ref() {
                 match runner_capacity_wait(
                     &app,
                     &ccx,
@@ -3729,7 +4976,7 @@ async fn execute_tools_inner(
                     }
                 }
             }
-            let result = execute_single_tool(
+            let result = execute_admitted_tool(
                 app.clone(),
                 ccx.clone(),
                 idx,
@@ -3744,6 +4991,7 @@ async fn execute_tools_inner(
                 options.native_pause.clone(),
                 options.native_abort.clone(),
                 execution.clone(),
+                operation_guards,
             )
             .await;
             all_results.push(result);
@@ -3811,7 +5059,16 @@ async fn execute_tools_inner(
         .map(|tc| tc.id.clone())
         .collect();
 
-    let results = crate::file_activity::TOOL_ACTOR
+    let (ready_messages, tool_messages): (Vec<_>, Vec<_>) =
+        tool_messages.into_iter().partition(|message| {
+            message
+                .extra
+                .get("tool_job_postprocessed")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+                || message.extra.contains_key("tool_job")
+        });
+    let mut results = crate::file_activity::TOOL_ACTOR
         .scope(
             chat_id,
             postprocess_tool_results(
@@ -3827,6 +5084,13 @@ async fn execute_tools_inner(
         )
         .await;
 
+    results.extend(ready_messages);
+    results.sort_by_key(|message| {
+        tool_calls
+            .iter()
+            .position(|call| call.id == message.tool_call_id)
+            .unwrap_or(usize::MAX)
+    });
     (results, any_corrections)
 }
 
@@ -3957,7 +5221,6 @@ async fn execute_parallel_batch(
             let native_abort = native_abort.clone();
 
             async move {
-                let _operation_guard = operation_guard;
                 if is_wait {
                     if let Some(execution) = execution.as_ref() {
                         if let Err(error) = runner_capacity_wait(
@@ -3972,7 +5235,7 @@ async fn execute_parallel_batch(
                         }
                     }
                 }
-                execute_single_tool(
+                execute_admitted_tool(
                     gcx,
                     ccx,
                     idx,
@@ -3987,6 +5250,7 @@ async fn execute_parallel_batch(
                     native_pause.clone(),
                     native_abort,
                     execution.clone(),
+                    vec![operation_guard],
                 )
                 .await
             }
@@ -4220,6 +5484,12 @@ pub async fn execute_tools(
     .await;
 
     for (tool_call_id, dedupe_key) in &tool_meta {
+        if result_msgs
+            .iter()
+            .any(|m| &m.tool_call_id == tool_call_id && m.extra.contains_key("tool_job"))
+        {
+            continue;
+        }
         let failed = result_msgs
             .iter()
             .any(|m| &m.tool_call_id == tool_call_id && m.tool_failed == Some(true));

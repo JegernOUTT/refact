@@ -649,6 +649,7 @@ fn context_file_message(
 
 async fn cleanup_old_worktree(
     gcx: Arc<GlobalContext>,
+    scopes: Arc<crate::tool_jobs::scope::ScopeCoordinator>,
     source: &AcceptedAgentSource,
     agent_worktree_name: Option<&str>,
     agent_worktree: Option<&str>,
@@ -659,6 +660,7 @@ async fn cleanup_old_worktree(
         let name = agent_worktree_name.ok_or("Previous worktree registration is missing")?;
         let service =
             WorktreeService::new_async(gcx.cache_dir.clone(), source.root().to_path_buf()).await?;
+        let service = crate::worktrees::service::fenced_service(service, scopes);
         let registered = service.get_worktree(name).await?;
         if registered.meta.branch.as_deref() != agent_branch
             || agent_worktree
@@ -1511,7 +1513,7 @@ impl ToolTaskRestartAgent {
 
         if let Err(e) = self
             .create_and_dispatch_session(
-                app,
+                app.clone(),
                 source,
                 task_id,
                 planner_chat_id,
@@ -1544,6 +1546,7 @@ impl ToolTaskRestartAgent {
 
         cleanup_old_worktree(
             gcx.clone(),
+            app.runtime.tool_jobs.scopes.clone(),
             source,
             original_card.agent_worktree_name.as_deref(),
             original_card.agent_worktree.as_deref(),

@@ -73,6 +73,10 @@ impl LandingAdapter {
         drafts: Arc<dyn DraftRegistry<LandingDraft>>,
         materials: Arc<dyn RecoveryMaterialStore>,
     ) -> Self {
+        let worktrees = crate::worktrees::service::fenced_service(
+            worktrees,
+            app.runtime.tool_jobs.scopes.clone(),
+        );
         Self {
             app,
             runtime,
@@ -152,9 +156,10 @@ impl LandingAdapter {
         authority.validate().await.map_err(store_error)?;
         let service = self
             .worktrees
-            .acquire_merge_permit()
+            .fence_merge_worktree(&draft.worktree_id, Some(&draft.exact.target_branch))
             .await
             .map_err(store_error)?;
+        let service = service.acquire_merge_permit().await.map_err(store_error)?;
         let service = service
             .for_merge_target(&draft.exact.target_branch)
             .await

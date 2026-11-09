@@ -19,6 +19,8 @@ mod context_rebuild_recovery_tests;
 pub mod delivery;
 pub mod diagnostics;
 mod generation;
+#[cfg(test)]
+pub(crate) use generation::take_ready_review_continuation;
 pub mod live_diagnostics;
 pub(crate) use generation::{
     length_stop_continue_instruction, normalize_stop_reason, tool_catalog_intent_for_thread,
@@ -90,6 +92,7 @@ pub mod task_agent_monitor;
 mod tests;
 mod tool_call_recovery;
 mod tool_call_recovery_oss;
+pub(crate) mod tool_job_delivery;
 pub mod tools;
 pub mod trajectories;
 pub mod trajectory_archive;

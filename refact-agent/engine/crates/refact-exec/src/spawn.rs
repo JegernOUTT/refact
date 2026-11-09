@@ -495,6 +495,7 @@ async fn finish_pumps_with_timeout(
     }
     stdout_task.0.abort();
     stderr_task.0.abort();
+    let _ = tokio::join!(&mut stdout_task.0, &mut stderr_task.0);
     false
 }
 
@@ -700,6 +701,7 @@ async fn monitor_process(
     stdout_task: AbortOnDropTask,
     stderr_task: AbortOnDropTask,
 ) {
+    let mut quiescent = true;
     let (terminal_status, finish_response) = loop {
         let abort_wait = async {
             loop {
@@ -801,6 +803,7 @@ async fn monitor_process(
             | ExecStatus::Killed
     ) {
         if let Err(error) = kill_and_reap_observed(&child, &observation).await {
+            quiescent = false;
             tracing::warn!("exec kill/reap failed for {process_id}: {error}");
         }
     }
@@ -815,7 +818,8 @@ async fn monitor_process(
         }
         | ExecStatus::TimedOut
         | ExecStatus::Killed => {
-            finish_pumps_with_timeout(stdout_task, stderr_task, KILL_PUMP_DRAIN_TIMEOUT).await;
+            quiescent &=
+                finish_pumps_with_timeout(stdout_task, stderr_task, KILL_PUMP_DRAIN_TIMEOUT).await;
             terminal_status
         }
         ExecStatus::Exited {
@@ -828,14 +832,16 @@ async fn monitor_process(
             #[cfg(not(target_os = "linux"))]
             let observation_ended_early = false;
             if observation_ended_early {
-                stdout_task.0.abort();
-                stderr_task.0.abort();
+                quiescent &=
+                    finish_pumps_with_timeout(stdout_task, stderr_task, KILL_PUMP_DRAIN_TIMEOUT)
+                        .await;
                 terminal_status
             } else {
                 let drain_timeout = output_drain_timeout.unwrap_or(EXIT_PUMP_DRAIN_TIMEOUT);
                 if finish_pumps_with_timeout(stdout_task, stderr_task, drain_timeout).await {
                     terminal_status
                 } else if child.lock().await.is_pty() {
+                    quiescent = false;
                     // The drain timeout detects a descendant holding the pipes, which is a pipe
                     // condition. A pty ends its output when the console closes, and closing it can
                     // outlast the drain, so a slow close must not fail a process that exited fine.
@@ -845,6 +851,7 @@ async fn monitor_process(
                     );
                     terminal_status
                 } else {
+                    quiescent = false;
                     if let Err(error) = kill_and_reap_observed(&child, &observation).await {
                         tracing::warn!("exec kill/reap after output drain timeout failed for {process_id}: {error}");
                     }
@@ -866,6 +873,15 @@ async fn monitor_process(
     };
     if let Err(error) = &final_snapshot {
         tracing::warn!(%process_id, %error, "Process terminal outcome not applied to registered runtime");
+    }
+    #[cfg(target_os = "linux")]
+    if let Some(observation) = observation {
+        let _ = observation.wait_status().await;
+    }
+    if quiescent {
+        if let Some(control_tx) = control_tx.upgrade() {
+            registry.monitor_quiesced(&process_id, &control_tx).await;
+        }
     }
     if let Some(response) = finish_response {
         let _ = response.send(final_snapshot);
@@ -1033,6 +1049,15 @@ impl ExecRegistry {
             request.output_progress_tx.clone(),
         );
         let snapshot = self.mark_started(&process_id).await?;
+        if let Some(guard) = request.execution_guard.clone() {
+            let handle = self
+                .execution_handle(&snapshot.meta)
+                .await
+                .expect("registered runtime");
+            if let Err(guard) = self.attach_execution_guard(&handle, guard).await {
+                std::mem::forget(guard); // Unknown effect ownership must not release guards.
+            }
+        }
         if request.notify_chat_on_spawn {
             self.notify_spawn(&snapshot);
         }
@@ -1051,6 +1076,13 @@ impl ExecRegistry {
             stderr_task,
         ))
         .await;
+        if request.return_after_monitor_attach {
+            #[cfg(target_os = "linux")]
+            let observation = observation.finish(false).await;
+            #[cfg(not(target_os = "linux"))]
+            let observation = crate::observe::status(request.observe);
+            return Ok(ExecSpawnResult::new(snapshot, observation));
+        }
         if matches!(request.mode, ExecMode::Foreground) {
             #[cfg(target_os = "linux")]
             let observation = observation.finish(true).await;
@@ -1157,6 +1189,15 @@ impl ExecRegistry {
         );
         let stderr_task = AbortOnDropTask(tokio::spawn(async {}));
         let snapshot = self.mark_started(&process_id).await?;
+        if let Some(guard) = request.execution_guard.clone() {
+            let handle = self
+                .execution_handle(&snapshot.meta)
+                .await
+                .expect("registered runtime");
+            if let Err(guard) = self.attach_execution_guard(&handle, guard).await {
+                std::mem::forget(guard); // Unknown effect ownership must not release guards.
+            }
+        }
         if request.notify_chat_on_spawn {
             self.notify_spawn(&snapshot);
         }
@@ -1175,6 +1216,12 @@ impl ExecRegistry {
             stderr_task,
         ))
         .await;
+        if request.return_after_monitor_attach {
+            return Ok(ExecSpawnResult::new(
+                snapshot,
+                crate::observe::unsupported_status(request.observe),
+            ));
+        }
         if matches!(request.mode, ExecMode::Foreground) {
             return Ok(ExecSpawnResult::new(
                 self.wait(&process_id).await?,
@@ -1629,6 +1676,60 @@ mod tests {
             .status()
             .map(|status| status.success())
             .unwrap_or(false)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn foreground_monitor_attach_preserves_tty_timeout_and_single_process() {
+        for tty in [false, true] {
+            let registry = ExecRegistry::new();
+            let mut request = ExecSpawnRequest::foreground("printf once; sleep 30")
+                .with_tty(tty)
+                .with_timeout(Duration::from_millis(200));
+            request.return_after_monitor_attach = true;
+            let result = tokio::time::timeout(Duration::from_secs(2), registry.spawn(request))
+                .await
+                .unwrap()
+                .unwrap();
+            let id = result.snapshot.meta.process_id;
+            assert_eq!(result.snapshot.meta.mode, ExecMode::Foreground);
+            assert_eq!(result.snapshot.meta.tty, tty);
+            registry.detach_foreground(&id).await.unwrap();
+            let terminal = tokio::time::timeout(Duration::from_secs(5), registry.wait(&id))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(terminal.status, ExecStatus::TimedOut);
+            let all = registry.list(ExecProcessFilter::default()).await;
+            assert_eq!(all.len(), 1);
+            assert_eq!(all[0].meta.process_id, id);
+            let text = registry
+                .read(&id, 0, None)
+                .await
+                .chunks
+                .into_iter()
+                .map(|chunk| chunk.text)
+                .collect::<String>();
+            assert_eq!(text.matches("once").count(), 1);
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn detached_foreground_abort_still_kills_original_process() {
+        let registry = ExecRegistry::new();
+        let abort = Arc::new(AtomicBool::new(false));
+        let mut request = ExecSpawnRequest::foreground("sleep 30").with_abort_flag(abort.clone());
+        request.return_after_monitor_attach = true;
+        let result = registry.spawn(request).await.unwrap();
+        let id = result.snapshot.meta.process_id;
+        registry.detach_foreground(&id).await.unwrap();
+        abort.store(true, Ordering::Relaxed);
+        let terminal = tokio::time::timeout(Duration::from_secs(5), registry.wait(&id))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(terminal.status, ExecStatus::Killed);
     }
 
     #[tokio::test]

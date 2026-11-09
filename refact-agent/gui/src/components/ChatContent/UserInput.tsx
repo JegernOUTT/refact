@@ -14,6 +14,7 @@ import { MessageFooter, MessageWrapper } from "./MessageFooter";
 
 export type UserInputProps = {
   children: UserMessage["content"];
+  bodyContent?: React.ReactNode;
   messageIndex: number;
   messageId?: string;
   checkpoints?: Checkpoint[];
@@ -30,6 +31,7 @@ const _UserInput: React.FC<UserInputProps> = ({
   messageId,
   checkpoints,
   children,
+  bodyContent,
   onRetry,
   onBranch,
   onDelete,
@@ -173,7 +175,9 @@ const _UserInput: React.FC<UserInputProps> = ({
       <Container pt="1">
         <Flex justify="end">
           <Box className={styles.userInput} onClick={handleEditClick}>
-            {isCompressed ? (
+            {bodyContent !== undefined ? (
+              bodyContent
+            ) : isCompressed ? (
               <Reveal defaultOpen={false}>
                 <Markdown canHaveInteractiveElements={false}>
                   {textContent}

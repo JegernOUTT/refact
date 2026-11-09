@@ -18068,6 +18068,11 @@ mod tests {
 
         let (tx, _rx) = broadcast::channel(16);
         let session = ChatSession {
+            execution_abort: Arc::new(AtomicBool::new(false)),
+            review_readiness_pending: None,
+            review_readiness_resume_nonce: None,
+            verifier_readiness_pending: None,
+            verifier_readiness_resume_nonce: None,
             delivery_save_id: uuid::Uuid::new_v4(),
             runner_lease: None,
             runner_message_digest: None,
@@ -18256,6 +18261,11 @@ mod tests {
 
         let (tx, _rx) = broadcast::channel(16);
         let mut session = ChatSession {
+            execution_abort: Arc::new(AtomicBool::new(false)),
+            review_readiness_pending: None,
+            review_readiness_resume_nonce: None,
+            verifier_readiness_pending: None,
+            verifier_readiness_resume_nonce: None,
             delivery_save_id: uuid::Uuid::new_v4(),
             runner_lease: None,
             runner_message_digest: None,

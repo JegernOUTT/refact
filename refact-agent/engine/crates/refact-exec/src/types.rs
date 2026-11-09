@@ -292,6 +292,11 @@ pub struct ExecAuditMeta {
     pub justification: Option<String>,
 }
 
+/// Settled only by the execution monitor after effect and observation quiescence.
+pub trait ExecLifecycleGuard: Send + Sync + std::fmt::Debug {
+    fn settle(&self);
+}
+
 #[derive(Debug, Clone)]
 pub struct ExecSpawnRequest {
     pub command: String,
@@ -316,6 +321,10 @@ pub struct ExecSpawnRequest {
     pub abort_flag: Option<Arc<AtomicBool>>,
     pub output_progress_tx: Option<tokio::sync::mpsc::UnboundedSender<ExecOutputChunk>>,
     pub notify_chat_on_spawn: bool,
+    /// Return the existing process receipt after its registry-owned monitor is attached.
+    /// This changes only caller waiting, never execution mode, timeout or terminal setup.
+    pub return_after_monitor_attach: bool,
+    pub execution_guard: Option<Arc<dyn ExecLifecycleGuard>>,
     /// How the asynchronous completion notification for this process should land
     /// in the owning chat. Only meaningful for modes that emit a completion
     /// event (background/service); foreground results come back as a tool result.
@@ -355,6 +364,8 @@ impl ExecSpawnRequest {
             abort_flag: None,
             output_progress_tx: None,
             notify_chat_on_spawn: false,
+            return_after_monitor_attach: false,
+            execution_guard: None,
             push: PushMode::default(),
         }
     }

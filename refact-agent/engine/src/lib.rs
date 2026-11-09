@@ -87,6 +87,7 @@ pub mod organization;
 pub mod code_mode;
 pub mod codegraph;
 pub mod postprocessing;
+pub mod review;
 pub mod runtime_config;
 pub mod scheduler;
 pub mod scratchpad_abstract;
@@ -96,6 +97,7 @@ pub mod subchat;
 #[cfg(test)]
 mod subchat_pressure_retry_tests;
 pub mod tokens;
+pub mod tool_jobs;
 pub mod tools;
 pub mod vecdb;
 
@@ -363,7 +365,14 @@ pub async fn run_with_cmdline(cmdline: global_context::CommandLine) {
         let _ = main_handle.unwrap().await;
     }
 
-    chat::close_all_chat_sessions(crate::app_state::AppState::from_gcx(gcx.clone()).await).await;
+    gcx.tool_jobs.scopes.begin_shutdown();
+    gcx.review_readiness.shutdown().await;
+    gcx.tool_jobs.shutdown().await;
+    if let Err(error) =
+        chat::close_all_chat_sessions(crate::app_state::AppState::from_gcx(gcx.clone()).await).await
+    {
+        tracing::error!("chat shutdown could not establish tool effect quiescence: {error}");
+    }
     chat::verifier::shutdown_card_verifiers(gcx.clone()).await;
     if let Err(error) = gcx.trajectory_index_coordinator.flush_all().await {
         tracing::warn!("trajectory index coordinator shutdown flush failed: {error}");

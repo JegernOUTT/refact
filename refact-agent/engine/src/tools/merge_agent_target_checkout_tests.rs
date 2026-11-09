@@ -337,7 +337,17 @@ async fn unoccupied_base_with_dirty_source_uses_and_removes_temporary_checkout()
 #[tokio::test]
 async fn merge_service_serialization_uses_selected_checkout_without_changing_registry_identity() {
     let fixture = Fixture::new(true).await;
-    let selected = fixture.service.for_merge_target(TARGET).await.unwrap();
+    let app = AppState::from_gcx(fixture.gcx.clone()).await;
+    let selected = crate::worktrees::service::fenced_service(
+        fixture.service.clone(),
+        app.runtime.tool_jobs.scopes.clone(),
+    )
+    .fence_merge_worktree(&fixture.id, Some(TARGET))
+    .await
+    .unwrap()
+    .for_merge_target(TARGET)
+    .await
+    .unwrap();
     assert_eq!(selected.registry_path(), fixture.service.registry_path());
     assert_eq!(
         selected.source_workspace_root(),
@@ -353,7 +363,13 @@ async fn merge_service_serialization_uses_selected_checkout_without_changing_reg
     ));
     let lock = merge_lock_for(&fixture.planner);
     let guard = lock.lock().await;
-    let merge = selected.merge_worktree(&fixture.id, fixture.request());
+    let merge = async {
+        selected
+            .acquire_merge_permit()
+            .await?
+            .merge_worktree(&fixture.id, fixture.request())
+            .await
+    };
     tokio::pin!(merge);
     assert!(tokio::time::timeout(Duration::from_millis(100), &mut merge)
         .await

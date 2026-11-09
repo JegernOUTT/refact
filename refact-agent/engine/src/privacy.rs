@@ -290,14 +290,65 @@ fn legacy_policy(privacy_settings: &PrivacySettings) -> PrivacyPolicy {
     policy
 }
 
+#[cfg(test)]
+thread_local! {
+    pub(crate) static LEGACY_PRIVACY_COMPILE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+pub(crate) struct LegacyPrivacyMatcher {
+    policy: Result<refact_privacy::CompiledPolicy, String>,
+}
+
+impl LegacyPrivacyMatcher {
+    pub(crate) fn new(privacy_settings: &PrivacySettings) -> Self {
+        #[cfg(test)]
+        LEGACY_PRIVACY_COMPILE_COUNT.with(|count| count.set(count.get() + 1));
+        Self {
+            policy: legacy_policy(privacy_settings)
+                .compile()
+                .map_err(|error| error.to_string()),
+        }
+    }
+
+    fn level(&self, path: &Path) -> FilePrivacyLevel {
+        match &self.policy {
+            Ok(policy) => file_privacy_level_with_policy(policy, path),
+            Err(_) => FilePrivacyLevel::Blocked,
+        }
+    }
+
+    pub(crate) fn check(
+        &self,
+        path: &Path,
+        min_allowed_privacy_level: &FilePrivacyLevel,
+    ) -> Result<(), String> {
+        let file_privacy_level = self.level(path);
+        if file_privacy_level < *min_allowed_privacy_level {
+            return Err(format!("privacy level {:?}", file_privacy_level));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn check_for_read_preparation(&self, path: &Path) -> Result<(), String> {
+        let file_privacy_level = self.level(path);
+        if file_privacy_level == FilePrivacyLevel::Blocked {
+            return Err(format!("privacy level {:?}", file_privacy_level));
+        }
+        Ok(())
+    }
+}
+
 pub fn get_file_privacy_level(
     privacy_settings: Arc<PrivacySettings>,
     path: &Path,
 ) -> FilePrivacyLevel {
-    let policy = match legacy_policy(&privacy_settings).compile() {
-        Ok(policy) => policy,
-        Err(_) => return FilePrivacyLevel::Blocked,
-    };
+    LegacyPrivacyMatcher::new(&privacy_settings).level(path)
+}
+
+fn file_privacy_level_with_policy(
+    policy: &refact_privacy::CompiledPolicy,
+    path: &Path,
+) -> FilePrivacyLevel {
     let zone = policy.zone_for_path(path);
     if zone.name == "blocked" {
         FilePrivacyLevel::Blocked
@@ -315,22 +366,14 @@ pub fn check_file_privacy(
     path: &Path,
     min_allowed_privacy_level: &FilePrivacyLevel,
 ) -> Result<(), String> {
-    let file_privacy_level = get_file_privacy_level(privacy_settings.clone(), path);
-    if file_privacy_level < *min_allowed_privacy_level {
-        return Err(format!("privacy level {:?}", file_privacy_level));
-    }
-    Ok(())
+    LegacyPrivacyMatcher::new(&privacy_settings).check(path, min_allowed_privacy_level)
 }
 
 pub(crate) fn check_file_privacy_for_read_preparation(
     privacy_settings: Arc<PrivacySettings>,
     path: &Path,
 ) -> Result<(), String> {
-    let file_privacy_level = get_file_privacy_level(privacy_settings, path);
-    if file_privacy_level == FilePrivacyLevel::Blocked {
-        return Err(format!("privacy level {:?}", file_privacy_level));
-    }
-    Ok(())
+    LegacyPrivacyMatcher::new(&privacy_settings).check_for_read_preparation(path)
 }
 
 #[cfg(test)]

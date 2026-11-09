@@ -555,37 +555,77 @@ fn glob_matches(pattern: &str, name: &str) -> bool {
     pattern == name
 }
 
+pub(crate) fn customization_generation(gcx: &GlobalContext) -> u64 {
+    let _cache = gcx
+        .project_registry_cache
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
+    gcx.tool_catalog_generations
+        .customization
+        .load(std::sync::atomic::Ordering::Acquire)
+}
+
 pub async fn get_project_registry(gcx: Arc<GlobalContext>) -> Option<ProjectRegistry> {
-    let config_dir = gcx.config_dir.clone();
     let dirs = get_project_dirs(gcx.clone()).await;
-    let project_root = dirs.first().cloned();
+    get_project_registry_for_root(gcx, dirs.first().cloned(), false)
+        .await
+        .ok()
+}
 
+pub(crate) async fn get_project_registry_for_root(
+    gcx: Arc<GlobalContext>,
+    project_root: Option<PathBuf>,
+    validate: bool,
+) -> Result<ProjectRegistry, String> {
+    let config_dir = gcx.config_dir.clone();
     let cache_key = project_root.clone().unwrap_or_else(|| config_dir.clone());
-
-    {
-        let cache_result = gcx.project_registry_cache.read();
-        if let Ok(cache) = cache_result {
+    loop {
+        let generation = {
+            let cache = gcx
+                .project_registry_cache
+                .read()
+                .map_err(|_| "customization cache unavailable")?;
             if let Some(cached) = cache.get(&cache_key) {
-                return Some(cached.registry.clone());
+                if validate && !cached.registry.errors.is_empty() {
+                    return Err("customization registry reload has validation errors".into());
+                }
+                return Ok(cached.registry.clone());
             }
+            gcx.tool_catalog_generations
+                .customization
+                .load(std::sync::atomic::Ordering::Acquire)
+        };
+        let _ = global_configs_try_create_all(&config_dir).await;
+        if let Some(ref root) = project_root {
+            let _ = project_configs_ensure_dirs(root).await;
         }
-    }
-
-    let _ = global_configs_try_create_all(&config_dir).await;
-    if let Some(ref root) = project_root {
-        let _ = project_configs_ensure_dirs(root).await;
-    }
-
-    let registry = load_merged_registry(&config_dir, project_root.as_deref()).await;
-
-    {
-        let cache_result = gcx.project_registry_cache.write();
-        if let Ok(mut cache) = cache_result {
-            cache.insert(cache_key, registry.clone());
+        let registry = load_merged_registry(&config_dir, project_root.as_deref()).await;
+        #[cfg(test)]
+        tests::before_registry_publication(&gcx, &cache_key, &registry);
+        let mut cache = gcx
+            .project_registry_cache
+            .write()
+            .map_err(|_| "customization cache unavailable")?;
+        if gcx
+            .tool_catalog_generations
+            .customization
+            .load(std::sync::atomic::Ordering::Acquire)
+            != generation
+        {
+            continue;
         }
+        if let Some(cached) = cache.get(&cache_key) {
+            if validate && !cached.registry.errors.is_empty() {
+                return Err("customization registry reload has validation errors".into());
+            }
+            return Ok(cached.registry.clone());
+        }
+        if validate && !registry.errors.is_empty() {
+            return Err("customization registry reload has validation errors".into());
+        }
+        cache.insert(cache_key.clone(), registry.clone());
+        return Ok(registry);
     }
-
-    Some(registry)
 }
 
 #[allow(dead_code)]
@@ -596,10 +636,11 @@ pub async fn get_global_registry(gcx: Arc<GlobalContext>) -> ProjectRegistry {
 }
 
 pub async fn invalidate_all_registry_caches(gcx: Arc<GlobalContext>) {
-    let cache_arc = gcx.project_registry_cache.clone();
-    if let Ok(mut cache) = cache_arc.write() {
-        cache.cache.clear();
-    };
+    let mut cache = gcx
+        .project_registry_cache
+        .write()
+        .unwrap_or_else(|e| e.into_inner());
+    cache.cache.clear();
     gcx.tool_catalog_generations.advance_customization();
 }
 
@@ -657,6 +698,67 @@ pub fn map_legacy_mode_to_id(mode_str: &str) -> &str {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    type PublicationHook = Box<dyn FnOnce(&GlobalContext, &Path)>;
+    thread_local! {
+        static PUBLICATION_HOOK: std::cell::RefCell<Option<PublicationHook>> = std::cell::RefCell::new(None);
+    }
+
+    pub(super) fn before_registry_publication(
+        gcx: &GlobalContext,
+        root: &Path,
+        registry: &ProjectRegistry,
+    ) {
+        let hook = PUBLICATION_HOOK.with(|slot| slot.borrow_mut().take());
+        if let Some(hook) = hook {
+            assert!(!registry.modes.is_empty());
+            hook(gcx, root);
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn stale_registry_load_cannot_replace_published_winner() {
+        let temp = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
+            temp.path().join("cache"),
+            temp.path().join("config"),
+        )
+        .await;
+        let root = temp.path().join("workspace");
+        std::fs::create_dir_all(&root).unwrap();
+        for reload in [false, true] {
+            invalidate_all_registry_caches(gcx.clone()).await;
+            PUBLICATION_HOOK.with(|slot| {
+                *slot.borrow_mut() = Some(Box::new(|gcx, root| {
+                    let mut cache = gcx.project_registry_cache.write().unwrap();
+                    cache.cache.clear();
+                    gcx.tool_catalog_generations.advance_customization();
+                    cache.insert(root.to_path_buf(), ProjectRegistry::default());
+                }));
+            });
+            if reload {
+                crate::yaml_configs::customization_service::reload_project(gcx.clone(), &root)
+                    .await
+                    .unwrap();
+            } else {
+                let registry =
+                    get_project_registry_for_root(gcx.clone(), Some(root.clone()), false)
+                        .await
+                        .unwrap();
+                assert!(registry.modes.is_empty());
+            }
+            assert!(PUBLICATION_HOOK.with(|slot| slot.borrow().is_none()));
+            assert!(gcx
+                .project_registry_cache
+                .read()
+                .unwrap()
+                .get(&root)
+                .unwrap()
+                .registry
+                .modes
+                .is_empty());
+        }
+    }
 
     fn runtime_required_subagent_ids() -> Vec<&'static str> {
         vec![

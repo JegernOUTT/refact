@@ -57,7 +57,11 @@ impl Fixture {
         let mut card = test_card(column, Some("agent-chat-1".into()), None);
         card.final_report = Some("Original report".into());
         let gcx = write_task(&source, card).await;
-        let service = WorktreeService::new(gcx.cache_dir.clone(), source.clone()).unwrap();
+        let app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
+        let service = crate::worktrees::service::fenced_service(
+            WorktreeService::new(gcx.cache_dir.clone(), source.clone()).unwrap(),
+            app.runtime.tool_jobs.scopes.clone(),
+        );
         let branch = "refact/task/task-1/card/T-39/agent".to_string();
         let created = service
             .create_worktree(CreateWorktreeRequest {
@@ -358,4 +362,40 @@ async fn discard_refuses_unregistered_worktree_without_raw_git_cleanup() {
         .await
         .unwrap();
     assert!(board.get_card("T-39").unwrap().agent_worktree.is_some());
+}
+
+#[tokio::test]
+async fn discard_drains_application_scope_before_removing_checkout() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let fixture = Fixture::new("failed").await;
+    let app = crate::app_state::AppState::from_gcx(fixture.gcx.clone()).await;
+    let cancel = Arc::new(AtomicBool::new(false));
+    let key = crate::tool_jobs::scope::ScopeKey::Worktree {
+        project: dunce::canonicalize(&fixture.source).unwrap(),
+        root: fixture.worktree.clone(),
+    };
+    let lease = app
+        .runtime
+        .tool_jobs
+        .scopes
+        .acquire(&[key], cancel.clone())
+        .unwrap();
+    let discard = fixture.discard(&[]);
+    tokio::pin!(discard);
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        tokio::select! {
+            result = &mut discard => panic!("discard completed before drain: {result:?}"),
+            _ = async {
+                while !cancel.load(Ordering::Acquire) {
+                    tokio::task::yield_now().await;
+                }
+            } => {}
+        }
+    })
+    .await
+    .unwrap();
+    assert!(fixture.worktree.exists());
+    lease.settle();
+    discard.await.unwrap();
+    fixture.assert_removed("failed", true).await;
 }

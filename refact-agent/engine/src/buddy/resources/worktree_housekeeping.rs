@@ -52,6 +52,10 @@ impl WorktreeHousekeepingAdapter {
         if worktrees.source_workspace_root().to_string_lossy() != runtime.project().canonical_root {
             return Err(ResourceError::ProjectScopeMismatch);
         }
+        let worktrees = crate::worktrees::service::fenced_service(
+            worktrees,
+            app.runtime.tool_jobs.scopes.clone(),
+        );
         Ok(Self {
             app,
             runtime,
@@ -360,8 +364,38 @@ mod tests {
         );
         assert!(adapter.apply(&spec).await.is_err());
         app.chat.sessions.write().await.remove("scratch-active");
+        // A job belonging to another chat still holds the shared checkout.
+        // Cancellation is only a request; the archive must await actual settlement.
+        let key = crate::tool_jobs::ScopeKey::Worktree {
+            project: created.worktree.meta.source_workspace_root.clone(),
+            root: created.worktree.meta.root.clone(),
+        };
+        let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let lease = app
+            .runtime
+            .tool_jobs
+            .scopes
+            .acquire(&[key.clone()], cancelled.clone())
+            .unwrap();
+        let mut archive = Box::pin(adapter.apply(&spec));
+        tokio::select! {
+            result = &mut archive => panic!("archive completed before job settled: {result:?}"),
+            _ = async {
+                while !cancelled.load(std::sync::atomic::Ordering::Acquire) {
+                    tokio::task::yield_now().await;
+                }
+            } => {}
+        }
+        assert!(checkout.exists());
+        assert!(app
+            .runtime
+            .tool_jobs
+            .scopes
+            .acquire(&[key], Arc::new(std::sync::atomic::AtomicBool::new(false)))
+            .is_err());
+        lease.settle();
         // Actual adapter call, actual Git move, exact owner verification and actual recovery.
-        let receipt = adapter.apply(&spec).await.unwrap();
+        let receipt = archive.await.unwrap();
         assert!(!checkout.exists());
         assert!(adapter
             .verify(&spec, &receipt.expected_post_version)
@@ -757,9 +791,24 @@ impl AsyncResourceAdapter for WorktreeHousekeepingAdapter {
     }
 
     async fn apply(&self, spec: &ActionSpec) -> Result<ResourceApplyReceipt, ResourceError> {
+        // Discover the trusted registered identity before closing admission, then
+        // re-read it under the existing mutation checks after the drain. Do not
+        // hold the adapter, trajectory, store, or session locks while draining.
+        let candidate = self.prepare(spec).await?;
+        let worktrees = self
+            .worktrees
+            .fence_worktrees(&[candidate.record.meta.id.to_string()], false)
+            .await
+            .map_err(ResourceError::ValidationFailed)?;
         let _gate = self.gate.lock().await;
         crate::chat::trajectory_archive::with_trajectory_mutation_lock(async {
             let identity = self.prepare(spec).await?;
+            if identity.record.meta.source_workspace_root
+                != candidate.record.meta.source_workspace_root
+                || identity.record.meta.root != candidate.record.meta.root
+            {
+                return Err(ResourceError::VersionMismatch);
+            }
             let sessions = self.app.chat.sessions.read().await;
             // Keep every loaded session stable until the owner finishes; fail closed on contention.
             let mut guards = Vec::new();
@@ -778,7 +827,7 @@ impl AsyncResourceAdapter for WorktreeHousekeepingAdapter {
                 &serde_json::to_vec(&(spec.project.clone(), identity.clone()))
                     .map_err(|e| ResourceError::ValidationFailed(e.to_string()))?,
             )?;
-            let worktrees = self.worktrees.clone();
+            let worktrees = worktrees.clone();
             let expected_post_version = archive_version(&identity);
             let id = identity.record.meta.id.clone();
             let root = identity.record.meta.root.to_string_lossy().into_owned();
@@ -843,8 +892,13 @@ impl AsyncResourceAdapter for WorktreeHousekeepingAdapter {
         spec: &ActionSpec,
         recovery: &RecoveryDescriptor,
     ) -> Result<ResourceApplyState, ResourceError> {
-        let _gate = self.gate.lock().await;
         let identity = self.recovery_identity(spec, recovery)?;
+        let worktrees = self
+            .worktrees
+            .fence_archive_recovery(&identity)
+            .await
+            .map_err(ResourceError::ValidationFailed)?;
+        let _gate = self.gate.lock().await;
         crate::chat::trajectory_archive::with_trajectory_mutation_lock(async {
             self.native_references(&identity).await?;
             let checked = identity.clone();
@@ -862,7 +916,7 @@ impl AsyncResourceAdapter for WorktreeHousekeepingAdapter {
             {
                 return Err(protected());
             }
-            self.worktrees
+            worktrees
                 .recover_worktree_archive(identity)
                 .await
                 .map_err(ResourceError::ValidationFailed)?;

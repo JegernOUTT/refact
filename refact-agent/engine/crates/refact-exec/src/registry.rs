@@ -68,6 +68,12 @@ pub struct ProcessSpawnEvent {
     pub started_at_ms: u64,
 }
 
+#[derive(Clone)]
+pub struct ExecExecutionHandle {
+    meta: ExecProcessMeta,
+    control_tx: mpsc::Sender<ExecProcessCommand>,
+}
+
 pub struct ExecProcessCleanupTarget {
     snapshot: ExecProcessSnapshot,
     control_tx: mpsc::Sender<ExecProcessCommand>,
@@ -220,6 +226,10 @@ struct ExecProcessRecord {
     observation: Option<ObservationReader>,
     process_group_isolated: bool,
     cleanup_requested: bool,
+    detached_foreground: bool,
+    completion_notified: bool,
+    execution_guards: Vec<Arc<dyn crate::types::ExecLifecycleGuard>>,
+    monitor_quiesced: bool,
 }
 
 async fn remove_spill_file(path: Option<std::path::PathBuf>) {
@@ -260,6 +270,10 @@ impl ExecProcessRecord {
             observation: None,
             process_group_isolated: false,
             cleanup_requested: false,
+            detached_foreground: false,
+            completion_notified: false,
+            execution_guards: Vec::new(),
+            monitor_quiesced: false,
         }
     }
 
@@ -303,8 +317,11 @@ impl ExecProcessRecord {
     }
 }
 
-fn process_completion_event(snapshot: &ExecProcessSnapshot) -> Option<ProcessCompletionEvent> {
-    if !matches!(snapshot.meta.mode, ExecMode::Background | ExecMode::Service) {
+fn completion_event(
+    snapshot: &ExecProcessSnapshot,
+    detached: bool,
+) -> Option<ProcessCompletionEvent> {
+    if !detached && !matches!(snapshot.meta.mode, ExecMode::Background | ExecMode::Service) {
         return None;
     }
     let chat_id = snapshot.meta.owner.chat_id.clone()?;
@@ -615,6 +632,105 @@ impl Default for ExecRegistry {
 }
 
 impl ExecRegistry {
+    pub async fn execution_handle(
+        &self,
+        expected: &ExecProcessMeta,
+    ) -> Option<ExecExecutionHandle> {
+        let records = self.records.lock().await;
+        let record = records.get(&expected.process_id)?;
+        (record.snapshot.meta.owner == expected.owner
+            && record.snapshot.meta.mode == expected.mode
+            && record.snapshot.meta.created_at_ms == expected.created_at_ms)
+            .then_some(ExecExecutionHandle {
+                meta: expected.clone(),
+                control_tx: record.runtime.as_ref()?.control_tx.clone(),
+            })
+    }
+
+    /// Exact owner/tool-call/mode binding; the retained runtime is the incarnation.
+    /// On failure ownership is returned to the caller, never silently settled.
+    pub async fn attach_execution_guard(
+        &self,
+        expected: &ExecExecutionHandle,
+        guard: Arc<dyn crate::types::ExecLifecycleGuard>,
+    ) -> Result<(), Arc<dyn crate::types::ExecLifecycleGuard>> {
+        let mut records = self.records.lock().await;
+        let Some(record) = records.get_mut(&expected.meta.process_id) else {
+            return Err(guard);
+        };
+        if record.snapshot.meta.owner != expected.meta.owner
+            || record.snapshot.meta.mode != expected.meta.mode
+            || record.snapshot.meta.created_at_ms != expected.meta.created_at_ms
+            || !record
+                .runtime
+                .as_ref()
+                .is_some_and(|r| r.control_tx.same_channel(&expected.control_tx))
+        {
+            return Err(guard);
+        }
+        if record.monitor_quiesced {
+            drop(records);
+            guard.settle();
+        } else {
+            record.execution_guards.push(guard);
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn monitor_quiesced(
+        &self,
+        id: &ExecProcessId,
+        expected: &mpsc::Sender<ExecProcessCommand>,
+    ) {
+        let guards = {
+            let mut records = self.records.lock().await;
+            let Some(record) = records.get_mut(id) else {
+                return;
+            };
+            if !record
+                .runtime
+                .as_ref()
+                .is_some_and(|r| r.control_tx.same_channel(expected))
+            {
+                return;
+            }
+            record.monitor_quiesced = true;
+            std::mem::take(&mut record.execution_guards)
+        };
+        for guard in guards {
+            guard.settle();
+        }
+    }
+
+    #[cfg(test)]
+    async fn lifecycle_test_runtime(
+        &self,
+        id: &str,
+    ) -> (
+        ExecProcessMeta,
+        mpsc::Sender<ExecProcessCommand>,
+        mpsc::Receiver<ExecProcessCommand>,
+    ) {
+        let meta = ExecProcessMeta::new(ExecMode::Foreground, "controlled".into())
+            .with_process_id(ExecProcessId(id.into()))
+            .with_chat_id("chat")
+            .with_tool_call_id("tool");
+        let (tx, rx) = mpsc::channel(8);
+        self.register_new_with_runtime(
+            meta.clone(),
+            1024,
+            ExecProcessRuntime {
+                control_tx: tx.clone(),
+                terminal: Arc::new(Notify::new()),
+                stdin_writer: None,
+            },
+            false,
+        )
+        .await
+        .unwrap();
+        (meta, tx, rx)
+    }
+
     pub fn new() -> Self {
         Self::default()
     }
@@ -1213,11 +1329,14 @@ impl ExecRegistry {
         let was_terminal = record.snapshot.status.is_terminal();
         record.set_status(status);
         let snapshot = record.snapshot.clone();
-        let completion_event = if !was_terminal && snapshot.status.is_terminal() {
-            process_completion_event(&snapshot)
-        } else {
-            None
-        };
+        let completion_event =
+            if !was_terminal && snapshot.status.is_terminal() && !record.completion_notified {
+                let event = completion_event(&snapshot, record.detached_foreground);
+                record.completion_notified = event.is_some();
+                event
+            } else {
+                None
+            };
         let terminal = if snapshot.status.is_terminal() {
             record
                 .runtime
@@ -1246,6 +1365,37 @@ impl ExecRegistry {
     ) -> Result<ExecProcessSnapshot, String> {
         self.set_status_for_runtime(process_id, status, Some(control_tx))
             .await
+    }
+
+    /// Atomically opt the existing foreground process into metadata-only completion delivery.
+    /// Terminal publication and detachment share the record lock, so either ordering emits once.
+    pub async fn detach_foreground(
+        &self,
+        process_id: &ExecProcessId,
+    ) -> Result<ExecProcessSnapshot, String> {
+        let mut records = self.records.lock().await;
+        let record = records
+            .get_mut(process_id)
+            .ok_or_else(|| format!("process not found: {process_id}"))?;
+        if record.snapshot.meta.mode != ExecMode::Foreground {
+            return Err(format!("process is not foreground: {process_id}"));
+        }
+        record.detached_foreground = true;
+        let snapshot = record.snapshot.clone();
+        let event = if snapshot.status.is_terminal() && !record.completion_notified {
+            let event = completion_event(&snapshot, true);
+            record.completion_notified = event.is_some();
+            event
+        } else {
+            None
+        };
+        drop(records);
+        if let Some(event) = event {
+            #[cfg(test)]
+            let _ = self.lifecycle_tx.send(ProcessLifecycleEvent::Completion);
+            let _ = self.completion_tx.send(event);
+        }
+        Ok(snapshot)
     }
 
     pub async fn mark_started(
@@ -3017,6 +3167,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn detached_foreground_completion_is_once_in_either_terminal_order() {
+        for terminal_first in [false, true] {
+            let registry = ExecRegistry::new();
+            let mut events = registry.subscribe_completion();
+            let snapshot = registry
+                .register(
+                    meta("exec_detach_race", ExecMode::Foreground, "sensitive-output")
+                        .with_chat_id("chat"),
+                    DEFAULT_MAX_BYTES,
+                )
+                .await;
+            let id = snapshot.meta.process_id;
+            registry.mark_started(&id).await.unwrap();
+            if terminal_first {
+                registry.mark_exited(&id, Some(0)).await.unwrap();
+            }
+            registry.detach_foreground(&id).await.unwrap();
+            if !terminal_first {
+                registry.mark_exited(&id, Some(0)).await.unwrap();
+            }
+            registry.detach_foreground(&id).await.unwrap();
+            registry.mark_exited(&id, Some(0)).await.unwrap();
+            let event = events.try_recv().unwrap();
+            assert_eq!(event.process_id, id);
+            assert_eq!(event.mode, ExecMode::Foreground);
+            assert_eq!(event.exit_code, Some(0));
+            assert!(events.try_recv().is_err());
+        }
+    }
+
+    #[tokio::test]
     async fn register_does_not_overwrite_terminal_record_with_retained_child() {
         let registry = ExecRegistry::new();
         let snapshot = registry
@@ -3453,5 +3634,70 @@ mod tests {
             registry.get(&process_id).await.is_none(),
             "record must be gone after second remove"
         );
+    }
+    #[derive(Debug)]
+    struct CountSettlement(std::sync::atomic::AtomicUsize);
+    impl crate::types::ExecLifecycleGuard for CountSettlement {
+        fn settle(&self) {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    #[tokio::test]
+    async fn execution_guard_waits_for_monitor_not_terminal_and_rejects_old_control() {
+        let registry = ExecRegistry::new();
+        let (meta, tx, _rx) = registry.lifecycle_test_runtime("guard-control").await;
+        let handle = registry.execution_handle(&meta).await.unwrap();
+        registry.mark_started(&meta.process_id).await.unwrap();
+        let guard = Arc::new(CountSettlement(std::sync::atomic::AtomicUsize::new(0)));
+        let mut wrong_owner = handle.clone();
+        wrong_owner.meta.owner.tool_call_id = Some("other-tool".into());
+        let mut wrong_mode = handle.clone();
+        wrong_mode.meta.mode = ExecMode::Background;
+        let mut wrong_incarnation = handle.clone();
+        wrong_incarnation.meta.created_at_ms += 1;
+        for invalid in [wrong_owner, wrong_mode, wrong_incarnation] {
+            assert!(registry
+                .attach_execution_guard(&invalid, guard.clone())
+                .await
+                .is_err());
+        }
+        assert_eq!(guard.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+        registry
+            .attach_execution_guard(&handle, guard.clone())
+            .await
+            .unwrap();
+        registry
+            .complete_status(&meta.process_id, &tx, ExecStatus::Killed)
+            .await
+            .unwrap();
+        assert_eq!(guard.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+        let (other, _other_rx) = mpsc::channel(8);
+        registry.monitor_quiesced(&meta.process_id, &other).await;
+        assert_eq!(guard.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+        registry.monitor_quiesced(&meta.process_id, &tx).await;
+        assert_eq!(guard.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let late = Arc::new(CountSettlement(std::sync::atomic::AtomicUsize::new(0)));
+        registry
+            .attach_execution_guard(&handle, late.clone())
+            .await
+            .unwrap();
+        assert_eq!(late.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+        registry
+            .attach_runtime(
+                &meta.process_id,
+                ExecProcessRuntime {
+                    control_tx: other,
+                    terminal: Arc::new(Notify::new()),
+                    stdin_writer: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(registry
+            .attach_execution_guard(&handle, late.clone())
+            .await
+            .is_err());
+        assert_eq!(late.0.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 }

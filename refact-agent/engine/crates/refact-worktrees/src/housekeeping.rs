@@ -101,7 +101,9 @@ impl WorktreeService {
         &self,
         identity: WorktreeArchiveIdentity,
     ) -> Result<(), String> {
-        let service = self.clone();
+        let service = self
+            .fence_worktrees(&[identity.record.meta.id.clone()], false)
+            .await?;
         async move {
             let service = service.acquire_merge_permit().await?;
             let _registry = service.registry_write_lock().await?;
@@ -119,6 +121,7 @@ impl WorktreeService {
             let merge_service = service.clone();
             tokio::task::spawn_blocking(move || {
                 let _registry_guard = registry_guard;
+                merge_service.validate_effect_token_blocking()?;
                 merge_service.validate_merge_phase()?;
                 reject_symlink_ancestors(&directory)?;
                 if directory.try_exists().map_err(|e| e.to_string())? {
@@ -188,50 +191,128 @@ impl WorktreeService {
 
     /// Exact move-back only. Retains the evidence directory forever; never replaces a checkout,
     /// rewinds a branch, force-removes a directory, or automatically retries interrupted work.
+    pub(super) fn validate_archive_effect_identity(
+        &self,
+        identity: &WorktreeArchiveIdentity,
+    ) -> Result<(), String> {
+        let directory = self.archive_directory(identity)?;
+        reject_symlink_ancestors(&directory.join("checkout"))?;
+        let stored: WorktreeArchiveIdentity = serde_json::from_slice(
+            &std::fs::read(directory.join("identity.json")).map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())?;
+        if &stored != identity
+            || identity.record.meta.source_workspace_root != self.source_workspace_root
+            || identity.record.meta.root != self.worktree_path_for_id(&identity.record.meta.id)?
+            || identity
+                .record
+                .meta
+                .root
+                .try_exists()
+                .map_err(|e| e.to_string())?
+        {
+            return Err("Archive recovery evidence or original registered identity changed".into());
+        }
+        let mut archived = identity.record.clone();
+        archived.meta.root = directory.join("checkout");
+        validate_registered_record_checkout(&archived)?;
+        git::ensure_clean_worktree(&archived.meta.root, "Archived checkout")?;
+        git::ensure_no_merge_in_progress(&archived.meta.root, "Archived checkout")?;
+        if git::head_rev(&archived.meta.root)? != identity.head {
+            return Err("Archive recovery head changed".into());
+        }
+        Ok(())
+    }
+
+    /// Verify persisted archive proof and drain its original checkout domain
+    /// before callers acquire adapter/trajectory or repository locks.
+    pub async fn fence_archive_recovery(
+        &self,
+        identity: &WorktreeArchiveIdentity,
+    ) -> Result<Self, String> {
+        if let Some(token) = &self.effect_token {
+            if token.archive.as_ref() == Some(identity) {
+                return Ok(self.clone());
+            }
+            return Err("Archive recovery token identity mismatch".into());
+        }
+        if self.merge_permit.is_some() {
+            return Err("Archive recovery requires a fresh fence before permits".into());
+        }
+        let service = self.clone();
+        let checked = identity.clone();
+        tokio::task::spawn_blocking(move || service.validate_archive_effect_identity(&checked))
+            .await
+            .map_err(|e| e.to_string())??;
+        let fence = self
+            .effect_fence
+            .as_ref()
+            .ok_or("Archive recovery requires application effect coordinator")?;
+        let guard = fence
+            .begin(
+                self.source_workspace_root.clone(),
+                vec![identity.record.meta.root.clone()],
+            )
+            .await?;
+        let service = Self {
+            effect_token: Some(Arc::new(EffectToken {
+                records: vec![],
+                includes_source: false,
+                archive: Some(identity.clone()),
+                legacy: None,
+                target: None,
+                target_materialized: Arc::new(AtomicBool::new(false)),
+                legacy_removed: Arc::new(AtomicBool::new(false)),
+                _guard: guard,
+            })),
+            ..self.clone()
+        };
+        service.validate_effect_token().await?;
+        Ok(service)
+    }
+
     pub async fn recover_worktree_archive(
         &self,
         identity: WorktreeArchiveIdentity,
     ) -> Result<(), String> {
-        let service = self.clone();
-        async move {
-            let service = service.acquire_merge_permit().await?;
-            let _registry = service.registry_write_lock().await?;
-            if !service.verify_worktree_archive(&identity).await? {
-                return Err("Archive changed or destination occupied".into());
-            }
-            let mut registry = service.load_registry_unlocked().await?;
-            if registry
-                .records
-                .iter()
-                .any(|r| r.meta.id == identity.record.meta.id && r != &identity.record)
-            {
-                return Err("Recovery registration changed; refusing overwrite".into());
-            }
-            let directory = service.archive_directory(&identity)?;
-            let record = identity.record.clone();
-            let registry_guard = _registry.clone();
-            let merge_service = service.clone();
-            tokio::task::spawn_blocking(move || {
-                let _registry_guard = registry_guard;
-                merge_service.validate_merge_phase()?;
-                move_checkout(
-                    &record.meta.source_workspace_root,
-                    &directory.join("checkout"),
-                    &record.meta.root,
-                )
-            })
-            .await
-            .map_err(|e| e.to_string())??;
-            if !registry
-                .records
-                .iter()
-                .any(|r| r.meta.id == identity.record.meta.id)
-            {
-                registry.records.push(identity.record);
-            }
-            service.save_registry_unlocked(&registry, &_registry).await
+        let service = self.fence_archive_recovery(&identity).await?;
+        let service = service.acquire_merge_permit().await?;
+        let registry_guard = service.registry_write_lock().await?;
+        service.validate_effect_token().await?;
+        let mut registry = service.load_registry_unlocked().await?;
+        if registry
+            .records
+            .iter()
+            .any(|r| r.meta.id == identity.record.meta.id && r != &identity.record)
+        {
+            return Err("Recovery registration changed; refusing overwrite".into());
         }
+        let directory = service.archive_directory(&identity)?;
+        let record = identity.record.clone();
+        let held = registry_guard.clone();
+        let worker = service.clone();
+        tokio::task::spawn_blocking(move || {
+            let _held = held;
+            worker.validate_effect_token_blocking()?;
+            worker.validate_merge_phase()?;
+            move_checkout(
+                &record.meta.source_workspace_root,
+                &directory.join("checkout"),
+                &record.meta.root,
+            )
+        })
         .await
+        .map_err(|e| e.to_string())??;
+        if !registry
+            .records
+            .iter()
+            .any(|r| r.meta.id == identity.record.meta.id)
+        {
+            registry.records.push(identity.record);
+        }
+        service
+            .save_registry_unlocked(&registry, &registry_guard)
+            .await
     }
 }
 
@@ -271,7 +352,11 @@ mod tests {
         std::fs::write(source.join("file"), "retained\n").unwrap();
         git(&source, &["add", "file"]);
         git(&source, &["commit", "-m", "scratch", "--no-gpg-sign"]);
-        let service = WorktreeService::new(temp.path().join("cache"), source.clone()).unwrap();
+        let service = super::super::worktree_registry_tests::test_service(
+            temp.path().join("cache"),
+            source.clone(),
+        )
+        .unwrap();
         let created = service
             .create_worktree(CreateWorktreeRequest {
                 branch: Some("refact/chat/archive-test".into()),
@@ -383,7 +468,11 @@ mod quarantine_tests {
         std::fs::write(root.join("tracked"), "retained\n").unwrap();
         git_cmd(&root, &["add", "tracked"]);
         git_cmd(&root, &["commit", "-m", "initial"]);
-        let owner = WorktreeService::new(scratch.path().join("cache"), root.clone()).unwrap();
+        let owner = super::super::worktree_registry_tests::test_service(
+            scratch.path().join("cache"),
+            root.clone(),
+        )
+        .unwrap();
         let created = owner
             .create_worktree(CreateWorktreeRequest {
                 branch: Some("refact/chat/archive-test".into()),

@@ -718,6 +718,26 @@ impl ExecutionRegistry {
             .cloned()
     }
 
+    /// Fence a synchronous authority check and its commit against config writers.
+    /// Callers holding a session must keep the existing Session -> configs order;
+    /// the callback must not await or acquire another session lock.
+    pub(crate) fn with_config_read_scope<R>(
+        &self,
+        agent_id: &str,
+        callback: impl FnOnce(Option<&crate::subchat::SubchatConfig>) -> R,
+    ) -> R {
+        let configs = self.configs.lock().unwrap_or_else(|e| e.into_inner());
+        callback(configs.get(agent_id))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn config_writer_blocked_for_test(&self) -> bool {
+        matches!(
+            self.configs.try_lock(),
+            Err(std::sync::TryLockError::WouldBlock)
+        )
+    }
+
     pub fn rebind_config(
         &self,
         agent_id: &str,

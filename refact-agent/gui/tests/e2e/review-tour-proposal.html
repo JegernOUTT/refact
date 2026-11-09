@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Synthetic Review proposal fixture</title>
+    <script>
+      globalThis.process ??= {};
+      globalThis.process.env ??= {};
+      globalThis.process.env.NODE_ENV = "development";
+      globalThis.process.env.DEBUG = "";
+    </script>
+    <style>
+      html,
+      body,
+      #root,
+      #root > .radix-themes {
+        margin: 0;
+        height: 100%;
+      }
+      main {
+        padding: 16px;
+        height: 100%;
+        box-sizing: border-box;
+        display: flex;
+        flex-direction: column;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="./review-tour-proposal.tsx"></script>
+  </body>
+</html>

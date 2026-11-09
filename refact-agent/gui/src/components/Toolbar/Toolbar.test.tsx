@@ -235,6 +235,58 @@ describe("Toolbar pane-only workspace navigation", () => {
     ).toBeInTheDocument();
   });
 
+  it("creates a review-mode chat atomically from New Review and focuses its workspace pane", async () => {
+    useToolbarHandlers();
+    const commands = vi.fn();
+    server.use(
+      http.post("*/v1/chats/:id/commands", async ({ request }) => {
+        commands(await request.json());
+        return HttpResponse.json({ status: "queued" });
+      }),
+    );
+    const view = renderToolbar({ type: "dashboard" });
+    arrangeFocusedWorkspaceChatWithHiddenCurrent(view);
+    rerenderToolbar(view, { type: "dashboard" });
+    const initialIds = new Set(Object.keys(view.store.getState().chat.threads));
+    const observedModes: (string | undefined)[] = [];
+    const unsubscribe = view.store.subscribe(() => {
+      const { chat } = view.store.getState();
+      if (chat.current_thread_id && !initialIds.has(chat.current_thread_id)) {
+        observedModes.push(chat.threads[chat.current_thread_id]?.thread.mode);
+      }
+    });
+
+    await view.user.click(
+      screen.getByRole("button", { name: "More new actions" }),
+    );
+    await view.user.click(
+      await screen.findByRole("menuitem", { name: "New Review" }),
+    );
+    unsubscribe();
+
+    const state = view.store.getState();
+    const reviewId = state.chat.current_thread_id;
+    expect(initialIds.has(reviewId)).toBe(false);
+    expect(state.chat.threads[reviewId]?.thread.mode).toBe("review");
+    expect(observedModes.length).toBeGreaterThan(0);
+    expect(observedModes.every((mode) => mode === "review")).toBe(true);
+    expect(state.chat.threads["chat-focused"]).toBeUndefined();
+    expect(state.chat.threads["chat-hidden"]).toBeDefined();
+    expect(state.chat.open_thread_ids).toContain(reviewId);
+    expect(selectFocusedWorkspaceSurfaceKey(state)).toBe(
+      makeSurfaceKey("chat", reviewId),
+    );
+    expect(state.pages.at(-1)).toEqual({ name: "chat" });
+    await waitFor(() => {
+      expect(commands).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: "set_params",
+          patch: expect.objectContaining({ mode: "review" }) as unknown,
+        }),
+      );
+    });
+  });
+
   it("creates a New Task from the split button menu and opens the task workspace", async () => {
     useToolbarHandlers();
     const view = renderToolbar({ type: "dashboard" });
@@ -391,6 +443,12 @@ describe("Toolbar pane-only workspace navigation", () => {
       initialThreadId,
     );
     expect(view.store.getState().pages.at(-1)?.name).toBe("chat");
+
+    expect(
+      view.store.getState().chat.threads[
+        view.store.getState().chat.current_thread_id
+      ]?.thread.mode,
+    ).toBe("agent");
 
     await view.user.click(screen.getByRole("button", { name: "Menu" }));
     await view.user.click(

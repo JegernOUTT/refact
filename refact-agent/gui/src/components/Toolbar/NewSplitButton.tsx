@@ -1,6 +1,6 @@
 import React from "react";
 import classNames from "classnames";
-import { CheckSquare, ChevronDown, Plus } from "lucide-react";
+import { CheckSquare, ChevronDown, ClipboardCheck, Plus } from "lucide-react";
 
 import { Icon, IconButton, Menu, Tooltip } from "../ui";
 import styles from "./NewSplitButton.module.css";
@@ -8,11 +8,13 @@ import styles from "./NewSplitButton.module.css";
 export type NewSplitButtonProps = {
   onCreateNewChat: () => void;
   onCreateNewTask: () => void;
+  onCreateNewReview: () => void;
 };
 
 export const NewSplitButton: React.FC<NewSplitButtonProps> = ({
   onCreateNewChat,
   onCreateNewTask,
+  onCreateNewReview,
 }) => {
   return (
     <div className={styles.group}>
@@ -51,6 +53,9 @@ export const NewSplitButton: React.FC<NewSplitButtonProps> = ({
         <Menu.Content align="end">
           <Menu.Item onSelect={onCreateNewTask}>
             <Icon icon={CheckSquare} size="sm" /> New Task
+          </Menu.Item>
+          <Menu.Item onSelect={onCreateNewReview}>
+            <Icon icon={ClipboardCheck} size="sm" /> New Review
           </Menu.Item>
         </Menu.Content>
       </Menu>

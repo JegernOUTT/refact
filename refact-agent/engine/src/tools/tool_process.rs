@@ -36,6 +36,7 @@ use crate::privacy::{check_file_privacy, load_privacy_if_needed, FilePrivacyLeve
 use crate::tools::file_edit::auxiliary::{active_execution_scope, scoped_path_warnings};
 use crate::tools::command_checkout::{self, ValidatedCommandCheckout};
 use crate::tools::shell_gate;
+use crate::tools::tool_shell::exec_status_label;
 use crate::tools::tools_description::{
     json_schema_from_params, MatchConfirmDeny, Tool, ToolDesc, ToolSource, ToolSourceType,
 };
@@ -644,6 +645,24 @@ impl Tool for ToolProcessRead {
                 stream_label(stream)
             ));
         }
+        let observation =
+            process_observation_status(exec_registry.as_ref(), &process_id, false).await;
+        if matches!(
+            observation,
+            Some(refact_exec::ObservationStatus::Pending(_))
+        ) {
+            // Pending reads are not proof that later output is safe. Do not read disk,
+            // enrich paths, expose transcript counters or advance the caller's cursor.
+            return Ok(tool_result(tool_call_id,
+                format!("Process observation pending; output withheld.\nprocess_id: {}\nstatus: {}\nRetry process_read with the same process ID; do not rerun the command.\n", process_id, exec_status_label(&snapshot.status)),
+                Some(serde_json::Map::from_iter([("exec".into(), json!({
+                    "process_id": process_id.as_str(),
+                    "status": exec_status_label(&snapshot.status),
+                    "observation_pending": true,
+                    "since_seq": since_seq,
+                    "next_seq": since_seq,
+                }))])), None));
+        }
         let read = exec_registry.read(&process_id, since_seq, None).await;
         let mut diagnostic_output = collect_combined(&read.chunks);
         let mut content = format_process_snapshot("Process output", &snapshot);
@@ -685,13 +704,7 @@ impl Tool for ToolProcessRead {
         )
         .await;
         let mut result_message = tool_message(tool_call_id, content, Some(extra), None);
-        if let Some(observation) = process_observation_status(
-            exec_registry.as_ref(),
-            &process_id,
-            snapshot.status.is_terminal(),
-        )
-        .await
-        {
+        if let Some(observation) = observation {
             apply_process_privacy(
                 &gcx,
                 &snapshot,
@@ -863,6 +876,15 @@ pub(crate) async fn execute_process_wait(
         }
         result = wait => { let (snapshot, timed_out) = result?; (snapshot, timed_out, false) },
     };
+    if matches!(
+        process_observation_status(exec_registry.as_ref(), &process_id, false).await,
+        Some(refact_exec::ObservationStatus::Pending(_))
+    ) {
+        return Ok(tool_result(tool_call_id,
+            json!({"outcome": "pending", "target": "process", "process_id": process_id,
+                "evidence": "Process observation pending; output withheld. Retry with the same process ID."}).to_string(),
+            None, None));
+    }
     let read = exec_registry.read(&process_id, 0, None).await;
     let (title, timed_out) = process_wait_outcome(&snapshot.status, timed_out);
     let outcome = if interrupted {
@@ -4039,9 +4061,54 @@ mod tests {
         let message = run_tool(&mut shell, fixture.ccx.clone(), args)
             .await
             .unwrap();
-        assert_eq!(exec(&message)["cwd"], json!(request.cwd));
-        assert_eq!(exec(&message)["cwd"], json!(fixture.root));
-        assert!(text(&message).contains(fixture.root.to_str().unwrap()));
+        let id = process_id(&message);
+        let completed = tokio::time::timeout(
+            Duration::from_secs(60),
+            fixture.app.runtime.exec_registry.wait(&id),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(completed.meta.process_id, id);
+        assert_eq!(completed.meta.cwd, request.cwd);
+        assert_eq!(completed.meta.cwd, Some(fixture.root.clone()));
+        if let Some(reader) = fixture
+            .app
+            .runtime
+            .exec_registry
+            .observation_reader(&id)
+            .await
+        {
+            assert!(!matches!(
+                reader.wait_status().await,
+                refact_exec::ObservationStatus::Pending(_)
+            ));
+        }
+        let mut read = ToolProcessRead {
+            config_path: String::new(),
+        };
+        let output = run_tool(
+            &mut read,
+            fixture.ccx.clone(),
+            make_args_map(vec![
+                ("process_id", json!(id.as_str())),
+                ("output_limit", json!("all")),
+            ]),
+        )
+        .await
+        .unwrap();
+        assert_eq!(process_id(&output), id);
+        assert!(text(&output).contains(fixture.root.to_str().unwrap()));
+        assert_eq!(
+            fixture
+                .app
+                .runtime
+                .exec_registry
+                .list(Default::default())
+                .await
+                .len(),
+            1
+        );
         if cfg!(target_os = "linux") {
             assert_eq!(
                 request.env["CARGO_TARGET_DIR"],
@@ -4051,7 +4118,7 @@ mod tests {
                     .to_str()
                     .unwrap()
             );
-            assert!(text(&message).contains(&format!(
+            assert!(text(&output).contains(&format!(
                 "{}\n{}",
                 fixture.root.display(),
                 request.env["CARGO_TARGET_DIR"]
@@ -4760,6 +4827,47 @@ mod tests {
         assert!(text(&listed).contains(owned.as_str()));
         assert!(text(&listed).contains(other.as_str()));
         assert_eq!(exec(&listed)["count"], 2);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn process_read_pending_observation_withholds_output_and_disk_metadata() {
+        let (gcx, ccx) = test_ccx().await;
+        let mut request = crate::exec::ExecSpawnRequest::foreground(
+            "printf PRIVATE_EARLY; sleep 1; printf PRIVATE_LATE",
+        )
+        .with_observe(true)
+        .with_owner(ExecOwnerMeta {
+            chat_id: Some("chat".into()),
+            ..Default::default()
+        });
+        request.return_after_monitor_attach = true;
+        let result = gcx.exec_registry.spawn(request).await.unwrap();
+        let id = result.snapshot.meta.process_id;
+        let reader = gcx.exec_registry.observation_reader(&id).await.unwrap();
+        if !matches!(reader.status(), refact_exec::ObservationStatus::Pending(_)) {
+            // ptrace may be unavailable on restricted CI hosts; degraded policy stays unchanged.
+            gcx.exec_registry.kill(&id).await.unwrap();
+            return;
+        }
+        let mut tool = ToolProcessRead {
+            config_path: String::new(),
+        };
+        let message = run_tool(
+            &mut tool,
+            ccx,
+            make_args_map(vec![
+                ("process_id", json!(id.as_str())),
+                ("from_disk", json!(true)),
+            ]),
+        )
+        .await
+        .unwrap();
+        assert_eq!(exec(&message)["observation_pending"], true);
+        assert!(!text(&message).contains("PRIVATE_"));
+        assert!(exec(&message).get("transcript").is_none());
+        assert!(exec(&message).get("path_references").is_none());
+        gcx.exec_registry.kill(&id).await.unwrap();
     }
 
     #[tokio::test]

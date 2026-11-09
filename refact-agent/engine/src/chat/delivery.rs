@@ -69,12 +69,43 @@ pub async fn deliver_to_chat(
         .map(|receipt| receipt.outcome)
 }
 
+pub(crate) async fn deliver_to_open_chat_with_receipt(
+    app: AppState,
+    chat_id: &str,
+    delivery: PendingDelivery,
+) -> Result<DeliveryReceipt, String> {
+    let session = app
+        .chat
+        .sessions
+        .read()
+        .await
+        .get(chat_id)
+        .cloned()
+        .ok_or("chat unavailable")?;
+    if session.lock().await.closed {
+        return Err("chat closed".into());
+    }
+    deliver_to_chat_internal(app, chat_id, delivery, Some(session)).await
+}
+
 pub async fn deliver_to_chat_with_receipt(
     app: AppState,
     chat_id: &str,
     delivery: PendingDelivery,
 ) -> Result<DeliveryReceipt, String> {
-    if delivery.messages.is_empty() {
+    deliver_to_chat_internal(app, chat_id, delivery, None).await
+}
+
+async fn deliver_to_chat_internal(
+    app: AppState,
+    chat_id: &str,
+    delivery: PendingDelivery,
+    open_session: Option<Arc<AMutex<ChatSession>>>,
+) -> Result<DeliveryReceipt, String> {
+    if delivery.deferred_job.is_some() && open_session.is_none() {
+        return Err("deferred tool job delivery requires an already open chat".into());
+    }
+    if delivery.messages.is_empty() && delivery.deferred_job.is_none() {
         return Err("delivery must contain at least one message".to_string());
     }
 
@@ -91,7 +122,10 @@ pub async fn deliver_to_chat_with_receipt(
     }
 
     let planner_reply = crate::tools::tool_agent_planner_qna::is_planner_reply_delivery(&delivery);
-    if !planner_reply && (!delivery.wake || !crate::agents::seal::is_sealed(&app, chat_id).await) {
+    if open_session.is_none()
+        && !planner_reply
+        && (!delivery.wake || !crate::agents::seal::is_sealed(&app, chat_id).await)
+    {
         if let Some(result) =
             crate::agents::delivery::route_to_runner(&app, chat_id, delivery.clone()).await
         {
@@ -112,18 +146,34 @@ pub async fn deliver_to_chat_with_receipt(
             return Err(format!("chat '{chat_id}' is closed"));
         }
     }
-    if !crate::chat::try_restore_session_if_trajectory_exists(app.clone(), &sessions, chat_id).await
+    if open_session.is_none()
+        && !crate::chat::try_restore_session_if_trajectory_exists(app.clone(), &sessions, chat_id)
+            .await
     {
         return Err(format!(
             "chat '{chat_id}' does not exist or cannot be restored"
         ));
     }
-    let session_arc = sessions
-        .read()
-        .await
-        .get(chat_id)
-        .cloned()
-        .ok_or_else(|| format!("chat '{chat_id}' is unavailable"))?;
+    let session_arc = match open_session {
+        Some(session) => {
+            let current = sessions
+                .read()
+                .await
+                .get(chat_id)
+                .cloned()
+                .ok_or("chat unavailable")?;
+            if !Arc::ptr_eq(&session, &current) || session.lock().await.closed {
+                return Err("chat lifecycle changed".into());
+            }
+            session
+        }
+        None => sessions
+            .read()
+            .await
+            .get(chat_id)
+            .cloned()
+            .ok_or_else(|| format!("chat '{chat_id}' is unavailable"))?,
+    };
 
     // Durability first, and with no session lock held across store I/O. A store
     // this engine cannot use costs the message its durability, not its
@@ -326,7 +376,7 @@ fn pending_saves() -> &'static std::sync::Mutex<PendingSaves> {
     SAVES.get_or_init(Default::default)
 }
 
-async fn schedule_delivery_save(
+pub(crate) async fn schedule_delivery_save(
     app: AppState,
     session: Arc<AMutex<ChatSession>>,
     source_root: Option<std::path::PathBuf>,
@@ -497,6 +547,7 @@ pub async fn drain_deliveries_at_boundary(
     app: AppState,
     session_arc: Arc<AMutex<ChatSession>>,
 ) -> bool {
+    super::tool_job_delivery::land_deferred_jobs(&app, &session_arc).await;
     let batch = collect_boundary_deliveries(&mut *session_arc.lock().await);
     finalize_boundary_deliveries(app, session_arc, batch).await
 }

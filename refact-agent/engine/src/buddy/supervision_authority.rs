@@ -58,6 +58,8 @@ pub struct NativeSpawnGuard {
     target_files: Vec<String>,
     engineering: bool,
     expires_at: i64,
+    // Shared by clones: nested invocation fences never restart the owner's budget.
+    owner_deadline: std::sync::Arc<std::sync::OnceLock<tokio::time::Instant>>,
 }
 
 impl NativeSpawnGuard {
@@ -91,6 +93,7 @@ impl NativeSpawnGuard {
                 vec![]
             },
             engineering,
+            owner_deadline: Default::default(),
             expires_at: DateTime::parse_from_rfc3339(
                 record
                     .mandate
@@ -230,7 +233,20 @@ impl NativeSpawnGuard {
             .as_ref()
             .and_then(|b| b.max_minutes)
             .ok_or("finite duration required")?;
+        let remaining = self
+            .expires_at
+            .saturating_sub(Utc::now().timestamp())
+            .max(0) as u64;
+        let deadline = *self.owner_deadline.get_or_init(|| {
+            tokio::time::Instant::now()
+                + std::time::Duration::from_secs((u64::from(minutes) * 60).min(remaining))
+        });
         let fenced = std::future::poll_fn(|cx| {
+            if tokio::time::Instant::now() >= deadline {
+                return std::task::Poll::Ready(
+                    Err("Aborted: supervised duration exhausted".into()),
+                );
+            }
             match with_command_guard(Some(&self.authority), child, || {
                 Ok(future.as_mut().poll(cx))
             }) {
@@ -238,10 +254,6 @@ impl NativeSpawnGuard {
                 Err(error) => std::task::Poll::Ready(Err(format!("Aborted: {error}"))),
             }
         });
-        let remaining = self
-            .expires_at
-            .saturating_sub(Utc::now().timestamp())
-            .max(0) as u64;
         let mut notifications = changes().subscribe();
         let watched = async {
             tokio::pin!(fenced);
@@ -256,12 +268,72 @@ impl NativeSpawnGuard {
                 }
             }
         };
-        tokio::time::timeout(
-            std::time::Duration::from_secs((u64::from(minutes) * 60).min(remaining)),
-            watched,
-        )
-        .await
-        .map_err(|_| "Aborted: supervised duration exhausted".to_string())?
+        tokio::time::timeout_at(deadline, watched)
+            .await
+            .map_err(|_| "Aborted: supervised duration exhausted".to_string())?
+    }
+}
+
+/// Process-local owner fence. Cloning it transfers no new mandate and never
+/// extends the shared absolute deadline. Only the spawn owner may end it.
+#[derive(Clone)]
+pub(crate) struct NativeJobFence {
+    guard: NativeSpawnGuard,
+    child: String,
+    ended: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+pub(crate) struct NativeJobOwner(NativeJobFence);
+
+impl Drop for NativeJobOwner {
+    fn drop(&mut self) {
+        self.0
+            .ended
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+}
+
+impl NativeJobFence {
+    pub(crate) fn new_owner(guard: NativeSpawnGuard, child: String) -> (Self, NativeJobOwner) {
+        let fence = Self {
+            guard,
+            child,
+            ended: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        };
+        (fence.clone(), NativeJobOwner(fence))
+    }
+
+    pub(crate) fn run<'a, T: Send + 'a>(
+        &'a self,
+        cancel: &'a std::sync::atomic::AtomicBool,
+        native_abort: &'a std::sync::atomic::AtomicBool,
+        future: impl std::future::Future<Output = Result<T, String>> + Send + 'a,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<T, String>> + Send + 'a>> {
+        Box::pin(async move {
+            let mut future = std::pin::pin!(future);
+            let guarded = std::future::poll_fn(|cx| {
+                if self.ended.load(std::sync::atomic::Ordering::Acquire)
+                    || cancel.load(std::sync::atomic::Ordering::Acquire)
+                    || native_abort.load(std::sync::atomic::Ordering::Acquire)
+                {
+                    return std::task::Poll::Ready(Err(
+                        "Aborted: native invocation owner ended".into()
+                    ));
+                }
+                future.as_mut().poll(cx)
+            });
+            // Wake parked pause gates even when no invocation event is forthcoming.
+            let watched = async {
+                tokio::pin!(guarded);
+                loop {
+                    tokio::select! {
+                        result = &mut guarded => return result,
+                        _ = tokio::time::sleep(std::time::Duration::from_millis(25)) => {}
+                    }
+                }
+            };
+            self.guard.run(&self.child, watched).await
+        })
     }
 }
 
@@ -1188,10 +1260,17 @@ pub(crate) async fn revoke(
 }
 
 #[cfg(test)]
+pub(crate) fn test_native_job_owner(child: &str) -> (NativeJobFence, NativeJobOwner) {
+    let (guard, _) = tests::spawn_fixture();
+    guard.bind_child(child).unwrap();
+    NativeJobFence::new_owner(guard, child.to_owned())
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
-    fn spawn_fixture() -> (NativeSpawnGuard, crate::agents::spawn::SpawnRequest) {
+    pub(super) fn spawn_fixture() -> (NativeSpawnGuard, crate::agents::spawn::SpawnRequest) {
         use crate::agents::spawn::{NotifyParent, SpawnGoal, SpawnRequest, SpawnWorktreeMode};
         let authority = SupervisionCommandGuard {
             mandate_id: uuid::Uuid::new_v4().to_string(),
@@ -1235,6 +1314,7 @@ mod tests {
             tools: vec!["cat".into(), "tree".into()],
             target_files: vec![],
             engineering: false,
+            owner_deadline: Default::default(),
             expires_at: Utc::now().timestamp() + 60,
         };
         let request = SpawnRequest {
@@ -1458,6 +1538,96 @@ mod tests {
         );
         assert!(app.agents.list_all().await.is_empty());
         assert!(app.chat.sessions.read().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn native_job_clones_share_absolute_owner_deadline_without_polling_expired_work() {
+        let (guard, _) = spawn_fixture();
+        guard.bind_child("child").unwrap();
+        guard
+            .owner_deadline
+            .set(tokio::time::Instant::now())
+            .unwrap();
+        let clone = guard.clone();
+        let polled = std::sync::atomic::AtomicBool::new(false);
+        assert!(clone
+            .run("child", async {
+                polled.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            })
+            .await
+            .is_err());
+        assert!(!polled.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(std::sync::Arc::ptr_eq(
+            &guard.owner_deadline,
+            &clone.owner_deadline
+        ));
+    }
+
+    #[tokio::test]
+    async fn native_job_owner_end_and_revoke_wake_parked_invocation_without_poll() {
+        for revoke in [false, true] {
+            let (guard, _) = spawn_fixture();
+            guard.bind_child("child").unwrap();
+            let (fence, owner) = NativeJobFence::new_owner(guard.clone(), "child".into());
+            let gate = std::sync::Arc::new(refact_agents_core::registry::PauseGate::default());
+            gate.request();
+            let polled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let useful = polled.clone();
+            let paused = gate.clone();
+            let task = tokio::spawn(async move {
+                let cancel = std::sync::atomic::AtomicBool::new(false);
+                let abort = std::sync::atomic::AtomicBool::new(false);
+                fence
+                    .run(&cancel, &abort, async {
+                        paused.hold(Some(&abort)).await;
+                        useful.store(true, std::sync::atomic::Ordering::SeqCst);
+                        Ok(())
+                    })
+                    .await
+            });
+            gate.quiesced().await;
+            if revoke {
+                invalidate(&guard.authority.mandate_id).unwrap();
+            }
+            drop(owner);
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_secs(2), task)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .is_err()
+            );
+            assert!(!polled.load(std::sync::atomic::Ordering::SeqCst));
+        }
+    }
+
+    #[tokio::test]
+    async fn revoked_native_fence_does_not_claim_blocking_worker_quiescence() {
+        let (guard, _) = spawn_fixture();
+        guard.bind_child("blocking-child").unwrap();
+        let (fence, _owner) = NativeJobFence::new_owner(guard.clone(), "blocking-child".into());
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let completed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let worker_completed = completed.clone();
+        let worker = tokio::task::spawn_blocking(move || {
+            entered_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            worker_completed.store(true, std::sync::atomic::Ordering::Release);
+        });
+        entered_rx.await.unwrap();
+        let revoked = guard.authority.mandate_id.clone();
+        invalidate(&revoked).unwrap();
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let abort = std::sync::atomic::AtomicBool::new(false);
+        // Rejecting the await does not cancel the already-launched OS worker.
+        // The adapter must report Unknown and retain its lifecycle fence.
+        assert!(fence.run(&cancel, &abort, async { Ok(()) }).await.is_err());
+        assert!(!completed.load(std::sync::atomic::Ordering::Acquire));
+        release_tx.send(()).unwrap();
+        worker.await.unwrap();
+        assert!(completed.load(std::sync::atomic::Ordering::Acquire));
     }
 
     #[tokio::test]

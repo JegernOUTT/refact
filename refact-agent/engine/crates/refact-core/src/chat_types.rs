@@ -1299,8 +1299,22 @@ impl CausalStamp {
 /// A batch of messages waiting to be appended to a chat at a boundary chosen by
 /// `push`. `id` is stable across the pending queue, SSE, and the delivered
 /// messages (stamped into `extra.delivery`), so dedupe works after a restart.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeferredJobRef {
+    pub job_id: String,
+    pub revision: u64,
+    pub chat_id: String,
+    pub tool_call_id: String,
+    pub tool_name: String,
+    pub model: String,
+    pub turn_id: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PendingDelivery {
+    /// Source-free identity only. Native payload must never enter a pending queue.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deferred_job: Option<DeferredJobRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub after_tool_call_id: Option<String>,
     /// Parameter changes committed atomically with this delivery at its boundary.
@@ -1340,7 +1354,8 @@ pub struct PendingDelivery {
 /// form, since `ChatMessage` intentionally does not implement `PartialEq`.
 impl PartialEq for PendingDelivery {
     fn eq(&self, other: &Self) -> bool {
-        self.after_tool_call_id == other.after_tool_call_id
+        self.deferred_job == other.deferred_job
+            && self.after_tool_call_id == other.after_tool_call_id
             && self.thread_patch == other.thread_patch
             && self.expires_at_ms == other.expires_at_ms
             && self.supersede_key == other.supersede_key
@@ -1409,6 +1424,7 @@ impl PendingDelivery {
             causal: None,
             thread_patch: None,
             after_tool_call_id: None,
+            deferred_job: None,
         }
     }
 

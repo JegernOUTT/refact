@@ -2006,6 +2006,7 @@ async fn run_task_briefing_subchat(
                 )];
                 let config = crate::subchat::SubchatConfig {
                     runner_lease_token: None,
+                    native_job_fence: None,
                     history_source_model: None,
                     tool_name: TASK_BRIEFING_CONTEXT_MARKER.to_string(),
                     stateful: false,

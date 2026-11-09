@@ -1,4 +1,4 @@
-schema_version: 34
+schema_version: 35
 id: agent
 title: Agent
 description: Full multi-step workflow with tools and editing capabilities
@@ -316,6 +316,7 @@ tools:
   - agent_list
   - agent_status
   - wait
+  - tool_job
   - agent_result
   - agent_cancel
   - agent_approval
@@ -334,6 +335,12 @@ tools:
   - task_done
   - worktree_create
   - worktree_merge
+  - review_get
+  - review_anchor
+  - review_update
+  - review_reply
+  - review_prepare_execution
+  - review_record_evidence
   - ask_questions
   - set_goal
   - update_goal
@@ -426,6 +433,18 @@ tool_confirm:
     - match: "task_done"
       action: auto
     - match: "worktree_create"
+      action: auto
+    - match: "review_get"
+      action: auto
+    - match: "review_anchor"
+      action: auto
+    - match: "review_update"
+      action: auto
+    - match: "review_reply"
+      action: auto
+    - match: "review_prepare_execution"
+      action: auto
+    - match: "review_record_evidence"
       action: auto
     - match: "ask_questions"
       action: auto

@@ -1,0 +1,9 @@
+.banner {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--rf-space-2);
+  padding: var(--rf-space-1) var(--rf-space-3);
+  color: var(--rf-color-muted);
+  overflow-wrap: anywhere;
+}

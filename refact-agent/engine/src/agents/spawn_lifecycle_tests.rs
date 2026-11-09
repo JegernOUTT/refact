@@ -1605,10 +1605,10 @@ async fn twelve_runs_across_both_runtimes_admit_four_queue_eight_and_rotate_root
     for id in ["T-1", "T-2", "T-3"] {
         let stored = board.get_card(id).unwrap().ab_variants.clone().unwrap();
         assert!(!stored.a.worktree.is_empty() && !stored.b.worktree.is_empty());
-        crate::tools::tool_spawn_ab::cleanup_ab_variant(fixture.app.gcx.clone(), &stored.a)
+        crate::tools::tool_spawn_ab::cleanup_ab_variant_with_app(&fixture.app, &stored.a)
             .await
             .unwrap();
-        crate::tools::tool_spawn_ab::cleanup_ab_variant(fixture.app.gcx.clone(), &stored.b)
+        crate::tools::tool_spawn_ab::cleanup_ab_variant_with_app(&fixture.app, &stored.b)
             .await
             .unwrap();
     }

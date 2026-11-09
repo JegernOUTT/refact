@@ -17,6 +17,11 @@ import { BuddyPulseContent } from "./BuddyPulseContent";
 import { ContextFiles } from "./ContextFiles";
 import { SystemPrompt } from "./SystemPrompt";
 import { AssistantInput } from "./AssistantInput";
+import { Markdown } from "../Markdown";
+import {
+  isRichReviewContribution,
+  ReviewChatContribution,
+} from "../../features/Review/ReviewChatContribution";
 import { PlainText } from "./PlainText";
 import { useAppDispatch } from "../../hooks/useAppDispatch";
 import { useAppSelector } from "../../hooks/useAppSelector";
@@ -83,6 +88,12 @@ import { SelectionToolbar } from "./SelectionToolbar";
 import { ErrorMessageCard } from "./ErrorMessage";
 import { SummarizationMessage as SummarizationMessageCard } from "./SummarizationMessage";
 import { PlanBanner } from "./PlanBanner";
+import { ToolJobCompletionCard } from "./ToolCard/ToolJobCard";
+import { ToolJobResult } from "./ToolCard/ToolJobResult";
+import {
+  isTerminalToolJob,
+  parseToolJobReceipt,
+} from "../../services/refact/toolJobs";
 import type {
   CompressionPhase,
   CompressionReason,
@@ -555,6 +566,15 @@ export const ChatContent: React.FC<ChatContentProps> = ({
               )}
               <AssistantInput
                 message={item.message.content}
+                bodyContent={
+                  isRichReviewContribution(item.message.extra) ? (
+                    <ReviewChatContribution
+                      extra={item.message.extra}
+                      chatId={renderChatId}
+                      fallback={<Markdown>{item.message.content}</Markdown>}
+                    />
+                  ) : undefined
+                }
                 reasoningContent={item.message.reasoning_content}
                 thinkingBlocks={item.message.thinking_blocks}
                 toolCalls={item.message.tool_calls}
@@ -573,10 +593,40 @@ export const ChatContent: React.FC<ChatContentProps> = ({
             </>
           );
 
-        case "user":
+        case "user": {
+          const job = parseToolJobReceipt(item.message.extra?.tool_job);
+          const completion =
+            job?.chat_id === renderChatId && isTerminalToolJob(job.status)
+              ? job
+              : null;
           return (
             <UserInput
-              onRetry={isCompanionChat ? undefined : onRetryWrapper}
+              onRetry={
+                isCompanionChat || completion ? undefined : onRetryWrapper
+              }
+              bodyContent={
+                completion && typeof item.message.content === "string" ? (
+                  <>
+                    {isRichReviewContribution(item.message.extra) ? (
+                      <ReviewChatContribution
+                        extra={item.message.extra}
+                        chatId={renderChatId}
+                        fallback={<Markdown>{item.message.content}</Markdown>}
+                      />
+                    ) : (
+                      <Markdown>{item.message.content}</Markdown>
+                    )}
+                    <ToolJobCompletionCard receipt={completion} />
+                  </>
+                ) : typeof item.message.content === "string" &&
+                  isRichReviewContribution(item.message.extra) ? (
+                  <ReviewChatContribution
+                    extra={item.message.extra}
+                    chatId={renderChatId}
+                    fallback={<Markdown>{item.message.content}</Markdown>}
+                  />
+                ) : undefined
+              }
               messageIndex={item.index}
               messageId={item.message.message_id}
               checkpoints={item.message.checkpoints}
@@ -586,6 +636,7 @@ export const ChatContent: React.FC<ChatContentProps> = ({
               {item.message.content}
             </UserInput>
           );
+        }
 
         case "context_files": {
           if (item.toolCallId === "buddy_project_memory_pulse") {
@@ -644,6 +695,9 @@ export const ChatContent: React.FC<ChatContentProps> = ({
           return (
             <SummarizationMessageCard key={item.key} message={item.message} />
           );
+
+        case "tool_job_result":
+          return <ToolJobResult key={item.key} result={item.result} />;
 
         case "event":
           return (

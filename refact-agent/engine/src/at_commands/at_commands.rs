@@ -43,6 +43,7 @@ pub struct AtCommandsContext {
     pub execution_scope: Option<ExecutionScope>,
     native_edit_scope: Option<crate::buddy::supervision_authority::NativeEditScope>,
     native_edit_required: bool,
+    pub(crate) native_job_fence: Option<crate::buddy::supervision_authority::NativeJobFence>,
     pub derived_privacy_zones: crate::privacy::records::DerivedPrivacyZones,
     pub subchat_depth: usize,
     pub tool_access_bypass: bool,
@@ -57,6 +58,8 @@ pub struct AtCommandsContext {
     pub subchat_tx: Arc<AMutex<mpsc::UnboundedSender<serde_json::Value>>>,
     pub subchat_rx: Arc<AMutex<mpsc::UnboundedReceiver<serde_json::Value>>>,
     pub abort_flag: Arc<AtomicBool>,
+    /// Latched originating-turn cancellation, independent of a tool job's abort.
+    pub execution_abort: Arc<AtomicBool>,
     pub activity_stamp: Option<Arc<AtomicU64>>,
 }
 
@@ -164,12 +167,22 @@ impl AtCommandsContext {
         let effective_root = root_chat_id.unwrap_or_else(|| chat_id.clone());
         let global_context = app.gcx.clone();
         let session = app.chat.sessions.read().await.get(&chat_id).cloned();
-        let derived_privacy_zones = match session {
+        let abort_flag = abort_flag.unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
+        let (derived_privacy_zones, execution_abort) = match session {
             Some(session) => {
                 let session = session.lock().await;
-                session.derived_privacy_zones.clone()
+                let execution_abort = if Arc::ptr_eq(&abort_flag, &session.abort_flag) {
+                    session.execution_abort.clone()
+                } else {
+                    // Runner-owned contexts supply their own origin-bound flag.
+                    abort_flag.clone()
+                };
+                (session.derived_privacy_zones.clone(), execution_abort)
             }
-            None => crate::privacy::records::new_derived_privacy_zones(),
+            None => (
+                crate::privacy::records::new_derived_privacy_zones(),
+                abort_flag.clone(),
+            ),
         };
         let background_agent_id = if !chat_id.starts_with("subchat-") {
             None
@@ -193,6 +206,11 @@ impl AtCommandsContext {
         AtCommandsContext {
             native_edit_scope,
             native_edit_required,
+            native_job_fence: background_agent_id.as_ref().and_then(|id| {
+                app.agent_executions
+                    .saved_config(id)
+                    .and_then(|config| config.native_job_fence)
+            }),
             global_context,
             app: app.clone(),
             n_ctx,
@@ -218,9 +236,67 @@ impl AtCommandsContext {
             postprocess_parameters: PostprocessSettings::new(),
             subchat_tx: Arc::new(AMutex::new(tx)),
             subchat_rx: Arc::new(AMutex::new(rx)),
-            abort_flag: abort_flag.unwrap_or_else(|| Arc::new(AtomicBool::new(false))),
+            abort_flag,
+            execution_abort,
             activity_stamp: None,
         }
+    }
+
+    /// Transfer one invocation into an independent context without consulting live
+    /// ambient defaults. Approval capabilities move, never clone. The caller must
+    /// hold the lifecycle execution lease while freezing and throughout execution.
+    pub(crate) fn freeze_tool_job(
+        &mut self,
+        tool_call_id: &str,
+        abort_flag: Arc<AtomicBool>,
+    ) -> Result<Self, String> {
+        if self.tool_access_bypass {
+            return Err("application-only tool authority cannot be backgrounded".into());
+        }
+        let derived = self
+            .derived_privacy_zones
+            .read()
+            .map_err(|_| "derived privacy state unavailable")?
+            .clone();
+        let (tx, rx) = mpsc::unbounded_channel();
+        let mut approved_executions = HashMap::new();
+        if let Some(approval) = self.approved_executions.remove(tool_call_id) {
+            approved_executions.insert(tool_call_id.to_string(), approval);
+        }
+        Ok(Self {
+            global_context: self.global_context.clone(),
+            app: self.app.clone(),
+            n_ctx: self.n_ctx,
+            top_n: self.top_n,
+            tokens_for_rag: self.tokens_for_rag,
+            messages: self.messages.clone(),
+            is_preview: self.is_preview,
+            pp_skeleton: self.pp_skeleton,
+            correction_only_up_to_step: self.correction_only_up_to_step,
+            chat_id: self.chat_id.clone(),
+            root_chat_id: self.root_chat_id.clone(),
+            current_model: self.current_model.clone(),
+            task_meta: self.task_meta.clone(),
+            execution_scope: self.execution_scope.clone(),
+            native_edit_scope: self.native_edit_scope.clone(),
+            native_edit_required: self.native_edit_required,
+            native_job_fence: self.native_job_fence.clone(),
+            derived_privacy_zones: Arc::new(std::sync::RwLock::new(derived)),
+            subchat_depth: self.subchat_depth,
+            tool_access_bypass: false,
+            background_agent_id: self.background_agent_id.clone(),
+            child_tool_ceiling: self.child_tool_ceiling.clone(),
+            approved_executions,
+            at_commands: self.at_commands.clone(),
+            subchat_tool_parameters: self.subchat_tool_parameters.clone(),
+            postprocess_parameters: self.postprocess_parameters.clone(),
+            // The job owns its channels. Never steal foreground subchat events.
+            subchat_tx: Arc::new(AMutex::new(tx)),
+            subchat_rx: Arc::new(AMutex::new(rx)),
+            abort_flag,
+            execution_abort: self.execution_abort.clone(),
+            activity_stamp: self.activity_stamp.clone(),
+        })
     }
 
     pub(crate) fn check_native_edit_scope(&self, path: &std::path::Path) -> Result<(), String> {
@@ -385,6 +461,46 @@ mod tests {
                 enforce: true,
             },
         )
+    }
+
+    #[tokio::test]
+    async fn execution_origin_context_and_frozen_job_keep_latched_stop() {
+        use std::sync::atomic::Ordering;
+        let app = AppState::from_gcx(crate::global_context::tests::make_test_gcx().await).await;
+        let session = Arc::new(AMutex::new(crate::chat::types::ChatSession::new(
+            "origin".into(),
+        )));
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert("origin".into(), session.clone());
+        session.lock().await.begin_execution_origin();
+        let abort = session.lock().await.abort_flag.clone();
+        let mut ccx = AtCommandsContext::new_with_abort(
+            app,
+            4096,
+            20,
+            false,
+            vec![],
+            "origin".into(),
+            None,
+            "model".into(),
+            None,
+            None,
+            Some(abort.clone()),
+        )
+        .await;
+        let job_abort = Arc::new(AtomicBool::new(false));
+        let frozen = ccx.freeze_tool_job("shell", job_abort.clone()).unwrap();
+        assert!(Arc::ptr_eq(&ccx.execution_abort, &frozen.execution_abort));
+        assert!(Arc::ptr_eq(&frozen.abort_flag, &job_abort));
+        session.lock().await.abort_stream();
+        abort.store(false, Ordering::SeqCst);
+        session.lock().await.begin_execution_origin();
+        assert!(frozen.execution_abort.load(Ordering::SeqCst));
+        assert!(!job_abort.load(Ordering::SeqCst));
+        assert!(!session.lock().await.execution_abort.load(Ordering::SeqCst));
     }
 
     #[tokio::test]

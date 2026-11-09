@@ -1725,6 +1725,29 @@ async fn select_next_command(session_arc: &Arc<AMutex<ChatSession>>) -> Option<S
         index += 1;
     }
 
+    if (session
+        .review_readiness_pending
+        .as_ref()
+        .is_some_and(|pending| pending.ready)
+        || session
+            .verifier_readiness_pending
+            .as_ref()
+            .is_some_and(|pending| pending.ready))
+        && session.command_queue.is_empty()
+        && session.turn_depth == 0
+        && session.runtime.state == SessionState::Idle
+        && !session.planner_paused()
+        && !session.runtime.paused
+        && session.runtime.pause_reasons.is_empty()
+        && session.runner_lease.is_none()
+    {
+        // Close the completion/check/register race without polling.
+        session.queue_notify.notify_one();
+        return Some(SelectedCommand {
+            command: None,
+            waiter: Some(waiter),
+        });
+    }
     let state = session.runtime.state;
     let is_busy = session.runner_lease.is_some()
         || state == SessionState::Generating
@@ -1904,6 +1927,15 @@ async fn process_command_queue_inner(
 
     loop {
         super::refusal_followup::drain_pending(app.clone(), session_arc.clone()).await;
+        // Internal readiness resumes are not Regenerate commands: retain the
+        // original command restrictions and consume the parked nonce exactly once.
+        if super::goal_verifier::resume_ready_verifier(&app, &session_arc).await {
+            continue;
+        }
+        if super::generation::take_ready_review_continuation(&session_arc).await {
+            start_generation(app.clone(), session_arc.clone()).await;
+            continue;
+        }
         let Some(SelectedCommand {
             command,
             waiter,

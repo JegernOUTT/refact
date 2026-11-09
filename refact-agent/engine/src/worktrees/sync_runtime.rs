@@ -34,6 +34,17 @@ pub(crate) async fn sync_under_lease(
     request: WorktreeSyncRequest,
     actor: String,
 ) -> Result<WorktreeSyncResponse, String> {
+    let service = crate::worktrees::service::fenced_service(
+        service.clone(),
+        app.runtime.tool_jobs.scopes.clone(),
+    );
+    let service = if matches!(request, WorktreeSyncRequest::Status { .. }) {
+        service
+    } else {
+        service
+            .fence_sync_worktree(id, matches!(request, WorktreeSyncRequest::Recover { .. }))
+            .await?
+    };
     let registry = service.load_registry().await?;
     let view = registry
         .records

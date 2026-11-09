@@ -12,7 +12,6 @@ use crate::chat::worktree_lifecycle::{
     check_ordinary_worktree_ancestry, is_ordinary_worktree_lineage, check_unchanged_attachment,
     transition_lock,
 };
-use crate::global_context::GlobalContext;
 use crate::tools::tools_description::{
     json_schema_from_params, Tool, ToolDesc, ToolSource, ToolSourceType,
 };
@@ -707,11 +706,11 @@ fn merge_response_message(response: &MergeWorktreeResponse) -> String {
 }
 
 async fn service_from_gcx(
-    gcx: Arc<GlobalContext>,
+    app: &crate::app_state::AppState,
     requested_source_root: Option<String>,
 ) -> Result<WorktreeService, String> {
-    let cache_dir = gcx.cache_dir.clone();
-    let project_dirs = crate::files_correction::get_project_dirs(gcx).await;
+    let cache_dir = app.paths.cache_dir.clone();
+    let project_dirs = crate::files_correction::get_project_dirs(app.gcx.clone()).await;
     if project_dirs.is_empty() {
         return Err("No project root available".to_string());
     }
@@ -743,7 +742,10 @@ async fn service_from_gcx(
     } else {
         project_dirs[0].clone()
     };
-    WorktreeService::new_async(cache_dir, source_root).await
+    Ok(crate::worktrees::service::fenced_service(
+        WorktreeService::new_async(cache_dir, source_root).await?,
+        app.runtime.tool_jobs.scopes.clone(),
+    ))
 }
 
 pub struct ToolWorktreeMerge;
@@ -974,8 +976,8 @@ impl Tool for ToolWorktreeMerge {
         let target_branch = string_arg(args, "target_branch")?;
 
         let parent_chat_id = ccx.lock().await.chat_id.clone();
-        let service = service_from_gcx(gcx.clone(), source_workspace_root).await?;
         let app = ccx.lock().await.app.clone();
+        let service = service_from_gcx(&app, source_workspace_root).await?;
         let self_session = if delete_after_merge
             && active_worktree
                 .as_ref()

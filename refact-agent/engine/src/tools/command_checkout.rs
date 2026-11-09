@@ -52,6 +52,13 @@ pub(crate) struct ValidatedCommandCheckout {
 }
 
 impl ValidatedCommandCheckout {
+    pub(crate) fn scope_key(&self) -> crate::tool_jobs::ScopeKey {
+        crate::tool_jobs::ScopeKey::Worktree {
+            project: self.meta.source_workspace_root.clone(),
+            root: self.root.clone(),
+        }
+    }
+
     fn binding(&self) -> Result<String, String> {
         serde_json::to_string(self).map_err(|_| REFUSED.into())
     }

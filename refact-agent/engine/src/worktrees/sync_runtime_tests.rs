@@ -284,3 +284,43 @@ fn conflict(fixture: &Fixture) {
     std::fs::write(fixture.source.join("file"), "target\n").unwrap();
     git(&fixture.source, &["commit", "-am", "target"]);
 }
+
+#[tokio::test]
+async fn http_sync_drains_source_jobs_but_status_does_not_cancel() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use crate::tool_jobs::scope::{ScopeChangeError, ScopeKey};
+    let f = fixture().await;
+    conflict(&f);
+    f.session
+        .lock()
+        .await
+        .set_runtime_state(SessionState::Idle, None);
+    let app = f.ccx.lock().await.app.clone();
+    let scopes = app.runtime.tool_jobs.scopes.clone();
+    let key = ScopeKey::Worktree {
+        project: f.source.clone(),
+        root: f.worktree.root.clone(),
+    };
+    let cancel = Arc::new(AtomicBool::new(false));
+    let lease = scopes.acquire(&[key.clone()], cancel.clone()).unwrap();
+    let status = http(&f, json!({"action":"status"})).await.unwrap();
+    assert!(!cancel.load(Ordering::Acquire));
+    let starting = http(
+        &f,
+        json!({"action":"start","expected_source_head":status["source_head"],"expected_target_head":status["target_head"]}),
+    );
+    tokio::pin!(starting);
+    tokio::select! {
+        result = &mut starting => panic!("sync before job drain: {result:?}"),
+        _ = async { while !cancel.load(Ordering::Acquire) { tokio::task::yield_now().await; } } => {}
+    }
+    assert!(!crate::worktrees::git::has_merge_in_progress(
+        &f.worktree.root
+    ));
+    assert!(matches!(
+        scopes.acquire(&[key], cancel),
+        Err(ScopeChangeError::Closed)
+    ));
+    lease.settle();
+    assert_eq!(starting.await.unwrap()["status"], "conflicts");
+}

@@ -158,47 +158,50 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
     [dispatch, openSettings],
   );
 
-  const onCreateNewChat = useCallback(() => {
-    const currentThread = shouldCleanToolbarChat
-      ? (allThreads[toolbarChatId] as
-          | { thread: { messages: unknown[] } }
-          | undefined)
-      : undefined;
+  const onCreateNewChat = useCallback(
+    (mode?: string) => {
+      const currentThread = shouldCleanToolbarChat
+        ? (allThreads[toolbarChatId] as
+            | { thread: { messages: unknown[] } }
+            | undefined)
+        : undefined;
 
-    if (currentThread && toolbarChatId !== currentChatId) {
-      dispatch(switchToThread({ id: toolbarChatId, openTab: false }));
-    }
+      if (currentThread && toolbarChatId !== currentChatId) {
+        dispatch(switchToThread({ id: toolbarChatId, openTab: false }));
+      }
 
-    if (shouldCleanToolbarChat) {
-      dispatch(clearThreadPauseReasons({ id: toolbarChatId }));
-      dispatch(
-        setThreadConfirmationStatus({
-          id: toolbarChatId,
-          wasInteracted: false,
-          confirmationStatus: true,
-        }),
-      );
-    }
+      if (shouldCleanToolbarChat) {
+        dispatch(clearThreadPauseReasons({ id: toolbarChatId }));
+        dispatch(
+          setThreadConfirmationStatus({
+            id: toolbarChatId,
+            wasInteracted: false,
+            confirmationStatus: true,
+          }),
+        );
+      }
 
-    if (
-      currentThread &&
-      currentThread.thread.messages.length === 0 &&
-      !hasOpenFiles
-    ) {
-      dispatch(closeThread({ id: toolbarChatId }));
-    }
+      if (
+        currentThread &&
+        currentThread.thread.messages.length === 0 &&
+        !hasOpenFiles
+      ) {
+        dispatch(closeThread({ id: toolbarChatId }));
+      }
 
-    dispatch(newChatAction());
-    handleNavigation("chat");
-  }, [
-    allThreads,
-    currentChatId,
-    shouldCleanToolbarChat,
-    toolbarChatId,
-    dispatch,
-    handleNavigation,
-    hasOpenFiles,
-  ]);
+      dispatch(newChatAction(mode ? { mode } : undefined));
+      handleNavigation("chat");
+    },
+    [
+      allThreads,
+      currentChatId,
+      shouldCleanToolbarChat,
+      toolbarChatId,
+      dispatch,
+      handleNavigation,
+      hasOpenFiles,
+    ],
+  );
 
   const onCreateNewTask = useCallback(() => {
     void createTask({ name: "New Task" })
@@ -235,8 +238,9 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
 
       <div className={classNames(styles.toolbarSection, styles.actionSection)}>
         <NewSplitButton
-          onCreateNewChat={onCreateNewChat}
+          onCreateNewChat={() => onCreateNewChat()}
           onCreateNewTask={onCreateNewTask}
+          onCreateNewReview={() => onCreateNewChat("review")}
         />
       </div>
 

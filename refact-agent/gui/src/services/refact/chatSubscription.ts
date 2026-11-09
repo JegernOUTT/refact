@@ -168,7 +168,16 @@ export function isRecoveryRecord(value: unknown): value is RecoveryRecord {
   );
 }
 
+export type ReviewReadiness =
+  | {
+      status: "pending";
+      turn_nonce: string;
+      receipt: import("./toolJobs").ToolJobReceipt;
+    }
+  | { status: "ready" | "unavailable"; turn_nonce: string };
+
 export type ThreadParams = {
+  review_readiness?: ReviewReadiness | null;
   recovery_policy?: RecoveryPolicyOverrides | null;
   app_workspace?: unknown;
   id: string;

@@ -4974,6 +4974,7 @@ dependencies = [
  "refact-pricing-core",
  "refact-privacy",
  "refact-providers",
+ "refact-review-core",
  "refact-runtime-api",
  "refact-sandbox",
  "refact-scheduler-core",
@@ -5096,6 +5097,22 @@ dependencies = [
  "tokio",
  "tracing",
  "url",
+ "uuid",
+]
+
+[[package]]
+name = "refact-review-core"
+version = "0.1.0"
+dependencies = [
+ "git2",
+ "libc",
+ "refact-privacy",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "similar",
+ "tempfile",
  "uuid",
 ]
 
@@ -5285,6 +5302,7 @@ dependencies = [
  "fd-lock",
  "git2",
  "libc",
+ "libgit2-sys",
  "refact-core",
  "serde",
  "serde_json",

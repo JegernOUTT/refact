@@ -1,0 +1,18 @@
+[package]
+name = "refact-review-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+refact-privacy = { path = "../refact-privacy" }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+uuid.workspace = true
+git2.workspace = true
+rusqlite.workspace = true
+libc.workspace = true
+similar = "2.3.0"
+
+[dev-dependencies]
+tempfile.workspace = true

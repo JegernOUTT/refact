@@ -6,7 +6,10 @@ import {
 /* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-non-null-assertion */
 import { expect, test, describe, beforeEach, vi } from "vitest";
 import type { RootState } from "../../../app/store";
-import { selectWaitingInterruptibleById } from "./selectors";
+import {
+  selectReviewReadinessById,
+  selectWaitingInterruptibleById,
+} from "./selectors";
 import { chatReducer } from "./reducer";
 import type { Chat } from "./types";
 import type { ChatHistoryItem } from "../../History/historySlice";
@@ -15,6 +18,7 @@ import {
   applyChatEvent,
   markThreadSseError,
   restoreChat,
+  closeThread,
   updateChatRuntimeFromSessionState,
 } from "./actions";
 import { subscribeToChatEvents } from "../../../services/refact/chatSubscription";
@@ -61,6 +65,232 @@ describe("Chat Thread Reducer - Edge Cases", () => {
     background_agents: [],
     messages,
   });
+
+  const jobReceipt = () => ({
+    job_id: "job-1",
+    chat_id: chatId,
+    tool_call_id: "call-1",
+    tool_name: "code_health",
+    model: "gpt-4",
+    turn_id: "turn-1",
+    status: "accepted" as const,
+    revision: 1,
+    result_available: false,
+    result_url: "/ignored-result",
+    cancel_url: "/ignored-cancel",
+  });
+  const readinessReceipt = (turn = "A") => ({
+    ...jobReceipt(),
+    tool_name: "review_readiness",
+    model: "",
+    turn_id: turn,
+  });
+
+  test("normalizes flattened accepted and terminal tool jobs without duplicating canonical completion", () => {
+    const accepted = jobReceipt();
+    const terminal = {
+      ...accepted,
+      status: "succeeded",
+      revision: 2,
+      terminal: true,
+      result_available: true,
+    };
+    const wire = {
+      role: "tool" as const,
+      tool_call_id: "call-1",
+      content: "Accepted",
+      tool_job: accepted,
+      extra: { retained: true },
+    };
+    let state = chatReducer(
+      initialState,
+      applyChatEvent(createSnapshot([wire])),
+    );
+    expect(state.threads[chatId]?.thread.messages[0].extra).toEqual({
+      retained: true,
+      tool_job: accepted,
+    });
+    const message = {
+      role: "user" as const,
+      content: "Canonical cleared result",
+      message_id: "completion-1",
+      tool_job: terminal,
+    };
+    for (const seq of ["2", "3"]) {
+      state = chatReducer(
+        state,
+        applyChatEvent({
+          chat_id: chatId,
+          seq,
+          type: "message_added",
+          index: 1,
+          message,
+        }),
+      );
+    }
+    expect(state.threads[chatId]?.thread.messages).toHaveLength(2);
+    expect(state.threads[chatId]?.thread.messages[1]).toMatchObject({
+      message_id: "completion-1",
+      content: "Canonical cleared result",
+      extra: { tool_job: terminal },
+    });
+    state = chatReducer(
+      state,
+      applyChatEvent({
+        chat_id: chatId,
+        seq: "4",
+        type: "message_updated",
+        message_id: "completion-1",
+        message,
+      }),
+    );
+    expect(state.threads[chatId]?.thread.messages[1]).not.toHaveProperty(
+      "tool_job",
+    );
+    expect(state.threads[chatId]?.thread.messages).toHaveLength(2);
+  });
+
+  test("readiness keeps newer pending nonce against stale completions and does not gate sending", () => {
+    const snapshot = createSnapshot();
+    snapshot.thread.review_readiness = {
+      status: "pending",
+      turn_nonce: "A",
+      receipt: readinessReceipt(),
+    };
+    let state = chatReducer(initialState, applyChatEvent(snapshot));
+    const readiness = () =>
+      selectReviewReadinessById({ chat: state } as RootState, chatId);
+    expect(readiness()?.turn_nonce).toBe("A");
+    const update = (
+      seq: string,
+      review_readiness: NonNullable<
+        SnapshotEnvelope["thread"]["review_readiness"]
+      >,
+    ) =>
+      applyChatEvent({
+        chat_id: chatId,
+        seq,
+        type: "thread_updated",
+        review_readiness,
+      });
+    state = chatReducer(
+      state,
+      update("2", {
+        status: "pending",
+        turn_nonce: "B",
+        receipt: { ...readinessReceipt("B"), job_id: "job-2" },
+      }),
+    );
+    state = chatReducer(
+      state,
+      update("3", { status: "ready", turn_nonce: "A" }),
+    );
+    state = chatReducer(
+      state,
+      update("4", { status: "unavailable", turn_nonce: "A" }),
+    );
+    expect(readiness()).toMatchObject({ status: "pending", turn_nonce: "B" });
+    expect(state.threads[chatId]).toMatchObject({
+      prevent_send: false,
+      waiting_for_response: false,
+      streaming: false,
+    });
+    state = chatReducer(
+      state,
+      update("5", { status: "unavailable", turn_nonce: "B" }),
+    );
+    expect(readiness()).toEqual({ status: "unavailable", turn_nonce: "B" });
+    state = chatReducer(state, clearAllSseConnections());
+    expect(readiness()).toBeUndefined();
+    state = chatReducer(state, applyChatEvent(snapshot));
+    state = chatReducer(state, removeSseConnection({ chatId }));
+    expect(readiness()).toBeUndefined();
+    state = chatReducer(state, applyChatEvent(snapshot));
+    state = chatReducer(state, closeThread({ id: chatId, force: true }));
+    expect(readiness()).toBeUndefined();
+  });
+
+  test("ignores cross-chat readiness receipts and clears absent snapshot metadata", () => {
+    const snapshot = createSnapshot();
+    snapshot.thread.review_readiness = {
+      status: "pending",
+      turn_nonce: "A",
+      receipt: { ...readinessReceipt(), chat_id: "another-chat" },
+    };
+    let state = chatReducer(initialState, applyChatEvent(snapshot));
+    expect(state.threads[chatId]?.review_readiness).toBeUndefined();
+    snapshot.thread.review_readiness.receipt.chat_id = chatId;
+    state = chatReducer(state, applyChatEvent(snapshot));
+    expect(state.threads[chatId]?.review_readiness?.status).toBe("pending");
+    state = chatReducer(state, applyChatEvent(createSnapshot()));
+    expect(state.threads[chatId]?.review_readiness).toBeUndefined();
+  });
+
+  test.each(["assistant", "user"] as const)(
+    "normalizes flattened %s review metadata across snapshot, addition and update",
+    (role) => {
+      const review = {
+        id: "review-1",
+        thread_id: "thread-1",
+        contribution_id: "reply-1",
+        blocks: [
+          {
+            id: "explanation",
+            revision: 1,
+            content: { kind: "markdown", body: "Rich explanation" },
+          },
+        ],
+      };
+      const wire = {
+        message_id: "reply",
+        role,
+        content: "Plain fallback",
+        review,
+        extra: { retained: true, review: { id: "stale" } },
+      };
+      let state = chatReducer(
+        initialState,
+        applyChatEvent(createSnapshot([wire])),
+      );
+      expect(state.threads[chatId]?.thread.messages[0].extra).toEqual({
+        retained: true,
+        review,
+      });
+      expect(state.threads[chatId]?.thread.messages[0]).not.toHaveProperty(
+        "review",
+      );
+      state = chatReducer(
+        state,
+        applyChatEvent({
+          chat_id: chatId,
+          seq: "2",
+          type: "message_added",
+          index: 1,
+          message: { ...wire, message_id: "added" },
+        }),
+      );
+      expect(state.threads[chatId]?.thread.messages[1].extra).toEqual({
+        retained: true,
+        review,
+      });
+      const updated = { ...review, contribution_id: "reply-2" };
+      const updatedWire = { ...wire, message_id: "added", review: updated };
+      state = chatReducer(
+        state,
+        applyChatEvent({
+          chat_id: chatId,
+          seq: "3",
+          type: "message_updated",
+          message_id: "added",
+          message: updatedWire,
+        }),
+      );
+      expect(state.threads[chatId]?.thread.messages[1].extra).toEqual({
+        retained: true,
+        review: updated,
+      });
+    },
+  );
 
   test("live chat activity survives delayed sidebar states and terminal updates clear waits", () => {
     const snapshot = createSnapshot([
@@ -211,6 +441,11 @@ describe("Chat Thread Reducer - Edge Cases", () => {
   test("SSE parsing preserves waiting_interruptible on snapshots and updates", async () => {
     const snapshot = createSnapshot();
     snapshot.runtime.waiting_interruptible = true;
+    snapshot.thread.review_readiness = {
+      status: "pending",
+      turn_nonce: "A",
+      receipt: readinessReceipt(),
+    };
     const update = {
       chat_id: chatId,
       seq: "2",
@@ -243,6 +478,13 @@ describe("Chat Thread Reducer - Edge Cases", () => {
       await vi.waitFor(() => expect(onEvent).toHaveBeenCalledTimes(2));
       expect(onEvent.mock.calls[0][0]).toMatchObject({
         runtime: { waiting_interruptible: true },
+        thread: {
+          review_readiness: {
+            status: "pending",
+            turn_nonce: "A",
+            receipt: { model: "", tool_name: "review_readiness" },
+          },
+        },
       });
       expect(onEvent.mock.calls[1][0]).toMatchObject({
         waiting_interruptible: false,

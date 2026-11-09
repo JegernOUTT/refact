@@ -173,22 +173,25 @@ async fn resolve_source_root(
 }
 
 async fn service_for_request(
-    gcx: Arc<GlobalContext>,
+    app: &AppState,
     requested: Option<String>,
 ) -> Result<WorktreeService, (StatusCode, Json<Value>)> {
-    let cache_dir = gcx.cache_dir.clone();
-    let source_root = resolve_source_root(gcx, requested).await?;
-    WorktreeService::new_async(cache_dir, source_root)
+    let cache_dir = app.paths.cache_dir.clone();
+    let source_root = resolve_source_root(app.gcx.clone(), requested).await?;
+    let service = WorktreeService::new_async(cache_dir, source_root)
         .await
-        .map_err(map_service_error)
+        .map_err(map_service_error)?;
+    Ok(crate::worktrees::service::fenced_service(
+        service,
+        app.runtime.tool_jobs.scopes.clone(),
+    ))
 }
 
 pub async fn handle_v1_worktrees_list(
     State(app): State<AppState>,
     Query(query): Query<WorktreeListQuery>,
 ) -> ApiResult<WorktreeListResponse> {
-    let gcx = app.gcx.clone();
-    let service = service_for_request(gcx, query.source_workspace_root).await?;
+    let service = service_for_request(&app, query.source_workspace_root).await?;
     service
         .list_worktrees_with_branches(query.include_branches.unwrap_or(true))
         .await
@@ -200,8 +203,7 @@ pub async fn handle_v1_worktrees_summary(
     State(app): State<AppState>,
     Query(query): Query<WorktreeQuery>,
 ) -> ApiResult<WorktreeInventory> {
-    let gcx = app.gcx.clone();
-    let service = service_for_request(gcx, query.source_workspace_root).await?;
+    let service = service_for_request(&app, query.source_workspace_root).await?;
     service
         .inspect_worktrees()
         .await
@@ -214,12 +216,11 @@ pub async fn handle_v1_worktrees_cleanup_dry_run(
     Query(query): Query<WorktreeQuery>,
     Json(request): Json<WorktreeCleanupRequest>,
 ) -> ApiResult<WorktreeCleanupPlan> {
-    let gcx = app.gcx.clone();
     let requested_root = request
         .source_workspace_root
         .clone()
         .or(query.source_workspace_root);
-    let service = service_for_request(gcx, requested_root).await?;
+    let service = service_for_request(&app, requested_root).await?;
     service
         .cleanup_worktrees_dry_run(request)
         .await
@@ -232,12 +233,11 @@ pub async fn handle_v1_worktrees_cleanup(
     Query(query): Query<WorktreeQuery>,
     Json(request): Json<WorktreeCleanupRequest>,
 ) -> ApiResult<WorktreeCleanupResult> {
-    let gcx = app.gcx.clone();
     let requested_root = request
         .source_workspace_root
         .clone()
         .or(query.source_workspace_root);
-    let service = service_for_request(gcx, requested_root).await?;
+    let service = service_for_request(&app, requested_root).await?;
     service
         .cleanup_worktrees(request)
         .await
@@ -249,8 +249,7 @@ pub async fn handle_v1_worktrees_create(
     State(app): State<AppState>,
     Json(request): Json<CreateWorktreeRequest>,
 ) -> ApiResult<CreateWorktreeResponse> {
-    let gcx = app.gcx.clone();
-    let service = service_for_request(gcx, request.source_workspace_root.clone()).await?;
+    let service = service_for_request(&app, request.source_workspace_root.clone()).await?;
     service
         .create_worktree(request)
         .await
@@ -263,8 +262,7 @@ pub async fn handle_v1_worktrees_get(
     Path(id): Path<String>,
     Query(query): Query<WorktreeQuery>,
 ) -> ApiResult<WorktreeRecordView> {
-    let gcx = app.gcx.clone();
-    let service = service_for_request(gcx, query.source_workspace_root).await?;
+    let service = service_for_request(&app, query.source_workspace_root).await?;
     service
         .get_worktree(&id)
         .await
@@ -277,8 +275,7 @@ pub async fn handle_v1_worktrees_diff(
     Path(id): Path<String>,
     Query(query): Query<WorktreeDiffQuery>,
 ) -> ApiResult<WorktreeDiffResponse> {
-    let gcx = app.gcx.clone();
-    let service = service_for_request(gcx, query.source_workspace_root).await?;
+    let service = service_for_request(&app, query.source_workspace_root).await?;
     match query.max_patch_bytes {
         Some(max_patch_bytes) => service
             .diff_worktree_with_limit(&id, max_patch_bytes.max(1).min(1_000_000))
@@ -299,8 +296,7 @@ pub async fn handle_v1_worktrees_merge(
     Query(query): Query<WorktreeQuery>,
     Json(mut request): Json<MergeWorktreeRequest>,
 ) -> ApiResult<MergeWorktreeResponse> {
-    let gcx = app.gcx.clone();
-    let service = service_for_request(gcx.clone(), query.source_workspace_root).await?;
+    let service = service_for_request(&app, query.source_workspace_root).await?;
     if request.generate_commit_message
         && request
             .commit_message
@@ -321,7 +317,8 @@ pub async fn handle_v1_worktrees_merge(
                     .or_else(|| diff.base_branch.clone())
                     .map(|target| format!("Merge worktree into {}", target));
                 if let Ok(message) =
-                    generate_commit_message_by_diff(gcx.clone(), &diff.patch, &prompt, None).await
+                    generate_commit_message_by_diff(app.gcx.clone(), &diff.patch, &prompt, None)
+                        .await
                 {
                     if !message.trim().is_empty() {
                         request.commit_message = Some(message);
@@ -362,7 +359,7 @@ pub async fn handle_v1_worktrees_sync(
     Query(query): Query<WorktreeQuery>,
     Json(request): Json<WorktreeSyncRequest>,
 ) -> ApiResult<crate::worktrees::sync_runtime::SyncResponse> {
-    let service = service_for_request(app.gcx.clone(), query.source_workspace_root).await?;
+    let service = service_for_request(&app, query.source_workspace_root).await?;
     let writer_readiness = if matches!(request, WorktreeSyncRequest::Status { .. }) {
         Some(
             crate::worktrees::sync_runtime::status_readiness(&app, &service, &id, None)
@@ -412,8 +409,7 @@ pub async fn handle_v1_worktrees_delete(
     Path(id): Path<String>,
     Query(query): Query<DeleteWorktreeQuery>,
 ) -> ApiResult<DeleteWorktreeResponse> {
-    let gcx = app.gcx.clone();
-    let service = service_for_request(gcx, query.source_workspace_root).await?;
+    let service = service_for_request(&app, query.source_workspace_root).await?;
     service
         .delete_worktree(
             &id,
@@ -430,8 +426,7 @@ pub async fn handle_v1_worktrees_open(
     Path(id): Path<String>,
     Query(query): Query<WorktreeQuery>,
 ) -> ApiResult<OpenWorktreeResponse> {
-    let gcx = app.gcx.clone();
-    let service = service_for_request(gcx, query.source_workspace_root).await?;
+    let service = service_for_request(&app, query.source_workspace_root).await?;
     service
         .open_worktree(&id)
         .await

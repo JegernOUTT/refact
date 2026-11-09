@@ -16,7 +16,7 @@ import {
   Globe,
   RefreshCw,
 } from "lucide-react";
-import { Icon, IconButton, Tooltip } from "../ui";
+import { Button, Icon, IconButton, Tooltip } from "../ui";
 import { ToolCard, type ToolStatus } from "../ChatContent/ToolCard";
 import { PreTag } from "./Pre";
 import { useAppearance } from "../../hooks/useAppearance";
@@ -33,6 +33,14 @@ import styles from "./ArtifactBlock.module.css";
 import markdownStyles from "./Markdown.module.css";
 import classNames from "classnames";
 import { QuestionArtifactContext } from "./questionArtifactContext";
+import { ArtifactPolicyContext } from "./ArtifactPolicyContext";
+import {
+  REVIEW_THEME_TOKENS,
+  reviewArtifactHtml,
+  reviewThemePayload,
+} from "./artifactPolicy";
+import { useTokens } from "../ui/useToken";
+import { useReducedMotion } from "../../hooks/useReducedMotion";
 import {
   questionArtifactHtml,
   readQuestionArtifactAnswer,
@@ -43,6 +51,7 @@ export interface ArtifactBlockProps {
   code: string;
   isStreaming?: boolean;
   onCopyClick?: (str: string) => void;
+  staticFallback?: string;
 }
 
 const MAX_ERROR_MESSAGE_LENGTH = 500;
@@ -75,16 +84,49 @@ const _ArtifactBlock: React.FC<ArtifactBlockProps> = ({
   code,
   isStreaming = false,
   onCopyClick,
+  staticFallback,
 }) => {
   const codeKey = useMemo(() => hashArtifactCode(code), [code]);
   const question = useContext(QuestionArtifactContext);
+  const policy = useContext(ArtifactPolicyContext);
+  const isReview = policy !== null;
+  const revealAnchorRef = useRef(policy?.onRevealAnchor);
+  revealAnchorRef.current = policy?.onRevealAnchor;
+  const revealAnchorCountRef = useRef(policy?.revealAnchorCount);
+  revealAnchorCountRef.current = policy?.revealAnchorCount;
+  const allowRevealAnchor = !!policy?.onRevealAnchor;
+  const reviewBindingKey = policy?.bindingKey;
+  const reviewTokens = useTokens([...REVIEW_THEME_TOKENS]);
+  const reducedMotion = useReducedMotion();
+  const choiceIdentity = JSON.stringify([
+    reviewBindingKey,
+    code,
+    reducedMotion,
+  ]);
+  const [liveChoice, setLiveChoice] = useState<{
+    identity: string;
+    live: boolean;
+  } | null>(null);
+  const hasFallback = !!staticFallback?.trim();
+  const offerStatic = hasFallback || reducedMotion;
+  const showStatic =
+    offerStatic &&
+    !(liveChoice?.identity === choiceIdentity
+      ? liveChoice.live
+      : !reducedMotion);
   const bindingRef = useRef(question);
   bindingRef.current = question;
   const questionInstance = question?.instance;
-  const channel = useMemo(
-    () => `${codeKey}:${questionInstance ? "question" : "preview"}:${uuidv4()}`,
-    [codeKey, questionInstance],
-  );
+  const channel = useMemo(() => {
+    const kind = allowRevealAnchor
+      ? "review"
+      : questionInstance
+        ? "question"
+        : "preview";
+    return `${hashArtifactCode(code)}:${kind}:${hashArtifactCode(
+      reviewBindingKey ?? "",
+    )}:${uuidv4()}`;
+  }, [code, questionInstance, allowRevealAnchor, reviewBindingKey]);
 
   const [showSource, setShowSource] = useState(false);
   const [isOpen, setIsOpen] = useState(true);
@@ -102,6 +144,8 @@ const _ArtifactBlock: React.FC<ArtifactBlockProps> = ({
   const pendingHeightRef = useRef<number | null>(null);
   const rafRef = useRef<number | null>(null);
   const errorReportsRef = useRef(0);
+  const anchorTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingAnchorRef = useRef<number | null>(null);
 
   const { isDarkMode } = useAppearance();
   const { host } = useConfig();
@@ -117,27 +161,52 @@ const _ArtifactBlock: React.FC<ArtifactBlockProps> = ({
 
   const wrappedHtml = useMemo(
     () =>
-      questionInstance
-        ? questionArtifactHtml(code, channel)
-        : wrapArtifactHtml(code),
-    [code, channel, questionInstance],
+      isReview
+        ? reviewArtifactHtml(code, channel, allowRevealAnchor)
+        : questionInstance
+          ? questionArtifactHtml(code, channel)
+          : wrapArtifactHtml(code),
+    [code, channel, questionInstance, isReview, allowRevealAnchor],
   );
 
   useEffect(() => {
     const handler = (event: MessageEvent) => {
       if (event.source !== iframeRef.current?.contentWindow) return;
-      if (questionInstance) event.stopImmediatePropagation();
+      if (questionInstance ?? isReview) event.stopImmediatePropagation();
       const data = event.data as Record<string, unknown> | null;
       if (!data || typeof data.type !== "string") return;
+      if (isReview && data.channel !== channel) return;
+      if (isReview && data.type === "refact-review-reveal-anchor") {
+        if (
+          !revealAnchorRef.current ||
+          typeof data.index !== "number" ||
+          !Number.isSafeInteger(data.index) ||
+          data.index < 0 ||
+          (revealAnchorCountRef.current !== undefined &&
+            data.index >= revealAnchorCountRef.current)
+        )
+          return;
+        pendingAnchorRef.current = data.index;
+        if (anchorTimerRef.current === null) {
+          anchorTimerRef.current = setTimeout(() => {
+            anchorTimerRef.current = null;
+            const index = pendingAnchorRef.current;
+            pendingAnchorRef.current = null;
+            if (index !== null) revealAnchorRef.current?.(index);
+          }, 150);
+        }
+        return;
+      }
       const answer = readQuestionArtifactAnswer(data, channel);
-      if (answer !== null && bindingRef.current?.enabled) {
+      if (!isReview && answer !== null && bindingRef.current?.enabled) {
         bindingRef.current.onAnswer(answer);
         return;
       }
 
       if (data.type === "refact-artifact-resize") {
+        if (isReview && typeof data.height !== "number") return;
         const h = Number(data.height);
-        if (!(h > 0)) return;
+        if (!Number.isFinite(h) || !(h > 0)) return;
         // Coalesce resize bursts to one application per frame, always keeping
         // the latest value, and apply hysteresis on the *clamped* height so
         // content taller than the cap cannot oscillate the iframe.
@@ -148,7 +217,10 @@ const _ArtifactBlock: React.FC<ArtifactBlockProps> = ({
             const pending = pendingHeightRef.current;
             pendingHeightRef.current = null;
             if (pending === null) return;
-            const next = Math.min(Math.round(pending), MAX_IFRAME_HEIGHT);
+            const next = Math.max(
+              1,
+              Math.min(Math.round(pending), MAX_IFRAME_HEIGHT),
+            );
             if (
               Math.abs(next - lastAppliedHeightRef.current) <= MIN_HEIGHT_DELTA
             ) {
@@ -165,7 +237,10 @@ const _ArtifactBlock: React.FC<ArtifactBlockProps> = ({
       if (data.type === "refact-artifact-error") {
         const msg = String(data.message).slice(0, MAX_ERROR_MESSAGE_LENGTH);
         setError(msg);
-        if (errorReportsRef.current < MAX_ERROR_REPORTS_PER_MOUNT) {
+        if (
+          !isReview &&
+          errorReportsRef.current < MAX_ERROR_REPORTS_PER_MOUNT
+        ) {
           errorReportsRef.current += 1;
           void reportBuddyFrontendError({
             source: "artifact_iframe",
@@ -180,8 +255,13 @@ const _ArtifactBlock: React.FC<ArtifactBlockProps> = ({
     return () => {
       window.removeEventListener("message", handler, true);
       if (rafRef.current !== null) cancelAnimationFrame(rafRef.current);
+      rafRef.current = null;
+      pendingHeightRef.current = null;
+      if (anchorTimerRef.current !== null) clearTimeout(anchorTimerRef.current);
+      anchorTimerRef.current = null;
+      pendingAnchorRef.current = null;
     };
-  }, [channel, questionInstance]);
+  }, [channel, questionInstance, isReview]);
 
   useEffect(() => {
     setError(null);
@@ -199,16 +279,31 @@ const _ArtifactBlock: React.FC<ArtifactBlockProps> = ({
   }, [codeKey]);
 
   const themeValue = isDarkMode ? "dark" : "light";
+  const reviewTheme = JSON.stringify(
+    reviewThemePayload(
+      policy?.theme ?? {
+        appearance: themeValue,
+        tokens: reviewTokens,
+        reducedMotion,
+      },
+    ),
+  );
   const postThemeToIframe = useCallback(() => {
     iframeRef.current?.contentWindow?.postMessage(
-      { type: "refact-artifact-theme", theme: themeValue },
+      isReview
+        ? {
+            type: "refact-review-theme",
+            channel,
+            theme: JSON.parse(reviewTheme) as unknown,
+          }
+        : { type: "refact-artifact-theme", theme: themeValue },
       "*",
     );
-  }, [themeValue]);
+  }, [themeValue, isReview, channel, reviewTheme]);
 
   const questionEnabled = question?.enabled;
   const postQuestionState = useCallback(() => {
-    if (questionEnabled === undefined) return;
+    if (isReview || questionEnabled === undefined) return;
     iframeRef.current?.contentWindow?.postMessage(
       {
         type: "refact-question-state",
@@ -217,7 +312,7 @@ const _ArtifactBlock: React.FC<ArtifactBlockProps> = ({
       },
       "*",
     );
-  }, [channel, questionEnabled]);
+  }, [channel, questionEnabled, isReview]);
 
   useEffect(() => {
     postQuestionState();
@@ -285,7 +380,63 @@ const _ArtifactBlock: React.FC<ArtifactBlockProps> = ({
   }, [isStreaming, error]);
 
   const effectiveShowSource = isStreaming || showSource;
-  const showIframe = !isStreaming && !showSource;
+  const showIframe = !isReview && !isStreaming && !showSource;
+
+  if (isReview) {
+    return (
+      <div className={styles.review_artifact}>
+        {offerStatic && (
+          <>
+            <Button
+              type="button"
+              size="sm"
+              variant="ghost"
+              aria-pressed={showStatic}
+              onClick={() =>
+                setLiveChoice({ identity: choiceIdentity, live: showStatic })
+              }
+            >
+              {showStatic ? "Show live explanation" : "Show static explanation"}
+            </Button>
+            {showStatic && (
+              <section aria-label="Static explanation">
+                {hasFallback ? (
+                  <p>{staticFallback}</p>
+                ) : (
+                  <>
+                    <p>
+                      No static explanation was provided. Inert visual source is
+                      available below; live scripts have not started.
+                    </p>
+                    <pre>{code}</pre>
+                  </>
+                )}
+                <small>
+                  Live explanation is stopped. Switching to live restarts it.
+                </small>
+              </section>
+            )}
+          </>
+        )}
+        {!isStreaming && !showStatic && (
+          <iframe
+            key={channel}
+            ref={iframeRef}
+            className={styles.review_iframe}
+            srcDoc={wrappedHtml}
+            sandbox="allow-scripts"
+            referrerPolicy="no-referrer"
+            title={policy.title ?? "Tour visual"}
+            style={{ height: `${height}px` }}
+            onLoad={postThemeToIframe}
+          />
+        )}
+        {error && (
+          <p className={styles.review_error}>Visual could not render.</p>
+        )}
+      </div>
+    );
+  }
 
   return (
     <ToolCard

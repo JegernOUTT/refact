@@ -19,8 +19,9 @@ pub use spawn::ExecSpawnResult;
 pub use transcript::{ExecRawOutput, ExecRawRead, ExecTranscript};
 pub use types::{
     default_tty, generate_short_description, sanitize_short_description, ExecAuditMeta,
-    ExecEnvPolicy, ExecMode, ExecOutputChunk, ExecOutputLimits, ExecOutputStream, ExecOwnerMeta,
-    ExecProcessFilter, ExecProcessId, ExecProcessMeta, ExecProcessSnapshot, ExecReadResult,
-    ExecReadinessProbe, ExecSandboxMode, ExecSandboxSpec, ExecServiceLookup, ExecSpawnRequest,
-    ExecStatus, ExecStatusKind, ExecWriteStdinResult, PushMode,
+    ExecEnvPolicy, ExecLifecycleGuard, ExecMode, ExecOutputChunk, ExecOutputLimits,
+    ExecOutputStream, ExecOwnerMeta, ExecProcessFilter, ExecProcessId, ExecProcessMeta,
+    ExecProcessSnapshot, ExecReadResult, ExecReadinessProbe, ExecSandboxMode, ExecSandboxSpec,
+    ExecServiceLookup, ExecSpawnRequest, ExecStatus, ExecStatusKind, ExecWriteStdinResult,
+    PushMode,
 };

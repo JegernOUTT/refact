@@ -16,7 +16,7 @@ use crate::call_validation::{
 };
 use crate::global_context::{GlobalContext, try_load_caps_quickly_if_not_present};
 use crate::scratchpad_abstract::HasTokenizerAndEot;
-use crate::chat::prepare::{prepare_chat_passthrough, ChatPrepareOptions};
+use crate::chat::prepare::{prepare_chat_passthrough, ChatPrepareOptions, PrepareOutcome};
 use crate::chat::internal_roles::{event, EventSubkind};
 use crate::llm::params::CacheControl;
 use crate::chat::stream_core::{
@@ -600,6 +600,8 @@ impl TraceParent {
 pub struct SubchatConfig {
     #[serde(skip)]
     pub(crate) runner_lease_token: Option<String>,
+    #[serde(skip)]
+    pub(crate) native_job_fence: Option<crate::buddy::supervision_authority::NativeJobFence>,
     pub tool_name: String,
     pub history_source_model: Option<String>,
     pub stateful: bool,
@@ -1475,6 +1477,7 @@ pub async fn resolve_subchat_config_with_parent(
 
     Ok(SubchatConfig {
         runner_lease_token: None,
+        native_job_fence: None,
         history_source_model: None,
         tool_name: tool_name.to_string(),
         stateful,
@@ -1607,6 +1610,7 @@ pub async fn resolve_subchat_config_with_explicit_params(
 
     Ok(SubchatConfig {
         runner_lease_token: None,
+        native_job_fence: None,
         history_source_model: None,
         tool_name: attribution_id.to_string(),
         stateful,
@@ -2266,6 +2270,7 @@ pub(crate) mod test_support {
     pub(crate) fn minimal_config(chat_id: &str, parent: &str) -> SubchatConfig {
         SubchatConfig {
             runner_lease_token: None,
+            native_job_fence: None,
             history_source_model: None,
             tool_name: "subagent".into(),
             stateful: true,
@@ -2428,6 +2433,7 @@ pub(crate) async fn run_subchat_with_lease(
     ccx.lock().await.background_agent_id = config.background_agent_id.clone();
     ccx.lock().await.activity_stamp = config.activity_stamp.clone();
     ccx.lock().await.child_tool_ceiling = Some(config.tools.clone());
+    ccx.lock().await.native_job_fence = config.native_job_fence.clone();
 
     if let Some(ref parent_tx) = config.parent_subchat_tx {
         ccx.lock().await.subchat_tx = parent_tx.clone();
@@ -3005,17 +3011,6 @@ async fn runner_model_turn(
             return Err("Aborted".to_string());
         }
         refresh_live_context_window(&ccx, config).await;
-        let execution = app.agent_executions.get(&chat_id);
-        let _operation = if let Some(execution) = &execution {
-            Some(
-                execution
-                    .begin_operation()
-                    .await
-                    .map_err(|e| e.to_string())?,
-            )
-        } else {
-            None
-        };
         let result = {
             let generation = subchat_single_internal(
                 ccx.clone(),
@@ -4122,6 +4117,61 @@ fn add_subchat_usage(total: &mut ChatUsage, usage: &ChatUsage) {
     }
 }
 
+async fn wait_for_subchat_readiness(
+    app: &AppState,
+    chat_id: &str,
+    receipt: &crate::tool_jobs::JobReceipt,
+    turn_nonce: &str,
+    abort_flag: &AtomicBool,
+) -> Result<(), String> {
+    let wait = crate::review::readiness::wait_for_readiness(app, chat_id, receipt, turn_nonce);
+    tokio::pin!(wait);
+    loop {
+        if abort_flag.load(Ordering::Acquire) || app.runtime.shutdown_flag.load(Ordering::Acquire) {
+            return Err("Aborted".into());
+        }
+        tokio::select! {
+            result = &mut wait => return result,
+            _ = tokio::time::sleep(refact_work_core::coordination_settings().lock_poll_interval()) => {}
+        }
+    }
+}
+
+#[cfg(test)]
+mod readiness_consumer_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn child_readiness_observes_abort_and_shutdown_before_resume() {
+        let app = AppState::from_gcx(crate::global_context::tests::make_test_gcx().await).await;
+        let receipt = crate::tool_jobs::JobReceipt {
+            job_id: "child-preflight".into(),
+            binding: crate::tool_jobs::JobBinding {
+                scope_keys: Vec::new(),
+                chat_id: "child".into(),
+                tool_call_id: String::new(),
+                tool_name: "review_readiness".into(),
+                model: String::new(),
+                turn_id: "original-attempt".into(),
+            },
+            status: crate::tool_jobs::JobStatus::Running,
+            result_url: String::new(),
+            cancel_url: String::new(),
+        };
+        let abort = AtomicBool::new(true);
+        assert_eq!(
+            wait_for_subchat_readiness(&app, "child", &receipt, "original-attempt", &abort).await,
+            Err("Aborted".into())
+        );
+        abort.store(false, Ordering::Release);
+        app.runtime.shutdown_flag.store(true, Ordering::Release);
+        assert_eq!(
+            wait_for_subchat_readiness(&app, "child", &receipt, "original-attempt", &abort).await,
+            Err("Aborted".into())
+        );
+    }
+}
+
 pub(crate) async fn subchat_stream(
     ccx: Arc<AMutex<AtCommandsContext>>,
     model_id: &str,
@@ -4244,20 +4294,51 @@ pub(crate) async fn subchat_stream(
         )
     };
 
-    let prepared = prepare_chat_passthrough(
-        gcx.clone(),
-        ccx.clone(),
-        &t,
-        messages.clone(),
-        &thread,
-        model_id,
-        mode_id,
-        tools,
-        &meta,
-        &mut parameters,
-        &options,
-    )
-    .await?;
+    // Stateless helper chats ordinarily have no Review binding and are immediately
+    // Ready. A bound child waits in its own worker, then retries this exact attempt;
+    // a new nonce would resubmit preflight forever instead of consuming its batch.
+    let app = AppState::from_gcx(gcx.clone()).await;
+    let execution = app.agent_executions.get(&meta.chat_id);
+    let (prepared, _operation) = loop {
+        if abort_flag.load(Ordering::Acquire) || app.runtime.shutdown_flag.load(Ordering::Acquire) {
+            return Err("Aborted".into());
+        }
+        let operation = if let Some(execution) = &execution {
+            Some(
+                execution
+                    .begin_operation()
+                    .await
+                    .map_err(|e| e.to_string())?,
+            )
+        } else {
+            None
+        };
+        match prepare_chat_passthrough(
+            gcx.clone(),
+            ccx.clone(),
+            &t,
+            messages.clone(),
+            &thread,
+            model_id,
+            mode_id,
+            tools.clone(),
+            &meta,
+            &mut parameters,
+            &options,
+        )
+        .await?
+        {
+            PrepareOutcome::Ready(prepared) => break (prepared, operation),
+            PrepareOutcome::Pending {
+                receipt,
+                turn_nonce,
+            } => {
+                drop(operation);
+                wait_for_subchat_readiness(&app, &meta.chat_id, &receipt, &turn_nonce, &abort_flag)
+                    .await?;
+            }
+        }
+    };
 
     let t1 = std::time::Instant::now();
     let mut llm_request = prepared.llm_request;
@@ -5339,6 +5420,7 @@ mod subchat_tests {
     fn test_subchat_config() -> SubchatConfig {
         SubchatConfig {
             runner_lease_token: None,
+            native_job_fence: None,
             history_source_model: None,
             tool_name: "subagent".to_string(),
             stateful: false,
@@ -6644,6 +6726,7 @@ mod subchat_tests {
         };
         let config = SubchatConfig {
             runner_lease_token: None,
+            native_job_fence: None,
             history_source_model: None,
             tool_name: "subagent".to_string(),
             stateful: true,
@@ -6720,6 +6803,7 @@ mod subchat_tests {
         };
         let config = SubchatConfig {
             runner_lease_token: None,
+            native_job_fence: None,
             history_source_model: None,
             tool_name: "subagent".to_string(),
             stateful: true,
@@ -6981,6 +7065,7 @@ mod subchat_tests {
             .unwrap();
         let config = SubchatConfig {
             runner_lease_token: None,
+            native_job_fence: None,
             history_source_model: None,
             tool_name: "subagent".to_string(),
             stateful: true,

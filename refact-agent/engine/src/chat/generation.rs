@@ -38,6 +38,7 @@ use super::trajectories::{
 use super::tools::{process_tool_calls_once, ToolStepOutcome};
 use super::prepare::{
     build_canonical_openai_tools_from_aliases, prepare_chat_passthrough, ChatPrepareOptions,
+    PrepareOutcome,
 };
 use super::prompts::prepend_the_right_system_prompt_and_maybe_more_initial_messages;
 use super::stream_core::{
@@ -1653,6 +1654,12 @@ async fn start_generation_iteration(
     session_arc: &Arc<AMutex<ChatSession>>,
     gcx: &Arc<crate::global_context::GlobalContext>,
 ) -> GenerationAttemptStart {
+    {
+        let mut session = session_arc.lock().await;
+        if park_pending_verifier_at_generation_boundary(&mut session) {
+            return GenerationAttemptStart::Stop;
+        }
+    }
     let Ok(_operation) = super::session_runtime::begin_board_operation(app, session_arc).await
     else {
         return GenerationAttemptStart::Stop;
@@ -1907,6 +1914,14 @@ async fn start_generation_iteration(
         },
         result: generation_result,
     };
+}
+
+pub(crate) fn park_pending_verifier_at_generation_boundary(session: &mut ChatSession) -> bool {
+    if session.verifier_readiness_pending.is_none() {
+        return false;
+    }
+    session.set_runtime_state(SessionState::Idle, None);
+    true
 }
 
 async fn handle_generation_error(
@@ -2238,14 +2253,158 @@ async fn handle_tool_step_outcome(
     GenerationLoopControl::Continue
 }
 
+fn review_continuation_is_current(
+    session: &ChatSession,
+    pending: &ReviewReadinessContinuation,
+) -> bool {
+    !session.closed
+        && pending.receipt.binding.chat_id == session.chat_id
+        && !pending.cancelled.load(Ordering::SeqCst)
+        && !session.user_interrupt_flag.load(Ordering::SeqCst)
+        && session.runtime.interruption.is_none()
+        && session.trajectory_version == pending.trajectory_version
+        && serde_json::to_value(&session.thread).ok().as_ref() == Some(&pending.thread_fingerprint)
+}
+
+pub(crate) async fn take_ready_review_continuation(session_arc: &Arc<AMutex<ChatSession>>) -> bool {
+    let mut session = session_arc.lock().await;
+    let Some(pending) = session.review_readiness_pending.as_ref() else {
+        return false;
+    };
+    if !review_continuation_is_current(&session, pending) {
+        session.invalidate_review_readiness();
+        return false;
+    }
+    if !pending.ready
+        || !session.command_queue.is_empty()
+        || session.turn_depth != 0
+        || session.runtime.state != SessionState::Idle
+        || session.planner_paused()
+        || session.runtime.paused
+        || !session.runtime.pause_reasons.is_empty()
+        || session.runner_lease.is_some()
+    {
+        return false;
+    }
+    let pending = session
+        .review_readiness_pending
+        .take()
+        .expect("checked pending");
+    session.active_command = pending.command;
+    session.review_readiness_resume_nonce = Some(pending.turn_nonce);
+    true
+}
+
+async fn park_review_readiness(
+    app: AppState,
+    session_arc: Arc<AMutex<ChatSession>>,
+    receipt: crate::tool_jobs::JobReceipt,
+    turn_nonce: String,
+) {
+    let (chat_id, cancelled) = {
+        let mut session = session_arc.lock().await;
+        session.invalidate_review_readiness();
+        if session.closed
+            || session.user_interrupt_flag.load(Ordering::SeqCst)
+            || !session.command_queue.is_empty()
+        {
+            session.finish_stream_with_next_state(None, SessionState::Idle);
+            return;
+        }
+        let command = session.active_command.clone();
+        // No assistant was generated. Close its empty draft without an error,
+        // tool result, or a fabricated successful completion.
+        session.finish_stream_with_next_state(None, SessionState::Idle);
+        let cancelled = Arc::new(AtomicBool::new(false));
+        session.review_readiness_pending = Some(ReviewReadinessContinuation {
+            turn_nonce: turn_nonce.clone(),
+            receipt: receipt.clone(),
+            command,
+            trajectory_version: session.trajectory_version,
+            thread_fingerprint: serde_json::to_value(&session.thread).unwrap_or_default(),
+            cancelled: cancelled.clone(),
+            ready: false,
+        });
+        session.emit(ChatEvent::ThreadUpdated {
+            params: json!({"review_readiness": {
+                "status": "pending", "receipt": receipt, "turn_nonce": turn_nonce,
+            }}),
+        });
+        (session.chat_id.clone(), cancelled)
+    };
+    // Detached observation owns no execution permit or transition lock. The
+    // queue, not this observer, owns the eventual generation continuation.
+    tokio::spawn(async move {
+        let result =
+            crate::review::readiness::wait_for_readiness(&app, &chat_id, &receipt, &turn_nonce)
+                .await;
+        if app.runtime.shutdown_flag.load(Ordering::Relaxed) || cancelled.load(Ordering::SeqCst) {
+            return;
+        }
+        let mut session = session_arc.lock().await;
+        let Some(pending) = session.review_readiness_pending.as_ref() else {
+            return;
+        };
+        if pending.turn_nonce != turn_nonce {
+            return;
+        }
+        if !review_continuation_is_current(&session, pending) {
+            clear_stale_review_observer(&mut session, &turn_nonce);
+        } else if result.is_ok() {
+            session.review_readiness_pending.as_mut().unwrap().ready = true;
+            session.emit(ChatEvent::ThreadUpdated {
+                params: json!({"review_readiness": {
+                    "status": "ready", "turn_nonce": turn_nonce,
+                }}),
+            });
+            session.queue_notify.notify_one();
+        } else {
+            session.invalidate_review_readiness();
+            session.emit(ChatEvent::ThreadUpdated {
+                params: json!({"review_readiness": {
+                    "status": "unavailable", "turn_nonce": turn_nonce,
+                }}),
+            });
+        }
+    });
+}
+
+fn clear_stale_review_observer(session: &mut ChatSession, nonce: &str) -> bool {
+    if !session
+        .review_readiness_pending
+        .as_ref()
+        .is_some_and(|pending| pending.turn_nonce == nonce)
+    {
+        return false;
+    }
+    let pending = session.review_readiness_pending.take().unwrap();
+    pending.cancelled.store(true, Ordering::SeqCst);
+    session.review_readiness_resume_nonce = None;
+    session.emit(ChatEvent::ThreadUpdated {
+        params: json!({"review_readiness": {"status": "unavailable", "turn_nonce": nonce}}),
+    });
+    session.queue_notify.notify_one();
+    true
+}
+
 pub fn start_generation(
     app: AppState,
     session_arc: Arc<AMutex<ChatSession>>,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
     Box::pin(async move {
         let gcx = app.gcx.clone();
-        if session_arc.lock().await.runner_lease.is_some() {
+        if app.runtime.shutdown_flag.load(Ordering::Relaxed) {
+            session_arc.lock().await.invalidate_review_readiness();
             return;
+        }
+        {
+            let session = session_arc.lock().await;
+            if session.runner_lease.is_some()
+                || session.review_readiness_pending.is_some()
+                || session.verifier_readiness_pending.is_some()
+            {
+                return;
+            }
         }
         let preparation = async {
             let board_execution = super::session_runtime::board_execution(&app, &session_arc).await;
@@ -2378,6 +2537,11 @@ pub fn start_generation(
                     .set_runtime_state(SessionState::Error, Some(error));
                 break;
             }
+            match crate::review::turn_completion::stop_at_boundary(&app, &session_arc).await {
+                Ok(true) => break,
+                Ok(false) => {}
+                Err(error) => tracing::warn!(%error, "proposal completion boundary unavailable"),
+            }
             let Some(attempt) = super::recovery::within_budget(
                 &session_arc,
                 start_generation_iteration(&app, &session_arc, &gcx),
@@ -2395,7 +2559,10 @@ pub fn start_generation(
                 } => (context, result),
             };
 
-            if let Ok(GenerationResult::PausedForUserDecision) = &generation_result {
+            if matches!(
+                &generation_result,
+                Ok(GenerationResult::PausedForUserDecision | GenerationResult::PendingReadiness)
+            ) {
                 maybe_save_trajectory_with_intent(
                     app.clone(),
                     session_arc.clone(),
@@ -2464,6 +2631,9 @@ impl TurnDepthGuard {
             let mut session = session_arc.lock().await;
             if session.runner_lease.is_some() {
                 return None;
+            }
+            if session.turn_depth == 0 {
+                session.begin_execution_origin();
             }
             session.turn_depth = session.turn_depth.saturating_add(1);
         }
@@ -2714,7 +2884,12 @@ pub async fn run_llm_generation(
         current_config_file: String::new(),
         context_tokens_cap: thread.context_tokens_cap,
         include_project_info: thread.include_project_info,
-        request_attempt_id: Uuid::new_v4().to_string(),
+        request_attempt_id: session_arc
+            .lock()
+            .await
+            .review_readiness_resume_nonce
+            .take()
+            .unwrap_or_else(|| Uuid::new_v4().to_string()),
         worktree: thread.worktree.clone(),
     };
 
@@ -2800,7 +2975,7 @@ pub async fn run_llm_generation(
     };
 
     check_aborted_before_stream(&abort_flag)?;
-    let mut prepared = prepare_chat_passthrough(
+    let prepared = prepare_chat_passthrough(
         gcx.clone(),
         ccx_arc.clone(),
         &t,
@@ -2814,6 +2989,19 @@ pub async fn run_llm_generation(
         &options,
     )
     .await?;
+    let mut prepared = match prepared {
+        PrepareOutcome::Ready(prepared) => prepared,
+        PrepareOutcome::Pending {
+            receipt,
+            turn_nonce,
+        } => {
+            // Release all admission/transition guards before starting the observer.
+            drop(_operation);
+            drop(_board_operation);
+            park_review_readiness(app, session_arc, receipt, turn_nonce).await;
+            return Ok(GenerationResult::PendingReadiness);
+        }
+    };
 
     let claude_code_identity = ensure_claude_code_identity(&session_arc, &model_rec.base).await;
     prepared.llm_request = prepared
@@ -2853,6 +3041,7 @@ async fn generation_metering_usd(
 pub enum GenerationResult {
     Completed,
     PausedForUserDecision,
+    PendingReadiness,
 }
 
 enum StreamCollectorEventPayload {
@@ -4082,6 +4271,131 @@ fn maybe_downgrade_bogus_tool_calls_finish_reason(result: &mut ChoiceFinal, stag
 mod tests {
     use super::*;
     use crate::call_validation::{ChatToolCall, ChatToolFunction};
+
+    fn ready_continuation(session: &ChatSession, nonce: &str) -> ReviewReadinessContinuation {
+        ReviewReadinessContinuation {
+            turn_nonce: nonce.into(),
+            receipt: crate::tool_jobs::JobReceipt {
+                job_id: "readiness-job".into(),
+                binding: crate::tool_jobs::JobBinding {
+                    scope_keys: Vec::new(),
+                    chat_id: session.chat_id.clone(),
+                    tool_call_id: String::new(),
+                    tool_name: "review_readiness".into(),
+                    model: session.thread.model.clone(),
+                    turn_id: nonce.into(),
+                },
+                status: crate::tool_jobs::JobStatus::Succeeded,
+                result_url: String::new(),
+                cancel_url: String::new(),
+            },
+            command: session.active_command.clone(),
+            trajectory_version: session.trajectory_version,
+            thread_fingerprint: serde_json::to_value(&session.thread).unwrap(),
+            cancelled: Arc::new(AtomicBool::new(false)),
+            ready: true,
+        }
+    }
+
+    #[tokio::test]
+    async fn readiness_resume_is_single_use_and_preserves_original_command() {
+        let mut session = ChatSession::new("readiness-resume".into());
+        session.active_command.model_override = Some("restricted-model".into());
+        session.review_readiness_pending = Some(ready_continuation(&session, "original-attempt"));
+        session.active_command = ActiveCommandContext::default();
+        let session = Arc::new(AMutex::new(session));
+        assert!(take_ready_review_continuation(&session).await);
+        assert!(!take_ready_review_continuation(&session).await);
+        let locked = session.lock().await;
+        assert_eq!(
+            locked.active_command.model_override.as_deref(),
+            Some("restricted-model")
+        );
+        assert_eq!(
+            locked.review_readiness_resume_nonce.as_deref(),
+            Some("original-attempt")
+        );
+        assert!(locked.messages.is_empty());
+    }
+
+    #[test]
+    fn readiness_stale_observer_clears_only_its_matching_continuation() {
+        let mut session = ChatSession::new("readiness-stale-observer".into());
+        session.review_readiness_pending = Some(ready_continuation(&session, "new-attempt"));
+        assert!(!clear_stale_review_observer(&mut session, "old-attempt"));
+        assert!(session.review_readiness_pending.is_some());
+        let cancelled = session
+            .review_readiness_pending
+            .as_ref()
+            .unwrap()
+            .cancelled
+            .clone();
+        assert!(clear_stale_review_observer(&mut session, "new-attempt"));
+        assert!(cancelled.load(Ordering::SeqCst));
+        assert!(session.review_readiness_pending.is_none());
+    }
+
+    #[tokio::test]
+    async fn readiness_rejects_cancelled_stale_scope_closed_and_human_priority() {
+        for case in ["cancelled", "frontier", "scope", "closed", "human", "abort"] {
+            let mut session = ChatSession::new(format!("readiness-{case}"));
+            session.review_readiness_pending = Some(ready_continuation(&session, "old-attempt"));
+            let cancellation = session
+                .review_readiness_pending
+                .as_ref()
+                .unwrap()
+                .cancelled
+                .clone();
+            match case {
+                "cancelled" => cancellation.store(true, Ordering::SeqCst),
+                "frontier" => session.increment_version(),
+                "scope" => session.thread.mode = "different-policy".into(),
+                "closed" => session.closed = true,
+                "human" => {
+                    session.enqueue_command(CommandRequest {
+                        native_approval_guard: None,
+                        supervision_guard: None,
+                        client_request_id: "human-priority".into(),
+                        priority: true,
+                        command: ChatCommand::Regenerate {},
+                    });
+                }
+                "abort" => session.abort_stream(),
+                _ => unreachable!(),
+            }
+            let session = Arc::new(AMutex::new(session));
+            assert!(!take_ready_review_continuation(&session).await, "{case}");
+            assert!(
+                session.lock().await.review_readiness_resume_nonce.is_none(),
+                "{case}"
+            );
+            if matches!(case, "human" | "abort") {
+                assert!(cancellation.load(Ordering::SeqCst));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn shutdown_invalidates_pending_without_starting_generation() {
+        let app = AppState::from_gcx(crate::global_context::tests::make_test_gcx().await).await;
+        let mut session = ChatSession::new("readiness-shutdown".into());
+        session.review_readiness_pending = Some(ready_continuation(&session, "never-resume"));
+        let cancelled = session
+            .review_readiness_pending
+            .as_ref()
+            .unwrap()
+            .cancelled
+            .clone();
+        let session = Arc::new(AMutex::new(session));
+        app.runtime.shutdown_flag.store(true, Ordering::Relaxed);
+        start_generation(app, session.clone()).await;
+        let session = session.lock().await;
+        assert!(cancelled.load(Ordering::SeqCst));
+        assert!(session.review_readiness_pending.is_none());
+        assert!(session.draft_message.is_none());
+        assert!(session.messages.is_empty());
+        assert_eq!(session.turn_depth, 0);
+    }
 
     #[tokio::test(start_paused = true)]
     async fn execution_fence_contention_has_bounded_retry_schedule() {

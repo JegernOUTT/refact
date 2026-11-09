@@ -100,7 +100,10 @@ impl Tool for ToolWorktreeCreate {
         };
         let root = ccx.lock().await.root_chat_id.clone();
         check_ordinary_worktree_ancestry(&app, &chat_id, &root, &before).await?;
-        let service = WorktreeService::new_async(app.gcx.cache_dir.clone(), source.clone()).await?;
+        let service = crate::worktrees::service::fenced_service(
+            WorktreeService::new_async(app.gcx.cache_dir.clone(), source.clone()).await?,
+            app.runtime.tool_jobs.scopes.clone(),
+        );
         let (worktree, reused, reattached) = if let Some(worktree) = before.worktree.as_ref() {
             let view = service.get_worktree(&worktree.id).await?;
             if view.meta != *worktree {

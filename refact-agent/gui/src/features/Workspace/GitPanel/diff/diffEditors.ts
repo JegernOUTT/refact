@@ -143,6 +143,7 @@ export type DiffEditorsConfig = {
   leftLabel: string;
   rightLabel: string;
   onFocusSide?: (side: DiffEditorSide) => void;
+  extensions?: { a?: Extension; b?: Extension };
 };
 
 export type DiffEditorsController = {
@@ -157,6 +158,7 @@ export type DiffEditorsController = {
   focus: () => void;
   scrollElement: () => HTMLElement;
   destroy: () => void;
+  views: () => { a: EditorView | null; b: EditorView };
 };
 
 const COLLAPSE_CONFIG = { margin: 3, minSize: 4 };
@@ -183,6 +185,7 @@ function sideExtensions(
       },
     }),
     diffClassesField,
+    side === "a" ? config.extensions?.a ?? [] : config.extensions?.b ?? [],
   ];
 }
 
@@ -261,6 +264,7 @@ export function createDiffEditors(
       focus: () => view.focus(),
       scrollElement: () => view.scrollDOM,
       destroy: () => view.destroy(),
+      views: () => ({ a: null, b: view }),
     };
   }
 
@@ -322,5 +326,6 @@ export function createDiffEditors(
     focus: () => activeView().focus(),
     scrollElement: () => merge.dom,
     destroy: () => merge.destroy(),
+    views: () => ({ a: merge.a, b: merge.b }),
   };
 }

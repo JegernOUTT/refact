@@ -461,7 +461,13 @@ pub fn branch_merged_into(root: &Path, branch: &str, base: &str) -> bool {
 }
 
 pub fn list_git_worktrees(source_root: &Path) -> Vec<GitWorktreeEntry> {
-    let output = run_git_lossy(source_root, &["worktree", "list", "--porcelain"]);
+    list_git_worktrees_checked(source_root).unwrap_or_default()
+}
+
+pub(crate) fn list_git_worktrees_checked(
+    source_root: &Path,
+) -> Result<Vec<GitWorktreeEntry>, String> {
+    let output = run_git(source_root, &["worktree", "list", "--porcelain"])?;
     let mut entries = Vec::new();
     let mut root: Option<PathBuf> = None;
     let mut branch: Option<String> = None;
@@ -492,7 +498,7 @@ pub fn list_git_worktrees(source_root: &Path) -> Vec<GitWorktreeEntry> {
             );
         }
     }
-    entries
+    Ok(entries)
 }
 
 pub fn prune_worktrees(source_root: &Path) -> Result<(), String> {
@@ -521,11 +527,10 @@ impl Drop for MergeCheckout {
 }
 
 pub fn prepare_merge_checkout(source_root: &Path, target: &str) -> Result<MergeCheckout, String> {
-    run_git(source_root, &["worktree", "list", "--porcelain"])?;
     let target_head = run_git(source_root, &["rev-parse", "--verify", target])?
         .trim()
         .to_string();
-    let mut targets = list_git_worktrees(source_root)
+    let mut targets = list_git_worktrees_checked(source_root)?
         .into_iter()
         .filter(|entry| entry.branch.as_deref() == Some(target));
     if let Some(entry) = targets.next() {
@@ -574,6 +579,10 @@ pub fn prepare_merge_checkout(source_root: &Path, target: &str) -> Result<MergeC
 }
 
 impl MergeCheckout {
+    pub(crate) fn is_temporary(&self) -> bool {
+        self.temporary.is_some()
+    }
+
     pub fn target_branch(&self) -> &str {
         &self.target_branch
     }

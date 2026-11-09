@@ -889,6 +889,11 @@ impl ChatSession {
 }
 
 impl ChatSession {
+    /// Rotate at a whole-turn boundary; never clear a flag retained by an old job.
+    pub(crate) fn begin_execution_origin(&mut self) {
+        self.execution_abort = Arc::new(AtomicBool::new(self.abort_flag.load(Ordering::SeqCst)));
+    }
+
     pub fn new(chat_id: String) -> Self {
         let (event_tx, _) = broadcast::channel(limits().event_channel_capacity);
         Self {
@@ -940,6 +945,7 @@ impl ChatSession {
             recent_request_ids: VecDeque::with_capacity(limits().recent_request_ids_capacity),
             recent_request_ids_set: HashSet::new(),
             abort_flag: Arc::new(AtomicBool::new(false)),
+            execution_abort: Arc::new(AtomicBool::new(false)),
             abort_notify: Arc::new(Notify::new()),
             interruptible_waits: 0,
             wait_delivery_boundary: false,
@@ -998,6 +1004,10 @@ impl ChatSession {
             turn_depth: 0,
             delivery_wake_sources: Default::default(),
             active_command: ActiveCommandContext::default(),
+            review_readiness_pending: None,
+            review_readiness_resume_nonce: None,
+            verifier_readiness_pending: None,
+            verifier_readiness_resume_nonce: None,
             skills_available_count: 0,
             skills_included: Vec::new(),
             post_turn_task_handles: Vec::new(),
@@ -1099,6 +1109,7 @@ impl ChatSession {
             recent_request_ids: VecDeque::with_capacity(limits().recent_request_ids_capacity),
             recent_request_ids_set: HashSet::new(),
             abort_flag: Arc::new(AtomicBool::new(false)),
+            execution_abort: Arc::new(AtomicBool::new(false)),
             abort_notify: Arc::new(Notify::new()),
             interruptible_waits: 0,
             wait_delivery_boundary: false,
@@ -1157,6 +1168,10 @@ impl ChatSession {
             turn_depth: 0,
             delivery_wake_sources: Default::default(),
             active_command: ActiveCommandContext::default(),
+            review_readiness_pending: None,
+            review_readiness_resume_nonce: None,
+            verifier_readiness_pending: None,
+            verifier_readiness_resume_nonce: None,
             skills_available_count: 0,
             skills_included: Vec::new(),
             post_turn_task_handles: Vec::new(),
@@ -2211,6 +2226,7 @@ impl ChatSession {
     }
 
     pub fn close_event_channel(&mut self) {
+        self.execution_abort.store(true, Ordering::SeqCst);
         self.live_diagnostics.clear_accepted();
         self.pending_context_rebuild = None;
         self.pending_mode_handoff = None;
@@ -2220,6 +2236,7 @@ impl ChatSession {
         self.clear_discarded_queue_timestamps();
         self.clear_stream_and_confirmation_timestamps();
         self.release_turn_only_state();
+        self.invalidate_review_readiness();
         self.closed = true;
         self.publish_work_metadata();
         self.runtime.interruption = None;
@@ -2670,6 +2687,17 @@ impl ChatSession {
         }
     }
 
+    pub(crate) fn invalidate_review_readiness(&mut self) {
+        if let Some(pending) = self.review_readiness_pending.take() {
+            pending.cancelled.store(true, Ordering::SeqCst);
+        }
+        self.review_readiness_resume_nonce = None;
+        if let Some(pending) = self.verifier_readiness_pending.take() {
+            pending.cancelled.store(true, Ordering::SeqCst);
+        }
+        self.verifier_readiness_resume_nonce = None;
+    }
+
     pub fn enqueue_accepted_command(&mut self, request: CommandRequest) -> EnqueueCommandOutcome {
         if let Err(error) = super::queue::prepare_guarded_command(self, &request) {
             super::queue::reject_guard(self, &request.client_request_id, error);
@@ -2681,6 +2709,9 @@ impl ChatSession {
             return EnqueueCommandOutcome::Full;
         }
 
+        // Human/control work supersedes a parked pre-model attempt, even before
+        // its queued message changes the trajectory frontier.
+        self.invalidate_review_readiness();
         if request.priority {
             self.enqueue_accepted_priority_command(request)
         } else {
@@ -2776,7 +2807,8 @@ impl ChatSession {
         }
     }
 
-    pub fn add_message(&mut self, message: ChatMessage) {
+    pub fn add_message(&mut self, mut message: ChatMessage) {
+        super::tools::redact_tool_message_urls(&mut message);
         // Legacy event producers must not insert ahead of an uncommitted draft
         // or between an assistant tool call and its results.
         if message.role == "event"
@@ -2799,6 +2831,7 @@ impl ChatSession {
     }
 
     fn add_message_at_boundary(&mut self, mut message: ChatMessage) {
+        super::tools::redact_tool_message_urls(&mut message);
         if message.message_id.is_empty() {
             message.message_id = Uuid::new_v4().to_string();
         }
@@ -3066,7 +3099,7 @@ impl ChatSession {
         self.enqueue_delivery(delivery)
     }
 
-    fn delivery_envelope_boundary_open(&self, delivery: &PendingDelivery) -> bool {
+    pub(crate) fn delivery_envelope_boundary_open(&self, delivery: &PendingDelivery) -> bool {
         if self.runtime.interruption.is_some()
             || self.planner_paused()
             || self.planner_pause_pending_tools
@@ -3120,7 +3153,7 @@ impl ChatSession {
 
     /// Append one delivery's messages, stamping delivery provenance so dedupe
     /// and the UI survive a restart without the pending queue.
-    fn append_delivery(&mut self, delivery: &PendingDelivery) {
+    pub(crate) fn append_delivery(&mut self, delivery: &PendingDelivery) {
         self.live_diagnostics.queue_progress = Some(Instant::now());
         if let Some(patch) = &delivery.thread_patch {
             let old_mode = self.thread.mode.clone();
@@ -3172,6 +3205,7 @@ impl ChatSession {
         if !had_draft && !was_active {
             return;
         }
+        self.execution_abort.store(true, Ordering::SeqCst);
         self.abort_flag.store(true, Ordering::SeqCst);
         self.user_interrupt_flag.store(true, Ordering::SeqCst);
         self.abort_notify.notify_waiters();
@@ -3203,10 +3237,21 @@ impl ChatSession {
         &mut self,
         mut delivery: PendingDelivery,
     ) -> Result<DeliveryOutcome, String> {
+        for message in &mut delivery.messages {
+            super::tools::redact_tool_message_urls(message);
+        }
         if self.closed {
             return Err("chat session is closed".to_string());
         }
-        if delivery.messages.is_empty() {
+        if delivery.deferred_job.is_some()
+            && (!delivery.messages.is_empty()
+                || delivery.thread_patch.is_some()
+                || delivery.push != PushMode::Append
+                || delivery.source != "tool_job.completed")
+        {
+            return Err("deferred tool job envelope must be source-free append-only".into());
+        }
+        if delivery.messages.is_empty() && delivery.deferred_job.is_none() {
             return Err("delivery must contain at least one message".to_string());
         }
         if delivery
@@ -3244,8 +3289,9 @@ impl ChatSession {
             .iter()
             .filter(|pending| !delivery.supersedes(pending))
             .count();
-        let preempt_now =
-            delivery.push == PushMode::Preempt && self.delivery_envelope_boundary_open(&delivery);
+        let preempt_now = delivery.deferred_job.is_none()
+            && delivery.push == PushMode::Preempt
+            && self.delivery_envelope_boundary_open(&delivery);
         if pending_count >= max_pending_deliveries(&settings) && !preempt_now {
             return Err("chat delivery queue is full".to_string());
         }
@@ -3261,7 +3307,8 @@ impl ChatSession {
             return Ok(DeliveryOutcome::Delivered);
         }
 
-        if self.delivery_envelope_boundary_open(&delivery)
+        if delivery.deferred_job.is_none()
+            && self.delivery_envelope_boundary_open(&delivery)
             && !(self.wait_delivery_boundary && !self.pending_deliveries.is_empty())
         {
             self.append_delivery(&delivery);
@@ -3271,14 +3318,25 @@ impl ChatSession {
         }
 
         self.begin_queue_diagnostics_episode();
-        self.pending_deliveries.push_back(delivery);
+        if delivery.source == "review.comment.user" && delivery.push == PushMode::Append {
+            let index = self
+                .pending_deliveries
+                .iter()
+                .position(|pending| {
+                    pending.push == PushMode::Append && pending.source != "review.comment.user"
+                })
+                .unwrap_or(self.pending_deliveries.len());
+            self.pending_deliveries.insert(index, delivery);
+        } else {
+            self.pending_deliveries.push_back(delivery);
+        }
         self.interrupt_wait_for_delivery();
         self.emit_queue_update();
         self.mark_persisted_runtime_changed();
         Ok(DeliveryOutcome::Queued)
     }
 
-    /// Land every pending delivery whose boundary is now open, in enqueue
+    /// Land every pending delivery whose boundary is now open, in queue
     /// order. A blocked `when_idle` delivery never blocks a later `append` one,
     /// and nothing lands inside an open tool-result window.
     ///
@@ -3291,11 +3349,9 @@ impl ChatSession {
         let mut wake = false;
         let expired = self.expire_pending_deliveries();
         loop {
-            let Some(index) = self
-                .pending_deliveries
-                .iter()
-                .position(|pending| self.delivery_envelope_boundary_open(pending))
-            else {
+            let Some(index) = self.pending_deliveries.iter().position(|pending| {
+                pending.deferred_job.is_none() && self.delivery_envelope_boundary_open(pending)
+            }) else {
                 break;
             };
             let Some(delivery) = self.pending_deliveries.remove(index) else {
@@ -3518,7 +3574,7 @@ impl ChatSession {
             .map(|delivery| delivery.id.clone())
             .collect();
         for mut delivery in deliveries {
-            if delivery.messages.is_empty()
+            if (delivery.messages.is_empty() && delivery.deferred_job.is_none())
                 || self.delivered_delivery_ids.contains(&delivery.id)
                 || !seen.insert(delivery.id.clone())
             {
@@ -4789,12 +4845,14 @@ impl ChatSession {
     }
 
     pub fn abort_stream(&mut self) {
+        self.invalidate_review_readiness();
         self.live_diagnostics.clear_accepted();
         self.pending_context_rebuild = None;
         self.pending_mode_handoff = None;
         if let Some(flag) = &self.compression_abort_flag {
             flag.store(true, Ordering::SeqCst);
         }
+        self.execution_abort.store(true, Ordering::SeqCst);
         self.abort_flag.store(true, Ordering::SeqCst);
         self.user_interrupt_flag.store(true, Ordering::SeqCst);
         self.abort_notify.notify_waiters();
@@ -5106,6 +5164,111 @@ mod tests {
 
     fn make_session() -> ChatSession {
         ChatSession::new("test-chat".to_string())
+    }
+
+    #[test]
+    fn execution_origin_stop_survives_turn_flag_reset() {
+        let mut session = make_session();
+        session.begin_execution_origin();
+        let origin = session.execution_abort.clone();
+        session.abort_stream();
+        session.abort_flag.store(false, Ordering::SeqCst);
+        session.user_interrupt_flag.store(false, Ordering::SeqCst);
+        assert!(origin.load(Ordering::SeqCst));
+        session.begin_execution_origin();
+        assert!(!session.execution_abort.load(Ordering::SeqCst));
+        assert!(!Arc::ptr_eq(&origin, &session.execution_abort));
+        assert!(origin.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn execution_origin_later_stop_does_not_cancel_earlier_background_work() {
+        let mut session = make_session();
+        session.begin_execution_origin();
+        let earlier = session.execution_abort.clone();
+        session.begin_execution_origin();
+        let current = session.execution_abort.clone();
+        session.abort_stream();
+        assert!(current.load(Ordering::SeqCst));
+        assert!(!earlier.load(Ordering::SeqCst));
+        session.abort_flag.store(false, Ordering::SeqCst);
+        session.begin_execution_origin();
+        let closing = session.execution_abort.clone();
+        session.close_event_channel();
+        assert!(closing.load(Ordering::SeqCst));
+        assert!(!earlier.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn execution_origin_preserves_stop_before_context_construction() {
+        let mut session = make_session();
+        session.abort_stream();
+        session.begin_execution_origin();
+        let origin = session.execution_abort.clone();
+        session.start_stream().unwrap();
+        assert!(!session.abort_flag.load(Ordering::SeqCst));
+        assert!(origin.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn tool_and_process_publication_scrubs_urls_without_rewriting_other_messages() {
+        let mut session = make_session();
+        let secret_url = "https://user:FAKE@host/repo?q=1";
+        let mut tool = ChatMessage::new(
+            "tool".into(),
+            json!({"output": secret_url, "path": "/home/test/file"}).to_string(),
+        );
+        tool.tool_call_id = "call".into();
+        tool.tool_failed = Some(true);
+        session.add_message(tool);
+        let published = &session.messages[0];
+        let output: serde_json::Value =
+            serde_json::from_str(&published.content.content_text_only()).unwrap();
+        assert_eq!(output["output"], "https://host/repo?q=1");
+        assert_eq!(output["path"], "/home/test/file");
+        assert_eq!(published.tool_failed, Some(true));
+        assert_eq!(published.tool_call_id, "call");
+
+        let process = event(
+            EventSubkind::SystemNotice,
+            "exec.subscribe",
+            json!({"line": secret_url}),
+            secret_url.to_string(),
+        );
+        session
+            .enqueue_delivery(PendingDelivery::new(
+                vec![process],
+                PushMode::Append,
+                "exec.subscribe",
+                false,
+            ))
+            .unwrap();
+        let published_event = session
+            .messages
+            .iter()
+            .find(|message| message.role == "event")
+            .unwrap();
+        assert_eq!(
+            published_event.extra["event"]["payload"]["line"],
+            "https://host/repo?q=1"
+        );
+        let serialized = serde_json::to_string(&session.messages).unwrap();
+        assert!(!serialized.contains("FAKE"));
+        assert!(serialized.contains("https://host/repo?q=1"));
+
+        let mut assistant = ChatMessage::new("assistant".into(), "ordinary".into());
+        assistant.thinking_blocks = Some(vec![json!({"signature": secret_url})]);
+        session.add_message(assistant);
+        session.add_message(ChatMessage::new("user".into(), secret_url.into()));
+        let assistant = &session.messages[session.messages.len() - 2];
+        assert_eq!(
+            assistant.thinking_blocks.as_ref().unwrap()[0]["signature"],
+            secret_url
+        );
+        assert_eq!(
+            session.messages.last().unwrap().content.content_text_only(),
+            secret_url
+        );
     }
 
     #[test]
@@ -6163,6 +6326,45 @@ mod tests {
         future.wake = true;
         session.enqueue_delivery(future).unwrap();
         assert!(!session.delivery_wake_sources.is_empty());
+    }
+
+    #[test]
+    fn deferred_job_refs_never_land_through_synchronous_paths() {
+        let mut session = make_session();
+        let mut delivery = PendingDelivery::with_id(
+            "native-ref",
+            vec![],
+            PushMode::Append,
+            "tool_job.completed",
+            false,
+        );
+        delivery.deferred_job = Some(refact_core::chat_types::DeferredJobRef {
+            job_id: "job".into(),
+            revision: 4,
+            chat_id: session.chat_id.clone(),
+            tool_call_id: "call".into(),
+            tool_name: "cat".into(),
+            model: "model".into(),
+            turn_id: "turn".into(),
+        });
+        assert_eq!(
+            session.enqueue_delivery(delivery.clone()).unwrap(),
+            DeliveryOutcome::Queued
+        );
+        assert!(session.drain_pending_deliveries().0.is_empty());
+        assert!(session.drain_pending_deliveries().0.is_empty());
+        assert!(session.messages.is_empty());
+        assert_eq!(session.pending_deliveries.len(), 1);
+        let saved = serde_json::to_string(&session.pending_deliveries_for_snapshot()).unwrap();
+        let mut restored = make_session();
+        restored.restore_pending_deliveries(serde_json::from_str(&saved).unwrap());
+        assert_eq!(restored.pending_deliveries.len(), 1);
+        assert_eq!(
+            restored.pending_deliveries[0].deferred_job,
+            delivery.deferred_job
+        );
+        assert!(restored.drain_pending_deliveries().0.is_empty());
+        assert!(restored.messages.is_empty());
     }
 
     #[test]

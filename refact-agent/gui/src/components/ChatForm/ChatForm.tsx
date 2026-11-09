@@ -103,6 +103,7 @@ import { useReportErrorMutation } from "../../services/refact/buddy";
 import { useUsageCounter } from "../UsageCounter/useUsageCounter";
 import { ChatInputTopControls } from "./ChatInputTopControls";
 import { InterruptionBanner } from "./InterruptionBanner";
+import { ReviewReadinessBanner } from "./ReviewReadinessBanner";
 
 import classNames from "classnames";
 import { useComposerActivity } from "./useComposerActivity";
@@ -757,6 +758,7 @@ export const ChatForm: React.FC<ChatFormProps> = ({
   return (
     <div ref={setComposerNode} className={styles.composerRoot}>
       <InterruptionBanner chatId={chatId} />
+      <ReviewReadinessBanner chatId={chatId} />
       {visibleError && (
         <ErrorCallout
           timeout={showsChatError ? null : 3000}

@@ -429,7 +429,7 @@ impl Tool for ToolSubagent {
             deliverable.as_ref(),
             &handoff_limits,
         );
-        let req = SpawnRequest {
+        let mut req = SpawnRequest {
             native_supervision_guard: None,
             kind: BgAgentKind::Subagent,
             parent_chat_id: parent_chat_id.clone(),
@@ -650,7 +650,11 @@ impl Tool for ToolSubagent {
                 );
             }
         }
-        let handle = spawn_background_agent(app, req).await?;
+        let review_launch = crate::review::runs::prepare_launch(&app, &mut req).await?;
+        let handle = spawn_background_agent(app.clone(), req).await?;
+        if let Some(binding) = review_launch {
+            crate::review::runs::record_launch(&app, binding, &handle).await?;
+        }
         Ok((
             false,
             vec![build_background_start_tool_result(

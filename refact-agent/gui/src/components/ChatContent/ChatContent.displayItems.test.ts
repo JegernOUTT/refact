@@ -9,6 +9,7 @@ import type {
 } from "../../services/refact";
 import {
   buildDisplayItems,
+  nativeToolJobResult,
   tryIncrementalDisplayItemsUpdate,
 } from "./ChatContentDisplayItems";
 import {
@@ -223,6 +224,121 @@ function expectIncrementalAppendMatchesFull(
 }
 
 describe("ChatContent display items", () => {
+  const completion: EventMessage = {
+    role: "event",
+    content: "## Native completed output",
+    subkind: "system_notice",
+    source: "tool_job.completed",
+    message_id: "tool_job:job:2:0",
+    extra: {
+      event: {
+        subkind: "system_notice",
+        source: "tool_job.completed",
+        payload: { actor: "tool_completion", job_id: "job" },
+      },
+      tool_job_result: {
+        actor: "tool_completion",
+        job_id: "job",
+        revision: 2,
+        tool_name: "code_health",
+        tool_call_id: "call",
+        original_role: "tool",
+      },
+      delivery: { source: "tool_job.completed", id: "tool_job:job:2" },
+    },
+  };
+
+  it("renders exact native completion once, preserving body and provenance, not as a human or event", () => {
+    const items = buildDisplayItems([completion], false);
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      type: "tool_job_result",
+      result: {
+        toolName: "code_health",
+        message: {
+          role: "tool",
+          content: completion.content,
+          extra: completion.extra,
+        },
+      },
+    });
+    expectIncrementalAppendMatchesFull(completion);
+  });
+
+  it("preserves native multimodal bodies and context files outside the original call", () => {
+    const content = [
+      { m_type: "text", m_content: "native text" },
+      { m_type: "image/png", m_content: "aGVsbG8=" },
+    ];
+    const imageEvent = { ...completion, content } as unknown as EventMessage;
+    expect(nativeToolJobResult(imageEvent)?.message.content).toBe(content);
+    const files = [
+      {
+        file_name: "src/native.ts",
+        file_content: "native file",
+        line1: 1,
+        line2: 1,
+      },
+    ];
+    const context = {
+      ...completion,
+      role: "context_file",
+      content: files,
+      tool_call_id: "call",
+      extra: {
+        ...completion.extra,
+        tool_job_result: {
+          ...(completion.extra?.tool_job_result as object),
+          original_role: "context_file",
+        },
+      },
+    } as unknown as ChatMessages[number];
+    const items = buildDisplayItems(
+      [toolCallMessage("call", "cat"), context],
+      false,
+    );
+    expect(items.map((item) => item.type)).toEqual([
+      "assistant",
+      "tool_job_result",
+    ]);
+    expect(nativeToolJobResult(context)?.message).toBe(context);
+  });
+
+  it.each([
+    { delivery: { source: "other", id: "tool_job:job:2" } },
+    { delivery: { source: "tool_job.completed", id: "tool_job:other:2" } },
+    { tool_job_result: { actor: "human" } },
+    { event: { subkind: "system_notice", source: "other", payload: {} } },
+  ])(
+    "leaves unrelated or malformed completion metadata on the ordinary event path: %j",
+    (extra) => {
+      const message = {
+        ...completion,
+        extra: { ...completion.extra, ...extra },
+      };
+      expect(nativeToolJobResult(message)).toBeNull();
+      expect(buildDisplayItems([message], false)[0]?.type).toBe("event");
+    },
+  );
+
+  it("keeps canonical Review replies visible without rendering internal contribution context", () => {
+    const reply = assistantMessage({ content: "Canonical rich reply" });
+    const items = buildDisplayItems(
+      [
+        eventMessage({
+          source: "review.comment",
+          content: "Review contribution context: internal JSON",
+        }),
+        reply,
+        eventMessage({ source: "review.failure", content: "Review failed" }),
+      ],
+      false,
+    );
+    expect(items.filter((item) => item.type === "assistant")).toHaveLength(1);
+    const events = items.filter((item) => item.type === "event");
+    expect(events).toHaveLength(1);
+    expect(events[0].event.source).toBe("review.failure");
+  });
   it("rebuilds a same-index assistant update into a summarization item when it becomes compressed", () => {
     const previousMessages: ChatMessages = [assistantMessage()];
     const nextMessages: ChatMessages = [

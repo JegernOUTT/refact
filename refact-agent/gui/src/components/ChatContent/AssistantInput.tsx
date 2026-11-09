@@ -22,6 +22,7 @@ import styles from "./ChatContent.module.css";
 
 type ChatInputProps = {
   message: string | null;
+  bodyContent?: React.ReactNode;
   reasoningContent?: string | null;
   thinkingBlocks?: ThinkingBlock[] | null;
   toolCalls?: ToolCall[] | null;
@@ -40,6 +41,7 @@ type ChatInputProps = {
 
 const _AssistantInput: React.FC<ChatInputProps> = ({
   message,
+  bodyContent,
   reasoningContent,
   thinkingBlocks,
   toolCalls,
@@ -147,13 +149,15 @@ const _AssistantInput: React.FC<ChatInputProps> = ({
       )}
       {hasMessageContent && (
         <Box py="4">
-          <Markdown
-            canHaveInteractiveElements={true}
-            onCopyClick={handleCopy}
-            isStreaming={isStreaming}
-          >
-            {message}
-          </Markdown>
+          {bodyContent ?? (
+            <Markdown
+              canHaveInteractiveElements={true}
+              onCopyClick={handleCopy}
+              isStreaming={isStreaming}
+            >
+              {message}
+            </Markdown>
+          )}
         </Box>
       )}
       {/* Server-executed tools indicator with citations */}

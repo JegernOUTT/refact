@@ -1531,10 +1531,10 @@ pub(crate) async fn notify_planner_agents_finished(
 
 pub(crate) async fn remove_agent_worktree_and_branch(
     app: AppState,
-    _task_id: &str,
+    task_id: &str,
     card_id: &str,
     agent_worktree: &str,
-    _agent_branch: &str,
+    agent_branch: &str,
     agent_worktree_name: Option<&str>,
 ) -> (bool, bool) {
     let cache_dir = app.paths.cache_dir.clone();
@@ -1547,42 +1547,74 @@ pub(crate) async fn remove_agent_worktree_and_branch(
         return (false, false);
     };
 
+    // A raw path from a board is not sufficient to identify a job domain.
+    // Refuse both registered and fallback cleanup unless we can pin an exact
+    // registered task checkout, and keep its barrier through the fallback.
+    let Some(id) = agent_worktree_name else {
+        tracing::warn!(%card_id, "Worktree cleanup deferred: no registered identity");
+        return (false, false);
+    };
+    let Ok(service) = WorktreeService::new_async(cache_dir.clone(), workspace_root.clone()).await
+    else {
+        return (false, false);
+    };
+    let Ok(view) = service.get_worktree(id).await else {
+        tracing::warn!(%card_id, "Worktree cleanup deferred: registered identity unavailable");
+        return (false, false);
+    };
+    let meta = view.meta;
+    if meta.kind != "task_agent"
+        || meta.task_id.as_deref() != Some(task_id)
+        || meta.card_id.as_deref() != Some(card_id)
+        || meta.root != Path::new(agent_worktree)
+        || meta.branch.as_deref() != Some(agent_branch)
+    {
+        tracing::warn!(%card_id, "Worktree cleanup deferred: registered identity mismatch");
+        return (false, false);
+    }
+    let service =
+        crate::worktrees::service::fenced_service(service, app.runtime.tool_jobs.scopes.clone());
+    let service = match service.fence_worktrees(&[id.to_string()], false).await {
+        Ok(service) => service,
+        Err(error) => {
+            tracing::warn!(?error, %card_id, "Worktree cleanup deferred by job lifecycle barrier");
+            return (false, false);
+        }
+    };
+    if !matches!(service.validate_worktree_meta_strict(&meta).await, Ok(current) if current == meta)
+    {
+        tracing::warn!(%card_id, "Worktree cleanup deferred: registered identity changed during drain");
+        return (false, false);
+    }
+
     let mut worktree_removed = !tokio::fs::try_exists(agent_worktree).await.unwrap_or(true);
     let mut branch_deleted = false;
 
     if let Some(worktree_id) = agent_worktree_name {
-        if let Ok(service) =
-            WorktreeService::new_async(cache_dir.clone(), workspace_root.clone()).await
-        {
-            match service.delete_worktree(worktree_id, true, true).await {
-                Ok(deleted) => {
-                    worktree_removed = deleted.deleted
-                        && !tokio::fs::try_exists(agent_worktree).await.unwrap_or(true);
-                    branch_deleted = deleted.branch_deleted;
-                    for warning in deleted.warnings {
-                        tracing::warn!(
-                            "Registered agent worktree cleanup warning for '{}': {}",
-                            worktree_id,
-                            warning
-                        );
-                    }
-                    return (worktree_removed, branch_deleted);
-                }
-                Err(e) => {
+        match service.delete_worktree(worktree_id, true, true).await {
+            Ok(deleted) => {
+                worktree_removed =
+                    deleted.deleted && !tokio::fs::try_exists(agent_worktree).await.unwrap_or(true);
+                branch_deleted = deleted.branch_deleted;
+                for warning in deleted.warnings {
                     tracing::warn!(
-                        "Failed to delete registered worktree '{}': {}",
+                        "Registered agent worktree cleanup warning for '{}': {}",
                         worktree_id,
-                        e
+                        warning
                     );
-                    return (worktree_removed, branch_deleted);
                 }
             }
-        } else {
-            return (worktree_removed, branch_deleted);
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to delete registered worktree '{}': {}",
+                    worktree_id,
+                    e
+                );
+            }
         }
-    } else {
-        return (worktree_removed, branch_deleted);
     }
+
+    (worktree_removed, branch_deleted)
 }
 
 pub(crate) async fn capture_failed_agent_diff(

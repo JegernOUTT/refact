@@ -9,6 +9,7 @@ import { Chat } from "../Chat/Chat";
 import { ChatThreadProvider } from "../Chat/Thread";
 import { selectCapabilities } from "../Config/configSlice";
 import { DesignSurface } from "../Design";
+import { ReviewChatSurface } from "../Review";
 import { FileViewer } from "./FilesPanel";
 import { GitPanel } from "./GitPanel";
 import {
@@ -113,12 +114,14 @@ export function SurfacePane({
       return (
         <div className={styles.surfacePane} data-surface-key={surfaceKey}>
           <ChatThreadProvider chatId={parsed.id}>
-            <Chat
-              host={config.host}
-              tabbed={config.tabbed}
-              backFromChat={backFromChat}
-              chatId={parsed.id}
-            />
+            <ReviewChatSurface chatId={parsed.id}>
+              <Chat
+                host={config.host}
+                tabbed={config.tabbed}
+                backFromChat={backFromChat}
+                chatId={parsed.id}
+              />
+            </ReviewChatSurface>
           </ChatThreadProvider>
         </div>
       );

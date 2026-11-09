@@ -236,18 +236,12 @@ pub fn reject_authority_widening(
 
 pub async fn reload_project(gcx: Arc<GlobalContext>, root: &std::path::Path) -> Result<(), String> {
     crate::yaml_configs::customization_registry::invalidate_all_registry_caches(gcx.clone()).await;
-    let registry = crate::yaml_configs::customization_registry::load_merged_registry(
-        &gcx.config_dir,
-        Some(root),
+    crate::yaml_configs::customization_registry::get_project_registry_for_root(
+        gcx,
+        Some(root.to_path_buf()),
+        true,
     )
-    .await;
-    if !registry.errors.is_empty() {
-        return Err("customization registry reload has validation errors".into());
-    }
-    gcx.project_registry_cache
-        .write()
-        .map_err(|_| "customization cache unavailable".to_string())?
-        .insert(root.to_path_buf(), registry);
+    .await?;
     Ok(())
 }
 

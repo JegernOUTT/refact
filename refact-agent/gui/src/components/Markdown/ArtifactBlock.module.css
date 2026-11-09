@@ -50,3 +50,16 @@
   border-top: var(--rf-hairline) solid var(--rf-border);
   background: var(--rf-color-danger-soft);
 }
+
+.review_artifact {
+  min-width: 0;
+}
+.review_iframe {
+  display: block;
+  width: 100%;
+  border: 0;
+  background: transparent;
+}
+.review_error {
+  color: var(--rf-color-muted);
+}

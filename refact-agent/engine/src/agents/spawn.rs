@@ -1105,6 +1105,11 @@ async fn accept_prepared_launch(
         )
         .await?;
     let agent_id = record.agent_id.clone();
+    if let Err(error) = crate::review::runs::record_accepted_launch(&app, &req, &record).await {
+        let _ = app.agents.mark_failed(&agent_id, error.clone()).await;
+        return Err(error);
+    }
+
     let launch_intent = crate::coordination::launch_intents::LaunchIntentSlot::persist_for_agent(
         &app, &agent_id, 1,
     )
@@ -1572,6 +1577,7 @@ async fn prepare_launch_for_parent_run(
         drop(resolve_config);
         Ok(SubchatConfig {
             runner_lease_token: None,
+            native_job_fence: None,
             history_source_model: None,
             tool_name: req.config_name.clone(),
             stateful: true,
@@ -2405,6 +2411,13 @@ async fn revalidate_prepared_launch(
         .get(&req.parent_chat_id)
         .cloned()
         .ok_or("parent session unavailable")?;
+    let pinned_review = crate::review::runs::is_pinned_launch(
+        app,
+        &prepared.project_root,
+        &req.parent_chat_id,
+        prepared.config.worktree.as_ref(),
+    )
+    .await?;
     {
         let parent = parent.lock().await;
         if parent.closed || parent.abort_flag.load(Ordering::Acquire) {
@@ -2414,8 +2427,9 @@ async fn revalidate_prepared_launch(
             .and_then(|root| dunce::canonicalize(root).ok())
             .as_ref()
             != Some(&prepared.project_root)
-            || parent.thread.worktree.as_ref().map(|w| (&w.id, &w.root))
-                != prepared.config.worktree.as_ref().map(|w| (&w.id, &w.root))
+            || (!pinned_review
+                && parent.thread.worktree.as_ref().map(|w| (&w.id, &w.root))
+                    != prepared.config.worktree.as_ref().map(|w| (&w.id, &w.root)))
         {
             return Err("accepted parent scope changed while queued".into());
         }
@@ -3228,6 +3242,9 @@ async fn resume_agent_for_parent_run(
                                         fresh.source_workspace_root.clone(),
                                     )
                                     .await?;
+                                    let service = crate::worktrees::service::fenced_service(
+                                        service, app.runtime.tool_jobs.scopes.clone(),
+                                    );
                                     let observed = service.get_worktree(&fresh.meta.id).await?;
                                     if observed.meta != fresh.meta
                                         || observed.status.dirty
@@ -3849,6 +3866,16 @@ async fn run_spawned_agent(
     config.background_agent_id = Some(agent_id.clone());
     config.chat_id = Some(stable_child_chat_id(&config, &child_chat_id));
     config.final_step_force_answer = req.native_supervision_guard.is_none();
+    // Install the opaque in-process capability before remember_config copies it.
+    // Serde skips it: persisted/recovered configuration never restores authority.
+    let native_owner = req.native_supervision_guard.as_ref().map(|guard| {
+        let (fence, owner) = crate::buddy::supervision_authority::NativeJobFence::new_owner(
+            guard.clone(),
+            child_chat_id.clone(),
+        );
+        config.native_job_fence = Some(fence);
+        owner
+    });
     if let Err(error) = persist_run_config(&app, &agent_id, &config).await {
         cleanup_spawn_worktree(app.clone(), spawned_worktree.as_ref()).await;
         return app
@@ -3928,6 +3955,7 @@ async fn run_spawned_agent(
     } else {
         run_background_subchat(app.gcx.clone(), messages, config).await
     };
+    drop(native_owner);
     progress_task.finish().await;
     if req.native_supervision_guard.is_some() {
         crate::subchat::finish_stateful_subchat_session(&app, &child_chat_id, &run_config).await;
@@ -4317,6 +4345,33 @@ async fn cleanup_spawn_worktree(app: AppState, spawned: Option<&SpawnedWorktree>
     .await
     {
         Ok(service) => {
+            let service = crate::worktrees::service::fenced_service(
+                service,
+                app.runtime.tool_jobs.scopes.clone(),
+            );
+            let service = match service
+                .fence_worktrees(&[spawned.meta.id.to_string()], false)
+                .await
+            {
+                Ok(service) => service,
+                Err(error) => {
+                    tracing::warn!(%error, "Worktree cleanup deferred by job lifecycle barrier");
+                    return;
+                }
+            };
+            // Revalidate after the drain so an id rebound to a different
+            // checkout is never deleted under the old checkout's barrier.
+            match service.validate_worktree_meta_strict(&spawned.meta).await {
+                Ok(meta) if meta == spawned.meta => {}
+                Ok(_) => {
+                    tracing::warn!("Worktree cleanup deferred: registered identity changed");
+                    return;
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "Worktree cleanup deferred: identity unavailable");
+                    return;
+                }
+            }
             if let Err(error) = service.delete_worktree(&spawned.meta.id, true, true).await {
                 tracing::warn!(
                     "Failed to clean up isolated subagent worktree '{}': {}",
@@ -4523,6 +4578,8 @@ pub(super) async fn prepare_spawn_merge_service(
     };
     let mut service =
         WorktreeService::new_async(app.gcx.cache_dir.clone(), source_workspace_root).await?;
+    service =
+        crate::worktrees::service::fenced_service(service, app.runtime.tool_jobs.scopes.clone());
     if let Some(parent) = parent_worktree {
         service = service.with_nested_merge_identity(source, parent);
     }

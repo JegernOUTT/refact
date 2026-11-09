@@ -335,6 +335,12 @@ pub fn try_apply_goal_nudge(
         return GoalNudgeOutcome::Skipped(GoalNudgeSkip::Busy);
     }
 
+    // A private pre-model continuation owns this frontier. Appending a goal
+    // nudge would invalidate it and repeatedly resubmit the same preflight.
+    if session.review_readiness_pending.is_some() || session.verifier_readiness_pending.is_some() {
+        return GoalNudgeOutcome::Skipped(GoalNudgeSkip::IntentionallyWaiting);
+    }
+
     let Some(goal) = session.goal.as_ref() else {
         return GoalNudgeOutcome::Skipped(GoalNudgeSkip::NoGoal);
     };

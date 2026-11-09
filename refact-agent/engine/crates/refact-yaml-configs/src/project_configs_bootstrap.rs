@@ -98,14 +98,6 @@ pub async fn global_configs_try_create_all(config_dir: &Path) -> Result<(), Stri
     }
 
     remove_retired_default(
-        &config_dir.join("modes").join("review.yaml"),
-        "modes/review.yaml",
-        &existing_checksums,
-        &mut new_checksums,
-    )
-    .await;
-
-    remove_retired_default(
         &config_dir.join("subagents").join("buddy_humor.yaml"),
         "subagents/buddy_humor.yaml",
         &existing_checksums,
@@ -514,6 +506,11 @@ mod tests {
         assert!(config_dir.join("subagents").exists());
         assert!(config_dir.join("toolbox_commands").exists());
         assert!(config_dir.join("code_lens").exists());
+        let review = config_dir.join("modes/review.yaml");
+        let installed = fs::read(&review).await.unwrap();
+        assert!(!installed.is_empty());
+        global_configs_try_create_all(&config_dir).await.unwrap();
+        assert_eq!(fs::read(&review).await.unwrap(), installed);
     }
 
     #[tokio::test]

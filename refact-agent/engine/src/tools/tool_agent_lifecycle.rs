@@ -28,6 +28,7 @@ struct PlannerContext {
     chat_id: String,
     gcx: Arc<GlobalContext>,
     chat_facade: Arc<dyn ChatSessionFacade>,
+    scopes: Arc<crate::tool_jobs::scope::ScopeCoordinator>,
 }
 
 #[derive(Default, Clone)]
@@ -118,6 +119,7 @@ async fn planner_context(
         chat_id: ccx_lock.chat_id.clone(),
         gcx: ccx_lock.app.gcx.clone(),
         chat_facade: ccx_lock.app.chat.facade.clone(),
+        scopes: ccx_lock.app.runtime.tool_jobs.scopes.clone(),
     })
 }
 
@@ -522,6 +524,7 @@ fn paths_match_if_recorded(recorded: Option<&str>, actual: &Path) -> Result<(), 
 
 async fn prepare_cleanup_target(
     gcx: Arc<GlobalContext>,
+    scopes: Arc<crate::tool_jobs::scope::ScopeCoordinator>,
     task_id: &str,
     card_id: &str,
     snapshot: &LifecycleCardSnapshot,
@@ -534,6 +537,7 @@ async fn prepare_cleanup_target(
             else {
                 continue;
             };
+            let service = crate::worktrees::service::fenced_service(service, scopes.clone());
             let Ok(view) = service.get_worktree(worktree_name).await else {
                 continue;
             };
@@ -720,6 +724,7 @@ async fn discard_registered_worktree(
     for source_root in project_dirs {
         let service =
             WorktreeService::new_async(planner.gcx.cache_dir.clone(), source_root).await?;
+        let service = crate::worktrees::service::fenced_service(service, planner.scopes.clone());
         let registry = service.load_registry().await?;
         let record = registry.records.iter().find(|record| {
             snapshot.agent_worktree_name.as_deref().map_or_else(
@@ -1013,8 +1018,14 @@ impl Tool for ToolCancelAgent {
         let cleanup_target = if retain_worktree {
             CleanupTarget::None
         } else {
-            prepare_cleanup_target(planner.gcx.clone(), &planner.task_id, &card_id, &snapshot)
-                .await?
+            prepare_cleanup_target(
+                planner.gcx.clone(),
+                planner.scopes.clone(),
+                &planner.task_id,
+                &card_id,
+                &snapshot,
+            )
+            .await?
         };
 
         let card_id_for_update = card_id.clone();

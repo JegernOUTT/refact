@@ -2226,6 +2226,7 @@ mod tests {
             .unwrap();
         let config = crate::subchat::SubchatConfig {
             runner_lease_token: Some("identity-test-runner".into()),
+            native_job_fence: None,
             history_source_model: None,
             tool_name: "subagent".to_string(),
             stateful: true,

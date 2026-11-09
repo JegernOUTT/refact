@@ -305,6 +305,8 @@ use crate::http::routers::v1::v1_browser::{
     handle_browser_annotate_clear, handle_browser_action,
 };
 
+pub mod tool_jobs;
+
 pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
     let builder = Router::new()
         .route("/engine/identity", get(engine_observation::identity))
@@ -319,6 +321,7 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
                 .layer(axum::extract::DefaultBodyLimit::max(128 * 1024)),
         )
         .merge(tools_routes())
+        .merge(tool_jobs::router())
         .merge(lsp_routes())
         .merge(ast_routes())
         .merge(performance_routes())
@@ -326,6 +329,7 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
         .merge(settings_routes())
         .merge(privacy_routes())
         .merge(worktrees_routes())
+        .merge(crate::review::http::router())
         .merge(background_agents_routes())
         .merge(at_commands_routes())
         .merge(integrations_routes())

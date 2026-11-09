@@ -1,0 +1,24 @@
+.resizable.resizable[data-review="true"] {
+  grid-template-columns: var(--review-chat-width) minmax(0, 1fr);
+}
+
+.handle {
+  grid-area: chat;
+  justify-self: end;
+  position: relative;
+  z-index: 1;
+  width: var(--rf-space-2);
+  margin-right: calc(-1 * var(--rf-space-1));
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.handle:hover,
+.handle:focus-visible {
+  background: var(--rf-color-accent-soft);
+}
+
+.handle:focus-visible {
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
+  outline-offset: var(--rf-focus-ring-offset-inset);
+}

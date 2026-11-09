@@ -273,7 +273,7 @@ async fn prepare_request(
         ..Default::default()
     };
 
-    prepare_chat_passthrough(
+    let prepared = prepare_chat_passthrough(
         gcx,
         Arc::new(AMutex::new(ccx)),
         &t,
@@ -287,7 +287,15 @@ async fn prepare_request(
         &options,
     )
     .await
-    .unwrap()
+    .unwrap();
+    match prepared {
+        crate::chat::prepare::PrepareOutcome::Ready(prepared) => prepared,
+        crate::chat::prepare::PrepareOutcome::Pending {
+            ..
+        } => {
+            panic!("ordinary cache-stability preparation must not defer")
+        }
+    }
 }
 
 fn openai_body(req: &LlmRequest, model_name: &str) -> Value {

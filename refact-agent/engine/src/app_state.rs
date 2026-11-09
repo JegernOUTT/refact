@@ -56,6 +56,8 @@ pub struct RuntimeServices {
     pub http_client: reqwest::Client,
     pub ask_shutdown_sender: Arc<StdMutex<std::sync::mpsc::Sender<String>>>,
     pub exec_registry: Arc<ExecRegistry>,
+    pub tool_jobs: Arc<crate::tool_jobs::JobRuntime>,
+    pub(crate) review_readiness: Arc<crate::review::readiness::ReadinessRegistry>,
 }
 
 #[derive(Clone)]
@@ -1482,7 +1484,7 @@ impl ToolRegistry for AppToolRegistry {
                 if let Some(pool) = pool.as_ref() {
                     Self::app_turn_tool_pool(pool)?.return_tool(tool).await;
                 }
-                return Err(error);
+                return Err(refact_core::string_utils::redact_url_credentials(&error));
             }
         };
         if let Some(pool) = pool.as_ref() {
@@ -1492,7 +1494,10 @@ impl ToolRegistry for AppToolRegistry {
         let mut context_files = Vec::new();
         for item in result.1 {
             match item {
-                crate::call_validation::ContextEnum::ChatMessage(message) => messages.push(message),
+                crate::call_validation::ContextEnum::ChatMessage(mut message) => {
+                    crate::chat::tools::redact_tool_message_urls(&mut message);
+                    messages.push(message);
+                }
                 crate::call_validation::ContextEnum::ContextFile(file) => context_files.push(file),
             }
         }
@@ -1585,7 +1590,7 @@ impl ToolRegistry for AppToolRegistry {
             Err(error) => {
                 runtime_span.finish_tool(PerfOutcome::Failure, 1, 1, None);
                 Self::app_turn_tool_pool(pool)?.return_tool(tool).await;
-                return Err(error);
+                return Err(refact_core::string_utils::redact_url_credentials(&error));
             }
         };
         Self::app_turn_tool_pool(pool)?.return_tool(tool).await;
@@ -1593,7 +1598,10 @@ impl ToolRegistry for AppToolRegistry {
         let mut context_files = Vec::new();
         for item in result.1 {
             match item {
-                crate::call_validation::ContextEnum::ChatMessage(message) => messages.push(message),
+                crate::call_validation::ContextEnum::ChatMessage(mut message) => {
+                    crate::chat::tools::redact_tool_message_urls(&mut message);
+                    messages.push(message);
+                }
                 crate::call_validation::ContextEnum::ContextFile(file) => context_files.push(file),
             }
         }

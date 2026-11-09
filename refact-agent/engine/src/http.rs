@@ -281,7 +281,16 @@ pub async fn start_server(
                             error!("graceful shutdown trajectory flush failed: {}", error);
                         }
                     }
-                    crate::chat::close_all_chat_sessions(app).await;
+                    if let Err(error) = crate::chat::close_all_chat_sessions(app).await {
+                        error!(
+                            ?error,
+                            "graceful shutdown blocked: job effects remain unresolved"
+                        );
+                        // The graceful-shutdown future must not resolve as if all
+                        // effects had stopped. The process can still be forced to
+                        // exit externally, but that is not a successful drain.
+                        std::future::pending::<()>().await;
+                    }
                 };
                 let server = builder
                     .serve(router.into_make_service_with_connect_info::<SocketAddr>())

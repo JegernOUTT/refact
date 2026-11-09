@@ -53,7 +53,102 @@ impl Journal {
     }
 }
 
+struct SyncCacheInvalidation(WorktreeService);
+
+impl Drop for SyncCacheInvalidation {
+    fn drop(&mut self) {
+        self.0.invalidate_registry_cache();
+    }
+}
+
 impl WorktreeService {
+    pub async fn fence_sync_worktree(&self, id: &str, allow_missing: bool) -> Result<Self, String> {
+        validate_worktree_id(id)?;
+        let registry = self.load_registry_unlocked().await?;
+        let record = registry
+            .records
+            .iter()
+            .find(|r| r.meta.id == id)
+            .cloned()
+            .ok_or("Sync worktree is not registered")?;
+        let checked = record.clone();
+        let worker = self.clone();
+        tokio::task::spawn_blocking(move || worker.sync_validate_record(&checked, allow_missing))
+            .await
+            .map_err(|e| e.to_string())??;
+        let service = if let Some(token) = &self.effect_token {
+            if !token.records.contains(&record.meta) {
+                return Err("Existing effect token does not cover sync source identity".into());
+            }
+            self.clone()
+        } else {
+            if self.merge_permit.is_some() {
+                return Err("Acquire sync effect fence before merge permit".into());
+            }
+            let fence = self
+                .effect_fence
+                .as_ref()
+                .ok_or("Sync mutation requires an application effect coordinator")?;
+            let guard = fence
+                .begin(
+                    self.source_workspace_root.clone(),
+                    vec![record.meta.root.clone()],
+                )
+                .await?;
+            Self {
+                effect_token: Some(Arc::new(EffectToken {
+                    records: vec![record.meta.clone()],
+                    includes_source: false,
+                    archive: None,
+                    legacy: None,
+                    target: None,
+                    target_materialized: Arc::new(AtomicBool::new(false)),
+                    legacy_removed: Arc::new(AtomicBool::new(false)),
+                    _guard: guard,
+                })),
+                ..self.clone()
+            }
+        };
+        let worker = service.clone();
+        tokio::task::spawn_blocking(move || worker.sync_validate_record(&record, allow_missing))
+            .await
+            .map_err(|e| e.to_string())??;
+        Ok(service)
+    }
+
+    fn sync_validate_record(
+        &self,
+        record: &WorktreeRegistryRecord,
+        allow_missing: bool,
+    ) -> Result<(), String> {
+        let registry: WorktreeRegistry = serde_json::from_slice(
+            &std::fs::read(self.registry_path()).map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())?;
+        if registry.project_hash != self.project_hash
+            || registry.source_workspace_root != self.source_workspace_root
+            || !registry.records.iter().any(|r| r.meta == record.meta)
+            || record.meta.source_workspace_root != self.source_workspace_root
+            || record.meta.root == self.source_workspace_root
+            || !record.meta.root.is_absolute()
+            || record
+                .meta
+                .root
+                .components()
+                .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            return Err("Sync registered identity changed after effect drain".into());
+        }
+        if allow_missing && !record.meta.root.try_exists().map_err(|e| e.to_string())? {
+            return Ok(());
+        }
+        validate_registered_record_checkout(record)?;
+        if dunce::canonicalize(&record.meta.root).map_err(|e| e.to_string())? != record.meta.root {
+            return Err("Sync canonical source identity changed".into());
+        }
+        Ok(())
+    }
+
     pub fn with_sync_actor(&self, actor: String) -> Self {
         Self {
             sync_actor: Some(actor),
@@ -270,7 +365,14 @@ impl WorktreeService {
         request: WorktreeSyncRequest,
     ) -> Result<WorktreeSyncResponse, String> {
         validate_worktree_id(id)?;
-        let service = self.acquire_merge_permit().await?;
+        let mutating = !matches!(request, WorktreeSyncRequest::Status { .. });
+        let allow_missing = matches!(request, WorktreeSyncRequest::Recover { .. });
+        let service = if mutating {
+            self.fence_sync_worktree(id, allow_missing).await?
+        } else {
+            self.clone()
+        };
+        let service = service.acquire_merge_permit().await?;
         let guard = service.registry_write_lock().await?;
         let registry = service.load_registry_unlocked().await?;
         let record = registry
@@ -281,14 +383,23 @@ impl WorktreeService {
             .ok_or("Sync worktree is not registered")?;
         let id = id.to_string();
         let worker = service.clone();
-        let result = tokio::task::spawn_blocking(move || {
+        tokio::task::spawn_blocking(move || {
             let _guard = guard;
+            let _invalidation = mutating.then(|| SyncCacheInvalidation(worker.clone()));
+            if mutating {
+                if !worker
+                    .effect_token
+                    .as_ref()
+                    .is_some_and(|token| token.records.contains(&record.meta))
+                {
+                    return Err("Sync effect token does not cover registered source".into());
+                }
+                worker.sync_validate_record(&record, allow_missing)?;
+            }
             worker.sync_inner(&id, record, request)
         })
         .await
-        .map_err(|e| format!("Sync task interrupted; inspect status before retry: {e}"))?;
-        invalidate_list_cache();
-        result
+        .map_err(|e| format!("Sync task interrupted; inspect status before retry: {e}"))?
     }
 
     fn sync_inner(
@@ -328,7 +439,7 @@ impl WorktreeService {
                         Vec::new(),
                     ));
                 }
-                self.sync_reconcile(j)?;
+                self.sync_reconcile_observed(j, false)?;
                 if !j.active()
                     && requested.is_some_and(|branch| branch != j.operation.target_branch)
                 {
@@ -600,6 +711,10 @@ impl WorktreeService {
     }
 
     fn sync_reconcile(&self, j: &mut Journal) -> Result<(), String> {
+        self.sync_reconcile_observed(j, true)
+    }
+
+    fn sync_reconcile_observed(&self, j: &mut Journal, persist: bool) -> Result<(), String> {
         if !j.active() {
             return Ok(());
         }
@@ -688,7 +803,11 @@ impl WorktreeService {
         } else {
             j.status = WorktreeSyncStatus::RecoveryRequired;
         }
-        self.sync_save(j)
+        if persist {
+            self.sync_save(j)
+        } else {
+            Ok(())
+        }
     }
 
     fn sync_resolve(

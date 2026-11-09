@@ -1,5 +1,149 @@
 use super::*;
 
+#[derive(Debug)]
+struct RetainedSyncFence(Arc<AtomicBool>);
+
+#[derive(Debug)]
+struct ReplaceSyncRegistration(PathBuf);
+
+impl WorktreeEffectFence for ReplaceSyncRegistration {
+    fn begin(
+        &self,
+        _project: PathBuf,
+        _roots: Vec<PathBuf>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<EffectGuard, String>> + Send + '_>>
+    {
+        Box::pin(async move {
+            let mut registry: WorktreeRegistry =
+                serde_json::from_slice(&std::fs::read(&self.0).unwrap()).unwrap();
+            registry.records[0].meta.branch = Some("replacement".into());
+            std::fs::write(&self.0, serde_json::to_vec(&registry).unwrap()).unwrap();
+            Ok(Arc::new(()) as EffectGuard)
+        })
+    }
+}
+
+#[tokio::test]
+async fn native_sync_registration_changed_during_drain_is_not_authorized() {
+    let (_temp, service, meta) = fixture().await;
+    let service =
+        service.with_effect_fence(Arc::new(ReplaceSyncRegistration(service.registry_path())));
+    let error = service
+        .sync_worktree(
+            &meta.id,
+            WorktreeSyncRequest::Start {
+                target_branch: Some("main".into()),
+                expected_source_head: native::head(&meta.root).unwrap(),
+                expected_target_head: native::target(&meta.root, "main").unwrap(),
+                checkpoint: false,
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(error.contains("identity changed"), "{error}");
+    assert!(!service.sync_path(&meta.id).unwrap().exists());
+}
+
+struct RetainedSyncGuard(Arc<AtomicBool>);
+
+impl Drop for RetainedSyncGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
+impl WorktreeEffectFence for RetainedSyncFence {
+    fn begin(
+        &self,
+        _project: PathBuf,
+        roots: Vec<PathBuf>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<EffectGuard, String>> + Send + '_>>
+    {
+        Box::pin(async move {
+            assert_eq!(roots.len(), 1);
+            self.0.store(true, Ordering::Release);
+            Ok(Arc::new(RetainedSyncGuard(self.0.clone())) as EffectGuard)
+        })
+    }
+}
+
+#[tokio::test]
+async fn native_sync_worker_retains_fence_and_invalidates_after_drop_and_panic() {
+    for panic_worker in [false, true] {
+        let (_temp, service, meta) = fixture().await;
+        let active = Arc::new(AtomicBool::new(false));
+        let service = service.with_effect_fence(Arc::new(RetainedSyncFence(active.clone())));
+        let generation = registry_generation(&service.cache_dir);
+        let before = generation.load(Ordering::SeqCst);
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let started_tx = std::sync::Mutex::new(Some(started_tx));
+        let barrier = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+        let worker_barrier = barrier.clone();
+        let service = service.with_merge_authority(Arc::new(move || {
+            if let Some(tx) = started_tx.lock().unwrap().take() {
+                tx.send(()).unwrap();
+                let (lock, changed) = &*worker_barrier;
+                let mut released = lock.lock().unwrap();
+                while !*released {
+                    released = changed.wait(released).unwrap();
+                }
+                assert!(!panic_worker, "sync worker panic");
+            }
+            Ok(())
+        }));
+        let task = tokio::spawn(async move { start(&service, &meta, false).await });
+        started_rx.await.unwrap();
+        task.abort();
+        let _ = task.await;
+        assert!(active.load(Ordering::Acquire));
+        assert_eq!(generation.load(Ordering::SeqCst), before);
+        {
+            let (lock, changed) = &*barrier;
+            *lock.lock().unwrap() = true;
+            changed.notify_all();
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while active.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(generation.load(Ordering::SeqCst) > before);
+    }
+}
+
+#[tokio::test]
+async fn native_sync_status_is_read_only_and_raw_mutation_requires_fence() {
+    let (_temp, service, meta) = fixture().await;
+    commit(&meta.root, "file", b"ours");
+    commit(service.source_workspace_root(), "file", b"theirs");
+    start(&service, &meta, false).await;
+    let path = service.sync_path(&meta.id).unwrap();
+    let before = std::fs::read(&path).unwrap();
+    let raw = WorktreeService::new(
+        service.cache_dir.clone(),
+        service.source_workspace_root.clone(),
+    )
+    .unwrap();
+    let status = raw
+        .sync_worktree(
+            &meta.id,
+            WorktreeSyncRequest::Status {
+                target_branch: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(std::fs::read(path).unwrap(), before);
+    let error = raw
+        .sync_worktree(&meta.id, abort(&status.operation.unwrap(), false))
+        .await
+        .unwrap_err();
+    assert!(error.contains("coordinator"), "{error}");
+    assert!(git::has_merge_in_progress(&meta.root));
+}
+
 fn git(root: &Path, args: &[&str]) -> String {
     native::text(root, args).unwrap()
 }
@@ -14,7 +158,9 @@ async fn fixture() -> (tempfile::TempDir, WorktreeService, WorktreeMeta) {
     std::fs::create_dir(&source).unwrap();
     git(&source, &["init", "-b", "main"]);
     commit(&source, "file", b"base\n");
-    let service = WorktreeService::new(temp.path().join("cache"), source).unwrap();
+    let service =
+        super::super::worktree_registry_tests::test_service(temp.path().join("cache"), source)
+            .unwrap();
     let created = service
         .create_worktree(CreateWorktreeRequest {
             branch: Some("refact/chat/sync".into()),
@@ -89,7 +235,7 @@ async fn shell_resolution_lands_with_stale_active_or_unreadable_native_journal()
         if corrupt {
             std::fs::write(service.sync_path(&meta.id).unwrap(), b"invalid journal").unwrap();
         }
-        let restarted = WorktreeService::new(
+        let restarted = super::super::worktree_registry_tests::test_service(
             service.cache_dir.clone(),
             service.source_workspace_root.clone(),
         )
@@ -133,7 +279,7 @@ async fn native_sync_real_conflicts_restart_cas_ancestry_and_landing() {
         target_head
     );
     let op = response.operation.unwrap();
-    let service = WorktreeService::new(
+    let service = super::super::worktree_registry_tests::test_service(
         service.cache_dir.clone(),
         service.source_workspace_root.clone(),
     )
@@ -426,10 +572,13 @@ async fn native_sync_reconcile_interrupted_merge_and_checkpoint() {
         .await
         .unwrap();
     assert_eq!(recovered.status, WorktreeSyncStatus::Conflicts);
-    assert_eq!(
-        service.sync_journal(&meta.id).unwrap().unwrap().scope,
-        vec!["file"]
-    );
+    assert!(service
+        .sync_journal(&meta.id)
+        .unwrap()
+        .unwrap()
+        .scope
+        .is_empty());
+    assert_eq!(recovered.conflicts[0].path, "file");
     service
         .sync_worktree(&meta.id, abort(recovered.operation.as_ref().unwrap(), true))
         .await

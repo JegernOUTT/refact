@@ -712,15 +712,47 @@ fn winner_parts<'a>(
     }
 }
 
+#[cfg(test)]
 pub(crate) async fn cleanup_ab_variant(
     gcx: Arc<GlobalContext>,
     variant: &AbVariantInfo,
 ) -> Result<(), String> {
-    cleanup_ab_variant_with_timeout(gcx, variant, AGENT_ABORT_TIMEOUT).await
+    let app = crate::app_state::AppState::from_gcx(gcx).await;
+    cleanup_ab_variant_with_app(&app, variant).await
 }
 
+pub(crate) async fn cleanup_ab_variant_with_app(
+    app: &crate::app_state::AppState,
+    variant: &AbVariantInfo,
+) -> Result<(), String> {
+    cleanup_ab_variant_with_scopes(
+        app.gcx.clone(),
+        app.runtime.tool_jobs.scopes.clone(),
+        variant,
+        AGENT_ABORT_TIMEOUT,
+    )
+    .await
+}
+
+#[cfg(test)]
 async fn cleanup_ab_variant_with_timeout(
     gcx: Arc<GlobalContext>,
+    variant: &AbVariantInfo,
+    abort_timeout: std::time::Duration,
+) -> Result<(), String> {
+    let app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
+    cleanup_ab_variant_with_scopes(
+        gcx,
+        app.runtime.tool_jobs.scopes.clone(),
+        variant,
+        abort_timeout,
+    )
+    .await
+}
+
+async fn cleanup_ab_variant_with_scopes(
+    gcx: Arc<GlobalContext>,
+    scopes: Arc<crate::tool_jobs::scope::ScopeCoordinator>,
     variant: &AbVariantInfo,
     abort_timeout: std::time::Duration,
 ) -> Result<(), String> {
@@ -746,6 +778,7 @@ async fn cleanup_ab_variant_with_timeout(
     let mut selected = None;
     for root in crate::files_correction::get_project_dirs(gcx.clone()).await {
         let service = WorktreeService::new_async(gcx.cache_dir.clone(), root).await?;
+        let service = crate::worktrees::service::fenced_service(service, scopes.clone());
         let Ok(view) = service.get_worktree(name).await else {
             continue;
         };
@@ -944,12 +977,24 @@ async fn ab_card_state_matches(
         .is_some_and(|card| expected_state.matches_board_card(board.rev, card)))
 }
 
+#[cfg(test)]
 async fn pick_ab_winner_impl(
     gcx: Arc<GlobalContext>,
     task_id: &str,
     card_id: &str,
     winner: &str,
 ) -> Result<(String, String), String> {
+    let app = crate::app_state::AppState::from_gcx(gcx).await;
+    pick_ab_winner_with_app(&app, task_id, card_id, winner).await
+}
+
+async fn pick_ab_winner_with_app(
+    app: &crate::app_state::AppState,
+    task_id: &str,
+    card_id: &str,
+    winner: &str,
+) -> Result<(String, String), String> {
+    let gcx = app.gcx.clone();
     if winner != "a" && winner != "b" {
         return Err(format!("Invalid winner '{}', must be 'a' or 'b'", winner));
     }
@@ -995,7 +1040,7 @@ async fn pick_ab_winner_impl(
     if !ab_card_state_matches(gcx.clone(), task_id, card_id, &verifier_expected_state).await? {
         return Err(format!("{} for card {}", STALE_PICK_AB_WINNER, card_id));
     }
-    cleanup_ab_variant(gcx.clone(), &loser_variant).await?;
+    cleanup_ab_variant_with_app(app, &loser_variant).await?;
     mark_ab_loser_cleaned_if_current(
         gcx.clone(),
         task_id,
@@ -1215,7 +1260,7 @@ impl Tool for ToolPickAbWinner {
         tool_call_id: &String,
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
-        let (gcx, task_id, _, _) = planner_context(&ccx, args, "pick_ab_winner").await?;
+        let (_, task_id, _, _) = planner_context(&ccx, args, "pick_ab_winner").await?;
         let card_id = args
             .get("card_id")
             .and_then(|v| v.as_str())
@@ -1226,8 +1271,9 @@ impl Tool for ToolPickAbWinner {
             .ok_or("Missing 'winner'")?;
         validate_id(&task_id, "task_id")?;
         validate_id(card_id, "card_id")?;
+        let app = ccx.lock().await.app.clone();
         let (winner_chat_id, loser_key) =
-            pick_ab_winner_impl(gcx, &task_id, card_id, winner).await?;
+            pick_ab_winner_with_app(&app, &task_id, card_id, winner).await?;
         let result_message = format!(
             "# A/B Winner Picked\n\n**Card:** {}\n**Winner:** {} ({})\n**Loser:** {} cleaned up",
             card_id, winner, winner_chat_id, loser_key

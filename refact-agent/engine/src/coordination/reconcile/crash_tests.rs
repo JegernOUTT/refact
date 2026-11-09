@@ -150,7 +150,8 @@ fn kill_at_boundary(root: &Path, boundary: &str) {
         .unwrap();
     let reached = root.join("reached");
     let deadline = Instant::now() + Duration::from_secs(60);
-    while !reached.exists() {
+    let expected = boundary_of(boundary).unwrap().as_str();
+    while std::fs::read_to_string(&reached).ok().as_deref() != Some(expected) {
         if Instant::now() >= deadline || child.try_wait().unwrap().is_some() {
             let _ = child.kill();
             let _ = child.wait();

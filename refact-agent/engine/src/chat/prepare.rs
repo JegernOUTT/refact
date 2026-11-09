@@ -196,6 +196,14 @@ pub struct PreparedChat {
     pub rag_results: Vec<serde_json::Value>,
 }
 
+pub enum PrepareOutcome {
+    Ready(PreparedChat),
+    Pending {
+        receipt: crate::tool_jobs::JobReceipt,
+        turn_nonce: String,
+    },
+}
+
 pub struct ChatPrepareOptions {
     pub prepend_system_prompt: bool,
     pub allow_at_commands: bool,
@@ -302,7 +310,7 @@ pub async fn prepare_chat_passthrough(
     meta: &ChatMeta,
     sampling_parameters: &mut SamplingParameters,
     options: &ChatPrepareOptions,
-) -> Result<PreparedChat, String> {
+) -> Result<PrepareOutcome, String> {
     let companion = crate::buddy::companion::is_companion(thread);
     let companion_options;
     let options = if companion {
@@ -366,6 +374,42 @@ pub async fn prepare_chat_passthrough(
     };
     let task_meta = ccx.lock().await.task_meta.clone();
     let app = AppState::from_gcx(gcx.clone()).await;
+    crate::review::runs::verify_child_binding(&app, &meta.chat_id).await?;
+    let has_project_scope = app.chat.sessions.read().await.get(&meta.chat_id).cloned();
+    let mut review_context = None;
+    if let Some(session) = has_project_scope {
+        let project_owned = {
+            let session = session.lock().await;
+            crate::coordination::scope::session_source_root(&session)
+        };
+        if let Some(root) = project_owned {
+            if crate::review::service::get_for_chat(root, meta.chat_id.clone())
+                .await
+                .map_err(|error| error.to_string())?
+                .is_some_and(|review| review.current_candidate_id.is_some())
+            {
+                if let Some(receipt) = crate::review::readiness::prepare_readiness(
+                    &app,
+                    &meta.chat_id,
+                    &meta.request_attempt_id,
+                )
+                .await?
+                {
+                    return Ok(PrepareOutcome::Pending {
+                        receipt,
+                        turn_nonce: meta.request_attempt_id.clone(),
+                    });
+                }
+                let scope = {
+                    let session = session.lock().await;
+                    crate::worktrees::scope::ExecutionScope::from_thread(&session.thread)
+                };
+                ccx.lock().await.execution_scope = scope;
+                review_context =
+                    crate::review::chat_bridge::context_for_chat(&app, &meta.chat_id).await?;
+            }
+        }
+    }
     let messages = if options.prepend_system_prompt {
         let (msgs, _) = prepend_the_right_system_prompt_and_maybe_more_initial_messages(
             app.clone(),
@@ -382,6 +426,16 @@ pub async fn prepare_chat_passthrough(
     } else {
         messages
     };
+    let mut messages = messages;
+    if let Some(context) = review_context {
+        let boundary = messages
+            .iter()
+            .take_while(|message| {
+                matches!(message.role.as_str(), "system" | "event" | "goal" | "plan")
+            })
+            .count();
+        messages.insert(boundary, context);
+    }
 
     // 4. Run @-commands
     let (mut messages, _) = if options.allow_at_commands {
@@ -554,11 +608,11 @@ pub async fn prepare_chat_passthrough(
         }
     }
 
-    Ok(PreparedChat {
+    Ok(PrepareOutcome::Ready(PreparedChat {
         llm_request,
         limited_messages: limited_adapted_msgs,
         rag_results: has_rag_results.in_json,
-    })
+    }))
 }
 
 fn adapt_sampling_for_reasoning_models(
@@ -983,6 +1037,9 @@ mod tests {
         .await
         .unwrap();
 
+        let PrepareOutcome::Ready(prepared) = prepared else {
+            panic!("unexpected Review pending");
+        };
         let sent = prepared
             .llm_request
             .messages

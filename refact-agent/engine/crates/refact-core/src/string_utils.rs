@@ -1,6 +1,24 @@
 use regex::Regex;
 use std::sync::OnceLock;
 
+pub fn redact_url_credentials(text: &str) -> String {
+    static URL: OnceLock<Regex> = OnceLock::new();
+    let url = URL.get_or_init(|| {
+        Regex::new(r#"(?i)(https?|ssh)://([^\s/?#"<>\\]+)@([^\s/@?#"<>\\]+)"#).unwrap()
+    });
+    url.replace_all(text, |captures: &regex::Captures<'_>| {
+        if captures[1].eq_ignore_ascii_case("ssh")
+            && !captures[2].contains(':')
+            && !captures[2].contains('@')
+        {
+            captures[0].to_string()
+        } else {
+            format!("{}://{}", &captures[1], &captures[3])
+        }
+    })
+    .into_owned()
+}
+
 pub fn redact_sensitive(text: &str) -> String {
     static PATTERNS: OnceLock<Vec<(Regex, &'static str)>> = OnceLock::new();
     let patterns = PATTERNS.get_or_init(|| {
@@ -51,7 +69,7 @@ pub fn redact_sensitive(text: &str) -> String {
         ]
     });
 
-    let mut out = text.to_string();
+    let mut out = redact_url_credentials(text);
     for (re, replacement) in patterns {
         out = re.replace_all(&out, *replacement).into_owned();
     }
@@ -112,7 +130,41 @@ pub fn bounded_redaction_window(text: &str, scan_cap: usize) -> (&str, bool) {
 
 #[cfg(test)]
 mod tests {
-    use super::redact_sensitive;
+    use super::{redact_sensitive, redact_url_credentials};
+
+    #[test]
+    fn url_userinfo_redaction_preserves_other_text() {
+        let input = "https://user:FAKE@host/repo?q=1 https://FAKE@host/x ssh://git@host/r ssh://git:FAKE@host/r git@host:r /home/me/x";
+        let expected = "https://host/repo?q=1 https://host/x ssh://git@host/r ssh://host/r git@host:r /home/me/x";
+        assert_eq!(redact_url_credentials(input), expected);
+        assert_eq!(redact_url_credentials(expected), expected);
+        assert!(!redact_sensitive("https://user:FAKE@host/repo").contains("FAKE"));
+    }
+
+    #[test]
+    fn url_userinfo_redaction_handles_delimiters_in_one_pass() {
+        assert_eq!(
+            redact_url_credentials(
+                "originhttps://fixture:FAKE_SMOKE_CREDENTIAL@invalid.test/repo (fetch)"
+            ),
+            "originhttps://invalid.test/repo (fetch)"
+        );
+        for input in [
+            "https://user:first@FAKE@host/repo",
+            "https://user:p'ass@host/repo",
+            "https://user:p%40FAKE@host/repo",
+            "https://first@second@third@host/repo",
+            "ssh://first@second@host/repo",
+        ] {
+            let expected = if input.starts_with("ssh:") {
+                "ssh://host/repo"
+            } else {
+                "https://host/repo"
+            };
+            assert_eq!(redact_url_credentials(input), expected);
+            assert_eq!(redact_url_credentials(expected), expected);
+        }
+    }
 
     #[test]
     fn url_query_redaction_is_idempotent() {

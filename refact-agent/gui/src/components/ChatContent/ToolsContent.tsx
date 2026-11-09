@@ -51,6 +51,8 @@ import {
   CompressReportTool,
 } from "./ToolCard";
 import { MultiModalTool } from "./ToolCard/MultiModalTool";
+import { ToolJobCard } from "./ToolCard/ToolJobCard";
+import { parseToolJobReceipt } from "../../services/refact/toolJobs";
 import { AppTool } from "./ToolCard/AppTool";
 import { isAppToolName } from "./ToolCard/appToolModel";
 import { AgentStatusView } from "./AgentStatusView";
@@ -445,7 +447,6 @@ function processToolCalls(
   const contextFiles = head.id ? contextFilesByToolId[head.id] : undefined;
   const diffs = head.id ? diffsByToolId[head.id] : undefined;
   const isActiveTool = head.id === activeToolCallId;
-
   if (
     result &&
     head.id &&
@@ -460,6 +461,30 @@ function processToolCalls(
         toolCallId={head.id}
         result={result}
       />
+    );
+    return processToolCalls(
+      tail,
+      toolResults,
+      features,
+      [...processed, elem],
+      contextFilesByToolId,
+      diffsByToolId,
+      activeToolCallId,
+      onOpenTrajectory,
+      threadId,
+    );
+  }
+
+  const job = parseToolJobReceipt(result?.extra?.tool_job);
+  if (
+    job &&
+    job.status === "accepted" &&
+    job.chat_id === threadId &&
+    job.tool_call_id === head.id &&
+    job.tool_name === head.function.name
+  ) {
+    const elem = (
+      <ToolJobCard key={`tool-job-${head.id}`} receipt={job} toolCall={head} />
     );
     return processToolCalls(
       tail,

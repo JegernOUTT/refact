@@ -681,6 +681,48 @@ pub async fn get_or_create_session_with_trajectory(
     sessions: &SessionsMap,
     chat_id: &str,
 ) -> Arc<AMutex<ChatSession>> {
+    // Existing open sessions do not require a lifecycle transition. In
+    // particular, looking up a session must not cancel its running jobs.
+    let existing = sessions.read().await.get(chat_id).cloned();
+    if let Some(session) = existing {
+        if !session.lock().await.closed {
+            super::trajectories::refresh_session_from_trajectory_if_stale(
+                app.clone(),
+                chat_id,
+                false,
+            )
+            .await;
+            return session;
+        }
+    }
+
+    // The key is stable across replacement of the session Arc. Never await the
+    // drain while holding the sessions map or a session lock: a job may need
+    // either in order to finish.
+    let key = app.runtime.tool_jobs.chat_scope_key(chat_id);
+    let _transition = match app
+        .runtime
+        .tool_jobs
+        .scopes
+        .begin_scope_change(&[key])
+        .await
+    {
+        Ok(guard) => guard,
+        Err(error) => {
+            warn!(%chat_id, ?error, "session reopen refused by job lifecycle barrier");
+            // This legacy API cannot return an error. Do not fabricate a new
+            // identity when effects may still be live.
+            return std::future::pending().await;
+        }
+    };
+    get_or_create_session_under_transition(app, sessions, chat_id).await
+}
+
+async fn get_or_create_session_under_transition(
+    app: AppState,
+    sessions: &SessionsMap,
+    chat_id: &str,
+) -> Arc<AMutex<ChatSession>> {
     let gcx = app.gcx.clone();
     let maybe_existing = {
         let sessions_read = sessions.read().await;
@@ -958,12 +1000,6 @@ pub async fn try_restore_session_if_trajectory_exists(
         if !is_closed {
             return true;
         }
-        let mut sessions_write = sessions.write().await;
-        if let Some(current) = sessions_write.get(chat_id) {
-            if Arc::ptr_eq(current, &session_arc) {
-                sessions_write.remove(chat_id);
-            }
-        }
     }
 
     if super::trajectories::load_trajectory_for_chat(app.gcx.clone(), chat_id)
@@ -977,7 +1013,24 @@ pub async fn try_restore_session_if_trajectory_exists(
     true
 }
 
-pub async fn close_all_chat_sessions(app: AppState) {
+pub async fn close_all_chat_sessions(
+    app: AppState,
+) -> Result<(), crate::tool_jobs::ScopeChangeError> {
+    // Stop admission globally before taking a session snapshot. Drain without
+    // holding session or map locks, since in-flight jobs may need either.
+    app.runtime.tool_jobs.scopes.begin_shutdown();
+    if let Err(error) = app.runtime.review_readiness.shutdown().await {
+        warn!(%error, "close_all_chat_sessions: readiness shutdown unresolved");
+        return Err(crate::tool_jobs::ScopeChangeError::UnknownEffects);
+    }
+    app.runtime.tool_jobs.shutdown().await;
+    if let Err(error) = app.runtime.tool_jobs.scopes.drain_shutdown().await {
+        warn!(
+            ?error,
+            "close_all_chat_sessions: job effects unresolved; sessions left open"
+        );
+        return Err(error);
+    }
     let sessions = app.chat.sessions.clone();
     let session_arcs: Vec<Arc<AMutex<ChatSession>>> = {
         let sessions_read = sessions.read().await;
@@ -1019,6 +1072,7 @@ pub async fn close_all_chat_sessions(app: AppState) {
             }
         }
     }
+    Ok(())
 }
 
 async fn cleanup_idle_session(
@@ -1027,9 +1081,23 @@ async fn cleanup_idle_session(
     chat_id: &str,
     session_arc: Arc<AMutex<ChatSession>>,
 ) -> bool {
-    if !save_idle_session_for_cleanup(app, session_arc.clone()).await {
+    if !save_idle_session_for_cleanup(app.clone(), session_arc.clone()).await {
         return false;
     }
+    let key = app.runtime.tool_jobs.chat_scope_key(chat_id);
+    let _transition = match app
+        .runtime
+        .tool_jobs
+        .scopes
+        .begin_scope_change(&[key])
+        .await
+    {
+        Ok(guard) => guard,
+        Err(error) => {
+            warn!(%chat_id, ?error, "idle cleanup refused by job lifecycle barrier");
+            return false;
+        }
+    };
     remove_idle_session_if_safe(sessions, chat_id, session_arc).await
 }
 
@@ -1162,6 +1230,7 @@ fn close_idle_session_for_cleanup(session: &mut ChatSession) -> bool {
 }
 
 pub fn start_session_cleanup_task(app: AppState) {
+    super::tool_job_delivery::ensure_bridge(&app);
     tokio::spawn(async move {
         let shutdown_flag = app.runtime.shutdown_flag.clone();
         let mut run_immediately = true;
@@ -1467,6 +1536,99 @@ mod tests {
         *gcx.documents_state.workspace_folders.lock().unwrap() = vec![workspace.to_path_buf()];
         let app = crate::app_state::AppState::from_gcx(gcx).await;
         (app, config_dir)
+    }
+
+    #[tokio::test]
+    async fn reopening_closed_session_waits_for_old_job_without_holding_session_lock() {
+        let workspace = tempfile::tempdir().unwrap();
+        let (app, _config_dir) = test_app_with_workspace(workspace.path()).await;
+        let chat_id = "reopen-waits-for-job";
+        let old = Arc::new(AMutex::new(ChatSession::new(chat_id.into())));
+        old.lock().await.close_event_channel();
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert(chat_id.into(), old.clone());
+
+        let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let key = app.runtime.tool_jobs.chat_scope_key(chat_id);
+        let lease = app
+            .runtime
+            .tool_jobs
+            .scopes
+            .acquire(&[key.clone()], cancel.clone())
+            .unwrap();
+        let reopening_app = app.clone();
+        let reopening = tokio::spawn(async move {
+            get_or_create_session_with_trajectory(
+                reopening_app.clone(),
+                &reopening_app.chat.sessions,
+                chat_id,
+            )
+            .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !cancel.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("reopen closes admission and requests cancellation");
+        assert!(!reopening.is_finished());
+        assert!(app
+            .runtime
+            .tool_jobs
+            .scopes
+            .acquire(&[key], cancel)
+            .is_err());
+        // A job completing under this lock must not deadlock the draining writer.
+        let session = tokio::time::timeout(std::time::Duration::from_secs(5), old.lock())
+            .await
+            .expect("reopen must not hold the session lock");
+        drop(session);
+        lease.settle();
+        let replacement = tokio::time::timeout(std::time::Duration::from_secs(5), reopening)
+            .await
+            .expect("reopen must finish after drain")
+            .unwrap();
+        assert!(!Arc::ptr_eq(&old, &replacement));
+        assert!(!replacement.lock().await.closed);
+    }
+
+    #[tokio::test]
+    async fn shutdown_leaves_session_open_when_job_effects_are_unknown() {
+        let workspace = tempfile::tempdir().unwrap();
+        let (app, _config_dir) = test_app_with_workspace(workspace.path()).await;
+        let chat_id = "shutdown-unknown-effects";
+        let session = Arc::new(AMutex::new(ChatSession::new(chat_id.into())));
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert(chat_id.into(), session.clone());
+        let key = app.runtime.tool_jobs.chat_scope_key(chat_id);
+        let lease = app
+            .runtime
+            .tool_jobs
+            .scopes
+            .acquire(
+                &[key.clone()],
+                Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            )
+            .unwrap();
+        drop(lease); // Abandoned execution does not prove its effects stopped.
+        assert!(matches!(
+            close_all_chat_sessions(app.clone()).await,
+            Err(crate::tool_jobs::ScopeChangeError::UnknownEffects)
+        ));
+        assert!(!session.lock().await.closed);
+        assert!(app
+            .runtime
+            .tool_jobs
+            .scopes
+            .acquire(&[key], Arc::new(std::sync::atomic::AtomicBool::new(false)),)
+            .is_err());
     }
 
     fn background_completion_meta(chat_id: &str) -> ExecProcessMeta {

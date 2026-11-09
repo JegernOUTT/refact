@@ -58,7 +58,14 @@ where
         target_branch: Some(target.clone()),
         ..request
     };
-    let service = service.acquire_merge_permit().await?;
+    let service = crate::worktrees::service::fenced_service(
+        service.clone(),
+        app.runtime.tool_jobs.scopes.clone(),
+    )
+    .fence_merge_worktree(worktree_id, Some(&target))
+    .await?
+    .acquire_merge_permit()
+    .await?;
     let service = service.for_merge_target(&target).await?;
     let Some(leases) =
         crate::coordination::leases::merge_leases_for(app, service.source_workspace_root()).await?
@@ -1511,13 +1518,53 @@ async fn merge_legacy_task_worktree(
             .ok_or("Card has no agent branch")?,
     )?;
     let app = crate::app_state::AppState::from_gcx(state.request.gcx.clone()).await;
-    let service =
+    let service = crate::worktrees::service::fenced_service(
         WorktreeService::new_async(app.paths.cache_dir.clone(), state.workspace_root.clone())
-            .await?
-            .acquire_merge_permit()
-            .await?
-            .for_merge_target(&state.base_branch)
-            .await?;
+            .await?,
+        app.runtime.tool_jobs.scopes.clone(),
+    );
+    // Mirror the accepted board attachment for the merge-only fence. This does
+    // not grant the stronger authority required to bind a task-agent session.
+    let root = tokio::fs::canonicalize(
+        state
+            .card
+            .agent_worktree
+            .as_deref()
+            .ok_or("Card has no agent worktree")?,
+    )
+    .await
+    .map_err(|error| format!("Legacy checkout identity unavailable: {error}"))?;
+    let root = dunce::simplified(&root).to_path_buf();
+    let meta = crate::worktrees::types::WorktreeMeta {
+        id: state
+            .card
+            .agent_worktree_name
+            .clone()
+            .or_else(|| {
+                root.file_name()
+                    .and_then(|name| name.to_str())
+                    .map(str::to_string)
+            })
+            .ok_or("Legacy checkout identity missing")?,
+        kind: "task_agent".into(),
+        root,
+        source_workspace_root: service.source_workspace_root().to_path_buf(),
+        repo_root: service.source_workspace_root().to_path_buf(),
+        branch: state.card.agent_branch.clone(),
+        base_branch: Some(state.base_branch.clone()),
+        base_commit: state.card.base_commit.clone(),
+        task_id: Some(state.request.task_id.clone()),
+        card_id: Some(state.request.card_id.clone()),
+        agent_id: state.card.assignee.clone(),
+        enforce: true,
+    };
+    let service = service
+        .fence_legacy_merge_worktree(&meta, &state.base_branch)
+        .await?
+        .acquire_merge_permit()
+        .await?
+        .for_merge_target(&state.base_branch)
+        .await?;
     state.workspace_root = service.merge_checkout_root().to_path_buf();
     let (service, renewal) = if let Some(leases) =
         crate::coordination::leases::merge_leases_for(&app, service.source_workspace_root()).await?
@@ -1748,21 +1795,12 @@ async fn finish_legacy_nothing_to_merge(
             "cleanup skipped; dirty agent worktree preserved for inspection or restart_agent(mode=resume)",
         );
     } else if agent_branch != state.base_branch {
-        worktree_removed = run_git_in(
-            &state.workspace_root,
-            &["worktree", "remove", agent_worktree, "--force"],
-        )
-        .await
-        .is_ok();
-        state
+        (worktree_removed, branch_deleted) = state
             .merge_service
             .as_ref()
             .ok_or("Legacy merge permit missing")?
-            .checkpoint_merge_phase()
+            .cleanup_legacy_merge_source()
             .await?;
-        branch_deleted = run_git_in(&state.workspace_root, &["branch", "-D", agent_branch])
-            .await
-            .is_ok();
         if worktree_removed {
             cleanup_status.push("worktree removed");
         }
@@ -2041,27 +2079,12 @@ async fn cleanup_legacy_merge(result: &mut LegacyMergeGitResult) -> Result<(), S
         false
     };
     if agent_branch != &state.base_branch && !result.agent_worktree_dirty {
-        state
+        let (worktree_removed, branch_deleted) = state
             .merge_service
             .as_ref()
             .ok_or("Legacy merge permit missing")?
-            .checkpoint_merge_phase()
+            .cleanup_legacy_merge_source()
             .await?;
-        let worktree_removed = run_git_in(
-            &state.workspace_root,
-            &["worktree", "remove", agent_worktree, "--force"],
-        )
-        .await
-        .is_ok();
-        state
-            .merge_service
-            .as_ref()
-            .ok_or("Legacy merge permit missing")?
-            .checkpoint_merge_phase()
-            .await?;
-        let branch_deleted = run_git_in(&state.workspace_root, &["branch", "-D", agent_branch])
-            .await
-            .is_ok();
         result.worktree_removed = worktree_removed;
         result.branch_deleted = branch_deleted;
     }

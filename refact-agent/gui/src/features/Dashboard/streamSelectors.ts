@@ -1,5 +1,5 @@
 import type { OrganizationItem } from "../../services/refact/organization";
-import { createSelector } from "@reduxjs/toolkit";
+import { createSelector, type OutputSelector } from "@reduxjs/toolkit";
 import type { RootState } from "../../app/store";
 import {
   buildHistoryTree,
@@ -411,33 +411,33 @@ export const selectStreamGroups = createSelector(
   },
 );
 
-export const selectContinueItems = createSelector(
-  [selectStreamItems],
-  (items): StreamItem[] => {
-    if (items.length === 0) return EMPTY_ITEMS;
-    const active = items
-      .filter((item) => isActiveItem(item))
-      .sort((a, b) => b.updatedAtMs - a.updatedAtMs);
-    const rest = items
-      .filter((item) => !isActiveItem(item))
-      .sort((a, b) => b.updatedAtMs - a.updatedAtMs);
-    return [...active, ...rest].slice(0, 3);
-  },
-);
+export const selectContinueItems: OutputSelector<
+  [(state: RootState) => StreamItem[]],
+  StreamItem[]
+> = createSelector([selectStreamItems], (items): StreamItem[] => {
+  if (items.length === 0) return EMPTY_ITEMS;
+  const active = items
+    .filter((item) => isActiveItem(item))
+    .sort((a, b) => b.updatedAtMs - a.updatedAtMs);
+  const rest = items
+    .filter((item) => !isActiveItem(item))
+    .sort((a, b) => b.updatedAtMs - a.updatedAtMs);
+  return [...active, ...rest].slice(0, 3);
+});
 
-export const selectAttentionItems = createSelector(
-  [selectStreamItems],
-  (items): StreamItem[] => {
-    const picked = items.filter(
-      (item) =>
-        (item.kind === "task" && (item.cardsFailed ?? 0) > 0) ||
-        item.status === "failed" ||
-        item.status === "paused",
-    );
-    if (picked.length === 0) return EMPTY_ITEMS;
-    return [...picked].sort((a, b) => b.updatedAtMs - a.updatedAtMs);
-  },
-);
+export const selectAttentionItems: OutputSelector<
+  [(state: RootState) => StreamItem[]],
+  StreamItem[]
+> = createSelector([selectStreamItems], (items): StreamItem[] => {
+  const picked = items.filter(
+    (item) =>
+      (item.kind === "task" && (item.cardsFailed ?? 0) > 0) ||
+      item.status === "failed" ||
+      item.status === "paused",
+  );
+  if (picked.length === 0) return EMPTY_ITEMS;
+  return [...picked].sort((a, b) => b.updatedAtMs - a.updatedAtMs);
+});
 
 const selectRootId = (_state: RootState, rootId: string) => rootId;
 

@@ -16,7 +16,7 @@ use crate::chat::evidence::{
 };
 use std::future::Future;
 use crate::chat::internal_roles::{self, EventSubkind};
-use crate::chat::prepare::{prepare_chat_passthrough, ChatPrepareOptions, ToolChoice};
+use crate::chat::prepare::{prepare_chat_passthrough, ChatPrepareOptions, PrepareOutcome, ToolChoice};
 use crate::chat::stream_core::{
     run_llm_stream, ChoiceFinal, LlmStreamOutcome, StreamCollector, StreamRunParams,
     ABORT_ERROR_MESSAGE,
@@ -641,6 +641,298 @@ async fn verifier_cancel_requested(session_arc: &Arc<AMutex<ChatSession>>) -> bo
     session.user_interrupt_flag.load(Ordering::SeqCst)
 }
 
+const READINESS_WAIT_PREFIX: &str = "review_readiness:";
+
+#[derive(Clone)]
+pub(crate) struct VerifierReadinessContinuation {
+    pub nonce: String,
+    pub cancelled: Arc<AtomicBool>,
+    pub ready: bool,
+    fork: GoalVerificationFork,
+    thread: serde_json::Value,
+    trigger: String,
+    push: PushMode,
+    tool_call_id: Option<String>,
+    frontier: Vec<serde_json::Value>,
+    command: ActiveCommandContext,
+}
+
+fn verifier_readiness_frontier_matches(
+    session: &ChatSession,
+    pending: &VerifierReadinessContinuation,
+) -> bool {
+    let current = GoalVerificationFork::capture(session);
+    let same_goal = current.generation == pending.fork.generation
+        && current.goal_revision == pending.fork.goal_revision
+        && current.owner_revision == pending.fork.owner_revision
+        && current.epoch == pending.fork.epoch;
+    if !same_goal {
+        return false;
+    }
+    if current.trajectory_version == pending.fork.trajectory_version {
+        return true;
+    }
+    // validate_goal parks before its own tool result is appended. Permit exactly
+    // that identified result, never another tool, user input, or prefix rewrite.
+    let Some(tool_call_id) = pending.tool_call_id.as_deref() else {
+        return false;
+    };
+    session.messages.len() == pending.frontier.len() + 1
+        && session
+            .messages
+            .iter()
+            .take(pending.frontier.len())
+            .zip(&pending.frontier)
+            .all(|(message, original)| {
+                serde_json::to_value(message).ok().as_ref() == Some(original)
+            })
+        && session
+            .messages
+            .last()
+            .is_some_and(|message| message.role == "tool" && message.tool_call_id == tool_call_id)
+}
+
+pub(crate) fn readiness_allowed_tool_result(session: &ChatSession, nonce: &str) -> Option<String> {
+    let pending = session.verifier_readiness_pending.as_ref()?;
+    (pending.nonce == nonce
+        && !pending.cancelled.load(Ordering::SeqCst)
+        && !session.closed
+        && !session.user_interrupt_flag.load(Ordering::SeqCst)
+        && serde_json::to_value(&session.thread).ok().as_ref() == Some(&pending.thread)
+        && session.messages.len() == pending.frontier.len() + 1
+        && verifier_readiness_frontier_matches(session, pending))
+    .then(|| pending.tool_call_id.clone())
+    .flatten()
+}
+
+fn restore_verifier_foreground_command(
+    session: &mut ChatSession,
+    pending: &VerifierReadinessContinuation,
+) -> bool {
+    if pending.trigger != "validate_goal"
+        || pending.cancelled.load(Ordering::SeqCst)
+        || session.closed
+        || session.user_interrupt_flag.load(Ordering::SeqCst)
+        || session.runtime.interruption.is_some()
+        || !session.command_queue.is_empty()
+        || session.planner_paused()
+        || session.runtime.paused
+        || !session.runtime.pause_reasons.is_empty()
+        || session.turn_depth != 0
+        || session.runner_lease.is_some()
+        || session.verifier_readiness_pending.is_some()
+        || !matches!(
+            session.runtime.state,
+            SessionState::Idle | SessionState::Completed
+        )
+    {
+        return false;
+    }
+    session.active_command = pending.command.clone();
+    true
+}
+
+fn fail_verifier_readiness_observer(session: &mut ChatSession, nonce: &str, error: &str) -> bool {
+    let Some(pending) = session.verifier_readiness_pending.as_ref() else {
+        return false;
+    };
+    if pending.nonce != nonce {
+        return false;
+    }
+    let current = !pending.cancelled.load(Ordering::SeqCst)
+        && !session.closed
+        && !session.user_interrupt_flag.load(Ordering::SeqCst)
+        && session.command_queue.is_empty()
+        && verifier_readiness_frontier_matches(session, pending);
+    let pending = session.verifier_readiness_pending.take().unwrap();
+    pending.cancelled.store(true, Ordering::SeqCst);
+    session.verifier_readiness_resume_nonce = None;
+    if current {
+        handle_verifier_failure_with_delivery(
+            session,
+            &pending.trigger,
+            error,
+            pending.push,
+            pending.tool_call_id.as_deref(),
+        );
+    }
+    session.queue_notify.notify_one();
+    true
+}
+
+fn is_readiness_deferral(reply: &GoalVerifierReply) -> bool {
+    reply.tokens == 0
+        && matches!(&reply.verdict, GoalVerdict::Wait(GoalWait {
+        subject: GoalWaitSubject::Event { name }, ..
+    }) if name.starts_with(READINESS_WAIT_PREFIX))
+}
+
+pub(crate) async fn resume_ready_verifier(
+    app: &AppState,
+    session_arc: &Arc<AMutex<ChatSession>>,
+) -> bool {
+    if app.runtime.shutdown_flag.load(Ordering::Relaxed) {
+        session_arc.lock().await.invalidate_review_readiness();
+        return false;
+    }
+
+    let pending = {
+        let mut session = session_arc.lock().await;
+        let Some(pending) = session.verifier_readiness_pending.as_ref() else {
+            return false;
+        };
+        if !pending.ready
+            || session.turn_depth != 0
+            || !session.command_queue.is_empty()
+            || session.runtime.state != SessionState::Idle
+            || session.planner_paused()
+            || session.runtime.paused
+            || !session.runtime.pause_reasons.is_empty()
+            || session.runner_lease.is_some()
+        {
+            return false;
+        }
+        let current = !pending.cancelled.load(Ordering::SeqCst)
+            && !session.closed
+            && !session.user_interrupt_flag.load(Ordering::SeqCst)
+            && verifier_readiness_frontier_matches(&session, pending)
+            && serde_json::to_value(&session.thread).ok().as_ref() == Some(&pending.thread);
+        let pending = session.verifier_readiness_pending.take().unwrap();
+        if !current {
+            return false;
+        }
+        session.verifier_readiness_resume_nonce = Some(pending.nonce.clone());
+        session.goal_set_status(GoalStatus::Verifying);
+        let mut witness = pending.clone();
+        witness.ready = false;
+        witness.fork = GoalVerificationFork {
+            trajectory_version: pending.fork.trajectory_version,
+            ..GoalVerificationFork::capture(&session)
+        };
+        session.verifier_readiness_pending = Some(witness);
+        pending
+    };
+    let Ok(operation) = super::session_runtime::begin_board_operation(app, session_arc).await
+    else {
+        session_arc.lock().await.invalidate_review_readiness();
+        return true;
+    };
+    drop(operation);
+    let fork = GoalVerificationFork::capture(&*session_arc.lock().await);
+    let result = run_goal_verification(app.clone(), session_arc.clone()).await;
+    {
+        let mut session = session_arc.lock().await;
+        if !result.as_ref().is_ok_and(is_readiness_deferral)
+            && session
+                .verifier_readiness_pending
+                .as_ref()
+                .is_some_and(|live| live.nonce == pending.nonce)
+        {
+            session.verifier_readiness_pending = None;
+            session.verifier_readiness_resume_nonce = None;
+        }
+    }
+    match result {
+        Ok(reply) => {
+            let outcome = apply_goal_verdict_for_chat(
+                app,
+                session_arc,
+                &pending.trigger,
+                reply,
+                fork,
+                pending.push,
+                pending.tool_call_id.as_deref(),
+            )
+            .await;
+            let resume =
+                !matches!(
+                    outcome,
+                    GoalVerificationApplyOutcome::Superseded
+                        | GoalVerificationApplyOutcome::Sealed
+                        | GoalVerificationApplyOutcome::NoGoal
+                        | GoalVerificationApplyOutcome::Waiting
+                ) && restore_verifier_foreground_command(&mut *session_arc.lock().await, &pending);
+            if resume {
+                super::generation::start_generation(app.clone(), session_arc.clone()).await;
+            }
+        }
+        Err(error) => {
+            handle_verifier_failure_with_delivery(
+                &mut *session_arc.lock().await,
+                &pending.trigger,
+                &error,
+                pending.push,
+                pending.tool_call_id.as_deref(),
+            );
+        }
+    }
+    true
+}
+
+async fn defer_verifier_readiness(
+    app: AppState,
+    session_arc: Arc<AMutex<ChatSession>>,
+    receipt: crate::tool_jobs::JobReceipt,
+    nonce: String,
+) -> GoalVerifierReply {
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let chat_id = {
+        let mut session = session_arc.lock().await;
+        session.verifier_readiness_pending = Some(VerifierReadinessContinuation {
+            nonce: nonce.clone(),
+            cancelled: cancelled.clone(),
+            ready: false,
+            fork: GoalVerificationFork::capture(&session),
+            thread: serde_json::to_value(&session.thread).unwrap_or_default(),
+            trigger: "finish".into(),
+            push: PushMode::Append,
+            tool_call_id: None,
+            frontier: session
+                .messages
+                .iter()
+                .map(|message| serde_json::to_value(message).unwrap_or_default())
+                .collect(),
+            command: session.active_command.clone(),
+        });
+        session.chat_id.clone()
+    };
+    let subject = format!("{READINESS_WAIT_PREFIX}{}", receipt.job_id);
+    tokio::spawn(async move {
+        let ready =
+            crate::review::readiness::wait_for_readiness(&app, &chat_id, &receipt, &nonce).await;
+        if cancelled.load(Ordering::SeqCst) || app.runtime.shutdown_flag.load(Ordering::Relaxed) {
+            return;
+        }
+        let mut session = session_arc.lock().await;
+        match ready {
+            Ok(()) => {
+                if let Some(pending) = session
+                    .verifier_readiness_pending
+                    .as_mut()
+                    .filter(|pending| pending.nonce == nonce)
+                {
+                    pending.ready = true;
+                    session.queue_notify.notify_one();
+                }
+            }
+            Err(error) => {
+                fail_verifier_readiness_observer(&mut session, &nonce, &error);
+            }
+        }
+    });
+    GoalVerifierReply {
+        verdict: GoalVerdict::Wait(GoalWait::new(
+            GoalWaitSubject::Event {
+                name: subject,
+            },
+            None,
+        )),
+        verifier_reply: String::new(),
+        tokens: 0,
+        criteria_verdicts: vec![],
+    }
+}
+
 pub async fn run_goal_verifier(
     app: AppState,
     session_arc: Arc<AMutex<ChatSession>>,
@@ -737,7 +1029,12 @@ pub async fn run_goal_verifier(
         current_config_file: String::new(),
         context_tokens_cap: prepare_inputs.thread.context_tokens_cap,
         include_project_info: prepare_inputs.thread.include_project_info,
-        request_attempt_id: Uuid::new_v4().to_string(),
+        request_attempt_id: session_arc
+            .lock()
+            .await
+            .verifier_readiness_resume_nonce
+            .take()
+            .unwrap_or_else(|| Uuid::new_v4().to_string()),
         worktree: prepare_inputs.thread.worktree.clone(),
     };
     let mut sampling_parameters = prepare_inputs.sampling_parameters;
@@ -757,6 +1054,15 @@ pub async fn run_goal_verifier(
         &options,
     )
     .await?;
+    let prepared = match prepared {
+        PrepareOutcome::Ready(prepared) => prepared,
+        PrepareOutcome::Pending {
+            receipt,
+            turn_nonce,
+        } => {
+            return Ok(defer_verifier_readiness(app, session_arc, receipt, turn_nonce).await);
+        }
+    };
 
     if verifier_cancel_requested(&session_arc).await {
         return Err(ABORT_ERROR_MESSAGE.to_string());
@@ -995,7 +1301,9 @@ pub async fn run_goal_verification(
         return Err(ABORT_ERROR_MESSAGE.to_string());
     }
     let result = run_goal_verification_inner(app.clone(), session_arc.clone()).await;
-    crate::chat::goal_validation_hook::emit_goal_validation(&app, &session_arc, &result).await;
+    if !result.as_ref().is_ok_and(is_readiness_deferral) {
+        crate::chat::goal_validation_hook::emit_goal_validation(&app, &session_arc, &result).await;
+    }
     result
 }
 
@@ -1059,6 +1367,32 @@ pub async fn apply_goal_verdict_for_chat(
     push: PushMode,
     tool_call_id: Option<&str>,
 ) -> GoalVerificationApplyOutcome {
+    if is_readiness_deferral(&reply) {
+        let chat_id = session_arc.lock().await.chat_id.clone();
+        if crate::agents::seal::is_sealed(app, &chat_id).await {
+            return GoalVerificationApplyOutcome::Sealed;
+        }
+        let mut session = session_arc.lock().await;
+        if session.closed || GoalVerificationFork::capture(&session) != fork {
+            return GoalVerificationApplyOutcome::Superseded;
+        }
+        if session.goal_status == Some(GoalStatus::Verifying) {
+            session.goal_set_status(GoalStatus::Active);
+        }
+        // Pending is not a verdict, attempt, failure, or model-token charge.
+        let fork = GoalVerificationFork::capture(&session);
+        if let Some(pending) = session.verifier_readiness_pending.as_mut() {
+            pending.trigger = trigger.to_string();
+            pending.push = push;
+            pending.tool_call_id = tool_call_id.map(str::to_string);
+            pending.fork = fork;
+        }
+        if trigger != "validate_goal" {
+            session.set_runtime_state(SessionState::Idle, None);
+        }
+        session.queue_notify.notify_one();
+        return GoalVerificationApplyOutcome::Waiting;
+    }
     let chat_id = session_arc.lock().await.chat_id.clone();
     if crate::agents::seal::is_sealed(app, &chat_id).await {
         crate::buddy::supervision_proof::discard_pending(&chat_id, &reply.verifier_reply);
@@ -1303,6 +1637,208 @@ mod tests {
     use refact_tool_api::{ToolSource, ToolSourceType};
     use serde_json::json;
     use std::time::{Duration, Instant};
+
+    fn verifier_pending(session: &ChatSession) -> VerifierReadinessContinuation {
+        VerifierReadinessContinuation {
+            nonce: "verifier-original".into(),
+            cancelled: Arc::new(AtomicBool::new(false)),
+            ready: true,
+            fork: GoalVerificationFork::capture(session),
+            thread: serde_json::to_value(&session.thread).unwrap(),
+            trigger: "validate_goal".into(),
+            push: PushMode::Append,
+            tool_call_id: Some("validate-original".into()),
+            frontier: session
+                .messages
+                .iter()
+                .map(|message| serde_json::to_value(message).unwrap())
+                .collect(),
+            command: session.active_command.clone(),
+        }
+    }
+
+    #[test]
+    fn verifier_readiness_accepts_only_own_paired_result_not_human_or_rewrites() {
+        for case in ["own", "other", "human", "rewrite", "goal"] {
+            let mut session = session_with_goal();
+            session.add_message(ChatMessage::new("user".into(), "original".into()));
+            let pending = verifier_pending(&session);
+            if case == "goal" {
+                session.supersede_goal_verification();
+            } else {
+                let mut message = ChatMessage::new(
+                    if case == "human" { "user" } else { "tool" }.into(),
+                    "result".into(),
+                );
+                message.tool_call_id = if case == "other" {
+                    "unrelated"
+                } else {
+                    "validate-original"
+                }
+                .into();
+                session.add_message(message);
+                if case == "rewrite" {
+                    session.messages[0].content = ChatContent::SimpleText("rewritten".into());
+                }
+            }
+            assert_eq!(
+                verifier_readiness_frontier_matches(&session, &pending),
+                case == "own",
+                "{case}"
+            );
+            session.verifier_readiness_pending = Some(pending);
+            assert_eq!(
+                readiness_allowed_tool_result(&session, "verifier-original"),
+                (case == "own").then(|| "validate-original".to_string()),
+                "{case}"
+            );
+            assert!(readiness_allowed_tool_result(&session, "unrelated-nonce").is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn readiness_deferral_has_no_verdict_attempt_or_token_charge() {
+        let app = AppState::from_gcx(crate::global_context::tests::make_test_gcx().await).await;
+        let mut session = session_with_goal();
+        session.goal_set_status(GoalStatus::Verifying);
+        let fork = GoalVerificationFork::capture(&session);
+        session.verifier_readiness_pending = Some(verifier_pending(&session));
+        let before = session.goal.as_ref().unwrap().progress.clone();
+        let session = Arc::new(AMutex::new(session));
+        let reply = GoalVerifierReply {
+            verdict: GoalVerdict::Wait(GoalWait::new(
+                GoalWaitSubject::Event {
+                    name: "review_readiness:job".into(),
+                },
+                None,
+            )),
+            verifier_reply: String::new(),
+            tokens: 0,
+            criteria_verdicts: vec![],
+        };
+        assert_eq!(
+            apply_goal_verdict_for_chat(
+                &app,
+                &session,
+                "validate_goal",
+                reply,
+                fork,
+                PushMode::Append,
+                Some("validate-original")
+            )
+            .await,
+            GoalVerificationApplyOutcome::Waiting
+        );
+        let session = session.lock().await;
+        assert_eq!(session.goal_status, Some(GoalStatus::Active));
+        assert!(session.goal.as_ref().unwrap().attempts.is_empty());
+        assert_eq!(session.goal.as_ref().unwrap().progress, before);
+        assert!(session.command_queue.is_empty());
+        assert!(session.review_readiness_resume_nonce.is_none());
+    }
+
+    #[test]
+    fn readiness_pending_prevents_goal_monitor_from_mutating_frontier() {
+        let mut session = session_with_goal();
+        session.set_runtime_state(SessionState::Idle, None);
+        session.verifier_readiness_pending = Some(verifier_pending(&session));
+        let version = session.trajectory_version;
+        let messages = serde_json::to_value(&session.messages).unwrap();
+        assert_eq!(
+            try_apply_goal_nudge(
+                &mut session,
+                GoalNudgeTrigger::Monitor,
+                epoch_ms_now(),
+                Instant::now(),
+                GoalNudgeConfig::default(),
+                None,
+            ),
+            GoalNudgeOutcome::Skipped(GoalNudgeSkip::IntentionallyWaiting)
+        );
+        assert_eq!(session.trajectory_version, version);
+        assert_eq!(serde_json::to_value(&session.messages).unwrap(), messages);
+        assert!(session.command_queue.is_empty());
+    }
+
+    #[test]
+    fn readiness_boundary_parks_after_own_result_before_frontier_changes() {
+        let mut session = session_with_goal();
+        session.verifier_readiness_pending = Some(verifier_pending(&session));
+        let mut result = ChatMessage::new("tool".into(), "verification pending".into());
+        result.tool_call_id = "validate-original".into();
+        session.add_message(result);
+        let version = session.trajectory_version;
+        let messages = serde_json::to_value(&session.messages).unwrap();
+        assert!(
+            super::super::generation::park_pending_verifier_at_generation_boundary(&mut session)
+        );
+        assert_eq!(session.runtime.state, SessionState::Idle);
+        assert_eq!(session.trajectory_version, version);
+        assert_eq!(serde_json::to_value(&session.messages).unwrap(), messages);
+        assert_eq!(
+            readiness_allowed_tool_result(&session, "verifier-original"),
+            Some("validate-original".into())
+        );
+    }
+
+    #[test]
+    fn readiness_failure_backoff_is_scoped_and_does_not_fabricate_verdict() {
+        let mut session = session_with_goal();
+        session.verifier_readiness_pending = Some(verifier_pending(&session));
+        assert!(!fail_verifier_readiness_observer(
+            &mut session,
+            "older-nonce",
+            "cancelled"
+        ));
+        assert!(session.verifier_readiness_pending.is_some());
+        assert!(session.goal_verification_blocked_until_ms.is_none());
+        assert!(fail_verifier_readiness_observer(
+            &mut session,
+            "verifier-original",
+            "cancelled"
+        ));
+        assert!(session.verifier_readiness_pending.is_none());
+        assert!(session.goal_verification_blocked_until_ms.is_some());
+        assert!(session.goal.as_ref().unwrap().attempts.is_empty());
+        assert!(session.command_queue.is_empty());
+    }
+
+    #[test]
+    fn readiness_foreground_resume_preserves_command_and_yields_to_human_cancel() {
+        for case in ["resume", "human", "cancel", "paused"] {
+            let mut session = session_with_goal();
+            session.active_command.model_override = Some("restricted-model".into());
+            let pending = verifier_pending(&session);
+            session.active_command = ActiveCommandContext::default();
+            session.set_runtime_state(SessionState::Idle, None);
+            match case {
+                "human" => {
+                    session.enqueue_command(CommandRequest {
+                        native_approval_guard: None,
+                        supervision_guard: None,
+                        client_request_id: "human-priority".into(),
+                        priority: true,
+                        command: ChatCommand::Regenerate {},
+                    });
+                }
+                "cancel" => pending.cancelled.store(true, Ordering::SeqCst),
+                "paused" => session.runtime.paused = true,
+                _ => {}
+            }
+            assert_eq!(
+                restore_verifier_foreground_command(&mut session, &pending),
+                case == "resume",
+                "{case}"
+            );
+            if case == "resume" {
+                assert_eq!(
+                    session.active_command.model_override.as_deref(),
+                    Some("restricted-model")
+                );
+                assert!(session.command_queue.is_empty());
+            }
+        }
+    }
 
     fn session_with_goal() -> ChatSession {
         let mut session = ChatSession::new("goal-verifier-test".to_string());

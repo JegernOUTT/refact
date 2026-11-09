@@ -103,6 +103,7 @@ async fn validate_command_inner(
     } else {
         let config = SubchatConfig {
             runner_lease_token: None,
+            native_job_fence: None,
             history_source_model: None,
             tool_name: "shell_command_validator".to_string(),
             stateful: false,

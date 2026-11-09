@@ -376,6 +376,8 @@ pub struct GlobalContext {
     pub shutdown_flag: Arc<AtomicBool>,
     pub lsp_tcp_client_count: Arc<AtomicUsize>,
     pub exec_registry: Arc<ExecRegistry>,
+    pub tool_jobs: Arc<crate::tool_jobs::JobRuntime>,
+    pub(crate) review_readiness: Arc<crate::review::readiness::ReadinessRegistry>,
     pub card_verifier_tasks: Arc<AMutex<tokio::task::JoinSet<()>>>,
     pub trajectory_vectorization_queue:
         Arc<AMutex<crate::chat::trajectories::TrajectoryVectorizationQueue>>,
@@ -478,6 +480,8 @@ impl GlobalContext {
                 http_client: self.http_client.clone(),
                 ask_shutdown_sender: self.ask_shutdown_sender.clone(),
                 exec_registry: self.exec_registry.clone(),
+                tool_jobs: self.tool_jobs.clone(),
+                review_readiness: self.review_readiness.clone(),
             },
             paths: PathServices {
                 cache_dir: self.cache_dir.clone(),
@@ -964,6 +968,14 @@ pub async fn create_global_context(
         shutdown_flag: Arc::new(AtomicBool::new(false)),
         lsp_tcp_client_count: Arc::new(AtomicUsize::new(0)),
         exec_registry: Arc::new(ExecRegistry::new()),
+        tool_jobs: crate::tool_jobs::JobRuntime::open_durable(
+            cache_dir.clone(),
+            256,
+            4 * 1024 * 1024,
+        )
+        .await
+        .unwrap_or_else(|error| panic!("tool job ownership journal unavailable: {error}")),
+        review_readiness: Arc::new(Default::default()),
         card_verifier_tasks: Arc::new(AMutex::new(tokio::task::JoinSet::new())),
         trajectory_vectorization_queue: Arc::new(AMutex::new(Default::default())),
         cmdline: cmdline.clone(),
@@ -1303,6 +1315,8 @@ pub mod tests {
             shutdown_flag: Arc::new(AtomicBool::new(false)),
             lsp_tcp_client_count: Arc::new(AtomicUsize::new(0)),
             exec_registry: Arc::new(ExecRegistry::new()),
+        tool_jobs: crate::tool_jobs::JobRuntime::with_namespace(cache_dir.clone(), 256, 4 * 1024 * 1024),
+        review_readiness: Arc::new(Default::default()),
             card_verifier_tasks: Arc::new(AMutex::new(tokio::task::JoinSet::new())),
             trajectory_vectorization_queue: Arc::new(AMutex::new(Default::default())),
             cmdline,

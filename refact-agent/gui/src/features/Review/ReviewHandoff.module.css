@@ -1,0 +1,25 @@
+.status {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.markdown {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 240px;
+  max-height: 50vh;
+  resize: vertical;
+  font-family: monospace;
+  white-space: pre;
+}
+
+.error {
+  font-size: 12px;
+  overflow-wrap: anywhere;
+  max-width: 28em;
+}

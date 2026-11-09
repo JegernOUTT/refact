@@ -1,9 +1,11 @@
 import { useEffect, useRef } from "react";
+import classNames from "classnames";
 
 import { useAppearance } from "../../../../hooks";
 import { resolveLanguageForPath } from "./diffLanguage";
 import {
   createDiffEditors,
+  type DiffEditorsConfig,
   type DiffEditorsController,
   type DiffMode,
 } from "./diffEditors";
@@ -18,6 +20,9 @@ export type DiffEditorsHostProps = {
   leftLabel: string;
   rightLabel: string;
   onController: (controller: DiffEditorsController | null) => void;
+  extensions?: DiffEditorsConfig["extensions"];
+  className?: string;
+  testId?: string;
 };
 
 /**
@@ -34,6 +39,9 @@ export function DiffEditorsHost({
   leftLabel,
   rightLabel,
   onController,
+  extensions,
+  className,
+  testId = "git-diff-editors",
 }: DiffEditorsHostProps) {
   const hostRef = useRef<HTMLDivElement>(null);
   const controllerRef = useRef<DiffEditorsController | null>(null);
@@ -63,6 +71,7 @@ export function DiffEditorsHost({
       language: cachedLanguage,
       leftLabel: latest.current.leftLabel,
       rightLabel: latest.current.rightLabel,
+      extensions,
     });
     controllerRef.current = controller;
     latest.current.onController(controller);
@@ -71,7 +80,7 @@ export function DiffEditorsHost({
       latest.current.onController(null);
       controller.destroy();
     };
-  }, [collapseUnchanged, left, mode, right, languagePath]);
+  }, [collapseUnchanged, left, mode, right, languagePath, extensions]);
 
   useEffect(() => {
     controllerRef.current?.setDark(isDark);
@@ -91,6 +100,10 @@ export function DiffEditorsHost({
   }, [languagePath]);
 
   return (
-    <div ref={hostRef} className={styles.host} data-testid="git-diff-editors" />
+    <div
+      ref={hostRef}
+      className={classNames(styles.host, className)}
+      data-testid={testId}
+    />
   );
 }

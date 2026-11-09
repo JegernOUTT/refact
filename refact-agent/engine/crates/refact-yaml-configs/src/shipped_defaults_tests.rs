@@ -350,7 +350,8 @@ fn audit_modes_preserve_baselines_and_record_current_revision() {
     let manifest = shipped_defaults();
     let embedded: HashMap<_, _> = embedded_defaults("modes").into_iter().collect();
     assert_eq!(AUDIT_BASELINE_MODES.len(), 24);
-    assert_eq!(embedded.len(), AUDIT_BASELINE_MODES.len());
+    assert_eq!(embedded.len(), AUDIT_BASELINE_MODES.len() + 1);
+    assert!(embedded.contains_key("review.yaml"));
     for &(name, old_version) in AUDIT_BASELINE_MODES {
         let key = format!("modes/{name}.yaml");
         let entries = &manifest[&key];
@@ -486,6 +487,9 @@ async fn unbaselined_older_unknown_modes_upgrade_with_exact_backups() {
             embedded
         );
         assert_eq!(saved[&key], compute_checksum(&embedded));
+        if !originals.contains_key(&file) {
+            continue;
+        }
         let backups: Vec<_> = std::fs::read_dir(temp.path().join("modes"))
             .unwrap()
             .map(Result::unwrap)
@@ -590,7 +594,7 @@ fn audited_mode_semantic_workflows_and_confirmation_boundaries() {
             }
         }
     }
-    assert_eq!(spawning, 15);
+    assert_eq!(spawning, 16);
     let design = &modes["design"];
     for tool in [
         "worktree_create",

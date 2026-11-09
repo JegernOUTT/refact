@@ -25,12 +25,88 @@ import {
   syntheticCompressionReportMessage,
   syntheticSummarizationMessage,
   UserMessage,
+  ToolMessage,
+  ChatContextFileMessage,
+  isToolContent,
 } from "../../services/refact";
 import { normalizeToolName, isToolName } from "../../utils/toolNameAliases";
 import { isSkillReportContent, parseSkillReport } from "./skillReportUtils";
 import { foldedEventIndexFor } from "./foldedEventIndex";
 
 const BUDDY_PULSE_TOOL_CALL_ID = "buddy_project_memory_pulse";
+
+export type NativeToolJobResult = {
+  toolName: string;
+  message: ToolMessage | ChatContextFileMessage;
+};
+
+function record(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+// This is presentation validation, not authority. The owning transcript and the
+// backend's fresh delivery clearance determine which chat may receive output.
+export function nativeToolJobResult(
+  message: ChatMessages[number],
+): NativeToolJobResult | null {
+  const meta = record(message.extra?.tool_job_result);
+  const delivery = record(message.extra?.delivery);
+  if (
+    !meta ||
+    meta.actor !== "tool_completion" ||
+    !nonEmptyString(meta.job_id) ||
+    !nonEmptyString(meta.tool_name) ||
+    typeof meta.tool_call_id !== "string" ||
+    typeof meta.revision !== "number" ||
+    !Number.isSafeInteger(meta.revision) ||
+    meta.revision < 1 ||
+    delivery?.source !== "tool_job.completed" ||
+    delivery.id !== `tool_job:${meta.job_id}:${meta.revision}` ||
+    !message.message_id?.startsWith(`${delivery.id}:`) ||
+    !/^\d+$/.test(message.message_id.slice(delivery.id.length + 1))
+  )
+    return null;
+
+  if (message.role === "event") {
+    const event = normalizeEventMessageMetadata(message);
+    const payload = record(event.payload);
+    if (
+      event.source !== "tool_job.completed" ||
+      event.subkind !== "system_notice" ||
+      payload?.actor !== "tool_completion" ||
+      payload.job_id !== meta.job_id
+    )
+      return null;
+    const content: unknown = message.content;
+    if (meta.original_role === "tool" && isToolContent(content)) {
+      return {
+        toolName: meta.tool_name,
+        message: {
+          ...message,
+          role: "tool",
+          content,
+          tool_call_id: meta.tool_call_id,
+        },
+      };
+    }
+  }
+  if (
+    meta.original_role === "context_file" &&
+    isChatContextFileMessage(message)
+  ) {
+    return { toolName: meta.tool_name, message };
+  }
+  return null;
+}
+
+type DisplayItemToolJobResult = {
+  type: "tool_job_result";
+  key: string;
+  messageIndex: number;
+  result: NativeToolJobResult;
+};
 
 function getMessageKey(message: ChatMessages[number], index: number): string {
   if (message.message_id) return message.message_id;
@@ -382,7 +458,11 @@ function assistantDisplayClass(
 }
 
 function isHiddenDisplayMessage(message: ChatMessages[number]): boolean {
-  return message.role === "plan";
+  return (
+    message.role === "plan" ||
+    (isEventMessage(message) &&
+      normalizeEventMessageMetadata(message).source === "review.comment")
+  );
 }
 
 function isBlankText(value: unknown): boolean {
@@ -428,6 +508,7 @@ function isEmptyUserMessage(message: UserMessage): boolean {
 }
 
 export type DisplayItem =
+  | DisplayItemToolJobResult
   | DisplayItemAssistant
   | DisplayItemUser
   | DisplayItemContextFiles
@@ -611,6 +692,17 @@ function buildDisplayItemsFromIndex(
   for (let i = startIndex; i < messages.length; i++) {
     const head = messages[i];
 
+    const jobResult = nativeToolJobResult(head);
+    if (jobResult) {
+      items.push({
+        type: "tool_job_result",
+        key: getMessageKey(head, i),
+        messageIndex: i,
+        result: jobResult,
+      });
+      continue;
+    }
+
     if (isToolMessage(head)) continue;
 
     if (isCompressedAssistantPairedWithReport(messages, i)) continue;
@@ -736,6 +828,8 @@ function buildDisplayItemsFromIndex(
       let j = i + 1;
       while (j < messages.length) {
         const nextMsg = messages[j];
+
+        if (nativeToolJobResult(nextMsg)) break;
 
         if (isToolMessage(nextMsg)) {
           j++;

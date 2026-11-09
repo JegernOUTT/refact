@@ -111,7 +111,7 @@ fn registered_worktree_path_mappings_with_reader(
     Arc::new(read())
 }
 
-fn registered_worktree_path_mappings_uncached(
+pub(crate) fn registered_worktree_path_mappings_uncached(
     cache_dir: &Path,
 ) -> Vec<RegisteredWorktreePathMapping> {
     let worktrees_root = canonicalize_normalized_path(cache_dir.join("worktrees"));

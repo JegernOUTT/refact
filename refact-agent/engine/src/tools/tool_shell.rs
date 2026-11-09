@@ -78,6 +78,20 @@ struct ParsedShellArgs {
     push: PushMode,
 }
 
+struct ShellScopeGuard(std::sync::Mutex<Option<crate::tool_jobs::ExecutionLease>>);
+impl std::fmt::Debug for ShellScopeGuard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ShellScopeGuard")
+    }
+}
+impl refact_exec::ExecLifecycleGuard for ShellScopeGuard {
+    fn settle(&self) {
+        if let Some(lease) = self.0.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            lease.settle();
+        }
+    }
+}
+
 pub(crate) async fn approval_request(
     ccx: &Arc<AMutex<AtCommandsContext>>,
     args: &HashMap<String, Value>,
@@ -187,7 +201,7 @@ impl Tool for ToolShell {
             (
                 ccx_lock.app.gcx.clone(),
                 ccx_lock.app.runtime.exec_registry.clone(),
-                ccx_lock.abort_flag.clone(),
+                ccx_lock.execution_abort.clone(),
                 ccx_lock.execution_scope.clone(),
                 ccx_lock.chat_id.clone(),
                 ccx_lock.derived_privacy_zones.clone(),
@@ -284,7 +298,7 @@ impl Tool for ToolShell {
         let tty = parsed
             .tty
             .unwrap_or(parsed.run_in_background && refact_exec::default_tty());
-        let (progress_tx, progress_task) = if parsed.run_in_background {
+        let (progress_tx, progress_task) = if parsed.run_in_background || observe {
             (None, None)
         } else {
             let (tx, rx) = mpsc::unbounded_channel();
@@ -349,7 +363,7 @@ impl Tool for ToolShell {
         if !parsed.run_in_background {
             request = request
                 .with_timeout(Duration::from_secs(timeout))
-                .with_abort_flag(abort_flag);
+                .with_abort_flag(abort_flag.clone());
         }
         if let Some(progress_tx) = progress_tx {
             request = request.with_output_progress_tx(progress_tx);
@@ -411,7 +425,49 @@ impl Tool for ToolShell {
         }
         revalidate_span.finish_tool(PerfOutcome::Success, 1, 1, None);
         let spawn_span = perf_diagnostics::span(PerfComponent::ShellSpawnWait, None, None);
-        let result = match exec_registry.spawn(request).await {
+        let (jobs, mut scope_keys) = {
+            let context = ccx.lock().await;
+            let jobs = context.app.runtime.tool_jobs.clone();
+            let mut keys = vec![jobs.chat_scope_key(&chat_id)];
+            if let Some(checkout) = &checkout {
+                keys.push(checkout.scope_key());
+            } else if let Some(scope) = &execution_scope {
+                let meta = scope.worktree();
+                keys.push(crate::tool_jobs::ScopeKey::Worktree {
+                    project: meta.source_workspace_root.clone(),
+                    root: meta.root.clone(),
+                });
+            } else {
+                for root in context
+                    .global_context
+                    .documents_state
+                    .workspace_folders
+                    .lock()
+                    .unwrap()
+                    .iter()
+                {
+                    let root = std::fs::canonicalize(root)
+                        .map_err(|_| "shell workspace identity unavailable")?;
+                    let root = dunce::simplified(&root).to_path_buf();
+                    keys.push(crate::tool_jobs::ScopeKey::Worktree {
+                        project: root.clone(),
+                        root,
+                    });
+                }
+            }
+            (jobs, keys)
+        };
+        scope_keys.sort();
+        scope_keys.dedup();
+        let lease = jobs
+            .scopes
+            .acquire(&scope_keys, abort_flag.clone())
+            .map_err(|error| format!("shell execution scope unavailable: {error:?}"))?;
+        let scope_guard = Arc::new(ShellScopeGuard(std::sync::Mutex::new(Some(lease))));
+        request.execution_guard = Some(scope_guard.clone());
+        request = request.with_abort_flag(abort_flag);
+        request.return_after_monitor_attach = !parsed.run_in_background;
+        let mut result = match exec_registry.spawn(request).await {
             Ok(result) => result,
             Err(error) => {
                 if let Some(progress_task) = progress_task {
@@ -421,6 +477,62 @@ impl Tool for ToolShell {
                 return Err(error);
             }
         };
+        if !parsed.run_in_background {
+            let process_id = &result.snapshot.meta.process_id;
+            let completed = tokio::time::timeout(Duration::from_millis(100), async {
+                let snapshot = exec_registry.wait(process_id).await?;
+                let observation = match exec_registry.observation_reader(process_id).await {
+                    Some(reader) => reader.wait_status().await,
+                    None => result.observation.clone(),
+                };
+                Ok::<_, String>((snapshot, observation))
+            })
+            .await;
+            match completed {
+                Ok(Ok((snapshot, observation))) => {
+                    result.snapshot = snapshot;
+                    result.observation = observation;
+                }
+                Ok(Err(error)) => return Err(error),
+                Err(_) => {
+                    // Only the caller stops waiting. The registry monitor still owns the same
+                    // child, original timeout, output drain, observation and cancellation flag.
+                    let snapshot = exec_registry.detach_foreground(process_id).await?;
+                    if let Some(task) = progress_task {
+                        task.abort();
+                        let _ = task.await;
+                    }
+                    let mut extra = serde_json::Map::new();
+                    extra.insert(
+                        "exec".into(),
+                        json!({
+                            "process_id": snapshot.meta.process_id.as_str(),
+                            "status": exec_status_label(&snapshot.status),
+                            "mode": snapshot.meta.mode.to_string(),
+                            "tty": snapshot.meta.tty,
+                            "timeout_secs": timeout,
+                            "detached": true,
+                        }),
+                    );
+                    if let Some(cache) = &cache {
+                        cache.attach_report(&mut extra);
+                    }
+                    spawn_span.finish_tool(PerfOutcome::Success, 1, 1, None);
+                    let message = ChatMessage {
+                        role: "tool".into(),
+                        tool_call_id: tool_call_id.clone(),
+                        content: ChatContent::SimpleText(format!(
+                            "Foreground command continues under runtime ownership.\nprocess_id: {}\nUse process_read or wait with this process ID; do not rerun the command. Output is withheld until observation is ready.\n",
+                            snapshot.meta.process_id)),
+                        tool_failed: None,
+                        output_filter: Some(OutputFilter::no_limits()),
+                        extra,
+                        ..Default::default()
+                    };
+                    return Ok((false, vec![ContextEnum::ChatMessage(message)]));
+                }
+            }
+        }
         spawn_span.finish_tool(PerfOutcome::Success, 1, 1, None);
         let progress_span = perf_diagnostics::span(PerfComponent::ShellProgressDrain, None, None);
         if let Some(progress_task) = progress_task {
@@ -836,7 +948,7 @@ fn collect_foreground_output(
         .unwrap_or_else(|| collect_exec_output(read))
 }
 
-fn exec_status_label(status: &ExecStatus) -> &'static str {
+pub(crate) fn exec_status_label(status: &ExecStatus) -> &'static str {
     match status {
         ExecStatus::Starting => "starting",
         ExecStatus::Running => "running",
@@ -1333,13 +1445,76 @@ mod tests {
     }
 
     async fn run_shell(args: HashMap<String, Value>) -> ChatMessage {
-        let ccx = ccx_with_abort(None).await;
+        let (gcx, ccx) = ccx_with_gcx_and_abort(None).await;
         let mut shell = ToolShell::default();
         let (_, messages) = shell
             .tool_execute(ccx, &"shell".to_string(), &args)
             .await
             .unwrap();
-        only_chat_message(messages)
+        let mut message = only_chat_message(messages);
+        // Output regressions inspect the completed capture of the same execution,
+        // even when the shell receipt detached. Never rerun the command in tests.
+        if exec(&message)["detached"] == true {
+            let id = process_id(&message);
+            let snapshot =
+                tokio::time::timeout(Duration::from_secs(60), gcx.exec_registry.wait(&id))
+                    .await
+                    .unwrap()
+                    .unwrap();
+            let observation = match gcx.exec_registry.observation_reader(&id).await {
+                Some(reader) => Some(reader.wait_status().await),
+                None => None,
+            };
+            // Terminal execution alone does not make observed output safe to disclose.
+            assert!(!matches!(
+                observation,
+                Some(refact_exec::ObservationStatus::Pending(_))
+            ));
+            let read = gcx.exec_registry.read(&id, 0, None).await;
+            let raw = gcx.exec_registry.read_raw_capture(&id).await;
+            let (stdout, stderr) = collect_foreground_output(&read, raw.as_ref());
+            let filter = parse_output_filter_args(&args, &OutputFilter::default());
+            let mut out = crate::integrations::integr_cmdline::format_output(
+                &output_mini_postprocessing(&filter, &stdout),
+                &output_mini_postprocessing(&filter, &stderr),
+            );
+            if raw.as_ref().is_some_and(|raw| raw.is_truncated()) {
+                out.push_str("Raw foreground capture reached limits\n");
+            }
+            let timeout = args
+                .get("timeout")
+                .map(|value| match value {
+                    Value::String(value) => value.parse().unwrap(),
+                    value => value.as_u64().unwrap(),
+                })
+                .unwrap_or(10);
+            append_status_line(&mut out, &snapshot.status, Duration::ZERO, timeout);
+            message.content = ChatContent::SimpleText(out);
+            message.tool_failed = tool_failed_for_status(&snapshot.status);
+            message.extra = exec_extra(
+                &snapshot,
+                &read,
+                Duration::ZERO,
+                Some(timeout),
+                snapshot.meta.tty,
+            );
+            if let Some(observation) = observation {
+                apply_shell_privacy(
+                    &gcx,
+                    &snapshot.meta.command,
+                    request_cwd(&snapshot),
+                    &crate::privacy::records::provider_destination("model"),
+                    observation,
+                    &Default::default(),
+                    &mut message,
+                )
+                .await
+                .unwrap();
+            }
+            assert_eq!(process_id(&message), id);
+            assert_eq!(gcx.exec_registry.list(Default::default()).await.len(), 1);
+        }
+        message
     }
 
     async fn shell_error(args: HashMap<String, Value>) -> String {
@@ -1554,6 +1729,103 @@ mod tests {
         assert_eq!(message.tool_failed, Some(false));
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shell_receipt_scope_change_cancels_and_drains_actual_monitor() {
+        let workspace = tempfile::tempdir().unwrap();
+        let (gcx, ccx) = ccx_with_workspace(workspace.path()).await;
+        let (jobs, execution_abort) = {
+            let context = ccx.lock().await;
+            (
+                context.app.runtime.tool_jobs.clone(),
+                context.execution_abort.clone(),
+            )
+        };
+        let (_, messages) = ToolShell::default()
+            .tool_execute(
+                ccx,
+                &"scope-shell".into(),
+                &args(vec![
+                    ("command", json!("printf ready; sleep 30")),
+                    (
+                        "description",
+                        json!("Hold actual process for scope cancellation"),
+                    ),
+                ]),
+            )
+            .await
+            .unwrap();
+        let message = only_chat_message(messages);
+        assert_eq!(exec(&message)["detached"], true);
+        let id = process_id(&message);
+        let root =
+            dunce::simplified(&std::fs::canonicalize(workspace.path()).unwrap()).to_path_buf();
+        let keys = [crate::tool_jobs::ScopeKey::Worktree {
+            project: root.clone(),
+            root,
+        }];
+        let transition = jobs.scopes.begin_scope_change(&keys);
+        tokio::pin!(transition);
+        assert!(
+            futures::poll!(&mut transition).is_pending(),
+            "receipt must retain the actual process lease"
+        );
+        assert!(
+            execution_abort.load(Ordering::Acquire),
+            "scope change signals the process flag"
+        );
+        let change = tokio::time::timeout(Duration::from_secs(10), transition)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(gcx
+            .exec_registry
+            .get(&id)
+            .await
+            .unwrap()
+            .status
+            .is_terminal());
+        drop(change);
+    }
+
+    #[tokio::test]
+    async fn foreground_shell_detaches_same_id_and_keeps_timeout() {
+        let (gcx, ccx) = ccx_with_gcx_and_abort(None).await;
+        let mut shell = ToolShell::default();
+        let (_, messages) = shell
+            .tool_execute(
+                ccx,
+                &"shell".into(),
+                &args(vec![
+                    ("command", json!(slow_command())),
+                    ("description", json!("Run foreground timeout test")),
+                    ("timeout", json!(1)),
+                ]),
+            )
+            .await
+            .unwrap();
+        let message = only_chat_message(messages);
+        assert_eq!(exec(&message)["detached"], true);
+        assert_eq!(exec(&message)["mode"], "foreground");
+        assert_eq!(exec(&message)["tty"], false);
+        assert_eq!(exec(&message)["timeout_secs"], 1);
+        assert_eq!(message.tool_failed, None);
+        assert!(!text(&message).contains("start"));
+        let id = process_id(&message);
+        assert_eq!(gcx.exec_registry.list(Default::default()).await.len(), 1);
+        let terminal = tokio::time::timeout(Duration::from_secs(10), gcx.exec_registry.wait(&id))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(terminal.meta.process_id, id);
+        assert_eq!(terminal.status, ExecStatus::TimedOut);
+        assert_eq!(gcx.exec_registry.list(Default::default()).await.len(), 1);
+        let mut output = String::new();
+        append_status_line(&mut output, &terminal.status, Duration::ZERO, 1);
+        assert!(output.contains("timed out after 1 seconds"));
+        assert_eq!(tool_failed_for_status(&terminal.status), Some(true));
+    }
+
     #[tokio::test]
     async fn run_in_background_true_returns_immediately() {
         let (gcx, ccx) = ccx_with_gcx_and_abort(None).await;
@@ -1752,14 +2024,12 @@ mod tests {
             ("timeout", json!(1)),
         ]))
         .await;
-        let body = text(&message);
-
-        if !cfg!(windows) {
-            assert!(body.contains("start"));
-        }
-        assert!(body.contains("timed out"));
         assert_eq!(exec(&message)["status"], "timed_out");
+        assert_eq!(exec(&message)["timeout_secs"], 1);
         assert_eq!(message.tool_failed, Some(true));
+        if !cfg!(windows) {
+            assert!(text(&message).contains("start"));
+        }
     }
 
     #[tokio::test]
@@ -1853,38 +2123,57 @@ mod tests {
     #[tokio::test]
     async fn shell_exec_abort_returns_partial_output_and_failed_metadata() {
         let abort_flag = Arc::new(AtomicBool::new(false));
-        let ccx = ccx_with_abort(Some(abort_flag.clone())).await;
+        let (gcx, ccx) = ccx_with_gcx_and_abort(Some(abort_flag.clone())).await;
         let mut shell = ToolShell::default();
         let tool_call_id = "shell".to_string();
-        let run = tokio::spawn(async move {
-            shell
-                .tool_execute(
-                    ccx,
-                    &tool_call_id,
-                    &args(vec![
-                        ("command", json!(slow_command())),
-                        ("description", json!("Run slow command for abort test")),
-                        ("timeout", json!(10)),
-                    ]),
-                )
-                .await
-                .unwrap()
-        });
-        tokio::time::sleep(if cfg!(windows) {
-            Duration::from_secs(2)
-        } else {
-            Duration::from_millis(200)
-        })
-        .await;
-        abort_flag.store(true, Ordering::Relaxed);
-        let (_, messages) = run.await.unwrap();
+        let (_, messages) = shell
+            .tool_execute(
+                ccx.clone(),
+                &tool_call_id,
+                &args(vec![
+                    ("command", json!(slow_command())),
+                    ("description", json!("Run slow command for abort test")),
+                    ("timeout", json!(10)),
+                ]),
+            )
+            .await
+            .unwrap();
         let message = only_chat_message(messages);
-        let body = text(&message);
-
-        assert!(body.contains("start"));
-        assert!(body.contains("interrupted by user"));
-        assert_eq!(exec(&message)["status"], "killed");
-        assert_eq!(message.tool_failed, Some(true));
+        assert_eq!(exec(&message)["detached"], true);
+        assert_eq!(message.tool_failed, None);
+        let id = process_id(&message);
+        assert_eq!(gcx.exec_registry.list(Default::default()).await.len(), 1);
+        wait_for_output(gcx.clone(), &id, "start").await;
+        abort_flag.store(true, Ordering::Relaxed);
+        let terminal = tokio::time::timeout(Duration::from_secs(10), gcx.exec_registry.wait(&id))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(terminal.meta.process_id, id);
+        assert_eq!(terminal.status, ExecStatus::Killed);
+        assert_eq!(tool_failed_for_status(&terminal.status), Some(true));
+        if let Some(reader) = gcx.exec_registry.observation_reader(&id).await {
+            assert!(!matches!(
+                reader.wait_status().await,
+                refact_exec::ObservationStatus::Pending(_)
+            ));
+        }
+        let mut read = crate::tools::tool_process::ToolProcessRead {
+            config_path: String::new(),
+        };
+        let (_, messages) = read
+            .tool_execute(
+                ccx,
+                &"read-aborted".into(),
+                &args(vec![("process_id", json!(id.as_str()))]),
+            )
+            .await
+            .unwrap();
+        let output = only_chat_message(messages);
+        assert_eq!(process_id(&output), id);
+        assert_eq!(exec(&output)["status"], "killed");
+        assert!(text(&output).contains("start"));
+        assert_eq!(gcx.exec_registry.list(Default::default()).await.len(), 1);
     }
 
     #[tokio::test]

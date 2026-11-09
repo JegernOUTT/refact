@@ -71,12 +71,15 @@ async fn late_recapture_refusal_is_recorded_on_the_card() {
         queued.get_card("T-1").unwrap().agent_chat_id.as_deref(),
         Some(chat.as_str())
     );
-    WorktreeService::new_async(fixture.gcx.cache_dir.clone(), fixture.source.clone())
-        .await
-        .unwrap()
-        .delete_worktree(&fixture.old.worktree_name(), true, true)
-        .await
-        .unwrap();
+    crate::worktrees::service::fenced_service(
+        WorktreeService::new_async(fixture.gcx.cache_dir.clone(), fixture.source.clone())
+            .await
+            .unwrap(),
+        fixture.app.runtime.tool_jobs.scopes.clone(),
+    )
+    .delete_worktree(&fixture.old.worktree_name(), true, true)
+    .await
+    .unwrap();
     let worktrees = git(&fixture.source, &["worktree", "list", "--porcelain"]);
     let branches = git(&fixture.source, &["branch", "--list"]);
     holder.release();

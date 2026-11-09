@@ -201,12 +201,15 @@ impl Fixture {
             .agent_worktree_name
             .as_deref()
             .unwrap();
-        crate::worktrees::service::WorktreeService::new_async(
-            self.gcx.cache_dir.clone(),
-            self.source.clone(),
+        crate::worktrees::service::fenced_service(
+            crate::worktrees::service::WorktreeService::new_async(
+                self.gcx.cache_dir.clone(),
+                self.source.clone(),
+            )
+            .await
+            .unwrap(),
+            self.app.runtime.tool_jobs.scopes.clone(),
         )
-        .await
-        .unwrap()
         .delete_worktree(name, true, true)
         .await
         .unwrap();

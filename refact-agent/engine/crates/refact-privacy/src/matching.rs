@@ -1530,14 +1530,20 @@ mod tests {
 
     #[test]
     fn normalized_candidates_match_reference_dedup_algorithm() {
-        let paths = vec![
-            PathBuf::from("A//./cafe\u{301}.txt"),
-            PathBuf::from("a//./cafe\u{301}.txt"),
-            PathBuf::from("café.txt"),
-            PathBuf::from("A//./cafe\u{301}.txt"),
-            PathBuf::from(r"C:\\Work\\..\\Secret.TXT"),
-        ];
-        let actual = normalized_candidates(&paths);
+        let paths = [
+            "repo/cafe\u{301}.txt",
+            "repo/cafe\u{301}.txt",
+            "repo/café.txt",
+            "repo/Café.TXT",
+            "repo/./file.txt",
+            "repo/file.txt",
+            "repo/file.txt/",
+            "repo\\file.txt",
+            "",
+            "A//./cafe\u{301}.txt",
+            r"C:\\Work\\..\\Secret.TXT",
+        ]
+        .map(PathBuf::from);
         let mut expected = BTreeSet::new();
         for path in &paths {
             let normalized = normalize(&path.to_string_lossy());
@@ -1548,7 +1554,7 @@ mod tests {
                 expected.insert(normalized);
             }
         }
-        assert_eq!(actual, expected);
+        assert_eq!(normalized_candidates(&paths), expected);
         #[cfg(unix)]
         {
             use std::os::unix::ffi::OsStringExt;
@@ -1559,6 +1565,33 @@ mod tests {
                 BTreeSet::from([normalize(&replacement)])
             );
         }
+    }
+
+    #[test]
+    fn relative_candidate_dedup_preserves_distinct_root_spellings() {
+        let roots = [PathBuf::from("/repo"), PathBuf::from("/repo/./nested")];
+        let canonical_roots = [PathBuf::from("/repo"), PathBuf::from("/elsewhere")];
+        let paths = vec![
+            PathBuf::from("/repo/./nested/file.txt"),
+            PathBuf::from("/elsewhere/file.txt"),
+        ];
+        let mut expected = paths.clone();
+        for (root, canonical_root) in roots.iter().zip(&canonical_roots) {
+            for path in &paths {
+                for candidate_root in [root, canonical_root] {
+                    if let Ok(relative) = path.strip_prefix(candidate_root) {
+                        expected.push(relative.to_path_buf());
+                    }
+                }
+            }
+        }
+        let mut actual = paths;
+        let index = PreparedRootIndex::new(&roots, &canonical_roots);
+        append_relative_candidates(&mut actual, &index);
+        assert_eq!(
+            normalized_candidates(&actual),
+            normalized_candidates(&expected)
+        );
     }
 
     #[test]

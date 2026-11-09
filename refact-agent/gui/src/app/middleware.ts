@@ -68,6 +68,7 @@ import {
   setProjectStorageNamespaceFromProjectInfo,
 } from "../utils/chatUiPersistence";
 import { integrationsApi } from "../services/refact/integrations";
+import { invalidateReviewForChat } from "../services/refact/review";
 import { capsApi, isCapsErrorResponse } from "../services/refact/caps";
 import { promptsApi } from "../services/refact/prompts";
 import { toolsApi } from "../services/refact/tools";
@@ -575,6 +576,19 @@ startListening({
     }
 
     persistWorkspaceLayout(listenerApi.getState());
+  },
+});
+
+startListening({
+  actionCreator: applyChatEvent,
+  effect: (action, listenerApi) => {
+    const event = action.payload;
+    if (
+      (event.type === "thread_updated" && event.review !== undefined) ||
+      event.type === "snapshot"
+    ) {
+      listenerApi.dispatch(invalidateReviewForChat(event.chat_id));
+    }
   },
 });
 

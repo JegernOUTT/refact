@@ -94,6 +94,7 @@ pub(crate) struct PreparedWorktree {
     meta: WorktreeMeta,
     source: AcceptedAgentSource,
     branch_was_created: bool,
+    cleanup_service: WorktreeService,
     pub(crate) spawned_with_dirty_tree: bool,
     pub(crate) base_branch_mismatch_warning: Option<String>,
 }
@@ -124,10 +125,8 @@ impl PreparedWorktree {
             tracing::warn!(%error, "Unlinked task-agent checkout retained; reconciliation required");
             return;
         }
-        let cache_dir = gcx.cache_dir.clone();
-        if let Ok(service) =
-            WorktreeService::new_async(cache_dir, self.meta.source_workspace_root.clone()).await
         {
+            let service = self.cleanup_service;
             match service.validate_worktree_meta_strict(&self.meta).await {
                 Ok(meta) if meta == self.meta => {
                     if service
@@ -764,6 +763,9 @@ async fn prepare_agent_worktree_with_base_and_suffix(
     }
     let cache_dir = gcx.cache_dir.clone();
     let service = WorktreeService::new_async(cache_dir, workspace_root.clone()).await?;
+    let app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
+    let service =
+        crate::worktrees::service::fenced_service(service, app.runtime.tool_jobs.scopes.clone());
     let task_base_branch = base_branch;
     let current_branch = if task_base_branch.is_some() {
         current_branch_for_workspace(&workspace_root)?
@@ -815,6 +817,7 @@ async fn prepare_agent_worktree_with_base_and_suffix(
         meta: created.worktree.meta,
         source: source.clone(),
         branch_was_created: created.branch_was_created,
+        cleanup_service: service,
         spawned_with_dirty_tree: created.dirty_source_warning,
         base_branch_mismatch_warning,
     })

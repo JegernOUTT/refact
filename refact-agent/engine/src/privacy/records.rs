@@ -318,6 +318,43 @@ pub(crate) fn record_path_candidates(
     candidates
 }
 
+fn record_path_candidates_with_workspaces(
+    gcx: &Arc<GlobalContext>,
+    path: &Path,
+    mappings: &[crate::files_correction::RegisteredWorktreePathMapping],
+    workspaces: &[PathBuf],
+) -> Vec<PathBuf> {
+    let mut candidates = registered_alias_paths(path, mappings);
+    candidates.push(path.to_path_buf());
+    if let Some(facts) = gcx.file_index.get(path) {
+        candidates.extend(gcx.file_index.aliases_of(&facts, path));
+    }
+    let aliases = candidates.clone();
+    candidates.extend(workspaces.iter().flat_map(|workspace| {
+        aliases
+            .iter()
+            .filter_map(move |alias| alias.strip_prefix(workspace).ok().map(Path::to_path_buf))
+    }));
+    candidates.sort();
+    candidates.dedup();
+    candidates
+}
+
+fn privacy_roots_with_workspaces(
+    workspaces: &[PathBuf],
+    mappings: &[crate::files_correction::RegisteredWorktreePathMapping],
+) -> Vec<PathBuf> {
+    let mut roots = workspaces.to_vec();
+    roots.extend(
+        mappings
+            .iter()
+            .flat_map(|mapping| [mapping.root.clone(), mapping.source_root.clone()]),
+    );
+    roots.sort();
+    roots.dedup();
+    roots
+}
+
 pub(crate) fn privacy_roots(
     gcx: &Arc<GlobalContext>,
     mappings: &[crate::files_correction::RegisteredWorktreePathMapping],
@@ -926,6 +963,115 @@ pub fn declared_file_records(
     Ok(records)
 }
 
+/// Private request-local configuration, not a permission or topology cache.
+/// Admission must call `still_current` before publishing the resulting labels.
+#[derive(Clone)]
+pub(crate) struct ReviewPrivacyInputs {
+    read_context: Arc<crate::files_in_workspace::FileReadContext>,
+    policy: Arc<refact_privacy::PrivacyPolicy>,
+    compiled: Arc<refact_privacy::CompiledPolicy>,
+    workspaces: Vec<PathBuf>,
+}
+
+pub(crate) async fn prepare_review_privacy_inputs(
+    gcx: Arc<GlobalContext>,
+) -> Result<ReviewPrivacyInputs, String> {
+    let mut read_context = crate::files_in_workspace::prepare_file_read_context(gcx.clone()).await;
+    read_context.refresh_review_mappings(&gcx.cache_dir);
+    let load = gcx.privacy_policy_load.read().unwrap().clone();
+    if load.error.is_some() {
+        return Err("Review privacy configuration is unavailable".into());
+    }
+    let compiled = load.policy.compile().map_err(|error| error.to_string())?;
+    let workspaces = gcx
+        .documents_state
+        .workspace_folders
+        .lock()
+        .unwrap()
+        .clone();
+    Ok(ReviewPrivacyInputs {
+        read_context: Arc::new(read_context),
+        policy: load.policy,
+        compiled: Arc::new(compiled),
+        workspaces,
+    })
+}
+
+impl ReviewPrivacyInputs {
+    pub(crate) fn check_origin(&self, path: &Path) -> Result<(), String> {
+        crate::files_in_workspace::check_file_privacy_for_read_preparation_with_context(
+            &self.read_context,
+            path,
+        )
+    }
+
+    pub(crate) fn records(
+        &self,
+        gcx: &Arc<GlobalContext>,
+        paths: impl IntoIterator<Item = PathBuf>,
+    ) -> Result<Vec<FileRecord>, String> {
+        self.records_cancellable(gcx, paths, &std::sync::atomic::AtomicBool::new(false))
+    }
+
+    pub(crate) fn records_cancellable(
+        &self,
+        gcx: &Arc<GlobalContext>,
+        paths: impl IntoIterator<Item = PathBuf>,
+        cancel: &std::sync::atomic::AtomicBool,
+    ) -> Result<Vec<FileRecord>, String> {
+        let mut records = Vec::new();
+        let mut seen = HashSet::new();
+        for path in paths {
+            if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                return Err("Review privacy preparation cancelled".into());
+            }
+            // Retain config values only. Resolve roots, aliases and indexed
+            // identities anew for every record, including topology ABA changes.
+            let mappings = self.read_context.worktree_mappings();
+            let candidates =
+                record_path_candidates_with_workspaces(gcx, &path, mappings, &self.workspaces);
+            let zone = self.compiled.strictest_zone_for_paths_with_roots(
+                candidates,
+                privacy_roots_with_workspaces(&self.workspaces, mappings),
+            );
+            let record = FileRecord {
+                path: refact_core::chat_types::normalize_file_name(
+                    path.to_string_lossy().into_owned(),
+                ),
+                zone: zone.name.clone(),
+                attribution: Attribution::Declared,
+            };
+            if seen.insert(record.clone()) {
+                records.push(record);
+            }
+        }
+        Ok(records)
+    }
+
+    /// Actual configuration value equality, not an atomic filesystem guarantee.
+    pub(crate) async fn still_current(&self, gcx: Arc<GlobalContext>) -> bool {
+        let mut current = crate::files_in_workspace::prepare_file_read_context(gcx.clone()).await;
+        current.refresh_review_mappings(&gcx.cache_dir);
+        if !self.read_context.same_inputs(&current)
+            || *gcx.documents_state.workspace_folders.lock().unwrap() != self.workspaces
+        {
+            return false;
+        }
+        let load = gcx.privacy_policy_load.read().unwrap().clone();
+        if load.error.is_some() || load.policy != self.policy {
+            return false;
+        }
+        // Bypass the normal loader's TTL: malformed/changed source must not be
+        // admitted because the installed last-good policy is still equal.
+        let global = super::global_privacy_path(&gcx);
+        let projects = super::project_privacy_paths(
+            crate::files_correction::get_project_dirs(gcx.clone()).await,
+        );
+        let fresh = refact_privacy::load_policy(&global, &projects, None).await;
+        fresh.error.is_none() && fresh.policy == self.policy
+    }
+}
+
 pub fn observed_file_records(
     gcx: &Arc<GlobalContext>,
     paths: impl IntoIterator<Item = PathBuf>,
@@ -1255,6 +1401,111 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn review_inputs_validate_values_not_timestamps_and_fail_closed_on_sources() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        super::super::save_privacy_policy(gcx.clone(), PrivacyPolicy::default())
+            .await
+            .unwrap();
+        let inputs = prepare_review_privacy_inputs(gcx.clone()).await.unwrap();
+        assert!(inputs.still_current(gcx.clone()).await);
+        // Equal settings with a different allocation/refresh timestamp remain equal.
+        let settings = gcx.privacy_settings.read().unwrap().clone();
+        *gcx.privacy_settings.write().unwrap() = Arc::new(crate::privacy::PrivacySettings {
+            privacy_rules: crate::privacy::FilePrivacySettings {
+                blocked: settings.privacy_rules.blocked.clone(),
+                only_send_to_servers_I_control: settings
+                    .privacy_rules
+                    .only_send_to_servers_I_control
+                    .clone(),
+            },
+            loaded_ts: u64::MAX / 2,
+        });
+        assert!(inputs.still_current(gcx.clone()).await);
+        gcx.documents_state
+            .workspace_folders
+            .lock()
+            .unwrap()
+            .push(PathBuf::from("new-root"));
+        assert!(!inputs.still_current(gcx.clone()).await);
+        gcx.documents_state.workspace_folders.lock().unwrap().pop();
+        let path = super::super::global_privacy_path(&gcx);
+        std::fs::write(&path, "privacy_rules: [malformed").unwrap();
+        assert!(!inputs.still_current(gcx.clone()).await);
+        std::fs::write(&path, "privacy_rules:\n  blocked: ['*.rs']\n").unwrap();
+        assert!(!inputs.still_current(gcx).await);
+    }
+
+    #[tokio::test]
+    async fn review_inputs_use_retained_legacy_rules_and_cancel_between_records() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        super::super::save_privacy_policy(gcx.clone(), PrivacyPolicy::default())
+            .await
+            .unwrap();
+        let inputs = prepare_review_privacy_inputs(gcx.clone()).await.unwrap();
+        let path = PathBuf::from("example.rs");
+        assert!(inputs.check_origin(&path).is_ok());
+        *gcx.privacy_settings.write().unwrap() = Arc::new(crate::privacy::PrivacySettings {
+            privacy_rules: crate::privacy::FilePrivacySettings {
+                blocked: vec!["[".into()],
+                only_send_to_servers_I_control: Vec::new(),
+            },
+            loaded_ts: u64::MAX / 2,
+        });
+        assert!(!inputs.still_current(gcx.clone()).await);
+        assert!(inputs.check_origin(&path).is_ok());
+        let malformed = prepare_review_privacy_inputs(gcx.clone()).await.unwrap();
+        assert!(malformed.check_origin(&path).is_err());
+        let cancel = std::sync::atomic::AtomicBool::new(true);
+        assert!(inputs.records_cancellable(&gcx, [path], &cancel).is_err());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn review_inputs_resolve_live_root_topology_for_each_record() {
+        let temp = tempfile::tempdir().unwrap();
+        let first = temp.path().join("first");
+        let second = temp.path().join("second");
+        let root = temp.path().join("root");
+        std::fs::create_dir(&first).unwrap();
+        std::fs::create_dir_all(second.join("secrets")).unwrap();
+        let public = first.join("public.txt");
+        let secret = second.join("secrets/file.txt");
+        std::fs::write(&public, "public").unwrap();
+        std::fs::write(&secret, "guarded").unwrap();
+        std::os::unix::fs::symlink(&first, &root).unwrap();
+        let gcx = gcx_with_zones(&root, Vec::new()).await;
+        let mut policy = (*gcx.privacy_policy_load.read().unwrap().policy).clone();
+        policy.blocked = vec!["secrets/*".into()];
+        gcx.privacy_policy_load.write().unwrap().policy = Arc::new(policy);
+        // Keep this fixture's installed policy instead of asking the TTL loader to refresh it.
+        let settings = gcx.privacy_settings.read().unwrap().clone();
+        *gcx.privacy_settings.write().unwrap() = Arc::new(crate::privacy::PrivacySettings {
+            privacy_rules: crate::privacy::FilePrivacySettings {
+                blocked: settings.privacy_rules.blocked.clone(),
+                only_send_to_servers_I_control: settings
+                    .privacy_rules
+                    .only_send_to_servers_I_control
+                    .clone(),
+            },
+            loaded_ts: u64::MAX / 2,
+        });
+        let inputs = prepare_review_privacy_inputs(gcx.clone()).await.unwrap();
+        let paths = [public.clone(), secret, public]
+            .into_iter()
+            .enumerate()
+            .map(|(i, path)| {
+                std::fs::remove_file(&root).unwrap();
+                std::os::unix::fs::symlink(if i == 1 { &second } else { &first }, &root).unwrap();
+                path
+            });
+        let records = inputs.records(&gcx, paths).unwrap();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].zone, "normal");
+        assert_eq!(records[1].zone, "blocked");
+        assert_eq!(std::fs::read_link(root).unwrap(), first);
+    }
+
+    #[tokio::test]
     async fn path_enrichment_omits_destination_guarded_candidates() {
         let temp = tempfile::tempdir().unwrap();
         let public = temp.path().join("public.rs");
@@ -1308,6 +1559,174 @@ mod tests {
         let expected_confidence = if cfg!(windows) { Some(0.3) } else { Some(0.9) };
         assert_eq!(envelope.references[0].confidence, expected_confidence);
         assert!(envelope.truncated);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn declared_batch_refreshes_symlink_root_after_lazy_input_retarget() {
+        let temp = tempfile::tempdir().unwrap();
+        let first = temp.path().join("first");
+        let second = temp.path().join("second");
+        let root = temp.path().join("root");
+        std::fs::create_dir(&first).unwrap();
+        std::fs::create_dir_all(second.join("secrets")).unwrap();
+        let secret = second.join("secrets/file.txt");
+        let public = first.join("public.txt");
+        std::fs::write(&secret, "guarded").unwrap();
+        std::fs::write(&public, "public").unwrap();
+        std::os::unix::fs::symlink(&first, &root).unwrap();
+        let gcx = gcx_with_zones(&root, Vec::new()).await;
+        let mut policy = (*gcx.privacy_policy_load.read().unwrap().policy).clone();
+        policy.blocked = vec!["secrets/*".into()];
+        gcx.privacy_policy_load.write().unwrap().policy = Arc::new(policy);
+        let paths = [secret.clone(), public]
+            .into_iter()
+            .enumerate()
+            .map(|(index, path)| {
+                std::fs::remove_file(&root).unwrap();
+                std::os::unix::fs::symlink(if index == 0 { &second } else { &first }, &root)
+                    .unwrap();
+                path
+            });
+
+        let records = declared_file_records(&gcx, paths).unwrap();
+
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].zone, "blocked");
+        assert_eq!(records[1].zone, "normal");
+        assert_eq!(std::fs::read_link(&root).unwrap(), first);
+    }
+
+    #[tokio::test]
+    async fn declared_batch_rejects_workspace_roots_changed_by_lazy_input() {
+        let temp = tempfile::tempdir().unwrap();
+        let first = temp.path().join("first");
+        let second = temp.path().join("second");
+        std::fs::create_dir(&first).unwrap();
+        std::fs::create_dir_all(second.join("secrets")).unwrap();
+        let secret = second.join("secrets/file.txt");
+        std::fs::write(&secret, "guarded").unwrap();
+        let gcx = gcx_with_zones(&first, Vec::new()).await;
+        let mut policy = (*gcx.privacy_policy_load.read().unwrap().policy).clone();
+        policy.blocked = vec!["secrets/*".into()];
+        gcx.privacy_policy_load.write().unwrap().policy = Arc::new(policy);
+        let paths = std::iter::once_with(|| {
+            *gcx.documents_state.workspace_folders.lock().unwrap() = vec![second];
+            secret
+        });
+
+        assert_eq!(
+            declared_file_records(&gcx, paths).unwrap_err(),
+            "privacy context changed"
+        );
+    }
+
+    #[tokio::test]
+    async fn declared_batch_matches_single_records_and_reloads_changed_policy() {
+        let temp = tempfile::tempdir().unwrap();
+        let secret = temp.path().join("secret.txt");
+        let public = temp.path().join("public.txt");
+        std::fs::write(&secret, "guarded").unwrap();
+        std::fs::write(&public, "public").unwrap();
+        let gcx = gcx_with_policy(&secret, &[], ShellBehavior::Withhold).await;
+        let paths = vec![
+            public.clone(),
+            secret.clone(),
+            public.clone(),
+            secret.clone(),
+        ];
+        let expected = vec![
+            declared_file_record(&gcx, &public).unwrap(),
+            declared_file_record(&gcx, &secret).unwrap(),
+        ];
+        assert_eq!(
+            declared_file_records(&gcx, paths.clone()).unwrap(),
+            expected
+        );
+        let mut policy = (*gcx.privacy_policy_load.read().unwrap().policy).clone();
+        policy.blocked.push("public.txt".into());
+        gcx.privacy_policy_load.write().unwrap().policy = Arc::new(policy);
+        let changed = declared_file_records(&gcx, paths).unwrap();
+        assert_eq!(changed[0], declared_file_record(&gcx, &public).unwrap());
+        assert_eq!(changed[0].zone, "blocked");
+        assert_eq!(changed[1], expected[1]);
+    }
+
+    #[tokio::test]
+    async fn live_record_candidates_preserve_registered_alias_fanout() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        std::fs::create_dir(&source).unwrap();
+        let source = dunce::canonicalize(source).unwrap();
+        let file = source.join("file.txt");
+        std::fs::write(&file, "value").unwrap();
+        let mappings = (0..16)
+            .map(
+                |index| crate::files_correction::RegisteredWorktreePathMapping {
+                    root: temp.path().join(format!("worktree-{index}")),
+                    source_root: source.clone(),
+                },
+            )
+            .collect::<Vec<_>>();
+        let gcx = gcx_with_policy(&file, &[], ShellBehavior::Withhold).await;
+        let mut policy = (*gcx.privacy_policy_load.read().unwrap().policy).clone();
+        policy.blocked.push(
+            mappings[15]
+                .root
+                .join("file.txt")
+                .to_string_lossy()
+                .into_owned(),
+        );
+        let compiled = policy.compile().unwrap();
+        let candidates = record_path_candidates(&gcx, &file, &mappings);
+        for mapping in &mappings {
+            assert!(candidates.contains(&mapping.root.join("file.txt")));
+        }
+        assert_eq!(
+            compiled
+                .strictest_zone_for_paths_with_roots(&candidates, privacy_roots(&gcx, &mappings))
+                .name,
+            "blocked"
+        );
+        policy.blocked = vec![file.to_string_lossy().into_owned()];
+        let compiled = policy.compile().unwrap();
+        for mapping in &mappings {
+            let candidates =
+                record_path_candidates(&gcx, &mapping.root.join("file.txt"), &mappings);
+            assert!(candidates.contains(&file));
+            assert_eq!(
+                compiled
+                    .strictest_zone_for_paths_with_roots(
+                        &candidates,
+                        privacy_roots(&gcx, &mappings)
+                    )
+                    .name,
+                "blocked"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn declared_batch_preserves_indexed_hardlink_and_symlink_classification() {
+        let temp = tempfile::tempdir().unwrap();
+        let secret = temp.path().join("secret.txt");
+        let hardlink = temp.path().join("hardlink.txt");
+        let symlink = temp.path().join("symlink.txt");
+        std::fs::write(&secret, "guarded").unwrap();
+        std::fs::hard_link(&secret, &hardlink).unwrap();
+        std::os::unix::fs::symlink(&secret, &symlink).unwrap();
+        let gcx = gcx_with_policy(&secret, &[], ShellBehavior::Withhold).await;
+        gcx.file_index.lookup_or_stat(&secret).unwrap();
+        gcx.file_index.lookup_or_stat(&hardlink).unwrap();
+        let paths = vec![hardlink, symlink, secret];
+        let expected = paths
+            .iter()
+            .map(|path| declared_file_record(&gcx, path).unwrap())
+            .collect::<Vec<_>>();
+        let actual = declared_file_records(&gcx, paths).unwrap();
+        assert_eq!(actual, expected);
+        assert!(actual.iter().all(|record| record.zone == "secrets"));
     }
 
     #[test]

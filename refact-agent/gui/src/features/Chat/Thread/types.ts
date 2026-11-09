@@ -4,6 +4,7 @@ import type {
   BoardInterruption,
   CompressionPhase,
   CompressionReason,
+  ReviewReadiness,
 } from "../../../services/refact/chatSubscription";
 import {
   BackgroundAgentSummary,
@@ -212,6 +213,8 @@ export type ThreadConfirmation = {
 };
 
 export type ChatThreadRuntime = {
+  /** Ephemeral server feedback only; never grants permission or gates sending. */
+  review_readiness?: ReviewReadiness;
   recovery?:
     | import("../../../services/refact/chatSubscription").RecoveryRecord
     | null;

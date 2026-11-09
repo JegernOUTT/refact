@@ -295,7 +295,24 @@ pub(crate) struct PlannerPause {
     pub by: Option<String>,
 }
 
+/// Private, single-use continuation. A receipt is progress metadata, never authority.
+/// Preparation must re-admit the same nonce against fresh Review scope and policy.
+pub(crate) struct ReviewReadinessContinuation {
+    pub turn_nonce: String,
+    pub receipt: crate::tool_jobs::JobReceipt,
+    pub command: ActiveCommandContext,
+    pub trajectory_version: u64,
+    pub thread_fingerprint: serde_json::Value,
+    pub cancelled: Arc<AtomicBool>,
+    pub ready: bool,
+}
+
 pub struct ChatSession {
+    pub(crate) review_readiness_pending: Option<ReviewReadinessContinuation>,
+    pub(crate) review_readiness_resume_nonce: Option<String>,
+    pub(crate) verifier_readiness_pending:
+        Option<super::goal_verifier::VerifierReadinessContinuation>,
+    pub(crate) verifier_readiness_resume_nonce: Option<String>,
     pub(crate) delivery_save_id: uuid::Uuid,
     pub(crate) native_commands_in_flight: Arc<std::sync::atomic::AtomicUsize>,
     pub(crate) runner_lease: Option<(String, Arc<AtomicBool>)>,
@@ -341,6 +358,8 @@ pub struct ChatSession {
     pub recent_request_ids: VecDeque<String>,
     pub recent_request_ids_set: HashSet<String>,
     pub abort_flag: Arc<AtomicBool>,
+    /// Origin-bound execution cancellation. Never reset an Arc held by an old job.
+    pub execution_abort: Arc<AtomicBool>,
     pub abort_notify: Arc<Notify>,
     pub interruptible_waits: usize,
     pub wait_delivery_boundary: bool,

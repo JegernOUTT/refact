@@ -327,7 +327,12 @@ where
     F: FnOnce(PathBuf, Option<String>) -> Fut,
     Fut: Future<Output = Option<MergeVerification>>,
 {
+    // Drain effects before taking either the service permit or the merge lease.
+    // The returned service carries the private fence token through nested clones.
     let service = service
+        .fence_merge_worktree(worktree_id, request.target_branch.as_deref())
+        .await
+        .map_err(MergeGateError::Merge)?
         .acquire_merge_permit()
         .await
         .map_err(MergeGateError::Merge)?;
@@ -632,7 +637,10 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("repo");
         init_repo(&source);
-        let service = WorktreeService::new(temp.path().join("cache"), source.clone()).unwrap();
+        let service = crate::worktrees::service::fenced_service(
+            WorktreeService::new(temp.path().join("cache"), source.clone()).unwrap(),
+            Arc::new(crate::tool_jobs::scope::ScopeCoordinator::default()),
+        );
         let (mut gate, _leases) = shared_gate(&Uuid::new_v4().to_string()).await;
         let held_observed = Arc::new(tokio::sync::Notify::new());
         gate.held_observed = Some(held_observed.clone());
@@ -683,7 +691,10 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("repo");
         init_repo(&source);
-        let service = WorktreeService::new(temp.path().join("cache"), source.clone()).unwrap();
+        let service = crate::worktrees::service::fenced_service(
+            WorktreeService::new(temp.path().join("cache"), source.clone()).unwrap(),
+            Arc::new(crate::tool_jobs::scope::ScopeCoordinator::default()),
+        );
         let (gate, _leases) = shared_gate(&Uuid::new_v4().to_string()).await;
         let (id, worktree_root) =
             worktree_with_commit(&service, "refact/chat/dirty", "merged.txt", "merged\n").await;
@@ -730,7 +741,10 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("repo");
         init_repo(&source);
-        let service = WorktreeService::new(temp.path().join("cache"), source.clone()).unwrap();
+        let service = crate::worktrees::service::fenced_service(
+            WorktreeService::new(temp.path().join("cache"), source.clone()).unwrap(),
+            Arc::new(crate::tool_jobs::scope::ScopeCoordinator::default()),
+        );
         let (gate, _leases) = shared_gate(&Uuid::new_v4().to_string()).await;
         let (id, _) =
             worktree_with_commit(&service, "refact/chat/ack", "merged.txt", "merged\n").await;
@@ -765,7 +779,10 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("repo");
         init_repo(&source);
-        let service = WorktreeService::new(temp.path().join("cache"), source.clone()).unwrap();
+        let service = crate::worktrees::service::fenced_service(
+            WorktreeService::new(temp.path().join("cache"), source.clone()).unwrap(),
+            Arc::new(crate::tool_jobs::scope::ScopeCoordinator::default()),
+        );
         let (gate, _leases) = shared_gate(&Uuid::new_v4().to_string()).await;
         let (id, worktree_root) =
             worktree_with_commit(&service, "refact/chat/verify", "feature.txt", "feature\n").await;
@@ -817,7 +834,10 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("repo");
         init_repo(&source);
-        let service = WorktreeService::new(temp.path().join("cache"), source.clone()).unwrap();
+        let service = crate::worktrees::service::fenced_service(
+            WorktreeService::new(temp.path().join("cache"), source.clone()).unwrap(),
+            Arc::new(crate::tool_jobs::scope::ScopeCoordinator::default()),
+        );
         let (gate, _leases) = shared_gate(&Uuid::new_v4().to_string()).await;
         let (id, worktree_root) = worktree_with_commit(
             &service,
@@ -873,7 +893,10 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("repo");
         init_repo(&source);
-        let service = WorktreeService::new(temp.path().join("cache"), source.clone()).unwrap();
+        let service = crate::worktrees::service::fenced_service(
+            WorktreeService::new(temp.path().join("cache"), source.clone()).unwrap(),
+            Arc::new(crate::tool_jobs::scope::ScopeCoordinator::default()),
+        );
         let (gate, _leases) = shared_gate(&Uuid::new_v4().to_string()).await;
         let (id, worktree_root) =
             worktree_with_commit(&service, "refact/chat/green", "green.txt", "green\n").await;
@@ -956,7 +979,10 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("repo");
         init_repo(&source);
-        let service = WorktreeService::new(temp.path().join("cache"), source.clone()).unwrap();
+        let service = crate::worktrees::service::fenced_service(
+            WorktreeService::new(temp.path().join("cache"), source.clone()).unwrap(),
+            Arc::new(crate::tool_jobs::scope::ScopeCoordinator::default()),
+        );
         let (gate, _leases) = shared_gate(&Uuid::new_v4().to_string()).await;
         let (id, worktree_root) = worktree_with_commit(
             &service,
@@ -1080,7 +1106,10 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("repo");
         init_repo(&source);
-        let service = WorktreeService::new(temp.path().join("cache"), source.clone()).unwrap();
+        let service = crate::worktrees::service::fenced_service(
+            WorktreeService::new(temp.path().join("cache"), source.clone()).unwrap(),
+            Arc::new(crate::tool_jobs::scope::ScopeCoordinator::default()),
+        );
         let (gate, _leases) = shared_gate(&Uuid::new_v4().to_string()).await;
         let (id, worktree_root) =
             worktree_with_commit(&service, "refact/chat/conflict", "file.txt", "agent side\n")

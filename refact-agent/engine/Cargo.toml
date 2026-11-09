@@ -43,6 +43,7 @@ members = [
     "crates/refact-sandbox",
     "crates/refact-agents-core",
     "crates/refact-work-core",
+    "crates/refact-review-core",
     "crates/refact-self-update",
     "crates/refact-privacy",
 ]
@@ -338,6 +339,7 @@ refact-exec = { path = "crates/refact-exec" }
 refact-sandbox = { path = "crates/refact-sandbox" }
 refact-agents-core = { path = "crates/refact-agents-core" }
 refact-work-core = { path = "crates/refact-work-core" }
+refact-review-core = { path = "crates/refact-review-core" }
 refact-self-update = { path = "crates/refact-self-update" }
 
 astral-tokio-tar = "0.5.2"
