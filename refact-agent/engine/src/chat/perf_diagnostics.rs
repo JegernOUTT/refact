@@ -131,10 +131,17 @@ pub enum PerfComponent {
     WorkPagingLockHold,
     WorkPagingValidate,
     WorkPagingSelect,
+    WorkContextCapacityWait,
+    IndexRecoveryCheckpointRead,
+    IndexRecoveryCheckpointParse,
+    IndexRecoveryUnsupportedSchema,
+    IndexRecoveryJournalRead,
+    IndexRecoveryJournalParse,
+    IndexRecoveryChecksum,
 }
 
 impl PerfComponent {
-    pub const ALL: [Self; 116] = [
+    pub const ALL: [Self; 123] = [
         Self::TrajectorySnapshot,
         Self::TrajectorySerialize,
         Self::TrajectoryAtomicWrite,
@@ -251,6 +258,13 @@ impl PerfComponent {
         Self::WorkPagingLockHold,
         Self::WorkPagingValidate,
         Self::WorkPagingSelect,
+        Self::WorkContextCapacityWait,
+        Self::IndexRecoveryCheckpointRead,
+        Self::IndexRecoveryCheckpointParse,
+        Self::IndexRecoveryUnsupportedSchema,
+        Self::IndexRecoveryJournalRead,
+        Self::IndexRecoveryJournalParse,
+        Self::IndexRecoveryChecksum,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -371,6 +385,13 @@ impl PerfComponent {
             Self::WorkPagingLockHold => "work_paging.lock_hold",
             Self::WorkPagingValidate => "work_paging.validate",
             Self::WorkPagingSelect => "work_paging.select",
+            Self::WorkContextCapacityWait => "work_context.capacity_wait",
+            Self::IndexRecoveryCheckpointRead => "trajectory.index_recovery.checkpoint_read",
+            Self::IndexRecoveryCheckpointParse => "trajectory.index_recovery.checkpoint_parse",
+            Self::IndexRecoveryUnsupportedSchema => "trajectory.index_recovery.unsupported_schema",
+            Self::IndexRecoveryJournalRead => "trajectory.index_recovery.journal_read",
+            Self::IndexRecoveryJournalParse => "trajectory.index_recovery.journal_parse",
+            Self::IndexRecoveryChecksum => "trajectory.index_recovery.checksum",
         }
     }
 
@@ -384,6 +405,12 @@ impl PerfComponent {
             Self::TrajectoryIndexEnqueue
                 | Self::TrajectoryIndexJournalAppend
                 | Self::TrajectoryIndexCheckpoint
+                | Self::IndexRecoveryCheckpointRead
+                | Self::IndexRecoveryCheckpointParse
+                | Self::IndexRecoveryUnsupportedSchema
+                | Self::IndexRecoveryJournalRead
+                | Self::IndexRecoveryJournalParse
+                | Self::IndexRecoveryChecksum
         )
     }
 }

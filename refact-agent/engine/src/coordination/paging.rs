@@ -52,6 +52,7 @@ pub struct WorkViews(
     Mutex<State>,
     std::sync::OnceLock<(std::time::Instant, u64)>,
     pub(super) super::catalog_cache::CatalogCache,
+    #[cfg(test)] std::sync::atomic::AtomicUsize,
 );
 
 pub struct PageWindow {
@@ -71,18 +72,37 @@ pub(super) struct FrozenPage {
 }
 
 impl WorkViews {
+    #[cfg(test)]
+    pub(super) fn page_selections(&self) -> usize {
+        self.3.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     pub fn beginning_cursor(
         &self,
         snapshot_id: &str,
         seq: u64,
         now_ms: u64,
     ) -> Result<String, WorkError> {
-        let settings = crate::file_activity::settings();
+        self.beginning_cursor_with_settings(
+            snapshot_id,
+            seq,
+            &crate::file_activity::settings(),
+            now_ms,
+        )
+    }
+
+    fn beginning_cursor_with_settings(
+        &self,
+        snapshot_id: &str,
+        seq: u64,
+        settings: &CoordinationSettings,
+        now_ms: u64,
+    ) -> Result<String, WorkError> {
         settings
             .validate()
             .map_err(|_| WorkError::projection_failure(WorkFailureCause::SettingsUnavailable))?;
         let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
-        state.prune_snapshots(&settings, now_ms);
+        state.prune_snapshots(settings, now_ms);
         let view = state
             .views
             .get(snapshot_id)
@@ -279,6 +299,25 @@ impl WorkViews {
 }
 
 impl WorkViews {
+    pub(super) fn fresh_cursor(
+        &self,
+        binding: ViewBinding,
+        current: WorkSnapshot,
+        settings: &CoordinationSettings,
+        now_ms: u64,
+    ) -> Result<String, WorkError> {
+        settings
+            .validate()
+            .map_err(|_| WorkError::projection_failure(WorkFailureCause::SettingsUnavailable))?;
+        let (fingerprint, bytes) = current.signature(&binding)?;
+        let (id, seq) = {
+            let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
+            state.prune_snapshots(settings, now_ms);
+            state.register_snapshot(&binding, current, fingerprint, bytes, settings, now_ms)?
+        };
+        self.beginning_cursor_with_settings(&id, seq, settings, now_ms)
+    }
+
     pub(super) fn frozen_page(
         &self,
         binding: ViewBinding,
@@ -322,7 +361,6 @@ impl WorkViews {
         }
         let started = std::time::Instant::now();
         let (fingerprint, bytes) = current.signature(&binding)?;
-        let units = current.units();
         use crate::chat::perf_diagnostics::{self, PerfComponent, PerfOutcome};
         let mut wait = perf_diagnostics::span(PerfComponent::WorkPagingLockWait, None, None);
         let mut hold;
@@ -348,53 +386,14 @@ impl WorkViews {
                 (saved.view_id.clone(), saved.generation, saved.offset)
             }
             None => {
-                if units > settings.max_work_history_rows {
-                    return Err(WorkError::projection_failure(
-                        WorkFailureCause::SnapshotRowCapacity,
-                    ));
-                }
-                if bytes > settings.max_work_history_bytes {
-                    return Err(WorkError::projection_failure(
-                        WorkFailureCause::SnapshotByteCapacity,
-                    ));
-                }
-                let existing = state
-                    .views
-                    .iter()
-                    .find(|(_, view)| view.binding == binding && !view.snapshots.is_empty())
-                    .map(|(id, view)| (id.clone(), view.generation));
-                let (id, mut seq) = existing
-                    .clone()
-                    .unwrap_or_else(|| (Uuid::new_v4().to_string(), 0));
-                let unchanged = state
-                    .views
-                    .get(&id)
-                    .and_then(|v| v.snapshots.get(&seq))
-                    .is_some_and(|s| s.fingerprint == fingerprint);
-                if !unchanged {
-                    seq = seq.checked_add(1).ok_or_else(WorkError::unavailable)?;
-                    state.reserve_snapshot(settings, units, bytes, &id)?;
-                    let view = state.views.entry(id.clone()).or_insert_with(|| View {
-                        binding: binding.clone(),
-                        fingerprint: String::new(),
-                        generation: seq,
-                        accessed_at: now_ms,
-                        snapshots: BTreeMap::new(),
-                    });
-                    view.generation = seq;
-                    view.snapshots.insert(
-                        seq,
-                        FrozenView {
-                            snapshot: Arc::new(current),
-                            fingerprint: fingerprint.clone(),
-                            observed_at: now_ms,
-                            expires_at: now_ms
-                                .saturating_add(settings.work_cursor_ttl_secs.saturating_mul(1000)),
-                            units,
-                            bytes,
-                        },
-                    );
-                }
+                let (id, seq) = state.register_snapshot(
+                    &binding,
+                    current,
+                    fingerprint.clone(),
+                    bytes,
+                    settings,
+                    now_ms,
+                )?;
                 (id, seq, 0)
             }
         };
@@ -431,6 +430,8 @@ impl WorkViews {
         let requested_end = offset.saturating_add(limit).min(total);
         let select = perf_diagnostics::span(PerfComponent::WorkPagingSelect, None, None);
         let selected = if validation.is_ok() {
+            #[cfg(test)]
+            self.3.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             Some(select_end(&retained, offset, requested_end))
         } else {
             None
@@ -559,6 +560,66 @@ impl WorkViews {
 }
 
 impl State {
+    fn register_snapshot(
+        &mut self,
+        binding: &ViewBinding,
+        current: WorkSnapshot,
+        fingerprint: String,
+        bytes: usize,
+        settings: &CoordinationSettings,
+        now_ms: u64,
+    ) -> Result<(String, u64), WorkError> {
+        let units = current.units();
+        if units > settings.max_work_history_rows {
+            return Err(WorkError::projection_failure(
+                WorkFailureCause::SnapshotRowCapacity,
+            ));
+        }
+        if bytes > settings.max_work_history_bytes {
+            return Err(WorkError::projection_failure(
+                WorkFailureCause::SnapshotByteCapacity,
+            ));
+        }
+        let existing = self
+            .views
+            .iter()
+            .find(|(_, view)| view.binding == *binding && !view.snapshots.is_empty())
+            .map(|(id, view)| (id.clone(), view.generation));
+        let (id, mut seq) = existing
+            .clone()
+            .unwrap_or_else(|| (Uuid::new_v4().to_string(), 0));
+        let unchanged = self
+            .views
+            .get(&id)
+            .and_then(|v| v.snapshots.get(&seq))
+            .is_some_and(|s| s.fingerprint == fingerprint);
+        if !unchanged {
+            seq = seq.checked_add(1).ok_or_else(WorkError::unavailable)?;
+            self.reserve_snapshot(settings, units, bytes, &id)?;
+            let view = self.views.entry(id.clone()).or_insert_with(|| View {
+                binding: binding.clone(),
+                fingerprint: String::new(),
+                generation: seq,
+                accessed_at: now_ms,
+                snapshots: BTreeMap::new(),
+            });
+            view.generation = seq;
+            view.snapshots.insert(
+                seq,
+                FrozenView {
+                    snapshot: Arc::new(current),
+                    fingerprint: fingerprint.clone(),
+                    observed_at: now_ms,
+                    expires_at: now_ms
+                        .saturating_add(settings.work_cursor_ttl_secs.saturating_mul(1000)),
+                    units,
+                    bytes,
+                },
+            );
+        }
+        Ok((id, seq))
+    }
+
     fn remove_snapshot(&mut self, id: &str, seq: u64) {
         if let Some(view) = self.views.get_mut(id) {
             view.snapshots.remove(&seq);
@@ -1215,6 +1276,124 @@ mod tests {
                 .unwrap()
                 .code,
             "invalid_cursor"
+        );
+    }
+}
+
+#[cfg(test)]
+mod direct_cursor_tests {
+    use super::*;
+
+    #[test]
+    fn direct_cursor_keeps_absolute_ttl_and_capacity_limits() {
+        let binding = ViewBinding {
+            project: "p".into(),
+            principal: "c".into(),
+            disclosure: "d".into(),
+            filter: "f".into(),
+        };
+        let snapshot = WorkSnapshot {
+            roots: vec![super::super::roots::project_root_ref(std::path::Path::new(
+                "/test",
+            ))],
+            ..Default::default()
+        };
+        let settings = CoordinationSettings {
+            work_cursor_ttl_secs: 1,
+            max_work_cursors: 1,
+            max_work_views: 1,
+            ..Default::default()
+        };
+        let views = WorkViews::default();
+        let token = views
+            .fresh_cursor(binding.clone(), snapshot.clone(), &settings, 0)
+            .unwrap();
+        assert_eq!(views.page_selections(), 0);
+        assert_eq!(
+            views
+                .fresh_cursor(binding.clone(), snapshot.clone(), &settings, 900)
+                .unwrap(),
+            token
+        );
+        let page = views
+            .frozen_page(
+                binding.clone(),
+                snapshot.clone(),
+                1,
+                Some(&token),
+                &settings,
+                999,
+                |_| Ok(()),
+            )
+            .unwrap();
+        assert_eq!(page.snapshot.roots, snapshot.roots);
+        assert_eq!(page.observed_at, 0);
+        assert_eq!(
+            views
+                .frozen_page(
+                    binding.clone(),
+                    snapshot.clone(),
+                    1,
+                    Some(&token),
+                    &settings,
+                    1000,
+                    |_| Ok(())
+                )
+                .err()
+                .unwrap()
+                .code,
+            "cursor_expired"
+        );
+        assert_eq!(views.0.lock().unwrap().snapshot_usage(), (0, 0, 0));
+        let bytes = snapshot.signature(&binding).unwrap().1;
+        let too_small = CoordinationSettings {
+            max_work_history_bytes: bytes - 1,
+            ..settings.clone()
+        };
+        assert_eq!(
+            views
+                .fresh_cursor(binding.clone(), snapshot.clone(), &too_small, 1001)
+                .unwrap_err()
+                .cause,
+            Some(WorkFailureCause::SnapshotByteCapacity)
+        );
+        let token = views
+            .fresh_cursor(binding.clone(), snapshot.clone(), &settings, 1002)
+            .unwrap();
+        for limit in [0, settings.overview_max_rows + 1] {
+            assert_eq!(
+                views
+                    .frozen_page(
+                        binding.clone(),
+                        snapshot.clone(),
+                        limit,
+                        Some(&token),
+                        &settings,
+                        1003,
+                        |_| Ok(())
+                    )
+                    .err()
+                    .unwrap()
+                    .code,
+                "invalid_argument"
+            );
+        }
+        let mut other = binding.clone();
+        other.principal = "other".into();
+        views
+            .fresh_cursor(other, snapshot.clone(), &settings, 1004)
+            .unwrap();
+        assert_eq!(views.0.lock().unwrap().snapshot_usage().0, 1);
+        assert_eq!(views.0.lock().unwrap().cursors.len(), 1);
+        assert_eq!(
+            views
+                .frozen_page(binding, snapshot, 1, Some(&token), &settings, 1005, |_| Ok(
+                    ()
+                ))
+                .err()
+                .unwrap()
+                .code,
+            "cursor_expired"
         );
     }
 }

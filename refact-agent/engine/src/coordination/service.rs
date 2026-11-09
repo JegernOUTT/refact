@@ -19,10 +19,21 @@ static WORK_PROJECTION_PERMITS: tokio::sync::Semaphore = tokio::sync::Semaphore:
 pub(super) async fn projection_blocking<T: Send + 'static>(
     work: impl FnOnce() -> Result<T, WorkError> + Send + 'static,
 ) -> Result<T, WorkError> {
-    let permit = WORK_PROJECTION_PERMITS
-        .acquire()
-        .await
-        .map_err(|_| WorkError::unavailable())?;
+    use crate::chat::perf_diagnostics::{self, PerfComponent, PerfOutcome};
+    let wait = perf_diagnostics::span(PerfComponent::WorkContextCapacityWait, None, None);
+    let acquired = WORK_PROJECTION_PERMITS.acquire().await;
+    wait.finish(
+        if acquired.is_ok() {
+            PerfOutcome::Success
+        } else {
+            PerfOutcome::Failure
+        },
+        None,
+        None,
+        None,
+        None,
+    );
+    let permit = acquired.map_err(|_| WorkError::unavailable())?;
     let result = tokio::task::spawn_blocking(move || {
         let _permit = permit;
         work()
@@ -717,6 +728,24 @@ fn revalidate_snapshot(
     Ok(())
 }
 
+fn prepare_snapshot(
+    caller: &WorkCaller,
+    disclosure: &str,
+    filter: String,
+    snapshot: &mut WorkSnapshot,
+) -> ViewBinding {
+    snapshot
+        .rows
+        .sort_by_key(|row| (std::cmp::Reverse(row.updated_at_ms), row.key.to_string()));
+    snapshot.roots.sort_by(|a, b| a.id.cmp(&b.id));
+    ViewBinding {
+        project: super::roots::project_identity(&caller.source_root),
+        principal: caller.principal.clone(),
+        disclosure: disclosure.to_owned(),
+        filter,
+    }
+}
+
 fn page(
     app: &AppState,
     caller: &WorkCaller,
@@ -727,16 +756,7 @@ fn page(
     catalog: &WorkCatalog,
 ) -> Result<(WorkOverview, WorkSnapshot), WorkError> {
     let settings = crate::file_activity::settings();
-    snapshot
-        .rows
-        .sort_by_key(|row| (std::cmp::Reverse(row.updated_at_ms), row.key.to_string()));
-    snapshot.roots.sort_by(|a, b| a.id.cmp(&b.id));
-    let binding = ViewBinding {
-        project: super::roots::project_identity(&caller.source_root),
-        principal: caller.principal.clone(),
-        disclosure: disclosure.clone(),
-        filter,
-    };
+    let binding = prepare_snapshot(caller, &disclosure, filter, &mut snapshot);
     let provenance = snapshot.file_provenance.clone();
     let mut records = Vec::new();
     let frozen = app.work_views.frozen_page_select(
@@ -831,23 +851,81 @@ fn overview_selection(
         .transpose()
 }
 
-pub(super) async fn overview_from_projection(
+pub(super) async fn inventory_cursor_from_projection(
     app: &AppState,
     caller: &WorkCaller,
-    mut request: WorkOverviewRequest,
     catalog: Arc<WorkCatalog>,
     disclosure: &str,
-) -> Result<WorkOverview, WorkError> {
-    let selected = overview_selection(caller, &mut request)?;
-    overview_offloaded(
-        app,
-        caller,
-        request,
-        selected,
-        catalog,
-        disclosure.to_owned(),
-    )
-    .await
+    privacy: &crate::privacy::classification_cache::PrivacyKey,
+) -> Result<String, WorkError> {
+    let check = || {
+        check_disclosure(app, caller, disclosure)?;
+        if crate::privacy::classification_cache::privacy_key(&app.gcx)
+            .map_err(|_| WorkError::policy_unavailable())?
+            != *privacy
+        {
+            return Err(WorkError::policy_unavailable());
+        }
+        Ok(())
+    };
+    check()?;
+    let app_owned = app.clone();
+    let caller_owned = caller.clone();
+    let disclosure_owned = disclosure.to_owned();
+    let privacy_owned = privacy.clone();
+    let cursor = projection_blocking(move || {
+        let mut request = WorkOverviewRequest::default();
+        let selected = overview_selection(&caller_owned, &mut request)?;
+        let (mut snapshot, filter) =
+            overview_snapshot(&caller_owned, &request, selected, &catalog)?;
+        // The exact projection already cleared rows and roots; carried paths need their
+        // current classification as well as the carried zone authorization.
+        if let Some(model) = &caller_owned.model {
+            let paths = snapshot
+                .rows
+                .iter()
+                .flat_map(|row| {
+                    row.source_records.iter().map(move |record| WorkRootRef {
+                        id: String::new(),
+                        kind: super::types::WorkRootKind::Project,
+                        path: Some(if Path::new(&record.path).is_absolute() {
+                            record.path.clone()
+                        } else {
+                            Path::new(row.root.path.as_deref().unwrap_or(""))
+                                .join(&record.path)
+                                .to_string_lossy()
+                                .into_owned()
+                        }),
+                        branch: None,
+                        project: row.root.project.clone(),
+                        source_path: None,
+                        presence: Default::default(),
+                    })
+                })
+                .collect::<Vec<_>>();
+            let expected = paths.len();
+            if privacy_guard::clear_roots(&app_owned.gcx, paths, model)?.len() != expected {
+                return Err(WorkError::cursor_expired());
+            }
+        }
+        check_disclosure(&app_owned, &caller_owned, &disclosure_owned)?;
+        if crate::privacy::classification_cache::privacy_key(&app_owned.gcx)
+            .map_err(|_| WorkError::policy_unavailable())?
+            != privacy_owned
+        {
+            return Err(WorkError::policy_unavailable());
+        }
+        let binding = prepare_snapshot(&caller_owned, &disclosure_owned, filter, &mut snapshot);
+        app_owned.work_views.fresh_cursor(
+            binding,
+            snapshot,
+            &crate::file_activity::settings(),
+            now_ms(),
+        )
+    })
+    .await?;
+    check()?;
+    Ok(cursor)
 }
 
 async fn overview_offloaded(
@@ -884,6 +962,25 @@ fn overview_selected(
     catalog: &WorkCatalog,
     disclosure: &str,
 ) -> Result<WorkOverview, WorkError> {
+    let (snapshot, filter) = overview_snapshot(caller, &request, selected, catalog)?;
+    page(
+        app,
+        caller,
+        disclosure.to_owned(),
+        &request,
+        snapshot,
+        filter,
+        catalog,
+    )
+    .map(|(page, _)| page)
+}
+
+fn overview_snapshot(
+    caller: &WorkCaller,
+    request: &WorkOverviewRequest,
+    selected: Option<PathBuf>,
+    catalog: &WorkCatalog,
+) -> Result<(WorkSnapshot, String), WorkError> {
     let settings = crate::file_activity::settings();
     let recent = now_ms().saturating_sub(settings.recent_window_secs.saturating_mul(1000));
     let rows: Vec<_> = catalog
@@ -914,11 +1011,7 @@ fn overview_selected(
         .collect();
     let mut filter = request.clone();
     filter.cursor = None;
-    page(
-        app,
-        caller,
-        disclosure.to_owned(),
-        &request,
+    Ok((
         WorkSnapshot {
             rows,
             roots,
@@ -927,9 +1020,7 @@ fn overview_selected(
             ..Default::default()
         },
         digest(&(&filter, &request.root, &caller.checkout_root))?,
-        catalog,
-    )
-    .map(|(page, _)| page)
+    ))
 }
 
 pub async fn inspect(

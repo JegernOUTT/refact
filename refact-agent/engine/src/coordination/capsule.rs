@@ -266,14 +266,29 @@ pub async fn prepare_work_context(
 
     use crate::chat::perf_diagnostics::{self, PerfComponent, PerfOutcome};
     let caller_span = perf_diagnostics::span(PerfComponent::WorkContextCaller, None, None);
-    let caller = super::scope::model_caller(app, chat_id, model_id)
-        .await
-        .ok()?;
+    let caller = match super::scope::model_caller(app, chat_id, model_id).await {
+        Ok(caller) => caller,
+        Err(_) => {
+            caller_span.finish(PerfOutcome::Failure, None, None, None, None);
+            return None;
+        }
+    };
     caller_span.finish(PerfOutcome::Success, None, None, None, None);
     let projection_span = perf_diagnostics::span(PerfComponent::WorkContextProjection, None, None);
-    let (catalog, disclosure) = super::service::context_projection(app, &caller)
-        .await
-        .ok()?;
+    let privacy = match crate::privacy::classification_cache::privacy_key(&app.gcx) {
+        Ok(privacy) => privacy,
+        Err(_) => {
+            projection_span.finish(PerfOutcome::Failure, None, None, None, None);
+            return None;
+        }
+    };
+    let (catalog, disclosure) = match super::service::context_projection(app, &caller).await {
+        Ok(projection) => projection,
+        Err(_) => {
+            projection_span.finish(PerfOutcome::Failure, None, None, None, None);
+            return None;
+        }
+    };
     projection_span.finish(PerfOutcome::Success, None, None, None, None);
     let observed_at = now_ms();
     let policy_key = format!(
@@ -365,7 +380,7 @@ pub async fn prepare_work_context(
         |text: &str| crate::tokens::count_text_tokens_with_fallback(tokenizer.clone(), text);
     let message = loop {
         let render_span = perf_diagnostics::span(PerfComponent::WorkContextRender, None, None);
-        let mut rendered = super::capsule_render::render(
+        let rendered = super::capsule_render::render(
             &catalog.project,
             &visible_rows,
             &overlapping,
@@ -373,26 +388,31 @@ pub async fn prepare_work_context(
             &render_settings,
             observed_at,
             &count,
-        )?;
+        );
+        let Some(mut rendered) = rendered else {
+            render_span.finish(PerfOutcome::Skipped, None, None, None, None);
+            return None;
+        };
         render_span.finish(PerfOutcome::Success, None, None, None, None);
         if rendered.omitted > 0 {
             if inventory_cursor.is_none() {
                 let inventory_span =
                     perf_diagnostics::span(PerfComponent::WorkContextInventory, None, None);
-                let page = super::service::overview_from_projection(
+                inventory_cursor = match super::service::inventory_cursor_from_projection(
                     app,
                     &caller,
-                    super::types::WorkOverviewRequest::default(),
-                    std::sync::Arc::clone(&catalog),
+                    Arc::clone(&catalog),
                     &disclosure,
+                    &privacy,
                 )
                 .await
-                .ok()?;
-                inventory_cursor = Some(
-                    app.work_views
-                        .beginning_cursor(&page.snapshot_id, page.seq, observed_at)
-                        .ok()?,
-                );
+                {
+                    Ok(cursor) => Some(cursor),
+                    Err(_) => {
+                        inventory_span.finish(PerfOutcome::Failure, None, None, None, None);
+                        return None;
+                    }
+                };
                 inventory_span.finish(PerfOutcome::Success, None, None, None, None);
             }
             let cursor = inventory_cursor.as_ref()?;

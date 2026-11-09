@@ -1157,3 +1157,165 @@ async fn missing_or_timed_out_board_writer_never_changes_persisted_board() {
     drop(held);
     assert_eq!(tokio::fs::read(&path).await.unwrap(), before);
 }
+
+#[serial(coordination_work_overview)]
+#[tokio::test]
+async fn direct_inventory_cursor_uses_frozen_order_budget_and_revalidates_records() {
+    let (app, dir, caller) = fixture().await;
+    app.chat.sessions.write().await.remove("c");
+    for id in ["a", "b"] {
+        let mut message = crate::call_validation::ChatMessage::new("user".into(), "source".into());
+        message.message_id = "source".into();
+        crate::privacy::records::merge_records(
+            &mut message,
+            (0..150).map(|n| refact_privacy::FileRecord {
+                path: dir
+                    .path()
+                    .join(format!("{id}-{n}.rs"))
+                    .to_string_lossy()
+                    .into_owned(),
+                zone: "normal".into(),
+                attribution: refact_privacy::Attribution::Declared,
+            }),
+        );
+        app.chat
+            .sessions
+            .read()
+            .await
+            .get(id)
+            .unwrap()
+            .lock()
+            .await
+            .add_message(message);
+    }
+    let privacy = crate::privacy::classification_cache::privacy_key(&app.gcx).unwrap();
+    let (catalog, disclosure) = visible_projection(&app, &caller).await.unwrap();
+    let token = inventory_cursor_from_projection(&app, &caller, catalog, &disclosure, &privacy)
+        .await
+        .unwrap();
+    assert_eq!(app.work_views.page_selections(), 0);
+    let request = WorkOverviewRequest::default();
+    let direct = overview(
+        &app,
+        &caller,
+        WorkOverviewRequest {
+            cursor: Some(token.clone()),
+            ..request.clone()
+        },
+    )
+    .await
+    .unwrap();
+    let ordinary = overview(&app, &caller, request.clone()).await.unwrap();
+    assert_eq!(direct.rows, ordinary.rows);
+    assert_eq!(direct.returned, 1);
+    assert_eq!(direct.total, 2);
+    assert_eq!(direct.next_cursor, ordinary.next_cursor);
+    let next = overview(
+        &app,
+        &caller,
+        WorkOverviewRequest {
+            cursor: direct.next_cursor.clone(),
+            ..request.clone()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(next.returned, 1);
+    assert_ne!(direct.rows[0].key, next.rows[0].key);
+    assert!(next.next_cursor.is_none());
+    let id = next.rows[0].chat_id.as_ref().unwrap();
+    app.chat
+        .sessions
+        .read()
+        .await
+        .get(id)
+        .unwrap()
+        .lock()
+        .await
+        .remove_message("source");
+    let error = overview(
+        &app,
+        &caller,
+        WorkOverviewRequest {
+            cursor: Some(token),
+            ..request
+        },
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, "cursor_expired");
+}
+
+#[serial(coordination_work_overview)]
+#[tokio::test]
+async fn direct_inventory_cursor_refuses_changed_projection_privacy_receipt() {
+    let (app, dir, caller) = fixture().await;
+    let privacy = crate::privacy::classification_cache::privacy_key(&app.gcx).unwrap();
+    let (catalog, disclosure) = visible_projection(&app, &caller).await.unwrap();
+    let other = dir.path().join("other-workspace");
+    std::fs::create_dir(&other).unwrap();
+    app.gcx
+        .documents_state
+        .workspace_folders
+        .lock()
+        .unwrap()
+        .push(other);
+    let error = inventory_cursor_from_projection(&app, &caller, catalog, &disclosure, &privacy)
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, "policy_unavailable");
+    assert_eq!(app.work_views.page_selections(), 0);
+}
+
+#[serial(coordination_work_overview)]
+#[tokio::test]
+async fn direct_inventory_cursor_rechecks_absolute_and_relative_carried_paths() {
+    for relative in [false, true] {
+        let (app, dir, caller) = fixture().await;
+        let secret = dir.path().join("private.rs");
+        std::fs::write(&secret, "private").unwrap();
+        app.gcx.privacy_policy_load.write().unwrap().policy =
+            Arc::new(refact_privacy::PrivacyPolicy {
+                zones: vec![refact_privacy::Zone {
+                    name: "private".into(),
+                    patterns: vec![secret.to_string_lossy().into_owned()],
+                    send_to: vec!["other".into()],
+                    on_shell_read: refact_privacy::ShellBehavior::Withhold,
+                }],
+                ..Default::default()
+            });
+        let mut message = crate::call_validation::ChatMessage::new("user".into(), "source".into());
+        crate::privacy::records::merge_records(
+            &mut message,
+            [refact_privacy::FileRecord {
+                path: if relative {
+                    "private.rs".into()
+                } else {
+                    secret.to_string_lossy().into_owned()
+                },
+                zone: "normal".into(),
+                attribution: refact_privacy::Attribution::Declared,
+            }],
+        );
+        app.chat
+            .sessions
+            .read()
+            .await
+            .get("b")
+            .unwrap()
+            .lock()
+            .await
+            .add_message(message);
+        let privacy = crate::privacy::classification_cache::privacy_key(&app.gcx).unwrap();
+        let (catalog, disclosure) = visible_projection(&app, &caller).await.unwrap();
+        assert!(
+            catalog.find("b").is_some(),
+            "carried zone alone permits the row"
+        );
+        let error = inventory_cursor_from_projection(&app, &caller, catalog, &disclosure, &privacy)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "cursor_expired", "relative={relative}");
+        assert_eq!(app.work_views.page_selections(), 0);
+    }
+}

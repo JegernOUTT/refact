@@ -669,7 +669,23 @@ struct JournalScan {
     consumed: u64,
 }
 
+#[derive(Debug)]
+struct IndexReadError {
+    reason: perf_diagnostics::PerfComponent,
+    message: String,
+}
+
+impl From<IndexReadError> for String {
+    fn from(error: IndexReadError) -> Self {
+        error.message
+    }
+}
+
 fn scan_trajectory_index_journal(bytes: &[u8]) -> Result<JournalScan, String> {
+    scan_trajectory_index_journal_typed(bytes).map_err(Into::into)
+}
+
+fn scan_trajectory_index_journal_typed(bytes: &[u8]) -> Result<JournalScan, IndexReadError> {
     let mut records = Vec::new();
     let mut consumed = 0u64;
     for chunk in bytes.split_inclusive(|byte| *byte == b'\n') {
@@ -705,16 +721,30 @@ fn scan_trajectory_index_journal(bytes: &[u8]) -> Result<JournalScan, String> {
             payload: WirePayload,
             checksum: u32,
         }
-        let wire: WireRecord = serde_json::from_slice(line)
-            .map_err(|error| format!("Corrupt trajectory index journal line: {error}"))?;
+        let wire: WireRecord = serde_json::from_slice(line).map_err(|error| IndexReadError {
+            reason: PerfComponent::IndexRecoveryJournalParse,
+            message: format!("Corrupt trajectory index journal line: {error}"),
+        })?;
         if wire.schema != TRAJECTORY_INDEX_JOURNAL_SCHEMA_VERSION {
-            return Err(format!(
-                "Unsupported trajectory index journal schema version {}",
-                wire.schema
-            ));
+            return Err(IndexReadError {
+                reason: PerfComponent::IndexRecoveryUnsupportedSchema,
+                message: format!(
+                    "Unsupported trajectory index journal schema version {}",
+                    wire.schema
+                ),
+            });
         }
-        if crc32(&serde_json::to_vec(&wire.payload).map_err(|e| e.to_string())?) != wire.checksum {
-            return Err("Trajectory index journal checksum mismatch".to_string());
+        if crc32(
+            &serde_json::to_vec(&wire.payload).map_err(|e| IndexReadError {
+                reason: PerfComponent::IndexRecoveryJournalParse,
+                message: e.to_string(),
+            })?,
+        ) != wire.checksum
+        {
+            return Err(IndexReadError {
+                reason: PerfComponent::IndexRecoveryChecksum,
+                message: "Trajectory index journal checksum mismatch".to_string(),
+            });
         }
         let mut record = TrajectoryIndexJournalRecord {
             schema: wire.schema,
@@ -730,7 +760,10 @@ fn scan_trajectory_index_journal(bytes: &[u8]) -> Result<JournalScan, String> {
                     .into_iter()
                     .map(serde_json::from_value)
                     .collect::<Result<_, _>>()
-                    .map_err(|e| format!("Invalid journal entry: {e}"))?,
+                    .map_err(|e| IndexReadError {
+                        reason: PerfComponent::IndexRecoveryJournalParse,
+                        message: format!("Invalid journal entry: {e}"),
+                    })?,
                 removes: wire.payload.removes,
                 skipped: wire.payload.skipped,
             },
@@ -799,7 +832,7 @@ fn read_trajectory_index_journal_tail_sync(path: &Path, offset: u64) -> Result<V
             return Err(format!(
                 "Failed to open trajectory index journal {:?}: {error}",
                 path
-            ))
+            ));
         }
     };
     if offset > 0 {
@@ -835,10 +868,26 @@ fn read_persisted_trajectory_index_sync(
 fn read_persisted_trajectory_index_locked_sync(
     dir: &Path,
 ) -> Result<Option<PersistedTrajectoryIndex>, String> {
+    read_persisted_trajectory_index_locked_typed(dir).map_err(Into::into)
+}
+
+fn read_persisted_trajectory_index_locked_typed(
+    dir: &Path,
+) -> Result<Option<PersistedTrajectoryIndex>, IndexReadError> {
     let journal_path = trajectory_index_journal_path(dir);
-    let checkpoint_stamp = regular_file_generation(&trajectory_index_path(dir))?;
-    let checkpoint = read_trajectory_index_sync(dir)?;
-    let journal_bytes = read_trajectory_index_journal_tail_sync(&journal_path, 0)?;
+    let checkpoint_stamp =
+        regular_file_generation(&trajectory_index_path(dir)).map_err(|message| IndexReadError {
+            reason: PerfComponent::IndexRecoveryCheckpointRead,
+            message,
+        })?;
+    let checkpoint = read_trajectory_index_typed(dir)?;
+    let journal_bytes =
+        read_trajectory_index_journal_tail_sync(&journal_path, 0).map_err(|message| {
+            IndexReadError {
+                reason: PerfComponent::IndexRecoveryJournalRead,
+                message,
+            }
+        })?;
     if checkpoint.is_none() && journal_bytes.is_empty() {
         return Ok(None);
     }
@@ -851,7 +900,7 @@ fn read_persisted_trajectory_index_locked_sync(
         baseline: None,
         needs_compaction: false,
     });
-    let scan = scan_trajectory_index_journal(&journal_bytes)?;
+    let scan = scan_trajectory_index_journal_typed(&journal_bytes)?;
     let watermark = index.applied_seq;
     let last_seq = replay_journal_records(&mut index, &scan.records, watermark);
     Ok(Some(PersistedTrajectoryIndex {
@@ -2442,7 +2491,7 @@ fn load_trajectory_index_for_coordinator_locked_sync(
     index_read_span: Option<perf_diagnostics::PerfSpan>,
     listing_counter_scope: &TrajectoryIndexListingCounterScope,
 ) -> Result<CoordinatorLoadResult, String> {
-    let index_read = read_persisted_trajectory_index_locked_sync(dir);
+    let index_read = read_persisted_trajectory_index_locked_typed(dir);
     let item_count = index_read
         .as_ref()
         .ok()
@@ -2495,7 +2544,18 @@ fn load_trajectory_index_for_coordinator_locked_sync(
                 cursor,
             })
         }
-        Ok(None) | Err(_) => {
+        fallback => {
+            if let Err(error) = fallback {
+                perf_diagnostics::record(
+                    error.reason,
+                    None,
+                    PerfOutcome::Failure,
+                    0,
+                    None,
+                    None,
+                    None,
+                );
+            }
             let (entries, skipped_files) =
                 scan_trajectory_index_data_sync(dir, source_hint.clone(), listing_counter_scope)?;
             let index = TrajectoryIndex {
@@ -2520,24 +2580,34 @@ fn load_trajectory_index_for_coordinator_locked_sync(
 }
 
 fn read_trajectory_index_sync(dir: &Path) -> Result<Option<TrajectoryIndex>, String> {
+    read_trajectory_index_typed(dir).map_err(Into::into)
+}
+
+fn read_trajectory_index_typed(dir: &Path) -> Result<Option<TrajectoryIndex>, IndexReadError> {
     let path = trajectory_index_path(dir);
     let content = match std::fs::read_to_string(&path) {
         Ok(content) => content,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => {
-            return Err(format!(
-                "Failed to read trajectory index {:?}: {error}",
-                path
-            ))
+            return Err(IndexReadError {
+                reason: PerfComponent::IndexRecoveryCheckpointRead,
+                message: format!("Failed to read trajectory index {:?}: {error}", path),
+            });
         }
     };
-    let mut index = serde_json::from_str::<TrajectoryIndex>(&content)
-        .map_err(|error| format!("Failed to parse trajectory index {:?}: {error}", path))?;
+    let mut index =
+        serde_json::from_str::<TrajectoryIndex>(&content).map_err(|error| IndexReadError {
+            reason: PerfComponent::IndexRecoveryCheckpointParse,
+            message: format!("Failed to parse trajectory index {:?}: {error}", path),
+        })?;
     if index.schema_version != TRAJECTORY_INDEX_SCHEMA_VERSION {
-        return Err(format!(
-            "Unsupported trajectory index schema version {} in {:?}",
-            index.schema_version, path
-        ));
+        return Err(IndexReadError {
+            reason: PerfComponent::IndexRecoveryUnsupportedSchema,
+            message: format!(
+                "Unsupported trajectory index schema version {} in {:?}",
+                index.schema_version, path
+            ),
+        });
     }
     for entry in &mut index.entries {
         index.needs_compaction |= entry.compact_work();
@@ -3966,7 +4036,7 @@ fn scan_trajectory_dir_files_sync(
             return Err(format!(
                 "Failed to read trajectory directory {:?}: {error}",
                 dir
-            ))
+            ));
         }
     };
     let mut scan_targets = vec![(dir.to_path_buf(), None)];
@@ -4104,7 +4174,7 @@ async fn scan_trajectory_dir_files(
                 return Err(format!(
                     "Failed to read trajectory directory {:?}: {e}",
                     dir
-                ))
+                ));
             }
         };
         let mut scan_targets: Vec<(std::path::PathBuf, Option<String>)> = vec![(dir.clone(), None)];
@@ -4588,6 +4658,156 @@ mod tests {
     impl PerfClock for TestClock {
         fn now_us(&self) -> u64 {
             self.now.fetch_add(1, Ordering::SeqCst)
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn coordinator_recovery_records_only_actual_bounded_trigger() {
+        let temp = tempfile::tempdir().unwrap();
+        let invalid_entry_payload = r#"{"seq":1,"writer_id":"private","ts_ms":1,"updated_at":"now","upserts":[{}],"removes":[]}"#;
+        let invalid_entry = format!(
+            "{{\"schema\":1,{},\"checksum\":{}}}\n",
+            &invalid_entry_payload[1..invalid_entry_payload.len() - 1],
+            crc32(invalid_entry_payload.as_bytes()),
+        );
+        let cases = [
+            ("absent", None, None, None),
+            ("valid", None, None, None),
+            (
+                "checkpoint_read",
+                None,
+                None,
+                Some(PerfComponent::IndexRecoveryCheckpointRead),
+            ),
+            (
+                "checkpoint_parse",
+                Some(b"not json".to_vec()),
+                None,
+                Some(PerfComponent::IndexRecoveryCheckpointParse),
+            ),
+            (
+                "unsupported",
+                Some(br#"{"schema_version":999,"updated_at":"now","entries":[]}"#.to_vec()),
+                None,
+                Some(PerfComponent::IndexRecoveryUnsupportedSchema),
+            ),
+            (
+                "journal_read",
+                None,
+                None,
+                Some(PerfComponent::IndexRecoveryJournalRead),
+            ),
+            (
+                "journal_parse",
+                None,
+                Some(b"{bad}\n".to_vec()),
+                Some(PerfComponent::IndexRecoveryJournalParse),
+            ),
+            (
+                "invalid_entry",
+                None,
+                Some(invalid_entry.into_bytes()),
+                Some(PerfComponent::IndexRecoveryJournalParse),
+            ),
+            (
+                "checksum",
+                None,
+                Some(
+                    b"{\"schema\":1,\"seq\":1,\"writer_id\":\"private\",\"ts_ms\":1,\"updated_at\":\"now\",\"upserts\":[],\"removes\":[],\"checksum\":0}\n".to_vec(),
+                ),
+                Some(PerfComponent::IndexRecoveryChecksum),
+            ),
+        ];
+        for (name, checkpoint, journal, expected) in cases {
+            let dir = temp.path().join(name);
+            write_trajectory(&dir, "recovered", "Private title", "agent").await;
+            let scope = TrajectoryIndexListingCounterScope::Local(Arc::new(
+                TrajectoryIndexListingCounterState::new(),
+            ));
+            if name == "valid" {
+                let (mut entries, skipped_files) =
+                    scan_trajectory_index_data_sync(&dir, None, &scope).unwrap();
+                assert_eq!(entries.len(), 1);
+                entries[0].title = "Retained checkpoint title".into();
+                let index = TrajectoryIndex {
+                    schema_version: TRAJECTORY_INDEX_SCHEMA_VERSION,
+                    entries,
+                    skipped_files,
+                    ..Default::default()
+                };
+                std::fs::write(
+                    trajectory_index_path(&dir),
+                    serde_json::to_vec(&index).unwrap(),
+                )
+                .unwrap();
+            }
+            if name == "checkpoint_read" {
+                std::fs::create_dir(trajectory_index_path(&dir)).unwrap();
+            }
+            if name == "journal_read" {
+                std::fs::create_dir(trajectory_index_journal_path(&dir)).unwrap();
+            }
+            if let Some(bytes) = checkpoint {
+                std::fs::write(trajectory_index_path(&dir), bytes).unwrap();
+            }
+            if let Some(bytes) = journal {
+                std::fs::write(trajectory_index_journal_path(&dir), bytes).unwrap();
+            }
+            let sink = Arc::new(MemoryPerfSink::new());
+            let recorder = Arc::new(PerfRecorder::with_salt(
+                Arc::new(TestClock::new()),
+                sink.clone(),
+                [1; 32],
+            ));
+            let _guard = perf_diagnostics::install_test_recorder(recorder);
+            let loaded =
+                load_trajectory_index_for_coordinator_sync(&dir, None, None, None, &scope).unwrap();
+            assert_eq!(loaded.index.entries.len(), 1, "{name}");
+            assert_eq!(loaded.index.entries[0].id, "recovered");
+            assert_eq!(
+                loaded.index.entries[0].title,
+                if name == "valid" {
+                    "Retained checkpoint title"
+                } else {
+                    "Private title"
+                },
+                "{name}"
+            );
+            let telemetry = crate::chat::perf_telemetry::PerformanceTelemetry::new(true);
+            for event in sink.events() {
+                telemetry.record(&event);
+            }
+            let snapshot = telemetry.snapshot();
+            let reasons = [
+                PerfComponent::IndexRecoveryCheckpointRead,
+                PerfComponent::IndexRecoveryCheckpointParse,
+                PerfComponent::IndexRecoveryUnsupportedSchema,
+                PerfComponent::IndexRecoveryJournalRead,
+                PerfComponent::IndexRecoveryJournalParse,
+                PerfComponent::IndexRecoveryChecksum,
+            ];
+            for reason in reasons {
+                let aggregate = &snapshot.components[reason.index()];
+                assert_eq!(
+                    aggregate.sample_count,
+                    u64::from(expected == Some(reason)),
+                    "{name}: {}",
+                    reason.as_str()
+                );
+                assert_eq!(aggregate.success_count, 0);
+                assert_eq!(aggregate.failure_count, u64::from(expected == Some(reason)));
+                assert!(aggregate.counter_only);
+                assert_eq!(aggregate.min_us, None);
+                assert_eq!(aggregate.max_us, None);
+                assert_eq!(aggregate.p50_us, None);
+                assert_eq!(aggregate.p95_us, None);
+                assert_eq!(aggregate.p99_us, None);
+            }
+            let rendered = serde_json::to_string(&snapshot).unwrap();
+            assert!(!rendered.contains("Private title"));
+            assert!(!rendered.contains("Retained checkpoint title"));
+            assert!(!rendered.contains("recovered"));
+            assert!(!rendered.contains(temp.path().to_str().unwrap()));
         }
     }
 

@@ -186,6 +186,11 @@ async fn many_rows_shrink_to_total_message_budget_and_supply_a_recoverable_inven
             message
         })
         .await;
+    assert_eq!(
+        app.work_views.page_selections(),
+        0,
+        "cursor mint must not select or budget a discarded first page"
+    );
     let wire = refact_llm::adapters::render_extra::render_event_message(&message);
     assert!(
         crate::tokens::count_text_tokens(None, &wire).unwrap()
@@ -212,6 +217,14 @@ async fn many_rows_shrink_to_total_message_budget_and_supply_a_recoverable_inven
     )
     .await
     .unwrap();
+    assert_eq!(app.work_views.page_selections(), 1);
+    let ordinary = super::service::overview(&app, &caller, Default::default())
+        .await
+        .unwrap();
+    assert_eq!(page.rows, ordinary.rows);
+    assert_eq!(page.roots, ordinary.roots);
+    assert_eq!(page.snapshot_id, ordinary.snapshot_id);
+    assert_eq!(page.seq, ordinary.seq);
     assert_eq!(page.total, 42);
     assert_eq!(page.rows.len(), 42);
     let ids: std::collections::HashSet<_> = page
@@ -607,4 +620,104 @@ async fn warm_skip_still_checks_caller_and_does_not_starve_pending_state() {
             assert_eq!(super::capsule::ROW_DERIVATIONS.with(|count| count.get()), 3);
         })
         .await;
+}
+
+struct CapsuleTestClock;
+impl crate::chat::perf_diagnostics::PerfClock for CapsuleTestClock {
+    fn now_us(&self) -> u64 {
+        1
+    }
+}
+
+#[serial_test::serial(runtime_settings)]
+#[tokio::test(flavor = "current_thread")]
+async fn capsule_projection_errors_are_failures_but_dropped_futures_are_cancelled() {
+    use crate::chat::perf_diagnostics::{install_test_recorder, MemoryPerfSink, PerfRecorder};
+    for cancel in [false, true] {
+        let (app, _dir, _) = fixture().await;
+        let sink = Arc::new(MemoryPerfSink::new());
+        let _guard = install_test_recorder(Arc::new(PerfRecorder::new(
+            Arc::new(CapsuleTestClock),
+            sink.clone(),
+        )));
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let mut state = CapsuleState::default();
+        {
+            let future = super::service::PROJECTION_POST_WORK_GATE.scope(
+                std::cell::RefCell::new(Some((entered_tx, release_rx))),
+                prepare_work_context(&app, &mut state, "capsule-caller", "trusted/model"),
+            );
+            tokio::pin!(future);
+            tokio::select! {
+                ready = entered_rx => ready.expect("projection gate dropped"),
+                _ = &mut future => panic!("capsule completed before projection gate"),
+                _ = tokio::time::sleep(std::time::Duration::from_secs(10)) => panic!("projection gate timeout"),
+            }
+            if !cancel {
+                app.gcx.privacy_policy_load.write().unwrap().error = Some("fixture failure".into());
+                release_tx.send(()).unwrap();
+                assert!(future.await.is_none());
+            }
+        }
+        let outcomes = sink
+            .events()
+            .into_iter()
+            .filter(|event| event.component == "work_context.projection")
+            .map(|event| event.outcome)
+            .collect::<Vec<_>>();
+        assert_eq!(outcomes, vec![if cancel { "cancelled" } else { "failure" }]);
+    }
+}
+
+#[serial_test::serial(runtime_settings)]
+#[tokio::test(flavor = "current_thread")]
+async fn capsule_inventory_capacity_error_records_failure_without_consuming_cadence() {
+    use crate::chat::perf_diagnostics::{install_test_recorder, MemoryPerfSink, PerfRecorder};
+    let (app, dir, _) = fixture().await;
+    for number in 0..40 {
+        let id = format!("inventory-{number}");
+        let mut peer = ChatSession::new(id.clone());
+        peer.work_project_root = Some(dir.path().into());
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert(id, Arc::new(Mutex::new(peer)));
+    }
+    let original = crate::file_activity::settings();
+    struct Restore(refact_work_core::CoordinationSettings);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            refact_work_core::settings::install_coordination_settings(self.0.clone()).unwrap();
+        }
+    }
+    let _restore = Restore(original.clone());
+    refact_work_core::settings::install_coordination_settings(
+        refact_work_core::CoordinationSettings {
+            max_work_history_rows: 1,
+            ..original
+        },
+    )
+    .unwrap();
+    let sink = Arc::new(MemoryPerfSink::new());
+    let _guard = install_test_recorder(Arc::new(PerfRecorder::new(
+        Arc::new(CapsuleTestClock),
+        sink.clone(),
+    )));
+    let mut state = CapsuleState::default();
+    assert!(
+        prepare_work_context(&app, &mut state, "capsule-caller", "trusted/model")
+            .await
+            .is_none()
+    );
+    assert_eq!(state.last_fingerprint, None);
+    assert_eq!(app.work_views.page_selections(), 0);
+    let outcomes = sink
+        .events()
+        .into_iter()
+        .filter(|event| event.component == "work_context.inventory")
+        .map(|event| event.outcome)
+        .collect::<Vec<_>>();
+    assert_eq!(outcomes, vec!["failure"]);
 }
