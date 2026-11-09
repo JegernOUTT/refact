@@ -54,6 +54,7 @@ pub enum UserErrorCategory {
     StreamCorrupted,
     ToolSchemaInvalid,
     ContentPolicy,
+    Privacy,
     Unknown,
 }
 
@@ -545,6 +546,11 @@ fn contains_eof(lower: &str) -> bool {
 }
 
 fn classify_user_error_from_lower(lower: &str) -> UserErrorCategory {
+    if lower.contains("output withheld by user privacy policy")
+        || lower.trim() == "privacy context changed"
+    {
+        return UserErrorCategory::Privacy;
+    }
     if contains_any(lower, TOOL_SCHEMA_INVALID_PATTERNS) {
         return UserErrorCategory::ToolSchemaInvalid;
     }
@@ -707,6 +713,13 @@ pub fn user_error_info(category: UserErrorCategory) -> UserErrorInfo {
             suggested_action: "none",
             is_retryable: false,
         },
+        UserErrorCategory::Privacy => UserErrorInfo {
+            category,
+            title: "Privacy check blocked",
+            explanation: "The local privacy check denied access or could not complete verification. This is not a provider content-policy rejection.",
+            suggested_action: "none",
+            is_retryable: false,
+        },
         UserErrorCategory::Unknown => UserErrorInfo {
             category,
             title: "Unknown error",
@@ -748,6 +761,7 @@ pub fn classify_llm_error_for_retry(error: &str) -> RetryDecision {
         | UserErrorCategory::BillingQuota
         | UserErrorCategory::InvalidRequest
         | UserErrorCategory::ToolSchemaInvalid
+        | UserErrorCategory::Privacy
         | UserErrorCategory::ContentPolicy => RetryDecision::DoNotRetry {
             reason: "non_retryable_error",
         },
@@ -1259,6 +1273,28 @@ mod tests {
         assert_eq!(
             classify_user_error("Stream interrupted after partial output and all retry attempts failed. Original error: LLM error: invalid_request_error: context_length_exceeded: Your input exceeds the context window"),
             UserErrorCategory::ContextTooLarge
+        );
+    }
+
+    #[test]
+    fn local_privacy_failures_are_not_provider_moderation_or_request_retries() {
+        for error in [
+            "privacy context changed",
+            "LLM error: Output withheld by user privacy policy — privacy context kept changing, so verification could not complete. Try again once the privacy context is stable.",
+            "Output withheld by user privacy policy — privacy metadata or policy could not be verified. Resolve the privacy verification problem before trying again.",
+            "Output withheld by user privacy policy — \"provider\" cannot receive these guarded files:\n  - safety/api_key.json (zone \"secrets\")",
+        ] {
+            let category = classify_user_error(error);
+            assert_eq!(category, UserErrorCategory::Privacy, "{error}");
+            assert_eq!(classify_llm_error_for_retry(error), non_retryable());
+            let info = user_error_info(category);
+            assert_eq!(info.title, "Privacy check blocked");
+            assert!(!info.is_retryable);
+            assert_eq!(info.suggested_action, "none");
+        }
+        assert_eq!(
+            classify_user_error("Provider content policy: blocked by safety"),
+            UserErrorCategory::ContentPolicy
         );
     }
 

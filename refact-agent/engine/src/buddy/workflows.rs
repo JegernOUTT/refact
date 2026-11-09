@@ -40,6 +40,9 @@ pub fn workflow_failure_summary(category: &WorkflowFailureCategory, error: &str)
         WorkflowFailureCategory::ContentPolicy => {
             format!("Content policy blocked the request. {}", detail)
         }
+        WorkflowFailureCategory::Privacy => {
+            format!("Local privacy check blocked the request. {}", detail)
+        }
         WorkflowFailureCategory::Cancelled => "Workflow cancelled before completion.".to_string(),
         WorkflowFailureCategory::Unknown => format!("Workflow failed. {}", detail),
     }

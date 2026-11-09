@@ -7,6 +7,8 @@ use crate::destination::Destination;
 use crate::matching::CompiledPolicy;
 use crate::record::{FileRecord, PrivacyRecord};
 
+pub const PRIVACY_CONTEXT_CHANGED: &str = "privacy context changed";
+
 /// A value that passed the privacy policy for one destination.
 ///
 /// The inner value cannot be constructed outside this crate.
@@ -62,9 +64,11 @@ impl Refusal {
     pub fn model_facing(&self) -> String {
         let target = self.destination.id.0.as_str();
         if self.offending.is_empty() {
-            return format!(
-                "Output withheld by user privacy policy — \"{target}\" cannot receive guarded files carried by this request."
-            );
+            return if self.message == PRIVACY_CONTEXT_CHANGED {
+                "Output withheld by user privacy policy — privacy context kept changing, so verification could not complete. Try again once the privacy context is stable.".to_string()
+            } else {
+                "Output withheld by user privacy policy — privacy metadata or policy could not be verified. Resolve the privacy verification problem before trying again.".to_string()
+            };
         }
         let mut listed: Vec<String> = Vec::new();
         let mut seen: Vec<(&str, &str)> = Vec::new();
@@ -471,6 +475,32 @@ mod tests {
 
         assert!(refusal.message.contains("message 1"));
         assert!(refusal.message.contains("malformed privacy metadata"));
+    }
+
+    #[test]
+    fn verification_failure_display_is_safe_and_distinct_from_denial() {
+        let transient = Refusal {
+            destination: destination("private/internal/provider"),
+            offending: Vec::new(),
+            message: PRIVACY_CONTEXT_CHANGED.into(),
+        };
+        let generic = Refusal {
+            message: "malformed metadata at /private/internal/path: secret contents".into(),
+            ..transient.clone()
+        };
+        assert_eq!(transient.model_facing(), "Output withheld by user privacy policy — privacy context kept changing, so verification could not complete. Try again once the privacy context is stable.");
+        assert_eq!(generic.model_facing(), "Output withheld by user privacy policy — privacy metadata or policy could not be verified. Resolve the privacy verification problem before trying again.");
+        let refusal = clear(
+            AuditedRecords {
+                value: "payload".into(),
+                records: vec![record(".env", "secrets")],
+            },
+            &destination("untrusted"),
+            &compiled(&policy()),
+        )
+        .err()
+        .unwrap();
+        assert_eq!(refusal.model_facing(), "Output withheld by user privacy policy — \"untrusted\" cannot receive these guarded files:\n  - .env (zone \"secrets\")\nRetrying the same request will be refused again. Continue without those files, or ask the user to allow these zones for \"untrusted\".");
     }
 
     #[test]

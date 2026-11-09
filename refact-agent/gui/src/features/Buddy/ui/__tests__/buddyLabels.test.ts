@@ -19,6 +19,7 @@ describe("buddy label maps", () => {
     expect(buddyFailureLabel("tool_error")).toBe("Tool error");
     expect(buddyFailureLabel("browser_error")).toBe("Browser error");
     expect(buddyFailureLabel("network_error")).toBe("Network error");
+    expect(buddyFailureLabel("privacy")).toBe("Privacy check blocked");
     expect(buddyFailureLabel("generic")).toBe("Other");
     expect(buddyFailureLabel("LLM_ERROR")).toBe("Model error");
     expect(buddyFailureLabel(" ")).toBe("Other");

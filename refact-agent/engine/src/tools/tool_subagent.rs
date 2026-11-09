@@ -1739,8 +1739,9 @@ mod tests {
         std::fs::write(&settings_path, "launch_source_bytes: 0\n").unwrap();
         assert!(execute(request.clone()).await.is_err());
         std::fs::write(&settings_path, "{}\n").unwrap();
-        app.gcx.privacy_policy_load.write().unwrap().policy =
-            Arc::new(refact_privacy::PrivacyPolicy {
+        crate::privacy::save_privacy_policy(
+            app.gcx.clone(),
+            refact_privacy::PrivacyPolicy {
                 zones: vec![refact_privacy::Zone {
                     name: "private".into(),
                     patterns: vec![file.to_string_lossy().into_owned()],
@@ -1748,7 +1749,23 @@ mod tests {
                     on_shell_read: refact_privacy::ShellBehavior::Withhold,
                 }],
                 ..Default::default()
-            });
+            },
+        )
+        .await
+        .unwrap();
+        let mut settings = app.gcx.privacy_settings.write().unwrap();
+        *settings = Arc::new(crate::privacy::PrivacySettings {
+            privacy_rules: crate::privacy::FilePrivacySettings {
+                blocked: settings.privacy_rules.blocked.clone(),
+                only_send_to_servers_I_control: settings
+                    .privacy_rules
+                    .only_send_to_servers_I_control
+                    .clone(),
+            },
+            loaded_ts: 0,
+        });
+        drop(settings);
+        crate::privacy::load_privacy_if_needed(app.gcx.clone()).await;
         let denied = execute(request.clone()).await.unwrap().unwrap();
         assert!(!denied.messages.iter().any(|message| message
             .content

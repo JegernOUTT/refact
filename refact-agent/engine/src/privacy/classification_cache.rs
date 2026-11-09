@@ -15,7 +15,7 @@ pub struct PrivacyKey {
     workspaces: Vec<PathBuf>,
     base: PathBuf,
     epoch: u64,
-    registry_revision: refact_worktrees::service::RegistryRevision,
+    mappings: WorktreePathMappings,
 }
 
 impl PartialEq for PrivacyKey {
@@ -24,7 +24,7 @@ impl PartialEq for PrivacyKey {
             && self.workspaces == other.workspaces
             && self.base == other.base
             && self.epoch == other.epoch
-            && self.registry_revision == other.registry_revision
+            && Arc::ptr_eq(&self.mappings, &other.mappings)
     }
 }
 impl Eq for PrivacyKey {}
@@ -53,7 +53,7 @@ pub fn privacy_key(gcx: &GlobalContext) -> Result<PrivacyKey, String> {
             .clone(),
         base: std::env::current_dir().map_err(|_| "privacy base unavailable")?,
         epoch: gcx.privacy_classification.epoch.load(Ordering::SeqCst),
-        registry_revision: refact_worktrees::service::registry_revision(&gcx.cache_dir),
+        mappings: registered_worktree_path_mappings(&gcx.cache_dir),
     })
 }
 
@@ -72,6 +72,15 @@ pub struct ClassificationCache {
     pub(crate) compiles: AtomicU64,
     #[cfg(test)]
     pub(crate) classifications: AtomicU64,
+    #[cfg(test)]
+    pub(crate) observer: Mutex<Option<Box<dyn FnMut(&GlobalContext, &'static str) + Send>>>,
+}
+
+#[cfg(test)]
+pub(crate) fn observe(gcx: &GlobalContext, event: &'static str) {
+    if let Some(observer) = gcx.privacy_classification.observer.lock().unwrap().as_mut() {
+        observer(gcx, event);
+    }
 }
 
 pub(crate) struct Snapshot {
@@ -150,11 +159,13 @@ pub(crate) fn snapshot(gcx: &GlobalContext) -> Result<Arc<Snapshot>, String> {
         key: key.clone(),
         compiled,
         fingerprint,
-        mappings: registered_worktree_path_mappings(gcx.cache_dir.as_path()),
+        mappings: Arc::clone(&key.mappings),
         entries: Mutex::new(Entries::default()),
     });
+    #[cfg(test)]
+    observe(gcx, "snapshot");
     if privacy_key(gcx)? != key {
-        return Err("privacy context changed".into());
+        return Err(refact_privacy::gate::PRIVACY_CONTEXT_CHANGED.into());
     }
     *gcx.privacy_classification
         .state
@@ -176,7 +187,7 @@ impl Snapshot {
 
     pub(crate) fn finish(&self, gcx: &GlobalContext) -> Result<(), String> {
         if privacy_key(gcx)? != self.key {
-            return Err("privacy context changed".into());
+            return Err(refact_privacy::gate::PRIVACY_CONTEXT_CHANGED.into());
         }
         Ok(())
     }
@@ -312,7 +323,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn registry_publications_only_invalidate_the_relevant_cache_directory() {
+    async fn registry_metadata_preserves_snapshots_but_mapping_changes_invalidate() {
         use refact_worktrees::service::WorktreeService;
         use refact_worktrees::types::{WorktreeMeta, WorktreeRegistryRecord};
 
@@ -367,8 +378,12 @@ mod tests {
             .compare_and_save_registry(&expected, &expected)
             .await
             .unwrap();
-        assert_eq!(old.finish(&gcx).unwrap_err(), "privacy context changed");
-        let old = snapshot(&gcx).unwrap();
+        old.finish(&gcx).unwrap();
+        assert!(Arc::ptr_eq(&old, &snapshot(&gcx).unwrap()));
+        assert!(Arc::ptr_eq(
+            &old_mappings,
+            &registered_worktree_path_mappings(&gcx.cache_dir)
+        ));
 
         let expected = service.load_registry().await.unwrap();
         let mut registry = expected.clone();
@@ -405,12 +420,51 @@ mod tests {
         assert_eq!(fresh.mappings[0].root, root);
         assert_eq!(declared_file_record(&gcx, &path).unwrap().zone, "blocked");
         fresh.finish(&gcx).unwrap();
+
+        let mut metadata = registry.clone();
+        metadata.records[0].updated_at = "2026-02-01T00:00:00Z".into();
+        metadata.records[0]
+            .references
+            .push(refact_worktrees::types::WorktreeReference {
+                kind: "chat".into(),
+                chat_id: Some("metadata-only".into()),
+                ..Default::default()
+            });
+        service
+            .compare_and_save_registry(&registry, &metadata)
+            .await
+            .unwrap();
+        service
+            .compare_and_save_registry(&metadata, &metadata)
+            .await
+            .unwrap();
+        fresh.finish(&gcx).unwrap();
+        assert!(Arc::ptr_eq(&fresh, &snapshot(&gcx).unwrap()));
+        assert_eq!(declared_file_record(&gcx, &path).unwrap().zone, "blocked");
         assert_eq!(
             gcx.privacy_classification
                 .classifications
                 .load(Ordering::SeqCst),
             2
         );
+
+        let mut removed = metadata.clone();
+        removed.records.clear();
+        service
+            .compare_and_save_registry(&metadata, &removed)
+            .await
+            .unwrap();
+        assert_eq!(fresh.finish(&gcx).unwrap_err(), "privacy context changed");
+        assert!(snapshot(&gcx).unwrap().mappings.is_empty());
+        service
+            .compare_and_save_registry(&removed, &metadata)
+            .await
+            .unwrap();
+        assert_eq!(fresh.finish(&gcx).unwrap_err(), "privacy context changed");
+        assert!(!Arc::ptr_eq(
+            &fresh.mappings,
+            &snapshot(&gcx).unwrap().mappings
+        ));
         assert_eq!(
             gcx.privacy_classification.compiles.load(Ordering::SeqCst),
             1

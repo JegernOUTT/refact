@@ -720,6 +720,7 @@ export type UserErrorCategory =
   | "StreamCorrupted"
   | "ToolSchemaInvalid"
   | "ContentPolicy"
+  | "Privacy"
   | "Unknown";
 
 export type UserErrorInfo = {

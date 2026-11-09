@@ -72,28 +72,43 @@ static WORKTREE_MAPPINGS_CACHE: std::sync::OnceLock<
 > = std::sync::OnceLock::new();
 
 pub fn registered_worktree_path_mappings(cache_dir: &Path) -> WorktreePathMappings {
-    let revision = refact_worktrees::service::registry_revision(cache_dir);
+    registered_worktree_path_mappings_with_reader(cache_dir, || {
+        registered_worktree_path_mappings_uncached(cache_dir)
+    })
+}
+
+fn registered_worktree_path_mappings_with_reader(
+    cache_dir: &Path,
+    mut read: impl FnMut() -> Vec<RegisteredWorktreePathMapping>,
+) -> WorktreePathMappings {
     let cache = WORKTREE_MAPPINGS_CACHE
         .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
-    {
-        let guard = cache
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut guard = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    for _ in 0..3 {
+        let revision = refact_worktrees::service::registry_revision(cache_dir);
         if let Some((stamped_at, cached_revision, mappings)) = guard.get(cache_dir) {
             if *cached_revision == revision && stamped_at.elapsed() < WORKTREE_MAPPINGS_TTL {
                 return Arc::clone(mappings);
             }
         }
-    }
-    let mappings = Arc::new(registered_worktree_path_mappings_uncached(cache_dir));
-    cache
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .insert(
+        let fresh = read();
+        if refact_worktrees::service::registry_revision(cache_dir) != revision {
+            continue;
+        }
+        let mappings = guard
+            .get(cache_dir)
+            .filter(|(_, _, mappings)| mappings.as_ref() == &fresh)
+            .map(|(_, _, mappings)| Arc::clone(mappings))
+            .unwrap_or_else(|| Arc::new(fresh));
+        guard.insert(
             cache_dir.to_path_buf(),
             (Instant::now(), revision, Arc::clone(&mappings)),
         );
-    mappings
+        return mappings;
+    }
+    Arc::new(read())
 }
 
 fn registered_worktree_path_mappings_uncached(
@@ -159,6 +174,8 @@ fn registered_worktree_path_mappings_uncached(
             .components()
             .count()
             .cmp(&a.root.components().count())
+            .then_with(|| a.root.cmp(&b.root))
+            .then_with(|| a.source_root.cmp(&b.source_root))
     });
     mappings
 }
@@ -641,6 +658,68 @@ mod tests {
             serde_json::to_string_pretty(&registry).unwrap(),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn mapping_refresh_fences_publication_and_preserves_equal_values_after_ttl() {
+        use super::{registered_worktree_path_mappings_with_reader, RegisteredWorktreePathMapping};
+        use refact_worktrees::service::WorktreeService;
+        use std::sync::Arc;
+
+        let cache = tempfile::tempdir().unwrap();
+        let source = tempfile::tempdir().unwrap();
+        let service =
+            WorktreeService::new(cache.path().to_path_buf(), source.path().to_path_buf()).unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let expected = runtime.block_on(service.load_registry()).unwrap();
+        let mapping = RegisteredWorktreePathMapping {
+            root: cache.path().join("mapping"),
+            source_root: source.path().to_path_buf(),
+        };
+        let mut reads = 0;
+        let mappings = registered_worktree_path_mappings_with_reader(cache.path(), || {
+            reads += 1;
+            if reads == 1 {
+                runtime
+                    .block_on(service.compare_and_save_registry(&expected, &expected))
+                    .unwrap();
+                Vec::new()
+            } else {
+                vec![mapping.clone()]
+            }
+        });
+        assert_eq!(reads, 2);
+        assert_eq!(mappings.as_ref(), &vec![mapping.clone()]);
+
+        super::WORKTREE_MAPPINGS_CACHE
+            .get()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .get_mut(cache.path())
+            .unwrap()
+            .0 = std::time::Instant::now() - super::WORKTREE_MAPPINGS_TTL;
+        let refreshed =
+            registered_worktree_path_mappings_with_reader(cache.path(), || vec![mapping.clone()]);
+        assert!(Arc::ptr_eq(&mappings, &refreshed));
+
+        super::WORKTREE_MAPPINGS_CACHE
+            .get()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .get_mut(cache.path())
+            .unwrap()
+            .0 = std::time::Instant::now() - super::WORKTREE_MAPPINGS_TTL;
+        let unstable = registered_worktree_path_mappings_with_reader(cache.path(), || {
+            runtime
+                .block_on(service.compare_and_save_registry(&expected, &expected))
+                .unwrap();
+            vec![mapping.clone()]
+        });
+        let coherent =
+            registered_worktree_path_mappings_with_reader(cache.path(), || vec![mapping.clone()]);
+        assert!(!Arc::ptr_eq(&unstable, &coherent));
     }
 
     #[tokio::test]

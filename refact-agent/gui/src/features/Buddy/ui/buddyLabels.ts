@@ -26,6 +26,7 @@ export const BUDDY_FAILURE_LABELS: Partial<Record<string, string>> = {
   authentication_failed: "Sign-in failed",
   billing_quota: "Quota reached",
   content_policy: "Blocked by content policy",
+  privacy: "Privacy check blocked",
   cancelled: "Cancelled",
   network: "Network error",
   timeout: "Timed out",

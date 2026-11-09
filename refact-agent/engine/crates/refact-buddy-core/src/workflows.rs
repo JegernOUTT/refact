@@ -18,6 +18,7 @@ pub enum WorkflowFailureCategory {
     AuthenticationFailed,
     BillingQuota,
     ContentPolicy,
+    Privacy,
     Cancelled,
     Unknown,
 }
@@ -61,6 +62,7 @@ impl WorkflowFailureCategory {
             UserErrorCategory::AuthenticationFailed => Self::AuthenticationFailed,
             UserErrorCategory::BillingQuota => Self::BillingQuota,
             UserErrorCategory::ContentPolicy => Self::ContentPolicy,
+            UserErrorCategory::Privacy => Self::Privacy,
             UserErrorCategory::Unknown => Self::Unknown,
         }
     }
@@ -77,6 +79,7 @@ impl WorkflowFailureCategory {
             Self::AuthenticationFailed => "authentication_failed",
             Self::BillingQuota => "billing_quota",
             Self::ContentPolicy => "content_policy",
+            Self::Privacy => "privacy",
             Self::Cancelled => "cancelled",
             Self::Unknown => "unknown",
         }
@@ -94,6 +97,7 @@ impl WorkflowFailureCategory {
             Self::AuthenticationFailed => "Authentication failed",
             Self::BillingQuota => "Billing or quota limit reached",
             Self::ContentPolicy => "Content policy blocked request",
+            Self::Privacy => "Privacy check blocked",
             Self::Cancelled => "Workflow cancelled",
             Self::Unknown => "Workflow failed",
         }
@@ -106,6 +110,7 @@ impl WorkflowFailureCategory {
             | Self::ContextTooLarge
             | Self::ToolUnavailable
             | Self::ToolFailed
+            | Self::Privacy
             | Self::InvalidRequest => "high",
             Self::ProviderTransient | Self::ProviderRateLimit => "normal",
             Self::Cancelled | Self::Unknown => "normal",
@@ -223,6 +228,7 @@ pub fn housekeeping_blocked_report(
         Some(WorkflowFailureCategory::ToolUnavailable)
         | Some(WorkflowFailureCategory::ToolFailed) => "a tool it depends on failed",
         Some(WorkflowFailureCategory::ContentPolicy) => "a content policy blocked the requests",
+        Some(WorkflowFailureCategory::Privacy) => "the local privacy check blocked the requests",
         _ => "its runs kept failing",
     };
     let body = format!(
@@ -329,6 +335,23 @@ mod tests {
                 "{error}"
             );
         }
+    }
+
+    #[test]
+    fn local_privacy_failure_keeps_its_category_in_workflow_reports() {
+        let category = WorkflowFailureCategory::classify(
+            "Output withheld by user privacy policy — privacy metadata or policy could not be verified.",
+        );
+        assert_eq!(category, WorkflowFailureCategory::Privacy);
+        assert_eq!(category.as_str(), "privacy");
+        assert_eq!(category.title(), "Privacy check blocked");
+        assert_eq!(category.priority(), "high");
+        let encoded = serde_json::to_value(&category).unwrap();
+        assert_eq!(encoded, "privacy");
+        assert_eq!(
+            serde_json::from_value::<WorkflowFailureCategory>(encoded).unwrap(),
+            category
+        );
     }
 
     #[tokio::test]
