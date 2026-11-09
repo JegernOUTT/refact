@@ -22,7 +22,7 @@
 }
 
 .section + .section {
-  box-shadow: inset 1px 0 var(--rf-border);
+  box-shadow: calc(-1 * var(--rf-hairline)) 0 var(--rf-border);
 }
 
 .section > *,

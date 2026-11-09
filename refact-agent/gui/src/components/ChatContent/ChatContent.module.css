@@ -279,3 +279,7 @@
 .virtuosoItem {
   min-height: 1px;
 }
+
+.transcriptFooter {
+  padding: var(--rf-space-2) var(--rf-space-4) 0 var(--rf-space-2);
+}

@@ -467,7 +467,7 @@ export const ChatContent: React.FC<ChatContentProps> = ({
   const virtuosoFooter = useMemo(
     () => (
       <>
-        <Container>
+        <Container className={styles.transcriptFooter}>
           <UncommittedChangesWarning />
           {recovery && (
             <RecoveryCard

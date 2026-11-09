@@ -1,6 +1,16 @@
 import { useCallback, useEffect, useId, useRef, useState } from "react";
-import { ChevronDown, Copy, ListTree, Settings2 } from "lucide-react";
-import { Button, FieldText, SegmentedControl } from "../ui";
+import {
+  Copy,
+  ListTree,
+  LoaderCircle,
+  Play,
+  RefreshCw,
+  RotateCcw,
+  Settings2,
+  Square,
+  X,
+} from "lucide-react";
+import { FieldText, IconButton, SegmentedControl, Tooltip } from "../ui";
 import { useAppSelector } from "../../hooks/useAppSelector";
 import { useChatCommandRequest } from "../../hooks/useChatCommandRequest";
 import { useChatActions } from "../../hooks/useChatActions";
@@ -218,31 +228,35 @@ export function RecoveryCard({
             <span className={styles.status} role="status">
               {request.uncertain
                 ? "Command not confirmed"
-                : queuedRetries.length > 0 || request.phase === "queued"
-                  ? "Retry queued"
-                  : request.pending
-                    ? "Awaiting confirmation…"
-                    : stopping
-                      ? "Stop requested…"
-                      : goalHeld
-                        ? "Goal paused"
-                        : recovery.state === "attempting"
-                          ? "Request in progress"
-                          : recovery.state === "waiting"
-                            ? `${cooldown ? "Provider cooldown" : "Retry"}${
-                                recovery.next_retry_at_ms
-                                  ? ` · ${Math.max(
-                                      0,
-                                      Math.ceil(
-                                        (recovery.next_retry_at_ms - now) /
-                                          1000,
-                                      ),
-                                    )}s`
-                                  : " pending"
-                              }`
-                            : recovery.terminal_reason
-                              ? humanizeIdentifier(recovery.terminal_reason)
-                              : humanizeIdentifier(recovery.state)}
+                : cancellingQueued
+                  ? "Cancelling…"
+                  : request.phase === "sending"
+                    ? "Submitting…"
+                    : queuedRetries.length > 0 || request.phase === "queued"
+                      ? "Retry queued"
+                      : request.pending
+                        ? "Awaiting confirmation…"
+                        : stopping
+                          ? "Stop requested…"
+                          : goalHeld
+                            ? "Goal paused"
+                            : recovery.state === "attempting"
+                              ? "Request in progress"
+                              : recovery.state === "waiting"
+                                ? `${cooldown ? "Provider cooldown" : "Retry"}${
+                                    recovery.next_retry_at_ms
+                                      ? ` · ${Math.max(
+                                          0,
+                                          Math.ceil(
+                                            (recovery.next_retry_at_ms - now) /
+                                              1000,
+                                          ),
+                                        )}s`
+                                      : " pending"
+                                  }`
+                                : recovery.terminal_reason
+                                  ? humanizeIdentifier(recovery.terminal_reason)
+                                  : humanizeIdentifier(recovery.state)}
             </span>
             <span>
               {recovery.retries_used} / {recovery.policy.max_retries}{" "}
@@ -274,15 +288,34 @@ export function RecoveryCard({
             </div>
           )}
         </div>
-        <div className={styles.actions}>
-          {request.uncertain ? (
-            <Button size="sm" onClick={() => void request.checkStatus()}>
-              Check status
-            </Button>
-          ) : queuedRetries.length > 0 ||
-            (request.phase === "queued" && request.queuedCommandId) ? (
-            <Button
+      </div>
+      <div
+        className={styles.actions}
+        role="group"
+        aria-label="Recovery actions"
+      >
+        {request.uncertain ? (
+          <Tooltip content="Check status">
+            <IconButton
               size="sm"
+              variant="ghost"
+              icon={RefreshCw}
+              aria-label="Check status"
+              onClick={() => void request.checkStatus()}
+            />
+          </Tooltip>
+        ) : queuedRetries.length > 0 ||
+          (request.phase === "queued" && request.queuedCommandId) ? (
+          <Tooltip
+            content={cancellingQueued ? "Cancelling…" : "Cancel queued retry"}
+          >
+            <IconButton
+              size="sm"
+              variant="ghost"
+              icon={X}
+              aria-label={
+                cancellingQueued ? "Cancelling…" : "Cancel queued retry"
+              }
               disabled={cancellingQueued}
               onClick={() => {
                 setCancellingQueued(true);
@@ -309,18 +342,35 @@ export function RecoveryCard({
                     });
                 }
               }}
-            >
-              {cancellingQueued ? "Cancelling…" : "Cancel queued retry"}
-            </Button>
-          ) : request.pending ? (
-            <Button size="sm" disabled>
-              {request.phase === "sending"
+            />
+          </Tooltip>
+        ) : request.pending ? (
+          <Tooltip
+            content={
+              request.phase === "sending"
                 ? "Submitting…"
-                : "Awaiting confirmation…"}
-            </Button>
-          ) : goalHeld ? (
-            <Button
+                : "Awaiting confirmation…"
+            }
+          >
+            <IconButton
               size="sm"
+              variant="ghost"
+              icon={LoaderCircle}
+              disabled
+              aria-label={
+                request.phase === "sending"
+                  ? "Submitting…"
+                  : "Awaiting confirmation…"
+              }
+            />
+          </Tooltip>
+        ) : goalHeld ? (
+          <Tooltip content="Resume goal">
+            <IconButton
+              size="sm"
+              variant="ghost"
+              icon={Play}
+              aria-label="Resume goal"
               onClick={() => {
                 void controlGoal("resume").catch(() =>
                   setStopError(
@@ -328,63 +378,69 @@ export function RecoveryCard({
                   ),
                 );
               }}
-            >
-              Resume goal
-            </Button>
-          ) : recovery.state === "attempting" ? null : (
-            <Button
+            />
+          </Tooltip>
+        ) : recovery.state === "attempting" ? null : (
+          <Tooltip content={active ? "Retry now" : "Retry"}>
+            <IconButton
               size="sm"
+              variant="ghost"
+              icon={RotateCcw}
+              aria-label={active ? "Retry now" : "Retry"}
               disabled={request.blocked || stopping || cooldown || !valid}
               onClick={() =>
                 apply(active ? "recovery_retry_now" : "recovery_retry")
               }
-            >
-              {active ? "Retry now" : "Retry"}
-            </Button>
-          )}
-          {active && (
-            <Button size="sm" variant="soft" disabled={stopping} onClick={stop}>
-              {stopping ? "Stop requested…" : "Stop"}
-            </Button>
-          )}
-        </div>
-      </div>
-      <div className={styles.toggles}>
-        <Button
-          ref={detailsRef}
-          size="sm"
-          variant="ghost"
-          className={styles.disclosure}
-          leftIcon={ListTree}
-          rightIcon={ChevronDown}
-          aria-expanded={panel === "details"}
-          aria-controls={`${id}-details`}
-          onClick={() => toggle("details")}
-        >
-          Details
-        </Button>
-        <Button
-          ref={optionsRef}
-          size="sm"
-          variant="ghost"
-          className={styles.disclosure}
-          leftIcon={Settings2}
-          rightIcon={ChevronDown}
-          aria-expanded={panel === "options"}
-          aria-controls={`${id}-options`}
-          onClick={() => toggle("options")}
-        >
-          Options
-        </Button>
-        <Button
-          size="sm"
-          variant="ghost"
-          leftIcon={Copy}
-          aria-label="Copy errors"
-          onClick={() => copyToClipboard(texts.join("\n\n"))}
-        >
-          Copy
-        </Button>
+            />
+          </Tooltip>
+        )}
+        {active && (
+          <Tooltip content={stopping ? "Stop requested…" : "Stop"}>
+            <IconButton
+              size="sm"
+              variant="ghost"
+              icon={Square}
+              aria-label={stopping ? "Stop requested…" : "Stop"}
+              disabled={stopping}
+              onClick={stop}
+            />
+          </Tooltip>
+        )}
+        <Tooltip content="Details">
+          <IconButton
+            ref={detailsRef}
+            size="sm"
+            variant="ghost"
+            className={styles.disclosure}
+            icon={ListTree}
+            aria-label="Details"
+            aria-expanded={panel === "details"}
+            aria-controls={`${id}-details`}
+            onClick={() => toggle("details")}
+          />
+        </Tooltip>
+        <Tooltip content="Options">
+          <IconButton
+            ref={optionsRef}
+            size="sm"
+            variant="ghost"
+            className={styles.disclosure}
+            icon={Settings2}
+            aria-label="Options"
+            aria-expanded={panel === "options"}
+            aria-controls={`${id}-options`}
+            onClick={() => toggle("options")}
+          />
+        </Tooltip>
+        <Tooltip content="Copy errors">
+          <IconButton
+            size="sm"
+            variant="ghost"
+            icon={Copy}
+            aria-label="Copy errors"
+            onClick={() => copyToClipboard(texts.join("\n\n"))}
+          />
+        </Tooltip>
       </div>
       <div
         id={`${id}-details`}

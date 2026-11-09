@@ -1,4 +1,6 @@
 .page {
+  box-sizing: border-box;
+  min-width: 0;
   min-height: 100dvh;
   background: var(--rf-bg);
   color: var(--rf-color-fg);
@@ -26,6 +28,7 @@
 }
 
 .toolbar select {
+  max-width: 100%;
   color: var(--rf-color-fg);
   background: var(--rf-surface-2);
   border: var(--rf-border-width) solid var(--rf-border);

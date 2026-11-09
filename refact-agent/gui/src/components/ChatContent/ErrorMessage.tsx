@@ -1,6 +1,6 @@
 import React from "react";
-import { AlertTriangle } from "lucide-react";
-import { Button, Icon } from "../ui";
+import { AlertTriangle, RotateCcw } from "lucide-react";
+import { Icon, IconButton, Tooltip } from "../ui";
 import type { ErrorMessage } from "../../services/refact/types";
 import { collectErrorTexts } from "../../services/refact/recoveryPresentation";
 import styles from "./ErrorMessage.module.css";
@@ -18,7 +18,7 @@ export const ErrorMessageCard: React.FC<ErrorMessageCardProps> = ({
   if (texts.length === 0) return null;
   return (
     <section
-      className={styles.errors}
+      className={`${styles.card} ${styles.errors}`}
       data-testid="error-message-card"
       aria-label="Request error"
     >
@@ -34,9 +34,17 @@ export const ErrorMessageCard: React.FC<ErrorMessageCardProps> = ({
         ))}
       </div>
       {onRetryGeneration && (
-        <Button size="sm" variant="soft" onClick={onRetryGeneration}>
-          Retry
-        </Button>
+        <div className={styles.actions}>
+          <Tooltip content="Retry">
+            <IconButton
+              size="sm"
+              variant="ghost"
+              icon={RotateCcw}
+              aria-label="Retry"
+              onClick={onRetryGeneration}
+            />
+          </Tooltip>
+        </div>
       )}
     </section>
   );

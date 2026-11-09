@@ -46,8 +46,18 @@ describe("ErrorMessageCard", () => {
       />,
     );
     expect(screen.getAllByRole("button", { name: "Retry" })).toHaveLength(1);
-    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    const button = screen.getByRole("button", { name: "Retry" });
+    expect(button).toHaveTextContent("");
+    expect(button.querySelector("svg")).toHaveAttribute("aria-hidden", "true");
+    fireEvent.click(button);
     expect(retry).toHaveBeenCalledOnce();
+  });
+  test("exposes the icon retry tooltip on focus", async () => {
+    render(
+      <ErrorMessageCard errors={[classified]} onRetryGeneration={vi.fn()} />,
+    );
+    fireEvent.focus(screen.getByRole("button", { name: "Retry" }));
+    expect(await screen.findByRole("tooltip")).toHaveTextContent("Retry");
   });
   test("legacy errors remain readable without invented counts", () => {
     render(

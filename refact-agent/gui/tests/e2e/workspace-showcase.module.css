@@ -1,0 +1,14 @@
+.page {
+  height: 100vh;
+  min-width: 0;
+}
+
+.toolbar {
+  height: var(--rf-control-h);
+  flex-shrink: 0;
+}
+
+.body {
+  flex: 1;
+  min-height: 0;
+}

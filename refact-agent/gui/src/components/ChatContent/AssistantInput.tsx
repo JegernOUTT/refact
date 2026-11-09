@@ -124,26 +124,28 @@ const _AssistantInput: React.FC<ChatInputProps> = ({
     }
   }, [message, handleCopy]);
 
+  const hasMessageContent = Boolean(message?.trim());
+
   return (
     <MessageWrapper>
       {combinedReasoning && (
-        <Box mb={!message ? "3" : undefined}>
+        <Box mb={!hasMessageContent ? "3" : undefined}>
           <ReasoningContent
             reasoningContent={combinedReasoning}
             onCopyClick={handleCopy}
             isStreaming={isStreaming}
-            hasMessageContent={!!message}
+            hasMessageContent={hasMessageContent}
             stateKey={messageId ? `re:${messageId}` : undefined}
           />
         </Box>
       )}
 
       {!!serverContentBlocks?.length && (
-        <Box mb={!message && !combinedReasoning ? "3" : undefined}>
+        <Box mb={!hasMessageContent && !combinedReasoning ? "3" : undefined}>
           <ServerContentBlocks blocks={serverContentBlocks} />
         </Box>
       )}
-      {message && (
+      {hasMessageContent && (
         <Box py="4">
           <Markdown
             canHaveInteractiveElements={true}
@@ -232,11 +234,11 @@ const _AssistantInput: React.FC<ChatInputProps> = ({
       )}
       <MessageFooter
         messageId={messageId}
-        onCopy={message ? handleCopyMessage : undefined}
+        onCopy={hasMessageContent ? handleCopyMessage : undefined}
         onBranch={onBranch}
         onDelete={onDelete}
         usage={usage}
-        overlay={!message && !combinedReasoning}
+        overlay={!hasMessageContent && !combinedReasoning}
       />
     </MessageWrapper>
   );

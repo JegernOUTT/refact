@@ -11,6 +11,7 @@ import { RecoveryCard, RecoveryDetails } from "./RecoveryCard";
 const mocks = vi.hoisted(() => {
   vi.resetModules();
   return {
+    copy: vi.fn(),
     run: vi.fn(),
     abort: vi.fn(),
     controlGoal: vi.fn(),
@@ -38,6 +39,9 @@ vi.mock("../../features/Chat/Thread/selectors", async (importOriginal) => ({
   selectQueuedItemsById: () => mocks.queued,
   selectThreadById: () => ({ goal: mocks.goal }),
   selectRecoveryById: () => recovery,
+}));
+vi.mock("../../hooks/useCopyToClipboard", () => ({
+  useCopyToClipboard: () => mocks.copy,
 }));
 vi.mock("../../hooks/useChatActions", () => ({
   useChatActions: () => ({
@@ -121,6 +125,84 @@ beforeEach(() => {
   mocks.controlGoal.mockResolvedValue(undefined);
 });
 describe("RecoveryCard", () => {
+  it("groups icon-only actions below the full error and preserves copy content", async () => {
+    render(
+      <RecoveryCard
+        chatId="chat"
+        recovery={recovery}
+        errors={[{ role: "error", content: "second failure" }]}
+      />,
+    );
+    const actions = screen.getByRole("group", { name: "Recovery actions" });
+    const alert = screen.getByRole("alert");
+    expect(
+      alert.compareDocumentPosition(actions) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    for (const name of ["Retry", "Details", "Options", "Copy errors"]) {
+      const button = screen.getByRole("button", { name });
+      expect(actions).toContainElement(button);
+      expect(button).toHaveTextContent("");
+      expect(button.querySelector("svg")).toHaveAttribute(
+        "aria-hidden",
+        "true",
+      );
+    }
+    const copy = screen.getByRole("button", { name: "Copy errors" });
+    fireEvent.click(copy);
+    expect(mocks.copy).toHaveBeenCalledWith("second failure\n\noffline");
+    fireEvent.focus(copy);
+    expect(await screen.findByRole("tooltip")).toHaveTextContent("Copy errors");
+  });
+  it("keeps labeled options and restores disclosure focus when switching panels", () => {
+    render(<RecoveryCard chatId="chat" recovery={recovery} />);
+    const options = screen.getByRole("button", { name: "Options" });
+    const details = screen.getByRole("button", { name: "Details" });
+    fireEvent.click(options);
+    const count = screen.getByRole("spinbutton", { name: "New requests" });
+    expect(
+      screen.getByRole("spinbutton", {
+        name: "Delay between retries (seconds)",
+      }),
+    ).toBeVisible();
+    expect(
+      screen.getByRole("spinbutton", { name: "Total time limit (seconds)" }),
+    ).toBeVisible();
+    count.focus();
+    fireEvent.click(details);
+    expect(details).toHaveFocus();
+    expect(options).toHaveAttribute("aria-expanded", "false");
+    expect(
+      document.getElementById(options.getAttribute("aria-controls") ?? ""),
+    ).toHaveAttribute("inert");
+  });
+  it("keeps active Retry now and Stop icon callbacks and guards intact", () => {
+    const view = render(
+      <RecoveryCard
+        chatId="chat"
+        recovery={{ ...recovery, state: "waiting" }}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Retry now" }));
+    expect(mocks.run).toHaveBeenCalledWith(
+      { type: "recovery_retry_now", run_id: "run", expected_revision: 3 },
+      expect.any(Function),
+    );
+    view.rerender(
+      <RecoveryCard
+        chatId="chat"
+        recovery={{ ...recovery, state: "attempting" }}
+      />,
+    );
+    expect(
+      screen.queryByRole("button", { name: "Retry now" }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Stop" })).toBeEnabled();
+    mocks.pending = true;
+    mocks.phase = "sending";
+    view.rerender(<RecoveryCard chatId="chat" recovery={recovery} />);
+    expect(screen.getByRole("button", { name: "Submitting…" })).toBeDisabled();
+    expect(screen.getByRole("status")).toHaveTextContent("Submitting…");
+  });
   it("restores queued cancellation after remount without a hook-owned request", () => {
     mocks.queued = [
       {
@@ -139,6 +221,8 @@ describe("RecoveryCard", () => {
       screen.getByRole("button", { name: "Cancel queued retry" }),
     );
     expect(mocks.cancelQueued).toHaveBeenCalledWith("restored");
+    expect(screen.getByRole("status")).toHaveTextContent("Cancelling…");
+    expect(screen.getByRole("button", { name: "Cancelling…" })).toBeDisabled();
   });
   it("shows only queued cancellation or pending confirmation instead of another Retry", () => {
     mocks.phase = "queued";

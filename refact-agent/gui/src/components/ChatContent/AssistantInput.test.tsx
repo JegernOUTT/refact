@@ -85,6 +85,44 @@ describe("AssistantInput", () => {
     ).toBeInTheDocument();
   });
 
+  test.each([null, "", " \n\t "])(
+    "does not reserve a message body or footer lane for empty tool output %j",
+    (message) => {
+      const toolCall: ToolCall = {
+        id: "empty-body-read",
+        index: 0,
+        function: {
+          name: "cat",
+          arguments: JSON.stringify({ paths: "src/main.rs" }),
+        },
+      };
+      const view = render(
+        <AssistantInput message={message} toolCalls={[toolCall]} />,
+      );
+      const footer = screen.getByTestId("message-footer");
+      expect(footer).toHaveAttribute("data-overlay", "true");
+      expect(footer.parentElement?.firstElementChild).toHaveAttribute(
+        "data-transcript-item",
+        "true",
+      );
+      expect(
+        screen.queryByRole("button", { name: "Copy message" }),
+      ).not.toBeInTheDocument();
+
+      view.rerender(
+        <AssistantInput
+          message={" \nActual answer\n "}
+          toolCalls={[toolCall]}
+        />,
+      );
+      expect(screen.getByText("Actual answer")).toBeVisible();
+      expect(footer).toHaveAttribute("data-overlay", "false");
+      expect(
+        screen.getByRole("button", { name: "Copy message" }),
+      ).toBeDefined();
+    },
+  );
+
   test("keeps incomplete streaming mermaid fence as raw code until the fence closes", async () => {
     const { rerender } = render(
       <AssistantInput

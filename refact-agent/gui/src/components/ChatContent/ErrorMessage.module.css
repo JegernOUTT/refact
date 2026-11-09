@@ -1,3 +1,12 @@
+.card {
+  padding-block: var(--rf-space-2);
+  margin-inline-start: calc(var(--rf-space-2) + var(--rf-transcript-icon) / 2);
+  padding-inline-start: calc(var(--rf-space-2) + var(--rf-transcript-icon) / 2);
+  border-inline-start: var(--rf-hairline) solid var(--rf-border-strong);
+  font-size: var(--rf-text-2);
+  line-height: var(--rf-line-2);
+}
+
 .errors {
   display: grid;
   min-width: 0;
@@ -13,4 +22,12 @@
 .message {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--rf-space-1);
+  min-width: 0;
 }

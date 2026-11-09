@@ -90,10 +90,63 @@ function event(value: Omit<ChatEventEnvelope, "seq" | "chat_id">) {
   );
 }
 
-function loadScenario(state: RecoveryRecord["state"]) {
+const scenarios = [
+  "exhausted",
+  "waiting",
+  "attempting",
+  "needs_action",
+  "cancelled",
+  "succeeded",
+  "privacy",
+  "cooldown",
+  "goal-held",
+  "queued",
+  "request",
+  "request-no-retry",
+  "multiple",
+  "unbroken",
+  "multiline",
+] as const;
+type Scenario = (typeof scenarios)[number];
+const params = new URLSearchParams(window.location.search);
+const initialScenario =
+  scenarios.find((value) => value === params.get("scenario")) ?? "exhausted";
+const commandMode = params.get("command") ?? "applied";
+const privacyError =
+  "Privacy policy blocked sending this request to Example provider. Protected project files and conversation content cannot be shared with this destination. Review the privacy policy and choose an approved provider before continuing. No private content was sent.";
+const unbrokenError = `Provider request failed: ${"unbroken_request_identifier_".repeat(
+  18,
+)}`;
+const multilineError =
+  "Provider request failed\nThe connection closed before a response arrived.\nCheck the connection and retry when ready.";
+
+function loadScenario(scenario: Scenario) {
+  const standalone = scenario === "request" || scenario === "request-no-retry";
+  const state: RecoveryRecord["state"] = scenarios
+    .slice(0, 6)
+    .includes(scenario)
+    ? (scenario as RecoveryRecord["state"])
+    : scenario === "privacy"
+      ? "needs_action"
+      : scenario === "cooldown"
+        ? "waiting"
+        : "exhausted";
+  const rawError =
+    scenario === "privacy"
+      ? privacyError
+      : scenario === "unbroken"
+        ? unbrokenError
+        : scenario === "multiline"
+          ? multilineError
+          : timeout;
   const record: RecoveryRecord = {
     ...base,
     state,
+    terminal_reason: state === "exhausted" ? base.terminal_reason : null,
+    latest_error: { ...base.latest_error, raw_error: rawError },
+    attempts:
+      scenario === "multiple" || scenario === "exhausted" ? base.attempts : [],
+    retry_not_before_ms: scenario === "cooldown" ? Date.now() + 60000 : null,
     run_id: `run-${seq}`,
     retries_used: state === "waiting" ? 0 : base.retries_used,
     next_retry_at_ms: state === "waiting" ? Date.now() + 60000 : null,
@@ -125,11 +178,28 @@ function loadScenario(state: RecoveryRecord["state"]) {
       state: "error",
       paused: false,
       error: "Provider temporarily unavailable",
-      queue_size: 0,
-      queued_items: [],
+      queue_size: scenario === "queued" ? 1 : 0,
+      queued_items:
+        scenario === "queued"
+          ? [
+              {
+                client_request_id: "queued-retry",
+                command_type: "recovery_retry",
+                queued_at_ms: Date.now(),
+              },
+            ]
+          : [],
       pause_reasons: [],
-      recovery: record,
+      recovery: standalone ? null : record,
     },
+    goal:
+      scenario === "goal-held"
+        ? {
+            status: "paused",
+            goal: "Review remaining sample outputs",
+            stop_reason: "recovery_exhausted",
+          }
+        : null,
     background_agents: [],
     messages: [
       {
@@ -143,12 +213,46 @@ function loadScenario(state: RecoveryRecord["state"]) {
         content:
           "I’ll inspect the remaining comparison images before continuing.",
       },
-      archived,
+      {
+        role: "event",
+        message_id: "goal-notice",
+        subkind: "system_notice",
+        source: "goal",
+        content: "Goal paused for provider recovery",
+      },
+      {
+        role: "assistant",
+        message_id: "tool-only",
+        content: " \n ",
+        tool_calls: [
+          {
+            id: "goal-tool",
+            type: "function",
+            function: {
+              name: "goal",
+              arguments: JSON.stringify({ action: "status" }),
+            },
+          },
+          {
+            id: "subagent-tool",
+            type: "function",
+            function: {
+              name: "subagent",
+              arguments: JSON.stringify({ action: "list" }),
+            },
+          },
+        ],
+      },
+      ...(standalone
+        ? [{ role: "error", message_id: "standalone", content: multilineError }]
+        : scenario === "exhausted" || scenario === "multiple"
+          ? [archived]
+          : []),
     ],
   } as Omit<ChatEventEnvelope, "seq" | "chat_id">);
 }
 
-loadScenario("exhausted");
+loadScenario(initialScenario);
 
 window.fetch = async (input, init) => {
   const url =
@@ -163,6 +267,12 @@ window.fetch = async (input, init) => {
         headers: { "Content-Type": "application/json" },
       }),
     );
+  if (init?.method === "DELETE") {
+    if (commandMode === "cancelling")
+      return new Promise<Response>(() => undefined);
+    if (commandMode === "cancel-error")
+      throw new TypeError("Connection interrupted");
+  }
   if (url.includes("/commands") && init?.method === "POST") {
     const request = JSON.parse(String(init.body)) as {
       type: string;
@@ -170,12 +280,29 @@ window.fetch = async (input, init) => {
       content?: string;
       patch?: Record<string, unknown>;
     };
+    if (
+      (request.type === "abort" && commandMode === "stop-error") ||
+      (request.type === "goal_control" && commandMode === "resume-error")
+    ) {
+      throw new TypeError("Connection interrupted");
+    }
+    if (request.type.startsWith("recovery_retry")) {
+      if (commandMode === "sending")
+        return new Promise<Response>(() => undefined);
+      if (commandMode === "uncertain")
+        throw new TypeError("Connection interrupted");
+      if (commandMode === "request-error")
+        return new Response(
+          JSON.stringify({ detail: "Retry rejected by provider policy" }),
+          { status: 409, headers: { "Content-Type": "application/json" } },
+        );
+    }
     event({
       type: "ack",
       client_request_id: request.client_request_id,
       accepted: true,
     } as Omit<ChatEventEnvelope, "seq" | "chat_id">);
-    if (request.type === "recovery_retry") {
+    if (request.type === "recovery_retry" && commandMode !== "pending") {
       const current = selectRecoveryById(store.getState(), chatId) ?? base;
       event({
         type: "recovery_updated",
@@ -265,6 +392,7 @@ window.fetch = async (input, init) => {
 
 function Showcase() {
   const [draft, setDraft] = useState("");
+  const [scenario, setScenario] = useState<Scenario>(initialScenario);
   const [theme, setTheme] = useState<"light" | "dark">("dark");
   const actions = useChatActions(chatId);
   return (
@@ -274,19 +402,14 @@ function Showcase() {
           State{" "}
           <select
             aria-label="Scenario"
-            defaultValue="exhausted"
-            onChange={(e) =>
-              loadScenario(e.target.value as RecoveryRecord["state"])
-            }
+            value={scenario}
+            onChange={(e) => {
+              const next = e.target.value as Scenario;
+              setScenario(next);
+              loadScenario(next);
+            }}
           >
-            {[
-              "exhausted",
-              "waiting",
-              "attempting",
-              "needs_action",
-              "cancelled",
-              "succeeded",
-            ].map((state) => (
+            {scenarios.map((state) => (
               <option key={state}>{state}</option>
             ))}
           </select>
@@ -306,7 +429,9 @@ function Showcase() {
         <ChatContent
           onRetry={() => undefined}
           onStopStreaming={() => undefined}
-          onRetryGeneration={() => undefined}
+          onRetryGeneration={
+            scenario === "request-no-retry" ? undefined : () => undefined
+          }
         />
       </div>
       <form
