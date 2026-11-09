@@ -12,6 +12,7 @@ import { Badge, Button as UiButton } from "../../src/components/ui";
 import { Button, Flex, Text } from "@radix-ui/themes";
 
 import { setUpStore, type RootState } from "../../src/app/store";
+import { workspaceSaveStatus } from "../../src/features/Apps/appWorkspacePersistence";
 import { Theme } from "../../src/components/Theme";
 import { AbortControllerProvider } from "../../src/contexts/AbortControllers";
 import { Dashboard } from "../../src/features/Dashboard";
@@ -2837,6 +2838,17 @@ if (performanceRoute) {
   };
 }
 const store = setUpStore(preloadedState);
+const appWorkspaceStatus = new URLSearchParams(window.location.search).get(
+  "app_workspace_status",
+);
+if (
+  appWorkspaceStatus === "error" ||
+  appWorkspaceStatus === "readonly" ||
+  appWorkspaceStatus === "saving" ||
+  appWorkspaceStatus === "saved"
+) {
+  store.dispatch(workspaceSaveStatus(chatId, appWorkspaceStatus));
+}
 Object.assign(window, {
   __setOrganizationFixture: (mode: string) => {
     organizationMode = mode;

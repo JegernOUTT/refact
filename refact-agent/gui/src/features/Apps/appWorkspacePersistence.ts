@@ -48,6 +48,7 @@ type Entry = {
   sentGeneration?: number;
   sentWorkspace?: AppWorkspace;
   dirty: boolean;
+  needsRefresh?: boolean;
   restored: boolean;
   observedLayout?: string;
   timer?: ReturnType<typeof setTimeout>;
@@ -85,6 +86,57 @@ export const appWorkspacePersistenceMiddleware: Middleware = (api) => {
     entries = new Map();
     pendingOpens.clear();
   };
+  const reconcile = (
+    chatId: string,
+    entry: Entry,
+    remote: AppWorkspace,
+    hasLocalEdits: boolean,
+  ) => {
+    const base = entry.sentWorkspace ?? entry.acknowledged;
+    entry.acknowledged = remote;
+    if (!hasLocalEdits) {
+      if (fingerprint(entry.desired) !== fingerprint(remote))
+        entry.restored = false;
+      entry.desired = remote;
+      entry.dirty = false;
+    } else {
+      // Remote records own updates and deletions; only genuinely new local
+      // bindings absent from the save/base may be carried forward.
+      const bindings = [
+        ...remote.bindings,
+        ...entry.desired.bindings.filter(
+          (binding) =>
+            !base.bindings.some(
+              (other) => other.binding_id === binding.binding_id,
+            ) &&
+            !remote.bindings.some(
+              (other) => other.binding_id === binding.binding_id,
+            ),
+        ),
+      ];
+      const layout =
+        paneToAppLayout(
+          appLayoutToPane(entry.desired.layout, chatId),
+          chatId,
+          new Set(bindings.map((binding) => binding.binding_id)),
+        ) ?? remote.layout;
+      const desired = { ...entry.desired, bindings, layout };
+      if (fingerprint(desired) !== fingerprint(entry.desired))
+        entry.restored = false;
+      entry.desired = desired;
+    }
+    entry.dirty = fingerprint(entry.desired) !== fingerprint(remote);
+    if (!entry.dirty) {
+      entry.needsRefresh = false;
+      if (!entry.inFlight && getState().apps.saveStatus?.[chatId] === "error")
+        dispatch(workspaceSaveStatus(chatId, "saved"));
+    }
+    for (const binding of remote.bindings)
+      if (getState().apps.pendingBindings?.[binding.binding_id])
+        dispatch(
+          appBindingPending({ bindingId: binding.binding_id, pending: false }),
+        );
+  };
   const entryFor = (chatId: string): Entry | undefined => {
     const thread = getState().chat.threads[chatId]?.thread;
     if (
@@ -105,51 +157,26 @@ export const appWorkspacePersistenceMiddleware: Middleware = (api) => {
       };
       entries.set(chatId, entry);
     }
-    if (entry && remote && remote.revision > entry.acknowledged.revision) {
-      const base = entry.sentWorkspace ?? entry.acknowledged;
-      const hasLocalEdits = entry.inFlight
-        ? entry.localGeneration !== entry.sentGeneration
-        : entry.dirty;
-      entry.acknowledged = remote;
-      if (!hasLocalEdits) {
-        if (fingerprint(entry.desired) !== fingerprint(remote))
-          entry.restored = false;
-        entry.desired = remote;
-        entry.dirty = false;
-      } else {
-        // Remote records own updates and deletions; only genuinely new local
-        // bindings absent from the save/base may be carried forward.
-        const bindings = [
-          ...remote.bindings,
-          ...entry.desired.bindings.filter(
-            (binding) =>
-              !base.bindings.some(
-                (other) => other.binding_id === binding.binding_id,
-              ) &&
-              !remote.bindings.some(
-                (other) => other.binding_id === binding.binding_id,
-              ),
-          ),
-        ];
-        const layout =
-          paneToAppLayout(
-            appLayoutToPane(entry.desired.layout, chatId),
-            chatId,
-            new Set(bindings.map((binding) => binding.binding_id)),
-          ) ?? remote.layout;
-        const desired = { ...entry.desired, bindings, layout };
-        if (fingerprint(desired) !== fingerprint(entry.desired))
-          entry.restored = false;
-        entry.desired = desired;
-      }
-    }
+    if (entry && remote && remote.revision > entry.acknowledged.revision)
+      reconcile(
+        chatId,
+        entry,
+        remote,
+        entry.inFlight
+          ? entry.localGeneration !== entry.sentGeneration
+          : entry.dirty,
+      );
     return entry;
   };
-  const save = async (chatId: string, entry: Entry) => {
+  const clearTimer = (entry: Entry) => {
     if (entry.timer) clearTimeout(entry.timer);
     entry.timer = undefined;
+  };
+  const save = async (chatId: string, entry: Entry) => {
+    clearTimer(entry);
     if (
       entry.inFlight ||
+      (entry.needsRefresh ?? false) ||
       !entry.dirty ||
       !hasUsableEngineEndpoint(getState().config)
     )
@@ -186,6 +213,7 @@ export const appWorkspacePersistenceMiddleware: Middleware = (api) => {
       );
       if (scope !== endpoint || entries.get(chatId) !== entry) return;
       const result: unknown = await response.json();
+      if (scope !== endpoint || entries.get(chatId) !== entry) return;
       const workspace =
         typeof result === "object" &&
         result !== null &&
@@ -196,7 +224,9 @@ export const appWorkspacePersistenceMiddleware: Middleware = (api) => {
         throw new Error("Workspace save failed");
       if (workspace.revision >= entry.acknowledged.revision)
         entry.acknowledged = workspace;
-      entry.dirty = entry.localGeneration !== entry.sentGeneration;
+      entry.dirty =
+        entry.localGeneration !== entry.sentGeneration &&
+        fingerprint(entry.desired) !== fingerprint(entry.acknowledged);
       if (!entry.dirty) {
         entry.desired = entry.acknowledged;
         if (fingerprint(workspace) !== fingerprint(entry.acknowledged))
@@ -210,14 +240,80 @@ export const appWorkspacePersistenceMiddleware: Middleware = (api) => {
           }),
         );
     } catch {
-      failed = true;
+      failed = entry.dirty;
+      entry.needsRefresh = failed;
     } finally {
+      clearTimer(entry);
       entry.inFlight = false;
       entry.sentWorkspace = undefined;
       entry.sentGeneration = undefined;
       if (scope === endpoint && entries.get(chatId) === entry) {
         dispatch(workspaceSaveStatus(chatId, failed ? "error" : "saved"));
         if (entry.dirty && !failed) void save(chatId, entry);
+      }
+    }
+  };
+  const retry = async (chatId: string, entry: Entry) => {
+    if (entry.inFlight || !hasUsableEngineEndpoint(getState().config)) return;
+    clearTimer(entry);
+    if (!entry.dirty) {
+      entry.needsRefresh = false;
+      dispatch(workspaceSaveStatus(chatId, "saved"));
+      return;
+    }
+    entry.inFlight = true;
+    const endpoint = scope;
+    const config = getState().config;
+    dispatch(workspaceSaveStatus(chatId, "saving"));
+    let refreshed = false;
+    try {
+      const response = await fetch(
+        buildApiUrl(config, `/v1/trajectories/${encodeURIComponent(chatId)}`),
+        {
+          method: "GET",
+          cache: "no-store",
+          headers: config.apiKey
+            ? { Authorization: `Bearer ${config.apiKey}` }
+            : {},
+        },
+      );
+      const result: unknown = await response.json();
+      if (scope !== endpoint || entries.get(chatId) !== entry) return;
+      const rawWorkspace =
+        typeof result === "object" &&
+        result !== null &&
+        "app_workspace" in result
+          ? result.app_workspace
+          : undefined;
+      const workspace =
+        rawWorkspace == null &&
+        typeof result === "object" &&
+        result !== null &&
+        "id" in result &&
+        result.id === chatId &&
+        entry.acknowledged.revision === 0
+          ? entry.acknowledged
+          : rawWorkspace;
+      if (!response.ok || !isAppWorkspace(workspace))
+        throw new Error("Workspace refresh failed");
+      if (workspace.revision >= entry.acknowledged.revision)
+        reconcile(chatId, entry, workspace, entry.dirty);
+      entry.dirty =
+        fingerprint(entry.desired) !== fingerprint(entry.acknowledged);
+      entry.needsRefresh = false;
+      refreshed = true;
+      if (!entry.restored && getState().chat.open_thread_ids.includes(chatId))
+        restore(chatId, entry);
+    } catch {
+      entry.needsRefresh = entry.dirty;
+    } finally {
+      entry.inFlight = false;
+      if (scope === endpoint && entries.get(chatId) === entry) {
+        if (refreshed && entry.dirty) void save(chatId, entry);
+        else
+          dispatch(
+            workspaceSaveStatus(chatId, entry.dirty ? "error" : "saved"),
+          );
       }
     }
   };
@@ -425,7 +521,7 @@ export const appWorkspacePersistenceMiddleware: Middleware = (api) => {
       dispatch(change({ name: "chat" }));
     } else if (retryAppWorkspaceSave.match(action)) {
       const entry = entries.get(action.payload);
-      if (entry) void save(action.payload, entry);
+      if (entry) void retry(action.payload, entry);
     } else if (
       typeof action === "object" &&
       action !== null &&

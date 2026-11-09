@@ -5,7 +5,7 @@ import {
   appWorkspacePersistenceMiddleware,
   openRequestedApp,
 } from "./appWorkspacePersistence";
-import { appsSlice, openRailApp } from "./appsSlice";
+import { appsSlice, openRailApp, retryAppWorkspaceSave } from "./appsSlice";
 import {
   workspaceSlice,
   openTab,
@@ -69,11 +69,17 @@ function setup(open = true, snapshotReceived = true) {
     reducer: {
       workspace: workspaceSlice.reducer,
       apps: appsSlice.reducer,
-      config: () => ({
-        lspUrl: "http://localhost:8001",
-        host: "web",
-        engineServed: true,
-      }),
+      config: (
+        state: { lspUrl: string; host: string; engineServed: boolean } = {
+          lspUrl: "http://localhost:8001",
+          host: "web",
+          engineServed: true,
+        },
+        action: UnknownAction,
+      ) =>
+        action.type === "test/endpoint"
+          ? { ...state, engineServed: false, lspUrl: String(action.payload) }
+          : state,
       chat: (state: typeof initial = initial, action: UnknownAction) =>
         action.type === "test/snapshot"
           ? {
@@ -209,16 +215,24 @@ describe("app workspace coordinator", () => {
         ),
       );
       await vi.advanceTimersByTimeAsync(500);
-      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(fetchMock).toHaveBeenCalledTimes(change === "detach" ? 1 : 2);
+      if (change === "detach") {
+        expect(
+          paneToAppLayout(
+            store.getState().workspace.groups["chat:a"]!.root,
+            "a",
+          ),
+        ).toMatchObject(remote.layout);
+        expect(store.getState().apps.saveStatus?.a).toBe("saved");
+        return;
+      }
       const saved = JSON.parse(String(fetchMock.mock.calls[1][1]?.body)) as {
         workspace: AppWorkspace;
         expected_revision: number;
       };
       expect(saved.expected_revision).toBe(9);
       expect(saved.workspace.bindings).toEqual(remote.bindings);
-      expect(saved.workspace.layout).toMatchObject(
-        change === "update" ? { sizes: [0.55, 0.45] } : remote.layout,
-      );
+      expect(saved.workspace.layout).toMatchObject({ sizes: [0.55, 0.45] });
     },
   );
 
@@ -585,6 +599,435 @@ test("portable projection filters foreign apps/files, collapses singleton and pr
     "app:own",
   ]);
 });
+
+test.each([false, true])(
+  "lost save response after authoritative snapshot keeps correct status (post-send edit: %s)",
+  async (edit) => {
+    vi.useFakeTimers();
+    let reject!: (reason: Error) => void;
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockRejectedValue(new Error("Unexpected request"))
+      .mockImplementationOnce(
+        () =>
+          new Promise((_resolve, fail) => {
+            reject = fail;
+          }),
+      );
+    const store = setup();
+    store.dispatch({ type: "test/snapshot", payload: remoteWorkspace(7) });
+    const root = store.getState().workspace.groups["chat:a"]!.root;
+    store.dispatch(
+      resizeGroupSplit({
+        tabId: "chat:a",
+        splitId: root.id,
+        sizes: [0.6, 0.4],
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(150);
+    if (edit)
+      store.dispatch(
+        resizeGroupSplit({
+          tabId: "chat:a",
+          splitId: root.id,
+          sizes: [0.55, 0.45],
+        }),
+      );
+    store.dispatch({
+      type: "test/snapshot",
+      payload: remoteWorkspace(8, [0.6, 0.4]),
+    });
+    reject(new Error("Lost response"));
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(store.getState().apps.saveStatus?.a).toBe(edit ? "error" : "saved");
+    expect(
+      paneToAppLayout(store.getState().workspace.groups["chat:a"]!.root, "a"),
+    ).toMatchObject({ sizes: edit ? [0.55, 0.45] : [0.6, 0.4] });
+  },
+);
+
+test("reverted post-send edits are clean when the sent layout is confirmed", async () => {
+  vi.useFakeTimers();
+  let reject!: (reason: Error) => void;
+  const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementationOnce(
+    () =>
+      new Promise((_done, fail) => {
+        reject = fail;
+      }),
+  );
+  const store = setup();
+  store.dispatch({ type: "test/snapshot", payload: remoteWorkspace(7) });
+  const root = store.getState().workspace.groups["chat:a"]!.root;
+  const resize = (sizes: number[]) =>
+    store.dispatch(
+      resizeGroupSplit({ tabId: "chat:a", splitId: root.id, sizes }),
+    );
+  resize([0.6, 0.4]);
+  await vi.advanceTimersByTimeAsync(150);
+  resize([0.55, 0.45]);
+  resize([0.6, 0.4]);
+  store.dispatch({
+    type: "test/snapshot",
+    payload: remoteWorkspace(8, [0.6, 0.4]),
+  });
+  reject(new Error("Lost response"));
+  await vi.advanceTimersByTimeAsync(1000);
+  expect(store.getState().apps.saveStatus?.a).toBe("saved");
+  expect(fetchMock).toHaveBeenCalledTimes(1);
+});
+
+test.each([false, true])(
+  "authoritative confirmation after a failed response clears the warning (local edit: %s)",
+  async (edit) => {
+    vi.useFakeTimers();
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockRejectedValue(new Error("Lost response"));
+    const store = setup();
+    store.dispatch({ type: "test/snapshot", payload: remoteWorkspace(7) });
+    const root = store.getState().workspace.groups["chat:a"]!.root;
+    store.dispatch(
+      resizeGroupSplit({
+        tabId: "chat:a",
+        splitId: root.id,
+        sizes: [0.6, 0.4],
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(150);
+    expect(store.getState().apps.saveStatus?.a).toBe("error");
+    if (edit)
+      store.dispatch(
+        resizeGroupSplit({
+          tabId: "chat:a",
+          splitId: root.id,
+          sizes: [0.55, 0.45],
+        }),
+      );
+    store.dispatch({
+      type: "test/snapshot",
+      payload: remoteWorkspace(8, [0.6, 0.4]),
+    });
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(store.getState().apps.saveStatus?.a).toBe(edit ? "error" : "saved");
+    expect(
+      paneToAppLayout(store.getState().workspace.groups["chat:a"]!.root, "a"),
+    ).toMatchObject({ sizes: edit ? [0.55, 0.45] : [0.6, 0.4] });
+  },
+);
+
+test.each(["snapshot", "retry"] as const)(
+  "confirmed first attachment releases its pending binding through %s after a lost response",
+  async (confirmation) => {
+    vi.useFakeTimers();
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockRejectedValue(new Error("Lost response"));
+    const store = setup();
+    store.dispatch(openRailApp({ appId, name: "App" }));
+    await vi.advanceTimersByTimeAsync(150);
+    const sent = JSON.parse(String(fetchMock.mock.calls[0][1]?.body)) as {
+      workspace: AppWorkspace;
+    };
+    const id = sent.workspace.bindings[0].binding_id;
+    expect(store.getState().apps.pendingBindings?.[id]).toBe(true);
+    const confirmed = { ...sent.workspace, revision: 1 };
+    if (confirmation === "snapshot")
+      store.dispatch({ type: "test/snapshot", payload: confirmed });
+    else {
+      fetchMock.mockResolvedValueOnce(
+        new Response(JSON.stringify({ id: "a", app_workspace: confirmed })),
+      );
+      store.dispatch(retryAppWorkspaceSave("a"));
+    }
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(store.getState().apps.saveStatus?.a).toBe("saved");
+    expect(store.getState().apps.pendingBindings?.[id]).toBe(false);
+    expect(fetchMock).toHaveBeenCalledTimes(
+      confirmation === "snapshot" ? 1 : 2,
+    );
+  },
+);
+
+test("authoritative confirmation during a failed retry refresh remains saved", async () => {
+  vi.useFakeTimers();
+  let reject!: (reason: Error) => void;
+  const fetchMock = vi
+    .spyOn(globalThis, "fetch")
+    .mockRejectedValueOnce(new Error("Lost response"))
+    .mockImplementationOnce(
+      () =>
+        new Promise((_done, fail) => {
+          reject = fail;
+        }),
+    );
+  const store = setup();
+  store.dispatch({ type: "test/snapshot", payload: remoteWorkspace(7) });
+  const root = store.getState().workspace.groups["chat:a"]!.root;
+  store.dispatch(
+    resizeGroupSplit({ tabId: "chat:a", splitId: root.id, sizes: [0.6, 0.4] }),
+  );
+  await vi.advanceTimersByTimeAsync(150);
+  store.dispatch(retryAppWorkspaceSave("a"));
+  store.dispatch({
+    type: "test/snapshot",
+    payload: remoteWorkspace(8, [0.6, 0.4]),
+  });
+  reject(new Error("Refresh response lost"));
+  await vi.advanceTimersByTimeAsync(1000);
+  expect(store.getState().apps.saveStatus?.a).toBe("saved");
+  expect(fetchMock).toHaveBeenCalledTimes(2);
+});
+
+test("retry refresh from a previous endpoint cannot write into the new endpoint", async () => {
+  vi.useFakeTimers();
+  let resolve!: (response: Response) => void;
+  const fetchMock = vi
+    .spyOn(globalThis, "fetch")
+    .mockRejectedValueOnce(new Error("Offline"))
+    .mockImplementationOnce(
+      () =>
+        new Promise((done) => {
+          resolve = done;
+        }),
+    );
+  const store = setup();
+  store.dispatch({ type: "test/snapshot", payload: remoteWorkspace(7) });
+  const root = store.getState().workspace.groups["chat:a"]!.root;
+  store.dispatch(
+    resizeGroupSplit({ tabId: "chat:a", splitId: root.id, sizes: [0.6, 0.4] }),
+  );
+  await vi.advanceTimersByTimeAsync(150);
+  store.dispatch(retryAppWorkspaceSave("a"));
+  store.dispatch({ type: "test/endpoint", payload: "http://localhost:8002" });
+  resolve(new Response(JSON.stringify({ app_workspace: remoteWorkspace(9) })));
+  await vi.advanceTimersByTimeAsync(1000);
+  expect(fetchMock).toHaveBeenCalledTimes(2);
+});
+
+test.each(["update", "detach"] as const)(
+  "explicit retry refreshes revision and preserves local layout with remote binding %s",
+  async (change) => {
+    vi.useFakeTimers();
+    const remote = remoteWorkspace(9, [0.8, 0.2]);
+    if (change === "update") remote.bindings[0].state = { remote: true };
+    else {
+      remote.bindings = [];
+      remote.layout = { kind: "leaf", tabs: [{ kind: "chat", ref: "self" }] };
+    }
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ current_revision: 9 }), { status: 409 }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ app_workspace: remote })),
+      )
+      .mockImplementation((_url, options) => {
+        const body = JSON.parse(String(options?.body)) as {
+          workspace: AppWorkspace;
+          expected_revision: number;
+        };
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              app_workspace: {
+                ...body.workspace,
+                revision: body.expected_revision + 1,
+              },
+            }),
+          ),
+        );
+      });
+    const store = setup();
+    store.dispatch({ type: "test/snapshot", payload: remoteWorkspace(7) });
+    const root = store.getState().workspace.groups["chat:a"]!.root;
+    store.dispatch(
+      resizeGroupSplit({
+        tabId: "chat:a",
+        splitId: root.id,
+        sizes: [0.6, 0.4],
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    store.dispatch(retryAppWorkspaceSave("a"));
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(fetchMock).toHaveBeenCalledTimes(change === "detach" ? 2 : 3);
+    expect(fetchMock.mock.calls[1][0]).toBe("/v1/trajectories/a");
+    expect(fetchMock.mock.calls[1][1]?.method).toBe("GET");
+    if (change === "detach") {
+      expect(
+        paneToAppLayout(store.getState().workspace.groups["chat:a"]!.root, "a"),
+      ).toMatchObject(remote.layout);
+      expect(store.getState().apps.saveStatus?.a).toBe("saved");
+      return;
+    }
+    const saved = JSON.parse(String(fetchMock.mock.calls[2][1]?.body)) as {
+      workspace: AppWorkspace;
+      expected_revision: number;
+    };
+    expect(saved.expected_revision).toBe(9);
+    expect(saved.workspace.bindings).toEqual(remote.bindings);
+    expect(saved.workspace.layout).toMatchObject({ sizes: [0.6, 0.4] });
+    expect(store.getState().apps.saveStatus?.a).toBe("saved");
+  },
+);
+
+test.each([null, undefined])(
+  "first save retry accepts authoritative absent workspace: %s",
+  async (workspace) => {
+    vi.useFakeTimers();
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockRejectedValueOnce(new Error("Offline"))
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ id: "a", app_workspace: workspace })),
+      )
+      .mockImplementation((_url, options) => {
+        const body = JSON.parse(String(options?.body)) as {
+          workspace: AppWorkspace;
+        };
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              app_workspace: { ...body.workspace, revision: 1 },
+            }),
+          ),
+        );
+      });
+    const store = setup();
+    store.dispatch(openRailApp({ appId, name: "App" }));
+    await vi.advanceTimersByTimeAsync(1000);
+    store.dispatch(retryAppWorkspaceSave("a"));
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(JSON.parse(String(fetchMock.mock.calls[2][1]?.body))).toMatchObject({
+      expected_revision: 0,
+    });
+    expect(store.getState().apps.saveStatus?.a).toBe("saved");
+  },
+);
+
+test("retry confirms a lost acknowledgment without an unnecessary write", async () => {
+  vi.useFakeTimers();
+  const fetchMock = vi
+    .spyOn(globalThis, "fetch")
+    .mockRejectedValueOnce(new Error("Lost response"))
+    .mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({ app_workspace: remoteWorkspace(8, [0.6, 0.4]) }),
+      ),
+    );
+  const store = setup();
+  store.dispatch({ type: "test/snapshot", payload: remoteWorkspace(7) });
+  const root = store.getState().workspace.groups["chat:a"]!.root;
+  store.dispatch(
+    resizeGroupSplit({ tabId: "chat:a", splitId: root.id, sizes: [0.6, 0.4] }),
+  );
+  await vi.advanceTimersByTimeAsync(1000);
+  store.dispatch(retryAppWorkspaceSave("a"));
+  await vi.advanceTimersByTimeAsync(1000);
+  expect(fetchMock).toHaveBeenCalledTimes(2);
+  expect(store.getState().apps.saveStatus?.a).toBe("saved");
+});
+
+test("retry refresh keeps edits made while reading and does not replace a newer snapshot", async () => {
+  vi.useFakeTimers();
+  let resolve!: (response: Response) => void;
+  const fetchMock = vi
+    .spyOn(globalThis, "fetch")
+    .mockRejectedValueOnce(new Error("Lost response"))
+    .mockImplementationOnce(
+      () =>
+        new Promise((done) => {
+          resolve = done;
+        }),
+    )
+    .mockImplementation((_url, options) => {
+      const body = JSON.parse(String(options?.body)) as {
+        workspace: AppWorkspace;
+        expected_revision: number;
+      };
+      return Promise.resolve(
+        new Response(
+          JSON.stringify({
+            app_workspace: {
+              ...body.workspace,
+              revision: body.expected_revision + 1,
+            },
+          }),
+        ),
+      );
+    });
+  const store = setup();
+  store.dispatch({ type: "test/snapshot", payload: remoteWorkspace(7) });
+  const root = store.getState().workspace.groups["chat:a"]!.root;
+  store.dispatch(
+    resizeGroupSplit({ tabId: "chat:a", splitId: root.id, sizes: [0.6, 0.4] }),
+  );
+  await vi.advanceTimersByTimeAsync(1000);
+  store.dispatch(retryAppWorkspaceSave("a"));
+  store.dispatch(
+    resizeGroupSplit({
+      tabId: "chat:a",
+      splitId: root.id,
+      sizes: [0.55, 0.45],
+    }),
+  );
+  const latest = remoteWorkspace(10);
+  latest.bindings[0].state = { latest: true };
+  store.dispatch({ type: "test/snapshot", payload: latest });
+  resolve(new Response(JSON.stringify({ app_workspace: remoteWorkspace(9) })));
+  await vi.advanceTimersByTimeAsync(1000);
+  expect(fetchMock).toHaveBeenCalledTimes(3);
+  const saved = JSON.parse(String(fetchMock.mock.calls[2][1]?.body)) as {
+    workspace: AppWorkspace;
+    expected_revision: number;
+  };
+  expect(saved.expected_revision).toBe(10);
+  expect(saved.workspace.bindings).toEqual(latest.bindings);
+  expect(saved.workspace.layout).toMatchObject({ sizes: [0.55, 0.45] });
+  expect(store.getState().apps.saveStatus?.a).toBe("saved");
+});
+
+test.each(["refresh", "save"] as const)(
+  "failed retry %s stops without looping or losing local edits",
+  async (failure) => {
+    vi.useFakeTimers();
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockRejectedValueOnce(new Error("Lost response"))
+      .mockResolvedValueOnce(
+        failure === "refresh"
+          ? new Response("{}", { status: 503 })
+          : new Response(JSON.stringify({ app_workspace: remoteWorkspace(9) })),
+      )
+      .mockResolvedValue(
+        new Response(JSON.stringify({ current_revision: 10 }), { status: 409 }),
+      );
+    const store = setup();
+    store.dispatch({ type: "test/snapshot", payload: remoteWorkspace(7) });
+    const root = store.getState().workspace.groups["chat:a"]!.root;
+    store.dispatch(
+      resizeGroupSplit({
+        tabId: "chat:a",
+        splitId: root.id,
+        sizes: [0.6, 0.4],
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(1000);
+    store.dispatch(retryAppWorkspaceSave("a"));
+    store.dispatch(retryAppWorkspaceSave("a"));
+    await vi.advanceTimersByTimeAsync(10000);
+    expect(fetchMock).toHaveBeenCalledTimes(failure === "refresh" ? 2 : 3);
+    expect(store.getState().apps.saveStatus?.a).toBe("error");
+    expect(
+      paneToAppLayout(store.getState().workspace.groups["chat:a"]!.root, "a"),
+    ).toMatchObject({ sizes: [0.6, 0.4] });
+  },
+);
 
 test("409 without authoritative workspace stops with retry status, never loops", async () => {
   vi.useFakeTimers();
