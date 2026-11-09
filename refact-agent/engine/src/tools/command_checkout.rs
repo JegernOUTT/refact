@@ -618,23 +618,6 @@ pub(crate) async fn planner_identity(
     )
 }
 
-pub(crate) async fn ensure_card_agent_stopped(
-    app: &AppState,
-    task: &TaskMeta,
-    owner: &str,
-    source: &Path,
-    card: &BoardCard,
-    worktree: &WorktreeMeta,
-) -> Result<(), String> {
-    let authority = TaskCardAuthority {
-        task: task.clone(),
-        owner: owner.to_string(),
-        source: source.to_path_buf(),
-        verifier: None,
-    };
-    ensure_agent_stopped(app, &authority, card, worktree).await
-}
-
 async fn ensure_agent_stopped(
     app: &AppState,
     authority: &TaskCardAuthority,

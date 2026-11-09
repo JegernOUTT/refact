@@ -361,33 +361,26 @@ pub async fn handle_v1_worktrees_sync(
     Path(id): Path<String>,
     Query(query): Query<WorktreeQuery>,
     Json(request): Json<WorktreeSyncRequest>,
-) -> ApiResult<crate::tools::tool_worktree_sync::SyncResponse> {
+) -> ApiResult<crate::worktrees::sync_runtime::SyncResponse> {
     let service = service_for_request(app.gcx.clone(), query.source_workspace_root).await?;
     let writer_readiness = if matches!(request, WorktreeSyncRequest::Status { .. }) {
         Some(
-            crate::tools::tool_worktree_sync::status_readiness(&app, &service, &id, None)
+            crate::worktrees::sync_runtime::status_readiness(&app, &service, &id, None)
                 .await
                 .map_err(map_service_error)?,
         )
     } else {
         None
     };
-    crate::tools::tool_worktree_sync::sync_under_lease(
-        &app,
-        &service,
-        &id,
-        request,
-        "user".into(),
-        None,
-    )
-    .await
-    .map(|sync| {
-        Json(crate::tools::tool_worktree_sync::SyncResponse {
-            sync,
-            writer_readiness,
+    crate::worktrees::sync_runtime::sync_under_lease(&app, &service, &id, request, "user".into())
+        .await
+        .map(|sync| {
+            Json(crate::worktrees::sync_runtime::SyncResponse {
+                sync,
+                writer_readiness,
+            })
         })
-    })
-    .map_err(map_service_error)
+        .map_err(map_service_error)
 }
 
 #[cfg(test)]

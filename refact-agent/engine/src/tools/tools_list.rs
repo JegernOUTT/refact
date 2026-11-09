@@ -881,7 +881,6 @@ async fn get_builtin_tools(
     let worktree_tools: Vec<Box<dyn Tool + Send>> = vec![
         Box::new(crate::tools::tool_worktree_create::ToolWorktreeCreate),
         Box::new(crate::tools::tool_worktree_merge::ToolWorktreeMerge::new()),
-        Box::new(crate::tools::tool_worktree_sync::ToolWorktreeSync),
     ];
 
     let mut tool_groups = vec![
@@ -1506,9 +1505,7 @@ mod tests {
                     assert!(names.contains(*name), "{} workflow missing {name}", mode.id);
                 }
             };
-            if names.contains("worktree_merge") {
-                require(&["worktree_sync"]);
-            }
+            assert!(!names.contains("worktree_sync"));
             // allow_subagents controls ConfigSubagent category expansion, not this
             // explicitly allowlisted builtin launcher or its owned-child controls.
             if names.contains("subagent") {
@@ -1543,7 +1540,6 @@ mod tests {
                     "apply_patch",
                     "worktree_create",
                     "worktree_merge",
-                    "worktree_sync",
                     "shell",
                     "process_start",
                     "process_list",
@@ -1559,7 +1555,6 @@ mod tests {
                         "check_agents",
                         "merge_agent",
                         "restart_agent",
-                        "worktree_sync",
                     ]);
                     assert!(
                         !names.contains("worktree_create"),
@@ -1608,6 +1603,32 @@ mod tests {
                         mode.id,
                     );
                 }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn chat_worktree_catalog_exposes_only_create_and_merge() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let groups = get_builtin_tools(gcx, &contract_availability(), None).await;
+        let names = groups
+            .into_iter()
+            .find(|group| group.name == "Worktrees")
+            .unwrap()
+            .tools
+            .into_iter()
+            .map(|tool| tool.tool_description().name)
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["worktree_create", "worktree_merge"]);
+        for mode in embedded_contract_modes() {
+            if ["agent", "solo"].contains(&mode.id.as_str()) {
+                let names = mode
+                    .tools
+                    .iter()
+                    .filter(|name| name.starts_with("worktree_"))
+                    .map(String::as_str)
+                    .collect::<Vec<_>>();
+                assert_eq!(names, ["worktree_create", "worktree_merge"], "{}", mode.id);
             }
         }
     }

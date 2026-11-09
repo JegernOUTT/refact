@@ -970,19 +970,17 @@ describe("Worktree lifecycle GUI", () => {
       screen.getByRole("button", { name: "Ask Refact to resolve conflicts" }),
     );
     await waitFor(() => expect(askRefact).toHaveBeenCalledOnce());
-    expect(syncActions).toContain("start");
+    expect(syncActions.filter((action) => action !== "status")).toEqual([]);
     const [files, response, handoff] = askRefact.mock.calls[0] as unknown as [
       string[],
       MergeWorktreeResponse,
       {
-        toolAvailable: boolean;
         sync: { operation?: { operation_id: string } };
       },
     ];
     expect(files).toEqual(["src/conflict.ts"]);
     expect(response.status).toBe("conflict");
-    expect(handoff.toolAvailable).toBeUndefined();
-    expect(handoff.sync.operation?.operation_id).toBe("op-1");
+    expect(handoff.sync.operation).toBeNull();
   });
 
   test("menu review row opens diff and merge flows", async () => {

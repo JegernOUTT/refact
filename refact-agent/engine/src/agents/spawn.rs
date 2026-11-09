@@ -355,22 +355,6 @@ pub(crate) async fn recover_run_config(
     if record.parent_chat_id != parent_chat_id {
         return Err("child owner does not match".into());
     }
-    if let Some(id) = &record.worktree_id {
-        if let Some(child) = record.child_chat_id.as_deref() {
-            if let Some(session) = app.chat.sessions.read().await.get(child).cloned() {
-                let meta = session.lock().await.thread.worktree.clone();
-                if let Some(meta) = meta.filter(|meta| &meta.id == id) {
-                    WorktreeService::new_async(
-                        app.gcx.cache_dir.clone(),
-                        meta.source_workspace_root.clone(),
-                    )
-                    .await?
-                    .ensure_no_active_sync(id)
-                    .await?;
-                }
-            }
-        }
-    }
     let parent = app
         .chat
         .sessions
@@ -570,13 +554,6 @@ pub(crate) async fn recover_run_config(
             record.merge_status.as_deref() == Some("merged") || !worktree.root.is_dir()
         });
     if let Some(worktree) = &config.worktree {
-        WorktreeService::new_async(
-            app.gcx.cache_dir.clone(),
-            worktree.source_workspace_root.clone(),
-        )
-        .await?
-        .ensure_no_active_sync(&worktree.id)
-        .await?;
         if dunce::canonicalize(&worktree.source_workspace_root)
             .ok()
             .as_ref()
@@ -827,17 +804,6 @@ pub struct LaunchEffective {
 }
 
 async fn validate_launch_request(app: &AppState, req: &SpawnRequest) -> Result<PathBuf, String> {
-    if matches!(req.worktree_mode, SpawnWorktreeMode::Inherit) {
-        if let Some(worktree) = &req.parent_worktree {
-            WorktreeService::new_async(
-                app.gcx.cache_dir.clone(),
-                worktree.source_workspace_root.clone(),
-            )
-            .await?
-            .ensure_no_active_sync(&worktree.id)
-            .await?;
-        }
-    }
     if let Some(goal) = &req.goal {
         let policy = crate::chat::verify_cmd::VerifyCommandPolicy::load(app.gcx.clone()).await;
         crate::chat::evidence::validate_goal_verify_commands(&goal.criteria, &policy)?;
@@ -3572,15 +3538,6 @@ pub(super) async fn install_resumed_session(
     held_transition: Option<&crate::chat::worktree_lifecycle::AttachmentTransitionGuard>,
 ) -> Result<Option<RunnerLeaseGuard>, String> {
     let chat_id = &trajectory.thread.id;
-    if let Some(meta) = &config.worktree {
-        WorktreeService::new_async(
-            app.gcx.cache_dir.clone(),
-            meta.source_workspace_root.clone(),
-        )
-        .await?
-        .ensure_no_active_sync(&meta.id)
-        .await?;
-    }
     let mut runner_guard = None;
     if let Some(expected) = expected_session {
         let acquired;
@@ -3592,15 +3549,6 @@ pub(super) async fn install_resumed_session(
                 &acquired
             }
         };
-        if let Some(meta) = &config.worktree {
-            WorktreeService::new_async(
-                app.gcx.cache_dir.clone(),
-                meta.source_workspace_root.clone(),
-            )
-            .await?
-            .ensure_no_active_sync(&meta.id)
-            .await?;
-        }
         let (saved_source, requests, aborted, interrupted) = {
             let session = expected.lock().await;
             (

@@ -2085,16 +2085,9 @@ const TaskWorkspaceContent: React.FC<TaskWorkspaceProps> = ({
         record: mergeTarget.worktree.record,
         response,
         sync: handoff.sync,
-        toolAvailable: handoff.toolAvailable,
         files,
         taskId,
         cardId: mergeTarget.card.id,
-        selector: {
-          worktree_id: handoff.sync.id,
-          ...(!mergeTarget.card.agent_chat_id
-            ? { card_id: mergeTarget.card.id }
-            : {}),
-        },
       });
       if (mergeTarget.card.agent_chat_id) {
         dispatch(

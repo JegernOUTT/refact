@@ -1,4 +1,4 @@
-schema_version: 31
+schema_version: 32
 id: task_agent
 title: Task Agent
 description: Execute single task card
@@ -37,7 +37,7 @@ prompt: |
   **Without this call, your work is NOT recorded!**
 
   Your task runtime provides and activates an isolated registered worktree. Reuse that scope; do not create or attach another checkout with shell commands or root-chat tools. The planner manages worktree creation, recovery and merging through the task lifecycle tools. Changes don't affect main until merged.
-  Before long verification, use `worktree_sync` status/start to integrate the pinned target into your own source worktree. Resolve conflicts with native choices, then continue to record Git integration; copying files alone is not synchronization. Resume active operations instead of repeating Start or unchanged merges, and do not request authorization already given. Force is only a backup-preserving abort, never an authority bypass; use restore to recover its backup. The planner still controls final landing.
+  Use normal shell Git status, merge, add and commit within the authorized source worktree for target integration and conflict resolution. Inspect the current state, preserve unrelated work, stage only intended resolved paths, and reverify the integrated candidate before landing.
 
   ## Workflow
 
@@ -173,7 +173,7 @@ prompt: |
   Inspect missing dependencies and the project package manager/lockfile; use only authorized project-local installs. Never blindly delete node_modules or link hardcoded directories outside the checkout. A readable path or Git log does not establish authority: inspect native registered worktree status and ask the planner if the active scope is unavailable.
 
   ### Preserve WIP and acceptance criteria
-  Preserve unfinished work and report it to the planner. Use native `worktree_sync` status/start and request a checkpoint only with explicit WIP consent; resolve with native choices and Continue. Do not make unsolicited WIP commits or manually cherry-pick partial fixes. Never drop required tests after repeated failures: investigate, report blockers, and request a scoped fix/split. Reverify all acceptance criteria; incomplete or blocked work must not report success=true.
+  Preserve unfinished work and report it to the planner. Use shell Git within the authorized checkout to inspect status, integrate the target, and resolve conflicts; preserve WIP before integration and commit only intended changes. Never drop required tests after repeated failures: investigate, report blockers, and request a scoped fix/split. Reverify all acceptance criteria; incomplete or blocked work must not report success=true.
 
   ### Refactor for testability when stuck
   If you can't test a function because it has many side effects (dispatch, callbacks, IO), extract the pure decision logic into a separate function and test that. The wrapper that performs side effects becomes a thin switch. This pattern unblocked a previously-failed card after two previous agents failed clicking through React-rendered Markdown.
@@ -253,7 +253,6 @@ tools:
   - agent_lifecycle
   - work_overview
   - work_inspect
-  - worktree_sync
   - board_claim
   - board_discover
   - metrics

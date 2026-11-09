@@ -303,14 +303,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn self_merge_continuation_preserves_lineage_and_returns_to_project() {
+    async fn self_merge_continuation_without_owner_reference_returns_to_project() {
         let (_temp, context, session, service) = fixture().await;
         context.lock().await.root_chat_id = "original-root".into();
         {
             let mut session = session.lock().await;
             session.thread.root_chat_id = Some("original-root".into());
             session.thread.parent_id = Some("previous-chat".into());
-            session.thread.link_type = Some("branch".into());
+            session.thread.link_type = Some("mode_transition".into());
         }
         let app = context.lock().await.app.clone();
         app.chat.sessions.write().await.insert(
@@ -328,10 +328,38 @@ mod tests {
             .insert("previous-chat".into(), Arc::new(AMutex::new(previous)));
         let before = session.lock().await.thread.clone();
         let worktree = before.worktree.as_ref().unwrap();
+        service
+            .add_reference(
+                &worktree.id,
+                crate::worktrees::types::WorktreeReference {
+                    kind: "chat".into(),
+                    chat_id: Some("original-root".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        service
+            .remove_reference(
+                &worktree.id,
+                &crate::worktrees::types::WorktreeReference {
+                    kind: "chat".into(),
+                    chat_id: Some("merge-root".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let registered = service.get_worktree(&worktree.id).await.unwrap();
+        assert_eq!(registered.references.len(), 1);
+        assert_eq!(
+            registered.references[0].chat_id.as_deref(),
+            Some("original-root")
+        );
         std::fs::write(worktree.root.join("landed"), "continuation change\n").unwrap();
         execute(&context, "worktree_merge", merge_args())
             .await
-            .expect("ordinary branch must retain self-merge authority");
+            .expect("ordinary continuation must not need the original owner's registry reference");
         assert!(!worktree.root.exists());
         assert_eq!(
             std::fs::read_to_string(service.source_workspace_root().join("landed")).unwrap(),
@@ -626,7 +654,7 @@ fn merge_response_message(response: &MergeWorktreeResponse) -> String {
             conflict.instructions
         );
         append_warnings(&mut message, &response_warnings(response));
-        message.push_str("\n\nUse worktree_sync on the authorized source checkout to synchronize and resolve conflicts, then reverify before attempting merge again; do not retry unchanged.");
+        message.push_str("\n\nUse shell Git in the source worktree to merge the target branch, resolve and stage conflicts, and commit the result. Reverify before calling worktree_merge again.");
         return message;
     }
 
@@ -895,7 +923,7 @@ impl Tool for ToolWorktreeMerge {
             },
             experimental: false,
             allow_parallel: false,
-            description: "Merge a registered worktree back into its target branch. Before long verification, use worktree_sync to synchronize its source; on conflict synchronize and resolve there, then reverify rather than retry unchanged. Generates a commit message unless supplied. By default uses squash and deletes the worktree/branch after successful merge or no-op cleanup.".to_string(),
+            description: "Merge any registered worktree in the current project back into its target branch. Use shell Git in the source worktree to merge target changes and resolve conflicts when needed, then reverify before retrying. Generates a commit message unless supplied. By default uses squash and deletes the worktree/branch after successful merge or no-op cleanup.".to_string(),
             input_schema: json_schema_from_params(
                 &[
                     ("worktree_id", "string", "Registered worktree id to merge. Defaults to the active chat worktree when omitted."),
@@ -989,16 +1017,8 @@ impl Tool for ToolWorktreeMerge {
             check_ordinary_worktree_ancestry(&app, &parent_chat_id, &root, before).await?;
             let worktree = before.worktree.as_ref().ok_or("Self merge scope changed")?;
             let view = service.get_worktree(&worktree_id).await?;
-            if view.meta != *worktree
-                || !view.references.iter().any(|reference| {
-                    reference.kind == "chat"
-                        && reference.chat_id.as_deref() == Some(&parent_chat_id)
-                        && reference.task_id.is_none()
-                        && reference.card_id.is_none()
-                        && reference.agent_id.is_none()
-                })
-            {
-                return Err("Self merge registry checkout ownership does not match".into());
+            if view.meta != *worktree {
+                return Err("Self merge registered checkout identity does not match".into());
             }
         }
         let commit_message = match string_arg(args, "commit_message")? {

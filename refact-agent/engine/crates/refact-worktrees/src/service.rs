@@ -439,13 +439,6 @@ impl WorktreeService {
 
     async fn load_registry_for_listing(&self) -> Result<WorktreeRegistry, String> {
         let registry = self.load_registry_unlocked().await?;
-        if registry
-            .records
-            .iter()
-            .any(|r| self.ensure_no_active_sync_blocking(&r.meta.id).is_err())
-        {
-            return Ok(registry);
-        }
         let mut missing = HashSet::new();
         for record in &registry.records {
             if !tokio::fs::try_exists(&record.meta.root)
@@ -562,9 +555,6 @@ impl WorktreeService {
         let mut tasks = tokio::task::JoinSet::new();
         for index in 0..records.len() {
             let records = records.clone();
-            let active_sync = self
-                .ensure_no_active_sync_blocking(&records[index].meta.id)
-                .is_err();
             let source_common_dirs = source_common_dirs.clone();
             let permits = permits.clone();
             tasks.spawn(async move {
@@ -574,15 +564,6 @@ impl WorktreeService {
                     .map_err(|e| format!("Worktree listing semaphore closed: {}", e))?;
                 let status = tokio::task::spawn_blocking(move || {
                     let meta = &records[index].meta;
-                    if active_sync && !meta.root.exists() {
-                        return Ok(WorktreeStatus {
-                            error: Some(
-                                "Active sync source is missing; journal retained for recovery"
-                                    .into(),
-                            ),
-                            ..Default::default()
-                        });
-                    }
                     let common_dir = source_common_dirs
                         .get(&meta.source_workspace_root)
                         .ok_or_else(|| "Worktree source common dir missing".to_string())?;
@@ -1189,7 +1170,6 @@ impl WorktreeService {
                 validate_branch_name(target_branch)?;
             }
             let service = service.acquire_merge_permit().await?;
-            service.ensure_sync_landing_fresh(&id, request.target_branch.as_deref())?;
             let target = request.target_branch.clone();
             let target = match target {
                 Some(target) => target,
@@ -1366,7 +1346,6 @@ impl WorktreeService {
         observer: Option<(crate::types::CheckedMergeIdentity, LandingCommitObserver)>,
     ) -> Result<MergeWorktreeResponse, String> {
         self.validate_merge_phase()?;
-        self.ensure_sync_landing_fresh(id, request.target_branch.as_deref())?;
         let index = registry
             .records
             .iter()
@@ -1379,6 +1358,7 @@ impl WorktreeService {
             .clone()
             .ok_or_else(|| format!("Worktree '{}' has no source branch", id))?;
         validate_registered_record_checkout(&record)?;
+        git::ensure_no_merge_in_progress(&record.meta.root, "Source worktree")?;
         validate_branch_name(&source_branch)?;
         let target_branch = request
             .target_branch
@@ -1793,7 +1773,6 @@ impl WorktreeService {
         validate_worktree_id(id)?;
         let _repository_guard = self.acquire_merge_permit().await?;
         let _guard = _repository_guard.registry_write_lock().await?;
-        self.ensure_no_active_sync_blocking(id)?;
         let mut registry = self.load_registry_unlocked().await?;
         let index = registry
             .records
@@ -2432,7 +2411,6 @@ impl WorktreeService {
         record: &WorktreeRegistryRecord,
         delete_branch: bool,
     ) -> Result<WorktreeRemovalResult, String> {
-        self.ensure_no_active_sync_blocking(&record.meta.id)?;
         if self.merge_permit.is_some() {
             self.validate_merge_phase()?;
         }

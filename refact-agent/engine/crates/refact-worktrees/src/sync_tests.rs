@@ -58,6 +58,67 @@ fn abort(op: &WorktreeSyncOperation, force: bool) -> WorktreeSyncRequest {
 }
 
 #[tokio::test]
+async fn shell_resolution_lands_with_stale_active_or_unreadable_native_journal() {
+    for corrupt in [false, true] {
+        let (_temp, service, meta) = fixture().await;
+        commit(&meta.root, "file", b"source\n");
+        commit(service.source_workspace_root(), "file", b"target\n");
+        let response = start(&service, &meta, false).await;
+        assert_eq!(response.status, WorktreeSyncStatus::Conflicts);
+        let journal = std::fs::read(service.sync_path(&meta.id).unwrap()).unwrap();
+        let refused = service
+            .merge_worktree(
+                &meta.id,
+                MergeWorktreeRequest {
+                    include_uncommitted: true,
+                    delete_after_merge: false,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(refused.contains("merge in progress"), "{refused}");
+        assert_eq!(native::conflicts(&meta.root).unwrap().len(), 1);
+        std::fs::write(meta.root.join("file"), b"shell resolution\n").unwrap();
+        git(&meta.root, &["add", "file"]);
+        git(&meta.root, &["commit", "-m", "shell merge resolution"]);
+        assert_eq!(
+            std::fs::read(service.sync_path(&meta.id).unwrap()).unwrap(),
+            journal
+        );
+        if corrupt {
+            std::fs::write(service.sync_path(&meta.id).unwrap(), b"invalid journal").unwrap();
+        }
+        let restarted = WorktreeService::new(
+            service.cache_dir.clone(),
+            service.source_workspace_root.clone(),
+        )
+        .unwrap();
+        let landed = restarted
+            .merge_worktree(
+                &meta.id,
+                MergeWorktreeRequest {
+                    delete_after_merge: false,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert!(landed.merged);
+        assert_eq!(
+            std::fs::read(service.source_workspace_root().join("file")).unwrap(),
+            b"shell resolution\n"
+        );
+        let deleted = restarted
+            .delete_worktree(&meta.id, true, true)
+            .await
+            .unwrap();
+        assert!(!meta.root.exists());
+        assert!(deleted.deleted);
+    }
+}
+
+#[tokio::test]
 async fn native_sync_real_conflicts_restart_cas_ancestry_and_landing() {
     let (_temp, service, meta) = fixture().await;
     commit(&meta.root, "file", b"source\n");
@@ -71,11 +132,6 @@ async fn native_sync_real_conflicts_restart_cas_ancestry_and_landing() {
         native::head(service.source_workspace_root()).unwrap(),
         target_head
     );
-    assert!(service
-        .delete_worktree(&meta.id, true, true)
-        .await
-        .unwrap_err()
-        .contains("active native"));
     let op = response.operation.unwrap();
     let service = WorktreeService::new(
         service.cache_dir.clone(),
@@ -181,12 +237,12 @@ async fn native_sync_checkpoint_force_abort_archives_edited_ignored_and_untracke
         b"untracked precious\0"
     );
     assert_eq!(native::head(&meta.root).unwrap(), op.source_head);
-    service.ensure_no_active_sync(&meta.id).await.unwrap();
 }
 
 #[tokio::test]
 async fn native_sync_add_add_delete_modify_binary_and_target_advance() {
     let (_temp, service, meta) = fixture().await;
+    commit(&meta.root, "source-only", b"source-only change");
     commit(&meta.root, "added", b"source add\n");
     commit(service.source_workspace_root(), "added", b"target add\n");
     commit(&meta.root, "file", b"source\0binary");
@@ -236,18 +292,22 @@ async fn native_sync_add_add_delete_modify_binary_and_target_advance() {
         .await
         .unwrap();
     assert_eq!(completed.status, WorktreeSyncStatus::Completed);
-    assert!(service
+    let landed = service
         .merge_worktree(
             &meta.id,
             MergeWorktreeRequest {
                 delete_after_merge: false,
                 target_branch: Some("main".into()),
                 ..Default::default()
-            }
+            },
         )
         .await
-        .unwrap_err()
-        .contains("target_advanced"));
+        .unwrap();
+    assert!(landed.merged);
+    assert_eq!(
+        std::fs::read(service.source_workspace_root().join("advanced")).unwrap(),
+        b"advance"
+    );
 }
 
 #[tokio::test]
@@ -495,8 +555,6 @@ async fn native_sync_identity_replacement_and_missing_source_keep_evidence() {
     let op = start(&service, &meta, false).await.operation.unwrap();
     let held = meta.root.with_extension("held");
     std::fs::rename(&meta.root, &held).unwrap();
-    let listed = service.list_worktrees().await.unwrap();
-    assert!(listed.worktrees.iter().any(|r| r.meta.id == meta.id));
     assert!(service.sync_journal(&meta.id).unwrap().is_some());
     std::fs::create_dir(&meta.root).unwrap();
     git(&meta.root, &["init", "-b", "refact/chat/sync"]);
@@ -509,7 +567,6 @@ async fn native_sync_identity_replacement_and_missing_source_keep_evidence() {
         std::fs::read(meta.root.join("unrelated")).unwrap(),
         b"never touch"
     );
-    assert!(service.ensure_no_active_sync(&meta.id).await.is_err());
 }
 
 #[tokio::test]
@@ -560,7 +617,7 @@ async fn native_sync_resume_restore_and_precommit_checkpoint_recovery() {
 }
 
 #[tokio::test]
-async fn native_sync_completed_pin_refuses_other_landing_target() {
+async fn native_sync_completed_pin_does_not_restrict_landing_target() {
     let (_temp, service, meta) = fixture().await;
     commit(&meta.root, "source", b"source");
     git(service.source_workspace_root(), &["branch", "other"]);
@@ -576,12 +633,11 @@ async fn native_sync_completed_pin_refuses_other_landing_target() {
                 ..Default::default()
             },
         )
-        .await;
-    assert!(
-        landed.is_err(),
-        "alternate landing target must require fresh sync"
-    );
-    assert_eq!(native::target(&meta.root, "other").unwrap(), other_head);
+        .await
+        .unwrap();
+    assert!(landed.merged);
+    assert_ne!(native::target(&meta.root, "other").unwrap(), other_head);
+    assert_eq!(git(&meta.root, &["show", "other:source"]), "source");
 }
 
 #[tokio::test]
@@ -632,7 +688,6 @@ async fn native_sync_corrupt_journal_recover_and_missing_root_archive() {
         .await
         .unwrap();
     assert_eq!(archived.status, WorktreeSyncStatus::Aborted);
-    service.ensure_no_active_sync(&meta.id).await.unwrap();
     assert!(held.join("file").exists());
 }
 
@@ -727,7 +782,6 @@ async fn native_sync_restore_resumes_each_atomic_write_and_precommit_source() {
         std::fs::read(meta.root.join("file")).unwrap(),
         b"dirty precommit"
     );
-    service.ensure_no_active_sync(&meta.id).await.unwrap();
 }
 
 #[test]
@@ -927,47 +981,45 @@ async fn native_sync_round2_recover_rekeys_old_cas() {
 }
 
 #[tokio::test]
-async fn native_sync_round2_user_delegates_only_to_identified_controller() {
+async fn native_sync_cross_initiator_mutation_keeps_revision_cas() {
     let (_temp, service, meta) = fixture().await;
     commit(&meta.root, "file", b"ours");
     commit(service.source_workspace_root(), "file", b"theirs");
-    let op = start(&service.with_sync_actor("user".into()), &meta, false)
+    let op = start(&service.with_sync_actor("chat:first".into()), &meta, false)
         .await
         .operation
         .unwrap();
-    let request = WorktreeSyncRequest::Resolve {
-        operation_id: op.operation_id,
-        expected_revision: op.revision,
-        resolutions: vec![WorktreeSyncResolution {
-            path: "file".into(),
-            choice: WorktreeSyncResolutionChoice::Source,
-        }],
-    };
-    assert!(service
-        .sync_worktree(&meta.id, request.clone())
+    let other = service.with_sync_actor("chat:other".into());
+    let ready = other
+        .sync_worktree(
+            &meta.id,
+            WorktreeSyncRequest::Resolve {
+                operation_id: op.operation_id.clone(),
+                expected_revision: op.revision,
+                resolutions: vec![WorktreeSyncResolution {
+                    path: "file".into(),
+                    choice: WorktreeSyncResolutionChoice::Source,
+                }],
+            },
+        )
         .await
-        .unwrap_err()
-        .contains("different initiator"));
-    let controller = service.with_sync_actor("chat:authorized".into());
-    let ready = controller.sync_worktree(&meta.id, request).await.unwrap();
-    assert_eq!(
-        controller
-            .sync_worktree(&meta.id, cont(ready.operation.as_ref().unwrap()))
-            .await
-            .unwrap()
-            .status,
-        WorktreeSyncStatus::Completed
-    );
-    // Model-created operations do not acquire the user's delegation semantics.
-    commit(&meta.root, "file", b"second source");
-    commit(service.source_workspace_root(), "file", b"second target");
-    let op = start(&controller, &meta, false).await.operation.unwrap();
-    assert!(service
-        .with_sync_actor("chat:other".into())
+        .unwrap();
+    let before = native::output(&meta.root, &["ls-files", "--stage", "-z"]).unwrap();
+    assert!(other
         .sync_worktree(&meta.id, cont(&op))
         .await
         .unwrap_err()
-        .contains("different initiator"));
+        .contains("Stale"));
+    assert_eq!(
+        native::output(&meta.root, &["ls-files", "--stage", "-z"]).unwrap(),
+        before
+    );
+    let completed = other
+        .sync_worktree(&meta.id, cont(ready.operation.as_ref().unwrap()))
+        .await
+        .unwrap();
+    assert_eq!(completed.status, WorktreeSyncStatus::Completed);
+    assert_eq!(std::fs::read(meta.root.join("file")).unwrap(), b"ours");
 }
 
 #[cfg(unix)]

@@ -1,4 +1,4 @@
-schema_version: 35
+schema_version: 36
 id: task_planner
 title: Task Planner
 description: Task board management mode
@@ -199,12 +199,12 @@ prompt: |
 
   1. Inspect pulse/diff and retain the worktree if cancellation is necessary.
   2. Inspect the registered card checkout with `work_inspect(selector={kind:"worktree", worktree_id:...})`. A path alone never authorizes execution. For completed-card shell/process verification obtain a fresh task-card checkout receipt and pass its exact card, board revision, agent chat, worktree, HEAD and canonical cwd expectations via `checkout`; refresh stale receipts, never substitute a path or another card's checkout.
-  3. Resume or repair the card with `restart_agent` and exact remaining acceptance criteria. Preserve WIP. Inspect native `worktree_sync` status before Start; request a checkpoint only with explicit WIP consent, resolve using native choices, then Continue. Do not shell-commit WIP or manually cherry-pick/merge as a rescue shortcut.
+  3. Resume or repair the card with `restart_agent` and exact remaining acceptance criteria. Preserve WIP. Use normal shell Git status, merge, add and commit in the authorized card checkout when integration or conflict resolution is needed; never discard unrelated work or cherry-pick partial fixes to manufacture completion.
   4. If dependencies are missing, inspect the project package manager and lockfile; use an authorized scoped project-local dependency install. Do not delete dependency trees blindly or link a hardcoded external node_modules directory.
   5. Reverify every acceptance criterion on the integrated candidate, including required tests. If blocked, report the evidence and repair/split the card; do not drop tests or mark incomplete work done. Only verified complete work can proceed through native card completion and `merge_agent`.
 
-  Use `spawn_agent`/`restart_agent` for card worktree creation and `merge_agent` for landing. Never improvise shell commands or direct API calls for worktree creation, attachment, merging or cleanup; root-chat `worktree_create` is not a card lifecycle tool.
-  Before long verification, use `worktree_sync` status/start for the authorized card source to integrate the pinned target. Resolve conflicts with native choices, then continue to record Git integration; copying files alone is not synchronization. Resume active operations instead of repeating Start or an unchanged merge, and do not request authorization already given. Force is only a backup-preserving abort, never an authority bypass; use restore to recover its backup. Reverify the integrated candidate before `merge_agent`.
+  Use `spawn_agent`/`restart_agent` for card worktree creation and `merge_agent` for landing. Use the registered lifecycle tools for worktree creation, attachment, landing and cleanup; root-chat `worktree_create` is not a card lifecycle tool.
+  Use normal shell Git status, merge, add and commit within the authorized source worktree for target integration and conflict resolution. Inspect the current state, preserve unrelated work, stage only intended resolved paths, and reverify the integrated candidate before landing.
 
   ## 5) Merge Protocol (CRITICAL - follow exactly)
 
@@ -246,7 +246,7 @@ prompt: |
   - Wrong directory? Agent edited main workspace instead of worktree
   - Create a fix card if needed
 
-  **Conflicts Detected** → Inspect native lifecycle status and the authorized registered card checkout. Read conflicts, resolve only the declared conflict scope with native choices or permitted scoped edits, then Continue the native operation. If blocked, retain WIP and create a conflict-resolution fix card; never improvise shell Git commits, aborts, or metadata edits.
+  **Conflicts Detected** → Inspect the authorized registered card checkout and Git status. Use normal shell Git merge, scoped edits, add and commit to resolve conflicts in that checkout. Preserve unrelated work and reverify before landing with `merge_agent`. If blocked, retain WIP and create a conflict-resolution fix card.
 
   ### Post-Merge Verification
   - Run the verification command specified by the merged card or wave plan.
@@ -415,7 +415,6 @@ tools:
   - agent_diff
   - task_verify_card
   - merge_agent
-  - worktree_sync
   - mark_done
   - mark_failed
   - finalize_card
@@ -529,7 +528,5 @@ tool_confirm:
       action: auto
     - match: "work_inspect"
       action: auto
-    - match: "worktree_sync"
-      action: ask
     - match: "metrics"
       action: auto

@@ -79,40 +79,6 @@ impl WorktreeService {
         }
     }
 
-    pub fn ensure_no_active_sync_blocking(&self, id: &str) -> Result<(), String> {
-        if self.sync_journal(id)?.is_some_and(|j| j.active()) {
-            return Err("Worktree has active native synchronization; inspect worktree_sync status and continue or abort before landing/deleting".into());
-        }
-        Ok(())
-    }
-
-    pub(super) fn ensure_sync_landing_fresh(
-        &self,
-        id: &str,
-        requested_target: Option<&str>,
-    ) -> Result<(), String> {
-        self.ensure_no_active_sync_blocking(id)?;
-        if let Some(j) = self.sync_journal(id)? {
-            if j.status == WorktreeSyncStatus::Completed
-                && (requested_target.unwrap_or(j.meta.base_branch.as_deref().unwrap_or(""))
-                    != j.operation.target_branch
-                    || native::target(&j.meta.root, &j.operation.target_branch)?
-                        != j.operation.target_head)
-            {
-                return Err("target_advanced: target changed since synchronization; request worktree_sync Status and Start against fresh heads before landing".into());
-            }
-        }
-        Ok(())
-    }
-
-    pub async fn ensure_no_active_sync(&self, id: &str) -> Result<(), String> {
-        let service = self.clone();
-        let id = id.to_string();
-        tokio::task::spawn_blocking(move || service.ensure_no_active_sync_blocking(&id))
-            .await
-            .map_err(|e| e.to_string())?
-    }
-
     fn sync_load_preimages(&self, journal: &mut Journal) -> Result<(), String> {
         if let Some(digest) = &journal.restore_preimages_digest {
             if digest.len() != 64 || !digest.bytes().all(|b| b.is_ascii_hexdigit()) {
@@ -554,18 +520,6 @@ impl WorktreeService {
         };
         if j.operation.operation_id != *operation_id || j.operation.revision != revision {
             return Err("Stale sync operation_id or expected_revision; refresh Status".into());
-        }
-        if matches!(
-            request,
-            WorktreeSyncRequest::Resolve { .. }
-                | WorktreeSyncRequest::Continue { .. }
-                | WorktreeSyncRequest::Restore { .. }
-        ) && j.operation.initiator.is_some()
-            && self.sync_actor != j.operation.initiator
-            && self.sync_actor.as_deref() != Some("user")
-            && !(j.operation.initiator.as_deref() == Some("user") && self.sync_actor.is_some())
-        {
-            return Err("Sync operation belongs to a different initiator; inspect Status or ask the user to recover it".into());
         }
         self.sync_validate(&j, false)?;
         self.sync_reconcile(&mut j)?;

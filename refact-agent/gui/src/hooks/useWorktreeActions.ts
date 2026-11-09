@@ -8,8 +8,6 @@ import {
 } from "../services/refact";
 import { worktreeErrorText } from "../features/Worktrees/worktreeError";
 
-export const WORKTREE_SYNC_TOOL = "worktree_sync";
-
 const TERMINAL_PHASES = new Set([
   "completed",
   "aborted",
@@ -330,11 +328,6 @@ export function useWorktreeSync({
     [run],
   );
 
-  const isToolAvailable = useCallback(
-    (): Promise<boolean | undefined> => Promise.resolve(undefined),
-    [],
-  );
-
   const statusError =
     !skip && statusQuery.isError ? worktreeErrorText(statusQuery.error) : null;
 
@@ -363,7 +356,6 @@ export function useWorktreeSync({
     abort,
     restore,
     recover,
-    isToolAvailable,
   };
 }
 

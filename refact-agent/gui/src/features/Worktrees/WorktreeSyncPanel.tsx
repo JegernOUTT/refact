@@ -330,8 +330,8 @@ export const WorktreeSyncPanel: React.FC<WorktreeSyncPanelProps> = ({
       {status === "target_advanced" ? (
         <p className={`${styles.warningText} ${styles.resultLine}`}>
           {isActive
-            ? "The target branch moved after synchronization started. Finish this operation, then synchronize again against the fresh target before landing."
-            : "The target branch moved since the last synchronization. Synchronize again before landing."}
+            ? "The target branch moved after this optional synchronization started. You can refresh and synchronize again, or use ordinary Git integration."
+            : "The target branch moved since the last synchronization. You can optionally synchronize again or use ordinary Git integration."}
         </p>
       ) : null}
       {status === "recovery_required" ? (

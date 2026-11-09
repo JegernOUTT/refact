@@ -138,33 +138,6 @@ function installSyncServer(
   return context;
 }
 
-function toolGroups(enabled: boolean) {
-  return http.get("*/v1/tools", () =>
-    HttpResponse.json([
-      {
-        name: "builtin",
-        category: "builtin",
-        description: "",
-        tools: enabled
-          ? [
-              {
-                enabled: true,
-                spec: {
-                  name: "worktree_sync",
-                  display_name: "Sync",
-                  description: "",
-                  input_schema: {},
-                  source: { source_type: "builtin", config_path: "" },
-                  agentic: false,
-                },
-              },
-            ]
-          : [],
-      },
-    ]),
-  );
-}
-
 function renderModal(
   props: Partial<React.ComponentProps<typeof MergeWorktreeModal>> = {},
   record = makeRecord(),
@@ -190,7 +163,6 @@ beforeEach(() => {
         worktrees: [],
       }),
     ),
-    toolGroups(true),
   );
 });
 
@@ -341,7 +313,8 @@ describe("native worktree synchronization", () => {
       name: "Synchronize with target",
     });
     expect(start).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Merge" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Merge" })).toBeEnabled();
+    expect(screen.getByLabelText("Target branch")).toBeEnabled();
     expect(screen.getAllByText("No synchronization").length).toBeGreaterThan(0);
     expect(sync.calls.every((call) => call.action === "status")).toBe(true);
 
@@ -424,58 +397,88 @@ describe("native worktree synchronization", () => {
         checkpoint: false,
       }),
     );
-    expect(target).toBeDisabled();
+    expect(target).toBeEnabled();
   });
-  test("starts sync before handing the conflict to chat and carries operation evidence", async () => {
-    const log: string[] = [];
-    const sync = installSyncServer(
-      syncResponse(),
-      (request) =>
+  test.each([false, true])(
+    "hands conflicts to chat without native mutation (dirty=%s)",
+    async (dirty) => {
+      const sync = installSyncServer(syncResponse(), (request) =>
         request.action === "start"
-          ? syncResponse({
-              status: "conflicts",
-              operation: operation({ phase: "integrating" }),
-              conflicts: [{ path: "src/conflict.ts", kind: "unmerged" }],
-            })
+          ? (HttpResponse.json(
+              { error: "start must not run" },
+              { status: 409 },
+            ) as unknown as Response)
           : undefined,
-      log,
-    );
-    const askRefact = vi.fn(() => {
-      log.push("chat");
-    });
-    const { user } = renderModal({ onAskRefact: askRefact });
-    await openConflict(user);
+      );
+      const askRefact = vi.fn();
+      const { user } = renderModal(
+        { onAskRefact: askRefact },
+        makeRecord(dirty),
+      );
+      await openConflict(user);
+      const target = screen.getByLabelText("Target branch");
+      await user.clear(target);
+      await user.type(target, "release");
+      await user.click(
+        screen.getByRole("button", { name: "Ask Refact to resolve conflicts" }),
+      );
+      await waitFor(() => expect(askRefact).toHaveBeenCalledOnce());
+      expect(sync.calls.filter((call) => call.action !== "status")).toEqual([]);
+      expect(askRefact.mock.calls[0][0]).toEqual(["src/conflict.ts"]);
+      expect(askRefact.mock.calls[0][1]).toMatchObject({
+        target_branch: "release",
+      });
+      expect(
+        (askRefact.mock.calls[0][2] as { sync?: WorktreeSyncResponse }).sync
+          ?.operation,
+      ).toBeNull();
+    },
+  );
 
+  test("stale active journal does not disable ordinary merge or target selection", async () => {
+    const sync = installSyncServer(
+      syncResponse({
+        status: "conflicts",
+        operation: operation(),
+        conflicts: [],
+      }),
+    );
+    const merges: unknown[] = [];
+    server.use(
+      http.post("*/v1/worktrees/:id/merge", async ({ request }) => {
+        merges.push(await request.json());
+        return HttpResponse.json(conflictMerge);
+      }),
+    );
+    const askRefact = vi.fn();
+    const { user } = renderModal({ onAskRefact: askRefact });
+    await screen.findByText(/Operation op-1/);
+    const target = screen.getByLabelText("Target branch");
+    expect(target).toBeEnabled();
+    await user.clear(target);
+    await user.type(target, "release");
+    expect(screen.getByRole("button", { name: "Merge" })).toBeEnabled();
+    await user.click(screen.getByRole("button", { name: "Merge" }));
+    await waitFor(() => expect(merges).toHaveLength(1));
+    expect(merges[0]).toMatchObject({ target_branch: "release" });
     await user.click(
       screen.getByRole("button", { name: "Ask Refact to resolve conflicts" }),
     );
-
     await waitFor(() => expect(askRefact).toHaveBeenCalledOnce());
-    expect(log.indexOf("sync:start")).toBeGreaterThan(-1);
-    expect(log.indexOf("sync:start")).toBeLessThan(log.indexOf("chat"));
-    const start = sync.calls.find((call) => call.action === "start");
-    expect(start).toEqual({
-      action: "start",
+    expect(askRefact.mock.calls[0][1]).toMatchObject({
+      target_branch: "release",
+    });
+    expect(
+      (askRefact.mock.calls[0][2] as { sync: WorktreeSyncResponse }).sync
+        .operation,
+    ).toMatchObject({
       target_branch: "main",
-      expected_source_head: "src-head",
-      expected_target_head: "tgt-head",
-      checkpoint: false,
     });
-    const handoff = askRefact.mock.calls[0] as unknown as [
-      string[],
-      MergeWorktreeResponse,
-      { sync: WorktreeSyncResponse; toolAvailable: boolean },
-    ];
-    expect(handoff[2].sync.operation).toMatchObject({
-      operation_id: "op-1",
-      revision: 4,
-    });
-    expect(handoff[2].toolAvailable).toBeUndefined();
-    expect(sync.urls[0]).toContain("source_workspace_root=%2Frepo");
+
+    expect(sync.calls.filter((call) => call.action !== "status")).toEqual([]);
   });
 
-  test("reports tool unavailability to the handoff while keeping native controls", async () => {
-    server.use(toolGroups(false));
+  test("keeps native controls without a model sync tool", async () => {
     installSyncServer(syncResponse(), (request) =>
       request.action === "start"
         ? syncResponse({
@@ -490,13 +493,10 @@ describe("native worktree synchronization", () => {
     await openConflict(user);
 
     await user.click(
-      screen.getByRole("button", { name: "Ask Refact to resolve conflicts" }),
+      screen.getByRole("button", { name: "Synchronize with target" }),
     );
 
-    await waitFor(() => expect(askRefact).toHaveBeenCalledOnce());
-    expect(askRefact.mock.calls[0][2]).toMatchObject({
-      toolAvailable: undefined,
-    });
+    expect(askRefact).not.toHaveBeenCalled();
     expect(
       await screen.findByRole("button", { name: "Apply resolutions" }),
     ).toBeInTheDocument();
@@ -544,18 +544,13 @@ describe("native worktree synchronization", () => {
     await openConflict(user);
 
     await user.click(
-      screen.getByRole("button", { name: "Ask Refact to resolve conflicts" }),
+      screen.getByRole("button", { name: "Synchronize with target" }),
     );
 
     expect(
       await screen.findByText("Sync source or target HEAD changed"),
     ).toBeInTheDocument();
     expect(askRefact).not.toHaveBeenCalled();
-    expect(
-      screen.getByText(
-        "Synchronization did not start, so no request was sent to Refact.",
-      ),
-    ).toBeInTheDocument();
     expect(sync.calls.some((call) => call.action === "start")).toBe(true);
     expect(
       screen.queryByText(/Conflict resolution request sent/),
@@ -771,7 +766,7 @@ describe("native worktree synchronization", () => {
     const { user } = renderModal();
 
     expect(
-      await screen.findByText(/Synchronize again before landing/),
+      await screen.findByText(/optionally synchronize again/),
     ).toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: "Abort…" }),
@@ -823,7 +818,7 @@ describe("native worktree synchronization", () => {
     });
     await openConflict(user);
     await user.click(
-      screen.getByRole("button", { name: "Ask Refact to resolve conflicts" }),
+      screen.getByRole("button", { name: "Synchronize with target" }),
     );
 
     rerender(element(second));

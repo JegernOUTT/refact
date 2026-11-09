@@ -29,6 +29,8 @@ Run `python3 tools/fn_size_report.py` to list the largest non-test Rust function
 
 Run checks in the worktree before landing its changes. `merge_worktree` squash-merges a worktree into the local `main` branch; it does not publish anything. Push separately afterward with `git push origin main`.
 
+The chat worktree tools are `worktree_create` and `worktree_merge`. Use shell Git in the source worktree to merge target changes, resolve and stage conflicts, and commit before verification and landing. The optional native synchronization panel is not required and its journal does not gate ordinary Git or worktree landing. Ordinary same-project chats need not be the checkout's original creator.
+
 ## Architecture
 
 `GlobalContext` (`Arc<ARwLock<GlobalContext>>`) is the central shared state. HTTP server (Axum) and LSP server (tower-lsp) both hold a reference. Background tasks (workspace file watcher, CodeGraph indexer, VecDB memory-plane vectorizer, git shadow cleanup, knowledge graph, trajectory memos, agent monitor, OAuth refresh) are spawned via `start_background_tasks()` (~18 tokio tasks). Workspace indexing is routed through `indexing_routing.rs`: memory-plane files go to VecDB, while source-code files go to CodeGraph.

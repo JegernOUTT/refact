@@ -156,4 +156,3 @@ mod tool_task_wait_for_agents;
 mod tool_tasks;
 mod tool_worktree_create;
 mod tool_worktree_merge;
-pub(crate) mod tool_worktree_sync;

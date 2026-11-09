@@ -63,44 +63,23 @@ fn manifest_versions_are_unique_and_increasing() {
 }
 
 #[test]
-fn worktree_sync_is_available_to_lifecycle_modes_only() {
-    let modes = embedded_defaults("modes");
-    let parse = |name: &str| {
-        let content = modes
-            .iter()
-            .find(|(filename, _)| filename == &format!("{name}.yaml"))
-            .unwrap_or_else(|| panic!("missing mode {name}"));
-        serde_yaml::from_str::<serde_yaml::Value>(&content.1).unwrap()
-    };
-    for (name, previous_version) in [
-        ("agent", 30),
-        ("solo", 2),
-        ("task_agent", 29),
-        ("task_planner", 33),
-        ("design", 28),
-    ] {
-        let mode = parse(name);
-        let tools = mode["tools"].as_sequence().expect("mode tools list");
-        assert!(
-            tools
-                .iter()
-                .any(|tool| tool.as_str() == Some("worktree_sync")),
-            "{name} must expose worktree_sync"
-        );
-        assert!(
-            mode["schema_version"].as_u64().unwrap() > previous_version,
-            "{name} must upgrade existing installations"
-        );
-    }
-    for name in ["ask", "brainstorming", "debug", "explore", "learn", "plan"] {
-        let mode = parse(name);
-        let tools = mode["tools"].as_sequence().expect("mode tools list");
-        assert!(
-            !tools
-                .iter()
-                .any(|tool| tool.as_str() == Some("worktree_sync")),
-            "read-only mode {name} must not expose worktree_sync"
-        );
+fn shipped_modes_exclude_native_sync_and_recommend_shell_git() {
+    for (filename, content) in embedded_defaults("modes") {
+        assert!(!content.contains("worktree_sync"), "{filename}");
+        if [
+            "agent.yaml",
+            "solo.yaml",
+            "design.yaml",
+            "task_agent.yaml",
+            "task_planner.yaml",
+        ]
+        .contains(&filename.as_str())
+        {
+            assert!(
+                content.contains("shell Git status, merge, add and commit"),
+                "{filename}"
+            );
+        }
     }
 }
 
@@ -316,7 +295,7 @@ fn audit_baseline(name: &str, version: u32) -> String {
 }
 
 #[test]
-fn audit_bumps_every_mode_exactly_once_above_its_previous_manifest_max() {
+fn audit_modes_preserve_baselines_and_record_current_revision() {
     let manifest = shipped_defaults();
     let embedded: HashMap<_, _> = embedded_defaults("modes").into_iter().collect();
     assert_eq!(AUDIT_BASELINE_MODES.len(), 24);
@@ -324,7 +303,7 @@ fn audit_bumps_every_mode_exactly_once_above_its_previous_manifest_max() {
     for &(name, old_version) in AUDIT_BASELINE_MODES {
         let key = format!("modes/{name}.yaml");
         let entries = &manifest[&key];
-        assert_eq!(entries[entries.len() - 2].0, old_version);
+        assert!(entries.iter().any(|(version, _)| *version == old_version));
         let previous_max = entries[..entries.len() - 1]
             .iter()
             .map(|(v, _)| *v)
@@ -562,7 +541,6 @@ fn audited_mode_semantic_workflows_and_confirmation_boundaries() {
     for tool in [
         "worktree_create",
         "worktree_merge",
-        "worktree_sync",
         "shell",
         "process_start",
         "process_list",
@@ -600,7 +578,6 @@ fn audited_mode_semantic_workflows_and_confirmation_boundaries() {
             "process_start",
             "worktree_create",
             "worktree_merge",
-            "worktree_sync",
         ] {
             assert!(!has(&modes[id], tool), "{id} must exclude {tool}");
         }

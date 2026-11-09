@@ -137,9 +137,7 @@ export const WorktreeMenu: React.FC<WorktreeMenuProps> = ({
         record: currentRecord,
         response,
         sync: handoff.sync,
-        toolAvailable: handoff.toolAvailable,
         files,
-        selector: { worktree_id: handoff.sync.id },
       });
       await sendUserMessage(chatId, prompt, config, apiKey, true);
       setLocalFeedback("Conflict resolution request sent to Refact.");
