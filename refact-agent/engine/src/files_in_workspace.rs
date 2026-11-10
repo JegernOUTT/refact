@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use indexmap::IndexSet;
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
-use notify::event::{AccessKind, AccessMode, CreateKind, ModifyKind, RemoveKind};
+use notify::event::{AccessKind, AccessMode, CreateKind, ModifyKind, RemoveKind, RenameMode};
 use ropey::Rope;
 use tokio::io::AsyncReadExt;
 use tokio::sync::{RwLock as ARwLock, Mutex as AMutex, Notify, mpsc};
@@ -842,27 +842,47 @@ pub(crate) async fn recover_file_index_watcher_drops(gcx: Arc<GlobalContext>) {
         .documents_state
         .file_watcher_dropped_events
         .load(Ordering::Relaxed);
-    if !gcx.file_index.observe_watcher_drops(dropped) || gcx.shutdown_flag.load(Ordering::Relaxed) {
+    if gcx.shutdown_flag.load(Ordering::Relaxed) {
         return;
     }
-    let roots = crate::files_correction::get_unscoped_project_dirs(gcx.clone()).await;
-    if let Some(task) =
+    let task = if gcx.file_index.observe_watcher_drops(dropped) {
+        let roots = crate::files_correction::get_unscoped_project_dirs(gcx.clone()).await;
         crate::file_index::spawn_build(gcx.file_index.clone(), roots, gcx.shutdown_flag.clone())
-    {
+    } else {
+        crate::file_index::spawn_due_build(gcx.file_index.clone(), gcx.shutdown_flag.clone())
+    };
+    if let Some(task) = task {
         let mut tasks = gcx.documents_state.watch_registration_tasks.lock().unwrap();
         tasks.retain(|task| !task.is_finished());
         tasks.push(task);
     }
 }
 
+fn start_file_watcher_event_queue(
+    gcx: &Arc<GlobalContext>,
+    gcx_weak: Weak<GlobalContext>,
+    receiver: mpsc::Receiver<Event>,
+) {
+    let old_event_task = std::mem::replace(
+        &mut *gcx.documents_state.file_watcher_event_task.lock().unwrap(),
+        Some(tokio::spawn(run_file_watcher_event_queue(
+            gcx_weak, receiver,
+        ))),
+    );
+    if let Some(handle) = old_event_task {
+        handle.abort();
+    }
+}
+
 async fn run_file_watcher_event_queue(
     gcx_weak: Weak<GlobalContext>,
-    mut receiver: mpsc::Receiver<Event>,
+    receiver: mpsc::Receiver<Event>,
 ) {
     let shutdown_flag = match gcx_weak.upgrade() {
         Some(gcx) => gcx.shutdown_flag.clone(),
         None => return,
     };
+    let mut receiver = Some(receiver);
     let mut recovery_tick = tokio::time::interval(Duration::from_millis(250));
     loop {
         let event = tokio::select! {
@@ -871,11 +891,17 @@ async fn run_file_watcher_event_queue(
                 recover_file_index_watcher_drops(gcx).await;
                 continue;
             }
-            event = receiver.recv() => event,
+            event = async {
+                match receiver.as_mut() {
+                    Some(receiver) => receiver.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => event,
             _ = wait_for_shutdown_flag(shutdown_flag.clone()) => return,
         };
         let Some(event) = event else {
-            return;
+            receiver = None;
+            continue;
         };
         file_watcher_event(event, gcx_weak.clone()).await;
     }
@@ -888,22 +914,16 @@ pub async fn watcher_init(gcx: Arc<GlobalContext>) {
         event_tx,
         gcx.documents_state.file_watcher_dropped_events.clone(),
     );
-    let watcher = match RecommendedWatcher::new(event_callback, Config::default()) {
+    let watcher = RecommendedWatcher::new(event_callback, Config::default());
+    // The queue also drives the deferred inventory walk tick, so it runs without a watcher.
+    start_file_watcher_event_queue(&gcx, gcx_weak, event_rx);
+    let watcher = match watcher {
         Ok(w) => w,
         Err(e) => {
             tracing::warn!("Failed to create file watcher (file watching disabled): {e}");
             return;
         }
     };
-    let old_event_task = std::mem::replace(
-        &mut *gcx.documents_state.file_watcher_event_task.lock().unwrap(),
-        Some(tokio::spawn(run_file_watcher_event_queue(
-            gcx_weak, event_rx,
-        ))),
-    );
-    if let Some(handle) = old_event_task {
-        handle.abort();
-    }
 
     let mut watch_folders = crate::files_correction::get_raw_project_dirs(gcx.clone()).await;
     watch_folders.extend(crate::files_correction::get_unscoped_project_dirs(gcx.clone()).await);
@@ -2807,6 +2827,20 @@ async fn flush_debounced_file_event_worker(gcx: Arc<GlobalContext>) {
     }
 }
 
+fn subtree_scan_target(event: &Event) -> Option<PathBuf> {
+    let path = match &event.kind {
+        EventKind::Create(_) => event.paths.first(),
+        EventKind::Modify(ModifyKind::Name(RenameMode::From)) => None,
+        EventKind::Modify(ModifyKind::Name(RenameMode::To)) => event.paths.first(),
+        EventKind::Modify(ModifyKind::Name(_)) if event.paths.len() == 2 => event.paths.get(1),
+        EventKind::Modify(ModifyKind::Name(_)) => event.paths.first(),
+        _ => None,
+    }?;
+    std::fs::symlink_metadata(path)
+        .is_ok_and(|metadata| metadata.is_dir())
+        .then(|| path.clone())
+}
+
 pub async fn file_watcher_event(event: Event, gcx_weak: Weak<GlobalContext>) {
     async fn update_directory_watch_registration(
         gcx: Arc<GlobalContext>,
@@ -2918,19 +2952,24 @@ pub async fn file_watcher_event(event: Event, gcx_weak: Weak<GlobalContext>) {
         // Inventory receives all names, including extensionless files and empty folders,
         // before the source-code indexing filters. A directory move may contain unseen
         // descendants: report uncertainty until the next bounded inventory rebuild.
-        for path in &event.paths {
-            gcx.file_index.refresh(path);
-        }
-        if gcx.file_index.state() == crate::file_index::FileIndexState::Degraded
-            || matches!(
-                event.kind,
-                EventKind::Create(_)
-                    | EventKind::Remove(_)
-                    | EventKind::Modify(ModifyKind::Name(_))
-            )
-        {
-            gcx.file_index.mark_degraded();
+        let structural = matches!(
+            event.kind,
+            EventKind::Create(_) | EventKind::Remove(_) | EventKind::Modify(ModifyKind::Name(_))
+        );
+        if gcx.file_index.observe_event(&event.paths, structural) {
             let roots = crate::files_correction::get_unscoped_project_dirs(gcx.clone()).await;
+            if let Some(dir) = subtree_scan_target(&event) {
+                if let Some(task) = crate::file_index::request_subtree_scan(
+                    gcx.file_index.clone(),
+                    dir,
+                    roots.clone(),
+                    gcx.shutdown_flag.clone(),
+                ) {
+                    let mut tasks = gcx.documents_state.watch_registration_tasks.lock().unwrap();
+                    tasks.retain(|task| !task.is_finished());
+                    tasks.push(task);
+                }
+            }
             if let Some(task) = crate::file_index::spawn_build(
                 gcx.file_index.clone(),
                 roots,
@@ -4224,6 +4263,223 @@ mod tests {
                 !path_is_excluded_from_watch(&root, &root.join(&kept), &indexing_everywhere),
                 "{} must stay watched",
                 kept.display()
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn moved_in_directory_hardlink_is_inventoried_without_full_walk() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let workspace = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let root = normalized(workspace.path());
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![root.clone()];
+        let secret = normalized(outside.path()).join(".env");
+        std::fs::write(&secret, "private").unwrap();
+        let staging = normalized(outside.path()).join("incoming");
+        std::fs::create_dir_all(staging.join("nested")).unwrap();
+        std::fs::hard_link(&secret, staging.join("nested/plain.txt")).unwrap();
+        let roots = vec![root.clone()];
+        let index = gcx.file_index.clone();
+        let started = crate::file_index::tests_now_ms();
+        assert!(index.request_walk_at(roots.clone(), started).is_some());
+        crate::file_index::build_blocking(&index, &roots, &AtomicBool::new(false));
+        assert!(index
+            .complete_walk_at(
+                roots.clone(),
+                crate::file_index::tests_now_ms(),
+                60 * 60_000,
+                crate::file_index::FileIndexWalkOutcome::Complete,
+                false,
+            )
+            .is_none());
+        let facts = index.lookup_or_stat(&secret).unwrap();
+        assert!(index.aliases_of(&facts, &secret).is_empty());
+
+        let moved = root.join("incoming");
+        std::fs::rename(&staging, &moved).unwrap();
+        let event = notify::Event::new(notify::EventKind::Modify(ModifyKind::Name(
+            notify::event::RenameMode::Both,
+        )))
+        .add_path(staging.clone())
+        .add_path(moved.clone());
+        file_watcher_event(event, Arc::downgrade(&gcx)).await;
+        let scans: Vec<_> = gcx
+            .documents_state
+            .watch_registration_tasks
+            .lock()
+            .unwrap()
+            .drain(..)
+            .collect();
+        for scan in scans {
+            scan.await.unwrap();
+        }
+
+        assert!(!index.status().walk_running, "no full walk may run here");
+        assert_eq!(
+            index.aliases_of(&facts, &secret),
+            vec![moved.join("nested/plain.txt")]
+        );
+        assert!(index.get(&moved.join("nested")).is_none());
+        assert!(index
+            .snapshot()
+            .iter()
+            .any(|(path, facts)| path == &moved.join("nested") && facts.is_none()));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn deferred_walk_is_served_after_the_watcher_channel_closes() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let workspace = tempfile::tempdir().unwrap();
+        let root = normalized(workspace.path());
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![root.clone()];
+        let roots = vec![root.clone()];
+        let index = gcx.file_index.clone();
+        let long_ago = crate::file_index::tests_now_ms() - 60_000;
+        assert!(index.request_walk_at(roots.clone(), long_ago).is_some());
+        assert!(index.request_walk_at(roots.clone(), long_ago).is_none());
+        assert!(index
+            .complete_walk_at(
+                roots.clone(),
+                long_ago,
+                0,
+                crate::file_index::FileIndexWalkOutcome::Complete,
+                true,
+            )
+            .is_none());
+        assert!(
+            index.status().rebuild_pending,
+            "wanted, due, and not started"
+        );
+
+        let (tx, rx) = mpsc::channel::<Event>(1);
+        drop(tx);
+        start_file_watcher_event_queue(&gcx, Arc::downgrade(&gcx), rx);
+        let served = tokio::time::timeout(Duration::from_secs(20), async {
+            while index.status().rebuild_pending || index.status().walk_running {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        assert!(served.is_ok(), "the tick must serve the deferred walk");
+        assert!(index.covers_roots(&roots));
+        let task = gcx
+            .documents_state
+            .file_watcher_event_task
+            .lock()
+            .unwrap()
+            .take()
+            .unwrap();
+        assert!(!task.is_finished(), "the tick outlives the watcher channel");
+        gcx.shutdown_flag.store(true, Ordering::Relaxed);
+        tokio::time::timeout(Duration::from_secs(10), task)
+            .await
+            .expect("the tick must stop on shutdown")
+            .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn event_handling_continues_while_a_subtree_scan_is_blocked() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let workspace = tempfile::tempdir().unwrap();
+        let root = normalized(workspace.path());
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![root.clone()];
+        let created = root.join("created");
+        std::fs::create_dir_all(created.join("inner")).unwrap();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let release_rx = Arc::new(StdMutex::new(release_rx));
+        let blocked_until_release = Arc::new(AtomicBool::new(false));
+        let hook_released = blocked_until_release.clone();
+        gcx.file_index
+            .set_subtree_scan_hook(Some(Arc::new(move |_dir: &Path| {
+                let _ = started_tx.send(());
+                let released = release_rx
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(10))
+                    .is_ok();
+                hook_released.store(released, Ordering::SeqCst);
+            })));
+        let create = notify::Event::new(notify::EventKind::Create(CreateKind::Folder))
+            .add_path(created.clone());
+        file_watcher_event(create, Arc::downgrade(&gcx)).await;
+        tokio::task::spawn_blocking(move || started_rx.recv_timeout(Duration::from_secs(10)))
+            .await
+            .unwrap()
+            .expect("the scan must have started");
+
+        let later = root.join("later.txt");
+        std::fs::write(&later, "x").unwrap();
+        file_watcher_event(modify_event(&later), Arc::downgrade(&gcx)).await;
+        assert!(gcx.file_index.get(&later).is_some());
+        recover_file_index_watcher_drops(gcx.clone()).await;
+
+        release_tx.send(()).unwrap();
+        let task = gcx
+            .documents_state
+            .watch_registration_tasks
+            .lock()
+            .unwrap()
+            .drain(..)
+            .collect::<Vec<_>>();
+        tokio::time::timeout(Duration::from_secs(30), async {
+            for task in task {
+                let _ = task.await;
+            }
+        })
+        .await
+        .expect("the subtree scan must finish before shutdown");
+        gcx.shutdown_flag.store(true, Ordering::Relaxed);
+        assert!(
+            blocked_until_release.load(Ordering::SeqCst),
+            "event handling must not wait for the subtree scan"
+        );
+        assert!(gcx.file_index.get(&created.join("inner")).is_none());
+        assert!(gcx
+            .file_index
+            .snapshot()
+            .iter()
+            .any(|(path, facts)| path == &created.join("inner") && facts.is_none()));
+    }
+
+    #[test]
+    fn subtree_scan_targets_rename_destination_and_real_directories_only() {
+        let temp = tempfile::tempdir().unwrap();
+        let old = temp.path().join("old");
+        let new = temp.path().join("new");
+        std::fs::create_dir(&old).unwrap();
+        std::fs::write(&new, "file").unwrap();
+        let both = notify::Event::new(notify::EventKind::Modify(ModifyKind::Name(
+            RenameMode::Both,
+        )))
+        .add_path(old.clone())
+        .add_path(new.clone());
+        assert_eq!(
+            subtree_scan_target(&both),
+            None,
+            "only the destination counts"
+        );
+        let from = notify::Event::new(notify::EventKind::Modify(ModifyKind::Name(
+            RenameMode::From,
+        )))
+        .add_path(old.clone());
+        assert_eq!(subtree_scan_target(&from), None);
+        let created =
+            notify::Event::new(notify::EventKind::Create(CreateKind::Folder)).add_path(old.clone());
+        assert_eq!(subtree_scan_target(&created), Some(old.clone()));
+        #[cfg(unix)]
+        {
+            let external = tempfile::tempdir().unwrap();
+            let link = temp.path().join("link");
+            std::os::unix::fs::symlink(external.path(), &link).unwrap();
+            let linked =
+                notify::Event::new(notify::EventKind::Create(CreateKind::Any)).add_path(link);
+            assert_eq!(
+                subtree_scan_target(&linked),
+                None,
+                "a link is never scanned"
             );
         }
     }
