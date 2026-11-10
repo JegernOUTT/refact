@@ -189,6 +189,34 @@ describe("app platform boundaries", () => {
     });
     expect(isAppWorkspace({ ...workspace, bindings: [] })).toBe(false);
   });
+  it("accepts valid workspaces above the former 512 KiB JSON cap", () => {
+    const blob = "s".repeat(700 * 1024);
+    const binding = {
+      binding_id: "00000000-0000-4000-8000-000000000001",
+      app_id: "00000000-0000-4000-8000-000000000002",
+      params: { seed: blob },
+      state: { notes: blob, list: [blob] },
+    };
+    const workspace = {
+      schema_version: 1,
+      revision: 9,
+      bindings: [binding],
+      layout: {
+        kind: "leaf",
+        tabs: [{ kind: "app", binding_id: binding.binding_id }],
+      },
+    };
+    expect(JSON.stringify(workspace).length).toBeGreaterThan(2 * 1024 * 1024);
+    expect(isAppWorkspace(workspace)).toBe(true);
+    const copy = JSON.parse(JSON.stringify(workspace)) as typeof workspace;
+    expect(copy.bindings[0].state.notes).toBe(blob);
+    expect(
+      isAppWorkspace({
+        ...workspace,
+        bindings: [{ ...binding, state: blob }],
+      }),
+    ).toBe(false);
+  });
   it("stages context in the fixed bound chat without changing other chat drafts", () => {
     const context = {
       id: "selection",

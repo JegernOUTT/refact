@@ -379,9 +379,6 @@ pub async fn execute(app: &AppState, caller: Caller, command: Command) -> Result
             }
             super::validate_binding(app, &runtime, app_id, chat_id.as_deref(), binding_id).await?;
             refact_apps_core::validate_identifier(&channel)?;
-            if serde_json::to_vec(&data).map_err(|e| e.to_string())?.len() > 65536 {
-                return Err("event too large".into());
-            }
             runtime.events.emit(
                 "app_event",
                 json!({"app_id":app_id,"binding_id":binding_id,"channel":channel,"data":data}),
@@ -821,9 +818,6 @@ pub async fn execute(app: &AppState, caller: Caller, command: Command) -> Result
         } => {
             let view = checked_view(app, &runtime, view_id, Some(&view_token)).await?;
             refact_apps_core::validate_identifier(&channel)?;
-            if serde_json::to_vec(&data).map_err(|e| e.to_string())?.len() > 64 * 1024 {
-                return Err("event exceeds limit".into());
-            }
             runtime.events.emit(
                 "app_event",
                 json!({"app_id":view.app_id,"binding_id":view.binding_id,"chat_id":view.chat_id,"view_id":view_id,"channel":channel,"data":data}),

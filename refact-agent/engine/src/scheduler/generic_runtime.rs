@@ -1010,10 +1010,11 @@ impl GenericAutomationRuntime {
             {
                 continue;
             }
-            if serde_json::to_vec(&payload)
-                .map_err(|e| e.to_string())?
-                .len()
-                > definition.policy.max_event_bytes
+            if definition.policy.max_event_bytes > 0
+                && serde_json::to_vec(&payload)
+                    .map_err(|e| e.to_string())?
+                    .len()
+                    > definition.policy.max_event_bytes
             {
                 return Err("event bounds".into());
             }
@@ -1191,7 +1192,7 @@ fn matches_filter(filter: &Value, payload: &Value) -> bool {
             .is_some_and(|fields| fields.iter().all(|(k, v)| payload.get(k) == Some(v)))
 }
 fn select(payload: &Value, fields: &[String], max: usize) -> Result<Value, String> {
-    if fields.len() > 128 || max > 262144 {
+    if fields.len() > 128 {
         return Err("transform bounds".into());
     }
     let mut output = serde_json::Map::new();
@@ -1201,10 +1202,11 @@ fn select(payload: &Value, fields: &[String], max: usize) -> Result<Value, Strin
         }
     }
     let output = Value::Object(output);
-    if serde_json::to_vec(&output)
-        .map_err(|e| e.to_string())?
-        .len()
-        > max
+    if max > 0
+        && serde_json::to_vec(&output)
+            .map_err(|e| e.to_string())?
+            .len()
+            > max
     {
         return Err("transform output bounds".into());
     }
@@ -1810,6 +1812,16 @@ mod tests {
             json!({"public":7})
         );
         assert!(select(&payload, &["secret".into()], 2).is_err());
+        let large = json!({"public":"history".repeat(50000),"secret":"omitted"});
+        assert_eq!(
+            select(&large, &["public".into()], 0).unwrap(),
+            json!({"public":large["public"]})
+        );
+        assert_eq!(
+            select(&large, &["public".into()], 500000).unwrap(),
+            json!({"public":large["public"]})
+        );
+        assert!(select(&large, &["public".into()], 262144).is_err());
         assert!(matches_filter(&json!({"public":7}), &payload));
         assert!(!matches_filter(&json!({"public":8}), &payload));
         assert!(!matches_filter(&json!("invalid"), &payload));

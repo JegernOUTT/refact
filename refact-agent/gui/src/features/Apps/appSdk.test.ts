@@ -192,6 +192,89 @@ describe("AppBridgeHost", () => {
     expect(createAppChannel()).not.toBe(createAppChannel());
     expect(createAppChannel()).toMatch(/^[0-9a-f]{32}$/);
   });
+
+  it("delivers state, event and action requests above the former 1M char cap exactly", async () => {
+    const big = "ä".repeat(1_200_000) + "z".repeat(300_000);
+    const setState = vi.fn((params: unknown) => ({
+      state: (params as { state: unknown }).state,
+      revision: 1,
+    }));
+    const emit = vi.fn(() => "emitted");
+    const action = vi.fn(() => "requested");
+    const { send, posted, rejected } = setup({
+      "state.set": setState,
+      "event.emit": emit,
+      "action.request": action,
+    });
+    send(env({ id: "c1", method: "ready", params: {} }));
+    await flush();
+    const state = { doc: big, rows: [big.slice(0, 10)] };
+    send(env({ id: "c2", method: "state.set", params: { state } }));
+    send(
+      env({
+        id: "c3",
+        method: "event.emit",
+        params: { name: "big.event", payload: { blob: big } },
+      }),
+    );
+    send(
+      env({
+        id: "c4",
+        method: "action.request",
+        params: { name: "big.action", payload: [big] },
+      }),
+    );
+    await flush();
+    expect(rejected).toEqual([]);
+    expect(setState).toHaveBeenCalledTimes(1);
+    expect(setState.mock.calls[0][0]).toEqual({ state });
+    expect(emit.mock.calls[0]).toEqual([
+      { name: "big.event", payload: { blob: big } },
+      expect.anything(),
+    ]);
+    expect(action.mock.calls[0]).toEqual([
+      { name: "big.action", payload: [big] },
+      expect.anything(),
+    ]);
+    const responses = posted as AppEnvelope[];
+    expect(responses.find((m) => m.id === "c2")).toMatchObject({
+      ok: true,
+      result: { state, revision: 1 },
+    });
+    expect(responses.find((m) => m.id === "c3")?.result).toBe("emitted");
+    expect(responses.find((m) => m.id === "c4")?.result).toBe("requested");
+  });
+
+  it("keeps context and capture response limits", async () => {
+    const stage = vi.fn(() => "ok");
+    const { send, posted, rejected, host } = setup({ "context.stage": stage });
+    send(env({ id: "c1", method: "ready", params: {} }));
+    await flush();
+    send(
+      env({
+        id: "c2",
+        method: "context.stage",
+        params: { text: "x".repeat(200_001) },
+      }),
+    );
+    await flush();
+    expect(stage).not.toHaveBeenCalled();
+    expect(
+      (posted as AppEnvelope[]).find((m) => m.id === "c2")?.error?.code,
+    ).toBe("invalid_request");
+    const pending = host.request("capture", {}, 50);
+    const req = posted.at(-1) as AppEnvelope;
+    send(
+      env({
+        kind: "response",
+        id: req.id,
+        ok: true,
+        result: "x".repeat(12_000_001),
+      }),
+    );
+    expect(rejected).toContain("size");
+    await expect(pending).rejects.toMatchObject({ code: "timeout" });
+  });
 });
 
 describe("appSdkRuntime theme tokens", () => {

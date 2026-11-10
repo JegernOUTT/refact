@@ -6,19 +6,38 @@ use std::{
 
 use refact_apps_core::{ActionOperation, StateScope};
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
-const MAX_PAYLOAD_BYTES: usize = 64 * 1024;
-const MAX_RESULT_BYTES: usize = 512 * 1024;
 const MAX_RECEIPT_BYTES: usize = 16 * 1024 * 1024;
 const RECEIPT_TTL: Duration = Duration::from_secs(600);
 const MAX_RECEIPTS_PER_VIEW: usize = 128;
 const MAX_RECEIPTS: usize = 16_384;
 
+fn canonicalize_payload(value: &mut Value) {
+    match value {
+        Value::Object(object) => {
+            for value in object.values_mut() {
+                canonicalize_payload(value);
+            }
+            object.sort_keys();
+        }
+        Value::Array(array) => {
+            for value in array {
+                canonicalize_payload(value);
+            }
+        }
+        Value::Number(number) if number.is_f64() && number.as_f64() == Some(0.0) => {
+            *number = serde_json::Number::from_f64(0.0).unwrap();
+        }
+        _ => {}
+    }
+}
+
 struct Receipt {
     action_id: String,
-    payload: Value,
+    payload_digest: [u8; 32],
     result: Result<Value, String>,
     expires: Instant,
     completed: bool,
@@ -26,19 +45,17 @@ struct Receipt {
 }
 
 impl Receipt {
-    fn finish(&mut self, result: &Result<Value, String>) {
+    fn finish(&mut self, result: &Result<Value, String>, available: usize) {
         let bytes = serde_json::to_vec(result)
             .map(|bytes| bytes.len())
             .unwrap_or(usize::MAX);
-        if bytes <= MAX_RESULT_BYTES {
+        if bytes <= available {
             self.result = result.clone();
-            self.reserved_bytes = serde_json::to_vec(&self.payload)
-                .map(|bytes| bytes.len())
-                .unwrap_or(MAX_PAYLOAD_BYTES)
-                + self.action_id.len()
-                + bytes;
+            self.reserved_bytes += bytes;
         } else {
-            self.result = Err("action completed; result exceeds receipt limit and was not cached; request will not be replayed".into());
+            self.result = Err(
+                "action completed; result was not retained; request will not be replayed".into(),
+            );
         }
     }
 }
@@ -72,12 +89,11 @@ pub async fn execute(
     if request_id.is_nil() {
         return Err("action request_id must not be nil".into());
     }
-    let payload_bytes = serde_json::to_vec(&payload)
-        .map_err(|e| e.to_string())?
-        .len();
-    if payload_bytes > MAX_PAYLOAD_BYTES {
-        return Err("action payload exceeds 64KiB".into());
-    }
+    let mut canonical_payload = payload.clone();
+    canonicalize_payload(&mut canonical_payload);
+    let payload_digest: [u8; 32] =
+        Sha256::digest(serde_json::to_vec(&canonical_payload).map_err(|e| e.to_string())?).into();
+    drop(canonical_payload);
     let activation = runtime.activation.lock().await;
     let current = runtime.views.lock().await.lookup(view_id)?;
     if current.generation != view.generation || current.app_id != view.app_id {
@@ -131,7 +147,7 @@ pub async fn execute(
     });
     let key = (view.generation, request_id);
     if let Some(receipt) = actions.receipts.get(&key) {
-        if receipt.action_id != action_id || receipt.payload != payload {
+        if receipt.action_id != action_id || receipt.payload_digest != payload_digest {
             return Err("action request_id payload conflict".into());
         }
         return receipt.result.clone();
@@ -148,7 +164,7 @@ pub async fn execute(
     if actions.receipts.len() >= MAX_RECEIPTS {
         return Err("runtime action receipt capacity reached".into());
     }
-    let reserved_bytes = payload_bytes + action_id.len() + MAX_RESULT_BYTES;
+    let reserved_bytes = 32 + action_id.len() + 128;
     if actions
         .receipts
         .values()
@@ -163,7 +179,7 @@ pub async fn execute(
         key,
         Receipt {
             action_id: action_id.to_owned(),
-            payload: payload.clone(),
+            payload_digest,
             result: Err("action interrupted; outcome unknown, request will not be replayed".into()),
             expires: now + RECEIPT_TTL,
             completed: false,
@@ -193,8 +209,10 @@ pub async fn execute(
             Err(error) => Err(error),
         };
         let mut actions = runtime.actions.lock().await;
+        let available = MAX_RECEIPT_BYTES
+            .saturating_sub(actions.receipts.values().map(|r| r.reserved_bytes).sum());
         if let Some(receipt) = actions.receipts.get_mut(&key) {
-            receipt.finish(&result);
+            receipt.finish(&result, available);
             receipt.completed = true;
             receipt.expires = Instant::now() + RECEIPT_TTL;
         }
@@ -257,8 +275,10 @@ pub async fn execute(
         } => unreachable!("refresh handled at admission"),
     };
     let mut actions = runtime.actions.lock().await;
+    let available =
+        MAX_RECEIPT_BYTES.saturating_sub(actions.receipts.values().map(|r| r.reserved_bytes).sum());
     if let Some(receipt) = actions.receipts.get_mut(&key) {
-        receipt.finish(&result);
+        receipt.finish(&result, available);
         receipt.completed = true;
         receipt.expires = Instant::now() + RECEIPT_TTL;
     }
@@ -315,21 +335,32 @@ mod tests {
             .check(id, registration["view_token"].as_str())
             .unwrap();
         let request = Uuid::new_v4();
-        let receipt = execute(&app, &runtime, id, &view, "notify", json!({"x":1}), request)
+        let payload: Value =
+            serde_json::from_str(r#"{"a":{"x":1,"y":2},"b":[{"c":3,"d":4}],"z":-0.0}"#).unwrap();
+        let reordered: Value =
+            serde_json::from_str(r#"{"z":0.0,"b":[{"d":4,"c":3}],"a":{"y":2,"x":1}}"#).unwrap();
+        assert_eq!(payload, reordered);
+        let receipt = execute(&app, &runtime, id, &view, "notify", payload, request)
             .await
             .unwrap();
         assert_eq!(
-            execute(&app, &runtime, id, &view, "notify", json!({"x":1}), request)
+            execute(&app, &runtime, id, &view, "notify", reordered, request)
                 .await
                 .unwrap(),
             receipt
         );
-        assert!(
-            execute(&app, &runtime, id, &view, "notify", json!({"x":2}), request)
-                .await
-                .unwrap_err()
-                .contains("conflict")
-        );
+        assert!(execute(
+            &app,
+            &runtime,
+            id,
+            &view,
+            "notify",
+            json!({"a":{"x":1,"y":2},"b":[{"c":3,"d":5}],"z":0.0}),
+            request
+        )
+        .await
+        .unwrap_err()
+        .contains("conflict"));
         let events = runtime.events.snapshot();
         let emitted: Vec<_> = events.iter().filter(|e| e.kind == "app_event").collect();
         assert_eq!(emitted.len(), 1);
@@ -369,12 +400,59 @@ mod tests {
         )
         .await
         .is_err());
+        let large_request = Uuid::new_v4();
+        let large_payload =
+            json!({"expected_revision":0,"value":"x".repeat(MAX_RECEIPT_BYTES + 1)});
+        let large_result = execute(
+            &app,
+            &runtime,
+            id,
+            &view,
+            "save",
+            large_payload.clone(),
+            large_request,
+        )
+        .await
+        .unwrap();
+        assert_eq!(large_result["value"], large_payload["value"]);
+        let retry = execute(
+            &app,
+            &runtime,
+            id,
+            &view,
+            "save",
+            large_payload,
+            large_request,
+        )
+        .await
+        .unwrap_err();
+        assert!(retry.contains("not retained"));
+        assert!(
+            runtime
+                .actions
+                .lock()
+                .await
+                .receipts
+                .values()
+                .map(|r| r.reserved_bytes)
+                .sum::<usize>()
+                <= MAX_RECEIPT_BYTES
+        );
+        assert_eq!(
+            runtime
+                .store
+                .read_state("actions", StateScope::Standalone)
+                .await
+                .unwrap()
+                .revision,
+            1
+        );
         let request = Uuid::new_v4();
-        let payload = json!({"expected_revision":0,"value":{"saved":true}});
+        let payload = json!({"expected_revision":1,"value":{"saved":true}});
         let state = execute(&app, &runtime, id, &view, "save", payload.clone(), request)
             .await
             .unwrap();
-        assert_eq!(state["revision"], 1);
+        assert_eq!(state["revision"], 2);
         assert_eq!(
             execute(&app, &runtime, id, &view, "save", payload.clone(), request)
                 .await

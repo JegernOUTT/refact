@@ -32,7 +32,6 @@ export function isAppWorkspace(value: unknown): value is AppWorkspace {
     value.bindings.length > 32
   )
     return false;
-  if (JSON.stringify(value).length > 512 * 1024) return false;
   const uuid =
     /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   const ids = new Set<string>();

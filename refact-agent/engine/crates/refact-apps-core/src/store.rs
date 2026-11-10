@@ -92,6 +92,9 @@ fn child(dir: &Dir, name: &str, create: bool) -> AppResult<Dir> {
     dir.open_dir_nofollow(name).map_err(err)
 }
 fn read(dir: &Dir, path: &str, limit: usize) -> AppResult<Vec<u8>> {
+    read_optional_limit(dir, path, Some(limit))
+}
+fn read_optional_limit(dir: &Dir, path: &str, limit: Option<usize>) -> AppResult<Vec<u8>> {
     let (parent, leaf) = parent(dir, path, false)?;
     let mut options = OpenOptions::new();
     options.read(true).follow(FollowSymlinks::No);
@@ -106,7 +109,7 @@ fn read(dir: &Dir, path: &str, limit: usize) -> AppResult<Vec<u8>> {
     }
     let mut file = parent.open_with(leaf, &options).map_err(err)?;
     let metadata = file.metadata().map_err(err)?;
-    if !metadata.is_file() || metadata.len() > limit as u64 {
+    if !metadata.is_file() || limit.is_some_and(|limit| metadata.len() > limit as u64) {
         return Err("not a bounded regular file".into());
     }
     #[cfg(unix)]
@@ -117,11 +120,15 @@ fn read(dir: &Dir, path: &str, limit: usize) -> AppResult<Vec<u8>> {
         }
     }
     let mut bytes = Vec::new();
-    Read::by_ref(&mut file)
-        .take(limit as u64 + 1)
-        .read_to_end(&mut bytes)
-        .map_err(err)?;
-    if bytes.len() > limit {
+    if let Some(limit) = limit {
+        Read::by_ref(&mut file)
+            .take(limit as u64 + 1)
+            .read_to_end(&mut bytes)
+            .map_err(err)?;
+    } else {
+        file.read_to_end(&mut bytes).map_err(err)?;
+    }
+    if limit.is_some_and(|limit| bytes.len() > limit) {
         return Err("file exceeds limit".into());
     }
     Ok(bytes)
@@ -795,9 +802,6 @@ impl AppStore {
                 value,
             };
             let bytes = serde_json::to_vec(&result).map_err(err)?;
-            if bytes.len() > MAX_FILE_BYTES {
-                return Err("state exceeds limit".into());
-            }
             atomic(&child(&dir, ".local", true)?, &state_path(&scope), &bytes)?;
             Ok(result)
         })
@@ -877,12 +881,81 @@ fn state(dir: &Dir, scope: &StateScope) -> AppResult<AppState> {
     if !local.try_exists(&path).map_err(err)? {
         return Ok(AppState::default());
     }
-    serde_json::from_slice(&read(&local, &path, MAX_FILE_BYTES)?).map_err(err)
+    serde_json::from_slice(&read_optional_limit(&local, &path, None)?).map_err(err)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn state_symlink_is_refused_for_read_and_write() {
+        let project = tempfile::tempdir().unwrap();
+        let store = AppStore::open(project.path()).await.unwrap();
+        store.create("links", "Links").await.unwrap();
+        store
+            .write_state(
+                "links",
+                StateScope::Standalone,
+                0,
+                serde_json::json!("safe"),
+            )
+            .await
+            .unwrap();
+        let path = project
+            .path()
+            .join(".refact/apps/links/.local/state/standalone.json");
+        let outside = project.path().join("outside.json");
+        std::fs::write(&outside, br#"{"revision":1,"value":"outside"}"#).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        std::os::unix::fs::symlink(&outside, &path).unwrap();
+        assert!(store
+            .read_state("links", StateScope::Standalone)
+            .await
+            .is_err());
+        assert!(store
+            .write_state("links", StateScope::Standalone, 1, serde_json::Value::Null)
+            .await
+            .is_err());
+        assert_eq!(
+            std::fs::read(&outside).unwrap(),
+            br#"{"revision":1,"value":"outside"}"#
+        );
+    }
+
+    #[tokio::test]
+    async fn large_state_roundtrips_after_reopen_and_obeys_cas() {
+        let project = tempfile::tempdir().unwrap();
+        let store = AppStore::open(project.path()).await.unwrap();
+        store.create("large", "Large").await.unwrap();
+        let value = serde_json::json!({"data": "x".repeat(4 * 1024 * 1024 + 1)});
+        let written = store
+            .write_state("large", StateScope::Standalone, 0, value.clone())
+            .await
+            .unwrap();
+        assert_eq!(written.revision, 1);
+        drop(store);
+        let store = AppStore::open(project.path()).await.unwrap();
+        let loaded = store
+            .read_state("large", StateScope::Standalone)
+            .await
+            .unwrap();
+        assert_eq!(loaded.value, value);
+        assert_eq!(loaded.revision, 1);
+        assert!(store
+            .write_state("large", StateScope::Standalone, 0, serde_json::Value::Null)
+            .await
+            .is_err());
+        assert_eq!(
+            store
+                .read_state("large", StateScope::Standalone)
+                .await
+                .unwrap()
+                .value,
+            value
+        );
+    }
 
     #[tokio::test]
     async fn named_icons_publish_without_files_but_resource_icons_must_exist() {

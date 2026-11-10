@@ -2,6 +2,113 @@ use super::*;
 use serde_json::json;
 
 #[tokio::test]
+async fn worker_http_accepts_large_state_without_weakening_view_origin_or_cas() {
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let gcx = crate::global_context::tests::make_test_gcx().await;
+    *gcx.documents_state.workspace_folders.lock().unwrap() = vec![dir.path().into()];
+    let app = crate::app_state::AppState::from_gcx(gcx).await;
+    let created = execute(
+        &app,
+        Caller::Host,
+        Command::Create {
+            slug: "large-http".into(),
+            name: "Large HTTP".into(),
+        },
+    )
+    .await
+    .unwrap();
+    let id = serde_json::from_value(created["manifest"]["app_id"].clone()).unwrap();
+    execute(
+        &app,
+        Caller::Host,
+        Command::Publish {
+            app_id: id,
+            expected_revision: created["revision"].as_str().unwrap().into(),
+        },
+    )
+    .await
+    .unwrap();
+    let view = execute(
+        &app,
+        Caller::Host,
+        Command::ViewRegister {
+            app_id: id,
+            chat_id: None,
+            binding_id: None,
+        },
+    )
+    .await
+    .unwrap();
+    let value = json!({"history": "metric-42;".repeat(2 * 1024 * 1024)});
+    let command = json!({
+        "action": "state_set", "app_id": id, "scope": {"type": "standalone"},
+        "view_id": view["view_id"], "view_token": view["view_token"],
+        "expected_revision": 0, "value": value,
+    });
+    let bytes = serde_json::to_vec(&command).unwrap();
+    assert!(bytes.len() > 15 * 1024 * 1024);
+    let router = crate::http::routers::make_refact_http_server(app.clone());
+    let request = |bytes: Vec<u8>, origin: &str| {
+        Request::builder()
+            .method("POST")
+            .uri("/v1/apps/commands")
+            .header("content-type", "application/json")
+            .header("host", "localhost:8001")
+            .header("origin", origin)
+            .body(Body::from(bytes))
+            .unwrap()
+    };
+    let response = router
+        .clone()
+        .oneshot(request(bytes.clone(), "http://localhost:8001"))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let result: serde_json::Value =
+        serde_json::from_slice(&hyper::body::to_bytes(response.into_body()).await.unwrap())
+            .unwrap();
+    assert_eq!(result, json!({"revision": 1, "value": value}));
+
+    let conflict = router
+        .clone()
+        .oneshot(request(bytes.clone(), "http://localhost:8001"))
+        .await
+        .unwrap();
+    assert_eq!(conflict.status(), StatusCode::CONFLICT);
+    let denied = router
+        .clone()
+        .oneshot(request(bytes, "null"))
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+    let mut wrong_view = command;
+    wrong_view["expected_revision"] = json!(1);
+    wrong_view["view_token"] = json!("wrong");
+    let denied = router
+        .oneshot(request(
+            serde_json::to_vec(&wrong_view).unwrap(),
+            "http://localhost:8001",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), StatusCode::BAD_REQUEST);
+    let saved = runtime(&app, &Caller::Host)
+        .await
+        .unwrap()
+        .store
+        .read_state("large-http", refact_apps_core::StateScope::Standalone)
+        .await
+        .unwrap();
+    assert_eq!(saved.revision, 1);
+    assert_eq!(saved.value, value);
+    app.gcx.apps.shutdown().await;
+}
+
+#[tokio::test]
 async fn shutdown_refuses_new_runtime_admission() {
     let first = tempfile::tempdir().unwrap();
     let second = tempfile::tempdir().unwrap();

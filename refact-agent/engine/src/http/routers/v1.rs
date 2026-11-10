@@ -425,7 +425,7 @@ fn coordination_routes() -> Router<AppState> {
         .route("/apps/:app_id/document", get(apps::document))
         .route(
             "/apps/commands",
-            post(apps::commands).layer(axum::extract::DefaultBodyLimit::max(9 * 1024 * 1024)),
+            post(apps::commands).layer(axum::extract::DefaultBodyLimit::disable()),
         )
         .route("/apps/subscribe", get(apps::subscribe))
         .route("/work", get(work::list))
@@ -847,6 +847,11 @@ fn chats_routes() -> Router<AppState> {
         .route("/chats/subscribe", get(handle_v1_chat_subscribe))
         .route("/chats/subscribe-many", get(handle_v1_chats_subscribe_many))
         .route("/chats/:chat_id/commands", post(handle_v1_chat_command))
+        .route(
+            "/chats/:chat_id/app-workspace",
+            post(crate::chat::handle_v1_chat_app_workspace)
+                .layer(axum::extract::DefaultBodyLimit::disable()),
+        )
         .route(
             "/chats/:chat_id/skills-status",
             get(handle_v1_skills_status),

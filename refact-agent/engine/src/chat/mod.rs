@@ -132,7 +132,7 @@ pub use trajectories::{
 };
 pub use handlers::{
     handle_v1_chats_subscribe_many, handle_v1_chat_subscribe, handle_v1_chat_command,
-    handle_v1_chat_cancel_queued, handle_v1_chat_reprioritize_queued,
+    handle_v1_chat_cancel_queued, handle_v1_chat_reprioritize_queued, handle_v1_chat_app_workspace,
 };
 pub use app_workspace::{get_app_workspace, set_app_workspace};
 pub use goal_monitor::start_goal_monitor;

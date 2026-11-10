@@ -703,10 +703,7 @@ impl AutomationJournal {
             .map(|(payload, target)| {
                 identifier(target)?;
                 let body = json(payload)?;
-                if body.len() > 262144 {
-                    return Err("delivery size limit".to_string());
-                }
-                Ok((body, target))
+                Ok::<_, String>((body, target))
             })
             .transpose()?;
         self.owner_epoch_for_write()?;
@@ -893,9 +890,6 @@ impl AutomationJournal {
             request.producer_epoch.as_str(),
         ))?;
         let data = json(&request.data)?;
-        if data.len() > 262144 {
-            return Err("event byte quota".into());
-        }
         self.owner_epoch_for_write()?;
         let mut db = self.db()?;
         let tx = self.transaction(&mut db)?;
@@ -1096,9 +1090,6 @@ impl AutomationJournal {
         self.writable()?;
         identifier(target)?;
         let data = json(payload)?;
-        if data.len() > 262144 {
-            return Err("delivery size limit".to_string());
-        }
         self.owner_epoch_for_write()?;
         let mut db = self.db()?;
         let tx = self.transaction(&mut db)?;

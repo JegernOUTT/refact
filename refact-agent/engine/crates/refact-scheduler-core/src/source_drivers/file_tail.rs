@@ -73,11 +73,24 @@ pub(crate) fn validate_path(path: &str) -> Result<(), String> {
 /// partial line stays in the file, not an unbounded in-memory restart buffer.
 /// Best effort only: same-inode copytruncate followed by regrowth beyond the
 /// saved offset between reads cannot be detected; continuity is not guaranteed.
-pub(crate) fn read(
+#[cfg(test)]
+pub(crate) async fn read(
     root: &cap_std::fs::Dir,
     grant: &FileGrant,
     cursor: Option<&str>,
 ) -> Result<Batch, String> {
+    read_cooperative(root, grant, cursor, tokio::task::yield_now).await
+}
+pub(crate) async fn read_cooperative<F, Fut>(
+    root: &cap_std::fs::Dir,
+    grant: &FileGrant,
+    cursor: Option<&str>,
+    mut checkpoint: F,
+) -> Result<Batch, String>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
     validate_path(&grant.path)?;
     use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
     let path = Path::new(&grant.path);
@@ -177,35 +190,37 @@ pub(crate) fn read(
         }
         file.seek(SeekFrom::Start(position.offset))
             .map_err(|_| "file seek failed")?;
-        let mut bytes = Vec::new();
-        file.take(262_145)
-            .read_to_end(&mut bytes)
-            .map_err(|_| "file read failed")?;
+        let remaining = metadata.len().saturating_sub(position.offset);
+        let mut reader = file.take(remaining);
         let mut lines = Vec::new();
-        let mut consumed = 0;
-        for line in bytes.split_inclusive(|b| *b == b'\n') {
-            if line.last() != Some(&b'\n') {
+        let mut line = Vec::new();
+        let mut chunk = [0u8; 16384];
+        'read: loop {
+            checkpoint().await;
+            let count = reader.read(&mut chunk).map_err(|_| "file read failed")?;
+            if count == 0 {
                 break;
             }
-            if lines.len() >= 128 {
-                break;
+            for byte in &chunk[..count] {
+                line.push(*byte);
+                if *byte != b'\n' {
+                    continue;
+                }
+                position.offset += line.len() as u64;
+                let text = std::str::from_utf8(&line)
+                    .map_err(|_| "file line is not UTF-8")?
+                    .trim_end_matches(['\r', '\n'])
+                    .to_owned();
+                lines.push((
+                    text,
+                    serde_json::to_string(&position)
+                        .map_err(|_| "checkpoint serialization failed")?,
+                ));
+                line.clear();
+                if lines.len() >= 128 {
+                    break 'read;
+                }
             }
-            if line.len() > 262_144 {
-                return Err("file line limit".into());
-            }
-            consumed += line.len();
-            position.offset += line.len() as u64;
-            let text = std::str::from_utf8(line)
-                .map_err(|_| "file line is not UTF-8")?
-                .trim_end_matches(['\r', '\n'])
-                .to_owned();
-            lines.push((
-                text,
-                serde_json::to_string(&position).map_err(|_| "checkpoint serialization failed")?,
-            ));
-        }
-        if lines.is_empty() && bytes.len() > 262_144 && consumed == 0 {
-            return Err("file partial line limit".into());
         }
         Ok(Batch {
             lines,
@@ -216,8 +231,84 @@ pub(crate) fn read(
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn hardlinks_are_not_file_capabilities() {
+    #[tokio::test]
+    async fn read_uses_finite_length_snapshot_when_writer_appends() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("log");
+        std::fs::write(&path, b"first\n").unwrap();
+        let root =
+            cap_std::fs::Dir::open_ambient_dir(temp.path(), cap_std::ambient_authority()).unwrap();
+        let grant = FileGrant {
+            path: "log".into(),
+            rotation: RotationPolicy::Follow,
+        };
+        let mut appended = false;
+        let batch = read_cooperative(&root, &grant, None, || {
+            if !appended {
+                use std::io::Write;
+                std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(&path)
+                    .unwrap()
+                    .write_all(b"second\n")
+                    .unwrap();
+                appended = true;
+            }
+            std::future::ready(())
+        })
+        .await
+        .unwrap();
+        assert_eq!(batch.lines.len(), 1);
+        assert_eq!(batch.lines[0].0, "first");
+        let next = read(&root, &grant, Some(&batch.lines[0].1)).await.unwrap();
+        assert_eq!(next.lines.len(), 1);
+        assert_eq!(next.lines[0].0, "second");
+    }
+    #[tokio::test]
+    async fn large_lines_partial_restart_and_record_backpressure() {
+        use std::io::Write;
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("log");
+        let text = "history".repeat(50000);
+        std::fs::write(&path, &text).unwrap();
+        let root =
+            cap_std::fs::Dir::open_ambient_dir(temp.path(), cap_std::ambient_authority()).unwrap();
+        let grant = FileGrant {
+            path: "log".into(),
+            rotation: RotationPolicy::Follow,
+        };
+        assert!(read(&root, &grant, None).await.unwrap().lines.is_empty());
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        file.write_all(b"\n").unwrap();
+        for _ in 0..129 {
+            file.write_all(b"next\n").unwrap();
+        }
+        let batch = read(&root, &grant, None).await.unwrap();
+        assert_eq!(batch.lines.len(), 128);
+        assert_eq!(batch.lines[0].0, text);
+        let cursor = batch.lines.last().unwrap().1.clone();
+        let remaining = read(&root, &grant, Some(&cursor)).await.unwrap();
+        assert_eq!(
+            remaining
+                .lines
+                .iter()
+                .map(|line| line.0.as_str())
+                .collect::<Vec<_>>(),
+            vec!["next", "next"]
+        );
+        assert!(
+            read(&root, &grant, Some(&remaining.lines.last().unwrap().1))
+                .await
+                .unwrap()
+                .lines
+                .is_empty()
+        );
+    }
+    #[tokio::test]
+    async fn hardlinks_are_not_file_capabilities() {
         let temp = tempfile::tempdir().unwrap();
         std::fs::write(temp.path().join("log"), b"secret\n").unwrap();
         std::fs::hard_link(temp.path().join("log"), temp.path().join("alias")).unwrap();
@@ -227,11 +318,11 @@ mod tests {
             path: "alias".into(),
             rotation: RotationPolicy::Follow,
         };
-        assert!(read(&root, &grant, None).is_err());
+        assert!(read(&root, &grant, None).await.is_err());
     }
     #[cfg(windows)]
-    #[test]
-    fn windows_devices_streams_and_foreign_checkpoints_are_denied() {
+    #[tokio::test]
+    async fn windows_devices_streams_and_foreign_checkpoints_are_denied() {
         for path in [
             "log:secret",
             "CON",
@@ -251,18 +342,21 @@ mod tests {
             path: "log".into(),
             rotation: RotationPolicy::Follow,
         };
-        assert!(read(&root, &grant, Some(r#"{"dev":1,"ino":1,"offset":0}"#)).is_err());
+        assert!(read(&root, &grant, Some(r#"{"dev":1,"ino":1,"offset":0}"#))
+            .await
+            .is_err());
         assert!(read(
             &root,
             &grant,
             Some(r#"{"identity_kind":"unix","dev":1,"ino":1,"offset":0}"#)
         )
+        .await
         .is_err());
-        let batch = read(&root, &grant, None).unwrap();
+        let batch = read(&root, &grant, None).await.unwrap();
         assert!(batch.lines[0].1.contains("windows_volume_file_index_v1"));
     }
-    #[test]
-    fn partial_restart_rotation_truncation_and_escape() {
+    #[tokio::test]
+    async fn partial_restart_rotation_truncation_and_escape() {
         let temp = tempfile::tempdir().unwrap();
         let root =
             cap_std::fs::Dir::open_ambient_dir(temp.path(), cap_std::ambient_authority()).unwrap();
@@ -271,21 +365,30 @@ mod tests {
             rotation: RotationPolicy::Follow,
         };
         std::fs::write(temp.path().join("log"), b"one\npart").unwrap();
-        let first = read(&root, &grant, None).unwrap();
+        let first = read(&root, &grant, None).await.unwrap();
         assert_eq!(first.lines.len(), 1);
         let cursor = &first.lines[0].1;
-        assert!(read(&root, &grant, Some(cursor)).unwrap().lines.is_empty());
+        assert!(read(&root, &grant, Some(cursor))
+            .await
+            .unwrap()
+            .lines
+            .is_empty());
         std::fs::write(temp.path().join("log"), b"one\npartial\n").unwrap();
         assert_eq!(
-            read(&root, &grant, Some(cursor)).unwrap().lines[0].0,
+            read(&root, &grant, Some(cursor)).await.unwrap().lines[0].0,
             "partial"
         );
         std::fs::rename(temp.path().join("log"), temp.path().join("old")).unwrap();
         std::fs::write(temp.path().join("log"), b"new\n").unwrap();
-        let rotated = read(&root, &grant, Some(cursor)).unwrap();
+        let rotated = read(&root, &grant, Some(cursor)).await.unwrap();
         assert!(rotated.gap);
         std::fs::write(temp.path().join("log"), b"x\n").unwrap();
-        assert!(read(&root, &grant, Some(&rotated.lines[0].1)).unwrap().gap);
+        assert!(
+            read(&root, &grant, Some(&rotated.lines[0].1))
+                .await
+                .unwrap()
+                .gap
+        );
         assert!(validate_path("../secret").is_err());
         assert!(validate_path("/absolute").is_err());
         #[cfg(unix)]
@@ -299,6 +402,7 @@ mod tests {
                 },
                 None
             )
+            .await
             .is_err());
         }
     }

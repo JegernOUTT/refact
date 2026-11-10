@@ -558,6 +558,24 @@ pub async fn handle_v1_chat_subscribe(
         .unwrap())
 }
 
+pub async fn handle_v1_chat_app_workspace(
+    State(app): State<AppState>,
+    Path(chat_id): Path<String>,
+    body_bytes: hyper::body::Bytes,
+) -> Result<Response<Body>, ScratchError> {
+    validate_trajectory_id(&chat_id)?;
+    let request: CommandRequest = serde_json::from_slice(&body_bytes)
+        .map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, format!("Invalid JSON: {}", e)))?;
+    if !matches!(request.command, ChatCommand::SetAppWorkspace { .. }) {
+        return Err(ScratchError::new(
+            StatusCode::BAD_REQUEST,
+            "Only set_app_workspace is accepted by this endpoint".to_string(),
+        ));
+    }
+    drop(request);
+    handle_v1_chat_command(State(app), Path(chat_id), body_bytes).await
+}
+
 pub async fn handle_v1_chat_command(
     State(app): State<AppState>,
     Path(chat_id): Path<String>,

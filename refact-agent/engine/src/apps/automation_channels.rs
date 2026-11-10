@@ -7,8 +7,6 @@
 use refact_scheduler_core::sources::AutomationService;
 use serde_json::{json, Value};
 
-pub(crate) const MAX_CHANNEL_BYTES: usize = 262_144;
-
 /// Only the approved generic outbox drain calls this host port. `event_id` is an
 /// occurrence identity, never a payload hash: equal independent updates survive.
 pub(crate) async fn publish(
@@ -41,13 +39,6 @@ pub(crate) async fn publish(
             "event_id": event_id,
         }
     });
-    if serde_json::to_vec(&envelope)
-        .map_err(|e| e.to_string())?
-        .len()
-        > MAX_CHANNEL_BYTES
-    {
-        return Err("automation channel envelope bounds".into());
-    }
     // Exclude the project source owner so Internal collectors cannot subscribe
     // to their own handoff and create an unbounded source->outbox feedback loop.
     // The service durably ingests each eligible App subscriber before success.
@@ -509,7 +500,7 @@ mod tests {
         assert!(publish(
             &service,
             "metrics",
-            json!("x".repeat(MAX_CHANNEL_BYTES)),
+            json!("x".repeat(262_144)),
             "large",
             "collector",
             None,
@@ -517,7 +508,7 @@ mod tests {
             3
         )
         .await
-        .is_err());
+        .is_ok());
         service.shutdown().await;
     }
 }

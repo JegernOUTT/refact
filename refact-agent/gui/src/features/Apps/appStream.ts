@@ -22,21 +22,25 @@ export async function readAppStream(
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
+  let scanFrom = 0;
+  let carriageReturn = false;
   let generation: string | null = null;
   let seq = 0;
   try {
     while (!signal.aborted) {
       const chunk = await reader.read();
       if (chunk.done) break;
-      buffer += decoder
-        .decode(chunk.value, { stream: true })
-        .replace(/\r\n/g, "\n");
-      if (buffer.length > 2 * 1024 * 1024)
-        throw new Error("App stream frame too large");
+      let text = decoder.decode(chunk.value, { stream: true });
+      if (carriageReturn) text = "\r" + text;
+      carriageReturn = text.endsWith("\r");
+      if (carriageReturn) text = text.slice(0, -1);
+      buffer += text.replace(/\r\n/g, "\n");
+      let start = 0;
       let end: number;
-      while ((end = buffer.indexOf("\n\n")) >= 0) {
-        const frame = buffer.slice(0, end);
-        buffer = buffer.slice(end + 2);
+      while ((end = buffer.indexOf("\n\n", scanFrom)) >= 0) {
+        const frame = buffer.slice(start, end);
+        start = end + 2;
+        scanFrom = start;
         const data = frame
           .split("\n")
           .filter((line) => line.startsWith("data:"))
@@ -62,6 +66,8 @@ export async function readAppStream(
         }
         onEvent(next);
       }
+      if (start > 0) buffer = buffer.slice(start);
+      scanFrom = Math.max(0, buffer.length - 1);
     }
   } finally {
     await reader.cancel().catch(() => undefined);

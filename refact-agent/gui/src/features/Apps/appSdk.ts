@@ -1,7 +1,6 @@
 export const APP_MESSAGE_TYPE = "refact-app";
 export const APP_PROTOCOL_VERSION = 1;
 export const APP_SDK_VERSION = "1.0.0";
-export const APP_MAX_MESSAGE_CHARS = 1_000_000;
 export const APP_MAX_CAPTURE_MESSAGE_CHARS = 12_000_000;
 export const APP_MAX_INFLIGHT = 16;
 export const APP_MAX_SEEN_IDS = 4096;
@@ -392,11 +391,16 @@ export class AppBridgeHost {
       this.reject("origin", event.origin);
       return;
     }
-    const limit =
-      isRecord(event.data) && event.data.kind === "response"
-        ? APP_MAX_CAPTURE_MESSAGE_CHARS
-        : APP_MAX_MESSAGE_CHARS;
-    if (approxMessageChars(event.data) > limit) {
+    const chars = approxMessageChars(event.data);
+    if (!Number.isFinite(chars)) {
+      this.reject("unserializable", null);
+      return;
+    }
+    if (
+      isRecord(event.data) &&
+      event.data.kind === "response" &&
+      chars > APP_MAX_CAPTURE_MESSAGE_CHARS
+    ) {
       this.reject("size", null);
       return;
     }

@@ -195,7 +195,10 @@ export const appWorkspacePersistenceMiddleware: Middleware = (api) => {
       entry.sentGeneration = entry.localGeneration;
       entry.sentWorkspace = sent;
       const response = await fetch(
-        buildApiUrl(config, `/v1/chats/${encodeURIComponent(chatId)}/commands`),
+        buildApiUrl(
+          config,
+          `/v1/chats/${encodeURIComponent(chatId)}/app-workspace`,
+        ),
         {
           method: "POST",
           headers: {

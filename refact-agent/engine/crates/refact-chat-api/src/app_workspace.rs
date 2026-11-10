@@ -10,8 +10,6 @@ pub const APP_WORKSPACE_MAX_LEAVES: usize = 32;
 pub const APP_WORKSPACE_MAX_BINDINGS: usize = 64;
 pub const APP_WORKSPACE_MAX_SPLIT_CHILDREN: usize = 8;
 pub const APP_WORKSPACE_MAX_LEAF_TABS: usize = 16;
-pub const APP_WORKSPACE_MAX_BINDING_BYTES: usize = 64 * 1024;
-pub const APP_WORKSPACE_MAX_TOTAL_BYTES: usize = 512 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -158,20 +156,6 @@ impl AppWorkspace {
             if !binding_ids.insert(binding.binding_id) {
                 return Err(format!("duplicate binding_id {}", binding.binding_id));
             }
-            let bytes = serde_json::to_vec(&binding.params)
-                .map(|v| v.len())
-                .unwrap_or(usize::MAX)
-                .saturating_add(
-                    serde_json::to_vec(&binding.state)
-                        .map(|v| v.len())
-                        .unwrap_or(usize::MAX),
-                );
-            if bytes > APP_WORKSPACE_MAX_BINDING_BYTES {
-                return Err(format!(
-                    "binding {} params/state exceed {} bytes",
-                    binding.binding_id, APP_WORKSPACE_MAX_BINDING_BYTES
-                ));
-            }
         }
         let mut walk = LayoutWalk {
             binding_ids: &binding_ids,
@@ -180,15 +164,6 @@ impl AppWorkspace {
             leaves: 0,
         };
         walk.node(&self.layout, 1)?;
-        let total = serde_json::to_vec(self)
-            .map(|v| v.len())
-            .unwrap_or(usize::MAX);
-        if total > APP_WORKSPACE_MAX_TOTAL_BYTES {
-            return Err(format!(
-                "workspace exceeds {} bytes",
-                APP_WORKSPACE_MAX_TOTAL_BYTES
-            ));
-        }
         Ok(())
     }
 
@@ -495,6 +470,47 @@ mod tests {
                 current_revision: 2
             })
         );
+    }
+
+    #[test]
+    fn large_binding_data_survives_cas_and_persisted_workspace_roundtrip() {
+        let mut workspace = populated(0);
+        workspace.bindings[0]
+            .params
+            .insert("query".into(), Value::String("metric".repeat(16 * 1024)));
+        workspace.bindings[0].state.insert(
+            "history".into(),
+            json!({"points": vec![json!({"at": 123, "value": 42}); 24 * 1024]}),
+        );
+        assert!(
+            serde_json::to_vec(&workspace.bindings[0].params)
+                .unwrap()
+                .len()
+                > 64 * 1024
+        );
+        assert!(serde_json::to_vec(&workspace).unwrap().len() > 512 * 1024);
+        let mut current = None;
+        let saved = apply_app_workspace_cas(&mut current, 0, workspace.clone()).unwrap();
+        workspace.revision = 1;
+        assert_eq!(saved, workspace);
+        let persisted = serde_json::to_vec(&current).unwrap();
+        let restored: Option<StoredAppWorkspace> = serde_json::from_slice(&persisted).unwrap();
+        assert_eq!(restored, current);
+        assert_eq!(restored.as_ref().unwrap().supported(), Some(&workspace));
+        assert!(matches!(
+            apply_app_workspace_cas(&mut current, 0, workspace.clone()),
+            Err(AppWorkspaceSetError::Conflict {
+                current_revision: 1
+            })
+        ));
+        assert_eq!(current, restored);
+        let mut invalid = workspace;
+        invalid.bindings[1].binding_id = invalid.bindings[0].binding_id;
+        assert!(matches!(
+            apply_app_workspace_cas(&mut current, 1, invalid),
+            Err(AppWorkspaceSetError::Invalid(_))
+        ));
+        assert_eq!(current, restored);
     }
 
     #[test]

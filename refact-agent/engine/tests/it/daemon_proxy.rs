@@ -76,13 +76,17 @@ struct Harness {
 
 impl Harness {
     async fn new(name: &str) -> Self {
+        Self::with_config(name, DaemonConfig::default(), None).await
+    }
+
+    async fn with_config(name: &str, config: DaemonConfig, token: Option<String>) -> Self {
         let dir = tempdir().unwrap();
         let project_root = dir.path().join(name);
         std::fs::create_dir_all(&project_root).unwrap();
         let state = DaemonState::new(
-            DaemonConfig::default(),
+            config,
             EventBus::new(dir.path().join("events.jsonl")),
-            None,
+            token,
         );
         state.load_projects(dir.path().join("projects.json")).await;
         let entry = {
@@ -528,6 +532,155 @@ async fn proxy_body_limit_accepts_15mb_and_rejects_larger() {
     )
     .await;
     assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    harness.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn proxy_apps_commands_forwards_large_body_with_exact_boundaries_and_auth() {
+    async fn send(router: Router, mut request: Request<Body>) -> Response<BoxBody> {
+        request
+            .extensions_mut()
+            .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+                [192, 168, 1, 50],
+                40000,
+            ))));
+        router.oneshot(request).await.unwrap()
+    }
+
+    let _env = EnvGuard::set().expect("python3 fake worker is required");
+    let fixture = tempdir().unwrap();
+    let script = fixture.path().join("apps_worker.py");
+    let worker_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests");
+    std::fs::write(
+        &script,
+        format!(
+            r#"import sys
+sys.dont_write_bytecode = True
+sys.path.insert(0, {worker_dir:?})
+import fake_worker
+original_post = fake_worker.WorkerHandler.do_POST
+def apps_post(self):
+    if self.path.split('?')[0] not in ['/v1/apps/commands', '/v1/chats/workspace-chat/app-workspace']:
+        return original_post(self)
+    body = self.rfile.read(int(self.headers.get('content-length', '0')))
+    self.send_response(200)
+    self.send_header('content-length', str(len(body)))
+    self.send_header('x-worker-authorization', self.headers.get('authorization', ''))
+    self.send_header('x-worker-cookie', self.headers.get('cookie', ''))
+    self.send_header('x-worker-project', self.headers.get('x-refact-project-id', ''))
+    self.send_header('x-worker-path', self.path)
+    self.end_headers()
+    self.wfile.write(body)
+fake_worker.WorkerHandler.do_POST = apps_post
+fake_worker.main()
+"#,
+            worker_dir = worker_dir.to_string_lossy(),
+        ),
+    )
+    .unwrap();
+    let python = std::env::var("PYTHON3").unwrap_or_else(|_| "python3".to_string());
+    std::env::set_var(
+        "REFACT_DAEMON_WORKER_CMD",
+        shell_words::join([python.as_str(), script.to_string_lossy().as_ref()]),
+    );
+    let mut config = DaemonConfig::default();
+    config.auth.enabled = true;
+    let harness =
+        Harness::with_config("apps-body-project", config, Some("worker-secret".into())).await;
+    let body: Vec<u8> = (0..refact_lsp::daemon::proxy::PROXY_BODY_LIMIT + 1024)
+        .map(|index| (index % 251) as u8)
+        .collect();
+    let cookie = format!(
+        "refact_daemon_auth=project:{}:worker-secret; theme=dark",
+        harness.entry.id
+    );
+
+    for suffix in ["/apps/commands", "/chats/workspace-chat/app-workspace"] {
+        for cookie in [None, Some("refact_daemon_auth=project:other:worker-secret")] {
+            let mut denied = request(Method::POST, harness.v1_uri(suffix));
+            if let Some(cookie) = cookie {
+                denied = denied.header("cookie", cookie);
+            }
+            let response = send(
+                harness.router.clone(),
+                denied.body(Body::from(body.clone())).unwrap(),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            assert_eq!(harness.state.supervisor.worker_count().await, 0);
+        }
+    }
+    for suffix in [
+        "/apps/commands",
+        "/apps/commands?source=test",
+        "/chats/workspace-chat/app-workspace",
+        "/chats/workspace-chat/app-workspace?source=test",
+    ] {
+        let response = send(
+            harness.router.clone(),
+            request(Method::POST, harness.v1_uri(suffix))
+                .header("cookie", &cookie)
+                .body(Body::from(body.clone()))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()["x-worker-authorization"],
+            if suffix.starts_with("/apps/") {
+                "Bearer worker-secret"
+            } else {
+                ""
+            }
+        );
+        assert_eq!(response.headers()["x-worker-cookie"], "theme=dark");
+        assert_eq!(response.headers()["x-worker-project"], harness.entry.id);
+        assert_eq!(response.headers()["x-worker-path"], format!("/v1{suffix}"));
+        let received = hyper::body::to_bytes(response.into_body()).await.unwrap();
+        assert_eq!(received.as_ref(), body.as_slice());
+    }
+
+    for (method, suffix) in [
+        (Method::POST, "/apps/commands/"),
+        (Method::POST, "/apps/commands/extra"),
+        (Method::POST, "/apps/commands-extra"),
+        (Method::POST, "/apps/events"),
+        (Method::POST, "/chats/workspace-chat/commands"),
+        (Method::POST, "/chats/workspace-chat/app-workspace/"),
+        (Method::POST, "/chats/workspace-chat/app-workspace/extra"),
+        (Method::POST, "/chats/workspace-chat/app-workspace-extra"),
+        (Method::POST, "/chats/nested/id/app-workspace"),
+        (Method::POST, "/chats//app-workspace"),
+        (Method::POST, "/chats/invalid.id/app-workspace"),
+        (
+            Method::POST,
+            "/echo?path=/v1/chats/workspace-chat/app-workspace",
+        ),
+        (Method::GET, "/chats/workspace-chat/app-workspace"),
+        (Method::PUT, "/chats/workspace-chat/app-workspace"),
+        (Method::PATCH, "/chats/workspace-chat/app-workspace"),
+        (Method::DELETE, "/chats/workspace-chat/app-workspace"),
+        (Method::POST, "/echo"),
+        (Method::GET, "/apps/commands"),
+        (Method::PUT, "/apps/commands"),
+        (Method::PATCH, "/apps/commands"),
+        (Method::DELETE, "/apps/commands"),
+    ] {
+        let response = send(
+            harness.router.clone(),
+            request(method.clone(), harness.v1_uri(suffix))
+                .header("cookie", &cookie)
+                .body(Body::from(body.clone()))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "{method} {suffix}"
+        );
+    }
     harness.stop().await;
 }
 

@@ -161,3 +161,91 @@ pub(crate) fn install_forked_app_workspace(session: &mut ChatSession, forked: St
     });
     session.thread.app_workspace = Some(StoredAppWorkspace::Supported(workspace));
 }
+
+#[cfg(test)]
+mod transport_tests {
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use serde_json::json;
+    use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn workspace_http_large_save_retains_cas_and_command_boundary() {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![dir.path().into()];
+        let app = crate::app_state::AppState::from_gcx(gcx).await;
+        let router = crate::http::routers::make_refact_http_server(app.clone());
+        let request = |path: &str, body: Vec<u8>| {
+            Request::builder()
+                .method("POST")
+                .uri(path)
+                .header("content-type", "application/json")
+                .header("host", "localhost:8001")
+                .header("origin", "http://localhost:8001")
+                .body(Body::from(body))
+                .unwrap()
+        };
+        let workspace = json!({
+            "schema_version": 1, "revision": 0,
+            "bindings": [{
+                "app_id": "11111111-1111-4111-8111-111111111111",
+                "binding_id": "22222222-2222-4222-8222-222222222222",
+                "params": {}, "state": {"history": "metric-42;".repeat(2 * 1024 * 1024)}
+            }],
+            "layout": {"kind": "leaf", "tabs": [{"kind": "chat", "ref": "self"}]}
+        });
+        let mut command = json!({
+            "type": "set_app_workspace", "client_request_id": "large-save",
+            "expected_revision": 0, "workspace": workspace
+        });
+        let bytes = serde_json::to_vec(&command).unwrap();
+        assert!(bytes.len() > 15 * 1024 * 1024);
+        let legacy = router
+            .clone()
+            .oneshot(request("/v1/chats/workspace-http/commands", bytes.clone()))
+            .await
+            .unwrap();
+        assert_eq!(legacy.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let response = router
+            .clone()
+            .oneshot(request("/v1/chats/workspace-http/app-workspace", bytes))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let result: serde_json::Value =
+            serde_json::from_slice(&hyper::body::to_bytes(response.into_body()).await.unwrap())
+                .unwrap();
+        let mut expected = workspace;
+        expected["revision"] = json!(1);
+        assert_eq!(result, json!({"revision": 1, "app_workspace": expected}));
+        command["client_request_id"] = json!("stale-save");
+        let conflict = router
+            .clone()
+            .oneshot(request(
+                "/v1/chats/workspace-http/app-workspace",
+                serde_json::to_vec(&command).unwrap(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(conflict.status(), StatusCode::CONFLICT);
+        let refused = router.oneshot(request("/v1/chats/refused-workspace/app-workspace", serde_json::to_vec(&json!({"type": "set_params", "client_request_id": "wrong-command", "patch": {"model": "changed"}})).unwrap())).await.unwrap();
+        assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+        assert!(!app
+            .chat
+            .sessions
+            .read()
+            .await
+            .contains_key("refused-workspace"));
+        assert_eq!(
+            serde_json::to_value(
+                super::get_app_workspace(app.clone(), "workspace-http")
+                    .await
+                    .unwrap()
+            )
+            .unwrap(),
+            expected
+        );
+        app.gcx.apps.shutdown().await;
+    }
+}

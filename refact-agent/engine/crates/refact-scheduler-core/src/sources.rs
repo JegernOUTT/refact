@@ -28,7 +28,6 @@ use tokio::sync::{broadcast, watch, Mutex, Notify};
 use tokio::task::JoinHandle;
 
 const EVENT_CAPACITY: usize = 256;
-const MAX_DATA_BYTES: usize = 262_144;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -1087,7 +1086,6 @@ impl AutomationService {
         expected_generation: &str,
         data: Value,
     ) -> Result<(), String> {
-        check_data(&data)?;
         let key = (app.to_owned(), id.to_owned());
         let mut state = self.state.lock().await;
         if state.closed || state.suspended {
@@ -1112,7 +1110,6 @@ impl AutomationService {
     }
 
     pub async fn publish(&self, app: &str, id: &str, data: Value) -> Result<(), String> {
-        check_data(&data)?;
         let key = (app.to_owned(), id.to_owned());
         let mut state = self.state.lock().await;
         if state.closed || state.suspended {
@@ -1133,7 +1130,6 @@ impl AutomationService {
     }
 
     pub async fn publish_internal(&self, topic: &str, data: Value) -> Result<(), String> {
-        check_data(&data)?;
         let mut state = self.state.lock().await;
         if state.closed || state.suspended {
             return Err("automation service shut down".into());
@@ -1164,7 +1160,6 @@ impl AutomationService {
         event_id: &str,
         origin: &str,
     ) -> Result<(), String> {
-        check_data(&data)?;
         if topic.is_empty()
             || topic.len() > 256
             || event_id.is_empty()
@@ -1237,17 +1232,6 @@ impl AutomationService {
             data
         };
         if matches!(status, SourceStatus::Data) {
-            if data
-                .as_ref()
-                .is_some_and(|value| check_data(value).is_err())
-            {
-                source.status = SourceStatus::Error;
-                source.error_class = Some("payload_limit".into());
-                source.pending_checkpoint = None;
-                source.upstream_event_id = None;
-                self.emit(key, source, SourceStatus::Error, None);
-                return Err("source payload bounds".into());
-            }
             let request = IngestRequest {
                 app_id: key.0.clone(),
                 source_id: key.1.clone(),
@@ -1528,26 +1512,52 @@ async fn tail_once(
     key: &(String, String),
     generation: &str,
 ) -> Result<(), String> {
+    tail_once_cooperative(service, key, generation, tokio::task::yield_now).await
+}
+
+async fn tail_once_cooperative<F, Fut>(
+    service: &Weak<AutomationService>,
+    key: &(String, String),
+    generation: &str,
+    checkpoint: F,
+) -> Result<(), String>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
     let owner = service.upgrade().ok_or("source unavailable")?;
+    let (grant, cursor, timeout_ms) = {
+        let state = owner.state.lock().await;
+        let source = state.sources.get(key).ok_or("source unavailable")?;
+        if state_closed_source(source, generation) {
+            return Err("source stopped".into());
+        }
+        let grant = source
+            .file_grant
+            .clone()
+            .ok_or("file capability forbidden")?;
+        let SourceDriver::FileTail {
+            path, ..
+        } = &source.definition.driver
+        else {
+            return Err("not a file tail".into());
+        };
+        if path != &grant.path {
+            return Err("file capability mismatch".into());
+        }
+        (grant, source.checkpoint.clone(), source.policy.timeout_ms)
+    };
+    let batch = tokio::time::timeout(
+        Duration::from_millis(timeout_ms),
+        file_tail::read_cooperative(&owner.file_root, &grant, cursor.as_deref(), checkpoint),
+    )
+    .await
+    .map_err(|_| "file read timeout")??;
     let mut state = owner.state.lock().await;
     let source = state.sources.get_mut(key).ok_or("source unavailable")?;
-    if state_closed_source(source, generation) {
+    if state_closed_source(source, generation) || !owner.check_authority(key, source) {
         return Err("source stopped".into());
     }
-    let grant = source
-        .file_grant
-        .as_ref()
-        .ok_or("file capability forbidden")?;
-    let SourceDriver::FileTail {
-        path, ..
-    } = &source.definition.driver
-    else {
-        return Err("not a file tail".into());
-    };
-    if path != &grant.path {
-        return Err("file capability mismatch".into());
-    }
-    let batch = file_tail::read(&owner.file_root, grant, source.checkpoint.as_deref())?;
     if batch.gap {
         owner.emit(
             key,
@@ -1781,9 +1791,6 @@ async fn stream_sse(
     .map_err(|_| "stream idle timeout")?
     .map_err(|e| e.to_string())?
     {
-        if buffer.len() + chunk.len() > MAX_DATA_BYTES {
-            return Err("SSE frame limit".into());
-        }
         // SSE accepts CR, LF and CRLF (including CRLF split across chunks).
         for byte in chunk {
             if byte == b'\n' && preceding_cr {
@@ -1907,8 +1914,8 @@ async fn stream_ws(
     .map_err(|_| "websocket connect timeout")?
     .map_err(|_| "websocket connect failed")?;
     let config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
-        .max_message_size(Some(MAX_DATA_BYTES))
-        .max_frame_size(Some(MAX_DATA_BYTES));
+        .max_message_size(None)
+        .max_frame_size(None);
     let (mut stream, response) = tokio::time::timeout(
         Duration::from_millis(policy.timeout_ms),
         tokio_tungstenite::client_async_tls_with_config(request, socket, Some(config), None),
@@ -2033,13 +2040,6 @@ async fn stop(source: &mut Source) {
     }
 }
 
-fn check_data(data: &Value) -> Result<(), String> {
-    if serde_json::to_vec(data).map_err(|e| e.to_string())?.len() > MAX_DATA_BYTES {
-        return Err("source data exceeds limit".into());
-    }
-    Ok(())
-}
-
 async fn read_driver(
     driver: &SourceDriver,
     grant: Option<&EndpointGrant>,
@@ -2109,9 +2109,6 @@ async fn poll_http_headers(
     }
     let mut bytes = Vec::new();
     while let Some(chunk) = response.chunk().await.map_err(|e| e.to_string())? {
-        if bytes.len() + chunk.len() > MAX_DATA_BYTES {
-            return Err("source data exceeds limit".into());
-        }
         bytes.extend_from_slice(&chunk);
     }
     serde_json::from_slice(&bytes).map_err(|e| e.to_string())
@@ -2380,9 +2377,13 @@ mod tests {
                 );
                 ws.send(Message::Ping(vec![1, 2].into())).await.unwrap();
                 assert!(ws.next().await.unwrap().unwrap().is_pong());
-                ws.send(Message::Text(json!({"n":n}).to_string().into()))
-                    .await
-                    .unwrap();
+                ws.send(Message::Text(
+                    json!({"n":n,"history":"ws-history".repeat(35000)})
+                        .to_string()
+                        .into(),
+                ))
+                .await
+                .unwrap();
                 ws.close(None).await.unwrap();
             }
         });
@@ -2432,7 +2433,9 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(3), async {
             loop {
                 let e = events.recv().await.unwrap();
-                if matches!(e.status, SourceStatus::Data) && e.data == Some(json!({"n":2})) {
+                if matches!(e.status, SourceStatus::Data)
+                    && e.data == Some(json!({"n":2,"history":"ws-history".repeat(35000)}))
+                {
                     break;
                 }
             }
@@ -2441,6 +2444,92 @@ mod tests {
         .unwrap();
         owner.shutdown().await;
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn in_flight_file_read_releases_state_and_revoke_fences_stale_batch() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp.path().join("log"),
+            format!("{}\n", "history".repeat(50000)),
+        )
+        .unwrap();
+        let owner = AutomationService::new(temp.path()).unwrap();
+        owner
+            .configure(
+                "app",
+                "ui".into(),
+                vec![SourceDefinition {
+                    source_id: "tail".into(),
+                    channel: "values".into(),
+                    driver: SourceDriver::FileTail {
+                        path: "log".into(),
+                        every_ms: 60000,
+                    },
+                    permissions: vec![],
+                }],
+            )
+            .await
+            .unwrap();
+        owner
+            .set_file_grant(
+                "app",
+                "tail",
+                Some(FileGrant {
+                    path: "log".into(),
+                    rotation: RotationPolicy::Follow,
+                }),
+            )
+            .await
+            .unwrap();
+        owner.set_grant("app", "tail", true).await.unwrap();
+        let key = ("app".into(), "tail".into());
+        let generation = {
+            let mut state = owner.state.lock().await;
+            let source = state.sources.get_mut(&key).unwrap();
+            source.consumers.insert("test".into());
+            source.generation.clone()
+        };
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let release = Arc::new(Notify::new());
+        let release_read = release.clone();
+        let weak = Arc::downgrade(&owner);
+        let task = tokio::spawn(async move {
+            let mut started_tx = Some(started_tx);
+            let mut chunks = 0;
+            tail_once_cooperative(&weak, &key, &generation, move || {
+                chunks += 1;
+                let started = if chunks == 2 { started_tx.take() } else { None };
+                let release = release_read.clone();
+                async move {
+                    if let Some(started) = started {
+                        started.send(()).unwrap();
+                        release.notified().await;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), started_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            assert_eq!(owner.snapshot("app").await.len(), 1);
+            owner.set_grant("app", "tail", false).await.unwrap();
+            owner.shutdown().await;
+        })
+        .await
+        .unwrap();
+        release.notify_one();
+        assert!(tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_err());
+        assert_eq!(owner.journal.latest("app", "tail").unwrap(), None);
+        assert_eq!(owner.journal.checkpoint("app", "tail").unwrap(), None);
     }
 
     #[tokio::test]
@@ -3294,7 +3383,7 @@ mod tests {
                 let (mut socket, _) = listener.accept().await.unwrap();
                 let mut request = [0; 2048];
                 socket.read(&mut request).await.unwrap();
-                socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\nid: 7\ndata: A\n\ndata: B\n\nid: 7\ndata: C\n\n").await.unwrap();
+                socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\nid: 7\ndata: {}\n\ndata: B\n\nid: 7\ndata: C\n\n", "A".repeat(350000)).as_bytes()).await.unwrap();
                 tokio::time::sleep(Duration::from_millis(300)).await;
             });
             let service = AutomationService::new(temp.path()).unwrap();
@@ -3344,9 +3433,9 @@ mod tests {
                 .await
                 .unwrap();
             let expected = if unique_event_ids {
-                vec![json!("A"), json!("B")]
+                vec![json!("A".repeat(350000)), json!("B")]
             } else {
-                vec![json!("A"), json!("B"), json!("C")]
+                vec![json!("A".repeat(350000)), json!("B"), json!("C")]
             };
             let mut observed = vec![];
             tokio::time::timeout(Duration::from_secs(2), async {
@@ -3379,6 +3468,118 @@ mod tests {
         let a = ProjectAutomationLease::acquire(temp.path()).unwrap();
         let b = ProjectAutomationLease::acquire(temp.path()).unwrap();
         assert!(Arc::ptr_eq(&a, &b));
+    }
+
+    #[tokio::test]
+    async fn large_http_payload_reaches_supervisor_snapshot_and_survives_restart() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let temp = tempfile::tempdir().unwrap();
+        let expected = json!({"history": (0..10000).map(|i| json!({"at":i,"value":"data".repeat(10)})).collect::<Vec<_>>()});
+        let body = serde_json::to_vec(&expected).unwrap();
+        assert!(body.len() > 299_000);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0; 4096];
+            assert!(socket.read(&mut request).await.unwrap() > 0);
+            socket
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+            for chunk in body.chunks(16384) {
+                socket.write_all(chunk).await.unwrap();
+            }
+        });
+        let service = AutomationService::new(temp.path()).unwrap();
+        service
+            .configure(
+                "app",
+                "ui".into(),
+                vec![SourceDefinition {
+                    source_id: "large".into(),
+                    channel: "values".into(),
+                    driver: SourceDriver::HttpPoll {
+                        url: format!("http://{address}/history"),
+                        every_ms: 60000,
+                    },
+                    permissions: vec![],
+                }],
+            )
+            .await
+            .unwrap();
+        service
+            .set_policy(
+                "app",
+                "large",
+                SourcePolicy {
+                    transform: Some(
+                        serde_json::from_value(
+                            json!({"name":"history","version":1,"select_fields":["history"]}),
+                        )
+                        .unwrap(),
+                    ),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        service
+            .set_endpoint_grant(
+                "app",
+                "large",
+                Some(EndpointGrant {
+                    origin: format!("http://{address}"),
+                    allowed_private_ips: vec![address.ip()],
+                }),
+            )
+            .await
+            .unwrap();
+        service.set_grant("app", "large", true).await.unwrap();
+        let mut events = service.subscribe();
+        service
+            .set_demand("app", "large", "test", true)
+            .await
+            .unwrap();
+        let event = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let event = events.recv().await.unwrap();
+                if matches!(event.status, SourceStatus::Data) {
+                    break event;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(event.data.as_ref(), Some(&expected));
+        assert_eq!(
+            service.journal.latest("app", "large").unwrap().as_ref(),
+            Some(&expected)
+        );
+        assert_eq!(
+            service.snapshot("app").await[0].data.as_ref(),
+            Some(&expected)
+        );
+        service.shutdown().await;
+        drop(service);
+        server.await.unwrap();
+        let restored = AutomationService::new(temp.path()).unwrap();
+        assert_eq!(
+            restored.journal.latest("app", "large").unwrap().as_ref(),
+            Some(&expected)
+        );
+        assert_eq!(
+            restored.snapshot("app").await[0].data.as_ref(),
+            Some(&expected)
+        );
+        assert!(restored.publish("app", "large", expected).await.is_err());
+        restored.shutdown().await;
     }
 
     #[tokio::test]

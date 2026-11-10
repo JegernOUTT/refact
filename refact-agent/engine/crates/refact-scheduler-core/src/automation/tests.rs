@@ -308,6 +308,46 @@ fn sql_ingest_commits_event_latest_checkpoint_and_outbox_once() {
     assert_eq!(j.pending_deliveries(10, 100).unwrap().len(), 1);
 }
 #[test]
+fn large_ingest_and_delivery_preserve_exact_payload_dedup_and_denial() {
+    let t = tempfile::tempdir().unwrap();
+    let j = AutomationJournal::open(t.path()).unwrap();
+    let lease = ProjectAutomationLease::acquire(t.path()).unwrap();
+    j.activate_owner(&lease).unwrap();
+    let mut r = source(&j);
+    r.data = json!({"history":"exact-data".repeat(40000)});
+    assert!(matches!(
+        j.ingest(&r).unwrap(),
+        IngestOutcome::Inserted { .. }
+    ));
+    assert_eq!(j.ingest(&r).unwrap(), IngestOutcome::Duplicate);
+    let deliveries = j.pending_deliveries(10, 100).unwrap();
+    assert_eq!(deliveries.len(), 1);
+    assert_eq!(deliveries[0].data, r.data);
+    assert_eq!(j.latest("app", "source").unwrap().as_ref(), Some(&r.data));
+    drop(j);
+    let j = AutomationJournal::open(t.path()).unwrap();
+    j.activate_owner(&lease).unwrap();
+    assert_eq!(j.pending_deliveries(10, 100).unwrap()[0].data, r.data);
+    assert_eq!(j.checkpoint("app", "source").unwrap(), r.cursor);
+    j.grant_source(&GrantRecord {
+        app_id: "app".into(),
+        source_id: "source".into(),
+        config_digest: "digest".into(),
+        endpoint_grant: None,
+        credential_refs: vec![],
+        granted: false,
+    })
+    .unwrap();
+    r.event_id = "denied".into();
+    r.cursor = Some("denied-cursor".into());
+    assert!(j.ingest(&r).is_err());
+    assert_eq!(
+        j.checkpoint("app", "source").unwrap().as_deref(),
+        Some("cursor-1")
+    );
+}
+
+#[test]
 fn malformed_delivery_rolls_back_every_ingest_write() {
     let t = tempfile::tempdir().unwrap();
     let j = AutomationJournal::open(t.path()).unwrap();
@@ -881,13 +921,14 @@ fn atomic_completion_rejects_invalid_payload_without_finishing_claim() {
         .unwrap()
         .unwrap();
     assert!(j.mark_effect_started(&claim).unwrap());
+    let prepared = json!({"prepared":"large-delivery".repeat(30000)});
     assert!(j
         .complete_run_and_enqueue_delivery(
             &claim,
             RunStatus::Succeeded,
             None,
             None,
-            Some((&json!({"prepared":true}), "invalid/target"))
+            Some((&prepared, "invalid/target"))
         )
         .is_err());
     assert_eq!(j.run_delivery_id(&claim).unwrap(), None);
@@ -897,10 +938,14 @@ fn atomic_completion_rejects_invalid_payload_without_finishing_claim() {
             RunStatus::Succeeded,
             Some(&json!({"ok":true})),
             None,
-            Some((&json!({"prepared":true}), "cron-delivery"))
+            Some((&prepared, "cron-delivery"))
         )
         .unwrap());
     let seq = j.run_delivery_id(&claim).unwrap().unwrap();
+    assert_eq!(
+        j.pending_deliveries(1, u64::MAX / 2).unwrap()[0].data,
+        prepared
+    );
     assert_eq!(
         j.pending_deliveries(1, u64::MAX / 2).unwrap()[0].event_seq,
         seq
@@ -1339,4 +1384,85 @@ fn cron_only_completion_and_ack_retention_is_bounded_without_any_source_ingest()
     assert_eq!(deliveries.len(), 1);
     assert_eq!(deliveries[0].event_seq, pending_seq);
     assert_eq!(deliveries[0].data, json!({"n":0}));
+}
+
+#[test]
+fn byte_policies_default_unlimited_and_preserve_positive_digest_covered_opt_ins() {
+    let mut definition = generic_definition();
+    definition.policy = ExecutionPolicy::default();
+    assert_eq!(definition.policy.max_event_bytes, 0);
+    definition.action = AutomationAction::Transform {
+        input_channel: "input".into(),
+        output_channel: "output".into(),
+        select_fields: vec!["history".into()],
+        max_output_bytes: 0,
+    };
+    definition.validate().unwrap();
+    let digest = definition.security_digest().unwrap();
+    definition.policy.max_event_bytes = 500000;
+    if let AutomationAction::Transform {
+        max_output_bytes, ..
+    } = &mut definition.action
+    {
+        *max_output_bytes = 500000;
+    }
+    definition.validate().unwrap();
+    assert_ne!(definition.security_digest().unwrap(), digest);
+    let mut persisted = serde_json::to_value(&definition).unwrap();
+    let restored: Definition = serde_json::from_value(persisted.clone()).unwrap();
+    assert_eq!(
+        restored.security_digest().unwrap(),
+        definition.security_digest().unwrap()
+    );
+    assert_eq!(restored.policy.max_event_bytes, 500000);
+    persisted["policy"]
+        .as_object_mut()
+        .unwrap()
+        .remove("max_event_bytes");
+    persisted["action"]
+        .as_object_mut()
+        .unwrap()
+        .remove("max_output_bytes");
+    let unset: Definition = serde_json::from_value(persisted).unwrap();
+    assert_eq!(unset.policy.max_event_bytes, 0);
+    assert!(matches!(
+        unset.action,
+        AutomationAction::Transform {
+            max_output_bytes: 0,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn explicit_run_delivery_accepts_large_payload_once_and_rejects_stale_claim() {
+    let t = tempfile::tempdir().unwrap();
+    let j = AutomationJournal::open(t.path()).unwrap();
+    let lease = ProjectAutomationLease::acquire(t.path()).unwrap();
+    j.activate_owner(&lease).unwrap();
+    let job = job("large-run-delivery");
+    j.put_legacy_job(&job).unwrap();
+    let claim = j
+        .claim_run(
+            &job.id,
+            "one",
+            &legacy_job_digest(&job).unwrap(),
+            lease.epoch(),
+            false,
+        )
+        .unwrap()
+        .unwrap();
+    let payload = json!({"history":"run-data".repeat(50000)});
+    let seq = j.enqueue_run_delivery(&claim, &payload, "view").unwrap();
+    assert_eq!(
+        j.enqueue_run_delivery(&claim, &payload, "view").unwrap(),
+        seq
+    );
+    let deliveries = j.pending_deliveries(10, 0).unwrap();
+    assert_eq!(deliveries.len(), 1);
+    assert_eq!(deliveries[0].data, payload);
+    let mut stale = claim.clone();
+    stale.run_id = "missing-run".into();
+    assert!(j.enqueue_run_delivery(&stale, &payload, "view").is_err());
+    assert_eq!(j.pending_deliveries(10, 0).unwrap().len(), 1);
 }

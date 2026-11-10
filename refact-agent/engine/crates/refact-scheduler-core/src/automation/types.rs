@@ -45,6 +45,7 @@ pub enum AutomationAction {
         input_channel: String,
         output_channel: String,
         select_fields: Vec<String>,
+        #[serde(default)]
         max_output_bytes: usize,
     },
 }
@@ -67,6 +68,7 @@ pub enum Lifecycle {
 pub struct ExecutionPolicy {
     pub idempotent: bool,
     pub max_pending_events: usize,
+    #[serde(default)]
     pub max_event_bytes: usize,
 }
 impl Default for ExecutionPolicy {
@@ -74,7 +76,7 @@ impl Default for ExecutionPolicy {
         Self {
             idempotent: false,
             max_pending_events: 1024,
-            max_event_bytes: 262144,
+            max_event_bytes: 0,
         }
     }
 }
@@ -90,7 +92,6 @@ impl Definition {
         if self.schema_version != 1
             || self.revision == 0
             || self.deliveries.len() > 32
-            || self.policy.max_event_bytes > 262144
             || self.policy.max_pending_events > 4096
         {
             return Err("invalid definition bounds/schema".into());
@@ -105,12 +106,10 @@ impl Definition {
             }
         }
         if let AutomationAction::Transform {
-            select_fields,
-            max_output_bytes,
-            ..
+            select_fields, ..
         } = &self.action
         {
-            if select_fields.len() > 128 || *max_output_bytes > 262144 {
+            if select_fields.len() > 128 {
                 return Err("transform bounds".into());
             }
         }

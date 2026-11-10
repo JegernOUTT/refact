@@ -38,10 +38,10 @@ impl TransformSpec {
                 return Err("transform field limit".into());
             }
         }
-        bounded(&serde_json::to_value(self).map_err(|_| "transform serialization")?)
+        bounded_definition(&serde_json::to_value(self).map_err(|_| "transform serialization")?)
     }
 }
-fn bounded(value: &Value) -> Result<(), String> {
+fn bounded_definition(value: &Value) -> Result<(), String> {
     let mut stack = vec![(value, 0usize)];
     let mut nodes = 0;
     while let Some((v, depth)) = stack.pop() {
@@ -73,6 +73,44 @@ fn bounded(value: &Value) -> Result<(), String> {
         return Err("transform byte limit".into());
     }
     Ok(())
+}
+fn bounded(value: &Value) -> Result<(), String> {
+    enum Children<'a> {
+        Array(std::slice::Iter<'a, Value>),
+        Object(serde_json::map::Values<'a>),
+    }
+    impl<'a> Iterator for Children<'a> {
+        type Item = &'a Value;
+        fn next(&mut self) -> Option<Self::Item> {
+            match self {
+                Self::Array(values) => values.next(),
+                Self::Object(values) => values.next(),
+            }
+        }
+    }
+    let mut stack = Vec::new();
+    let mut current = Some(value);
+    loop {
+        if let Some(value) = current.take() {
+            if stack.len() > 64 {
+                return Err("transform depth limit".into());
+            }
+            match value {
+                Value::Array(values) => stack.push(Children::Array(values.iter())),
+                Value::Object(values) => stack.push(Children::Object(values.values())),
+                _ => {}
+            }
+        }
+        match stack.last_mut() {
+            Some(children) => match children.next() {
+                Some(value) => current = Some(value),
+                None => {
+                    stack.pop();
+                }
+            },
+            None => return Ok(()),
+        }
+    }
 }
 /// A failed predicate returns Null (a documented filtered-out sentinel); callers
 /// that need to suppress delivery must test it explicitly. No stateful dedup.
@@ -116,8 +154,16 @@ mod tests {
             apply_transform(&spec, &json!({"kind":"other"})).unwrap(),
             Value::Null
         );
-        assert!(apply_transform(&spec, &json!({"x":"a".repeat(262145)})).is_err());
-        assert!(apply_transform(&spec, &json!({"x":vec![0;8193]})).is_err());
+        let history = json!({"x": (0..10000).map(|i| json!({"at":i,"value":"a".repeat(40)})).collect::<Vec<_>>(), "kind":"metric"});
+        assert_eq!(
+            apply_transform(&spec, &history).unwrap(),
+            json!({"value":history["x"]})
+        );
+        let mut deep = Value::Null;
+        for _ in 0..65 {
+            deep = json!([deep]);
+        }
+        assert!(apply_transform(&spec, &json!({"x":deep})).is_err());
         let mut collision = spec.clone();
         collision.select_fields.clear();
         collision.filter_equals.clear();

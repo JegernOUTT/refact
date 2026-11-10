@@ -94,7 +94,8 @@ async fn proxy_to_worker(
     };
 
     let (parts, body) = request.into_parts();
-    let body = match limited_body_bytes(body).await {
+    let body_limit = proxy_body_limit(&parts.method, &worker_path);
+    let body = match limited_body_bytes(body, body_limit).await {
         Ok(body) => body,
         Err(response) => return response,
     };
@@ -300,7 +301,23 @@ async fn project_entry(state: &DaemonState, project_id: &str) -> Option<ProjectE
     state.projects.read().await.get(project_id).cloned()
 }
 
-async fn limited_body_bytes(mut body: Body) -> Result<hyper::body::Bytes, Response<Body>> {
+fn proxy_body_limit(method: &axum::http::Method, worker_path: &str) -> Option<usize> {
+    let workspace_chat_id = worker_path
+        .strip_prefix("/v1/chats/")
+        .and_then(|path| path.strip_suffix("/app-workspace"));
+    let workspace = workspace_chat_id
+        .is_some_and(|id| crate::chat::trajectories::validate_trajectory_id(id).is_ok());
+    if method == axum::http::Method::POST && (worker_path == "/v1/apps/commands" || workspace) {
+        None
+    } else {
+        Some(PROXY_BODY_LIMIT)
+    }
+}
+
+async fn limited_body_bytes(
+    mut body: Body,
+    limit: Option<usize>,
+) -> Result<hyper::body::Bytes, Response<Body>> {
     let mut out = Vec::new();
     while let Some(chunk) = body.data().await {
         let chunk = match chunk {
@@ -312,7 +329,7 @@ async fn limited_body_bytes(mut body: Body) -> Result<hyper::body::Bytes, Respon
                 ));
             }
         };
-        if out.len().saturating_add(chunk.len()) > PROXY_BODY_LIMIT {
+        if limit.is_some_and(|limit| out.len().saturating_add(chunk.len()) > limit) {
             return Err(json_response(
                 StatusCode::PAYLOAD_TOO_LARGE,
                 json!({"error": "request body too large"}),
@@ -874,7 +891,9 @@ mod tests {
     async fn limited_body_bytes_rejects_proxy_bodies_over_limit() {
         let body = Body::from(vec![b'x'; PROXY_BODY_LIMIT + 1]);
 
-        let response = limited_body_bytes(body).await.unwrap_err();
+        let response = limited_body_bytes(body, Some(PROXY_BODY_LIMIT))
+            .await
+            .unwrap_err();
 
         assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
     }

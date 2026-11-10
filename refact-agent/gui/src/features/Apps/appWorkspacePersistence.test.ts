@@ -1232,3 +1232,49 @@ describe("HTTP-compat: works without crypto.randomUUID", () => {
     expect(body.client_request_id).toMatch(UUID_V4_RE);
   });
 });
+
+test("large binding state saves through the dedicated workspace transport", async () => {
+  vi.useFakeTimers();
+  const workspace = remoteWorkspace(7);
+  workspace.bindings[0].state = {
+    history: "metric-42;".repeat(2 * 1024 * 1024),
+  };
+  const fetchMock = vi
+    .spyOn(globalThis, "fetch")
+    .mockImplementation((_url, options) => {
+      const body = JSON.parse(String(options?.body)) as {
+        workspace: AppWorkspace;
+      };
+      return Promise.resolve(
+        new Response(
+          JSON.stringify({ app_workspace: { ...body.workspace, revision: 8 } }),
+        ),
+      );
+    });
+  const store = setup();
+  store.dispatch({ type: "test/snapshot", payload: workspace });
+  const root = store.getState().workspace.groups["chat:a"]!.root;
+  store.dispatch(
+    resizeGroupSplit({ tabId: "chat:a", splitId: root.id, sizes: [0.6, 0.4] }),
+  );
+  await vi.advanceTimersByTimeAsync(150);
+  expect(fetchMock).toHaveBeenCalledTimes(1);
+  const [url, options] = fetchMock.mock.calls[0];
+  expect(url).toBe("/v1/chats/a/app-workspace");
+  expect(options?.method).toBe("POST");
+  const body = String(options?.body);
+  expect(body.length).toBeGreaterThan(15 * 1024 * 1024);
+  expect(JSON.parse(body)).toEqual({
+    type: "set_app_workspace",
+    client_request_id: expect.any(String) as string,
+    expected_revision: 7,
+    workspace: {
+      ...workspace,
+      layout: paneToAppLayout(
+        store.getState().workspace.groups["chat:a"]!.root,
+        "a",
+      ),
+    },
+  });
+  expect(store.getState().apps.saveStatus?.a).toBe("saved");
+});
