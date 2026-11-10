@@ -201,7 +201,7 @@ describe("model selector caps pipeline", () => {
     expect(onValueChange).toHaveBeenCalledWith("openai/gpt-4o-mini");
   });
 
-  test("shows friendly display name while selecting the exact qualified id", async () => {
+  test("shows the model id even when caps provide a friendly display name", async () => {
     const onValueChange = vi.fn();
 
     const { user } = render(
@@ -223,11 +223,69 @@ describe("model selector caps pipeline", () => {
     ).toBeInTheDocument();
 
     await user.click(
-      within(listbox).getByRole("option", { name: /Claude Sonnet 4\.5/ }),
+      within(listbox).getByRole("option", {
+        name: /au\.anthropic\.claude-sonnet-4-5-20250929-v1:0/,
+      }),
     );
 
     expect(onValueChange).toHaveBeenCalledWith(
       "au.anthropic.claude-sonnet-4-5-20250929-v1:0",
     );
+  });
+
+  test("distinguishes providers with identical display names in options and the selected value", async () => {
+    const caps = capsWithModelRoles();
+    const selectedModel = "openai_codex/gpt-6.1-sol";
+    const nextModel = "openai_codex_personal/gpt-6.1-sol";
+    for (const id of [selectedModel, nextModel]) {
+      caps.chat_models[id] = {
+        ...caps.chat_models["openai/gpt-4o"],
+        id,
+        name: "gpt-6.1-sol",
+        display_name: "GPT-6.1-Sol",
+      };
+    }
+    mockCaps(caps);
+    const onValueChange = vi.fn();
+
+    const { user, rerender } = render(
+      <ModelSelector
+        value={selectedModel}
+        onValueChange={onValueChange}
+        compact={false}
+        showLabel={false}
+      />,
+      { preloadedState: { config } },
+    );
+
+    await user.click(
+      await screen.findByRole("button", { name: "Select model" }),
+    );
+    const selectedOption = await screen.findByRole("option", {
+      name: /openai_codex\/gpt-6\.1-sol/,
+    });
+    expect(selectedOption).toHaveAttribute("aria-selected", "true");
+    expect(
+      screen.getByRole("button", { name: "Select model" }),
+    ).toHaveTextContent(selectedModel);
+
+    await user.click(
+      screen.getByRole("option", {
+        name: /openai_codex_personal\/gpt-6\.1-sol/,
+      }),
+    );
+    expect(onValueChange).toHaveBeenCalledExactlyOnceWith(nextModel);
+
+    rerender(
+      <ModelSelector
+        value={nextModel}
+        onValueChange={onValueChange}
+        compact={false}
+        showLabel={false}
+      />,
+    );
+    expect(
+      screen.getByRole("button", { name: "Select model" }),
+    ).toHaveTextContent(nextModel);
   });
 });

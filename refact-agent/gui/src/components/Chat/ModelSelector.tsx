@@ -95,8 +95,7 @@ export const ModelSelector: React.FC<ModelSelectorProps> = ({
     const mappedModels = groupedModels.flatMap((group) =>
       group.models.map((model) => ({
         value: model.value,
-        displayName:
-          caps?.chat_models[model.value]?.display_name?.trim() ?? model.value,
+        displayName: model.value,
         group: group.provider,
         disabled: model.disabled,
         pricing: pricingOption(model),
@@ -120,12 +119,7 @@ export const ModelSelector: React.FC<ModelSelectorProps> = ({
     }
 
     return mappedModels;
-  }, [
-    caps?.chat_models,
-    effectiveValue,
-    groupedModels,
-    hasEffectiveValueInList,
-  ]);
+  }, [effectiveValue, groupedModels, hasEffectiveValueInList]);
 
   const handleSelect = useCallback(
     (nextValue: string) => {
