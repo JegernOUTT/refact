@@ -80,8 +80,11 @@
   overflow-wrap: anywhere;
 }
 .editor {
+  display: flex;
+  flex-direction: column;
   height: clamp(18rem, 50cqh, 36rem);
   min-height: 16rem;
+  overflow: hidden;
 }
 .question {
   margin-block: var(--rf-space-2);

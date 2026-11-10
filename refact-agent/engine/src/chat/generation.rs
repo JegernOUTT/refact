@@ -2537,11 +2537,6 @@ pub fn start_generation(
                     .set_runtime_state(SessionState::Error, Some(error));
                 break;
             }
-            match crate::review::turn_completion::stop_at_boundary(&app, &session_arc).await {
-                Ok(true) => break,
-                Ok(false) => {}
-                Err(error) => tracing::warn!(%error, "proposal completion boundary unavailable"),
-            }
             let Some(attempt) = super::recovery::within_budget(
                 &session_arc,
                 start_generation_iteration(&app, &session_arc, &gcx),

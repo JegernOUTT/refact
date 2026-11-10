@@ -1,10 +1,10 @@
 import { expect, test } from "@playwright/test";
 
-for (const { width, height } of [
-  { width: 390, height: 420 },
-  { width: 390, height: 844 },
-  { width: 768, height: 900 },
-  { width: 1600, height: 900 },
+for (const { width, height, minimumReadingHeight } of [
+  { width: 390, height: 420, minimumReadingHeight: 220 },
+  { width: 390, height: 844, minimumReadingHeight: 560 },
+  { width: 768, height: 900, minimumReadingHeight: 640 },
+  { width: 1600, height: 900, minimumReadingHeight: 780 },
 ]) {
   test(`review focus retains state and reading space at ${width}x${height}`, async ({
     page,
@@ -44,12 +44,21 @@ for (const { width, height } of [
       }));
     expect(titleGeometry.width).toBeGreaterThan(titleGeometry.available / 2);
     const reading = await reader.boundingBox();
-    expect(reading?.height).toBeGreaterThan(220);
+    console.log(
+      "reading-height",
+      JSON.stringify({
+        width,
+        height,
+        actual: reading?.height,
+        minimumReadingHeight,
+      }),
+    );
+    expect(reading?.height).toBeGreaterThan(minimumReadingHeight);
     expect(
       reading
         ? Math.min(reading.y + reading.height, height) - Math.max(reading.y, 0)
         : 0,
-    ).toBeGreaterThan(220);
+    ).toBeGreaterThan(minimumReadingHeight);
     if (width <= 768) {
       const browse = page.getByRole("button", { name: "Browse topics" });
       await browse.click();

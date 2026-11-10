@@ -962,10 +962,19 @@ pub(crate) async fn apply(
     review_id: &str,
     operation: Operation,
 ) -> std::result::Result<Review, String> {
+    apply_with_privacy(root, review_id, operation, vec![]).await
+}
+
+pub(crate) async fn apply_with_privacy(
+    root: PathBuf,
+    review_id: &str,
+    operation: Operation,
+    privacy: Vec<refact_privacy::FileRecord>,
+) -> std::result::Result<Review, String> {
     let id = review_id.to_owned();
     super::service::with_store(root, move |store| {
         let review = store.load(&id)?;
-        store.mutate(
+        store.mutate_with_privacy(
             &id,
             Mutation {
                 expected_revision: review.revision,
@@ -977,6 +986,7 @@ pub(crate) async fn apply(
                 at_ms: chrono::Utc::now().timestamp_millis(),
                 operation,
             },
+            privacy,
         )
     })
     .await

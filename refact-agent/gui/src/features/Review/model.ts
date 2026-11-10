@@ -32,6 +32,16 @@ export type ReviewFileEntry = {
   findingCount: number;
 };
 
+export function groupReviewFiles(entries: ReviewFileEntry[]): {
+  changed: ReviewFileEntry[];
+  unchanged: ReviewFileEntry[];
+} {
+  return {
+    changed: entries.filter((entry) => entry.status !== "unchanged"),
+    unchanged: entries.filter((entry) => entry.status === "unchanged"),
+  };
+}
+
 export function fileStatus(file: CandidateFile): FileStatus {
   if (!file.base && file.head) return "added";
   if (file.base && !file.head) return "deleted";

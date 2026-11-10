@@ -79,9 +79,16 @@ pub(crate) async fn activate_owned(
     review_id: String,
     expected_active: Option<String>,
     mutation: Mutation,
+    privacy: Vec<refact_privacy::FileRecord>,
 ) -> Result<Review> {
     with_store(root, move |store| {
-        store.mutate_and_set_active(&owner, &review_id, expected_active.as_deref(), mutation)
+        store.mutate_and_set_active_with_privacy(
+            &owner,
+            &review_id,
+            expected_active.as_deref(),
+            mutation,
+            privacy,
+        )
     })
     .await
 }
@@ -253,6 +260,10 @@ pub async fn anchor(root: PathBuf, review: Review, request: AnchorRequest) -> Re
     })
     .await
 }
+pub(crate) fn reply_contribution_id(review_id: &str, request_key: &str) -> String {
+    id("contribution", review_id, request_key)
+}
+
 async fn add_comment(
     app: AppState,
     root: PathBuf,
@@ -415,9 +426,9 @@ async fn add_comment(
             candidate_id,
             run_id: run.map(|run| run.id.clone()),
             applicability,
-            privacy,
+            privacy: privacy.clone(),
         });
-        let contribution_id = id("contribution", &rid, &key);
+        let contribution_id = reply_contribution_id(&rid, &key);
         if let Some(candidate) = context.as_ref().and_then(|c| c.candidate_id.as_deref()) {
             validate_block_candidate(&r, &req.blocks, candidate)?;
         }
@@ -448,7 +459,7 @@ async fn add_comment(
                 contribution: c,
             }
         };
-        s.mutate(
+        s.mutate_with_privacy(
             &rid,
             Mutation {
                 expected_revision: req.expected_revision,
@@ -457,6 +468,7 @@ async fn add_comment(
                 at_ms: now_ms(),
                 operation,
             },
+            privacy,
         )
     })
     .await?;
@@ -580,39 +592,6 @@ fn check_anchors(new: &[Anchor], old: &[Anchor]) -> Result<()> {
     }
     Ok(())
 }
-fn restore_tour_intake_history(review: &Review, mutation: &mut Mutation) -> Result<()> {
-    if let Operation::PutTourStep {
-        step,
-    } = &mut mutation.operation
-    {
-        if step.current.context_intake.is_some()
-            || step.history.iter().any(|v| v.context_intake.is_some())
-        {
-            return Err(invalid("context intake receipts are runtime-owned"));
-        }
-        if let Some(old) = review.tour.iter().find(|s| s.id == step.id) {
-            let retained = old
-                .history
-                .iter()
-                .take(step.history.len())
-                .cloned()
-                .collect::<Vec<_>>();
-            let mut expected = retained.clone();
-            for version in &mut expected {
-                version.context_intake = None;
-            }
-            if step.history != expected {
-                return Err(invalid("tour history protected"));
-            }
-            step.history = retained;
-        }
-    }
-    if matches!(&mutation.operation, Operation::ApplyTourRevision { current, .. } if current.context_intake.is_some())
-    {
-        return Err(invalid("context intake receipts are runtime-owned"));
-    }
-    Ok(())
-}
 fn validate_operation(r: &Review, op: &Operation) -> Result<()> {
     match op {
         Operation::Rename {
@@ -669,7 +648,7 @@ fn validate_operation(r: &Review, op: &Operation) -> Result<()> {
                 || thread.annotation_id != old.annotation_id
                 || thread.target != old.target
             {
-                return Err(invalid("thread history protected"));
+                return Err(invalid("thread history protected: contributions are append-only; answer a discussion with review_reply(thread_id, body). put_thread only re-anchors or resolves existing threads"));
             }
             check_anchors(&thread.anchors, &old.anchors)
         }
@@ -702,34 +681,7 @@ pub async fn model_mutate_with_privacy(
     mutation: Mutation,
     privacy: Vec<refact_privacy::FileRecord>,
 ) -> Result<Review> {
-    model_mutate_with_completion(root, owner, review_id, agent_id, mutation, privacy, None).await
-}
-
-pub(crate) async fn model_mutate_with_completion(
-    root: PathBuf,
-    owner: String,
-    review_id: String,
-    agent_id: String,
-    mutation: Mutation,
-    privacy: Vec<refact_privacy::FileRecord>,
-    intent: Option<ProposalTurnCompletionIntent>,
-) -> Result<Review> {
-    model_mutate_with_intake(
-        root, owner, review_id, agent_id, mutation, privacy, intent, None,
-    )
-    .await
-}
-
-pub(crate) async fn model_mutate_with_intake(
-    root: PathBuf,
-    owner: String,
-    review_id: String,
-    agent_id: String,
-    mut mutation: Mutation,
-    privacy: Vec<refact_privacy::FileRecord>,
-    intent: Option<ProposalTurnCompletionIntent>,
-    intake: Option<ContextIntakeReceipt>,
-) -> Result<Review> {
+    let mut mutation = mutation;
     let actor = Actor {
         kind: ActorKind::Agent,
         id: agent_id.clone(),
@@ -740,88 +692,6 @@ pub(crate) async fn model_mutate_with_intake(
         let r = s.load(&review_id)?;
         if r.owner_chat_id != owner {
             return Err(Error::NotFound);
-        }
-        restore_tour_intake_history(&r, &mut mutation)?;
-        if let Some(receipt) = intake.as_ref() {
-            if s.intake_for_request(&review_id, &mutation.request_key)?
-                .is_some()
-            {
-                match &mut mutation.operation {
-                    Operation::PutTourStep {
-                        step,
-                    } => {
-                        if step
-                            .current
-                            .candidate_id
-                            .as_ref()
-                            .is_some_and(|id| Some(id) != receipt.candidate_id.as_ref())
-                        {
-                            return Err(invalid("tour candidate differs from intake"));
-                        }
-                        step.current.candidate_id = receipt.candidate_id.clone();
-                        return s.mutate_with_intake(&review_id, mutation, receipt.clone());
-                    }
-                    Operation::ApplyTourRevision {
-                        ..
-                    } => {
-                        return s.mutate_current_tour_revision_with_intake(
-                            &owner,
-                            &review_id,
-                            mutation,
-                            None,
-                            receipt.clone(),
-                        )
-                    }
-                    _ => return Err(invalid("unexpected intake replay operation")),
-                }
-            }
-        }
-        match &mutation.operation {
-            Operation::AcceptTourRevision {
-                ..
-            } => {
-                return Err(invalid("Tour revision acceptance is user-only"));
-            }
-            Operation::ProposeTourRevision {
-                ..
-            }
-            | Operation::ApplyTourRevision {
-                ..
-            } => {
-                if agent_id != owner
-                    || s.get_for_chat(&owner)?.as_ref().map(|active| &active.id) != Some(&r.id)
-                {
-                    return Err(invalid(
-                        "Tour revision requires the owning foreground active review",
-                    ));
-                }
-                // Core checks replay before mutable target/candidate eligibility.
-                if let Operation::ProposeTourRevision {
-                    target, ..
-                } = &mutation.operation
-                {
-                    let context = ContributionContext {
-                        candidate_id: Some(target.candidate_id.clone()),
-                        run_id: None,
-                        applicability: Applicability::Current,
-                        privacy,
-                    };
-                    return s.mutate_current_tour_revision_with_completion(
-                        &owner,
-                        &review_id,
-                        mutation,
-                        Some(context),
-                        intent,
-                    );
-                }
-                return match intake {
-                    Some(receipt) => s.mutate_current_tour_revision_with_intake(
-                        &owner, &review_id, mutation, None, receipt,
-                    ),
-                    None => s.mutate_current_tour_revision(&owner, &review_id, mutation, None),
-                };
-            }
-            _ => {}
         }
         let candidate = if agent_id == owner {
             r.current_candidate_id
@@ -839,9 +709,11 @@ pub(crate) async fn model_mutate_with_intake(
             step,
         } = &mut mutation.operation
         {
-            if agent_id != owner {
+            if agent_id != owner
+                || s.get_for_chat(&owner)?.as_ref().map(|active| &active.id) != Some(&r.id)
+            {
                 return Err(invalid(
-                    "only the owning foreground tour author may update the tour",
+                    "only the owning foreground active tour author may update the tour",
                 ));
             }
             if step
@@ -853,6 +725,11 @@ pub(crate) async fn model_mutate_with_intake(
                 return Err(invalid("tour candidate differs from inspected candidate"));
             }
             step.current.candidate_id = Some(candidate.to_owned());
+            // A stale request can only be an exact replay or a CAS failure in the store.
+            // Let its fingerprint check run before validating against newer object history.
+            if mutation.expected_revision != r.revision {
+                return s.mutate_with_privacy(&review_id, mutation, privacy);
+            }
             validate_block_candidate(&r, &step.current.blocks, candidate)?;
         }
         if historical {
@@ -958,7 +835,7 @@ pub(crate) async fn model_mutate_with_intake(
                 .find(|run| run.agent_id == agent_id)
                 .map(|run| run.id.clone());
             evidence.created_at_ms = now_ms();
-            return s.mutate(&review_id, mutation);
+            return s.mutate_with_privacy(&review_id, mutation, privacy);
         }
         let anchors: &[Anchor] = match &mutation.operation {
             Operation::PutTourStep {
@@ -977,10 +854,7 @@ pub(crate) async fn model_mutate_with_intake(
             return Err(invalid("operation differs from inspected candidate"));
         }
         validate_operation(&r, &mutation.operation)?;
-        match intake {
-            Some(receipt) => s.mutate_with_intake(&review_id, mutation, receipt),
-            None => s.mutate(&review_id, mutation),
-        }
+        s.mutate_with_privacy(&review_id, mutation, privacy)
     })
     .await
 }
@@ -1007,58 +881,6 @@ async fn safe_mutate(
 
 #[cfg(test)]
 mod lookup_side_effect_tests {
-    #[test]
-    fn runtime_tour_receipts_restore_only_unchanged_history_and_allow_exact_retry_prefix() {
-        use refact_review_core::*;
-        let version = serde_json::json!({"version":1,"title":"old","body":"body","anchors":[]});
-        let mut review: Review = serde_json::from_value(serde_json::json!({"schema_version":1,"id":"r","owner_chat_id":"owner","revision":2,"title":"Review","origin":"imported","target_reference":"local","current_candidate_id":"c","candidates":[],"tour":[{"id":"step","current":version,"history":[version]}],"annotations":[],"threads":[],"evidence":[],"runs":[],"materials":[],"activity":[]})).unwrap();
-        let receipt: ContextIntakeReceipt = serde_json::from_value(serde_json::json!({"id":"runtime","phase":"before_tour","owner_chat_id":"owner","repository":"repo","base_oid":"base","head_oid":"head","candidate_id":"c","captured_at_ms":1,"input_reference":{"kind":"user_directive","message_id":"u","status":"cited_user_intent","content_hash":"hash"},"consultations":[],"gaps":[],"summary":"scope","privacy":[]})).unwrap();
-        review.tour[0].history[0].context_intake = Some(receipt.clone());
-        let mut step = review.tour[0].clone();
-        step.current.version = 3;
-        step.history[0].context_intake = None;
-        let mut mutation = Mutation {
-            expected_revision: 2,
-            request_key: "k".into(),
-            actor: Actor {
-                kind: ActorKind::Agent,
-                id: "owner".into(),
-            },
-            at_ms: 1,
-            operation: Operation::PutTourStep {
-                step,
-            },
-        };
-        super::restore_tour_intake_history(&review, &mut mutation).unwrap();
-        if let Operation::PutTourStep {
-            step,
-        } = &mutation.operation
-        {
-            assert_eq!(step.history[0].context_intake.as_ref(), Some(&receipt));
-        }
-        let mut changed = mutation.clone();
-        if let Operation::PutTourStep {
-            step,
-        } = &mut changed.operation
-        {
-            step.history[0].context_intake = None;
-            step.history[0].body = "changed".into();
-        }
-        assert!(super::restore_tour_intake_history(&review, &mut changed).is_err());
-        let mut retry = mutation;
-        if let Operation::PutTourStep {
-            step,
-        } = &mut retry.operation
-        {
-            step.history.clear();
-        }
-        super::restore_tour_intake_history(&review, &mut retry).unwrap();
-        assert!(
-            super::validate_operation(&review, &retry.operation).is_err(),
-            "short prefix is only usable by core exact replay, never fresh mutation"
-        );
-    }
-
     #[tokio::test]
     async fn absent_review_lookups_do_not_create_project_state() {
         let temp = tempfile::tempdir().unwrap();

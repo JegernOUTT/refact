@@ -84,7 +84,6 @@ struct UpdateArgs {
     expected_revision: u64,
     request_key: String,
     operation: Operation,
-    context_intake: Option<crate::review::intake::ContextIntakeRequest>,
 }
 
 #[derive(Deserialize)]
@@ -186,17 +185,6 @@ fn exact_object(
             })
     };
     let (value, allowed) = match kind {
-        "tour_revision_proposal" => {
-            let item = review
-                .tour_revision_proposals
-                .iter()
-                .find(|item| item.id == id)
-                .ok_or("Unknown review object")?;
-            (
-                json!(item),
-                Some(item.target.candidate_id.as_str()) == pinned,
-            )
-        }
         "tour_step" => {
             let item = review
                 .tour
@@ -329,8 +317,6 @@ pub fn summary(review: &Review) -> Value {
         "title": review.title,
         "target_reference": review.target_reference,
         "current_candidate_id": review.current_candidate_id,
-        "context_intake": review.context_intake.as_ref().map(crate::review::intake_runtime::summary),
-        "pending_tour_revision_actions": crate::review::proposals::pending(review),
         "candidates": review.candidates.iter().map(|candidate| json!({
             "id": candidate.id,
             "base_oid": candidate.base_oid,
@@ -345,7 +331,7 @@ pub fn summary(review: &Review) -> Value {
         "tour": review.tour.iter().rev().take(50).map(|step| {
             let (title, title_truncated) = bounded_text(&step.current.title);
             let (body, body_truncated) = bounded_text(&step.current.body);
-            json!({"id":step.id,"current":{"version":step.current.version,"candidate_id":step.current.candidate_id,"blocks":block_inventory(&step.current.blocks),"title":title,"title_truncated":title_truncated,"body":body,"body_truncated":body_truncated,"anchors":anchors(&step.current.anchors),"anchors_total":step.current.anchors.len(),"anchors_truncated":step.current.anchors.len()>50},"history_total":step.history.len(),"history_truncated":!step.history.is_empty()})
+            json!({"id":step.id,"current":{"version":step.current.version,"candidate_id":step.current.candidate_id,"blocks":block_inventory(&step.current.blocks),"title":title,"title_truncated":title_truncated,"body":body,"body_truncated":body_truncated,"html_present":step.current.html.is_some(),"html_bytes":step.current.html.as_ref().map_or(0, String::len),"anchors":anchors(&step.current.anchors),"anchors_total":step.current.anchors.len(),"anchors_truncated":step.current.anchors.len()>50},"history_total":step.history.len(),"history_truncated":!step.history.is_empty()})
         }).collect::<Vec<_>>(),
         "tour_total": review.tour.len(),
         "annotations": review.annotations.iter().rev().take(50).map(|item| {
@@ -391,9 +377,6 @@ pub fn summary(review: &Review) -> Value {
 fn pinned_summary(review: &Review, pinned: &str) -> Value {
     let mut projection = review.clone();
     projection.current_candidate_id = Some(pinned.to_owned());
-    projection
-        .tour_revision_proposals
-        .retain(|p| p.target.candidate_id == pinned);
     projection.candidates.retain(|item| item.id == pinned);
     projection
         .tour
@@ -448,7 +431,7 @@ async fn result_message(
         })
         .collect::<Vec<_>>();
     let mut records = crate::privacy::records::declared_file_records(&gcx, paths)?;
-    records.extend(crate::review::intake_runtime::privacy(review));
+    records.extend(review.privacy.clone());
     let mut message = ChatMessage {
         role: "tool".into(),
         tool_call_id: call_id.into(),
@@ -478,15 +461,15 @@ impl Tool for ToolReview {
                     "request_key":{"type":"string","description":"Stable idempotency key. Reuse only for retries of the identical request."}
                 });
                 properties["action"] = json!({"type":"string","enum":["stack_prepare","stack_import","stack_inspect","stack_member","stack_capture","stack_cumulative","stack_refresh"]});
-                properties["manifest"] = json!({"type":"object","description":"Explicit acquired StackManifest with local refs and source provenance; prepare validates and returns the exact ask_questions prompt before any capture."});
+                properties["manifest"] = json!({"type":"object","description":"Explicit acquired StackManifest with local refs and source provenance. For ambiguous multi-PR acquisition only, prepare returns the scope-choice question; ordinary local comparisons and workspace edits need no question."});
                 properties["member_id"] = json!({"type":"string"});
-                properties["scope_receipt_tool_call_id"] = json!({"type":"string","description":"Actual answered ask_questions call in this owning chat. Booleans or model assertions are not consent."});
-                ("Set Review Context", "After context searches and before capture or Tour mutation, call action context_sources with phase before_review or before_tour (optional review_id for Tour) to discover actual completed retrieval IDs in this owning chat. Cite returned tool_call_id values in context_intake; metadata is not consent or admission. For known Graphite stacks FIRST call stack_prepare with discovery (title, source, selected_member, members and comparison_mode), present its exact question using ask_questions and stop. After USER answers, stack_import with acquisition (preparation_token, actual scope_receipt_tool_call_id, request_key, comparisons, optional root_base_ref); only then stack_capture with member_id and request_key activates one member. stack_inspect, stack_member and stack_cumulative are read-only and never activate execution. No automatic expansion/download or Graphite mutations. Without action: attach a prepared local comparison to this same chat and Review Canvas. Captures immutable base/candidate material and creates a registered isolated investigation checkout. Does not download code, overwrite the user's checkout, publish remotely, or grant authority. Updates preserve history and stall uncertain anchors. Runtime-root only; existing reviewers remain pinned to the material they inspected.", vec![])
+                properties["scope_receipt_tool_call_id"] = json!({"type":"string","description":"Answered acquisition-scope choice for an ambiguous multi-PR stack only. Does not apply to ordinary local comparisons or workspace edits."});
+                ("Set Review Context", "Attach a prepared local comparison to this chat and Review workspace. Gather context with ordinary read, search, run and delegation tools. Captures immutable material and creates an isolated investigation checkout without overwriting the user checkout. Stack actions preserve confirmed scope and pinned member history. Runtime-root only; existing reviewers stay pinned to their inspected material.", vec![])
             }
             ReviewToolKind::Get => {
                 properties["candidate_id"] = json!({"type":"string","description":"Immutable candidate to read. A child may read only its pinned candidate."});
                 properties["object_id"] = json!({"type":"string","description":"ID of one exact object; requires object_kind and cannot be combined with path, range, or candidate_id."});
-                properties["object_kind"] = json!({"type":"string","enum":["tour_step","tour_revision_proposal","annotation","thread","evidence","material","run"],"description":"Kind of object to read with object_id."});
+                properties["object_kind"] = json!({"type":"string","enum":["tour_step","annotation","thread","evidence","material","run"],"description":"Kind of object to read with object_id."});
                 properties["path"] = json!({"type":"string","description":"Optional candidate-relative file to read from the immutable snapshot, not the mutable investigation checkout."});
                 properties["side"] = json!({"type":"string","enum":["base","head"]});
                 properties["start_line"] = json!({"type":"integer","minimum":1});
@@ -504,15 +487,15 @@ impl Tool for ToolReview {
             ReviewToolKind::Update => {
                 properties["expected_revision"] = json!({"type":"integer","minimum":0});
                 properties["request_key"] = json!({"type":"string"});
-                properties["operation"] = json!({"type":"object","description":"Typed review operation. op: put_tour_step {step:{id,current:{version,title,body,anchors},history:[]}}, put_annotation {annotation:{id,kind:explanation|highlight|finding,title,body,anchors,severity:info|low|medium|high|critical,confidence:unknown|low|medium|high,assessment:unassessed|supported|disputed|refuted,disposition:open|repair_proposed|fixed|risk_accepted|dismissed,applicability:current|needs_revalidation|historical|no_longer_applicable|unknown,evidence_ids,run_id}}, put_thread {thread}, rename {title}, or add_evidence {evidence} for source/external assertions only. Preserve existing object histories. Runtime attribution is automatic; execution evidence must use review_record_evidence. Candidate activation, fabricated runtime results, and direct contribution insertion are refused."});
-                ("Update Review", "Add durable Tour explanations, findings and source evidence. Chat-led Tour revisions use propose_tour_revision {target,thread_id,change_request,body,blocks?}, storing one canonical assistant contribution; do not repeat it in chat or review_reply. Acceptance is exclusively an explicit USER UI action, never model self-consent. After acceptance use apply_tour_revision {proposal_id,current} for that exact scope. Pending intent never automatically dispatches authoring. Both operations require the owning foreground active review. Source interpretation is not execution. Conflicts require rereading and reconciliation.", vec!["expected_revision","request_key","operation"])
+                properties["operation"] = json!({"type":"object","description":"Typed review operation. op: put_tour_step {step:{id,current:{version,title,body,html?,anchors,blocks?},history:[]}}, put_annotation {annotation:{id,kind:explanation|highlight|finding,title,body,anchors,severity:info|low|medium|high|critical,confidence:unknown|low|medium|high,assessment:unassessed|supported|disputed|refuted,disposition:open|repair_proposed|fixed|risk_accepted|dismissed,applicability:current|needs_revalidation|historical|no_longer_applicable|unknown,evidence_ids,run_id}}, put_thread {thread} only re-anchors/resolves; answer with review_reply(thread_id, body), rename {title}, or add_evidence {evidence} for source/external assertions only. Preserve existing object histories. Runtime attribution is automatic; execution evidence must use review_record_evidence. Candidate activation, fabricated runtime results, and direct contribution insertion are refused."});
+                ("Update Review", "Write durable Review workspace explanations, visual Tour pages, findings and source evidence. For ordinary Tour edits read the exact tour_step, then put_tour_step with the next version and unchanged history; CAS uses expected_revision and exact retries reuse request_key. Only the owning foreground chat authors Tours. Execution evidence is runtime-owned. Reread and reconcile conflicts.", vec!["expected_revision","request_key","operation"])
             }
             ReviewToolKind::Reply => {
                 properties["expected_revision"] = json!({"type":"integer","minimum":0});
                 properties["request_key"] = json!({"type":"string"});
                 properties["thread_id"] = json!({"type":"string"});
                 properties["body"] = json!({"type":"string"});
-                ("Reply in Review", "Answer a discussion with one canonical linked contribution. Ordinary replies have no obligation to revise the Tour. For an explanation improvement use review_update propose_tour_revision instead, wait for explicit user acceptance, then apply_tour_revision; a reply is not consent. Source-only review does not permit repository edits or execution. Do not separately post the same reply in chat. Attribution remains runtime-bound.", vec!["expected_revision","request_key","thread_id","body"])
+                ("Reply in Review", "The only way to answer a discussion: the reply is saved in the thread and delivered to chat as its linked message. Do not repeat its content. Continue other requested work, then end the turn with one short sentence, never an empty message. Tour edits use put_tour_step after reading the exact step. No repository execution or publication authority; attribution is runtime-bound.", vec!["expected_revision","request_key","thread_id","body"])
             }
             ReviewToolKind::PrepareExecution => {
                 properties = json!({"request_key":{"type":"string","description":"Stable preparation identity for this deliberate execution."}});
@@ -553,11 +536,7 @@ impl Tool for ToolReview {
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
         let advertised = self.tool_description().input_schema;
-        let validation = if matches!(self.0, ReviewToolKind::Context) {
-            schema::schema(self.0, advertised)
-        } else {
-            advertised
-        };
+        let validation = schema::schema(self.0, advertised);
         schema::validate(&validation, &json!(args))?;
         if matches!(self.0, ReviewToolKind::Context) {
             if let Some(action) = args.get("action").and_then(Value::as_str) {
@@ -571,43 +550,6 @@ impl Tool for ToolReview {
                     }
                     (context.app.clone(), context.chat_id.clone())
                 };
-                if action == "context_sources" {
-                    let phase = args
-                        .get("phase")
-                        .and_then(Value::as_str)
-                        .ok_or("phase required")?;
-                    let candidate = if phase == "before_tour" {
-                        let (_, review) = crate::review::runs::bound_review(
-                            ccx.clone(),
-                            args.get("review_id").and_then(Value::as_str),
-                        )
-                        .await?;
-                        Some(review.current_candidate_id.ok_or("No active candidate")?)
-                    } else {
-                        if args.contains_key("review_id") {
-                            return Err(
-                                "review_id is only supported for before_tour context sources"
-                                    .into(),
-                            );
-                        }
-                        None
-                    };
-                    let (value, records) = crate::review::intake_runtime::context_sources(
-                        &app,
-                        &chat,
-                        phase,
-                        candidate.as_deref(),
-                    )
-                    .await?;
-                    let mut message = ChatMessage {
-                        role: "tool".into(),
-                        tool_call_id: tool_call_id.clone(),
-                        content: ChatContent::SimpleText(value.to_string()),
-                        ..Default::default()
-                    };
-                    crate::privacy::records::merge_records(&mut message, records);
-                    return Ok((false, vec![ContextEnum::ChatMessage(message)]));
-                }
                 let member = || {
                     args.get("member_id")
                         .and_then(Value::as_str)
@@ -626,70 +568,6 @@ impl Tool for ToolReview {
                     return result_message(&ccx, tool_call_id, &receipt.review, json!({"review":summary(&receipt.review),"worktree":receipt.worktree,"candidate_id":receipt.candidate_id})).await;
                 }
                 let value = match action {
-                    "context_question" => {
-                        let phase = args
-                            .get("phase")
-                            .and_then(Value::as_str)
-                            .ok_or("phase required")?;
-                        let (repository, base, head, candidate) = if phase == "before_tour" {
-                            let (_, review) = crate::review::runs::bound_review(
-                                ccx.clone(),
-                                args.get("review_id").and_then(Value::as_str),
-                            )
-                            .await?;
-                            let candidate = review
-                                .candidates
-                                .iter()
-                                .find(|c| Some(&c.id) == review.current_candidate_id.as_ref())
-                                .ok_or("No active candidate")?;
-                            (
-                                candidate.repository.clone(),
-                                candidate.base_oid.clone(),
-                                candidate.head_oid.clone(),
-                                Some(candidate.id.clone()),
-                            )
-                        } else {
-                            let repository = dunce::canonicalize(
-                                args.get("repository")
-                                    .and_then(Value::as_str)
-                                    .ok_or("repository required")?,
-                            )
-                            .map_err(|e| e.to_string())?;
-                            crate::files_in_workspace::check_file_privacy_for_model_context(
-                                app.gcx.clone(),
-                                &repository,
-                            )
-                            .await?;
-                            let repo =
-                                git2::Repository::open(&repository).map_err(|e| e.to_string())?;
-                            let resolve = |name: &str| -> Result<String, String> {
-                                Ok(repo
-                                    .revparse_single(
-                                        args.get(name)
-                                            .and_then(Value::as_str)
-                                            .ok_or("comparison ref required")?,
-                                    )
-                                    .and_then(|o| o.peel_to_commit())
-                                    .map_err(|e| e.to_string())?
-                                    .id()
-                                    .to_string())
-                            };
-                            (
-                                repository.to_string_lossy().into_owned(),
-                                resolve("base_ref")?,
-                                resolve("candidate_ref")?,
-                                None,
-                            )
-                        };
-                        let q = crate::review::intake::expected_question(
-                            phase,
-                            &repository,
-                            &base,
-                            &head,
-                            candidate.as_deref(),
-                        );
-                        json!({"ask_questions":{"questions":[{"id":q.id,"type":q.question_type,"text":q.text,"options":q.options}]}})
-                    }
                     "stack_prepare" => serde_json::to_value(
                         crate::review::stack_entry::prepare(
                             &app,
@@ -703,7 +581,7 @@ impl Tool for ToolReview {
                     )
                     .map_err(|e| e.to_string())?,
                     "stack_import" => json!(
-                        crate::review::stack_entry::import_with_intake(
+                        crate::review::stack_entry::import(
                             &app,
                             &chat,
                             serde_json::from_value(
@@ -712,11 +590,6 @@ impl Tool for ToolReview {
                                     .ok_or("acquisition required")?
                             )
                             .map_err(|_| "Invalid acquisition".to_owned())?,
-                            args.get("context_intake")
-                                .cloned()
-                                .map(serde_json::from_value)
-                                .transpose()
-                                .map_err(|_| "Invalid context intake")?
                         )
                         .await?
                     ),
@@ -787,28 +660,18 @@ impl Tool for ToolReview {
                             members.push(json!({"review_id":review.id,"candidate_id":review.current_candidate_id}));
                             crate::privacy::records::merge_records(
                                 &mut message,
-                                crate::review::intake_runtime::privacy(&review),
+                                review.privacy.clone(),
                             );
                         }
                     }
                     message
                         .extra
-                        .insert("review_intake_members".into(), json!(members));
+                        .insert("review_members".into(), json!(members));
                 }
                 return Ok((false, vec![ContextEnum::ChatMessage(message)]));
             }
-            let intake = serde_json::from_value(
-                args.get("context_intake")
-                    .cloned()
-                    .ok_or("context_intake required before Review creation")?,
-            )
-            .map_err(|_| "Invalid context intake")?;
-            let mut capture = args.clone();
-            capture.remove("context_intake");
-            let request = parse(&capture)?;
-            let receipt =
-                crate::review::context::set_context_with_intake(ccx.clone(), request, intake)
-                    .await?;
+            let request = parse(args)?;
+            let receipt = crate::review::context::set_context(ccx.clone(), request).await?;
             let value = json!({"review":summary(&receipt.review),"candidate_id":receipt.candidate_id,"execution_commit":receipt.execution_commit,"worktree":receipt.worktree,"imported_material_id":receipt.imported_material_id,"investigation_material_id":receipt.investigation_material_id});
             return result_message(&ccx, tool_call_id, &receipt.review, value).await;
         }
@@ -971,12 +834,7 @@ impl Tool for ToolReview {
             ReviewToolKind::Update => {
                 let request: UpdateArgs = parse(args)?;
                 let _ = request.review_id;
-                if matches!(
-                    &request.operation,
-                    Operation::PutTourStep { .. }
-                        | Operation::ProposeTourRevision { .. }
-                        | Operation::ApplyTourRevision { .. }
-                ) {
+                if matches!(&request.operation, Operation::PutTourStep { .. }) {
                     let c = ccx.lock().await;
                     if c.background_agent_id.is_some()
                         || c.subchat_depth != 0
@@ -1005,139 +863,77 @@ impl Tool for ToolReview {
                     at_ms: chrono::Utc::now().timestamp_millis(),
                     operation: request.operation,
                 };
-                let intake = if matches!(
-                    &mutation.operation,
-                    Operation::PutTourStep { .. } | Operation::ApplyTourRevision { .. }
-                ) {
-                    let scope = review.id.clone();
-                    let key = mutation.request_key.clone();
-                    let saved = crate::review::service::with_store(root.clone(), move |s| {
-                        s.intake_for_request(&scope, &key)
-                    })
-                    .await
-                    .map_err(|e| e.to_string())?;
-                    if let Some(saved) = saved {
-                        crate::review::intake_runtime::verify_request(
-                            request
-                                .context_intake
-                                .as_ref()
-                                .ok_or("context_intake required")?,
-                            &saved,
-                        )?;
-                        Some(saved)
-                    } else {
-                        let candidate = review
-                            .current_candidate_id
-                            .as_ref()
-                            .and_then(|id| review.candidates.iter().find(|c| &c.id == id))
-                            .ok_or("No active candidate")?;
-                        Some(
-                            crate::review::intake_runtime::validate(
-                                &app,
-                                &review.owner_chat_id,
-                                request
-                                    .context_intake
-                                    .as_ref()
-                                    .ok_or("context_intake required before Tour authoring")?,
-                                "before_tour",
-                                &candidate.repository,
-                                &candidate.base_oid,
-                                &candidate.head_oid,
-                                Some(&candidate.id),
-                            )
-                            .await?,
-                        )
-                    }
-                } else {
-                    None
+                let (chat_id, mut sources) = {
+                    let context = ccx.lock().await;
+                    (context.chat_id.clone(), context.messages.clone())
                 };
-                let mut provenance = vec![];
-                if let Operation::ProposeTourRevision {
-                    target,
-                    blocks,
-                    ..
-                } = &mutation.operation
-                {
-                    let (chat_id, mut sources) = {
-                        let context = ccx.lock().await;
-                        (context.chat_id.clone(), context.messages.clone())
-                    };
-                    if let Some(live) = app.chat.sessions.read().await.get(&chat_id).cloned() {
-                        sources.extend(live.lock().await.messages.iter().cloned());
+                let live = app.chat.sessions.read().await.get(&chat_id).cloned();
+                if let Some(live) = live {
+                    sources.extend(live.lock().await.messages.iter().cloned());
+                }
+                let mut provenance = crate::privacy::records::records_to_carry(&sources)
+                    .map_err(|error| format!("Review source provenance unavailable: {error}"))?;
+                let mut paths = Vec::new();
+                let (blocks, anchors): (
+                    &[refact_review_core::RichBlock],
+                    &[refact_review_core::Anchor],
+                ) = match &mutation.operation {
+                    Operation::PutTourStep {
+                        step,
+                    } => (&step.current.blocks, &step.current.anchors),
+                    Operation::PutAnnotation {
+                        annotation,
+                    } => (&[], &annotation.anchors),
+                    Operation::PutThread {
+                        thread,
+                    } => (&[], &thread.anchors),
+                    Operation::AddEvidence {
+                        evidence,
+                    } => {
+                        if let refact_review_core::EvidenceSource::Source {
+                            path, ..
+                        } = &evidence.source
+                        {
+                            paths.push(root.join(path));
+                            if let Some(candidate) = review
+                                .candidates
+                                .iter()
+                                .find(|c| c.id == evidence.candidate_id)
+                            {
+                                paths.push(PathBuf::from(&candidate.repository).join(path));
+                            }
+                        }
+                        (&[], &[])
                     }
-                    provenance =
-                        crate::privacy::records::records_to_carry(&sources).map_err(|error| {
-                            format!("Proposal source provenance unavailable: {error}")
-                        })?;
-                    let mut paths = crate::review::service::rich_paths(&root, &review, blocks);
-                    // Resolve retained immutable context, not mutable eligibility.
-                    let (version, _) =
-                        refact_review_core::rich_blocks::resolve_tour_target(&review, target)
-                            .map_err(|e| e.to_string())?;
-                    paths.extend(crate::review::service::rich_paths(
-                        &root,
-                        &review,
-                        &version.blocks,
-                    ));
-                    for anchor in &version.anchors {
-                        paths.push(root.join(&anchor.position.path));
+                    _ => (&[], &[]),
+                };
+                paths.extend(crate::review::service::rich_paths(&root, &review, blocks));
+                for anchor in anchors {
+                    for position in std::iter::once(&anchor.position).chain(anchor.history.iter()) {
+                        paths.push(root.join(&position.path));
                         if let Some(candidate) = review
                             .candidates
                             .iter()
-                            .find(|c| c.id == anchor.position.candidate_id)
+                            .find(|c| c.id == position.candidate_id)
                         {
-                            paths.push(
-                                PathBuf::from(&candidate.repository).join(&anchor.position.path),
-                            );
+                            paths.push(PathBuf::from(&candidate.repository).join(&position.path));
                         }
                     }
-                    provenance.extend(crate::privacy::records::declared_file_records(
-                        &app.gcx, paths,
-                    )?);
                 }
-                let proposing =
-                    matches!(&mutation.operation, Operation::ProposeTourRevision { .. });
-                let captured = if proposing {
-                    crate::review::turn_completion::capture(
-                        &app,
-                        &review.owner_chat_id,
-                        tool_call_id,
-                    )
-                    .await
-                } else {
-                    None
-                };
-                let changed = crate::review::service::model_mutate_with_intake(
+                provenance.extend(crate::privacy::records::declared_file_records(
+                    &app.gcx, paths,
+                )?);
+                let changed = crate::review::service::model_mutate_with_privacy(
                     root.clone(),
                     review.owner_chat_id.clone(),
                     review.id.clone(),
                     agent_id,
                     mutation,
                     provenance,
-                    captured.as_ref().map(|(intent, _, _)| intent.clone()),
-                    intake,
                 )
                 .await
                 .map_err(|error| error.to_string())?;
                 crate::review::chat_bridge::invalidate(&app, &changed).await;
-                if let Some((intent, session, origin)) = captured {
-                    if let Some(proposal) = changed.tour_revision_proposals.iter().find(|p| {
-                        !review
-                            .tour_revision_proposals
-                            .iter()
-                            .any(|old| old.id == p.id)
-                    }) {
-                        crate::review::turn_completion::register(
-                            root.clone(),
-                            &changed,
-                            &intent,
-                            &proposal.id,
-                            session,
-                            origin,
-                        )
-                        .await?;
-                    }
-                }
                 if let Err(error) = crate::review::chat_bridge::flush(&app, root, &changed).await {
                     tracing::warn!(%error, "review contribution delivery pending");
                 }
@@ -1156,10 +952,13 @@ impl Tool for ToolReview {
                             .unwrap_or_else(|| context.chat_id.clone()),
                     )
                 };
+                let thread_id = request.thread_id.clone();
+                let contribution_id =
+                    crate::review::service::reply_contribution_id(&review.id, &request.request_key);
                 let request = crate::review::service::CommentRequest {
                     expected_revision: request.expected_revision,
                     request_key: request.request_key,
-                    thread_id: Some(request.thread_id),
+                    thread_id: Some(request.thread_id.clone()),
                     annotation_id: None,
                     anchor: None,
                     target: None,
@@ -1181,13 +980,32 @@ impl Tool for ToolReview {
                     root,
                     review.owner_chat_id.clone(),
                     review.id.clone(),
-                    agent_id,
+                    agent_id.clone(),
                     request,
                     provenance,
                 )
                 .await
                 .map_err(|error| error.to_string())?;
-                result_message(&ccx, tool_call_id, &changed, summary(&changed)).await
+                let contribution = changed
+                    .threads
+                    .iter()
+                    .find(|thread| thread.id == thread_id)
+                    .and_then(|thread| {
+                        thread.contributions.iter().find(|contribution| {
+                            contribution.id == contribution_id
+                                && contribution.actor.kind == ActorKind::Agent
+                                && contribution.actor.id == agent_id
+                        })
+                    })
+                    .ok_or_else(|| "Saved Review reply contribution is unavailable".to_string())?;
+                let receipt = json!({
+                    "review_id": changed.id,
+                    "revision": changed.revision,
+                    "thread_id": thread_id,
+                    "contribution_id": contribution.id,
+                    "next": "The reply is saved in the thread and delivered to chat as its linked message. Do not repeat its content. Continue other requested work, then end the turn with one short sentence, never an empty message."
+                });
+                result_message(&ccx, tool_call_id, &changed, receipt).await
             }
             ReviewToolKind::Context => unreachable!(),
         }

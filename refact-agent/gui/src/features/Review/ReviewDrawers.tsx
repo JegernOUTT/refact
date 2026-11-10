@@ -23,7 +23,6 @@ import {
   reviewErrorMessage,
   useCancelReviewRunMutation,
   useGetReviewBlobQuery,
-  contextIntakeDisplaySchema,
   type BlobRef,
   type Evidence,
   type Material,
@@ -387,107 +386,6 @@ function EvidenceGroup({
  * consulted evidence; execution output and materials come from isolated runs
  * and are never presented as candidate source.
  */
-function ContextIntake({
-  review,
-  candidateId,
-}: {
-  review: Review;
-  candidateId: string;
-}) {
-  const candidate = review.candidates.find((item) => item.id === candidateId);
-  const receipts = [
-    {
-      title: "Before Review",
-      phase: "before_review",
-      value: review.context_intake,
-    },
-    ...review.tour.map((step) => ({
-      title: `Before Tour · ${step.current.title} v${step.current.version}`,
-      phase: "before_tour",
-      value: step.current.context_intake,
-    })),
-  ];
-  const readOnly = useReviewReadOnly();
-  return (
-    <section aria-label="Context intake">
-      <h3 className={styles.sectionLabel}>Context intake</h3>
-      {receipts.map(({ title, phase, value }, index) => {
-        const parsed = contextIntakeDisplaySchema.safeParse(value);
-        if (!parsed.success)
-          return (
-            <p key={index} className={styles.meta}>
-              {title}: intake {value ? "invalid" : "not recorded"} · unverified.
-            </p>
-          );
-        const receipt = parsed.data;
-        const current =
-          !readOnly &&
-          candidate &&
-          receipt.phase === phase &&
-          receipt.owner_chat_id === review.owner_chat_id &&
-          receipt.repository === candidate.repository &&
-          receipt.base_oid === candidate.base_oid &&
-          receipt.head_oid === candidate.head_oid &&
-          (phase === "before_review"
-            ? receipt.candidate_id === null ||
-              receipt.candidate_id === candidateId
-            : receipt.candidate_id === candidateId);
-        return (
-          <details key={index}>
-            <summary>
-              {title} ·{" "}
-              {current
-                ? "Recorded receipt · identity matches"
-                : "Stale or mismatched · unverified"}
-            </summary>
-            <div className={styles.detailBody}>
-              <span className={styles.meta}>
-                Receipt {receipt.id} · {formatTime(receipt.captured_at_ms)} ·
-                immutable base/head {shortOid(receipt.base_oid)}/
-                {shortOid(receipt.head_oid)}. Not a live freshness check.
-              </span>
-              <p>{receipt.summary}</p>
-              <span className={styles.meta}>
-                {label(receipt.input_reference.kind)} ·{" "}
-                {label(receipt.input_reference.status)} · message{" "}
-                {receipt.input_reference.message_id ?? "not recorded"} · tool{" "}
-                {receipt.input_reference.tool_call_id ?? "not recorded"}
-              </span>
-              <strong>
-                Recorded retrieval references ({receipt.consultations.length})
-              </strong>
-              <ul>
-                {receipt.consultations.map((item, i) => (
-                  <li key={i}>
-                    {item.tool_name} · {item.categories.join(", ")} · message{" "}
-                    {item.message_id} · call {item.tool_call_id} · result{" "}
-                    {shortOid(item.result_hash)} ·{" "}
-                    {item.observed_at_ms === null
-                      ? "freshness unknown"
-                      : formatTime(item.observed_at_ms)}
-                  </li>
-                ))}
-              </ul>
-              <strong>Declared gaps ({receipt.gaps.length})</strong>
-              <ul>
-                {receipt.gaps.map((gap, i) => (
-                  <li key={i}>
-                    {gap.category} · {gap.status}: {gap.reason}
-                  </li>
-                ))}
-              </ul>
-              <span className={styles.meta}>
-                Privacy provenance retained ({receipt.privacy.length} records);
-                raw records not displayed.
-              </span>
-            </div>
-          </details>
-        );
-      })}
-    </section>
-  );
-}
-
 export function SourcesAndEvidence({
   review,
   candidateId,
@@ -515,7 +413,6 @@ export function SourcesAndEvidence({
   );
   return (
     <>
-      <ContextIntake review={review} candidateId={candidateId} />
       {annotation && (
         <>
           <h3 className={styles.sectionLabel}>Cited by “{annotation.title}”</h3>

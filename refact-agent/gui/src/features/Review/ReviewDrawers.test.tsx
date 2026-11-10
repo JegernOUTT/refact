@@ -4,81 +4,8 @@ import { describe, expect, it, vi } from "vitest";
 import { render } from "../../utils/test-utils";
 import { Drawer, SourcesAndEvidence } from "./ReviewDrawers";
 import { anchor, makeReview } from "./reviewFixtures";
-import type { ContextIntakeReceipt } from "../../services/refact/review";
 
 describe("Drawer disclosure", () => {
-  it("distinguishes receipt identity, retrieval references, declared gaps and missing old intake", async () => {
-    const review = makeReview();
-    const receipt: ContextIntakeReceipt = {
-      id: "intake-1",
-      phase: "before_review",
-      owner_chat_id: review.owner_chat_id,
-      repository: "/repo",
-      base_oid: review.candidates[0].base_oid,
-      head_oid: review.candidates[0].head_oid,
-      candidate_id: null,
-      captured_at_ms: 1000,
-      input_reference: {
-        kind: "user_directive",
-        message_id: "message-1",
-        tool_call_id: null,
-        status: "declined",
-        content_hash: "hash",
-      },
-      consultations: [
-        {
-          message_id: "message-2",
-          tool_call_id: "call-1",
-          tool_name: "cat",
-          categories: ["code"],
-          result_hash: "result",
-          observed_at_ms: null,
-        },
-      ],
-      gaps: [
-        {
-          category: "knowledge",
-          status: "unavailable",
-          reason: "No authorized source",
-        },
-      ],
-      summary: "Relevant code inspected",
-      privacy: [],
-    };
-    const display = (value = review) => (
-      <SourcesAndEvidence
-        review={value}
-        candidateId="c1"
-        selectedAnnotationId={null}
-        onRevealSource={vi.fn()}
-      />
-    );
-    const { user, rerender } = render(display());
-    expect(
-      screen.getByText(/Before Review: intake not recorded · unverified/),
-    ).toBeVisible();
-    const withReceipt = { ...review, context_intake: receipt };
-    rerender(display(withReceipt));
-    await user.click(
-      screen.getByText(/Before Review · Recorded receipt · identity matches/),
-    );
-    expect(
-      screen.getByText(/cat · code · message message-2 · call call-1/),
-    ).toHaveTextContent("freshness unknown");
-    expect(screen.getByText(/knowledge · unavailable/)).toBeVisible();
-    expect(screen.getByText(/User directive · Declined/)).toBeVisible();
-    expect(screen.getByText(/Not a live freshness check/)).toBeVisible();
-    rerender(
-      display({
-        ...withReceipt,
-        context_intake: { ...receipt, head_oid: "changed" },
-      }),
-    );
-    expect(
-      screen.getByText(/Before Review · Stale or mismatched · unverified/),
-    ).toBeVisible();
-  });
-
   it("retains nested input state while closed", async () => {
     function Example() {
       const [open, setOpen] = useState(true);

@@ -26,6 +26,7 @@ export function ReviewHandoff({
   live.current = identity;
   const request = useRef(0);
   const field = useRef<HTMLTextAreaElement>(null);
+  const trigger = useRef<HTMLButtonElement>(null);
   const [busy, setBusy] = useState(false);
   const [copied, setCopied] = useState(false);
   const [manual, setManual] = useState<HandoffExport | null>(null);
@@ -86,6 +87,7 @@ export function ReviewHandoff({
     <>
       <Tooltip content={copied ? "Copied" : "Copy review as Markdown"}>
         <IconButton
+          ref={trigger}
           icon={copied ? Check : Copy}
           aria-label="Copy review as Markdown"
           size="sm"
@@ -116,7 +118,20 @@ export function ReviewHandoff({
           }
         }}
       >
-        <Dialog.Content maxWidth="720px">
+        <Dialog.Content
+          maxWidth="720px"
+          onKeyDown={(event) => {
+            if (event.key !== "Escape" || event.defaultPrevented) return;
+            event.preventDefault();
+            setManual(null);
+            setShowManual(false);
+            setDownloadError(null);
+          }}
+          onCloseAutoFocus={(event) => {
+            event.preventDefault();
+            trigger.current?.focus();
+          }}
+        >
           <Dialog.Title>Copy review Markdown</Dialog.Title>
           <Dialog.Description>
             Clipboard access was unavailable. Download the complete Markdown

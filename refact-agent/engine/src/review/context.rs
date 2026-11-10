@@ -154,13 +154,11 @@ pub(crate) struct PreparedBinding {
     pub worktree: WorktreeMeta,
     pub previous: Option<WorktreeMeta>,
     pub review_id: String,
-    pub revision: u64,
 }
 
 impl PreparedBinding {
     pub(crate) fn same_identity(&self, other: &Self) -> bool {
         self.review_id == other.review_id
-            && self.revision == other.revision
             && self.candidate == other.candidate
             && self.worktree == other.worktree
             && self.previous == other.previous
@@ -259,7 +257,6 @@ pub(crate) async fn resolve_binding(
         worktree,
         previous,
         review_id: review.id,
-        revision: review.revision,
     }))
 }
 
@@ -349,25 +346,26 @@ pub async fn verify_binding_for_chat(
     publish_binding(app, chat_id, &binding, labels).await
 }
 
+/// Carry actual runtime source provenance, never model-supplied privacy claims.
+pub(crate) async fn chat_source_privacy(
+    app: &crate::app_state::AppState,
+    chat_id: &str,
+) -> std::result::Result<Vec<refact_privacy::FileRecord>, String> {
+    let session = app
+        .chat
+        .sessions
+        .read()
+        .await
+        .get(chat_id)
+        .cloned()
+        .ok_or("Owning chat unavailable")?;
+    let session = session.lock().await;
+    crate::privacy::records::records_to_carry(&session.messages).map_err(|e| e.to_string())
+}
+
 pub async fn set_context(
     ccx: Arc<Mutex<AtCommandsContext>>,
     request: SetContextRequest,
-) -> std::result::Result<ContextReceipt, String> {
-    set_context_internal(ccx, request, None).await
-}
-
-pub(crate) async fn set_context_with_intake(
-    ccx: Arc<Mutex<AtCommandsContext>>,
-    request: SetContextRequest,
-    intake: super::intake::ContextIntakeRequest,
-) -> std::result::Result<ContextReceipt, String> {
-    set_context_internal(ccx, request, Some(intake)).await
-}
-
-async fn set_context_internal(
-    ccx: Arc<Mutex<AtCommandsContext>>,
-    request: SetContextRequest,
-    intake: Option<super::intake::ContextIntakeRequest>,
 ) -> std::result::Result<ContextReceipt, String> {
     if request.request_key.is_empty()
         || request.repository.len() > 4096
@@ -422,8 +420,7 @@ async fn set_context_internal(
     if !confirmed {
         return Err("Current stack scope choice has not been confirmed".into());
     }
-    let fingerprint =
-        content_hash(&serde_json::to_vec(&(&request, &intake)).map_err(|e| e.to_string())?);
+    let fingerprint = content_hash(&serde_json::to_vec(&request).map_err(|e| e.to_string())?);
     if let Some(review) = super::service::get_for_chat(source.clone(), chat_id.clone())
         .await
         .map_err(|e| e.to_string())?
@@ -567,37 +564,7 @@ async fn set_context_internal(
     let owner = chat_id.clone();
     let req = request.clone();
     let capture_repository = repository.clone();
-    let receipt = if let Some(intake) = intake.as_ref() {
-        let repo = git2::Repository::open(&repository).map_err(|e| e.to_string())?;
-        let base = repo
-            .revparse_single(&request.base_ref)
-            .and_then(|o| o.peel_to_commit())
-            .map_err(|e| e.to_string())?
-            .id()
-            .to_string();
-        let head = repo
-            .revparse_single(&request.candidate_ref)
-            .and_then(|o| o.peel_to_commit())
-            .map_err(|e| e.to_string())?
-            .id()
-            .to_string();
-        drop(repo);
-        Some(
-            super::intake_runtime::validate(
-                &app,
-                &chat_id,
-                intake,
-                "before_review",
-                repository.to_str().ok_or("Invalid repository path")?,
-                &base,
-                &head,
-                None,
-            )
-            .await?,
-        )
-    } else {
-        None
-    };
+    let privacy = chat_source_privacy(&app, &chat_id).await?;
     let mut expected_active = super::service::get_for_chat(source.clone(), chat_id.clone())
         .await
         .map_err(|e| e.to_string())?
@@ -634,10 +601,7 @@ async fn set_context_internal(
                 if req.review_id.is_some() || req.expected_revision.is_some_and(|r| r != 0) {
                     return Err(Error::NotFound);
                 }
-                match receipt {
-                    Some(receipt) => store.create_with_intake(&owner, &req.title, Origin::Imported, &req.request_key, receipt)?,
-                    None => store.create(&owner, &req.title, Origin::Imported, &req.request_key)?,
-                }
+                store.create_with_privacy(&owner, &req.title, Origin::Imported, &req.request_key, privacy)?
             }
         };
         let repo = git2::Repository::open(&capture_repository)?;
@@ -806,6 +770,8 @@ async fn set_context_internal(
         check_caller(&c, &s)?;
         check_unchanged_attachment(&s, &before)?;
     }
+    let mut privacy = chat_source_privacy(&app, &chat_id).await?;
+    privacy.extend(origin_records.clone());
     review = super::service::activate_owned(
         source.clone(),
         chat_id.clone(),
@@ -826,6 +792,7 @@ async fn set_context_internal(
                 target_reference: request.target_reference,
             },
         },
+        privacy,
     )
     .await
     .map_err(|e| e.to_string())?;
@@ -1062,7 +1029,21 @@ mod tests {
             "cancelled caller must have no durable capture side effect"
         );
         abort.store(false, Ordering::Relaxed);
+        let mut source_message = crate::call_validation::ChatMessage::new(
+            "tool".into(),
+            "Actually retrieved source context".into(),
+        );
+        let source_record: refact_privacy::FileRecord = serde_json::from_value(serde_json::json!({
+            "path":source.join("design.md"), "zone":"normal", "attribution":"declared"
+        }))
+        .unwrap();
+        crate::privacy::records::merge_records(&mut source_message, vec![source_record.clone()]);
+        session.lock().await.add_message(source_message);
         let first = set_context(ccx.clone(), request.clone()).await.unwrap();
+        assert!(
+            first.review.privacy.contains(&source_record),
+            "direct capture must retain actual chat source provenance"
+        );
         assert_eq!(
             std::fs::read(first.worktree.root.join("tracked")).unwrap(),
             b"original\n"
@@ -1221,6 +1202,10 @@ mod tests {
             b"updated\n"
         );
         assert_eq!(second.review.candidates.len(), 2);
+        assert!(
+            second.review.privacy.contains(&source_record),
+            "refresh must not erase earlier source provenance"
+        );
         verify_binding_for_chat(&app, "review-context-root")
             .await
             .unwrap();
@@ -1330,5 +1315,45 @@ mod tests {
         verify_binding_for_chat(&app, "review-context-root")
             .await
             .unwrap();
+        let root = super::super::service::trusted_root(&app, "review-context-root")
+            .await
+            .unwrap();
+        let bound = resolve_binding(&app, "review-context-root")
+            .await
+            .unwrap()
+            .unwrap();
+        let active =
+            super::super::service::get_for_chat(root.clone(), "review-context-root".into())
+                .await
+                .unwrap()
+                .unwrap();
+        let renamed = super::super::service::user_mutate(
+            root,
+            "review-context-root".into(),
+            active.id.clone(),
+            Mutation {
+                expected_revision: active.revision,
+                request_key: "rename-while-bound".into(),
+                actor: Actor {
+                    kind: ActorKind::User,
+                    id: "user".into(),
+                },
+                at_ms: 0,
+                operation: Operation::Rename {
+                    title: "Renamed while bound".into(),
+                },
+            },
+        )
+        .await
+        .unwrap();
+        assert!(renamed.revision > active.revision);
+        let rebound = resolve_binding(&app, "review-context-root")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            bound.same_identity(&rebound),
+            "an ordinary review edit must not invalidate the checkout binding"
+        );
     }
 }

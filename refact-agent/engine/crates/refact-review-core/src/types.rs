@@ -80,8 +80,8 @@ pub struct HandoffSnapshot {
 pub const SCHEMA_VERSION: u32 = 1;
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Review {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub context_intake: Option<ContextIntakeReceipt>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub privacy: Vec<refact_privacy::FileRecord>,
     pub schema_version: u32,
     pub id: String,
     pub owner_chat_id: String,
@@ -92,8 +92,6 @@ pub struct Review {
     pub target_reference: String,
     pub candidates: Vec<Candidate>,
     pub tour: Vec<TourStep>,
-    #[serde(default)]
-    pub tour_revision_proposals: Vec<TourRevisionProposal>,
     pub annotations: Vec<Annotation>,
     pub threads: Vec<Thread>,
     pub evidence: Vec<Evidence>,
@@ -222,33 +220,9 @@ pub struct TourDiscussionTarget {
     pub block_revision: Option<u64>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct TourRevisionProposal {
-    pub id: String,
-    pub target: TourDiscussionTarget,
-    pub thread_id: String,
-    pub proposal_contribution_id: String,
-    pub change_request: String,
-    pub proposed_by: Actor,
-    pub proposed_at_ms: i64,
-    pub acceptance: Option<TourRevisionAcceptance>,
-    pub fulfilment: Option<TourRevisionFulfilment>,
-}
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct TourRevisionAcceptance {
-    pub actor: Actor,
-    pub accepted_at_ms: i64,
-    pub contribution_id: String,
-}
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct TourRevisionFulfilment {
-    pub actor: Actor,
-    pub fulfilled_at_ms: i64,
-    pub version: u64,
-}
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct TourVersion {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub context_intake: Option<ContextIntakeReceipt>,
+    pub html: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub blocks: Vec<RichBlock>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -457,23 +431,6 @@ pub struct Activity {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Operation {
-    ProposeTourRevision {
-        target: TourDiscussionTarget,
-        thread_id: String,
-        change_request: String,
-        body: String,
-        #[serde(default)]
-        blocks: Vec<RichBlock>,
-    },
-    AcceptTourRevision {
-        proposal_id: String,
-        target: TourDiscussionTarget,
-    },
-    ApplyTourRevision {
-        proposal_id: String,
-        current: TourVersion,
-    },
-
     /// Runtime-owned atomic context activation; never accepted by generic client mutation APIs.
     ActivateSnapshot {
         candidate: Candidate,
@@ -546,30 +503,6 @@ pub struct FileView {
     pub diff: String,
 }
 
-#[derive(Clone, Debug, PartialEq)]
-pub struct ProposalTurnCompletionIntent {
-    pub owner_chat_id: String,
-    pub turn_id: String,
-    pub tool_call_id: String,
-    pub job_id: Option<String>,
-    pub human_message_id: Option<String>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct ProposalTurnCompletion {
-    pub owner_chat_id: String,
-    pub turn_id: String,
-    pub tool_call_id: String,
-    pub job_id: Option<String>,
-    pub human_message_id: Option<String>,
-    pub review_id: String,
-    pub candidate_id: String,
-    pub proposal_id: String,
-    pub contribution_id: String,
-    pub delivery_id: String,
-    pub result_message_ids: Vec<String>,
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct ReviewDelivery {
     pub id: String,
@@ -593,44 +526,4 @@ pub struct ObjectRevision {
     pub actor: Actor,
     pub at_ms: i64,
     pub object: HistoricalObject,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct ContextIntakeReceipt {
-    pub id: String,
-    pub phase: String,
-    pub owner_chat_id: String,
-    pub repository: String,
-    pub base_oid: String,
-    pub head_oid: String,
-    pub candidate_id: Option<String>,
-    pub captured_at_ms: i64,
-    pub input_reference: ContextInputReference,
-    pub consultations: Vec<ContextConsultation>,
-    pub gaps: Vec<ContextIntakeGap>,
-    pub summary: String,
-    pub privacy: Vec<refact_privacy::FileRecord>,
-}
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct ContextInputReference {
-    pub kind: String,
-    pub message_id: Option<String>,
-    pub tool_call_id: Option<String>,
-    pub status: String,
-    pub content_hash: String,
-}
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct ContextConsultation {
-    pub message_id: String,
-    pub tool_call_id: String,
-    pub tool_name: String,
-    pub categories: Vec<String>,
-    pub result_hash: String,
-    pub observed_at_ms: Option<i64>,
-}
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct ContextIntakeGap {
-    pub category: String,
-    pub status: String,
-    pub reason: String,
 }

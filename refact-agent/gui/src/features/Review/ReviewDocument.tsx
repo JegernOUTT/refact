@@ -9,6 +9,7 @@ import type {
 } from "../../services/refact/review";
 import { ReviewRichBlocks, BlockQuestion } from "./ReviewRichBlocks";
 import { ArtifactPolicyProvider } from "../../components/Markdown/ArtifactPolicyContext";
+import { ReviewHtmlPage } from "./ReviewHtmlPage";
 import { ObjectHistory } from "./ObjectHistory";
 import styles from "./ReviewDocument.module.css";
 
@@ -118,7 +119,7 @@ function Topic({
   return (
     <article ref={root} className={styles.topic} data-step-id={step.id}>
       <header className={styles.topicHeader}>
-        <h2>{shown.title}</h2>
+        {!shown.html && <h2>{shown.title}</h2>}
         <Badge size="xs" tone="muted">
           v{shown.version}
         </Badge>
@@ -165,26 +166,37 @@ function Topic({
           Historical candidate · {candidateId?.slice(0, 8)}
         </p>
       )}
-      <ArtifactPolicyProvider
-        value={{
-          mode: "review-seamless",
-          bindingKey: `${review.id}:${step.id}`,
-          revealAnchorCount: shown.anchors.length,
-          onRevealAnchor: (index) => {
-            const anchor = shown.anchors.at(index);
-            if (anchor && anchor.status === "current") onRevealAnchor(anchor);
-          },
-        }}
-      >
-        <ReviewRichBlocks
+      {shown.html ? (
+        <ReviewHtmlPage
+          key={`${step.id}:${shown.version}`}
           review={review}
-          blocks={shown.blocks}
-          body={shown.body}
+          version={shown}
+          revealTarget={active ? revealTarget : undefined}
+          stepId={step.id}
           target={target}
-          bindingKey={`${review.id}:${step.id}`}
         />
-      </ArtifactPolicyProvider>
-      {!shown.blocks?.length && target && (
+      ) : (
+        <ArtifactPolicyProvider
+          value={{
+            mode: "review-seamless",
+            bindingKey: `${review.id}:${step.id}`,
+            revealAnchorCount: shown.anchors.length,
+            onRevealAnchor: (index) => {
+              const anchor = shown.anchors.at(index);
+              if (anchor && anchor.status === "current") onRevealAnchor(anchor);
+            },
+          }}
+        >
+          <ReviewRichBlocks
+            review={review}
+            blocks={shown.blocks}
+            body={shown.body}
+            target={target}
+            bindingKey={`${review.id}:${step.id}`}
+          />
+        </ArtifactPolicyProvider>
+      )}
+      {!shown.html && !shown.blocks?.length && target && (
         <BlockQuestion review={review} target={target} />
       )}
     </article>

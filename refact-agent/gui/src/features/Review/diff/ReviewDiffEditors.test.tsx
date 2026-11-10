@@ -162,3 +162,257 @@ test("initializes highlights and reveal after host rebuilds and ignores stale la
   expect(currentLanguage).not.toHaveBeenCalled();
   expect(destroySecond).toHaveBeenCalledOnce();
 });
+
+test.each(["unified", "side-by-side"] as const)(
+  "%s visits the first changed hunk, traverses deletion/addition and restores keyed snapshots",
+  async (mode) => {
+    const create = vi.spyOn(editors, "createDiffEditors");
+    const scroll = vi.spyOn(EditorView, "scrollIntoView");
+    const prefix =
+      Array.from({ length: 40 }, (_, i) => `unchanged ${i}`).join("\n") + "\n";
+    const middle =
+      Array.from({ length: 40 }, (_, i) => `context ${i}`).join("\n") + "\n";
+    const positions = new Map<
+      string,
+      import("./ReviewDiffEditors").DiffPosition
+    >();
+    const input = {
+      ...props,
+      mode,
+      left: prefix + "deleted\n" + middle,
+      right: prefix + middle + "added\n",
+      positions,
+    };
+    const { rerender } = render(
+      <ReviewDiffEditors {...input} navigationKey="candidate:full:a:mode" />,
+    );
+    expect(screen.getByRole("status")).toHaveTextContent("1 / 2 changes");
+    expect(scroll).toHaveBeenCalledWith(prefix.length, { y: "center" });
+    screen.getByRole("button", { name: "Next change" }).click();
+    await waitFor(() =>
+      expect(screen.getByRole("status")).toHaveTextContent("2 / 2 changes"),
+    );
+    expect(screen.getByRole("button", { name: "Next change" })).toBeDisabled();
+    const first = create.mock.results[0].value as editors.DiffEditorsController;
+    const snapshot = vi.spyOn(first.views().b, "scrollSnapshot");
+    first.views().b.scrollDOM.scrollTop = 10000;
+    first.views().b.scrollDOM.dispatchEvent(new Event("scroll"));
+    rerender(
+      <ReviewDiffEditors
+        key="other"
+        {...props}
+        positions={positions}
+        navigationKey="candidate:full:b:mode"
+      />,
+    );
+    expect(snapshot).toHaveBeenCalled();
+    expect(positions.has("candidate:full:a:mode")).toBe(true);
+    rerender(
+      <ReviewDiffEditors
+        key="original"
+        {...input}
+        navigationKey="candidate:full:a:mode"
+      />,
+    );
+    expect(screen.getByRole("status")).toHaveTextContent("2 / 2 changes");
+    screen.getByRole("button", { name: "Previous change" }).click();
+    await waitFor(() =>
+      expect(screen.getByRole("status")).toHaveTextContent("1 / 2 changes"),
+    );
+  },
+);
+
+test("an explicit reveal overrides cached scroll, but streaming highlights never replay it", () => {
+  const create = vi.spyOn(editors, "createDiffEditors");
+  const scroll = vi.spyOn(EditorView, "scrollIntoView");
+  const positions = new Map<
+    string,
+    import("./ReviewDiffEditors").DiffPosition
+  >();
+  const { rerender } = render(
+    <ReviewDiffEditors
+      {...props}
+      positions={positions}
+      navigationKey="a"
+      reveal={{ pane: "right", line: 2, token: 1 }}
+    />,
+  );
+  rerender(
+    <ReviewDiffEditors
+      key="b"
+      {...props}
+      positions={positions}
+      navigationKey="b"
+    />,
+  );
+  scroll.mockClear();
+  rerender(
+    <ReviewDiffEditors
+      key="a"
+      {...props}
+      positions={positions}
+      navigationKey="a"
+      reveal={{ pane: "right", line: 3, token: 2 }}
+    />,
+  );
+  expect(scroll).toHaveBeenLastCalledWith(9, { y: "center" });
+  const builds = create.mock.calls.length;
+  scroll.mockClear();
+  rerender(
+    <ReviewDiffEditors
+      key="a"
+      {...props}
+      positions={positions}
+      navigationKey="a"
+      reveal={{ pane: "right", line: 3, token: 2 }}
+      highlights={{
+        left: [],
+        right: [
+          {
+            id: "streamed",
+            kind: "finding",
+            startLine: 1,
+            endLine: 1,
+            active: false,
+          },
+        ],
+      }}
+    />,
+  );
+  expect(scroll).not.toHaveBeenCalled();
+  expect(create).toHaveBeenCalledTimes(builds);
+});
+
+test("initial explicit reveal selects the matching hunk on mount", () => {
+  const context =
+    Array.from({ length: 40 }, (_, i) => `context ${i}`).join("\n") + "\n";
+  render(
+    <ReviewDiffEditors
+      {...props}
+      left={"old\n" + context + "removed\n"}
+      right={"new\n" + context + "added\n"}
+      reveal={{ pane: "right", line: 42, token: 9 }}
+    />,
+  );
+  expect(screen.getByRole("status")).toHaveTextContent("2 / 2 changes");
+  expect(screen.getByRole("button", { name: "Next change" })).toBeDisabled();
+});
+
+test.each(["a", "b"] as const)(
+  "split scroll from %s mirrors only vertical movement and skips equal positions",
+  (side) => {
+    const create = vi.spyOn(editors, "createDiffEditors");
+    render(<ReviewDiffEditors {...props} autoRevealFirstChange={false} />);
+    const controller = create.mock.results[0]
+      .value as editors.DiffEditorsController;
+    const { a, b } = controller.views();
+    if (!a) throw new Error("Expected split editors");
+    const source = side === "a" ? a : b;
+    const target = side === "a" ? b : a;
+    target.scrollDOM.scrollLeft = 25;
+    let targetTop = 0;
+    const write = vi.fn((value: number) => {
+      targetTop = value;
+    });
+    Object.defineProperty(target.scrollDOM, "scrollTop", {
+      configurable: true,
+      get: () => targetTop,
+      set: write,
+    });
+    source.scrollDOM.scrollTop = 120;
+    source.scrollDOM.dispatchEvent(new Event("scroll"));
+    expect(target.scrollDOM.scrollTop).toBe(120);
+    expect(target.scrollDOM.scrollLeft).toBe(25);
+    expect(write).toHaveBeenCalledTimes(1);
+    target.scrollDOM.dispatchEvent(new Event("scroll"));
+    source.scrollDOM.dispatchEvent(new Event("scroll"));
+    expect(write).toHaveBeenCalledTimes(1);
+    const sourceLine = vi.spyOn(source, "lineBlockAtHeight");
+    const targetLine = vi.spyOn(target, "lineBlockAtHeight");
+    source.contentDOM.dispatchEvent(new Event("wheel"));
+    source.scrollDOM.scrollTop = 160;
+    source.scrollDOM.dispatchEvent(new Event("scroll"));
+    target.scrollDOM.dispatchEvent(new Event("scroll"));
+    expect(sourceLine).toHaveBeenCalledOnce();
+    expect(targetLine).not.toHaveBeenCalled();
+  },
+);
+
+test("a mirror clamped by the other pane does not pull the scrolled pane back", () => {
+  const create = vi.spyOn(editors, "createDiffEditors");
+  render(<ReviewDiffEditors {...props} autoRevealFirstChange={false} />);
+  const controller = create.mock.results[0]
+    .value as editors.DiffEditorsController;
+  const { a, b } = controller.views();
+  if (!a) throw new Error("Expected split editors");
+  let baseTop = 0;
+  Object.defineProperty(a.scrollDOM, "scrollTop", {
+    configurable: true,
+    get: () => baseTop,
+    set: (value: number) => {
+      baseTop = Math.min(value, 100);
+    },
+  });
+  b.scrollDOM.scrollTop = 115;
+  b.scrollDOM.dispatchEvent(new Event("scroll"));
+  expect(a.scrollDOM.scrollTop).toBe(100);
+  a.scrollDOM.dispatchEvent(new Event("scroll"));
+  expect(b.scrollDOM.scrollTop).toBe(115);
+});
+
+test("unified scroll remains local", () => {
+  const create = vi.spyOn(editors, "createDiffEditors");
+  render(<ReviewDiffEditors {...props} mode="unified" />);
+  const controller = create.mock.results[0]
+    .value as editors.DiffEditorsController;
+  const { a, b } = controller.views();
+  expect(a).toBeNull();
+  b.scrollDOM.scrollTop = 120;
+  const write = vi.fn();
+  Object.defineProperty(b.scrollDOM, "scrollTop", {
+    configurable: true,
+    get: () => 120,
+    set: write,
+  });
+  b.scrollDOM.dispatchEvent(new Event("scroll"));
+  expect(b.scrollDOM.scrollTop).toBe(120);
+  expect(write).not.toHaveBeenCalled();
+});
+
+test("split restore prefers the cached head position over a divergent base", async () => {
+  const create = vi.spyOn(editors, "createDiffEditors");
+  const positions = new Map<
+    string,
+    import("./ReviewDiffEditors").DiffPosition
+  >();
+  const { rerender } = render(
+    <ReviewDiffEditors {...props} positions={positions} navigationKey="a" />,
+  );
+  const first = create.mock.results[0].value as editors.DiffEditorsController;
+  first.views().b.scrollDOM.dispatchEvent(new Event("scroll"));
+  rerender(
+    <ReviewDiffEditors
+      key="b"
+      {...props}
+      positions={positions}
+      navigationKey="b"
+    />,
+  );
+  const cached = positions.get("a");
+  if (!cached) throw new Error("Expected cached position");
+  positions.set("a", { ...cached, topA: 80, topB: 240 });
+  rerender(
+    <ReviewDiffEditors
+      key="a"
+      {...props}
+      positions={positions}
+      navigationKey="a"
+    />,
+  );
+  const controller = create.mock.results[2]
+    .value as editors.DiffEditorsController;
+  await waitFor(() => {
+    expect(controller.views().a?.scrollDOM.scrollTop).toBe(240);
+    expect(controller.views().b.scrollDOM.scrollTop).toBe(240);
+  });
+});

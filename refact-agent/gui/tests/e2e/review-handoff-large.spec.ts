@@ -63,6 +63,9 @@ test("denied clipboard downloads the entire large snapshot without mounting it",
   ).toBeFocused();
   await page.keyboard.press("Escape");
   await expect(dialog).not.toBeVisible({ timeout: 2000 });
+  await expect(
+    page.getByRole("button", { name: "Copy review as Markdown" }),
+  ).toBeFocused();
   await expect
     .poll(() =>
       page.evaluate(() => {

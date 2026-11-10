@@ -305,3 +305,75 @@ fn refresh_is_atomic_retries_without_duplicates_and_preserves_execution_slot() {
         assert_eq!(review.candidates.len(), 2);
     }
 }
+
+#[test]
+fn member_privacy_is_atomic_and_retries_union_without_new_content() {
+    let (root, store, m) = fixture();
+    store.put_stack_preparation("owner", "A", &m).unwrap();
+    let records = |path: &str| {
+        vec![refact_privacy::FileRecord {
+            path: path.into(),
+            zone: "private".into(),
+            attribution: refact_privacy::Attribution::Declared,
+        }]
+    };
+    let privacy = vec![(m.members[0].id.clone(), records("a"))];
+    let mut invalid = privacy.clone();
+    invalid.push(("unknown".into(), records("bad")));
+    assert!(store
+        .publish_stack_import_with_privacy(m.clone(), "A", "publish", capture(&store, &m), invalid)
+        .is_err());
+    assert_empty(&store);
+    let published = store
+        .publish_stack_import_with_privacy(m.clone(), "A", "publish", capture(&store, &m), privacy)
+        .unwrap();
+    let id = published.members[0].review_id.as_ref().unwrap();
+    let before = store.load(id).unwrap();
+    let retry = store
+        .publish_stack_import_with_privacy(
+            m.clone(),
+            "A",
+            "publish",
+            capture(&store, &m),
+            vec![(m.members[0].id.clone(), records("b"))],
+        )
+        .unwrap();
+    assert_eq!(retry, published);
+    let after = store.load(id).unwrap();
+    assert_eq!(after.revision, before.revision);
+    assert_eq!(after.candidates, before.candidates);
+    assert_eq!(after.privacy, [records("a"), records("b")].concat());
+    assert!(store
+        .load(published.members[1].review_id.as_ref().unwrap())
+        .unwrap()
+        .privacy
+        .is_empty());
+    drop(store);
+    let db =
+        rusqlite::Connection::open(root.path().join(".refact/reviews/reviews.sqlite")).unwrap();
+    db.execute_batch("DELETE FROM review_data_migrations; CREATE TABLE stack_request_intakes(scope TEXT,key TEXT,document TEXT);").unwrap();
+    let document = serde_json::json!([[m.members[1].id, {"owner_chat_id":"owner","privacy":records("legacy-member-two")}]]);
+    db.execute(
+        "INSERT INTO stack_request_intakes VALUES('stack-intakes:owner:A','publish',?1)",
+        [document.to_string()],
+    )
+    .unwrap();
+    let store = ReviewStore::open(root.path()).unwrap();
+    assert_eq!(
+        store
+            .load(published.members[1].review_id.as_ref().unwrap())
+            .unwrap()
+            .privacy,
+        records("legacy-member-two")
+    );
+    assert_eq!(store.load(id).unwrap(), after);
+    assert_eq!(
+        db.query_row(
+            "SELECT count(*) FROM sqlite_master WHERE name='stack_request_intakes'",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        0
+    );
+}

@@ -5,6 +5,7 @@ import { Badge, IconButton } from "../../components/ui";
 import { Markdown } from "../../components/Markdown";
 import { ArtifactPolicyProvider } from "../../components/Markdown/ArtifactPolicyContext";
 import type { Anchor, Review, TourStep } from "../../services/refact/review";
+import { ReviewHtmlPage } from "./ReviewHtmlPage";
 import { ObjectHistory } from "./ObjectHistory";
 import { label } from "./labels";
 import { shortOid } from "./model";
@@ -204,13 +205,33 @@ export function TourStepContent({
       data-step-id={step.id}
     >
       <StepNav review={review} index={index} onSelectStep={onSelectStep} />
-      <StepHeading step={step} />
-      <AnchorChips
-        review={review}
-        anchors={step.current.anchors}
-        onRevealAnchor={onRevealAnchor}
-      />
-      {step.current.body ? (
+      {!step.current.html && <StepHeading step={step} />}
+      {!step.current.html && (
+        <AnchorChips
+          review={review}
+          anchors={step.current.anchors}
+          onRevealAnchor={onRevealAnchor}
+        />
+      )}
+      {step.current.html ? (
+        <ReviewHtmlPage
+          review={review}
+          version={step.current}
+          stepId={step.id}
+          target={
+            step.current.candidate_id ?? review.current_candidate_id
+              ? {
+                  candidate_id:
+                    step.current.candidate_id ??
+                    review.current_candidate_id ??
+                    "",
+                  step_id: step.id,
+                  version: step.current.version,
+                }
+              : undefined
+          }
+        />
+      ) : step.current.body ? (
         <div className={styles.body}>
           <TourBody
             key={`${review.id}:${review.current_candidate_id}:${step.id}:${step.current.version}`}

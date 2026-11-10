@@ -42,14 +42,6 @@ pub struct AcquisitionRequest {
     pub request_key: String,
     pub root_base_ref: Option<String>,
     pub comparisons: Vec<MemberComparison>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub member_context_intakes: Vec<MemberContextIntake>,
-}
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct MemberContextIntake {
-    pub member: String,
-    pub context_intake: super::intake::ContextIntakeRequest,
 }
 #[derive(Serialize)]
 pub struct PreparedStack {
@@ -86,9 +78,25 @@ fn question(manifest: &StackManifest, token: &str) -> PendingQuestion {
         .find(|m| m.id == manifest.scope_choice.selected_member_id)
         .unwrap();
     PendingQuestion {
-        id: format!("review-stack-scope:{token}"), question_type: "single_select".into(),
-        text: format!("Selected target `{}` belongs to known stack **{}** ({} members), source {}: {}. {} Review only this PR, or the whole stack? No comparison has been acquired or captured.", selected.branch_ref, manifest.title, manifest.members.len(), manifest.source.kind, manifest.source.reference.as_deref().unwrap_or(""), if historical(manifest) { "These are explicitly recorded historical comparisons, not live parent-relative comparisons; cumulative projection is unavailable." } else { "Live comparisons must retain strict parent pins." }),
-        options: Some(vec!["Review this PR only".into(), "Review the whole stack".into()]),
+        id: format!("review-stack-scope:{token}"),
+        question_type: "single_select".into(),
+        text: format!(
+            "Selected target `{}` belongs to known stack **{}** ({} members), source {}: {}. {} Review only this PR, or the whole stack? No comparison has been acquired or captured.",
+            selected.branch_ref,
+            manifest.title,
+            manifest.members.len(),
+            manifest.source.kind,
+            manifest.source.reference.as_deref().unwrap_or(""),
+            if historical(manifest) {
+                "These are explicitly recorded historical comparisons, not live parent-relative comparisons; cumulative projection is unavailable."
+            } else {
+                "Live comparisons must retain strict parent pins."
+            }
+        ),
+        options: Some(vec![
+            "Review this PR only".into(),
+            "Review the whole stack".into(),
+        ]),
     }
 }
 fn discovery(
@@ -215,8 +223,14 @@ pub async fn prepare(
     .map_err(|e| e.to_string())?;
     let question = question(&manifest, &fingerprint);
     let ask_questions = serde_json::json!({"questions":[{"id":question.id,"type":question.question_type,"text":question.text,"options":question.options}]});
-    Ok(PreparedStack { status: "pending_scope_choice", question, ask_questions, manifest, fingerprint,
-        acquisition: "Ask the exact returned question with ask_questions. After its actual owning-chat answer, provide comparisons ONLY for chosen scope, keyed by discovery member key. No network, credentials, checkout, restack or Graphite mutations. Recorded historical comparisons must use source-disclosed immutable base/head OIDs. Live single may omit root_base_ref: its explicit base/head comparison must retain the declared parent identity, without acquiring peers." })
+    Ok(PreparedStack {
+        status: "pending_scope_choice",
+        question,
+        ask_questions,
+        manifest,
+        fingerprint,
+        acquisition: "Ask the exact returned question with ask_questions. After its actual owning-chat answer, provide comparisons ONLY for chosen scope, keyed by discovery member key. No network, credentials, checkout, restack or Graphite mutations. Recorded historical comparisons must use source-disclosed immutable base/head OIDs. Live single may omit root_base_ref: its explicit base/head comparison must retain the declared parent identity, without acquiring peers.",
+    })
 }
 fn acquire(
     mut manifest: StackManifest,
@@ -270,7 +284,9 @@ fn acquire(
                 && (git2::Oid::from_str(&c.base_ref).is_err()
                     || git2::Oid::from_str(&c.head_ref).is_err())
             {
-                return Err(invalid("Recorded historical comparisons require immutable base/head OIDs disclosed by the source"));
+                return Err(invalid(
+                    "Recorded historical comparisons require immutable base/head OIDs disclosed by the source",
+                ));
             }
             if !recorded && resolve(&c.head_ref)? != resolve(&m.branch_ref)? {
                 return Err(invalid(
@@ -301,7 +317,9 @@ fn acquire(
                     } else {
                         // Resolve only the explicitly chosen base; never touch a peer ref.
                         if m.declared_base_ref != parent.branch_ref {
-                            return Err(invalid("Live single base_ref must identify its declared parent branch; use recorded_comparisons for historical pins"));
+                            return Err(invalid(
+                                "Live single base_ref must identify its declared parent branch; use recorded_comparisons for historical pins",
+                            ));
                         }
                         m.resolved_base_oid.clone()
                     }
@@ -315,7 +333,9 @@ fn acquire(
                 }),
             };
             if expected.is_none() || expected != m.resolved_base_oid {
-                return Err(invalid("Live comparison base must equal pinned parent head/root; whole live scope requires root_base_ref"));
+                return Err(invalid(
+                    "Live comparison base must equal pinned parent head/root; whole live scope requires root_base_ref",
+                ));
             }
         }
     }
@@ -329,79 +349,11 @@ pub async fn import(
     chat: &str,
     request: AcquisitionRequest,
 ) -> std::result::Result<StackManifest, String> {
-    import_internal(app, chat, request, None).await
-}
-pub(crate) async fn import_with_intake(
-    app: &AppState,
-    chat: &str,
-    request: AcquisitionRequest,
-    intake: Option<super::intake::ContextIntakeRequest>,
-) -> std::result::Result<StackManifest, String> {
-    if intake.is_some() == !request.member_context_intakes.is_empty() {
-        return Err("Supply either a shared context intake or exact per-member intakes".into());
-    }
-    import_internal(app, chat, request, intake).await
-}
-async fn import_internal(
-    app: &AppState,
-    chat: &str,
-    request: AcquisitionRequest,
-    intake: Option<super::intake::ContextIntakeRequest>,
-) -> std::result::Result<StackManifest, String> {
     if request.request_key.is_empty() || request.request_key.len() > 256 {
         return Err("request_key must contain 1..256 characters".into());
     }
     let root = super::service::trusted_root(app, chat).await?;
     let owner = chat.to_string();
-    if intake.is_some() || !request.member_context_intakes.is_empty() {
-        let retry_owner = owner.clone();
-        let retry_token = request.preparation_token.clone();
-        let retry_key = request.request_key.clone();
-        let saved = super::service::with_store(root.clone(), move |s| {
-            s.intakes_for_stack_request(&retry_owner, &retry_token, &retry_key)
-        })
-        .await
-        .map_err(|e| e.to_string())?;
-        if let Some(saved) = saved {
-            let req = request.clone();
-            let retry_owner = owner.clone();
-            let shared = intake.clone();
-            let replay = super::service::with_store(root.clone(), move |s| {
-                let manifest = s.get_stack_for_chat(&retry_owner)?.ok_or(Error::NotFound)?;
-                validate_member_intakes(&manifest, &req.member_context_intakes)?;
-                for (member_id, receipt) in &saved {
-                    let member = manifest
-                        .members
-                        .iter()
-                        .find(|m| &m.id == member_id)
-                        .ok_or(Error::NotFound)?;
-                    let input = shared
-                        .as_ref()
-                        .or_else(|| {
-                            req.member_context_intakes
-                                .iter()
-                                .find(|i| i.member == member_key(member))
-                                .map(|i| &i.context_intake)
-                        })
-                        .ok_or_else(|| invalid("Missing member context intake"))?;
-                    super::intake_runtime::verify_request(input, receipt)
-                        .map_err(Error::Invalid)?;
-                }
-                let fingerprint =
-                    content_hash(&serde_json::to_vec(&(&req, &manifest.scope_choice.scope))?);
-                s.replay_stack_entry_import_with_intakes(
-                    &retry_owner,
-                    &req.preparation_token,
-                    &req.request_key,
-                    &fingerprint,
-                    &saved,
-                )
-            })
-            .await
-            .map_err(|e| e.to_string())?;
-            return replay.ok_or("Context intake replay record unavailable".into());
-        }
-    }
     let (token, manifest) =
         super::service::with_store(root.clone(), move |s| s.get_stack_preparation(&owner))
             .await
@@ -448,44 +400,7 @@ async fn import_internal(
         super::service::with_store(root.clone(), move |_| acquire(manifest, scope, &req))
             .await
             .map_err(|e| e.to_string())?;
-    validate_member_intakes(&manifest, &request.member_context_intakes)
-        .map_err(|e| e.to_string())?;
     let staged = manifest.clone();
-    let mut intakes = Vec::new();
-    if intake.is_some() || !request.member_context_intakes.is_empty() {
-        for member in manifest.members.iter().filter(|m| {
-            manifest.scope_choice.scope == StackScope::Whole
-                || m.id == manifest.scope_choice.selected_member_id
-        }) {
-            let intake = intake
-                .as_ref()
-                .or_else(|| {
-                    request
-                        .member_context_intakes
-                        .iter()
-                        .find(|i| i.member == member_key(member))
-                        .map(|i| &i.context_intake)
-                })
-                .ok_or("Missing member context intake")?;
-            intakes.push((
-                member.id.clone(),
-                super::intake_runtime::validate(
-                    app,
-                    chat,
-                    intake,
-                    "before_review",
-                    &manifest.repository,
-                    member
-                        .resolved_base_oid
-                        .as_deref()
-                        .ok_or("Missing base pin")?,
-                    member.head_oid.as_deref().ok_or("Missing head pin")?,
-                    None,
-                )
-                .await?,
-            ));
-        }
-    }
     let candidates = super::service::with_store(root.clone(), move |s| {
         staged
             .members
@@ -527,49 +442,33 @@ async fn import_internal(
             .await?;
         }
     }
+    let source_privacy = super::context::chat_source_privacy(app, chat).await?;
+    let privacy = candidates
+        .iter()
+        .map(|(id, candidate)| {
+            let mut records = source_privacy.clone();
+            records.extend(crate::privacy::records::declared_file_records(
+                &app.gcx,
+                candidate
+                    .files
+                    .iter()
+                    .map(|f| std::path::PathBuf::from(&candidate.repository).join(&f.path)),
+            )?);
+            Ok((id.clone(), records))
+        })
+        .collect::<std::result::Result<Vec<_>, String>>()?;
     super::service::with_store(root, move |s| {
-        if !intakes.is_empty() {
-            return s.publish_stack_entry_acquisition_with_intakes(
-                manifest,
-                &token,
-                &request.request_key,
-                candidates,
-                &acquisition_fingerprint,
-                intakes,
-            );
-        }
-        s.publish_stack_entry_acquisition(
+        s.publish_stack_entry_acquisition_with_privacy(
             manifest,
             &token,
             &request.request_key,
             candidates,
             &acquisition_fingerprint,
+            privacy,
         )
     })
     .await
     .map_err(|e| e.to_string())
-}
-
-fn validate_member_intakes(manifest: &StackManifest, inputs: &[MemberContextIntake]) -> Result<()> {
-    if inputs.is_empty() {
-        return Ok(());
-    }
-    let selected: HashSet<_> = manifest
-        .members
-        .iter()
-        .filter(|member| {
-            manifest.scope_choice.scope == StackScope::Whole
-                || member.id == manifest.scope_choice.selected_member_id
-        })
-        .map(member_key)
-        .collect();
-    let provided: HashSet<_> = inputs.iter().map(|i| i.member.as_str()).collect();
-    if inputs.len() > 200 || inputs.len() != provided.len() || provided != selected {
-        return Err(invalid(
-            "Per-member context intakes must cover exactly the selected member keys",
-        ));
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -626,52 +525,17 @@ mod tests {
                 base_ref: ids[0].clone(),
                 head_ref: ids[1].clone(),
             }],
-            member_context_intakes: vec![],
         }
     }
     #[test]
-    fn member_intakes_bind_distinct_pins_and_require_exact_selected_keys() {
-        let mut manifest = discovery(request(), "owner", "/repo".into()).unwrap();
-        manifest.scope_choice.scope = StackScope::Whole;
-        manifest.members[0].resolved_base_oid = Some("base-first".into());
-        manifest.members[0].head_oid = Some("head-first".into());
-        manifest.members[1].resolved_base_oid = Some("head-first".into());
-        manifest.members[1].head_oid = Some("head-second".into());
-        let input = |member: &StackMember| MemberContextIntake {
-            member: member_key(member).into(),
-            context_intake: super::super::intake::ContextIntakeRequest {
-                user_message_id: None,
-                question_tool_call_id: Some(format!("ask-{}", member_key(member))),
-                retrieval_tool_call_ids: vec![],
-                gaps: vec![],
-                summary: "Member sources".into(),
-            },
-        };
-        let inputs: Vec<_> = manifest.members.iter().map(input).collect();
-        validate_member_intakes(&manifest, &inputs).unwrap();
-        assert!(validate_member_intakes(&manifest, &inputs[..1]).is_err());
-        let duplicated = vec![inputs[0].clone(), inputs[0].clone()];
-        assert!(validate_member_intakes(&manifest, &duplicated).is_err());
-        let mut foreign = inputs.clone();
-        foreign[1].member = "foreign".into();
-        assert!(validate_member_intakes(&manifest, &foreign).is_err());
-        let first = super::super::intake::expected_question(
-            "before_review",
-            "/repo",
-            "base-first",
-            "head-first",
-            None,
-        );
-        let second = super::super::intake::expected_question(
-            "before_review",
-            "/repo",
-            "head-first",
-            "head-second",
-            None,
-        );
-        assert_ne!(first, second);
-        let encoded = serde_json::to_value(acquisition(&["base".into(), "head".into()])).unwrap();
-        assert!(encoded.get("member_context_intakes").is_none());
+    fn acquisition_rejects_retired_context_metadata() {
+        let baseline = serde_json::to_value(acquisition(&["base".into(), "head".into()])).unwrap();
+        assert!(serde_json::from_value::<AcquisitionRequest>(baseline.clone()).is_ok());
+        for field in ["context_intake", "member_context_intakes"] {
+            let mut input = baseline.clone();
+            input[field] = json!([]);
+            assert!(serde_json::from_value::<AcquisitionRequest>(input).is_err());
+        }
     }
     #[test]
     fn public_discovery_requires_no_repository_or_peer_refs_and_aggregates_errors() {
@@ -767,6 +631,17 @@ mod tests {
         let app = AppState::from_gcx(gcx).await;
         let mut session = crate::chat::types::ChatSession::new("owner".into());
         session.work_project_root = Some(root.path().into());
+        let source_record: refact_privacy::FileRecord = serde_json::from_value(json!({
+            "path":root.path().join("design.md"), "zone":"normal", "attribution":"declared"
+        }))
+        .unwrap();
+        let mut source_message = crate::call_validation::ChatMessage::new(
+            "tool".into(),
+            "Retrieved design context".into(),
+        );
+        crate::privacy::records::merge_records(&mut source_message, vec![source_record.clone()]);
+        session.add_message(source_message);
+
         let session = std::sync::Arc::new(tokio::sync::Mutex::new(session));
         app.chat
             .sessions
@@ -801,6 +676,15 @@ mod tests {
                 }),
             });
         let published = import(&app, "owner", input.clone()).await.unwrap();
+        let store = ReviewStore::open(root.path()).unwrap();
+        let member_review = store
+            .stack_review_for_member(&published.id, &published.members[0].id)
+            .unwrap()
+            .unwrap();
+        assert!(member_review.privacy.contains(&source_record));
+        let candidate = &member_review.candidates[0];
+        assert_eq!(candidate.base_oid, ids[0]);
+        assert_eq!(candidate.head_oid, ids[1]);
         let repo = git2::Repository::open(root.path()).unwrap();
         repo.find_reference("refs/heads/first")
             .unwrap()

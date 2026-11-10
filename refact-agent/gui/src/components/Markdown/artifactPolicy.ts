@@ -49,6 +49,7 @@ export function reviewArtifactHtml(
   code: string,
   channel = "",
   allowRevealAnchor = false,
+  page = false,
 ): string {
   const doc = new DOMParser().parseFromString(
     wrapArtifactHtml(code),
@@ -111,7 +112,61 @@ html[data-refact-reduced-motion=true] *, html[data-refact-reduced-motion=true] *
       if (link && !(link.getAttribute('href') || '').startsWith('#')) event.preventDefault();
     }, true);
     ${
-      allowRevealAnchor
+      page
+        ? `
+    var previews = [];
+    var rendered = new WeakMap();
+    function action(kind, id) {
+      if (typeof id === 'string' && id.length <= 256) parent.postMessage({type: 'refact-review-block-action', channel: channel, action: kind, id: id}, '*');
+    }
+    window.refactReview = Object.freeze({
+      revealBlock: function(id) { action('reveal', id); },
+      commentBlock: function(id) { action('comment', id); }
+    });
+    function slots() {
+      var seen = new Set();
+      document.querySelectorAll('refact-slot').forEach(function(slot) {
+        var id = slot.getAttribute('data-block');
+        var matches = previews.filter(function(p) { return p.id === id; });
+        var p = matches.length === 1 && !seen.has(id) ? matches[0] : null;
+        seen.add(id);
+        var signature = JSON.stringify(p);
+        if (rendered.get(slot) === signature) return;
+        rendered.set(slot, signature);
+        slot.replaceChildren();
+        slot.style.display = 'block';
+        var title = document.createElement('strong');
+        title.textContent = p ? p.title : 'Block unavailable (unknown or duplicate slot)';
+        slot.append(title);
+        var pre = document.createElement('pre');
+        pre.style.cssText = 'white-space:pre;overflow:auto;max-height:320px';
+        pre.textContent = p ? p.text : 'No registered preview is available.';
+        slot.append(pre);
+        if (!p || !p.available) return;
+        ['reveal', 'comment'].forEach(function(kind) {
+          var button = document.createElement('button');
+          button.type = 'button';
+          button.textContent = kind === 'reveal' ? 'Reveal' : 'Comment';
+          button.onclick = function() { action(kind, id); };
+          slot.append(button);
+        });
+      });
+    }
+    window.addEventListener('message', function(event) {
+      var d = event.data;
+      if (event.source !== parent || !d || d.channel !== channel || d.type !== 'refact-review-page-data' || !Array.isArray(d.previews)) return;
+      previews = d.previews;
+      slots();
+    });
+    document.addEventListener('DOMContentLoaded', function() {
+      new MutationObserver(slots).observe(document.body, {childList:true, subtree:true, attributes:true, attributeFilter:['data-block']});
+      slots();
+    });
+    `
+        : ""
+    }
+    ${
+      allowRevealAnchor && !page
         ? `window.refactReview = Object.freeze({revealAnchor: function(index) {
       if (Number.isSafeInteger(index) && index >= 0) parent.postMessage({type: 'refact-review-reveal-anchor', channel: channel, index: index}, '*');
     }});`
@@ -123,5 +178,25 @@ html[data-refact-reduced-motion=true] *, html[data-refact-reduced-motion=true] *
   policy.httpEquiv = "Content-Security-Policy";
   policy.content = REVIEW_ARTIFACT_CSP;
   doc.head.prepend(policy);
-  return "<!doctype html>" + doc.documentElement.outerHTML;
+  const html = "<!doctype html>" + doc.documentElement.outerHTML;
+  if (!page) return html;
+  // Only trusted relay code inhabits the outer opaque document. Its frame-src
+  // policy also governs self-navigation of the authored child frame.
+  const inner = JSON.stringify(html).replace(/</g, "\\u003c");
+  const relayChannel = JSON.stringify(channel).replace(/</g, "\\u003c");
+  return `<!doctype html><html><head><meta http-equiv="Content-Security-Policy" content="${REVIEW_ARTIFACT_CSP}"><style>html,body{margin:0;background:transparent}iframe{display:block;width:100%;border:0}</style></head><body><iframe sandbox="allow-scripts" referrerpolicy="no-referrer" title="Authored review page"></iframe><script>(function(){
+    var channel=${relayChannel};
+    var frame=document.querySelector('iframe');
+    var pending={};
+    frame.addEventListener('load',function(){ Object.keys(pending).forEach(function(type){frame.contentWindow.postMessage(pending[type],'*');}); });
+    window.addEventListener('message',function(event){
+      var d=event.data;
+      if(!d || d.channel!==channel) return;
+      if(event.source===parent){ if(d.type!=='refact-review-theme' && d.type!=='refact-review-page-data') return; pending[d.type]=d; frame.contentWindow.postMessage(d,'*'); return; }
+      if(event.source!==frame.contentWindow) return;
+      if(d.type==='refact-artifact-resize' && typeof d.height==='number' && Number.isFinite(d.height)) frame.style.height=Math.max(1,Math.min(100000,d.height))+'px';
+      if(['refact-artifact-resize','refact-artifact-error','refact-review-block-action'].indexOf(d.type)!==-1) parent.postMessage(d,'*');
+    });
+    frame.srcdoc=${inner};
+  })();</script></body></html>`;
 }

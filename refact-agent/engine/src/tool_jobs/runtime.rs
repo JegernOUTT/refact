@@ -680,32 +680,6 @@ impl JobRuntime {
         }
     }
 
-    pub(crate) fn proposal_job(&self, chat: &str, call: &str) -> Option<JobReceipt> {
-        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        let mut jobs = state.records.values().filter(|r| {
-            r.receipt.binding.chat_id == chat
-                && r.receipt.binding.tool_call_id == call
-                && r.receipt.binding.tool_name == "review_update"
-        });
-        let job = jobs.next()?.receipt.clone();
-        jobs.next().is_none().then_some(job)
-    }
-
-    pub(crate) fn proposal_boundary_clear(&self, chat: &str, own_job: Option<&str>) -> bool {
-        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        state
-            .records
-            .values()
-            .filter(|r| r.receipt.binding.chat_id == chat)
-            .all(|r| {
-                if Some(r.receipt.job_id.as_str()) == own_job {
-                    r.status == JobStatus::Succeeded
-                } else {
-                    r.status.terminal() && r.consumed
-                }
-            })
-    }
-
     pub fn get(&self, chat_id: &str, job_id: &str) -> Option<JobSnapshot> {
         let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let record = state.records.get(job_id)?;

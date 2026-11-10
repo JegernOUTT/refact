@@ -67,176 +67,12 @@ impl ReviewStore {
         c.busy_timeout(std::time::Duration::from_secs(10))?;
         c.execute_batch("PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL; CREATE TABLE IF NOT EXISTS reviews(id TEXT PRIMARY KEY, chat TEXT NOT NULL UNIQUE, document TEXT NOT NULL); CREATE TABLE IF NOT EXISTS requests(scope TEXT NOT NULL, key TEXT NOT NULL, fingerprint TEXT NOT NULL, response TEXT NOT NULL, PRIMARY KEY(scope,key)); CREATE TABLE IF NOT EXISTS blobs(digest TEXT PRIMARY KEY, data BLOB NOT NULL); CREATE TABLE IF NOT EXISTS captures(id TEXT PRIMARY KEY, document TEXT NOT NULL); CREATE TABLE IF NOT EXISTS object_revisions(review_id TEXT NOT NULL, revision INTEGER NOT NULL, document TEXT NOT NULL); CREATE TABLE IF NOT EXISTS deliveries(id TEXT PRIMARY KEY, review_id TEXT NOT NULL, document TEXT NOT NULL, delivered INTEGER NOT NULL);")?;
         c.execute_batch("CREATE UNIQUE INDEX IF NOT EXISTS object_revision_identity ON object_revisions(review_id, revision, json_extract(document,'$.object.kind'), json_extract(document,'$.object.value.id'));")?;
-        c.execute_batch("CREATE TABLE IF NOT EXISTS request_intakes(scope TEXT NOT NULL, key TEXT NOT NULL, document TEXT NOT NULL, PRIMARY KEY(scope,key));")?;
-        c.execute_batch("CREATE TABLE IF NOT EXISTS proposal_turn_completions(proposal_id TEXT PRIMARY KEY, owner TEXT NOT NULL, document TEXT NOT NULL, consumed INTEGER NOT NULL DEFAULT 0);")?;
+        crate::privacy::migrate(&mut c)?;
         crate::stacks::migrate(&mut c)?;
         Ok(Self {
             connection: Mutex::new(c),
             _directory: directory,
         })
-    }
-    pub fn set_completion_busy_timeout_zero(&self) -> Result<()> {
-        self.connection
-            .lock()
-            .map_err(|_| invalid("poisoned store"))?
-            .busy_timeout(std::time::Duration::ZERO)?;
-        Ok(())
-    }
-
-    pub fn proposal_completion(
-        &self,
-        owner: &str,
-        proposal_id: &str,
-    ) -> Result<Option<ProposalTurnCompletion>> {
-        let c = self
-            .connection
-            .lock()
-            .map_err(|_| invalid("poisoned store"))?;
-        let document: Option<String> = c
-            .query_row(
-                "SELECT document FROM proposal_turn_completions WHERE owner=?1 AND proposal_id=?2",
-                params![owner, proposal_id],
-                |r| r.get(0),
-            )
-            .optional()?;
-        document.map(|s| Ok(serde_json::from_str(&s)?)).transpose()
-    }
-    pub fn proposal_completions(&self, owner: &str) -> Result<Vec<ProposalTurnCompletion>> {
-        let c = self
-            .connection
-            .lock()
-            .map_err(|_| invalid("poisoned store"))?;
-        let mut stmt = c.prepare(
-            "SELECT document FROM proposal_turn_completions WHERE owner=?1 AND consumed=0",
-        )?;
-        let rows = stmt.query_map([owner], |row| row.get::<_, String>(0))?;
-        rows.map(|row| Ok(serde_json::from_str(&row?)?)).collect()
-    }
-    pub fn acknowledge_proposal_result(
-        &self,
-        record: &ProposalTurnCompletion,
-        ids: &[String],
-    ) -> Result<()> {
-        if ids.is_empty() || ids.iter().any(String::is_empty) {
-            return Err(invalid("missing proposal result"));
-        }
-        let mut c = self
-            .connection
-            .lock()
-            .map_err(|_| invalid("poisoned store"))?;
-        let tx = c.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let (document, consumed): (String, bool) = tx.query_row(
-            "SELECT document,consumed FROM proposal_turn_completions WHERE proposal_id=?1 AND owner=?2",
-            params![record.proposal_id, record.owner_chat_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
-        let stored: ProposalTurnCompletion = serde_json::from_str(&document)?;
-        let mut updated = record.clone();
-        updated.result_message_ids = stored.result_message_ids.clone();
-        if updated != stored
-            || (!record.result_message_ids.is_empty() && record.result_message_ids != ids)
-            || (!stored.result_message_ids.is_empty() && stored.result_message_ids != ids)
-        {
-            return Err(invalid("proposal completion acknowledgement mismatch"));
-        }
-        if stored.result_message_ids.is_empty() {
-            if consumed {
-                return Err(invalid("proposal completion already consumed"));
-            }
-            updated.result_message_ids = ids.to_vec();
-            tx.execute("UPDATE proposal_turn_completions SET document=?1 WHERE proposal_id=?2 AND document=?3 AND consumed=0",
-                params![serde_json::to_string(&updated)?, record.proposal_id, document])?;
-        }
-        tx.commit()?;
-        Ok(())
-    }
-    pub fn consume_proposal_completion(&self, record: &ProposalTurnCompletion) -> Result<bool> {
-        let mut c = self
-            .connection
-            .lock()
-            .map_err(|_| invalid("poisoned store"))?;
-        let tx = c.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let review = load(&tx, &record.review_id)?;
-        let active: Option<String> = tx
-            .query_row(
-                "SELECT review_id FROM active_reviews WHERE chat=?1",
-                [&record.owner_chat_id],
-                |r| r.get(0),
-            )
-            .optional()?;
-        let proposal = review
-            .tour_revision_proposals
-            .iter()
-            .find(|p| p.id == record.proposal_id);
-        let Some(proposal) = proposal else {
-            return Ok(false);
-        };
-        let contribution = review
-            .threads
-            .iter()
-            .find(|t| t.id == proposal.thread_id && t.target.as_ref() == Some(&proposal.target))
-            .and_then(|t| {
-                t.contributions
-                    .iter()
-                    .find(|c| c.id == record.contribution_id)
-            });
-        let settled: Option<(String, String)> = tx
-            .query_row(
-                "SELECT review_id,document FROM deliveries WHERE id=?1 AND delivered=1",
-                [&record.delivery_id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .optional()?;
-        let delivery_matches = if let Some((id, document)) = settled {
-            let delivery: ReviewDelivery = serde_json::from_str(&document)?;
-            id == review.id
-                && delivery.review_id == review.id
-                && delivery.owner_chat_id == record.owner_chat_id
-                && delivery.contribution_id == record.contribution_id
-                && delivery.id == record.delivery_id
-        } else {
-            false
-        };
-        if active.as_deref() != Some(&record.review_id)
-            || review.owner_chat_id != record.owner_chat_id
-            || review.current_candidate_id.as_deref() != Some(&record.candidate_id)
-            || proposal.target.candidate_id != record.candidate_id
-            || proposal.acceptance.is_some()
-            || proposal.fulfilment.is_some()
-            || require_current_target(&review, &proposal.target).is_err()
-            || proposal.proposal_contribution_id != record.contribution_id
-            || record.delivery_id != format!("{}:{}", review.id, record.contribution_id)
-            || !contribution.is_some_and(|c| {
-                c.actor.kind == ActorKind::Agent
-                    && c.actor.id == record.owner_chat_id
-                    && c.actor == proposal.proposed_by
-            })
-            || !delivery_matches
-            || record.result_message_ids.is_empty()
-            || record.result_message_ids.iter().any(String::is_empty)
-        {
-            return Ok(false);
-        }
-        let consumed = tx.execute("UPDATE proposal_turn_completions SET consumed=1 WHERE proposal_id=?1 AND owner=?2 AND document=?3 AND consumed=0",
-            params![record.proposal_id, record.owner_chat_id, serde_json::to_string(record)?])? == 1;
-        tx.commit()?;
-        Ok(consumed)
-    }
-    pub fn intake_for_request(
-        &self,
-        scope: &str,
-        key: &str,
-    ) -> Result<Option<ContextIntakeReceipt>> {
-        let c = self
-            .connection
-            .lock()
-            .map_err(|_| invalid("poisoned store"))?;
-        let doc: Option<String> = c
-            .query_row(
-                "SELECT document FROM request_intakes WHERE scope=?1 AND key=?2",
-                params![scope, key],
-                |r| r.get(0),
-            )
-            .optional()?;
-        doc.map(|doc| Ok(serde_json::from_str(&doc)?)).transpose()
     }
     pub fn create(
         &self,
@@ -245,17 +81,17 @@ impl ReviewStore {
         origin: Origin,
         request_key: &str,
     ) -> Result<Review> {
-        self.create_internal(owner_chat_id, title, origin, request_key, None)
+        self.create_internal(owner_chat_id, title, origin, request_key, vec![])
     }
-    pub fn create_with_intake(
+    pub fn create_with_privacy(
         &self,
         owner_chat_id: &str,
         title: &str,
         origin: Origin,
         request_key: &str,
-        receipt: ContextIntakeReceipt,
+        privacy: Vec<refact_privacy::FileRecord>,
     ) -> Result<Review> {
-        self.create_internal(owner_chat_id, title, origin, request_key, Some(receipt))
+        self.create_internal(owner_chat_id, title, origin, request_key, privacy)
     }
     fn create_internal(
         &self,
@@ -263,17 +99,13 @@ impl ReviewStore {
         title: &str,
         origin: Origin,
         request_key: &str,
-        intake: Option<ContextIntakeReceipt>,
+        privacy: Vec<refact_privacy::FileRecord>,
     ) -> Result<Review> {
         if owner_chat_id.is_empty() || request_key.is_empty() {
             return Err(invalid("missing identity/request key"));
         }
         let semantic = (owner_chat_id, title, &origin);
-        let fingerprint = content_hash(&if let Some(receipt) = &intake {
-            serde_json::to_vec(&(semantic, crate::intake::intake_semantic(receipt)))?
-        } else {
-            serde_json::to_vec(&semantic)?
-        });
+        let fingerprint = content_hash(&serde_json::to_vec(&semantic)?);
         let scope = format!("create:{owner_chat_id}");
         let mut c = self
             .connection
@@ -281,10 +113,9 @@ impl ReviewStore {
             .map_err(|_| invalid("poisoned store"))?;
         let tx = c.transaction_with_behavior(TransactionBehavior::Immediate)?;
         if let Some(r) = replay(&tx, &scope, request_key, &fingerprint)? {
+            let r = crate::privacy::retain(&tx, r, &privacy)?;
+            tx.commit()?;
             return Ok(r);
-        }
-        if let Some(receipt) = &intake {
-            crate::intake::bind_intake(receipt, "before_review", owner_chat_id, None)?;
         }
         if let Some(id) = tx
             .query_row(
@@ -294,7 +125,7 @@ impl ReviewStore {
             )
             .optional()?
         {
-            let r = load(&tx, &id)?;
+            let r = crate::privacy::retain(&tx, load(&tx, &id)?, &privacy)?;
             tx.execute(
                 "INSERT INTO requests VALUES(?1,?2,?3,?4)",
                 params![scope, request_key, fingerprint, format!("review:{id}")],
@@ -306,7 +137,7 @@ impl ReviewStore {
             return Err(invalid("stack chat requires create_member_review"));
         }
         let r = Review {
-            context_intake: intake,
+            privacy: crate::privacy::union(&[], &privacy)?,
             schema_version: SCHEMA_VERSION,
             id: uuid::Uuid::new_v4().to_string(),
             owner_chat_id: owner_chat_id.to_owned(),
@@ -317,7 +148,6 @@ impl ReviewStore {
             target_reference: String::new(),
             candidates: vec![],
             tour: vec![],
-            tour_revision_proposals: vec![],
             annotations: vec![],
             threads: vec![],
             evidence: vec![],
@@ -326,12 +156,6 @@ impl ReviewStore {
             activity: vec![],
         };
         let document = serde_json::to_string(&r)?;
-        if let Some(receipt) = &r.context_intake {
-            tx.execute(
-                "INSERT INTO request_intakes VALUES(?1,?2,?3)",
-                params![scope, request_key, serde_json::to_string(receipt)?],
-            )?;
-        }
         tx.execute(
             "INSERT INTO reviews VALUES(?1,?2,?3)",
             params![r.id, owner_chat_id, document],
@@ -375,173 +199,18 @@ impl ReviewStore {
     pub fn mutate(&self, id: &str, mutation: Mutation) -> Result<Review> {
         self.mutate_internal(id, mutation, None)
     }
-    pub fn mutate_with_intake(
+    pub fn mutate_with_privacy(
         &self,
         id: &str,
         mutation: Mutation,
-        receipt: ContextIntakeReceipt,
-    ) -> Result<Review> {
-        if !matches!(mutation.operation, Operation::PutTourStep { .. }) {
-            return Err(invalid("context intake requires put tour step"));
-        }
-        self.mutate_intake_internal(None, id, mutation, None, receipt)
-    }
-    pub fn mutate_current_tour_revision_with_intake(
-        &self,
-        owner: &str,
-        id: &str,
-        mutation: Mutation,
-        context: Option<ContributionContext>,
-        receipt: ContextIntakeReceipt,
-    ) -> Result<Review> {
-        if !matches!(mutation.operation, Operation::ApplyTourRevision { .. }) || context.is_some() {
-            return Err(invalid("context intake requires apply tour revision"));
-        }
-        self.mutate_intake_internal(Some(owner), id, mutation, context, receipt)
-    }
-    fn mutate_intake_internal(
-        &self,
-        owner: Option<&str>,
-        id: &str,
-        mutation: Mutation,
-        context: Option<ContributionContext>,
-        receipt: ContextIntakeReceipt,
+        privacy: Vec<refact_privacy::FileRecord>,
     ) -> Result<Review> {
         let mut c = self
             .connection
             .lock()
             .map_err(|_| invalid("poisoned store"))?;
         let tx = c.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        if let Some(owner) = owner {
-            let review = load(&tx, id)?;
-            let active: Option<String> = tx
-                .query_row(
-                    "SELECT review_id FROM active_reviews WHERE chat=?1",
-                    [owner],
-                    |row| row.get(0),
-                )
-                .optional()?;
-            if review.owner_chat_id != owner || active.as_deref() != Some(id) {
-                return Err(invalid("tour revision requires active owner review"));
-            }
-        }
-        let result = mutate_with_intake_context(&tx, id, mutation, None, context, Some(receipt))?;
-        tx.commit()?;
-        Ok(result)
-    }
-    pub fn mutate_current_tour_revision(
-        &self,
-        owner: &str,
-        id: &str,
-        mutation: Mutation,
-        context: Option<ContributionContext>,
-    ) -> Result<Review> {
-        self.mutate_current_tour_revision_with_completion(owner, id, mutation, context, None)
-    }
-    pub fn mutate_current_tour_revision_with_completion(
-        &self,
-        owner: &str,
-        id: &str,
-        mutation: Mutation,
-        context: Option<ContributionContext>,
-        intent: Option<ProposalTurnCompletionIntent>,
-    ) -> Result<Review> {
-        if intent.is_some() && !matches!(mutation.operation, Operation::ProposeTourRevision { .. })
-        {
-            return Err(invalid("completion intent requires proposal"));
-        }
-        if !matches!(
-            mutation.operation,
-            Operation::ProposeTourRevision { .. }
-                | Operation::AcceptTourRevision { .. }
-                | Operation::ApplyTourRevision { .. }
-        ) {
-            return Err(invalid("current tour revision requires revision operation"));
-        }
-        if context.is_some() && !matches!(mutation.operation, Operation::ProposeTourRevision { .. })
-        {
-            return Err(invalid("proposal context requires propose tour revision"));
-        }
-        let mut c = self
-            .connection
-            .lock()
-            .map_err(|_| invalid("poisoned store"))?;
-        let tx = c.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let review = load(&tx, id)?;
-        let active: Option<String> = tx
-            .query_row(
-                "SELECT review_id FROM active_reviews WHERE chat=?1",
-                [owner],
-                |row| row.get(0),
-            )
-            .optional()?;
-        if review.owner_chat_id != owner || active.as_deref() != Some(id) {
-            return Err(invalid("tour revision requires active owner review"));
-        }
-        let replayed: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM requests WHERE scope=?1 AND key=?2)",
-            params![id, mutation.request_key],
-            |r| r.get(0),
-        )?;
-        let result = mutate_with_context(&tx, id, mutation, None, context)?;
-        if !replayed {
-            if let Some(intent) = intent {
-                if intent.owner_chat_id != owner
-                    || intent.turn_id.is_empty()
-                    || intent.tool_call_id.is_empty()
-                    || intent.job_id.as_ref().is_some_and(String::is_empty)
-                    || intent
-                        .human_message_id
-                        .as_ref()
-                        .is_some_and(String::is_empty)
-                {
-                    return Err(invalid("invalid proposal completion intent"));
-                }
-                let proposal = result
-                    .tour_revision_proposals
-                    .iter()
-                    .find(|p| {
-                        !review
-                            .tour_revision_proposals
-                            .iter()
-                            .any(|old| old.id == p.id)
-                    })
-                    .ok_or_else(|| invalid("completion requires new proposal"))?;
-                let record = ProposalTurnCompletion {
-                    owner_chat_id: intent.owner_chat_id,
-                    turn_id: intent.turn_id,
-                    tool_call_id: intent.tool_call_id,
-                    job_id: intent.job_id,
-                    human_message_id: intent.human_message_id,
-                    review_id: result.id.clone(),
-                    candidate_id: proposal.target.candidate_id.clone(),
-                    proposal_id: proposal.id.clone(),
-                    contribution_id: proposal.proposal_contribution_id.clone(),
-                    delivery_id: format!("{}:{}", result.id, proposal.proposal_contribution_id),
-                    result_message_ids: vec![],
-                };
-                tx.execute("INSERT INTO proposal_turn_completions(proposal_id,owner,document) VALUES(?1,?2,?3)",
-                    params![record.proposal_id, owner, serde_json::to_string(&record)?])?;
-            }
-        }
-        tx.commit()?;
-        Ok(result)
-    }
-    pub fn mutate_tour_revision_with_context(
-        &self,
-        id: &str,
-        mutation: Mutation,
-        context: ContributionContext,
-    ) -> Result<Review> {
-        if !matches!(mutation.operation, Operation::ProposeTourRevision { .. }) {
-            return Err(invalid("proposal context requires propose tour revision"));
-        }
-        let mut c = self
-            .connection
-            .lock()
-            .map_err(|_| invalid("poisoned store"))?;
-        let tx = c.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let result = mutate_with_context(&tx, id, mutation, None, Some(context))?;
+        let result = mutate_with_privacy(&tx, id, mutation, None, &privacy)?;
         tx.commit()?;
         Ok(result)
     }
@@ -554,6 +223,24 @@ impl ReviewStore {
         mutation: Mutation,
     ) -> Result<Review> {
         self.mutate_internal(id, mutation, Some((owner, expected_active)))
+    }
+    pub fn mutate_and_set_active_with_privacy(
+        &self,
+        owner: &str,
+        id: &str,
+        expected_active: Option<&str>,
+        mutation: Mutation,
+        privacy: Vec<refact_privacy::FileRecord>,
+    ) -> Result<Review> {
+        let mut c = self
+            .connection
+            .lock()
+            .map_err(|_| invalid("poisoned store"))?;
+        let tx = c.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let result =
+            mutate_with_privacy(&tx, id, mutation, Some((owner, expected_active)), &privacy)?;
+        tx.commit()?;
+        Ok(result)
     }
     fn mutate_internal(
         &self,
@@ -711,15 +398,6 @@ fn unique<T>(items: &[T], id: impl Fn(&T) -> &str) -> Result<()> {
 }
 fn apply(c: &Connection, r: &mut Review, op: &Operation) -> Result<()> {
     match op {
-        Operation::ProposeTourRevision {
-            ..
-        }
-        | Operation::AcceptTourRevision {
-            ..
-        }
-        | Operation::ApplyTourRevision {
-            ..
-        } => return Err(invalid("revision requires mutation context")),
         Operation::RequestRunCancel {
             run_id,
         } => {
@@ -836,16 +514,6 @@ fn apply(c: &Connection, r: &mut Review, op: &Operation) -> Result<()> {
                 .optional()?;
             if stored.as_deref() != Some(&serde_json::to_string(candidate)?) {
                 return Err(invalid("candidate must be captured by this store"));
-            }
-            if r.candidates.is_empty() {
-                if let Some(receipt) = &r.context_intake {
-                    crate::intake::bind_intake(
-                        receipt,
-                        "before_review",
-                        &r.owner_chat_id,
-                        Some(candidate),
-                    )?;
-                }
             }
             r.candidates.push(candidate.clone());
         }
@@ -986,200 +654,6 @@ fn apply(c: &Connection, r: &mut Review, op: &Operation) -> Result<()> {
     }
     Ok(())
 }
-fn apply_revision(
-    c: &Connection,
-    r: &mut Review,
-    m: &Mutation,
-    context: Option<ContributionContext>,
-) -> Result<()> {
-    let stable_id = |role: &str| -> Result<String> {
-        Ok(format!(
-            "tour-revision:{role}:{}",
-            content_hash(&serde_json::to_vec(&(&r.id, &m.request_key, role))?)
-        ))
-    };
-    let owner_agent = || -> Result<()> {
-        if m.actor.kind != ActorKind::Agent || m.actor.id != r.owner_chat_id {
-            return Err(invalid("tour revision requires owner agent"));
-        }
-        Ok(())
-    };
-    let contribution =
-        |id: String, thread_id: String, body: String, blocks: Vec<RichBlock>| Contribution {
-            id,
-            thread_id,
-            body,
-            blocks,
-            actor: m.actor.clone(),
-            created_at_ms: m.at_ms,
-            chat_message_id: None,
-            context: None,
-        };
-    match &m.operation {
-        Operation::ProposeTourRevision {
-            target,
-            thread_id,
-            change_request,
-            body,
-            blocks,
-        } => {
-            owner_agent()?;
-            if change_request.trim().is_empty() || (body.trim().is_empty() && blocks.is_empty()) {
-                return Err(invalid("empty tour revision proposal"));
-            }
-            require_current_target(r, target)?;
-            let thread = r
-                .threads
-                .iter()
-                .find(|t| &t.id == thread_id)
-                .ok_or(Error::NotFound)?;
-            if thread.target.as_ref() != Some(target) {
-                return Err(invalid("proposal thread target mismatch"));
-            }
-            let proposal = TourRevisionProposal {
-                id: stable_id("proposal")?,
-                target: target.clone(),
-                thread_id: thread_id.clone(),
-                proposal_contribution_id: stable_id("proposal-contribution")?,
-                change_request: change_request.clone(),
-                proposed_by: m.actor.clone(),
-                proposed_at_ms: m.at_ms,
-                acceptance: None,
-                fulfilment: None,
-            };
-            if context.as_ref().is_some_and(|context| {
-                context.candidate_id.as_ref() != Some(&target.candidate_id)
-                    || context.run_id.is_some()
-                    || context.applicability != Applicability::Current
-            }) {
-                return Err(invalid("proposal context provenance mismatch"));
-            }
-            let mut receipt = contribution(
-                proposal.proposal_contribution_id.clone(),
-                thread_id.clone(),
-                body.clone(),
-                blocks.clone(),
-            );
-            receipt.context = context;
-            apply(
-                c,
-                r,
-                &Operation::AddContribution {
-                    contribution: receipt,
-                },
-            )?;
-            r.tour_revision_proposals.push(proposal);
-        }
-        Operation::AcceptTourRevision {
-            proposal_id,
-            target,
-        } => {
-            if m.actor.kind != ActorKind::User {
-                return Err(invalid("tour revision acceptance requires user"));
-            }
-            let index = r
-                .tour_revision_proposals
-                .iter()
-                .position(|p| &p.id == proposal_id)
-                .ok_or(Error::NotFound)?;
-            let proposal = &r.tour_revision_proposals[index];
-            if &proposal.target != target {
-                return Err(invalid("acceptance target mismatch"));
-            }
-            require_current_target(r, target)?;
-            if proposal.acceptance.is_some() || proposal.fulfilment.is_some() {
-                return Err(invalid("tour revision already accepted"));
-            }
-            let receipt = contribution(
-                stable_id("acceptance-contribution")?,
-                proposal.thread_id.clone(),
-                format!("Accepted Tour revision: {}", proposal.change_request),
-                vec![],
-            );
-            let acceptance = TourRevisionAcceptance {
-                actor: m.actor.clone(),
-                accepted_at_ms: m.at_ms,
-                contribution_id: receipt.id.clone(),
-            };
-            apply(
-                c,
-                r,
-                &Operation::AddContribution {
-                    contribution: receipt,
-                },
-            )?;
-            r.tour_revision_proposals[index].acceptance = Some(acceptance);
-        }
-        Operation::ApplyTourRevision {
-            proposal_id,
-            current,
-        } => {
-            owner_agent()?;
-            let index = r
-                .tour_revision_proposals
-                .iter()
-                .position(|p| &p.id == proposal_id)
-                .ok_or(Error::NotFound)?;
-            let proposal = &r.tour_revision_proposals[index];
-            if proposal.acceptance.is_none() || proposal.fulfilment.is_some() {
-                return Err(invalid("tour revision must be accepted and unfulfilled"));
-            }
-            require_current_target(r, &proposal.target)?;
-            if Some(current.version) != proposal.target.version.checked_add(1)
-                || current.candidate_id.as_ref() != Some(&proposal.target.candidate_id)
-            {
-                return Err(invalid("tour revision authored version/candidate mismatch"));
-            }
-            let step_id = proposal.target.step_id.clone();
-            let old = r
-                .tour
-                .iter()
-                .find(|s| s.id == step_id)
-                .ok_or(Error::NotFound)?
-                .current
-                .clone();
-            apply(
-                c,
-                r,
-                &Operation::PutTourStep {
-                    step: TourStep {
-                        id: step_id.clone(),
-                        current: current.clone(),
-                        history: vec![],
-                    },
-                },
-            )?;
-            let mut normalized = r
-                .tour
-                .iter()
-                .find(|s| s.id == step_id)
-                .unwrap()
-                .current
-                .clone();
-            normalized.version = old.version;
-            normalized.context_intake = old.context_intake.clone();
-            // A revision number alone is not authored content.
-            if normalized == old {
-                return Err(invalid("tour revision content unchanged"));
-            }
-            r.tour_revision_proposals[index].fulfilment = Some(TourRevisionFulfilment {
-                actor: m.actor.clone(),
-                fulfilled_at_ms: m.at_ms,
-                version: current.version,
-            });
-        }
-        _ => apply(c, r, &m.operation)?,
-    }
-    Ok(())
-}
-fn require_current_target(r: &Review, target: &TourDiscussionTarget) -> Result<()> {
-    crate::rich_blocks::resolve_tour_target(r, target)?;
-    if !crate::rich_blocks::is_tour_revision_target_current(r, target) {
-        return Err(invalid("stale tour revision target"));
-    }
-    Ok(())
-}
-
 fn validate(c: &Connection, r: &Review) -> Result<()> {
     unique(&r.tour, |x| &x.id)?;
     unique(&r.annotations, |x| &x.id)?;
@@ -1393,24 +867,14 @@ pub(crate) fn mutate_in_transaction(
     mutation: Mutation,
     activation: Option<(&str, Option<&str>)>,
 ) -> Result<Review> {
-    mutate_with_context(c, id, mutation, activation, None)
+    mutate_with_privacy(c, id, mutation, activation, &[])
 }
-fn mutate_with_context(
+fn mutate_with_privacy(
     c: &Connection,
     id: &str,
     mutation: Mutation,
     activation: Option<(&str, Option<&str>)>,
-    context: Option<ContributionContext>,
-) -> Result<Review> {
-    mutate_with_intake_context(c, id, mutation, activation, context, None)
-}
-fn mutate_with_intake_context(
-    c: &Connection,
-    id: &str,
-    mut mutation: Mutation,
-    activation: Option<(&str, Option<&str>)>,
-    context: Option<ContributionContext>,
-    intake: Option<ContextIntakeReceipt>,
+    privacy: &[refact_privacy::FileRecord],
 ) -> Result<Review> {
     if mutation.request_key.is_empty() {
         return Err(invalid("missing request key"));
@@ -1419,9 +883,6 @@ fn mutate_with_intake_context(
         Operation::PutTourStep {
             step,
         } => {
-            if step.current.context_intake.is_some() {
-                return Err(invalid("runtime-owned context intake"));
-            }
             let stored = load(c, id)?;
             let history = stored
                 .tour
@@ -1432,11 +893,6 @@ fn mutate_with_intake_context(
             if !history.starts_with(&step.history) {
                 return Err(invalid("tour history protected"));
             }
-        }
-        Operation::ApplyTourRevision {
-            current, ..
-        } if current.context_intake.is_some() => {
-            return Err(invalid("runtime-owned context intake"))
         }
         _ => {}
     }
@@ -1464,19 +920,13 @@ fn mutate_with_intake_context(
         &semantic_operation,
     );
     // Keep legacy mutation fingerprints byte-compatible when not switching slots.
-    let fingerprint = content_hash(&if let Some(receipt) = &intake {
-        serde_json::to_vec(&(
-            semantic,
-            activation,
-            crate::intake::intake_semantic(receipt),
-        ))?
-    } else if activation.is_some() {
+    let fingerprint = content_hash(&if activation.is_some() {
         serde_json::to_vec(&(semantic, activation))?
     } else {
         serde_json::to_vec(&semantic)?
     });
     if let Some(r) = replay(c, id, &mutation.request_key, &fingerprint)? {
-        return Ok(r);
+        return crate::privacy::retain(c, r, privacy);
     }
     let mut r = load(c, id)?;
     if let Some((owner, expected)) = activation {
@@ -1500,33 +950,8 @@ fn mutate_with_intake_context(
         _ => {}
     }
     let previous = r.clone();
-    if let Some(receipt) = &intake {
-        let candidate = r
-            .current_candidate_id
-            .as_ref()
-            .and_then(|id| r.candidates.iter().find(|c| &c.id == id));
-        crate::intake::bind_intake(&receipt, "before_tour", &r.owner_chat_id, candidate)?;
-        match &mut mutation.operation {
-            Operation::PutTourStep {
-                step,
-            } => {
-                if step.current.candidate_id != receipt.candidate_id {
-                    return Err(invalid("authored tour intake candidate mismatch"));
-                }
-                step.current.context_intake = Some(receipt.clone());
-            }
-            Operation::ApplyTourRevision {
-                current, ..
-            } => {
-                if current.candidate_id != receipt.candidate_id {
-                    return Err(invalid("authored tour intake candidate mismatch"));
-                }
-                current.context_intake = Some(receipt.clone());
-            }
-            _ => return Err(invalid("context intake requires tour authoring")),
-        }
-    }
-    apply_revision(c, &mut r, &mutation, context)?;
+    r.privacy = crate::privacy::union(&r.privacy, privacy)?;
+    apply(c, &mut r, &mutation.operation)?;
     validate(c, &r)?;
     r.revision = r
         .revision
@@ -1543,12 +968,6 @@ fn mutate_with_intake_context(
         candidate_id: r.current_candidate_id.clone(),
     });
     let document = serde_json::to_string(&r)?;
-    if let Some(receipt) = &intake {
-        c.execute(
-            "INSERT INTO request_intakes VALUES(?1,?2,?3)",
-            params![id, mutation.request_key, serde_json::to_string(receipt)?],
-        )?;
-    }
     for object in changed_objects(&previous, &r) {
         let record = ObjectRevision {
             review_id: id.to_owned(),

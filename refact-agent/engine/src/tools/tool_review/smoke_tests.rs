@@ -10,19 +10,11 @@ fn invocation(id: &str, name: &str, value: &Value) -> ChatMessage {
     message
 }
 
-fn intake(retrieval_id: &str) -> Value {
-    let gaps = ["mcp", "web", "messenger", "knowledge", "trajectories", "tasks", "memory"]
-        .map(|category| json!({"category":category,"status":"unavailable","reason":"Not provided by this source-only smoke fixture"}));
-    json!({"user_message_id":"smoke-user","retrieval_tool_call_ids":[retrieval_id],
-        "gaps":gaps,"summary":"Inspect the fixture source; no external context or execution verdict asserted"})
-}
-
 struct Fixture {
     _temp: tempfile::TempDir,
     source: PathBuf,
     oid: String,
     ccx: Arc<Mutex<AtCommandsContext>>,
-    tour_intakes: Mutex<std::collections::HashMap<String, Value>>,
 }
 
 impl Fixture {
@@ -64,7 +56,7 @@ impl Fixture {
         );
         user.message_id = "smoke-user".into();
         live.add_message(user);
-        // Captured native IO fixture: real file bytes, not a mocked intake decision.
+        // Captured native IO fixture with actual file content and provenance.
         live.add_message(invocation(
             "smoke-source",
             "cat",
@@ -76,6 +68,14 @@ impl Fixture {
         );
         source_result.tool_call_id = "smoke-source".into();
         source_result.tool_failed = Some(false);
+        crate::privacy::records::merge_records(
+            &mut source_result,
+            crate::privacy::records::declared_file_records(
+                &app.gcx,
+                vec![source.join("tracked.py")],
+            )
+            .unwrap(),
+        );
         live.add_message(source_result);
         let abort = live.abort_flag.clone();
         app.chat
@@ -102,7 +102,6 @@ impl Fixture {
             source,
             oid,
             ccx: Arc::new(Mutex::new(context)),
-            tour_intakes: Mutex::new(std::collections::HashMap::new()),
         }
     }
 
@@ -170,7 +169,7 @@ impl Fixture {
             ReviewToolKind::Context,
             json!({
                 "repository":self.source,"base_ref":self.oid,"candidate_ref":self.oid,
-                "request_key":"capture","title":"Smoke","context_intake":intake("smoke-source")
+                "request_key":"capture","title":"Smoke"
             }),
         )
         .await
@@ -179,27 +178,7 @@ impl Fixture {
 
     async fn update(&self, operation: Value, key: &str) -> Value {
         let current = self.call(ReviewToolKind::Get, json!({})).await.unwrap();
-        let mut request = json!({"expected_revision":current["revision"],"request_key":key,"operation":operation});
-        if request["operation"]["op"] == "put_tour_step" {
-            let saved = self.tour_intakes.lock().await.get(key).cloned();
-            request["context_intake"] = if let Some(saved) = saved {
-                saved
-            } else {
-                let (read_id, _) = self
-                    .call_with_id(
-                        ReviewToolKind::Get,
-                        json!({"path":"tracked.py","side":"head","start_line":1,"end_line":1}),
-                    )
-                    .await
-                    .unwrap();
-                let intake = intake(&read_id);
-                self.tour_intakes
-                    .lock()
-                    .await
-                    .insert(key.into(), intake.clone());
-                intake
-            };
-        }
+        let request = json!({"expected_revision":current["revision"],"request_key":key,"operation":operation});
         self.call(ReviewToolKind::Update, request)
             .await
             .unwrap_or_else(|error| panic!("fixture update {key} failed: {error}"))
@@ -207,7 +186,7 @@ impl Fixture {
 }
 
 #[tokio::test]
-async fn executor_receipt_history_three_versions_exact_retries_and_tamper_rejection() {
+async fn direct_edit_history_three_versions_exact_retries_and_tamper_rejection() {
     let f = Fixture::new().await;
     f.activate().await;
     let store = refact_review_core::ReviewStore::open(&f.source).unwrap();
@@ -215,22 +194,18 @@ async fn executor_receipt_history_three_versions_exact_retries_and_tamper_reject
     let mut snapshots = Vec::new();
     for version in 1..=3 {
         let before = store.get_for_chat("review-tool-smoke").unwrap().unwrap();
-        let mut history = before
+        let history = before
             .tour
             .first()
             .map(|s| s.history.clone())
             .unwrap_or_default();
-        for retained in &mut history {
-            retained.context_intake = None;
-        }
         let operation = json!({"op":"put_tour_step","step":{"id":"history","current":{
             "version":version,"title":"History","body":format!("Explanation {version}"),"anchors":[]
         },"history":history}});
         let key = format!("history-{version}");
         f.update(operation.clone(), &key).await;
-        let saved = f.tour_intakes.lock().await.get(&key).cloned().unwrap();
-        let request = json!({"expected_revision":before.revision,"request_key":key,
-            "operation":operation,"context_intake":saved});
+        let request =
+            json!({"expected_revision":before.revision,"request_key":key,"operation":operation});
         retries.push(request);
         snapshots.push(store.get_for_chat("review-tool-smoke").unwrap().unwrap());
     }
@@ -238,7 +213,6 @@ async fn executor_receipt_history_three_versions_exact_retries_and_tamper_reject
     assert_eq!(persisted.tour[0].history.len(), 2);
     for (index, version) in persisted.tour[0].history.iter().enumerate() {
         assert_eq!(version, &snapshots[index].tour[0].current);
-        assert!(version.context_intake.is_some());
     }
     let journal = store.object_history(&persisted.id).unwrap();
     for request in &retries {
@@ -248,15 +222,10 @@ async fn executor_receipt_history_three_versions_exact_retries_and_tamper_reject
             .unwrap();
         assert_eq!(replay["revision"], persisted.revision);
     }
-    for field in ["body", "receipt", "current_receipt", "extra", "short_fresh"] {
+    for field in ["body", "extra", "short_fresh"] {
         let mut tampered = retries[2].clone();
-        let receipt = serde_json::to_value(&persisted.tour[0].history[0].context_intake).unwrap();
         match field {
             "body" => tampered["operation"]["step"]["history"][0]["body"] = json!("forged"),
-            "receipt" => tampered["operation"]["step"]["history"][0]["context_intake"] = receipt,
-            "current_receipt" => {
-                tampered["operation"]["step"]["current"]["context_intake"] = receipt
-            }
             "extra" => {
                 let extra = tampered["operation"]["step"]["current"].clone();
                 tampered["operation"]["step"]["history"]
@@ -278,6 +247,65 @@ async fn executor_receipt_history_three_versions_exact_retries_and_tamper_reject
     }
     assert_eq!(store.load(&persisted.id).unwrap(), *persisted);
     assert_eq!(store.object_history(&persisted.id).unwrap(), journal);
+}
+
+#[tokio::test]
+async fn reply_older_key_retry_returns_original_contribution_without_store_changes() {
+    let f = Fixture::new().await;
+    f.activate().await;
+    let store = refact_review_core::ReviewStore::open(&f.source).unwrap();
+    let current = store.get_for_chat("review-tool-smoke").unwrap().unwrap();
+    let app = f.ccx.lock().await.app.clone();
+    let seeded = crate::review::service::comment(
+        app,
+        f.source.clone(),
+        "review-tool-smoke".into(),
+        current.id.clone(),
+        crate::review::service::CommentRequest {
+            expected_revision: current.revision,
+            request_key: "retry-question".into(),
+            thread_id: None,
+            annotation_id: None,
+            anchor: None,
+            target: None,
+            blocks: vec![],
+            body: "Explain this source".into(),
+        },
+    )
+    .await
+    .unwrap();
+    let thread_id = &seeded.threads[0].id;
+    let first_request = json!({
+        "expected_revision":seeded.revision,"request_key":"reply-k1",
+        "thread_id":thread_id,"body":"First answer"
+    });
+    let first = f
+        .call(ReviewToolKind::Reply, first_request.clone())
+        .await
+        .unwrap();
+    let second = f
+        .call(
+            ReviewToolKind::Reply,
+            json!({"expected_revision":first["revision"],"request_key":"reply-k2",
+                "thread_id":thread_id,"body":"Second answer"}),
+        )
+        .await
+        .unwrap();
+    let before = store.load(&seeded.id).unwrap();
+    let history = store.object_history(&seeded.id).unwrap();
+    let contributions = &before.threads[0].contributions;
+    assert_eq!(contributions.len(), 3);
+    assert_eq!(contributions[1].body, "First answer");
+    assert_eq!(contributions[2].body, "Second answer");
+    assert_eq!(first["contribution_id"], contributions[1].id);
+    assert_eq!(second["contribution_id"], contributions[2].id);
+    assert_ne!(first["contribution_id"], second["contribution_id"]);
+    assert!(second["revision"].as_u64().unwrap() > first["revision"].as_u64().unwrap());
+    let retry = f.call(ReviewToolKind::Reply, first_request).await.unwrap();
+    assert_eq!(retry["contribution_id"], contributions[1].id);
+    assert_eq!(retry["revision"], before.revision);
+    assert_eq!(store.load(&seeded.id).unwrap(), before);
+    assert_eq!(store.object_history(&seeded.id).unwrap(), history);
 }
 
 #[tokio::test]
@@ -458,7 +486,6 @@ async fn executor_all_seven_tools_and_cas_preserve_immutable_source() {
     f.update(json!({"op":"add_evidence","evidence":{"id":"source-evidence","candidate_id":candidate,"material_id":null,"run_id":null,"source":{"kind":"source","path":"tracked.py","anchor":anchor},"summary":"Source assertion, not execution","applicability":"current","created_at_ms":1}}), "source").await;
     let current = f.call(ReviewToolKind::Get, json!({})).await.unwrap();
     let replied = f.call(ReviewToolKind::Reply, json!({"expected_revision":current["revision"],"request_key":"reply","thread_id":thread_id,"body":"Fixture reply"})).await.unwrap();
-    assert_eq!(replied["threads"][0]["contributions_total"], 2);
     let exact = f
         .call(
             ReviewToolKind::Get,
@@ -467,6 +494,45 @@ async fn executor_all_seven_tools_and_cas_preserve_immutable_source() {
         .await
         .unwrap();
     assert_eq!(exact["contributions"][1]["body"], "Fixture reply");
+    assert_eq!(exact["contributions"].as_array().unwrap().len(), 2);
+    assert_eq!(replied.as_object().unwrap().len(), 5);
+    assert_eq!(replied["review_id"], current["id"]);
+    assert_eq!(
+        replied["revision"],
+        current["revision"].as_u64().unwrap() + 1
+    );
+    assert_eq!(replied["thread_id"], thread_id);
+    assert_eq!(replied["contribution_id"], exact["contributions"][1]["id"]);
+    let next = replied["next"].as_str().unwrap();
+    assert!(next.contains("saved in the thread and delivered to chat as its linked message"));
+    assert!(!next.contains("already shown"));
+    assert!(next.contains("Do not repeat its content"));
+    assert!(next.contains("Continue other requested work"));
+    assert!(next.contains("end the turn with one short sentence, never an empty message"));
+    assert!(!replied.to_string().contains("changed_files"));
+    let store = refact_review_core::ReviewStore::open(&f.source).unwrap();
+    let before = store.load(current["id"].as_str().unwrap()).unwrap();
+    let journal = store.object_history(&before.id).unwrap();
+    let mut forged = exact.clone();
+    let mut extra = exact["contributions"][1].clone();
+    extra["id"] = json!("forged-contribution");
+    extra["body"] = json!("Unlinked answer");
+    forged["contributions"].as_array_mut().unwrap().push(extra);
+    let error = f
+        .call(
+            ReviewToolKind::Update,
+            json!({
+                "expected_revision":before.revision,"request_key":"forged-answer",
+                "operation":{"op":"put_thread","thread":forged}
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert!(error.contains("contributions are append-only"));
+    assert!(error.contains("review_reply(thread_id, body)"));
+    assert!(error.contains("put_thread only re-anchors or resolves existing threads"));
+    assert_eq!(store.load(&before.id).unwrap(), before);
+    assert_eq!(store.object_history(&before.id).unwrap(), journal);
     std::fs::write(checkout.join("tracked.py"), b"assert 2 == 2\n").unwrap();
     let source = f
         .call(
@@ -618,66 +684,59 @@ async fn executor_rejects_invalid_arguments_ownership_and_fabricated_execution()
 }
 
 #[tokio::test]
-async fn context_sources_return_actual_ids_for_capture_and_tour_without_broadening_access() {
+async fn direct_capture_and_tour_edits_need_no_intake_proposal_or_thread() {
     let f = Fixture::new().await;
-    let before = f
-        .call(
-            ReviewToolKind::Context,
-            json!({"action":"context_sources","phase":"before_review"}),
-        )
+    let capture = json!({"repository":f.source,"base_ref":f.oid,"candidate_ref":f.oid,
+        "request_key":"direct-capture","title":"Direct workspace"});
+    let activated = f
+        .call(ReviewToolKind::Context, capture.clone())
         .await
         .unwrap();
-    assert_eq!(before["sources"].as_array().unwrap().len(), 1);
-    let source = &before["sources"][0];
-    assert_eq!(source["tool_call_id"], "smoke-source");
+    let recaptured = f.call(ReviewToolKind::Context, capture).await.unwrap();
     assert_eq!(
-        source["result_hash"],
-        refact_review_core::content_hash(b"assert 1 == 1\n")
+        activated["review"]["revision"],
+        recaptured["review"]["revision"]
     );
-    assert!(source.get("content").is_none() && source.get("arguments").is_none());
-    let activation = f.call(ReviewToolKind::Context, json!({
-        "repository":f.source,"base_ref":f.oid,"candidate_ref":f.oid,"request_key":"from-helper",
-        "context_intake":intake(source["tool_call_id"].as_str().unwrap())
-    })).await.unwrap();
-    let empty = f
+    let first_request = json!({"expected_revision":activated["review"]["revision"],
+        "request_key":"direct-first","operation":{"op":"put_tour_step","step":{
+        "id":"page","current":{"version":1,"title":"Flow","body":"Short accessible fallback",
+        "html":"<main><h1>Flow</h1><p>Source-linked explanation</p></main>","anchors":[]},"history":[]}}});
+    let first = f
+        .call(ReviewToolKind::Update, first_request.clone())
+        .await
+        .unwrap();
+    let mut exact = f
         .call(
-            ReviewToolKind::Context,
-            json!({"action":"context_sources","phase":"before_tour"}),
+            ReviewToolKind::Get,
+            json!({"object_kind":"tour_step","object_id":"page"}),
         )
         .await
         .unwrap();
-    assert!(empty["sources"].as_array().unwrap().is_empty());
-    let (read_id, _) = f
-        .call_with_id(ReviewToolKind::Get, json!({"path":"tracked.py"}))
+    assert_eq!(
+        exact["current"]["html"],
+        first_request["operation"]["step"]["current"]["html"]
+    );
+    exact["current"]["version"] = json!(2);
+    exact["current"]["html"] = json!("<main><h1>Updated flow</h1></main>");
+    let second_request = json!({"expected_revision":first["revision"],"request_key":"direct-second",
+        "operation":{"op":"put_tour_step","step":exact}});
+    let second = f
+        .call(ReviewToolKind::Update, second_request.clone())
         .await
         .unwrap();
-    let tour = f
-        .call(
-            ReviewToolKind::Context,
-            json!({"action":"context_sources","phase":"before_tour"}),
-        )
-        .await
-        .unwrap();
-    assert_eq!(tour["sources"][0]["tool_call_id"], read_id);
-    let authored = f.call(ReviewToolKind::Update, json!({"expected_revision":activation["review"]["revision"],
-        "request_key":"helper-tour","context_intake":intake(tour["sources"][0]["tool_call_id"].as_str().unwrap()),
-        "operation":{"op":"put_tour_step","step":{"id":"helper","current":{"version":1,"title":"Source","body":"Read candidate source","anchors":[]},"history":[]}}
-    })).await.unwrap();
-    assert_eq!(authored["tour_total"], 1);
-    assert!(f
-        .call(
-            ReviewToolKind::Context,
-            json!({"action":"context_sources","phase":"before_tour","review_id":"foreign"})
-        )
-        .await
-        .is_err());
-    assert!(f
-        .call(
-            ReviewToolKind::Context,
-            json!({"action":"context_sources","phase":"before_review","repository":"/private"})
-        )
-        .await
-        .is_err());
+    for request in [first_request.clone(), second_request.clone()] {
+        assert_eq!(
+            f.call(ReviewToolKind::Update, request).await.unwrap()["revision"],
+            second["revision"]
+        );
+    }
+    let store = refact_review_core::ReviewStore::open(&f.source).unwrap();
+    let persisted = store.load(second["id"].as_str().unwrap()).unwrap();
+    assert!(persisted.threads.is_empty());
+    assert!(persisted
+        .privacy
+        .iter()
+        .any(|record| record.path.ends_with("tracked.py")));
     let app = f.ccx.lock().await.app.clone();
     let live = app
         .chat
@@ -687,31 +746,91 @@ async fn context_sources_return_actual_ids_for_capture_and_tour_without_broadeni
         .get("review-tool-smoke")
         .unwrap()
         .clone();
-    let mut user = ChatMessage::new("user".into(), "New ordinary directive".into());
-    user.message_id = "new-user".into();
-    live.lock().await.add_message(user);
-    let empty = f
+    let live = live.lock().await;
+    let written = live
+        .messages
+        .iter()
+        .rev()
+        .find(|message| message.role == "tool" && message.extra.contains_key("review"))
+        .unwrap();
+    let carried = crate::privacy::records::records_to_carry(&[written.clone()]).unwrap();
+    for record in &persisted.privacy {
+        assert!(
+            carried.contains(record),
+            "Review tool result lost source privacy"
+        );
+    }
+    drop(live);
+    assert_eq!(persisted.tour[0].history.len(), 1);
+    assert_eq!(persisted.tour[0].history[0].version, 1);
+    let journal = store.object_history(&persisted.id).unwrap();
+    for failure in [
+        "cas",
+        "candidate",
+        "foreign",
+        "version",
+        "history",
+        "changed_retry",
+    ] {
+        let mut request = second_request.clone();
+        request["request_key"] = json!(format!("rejected-{failure}"));
+        request["expected_revision"] = second["revision"].clone();
+        request["operation"]["step"]["history"] =
+            serde_json::to_value(&persisted.tour[0].history).unwrap();
+        request["operation"]["step"]["current"]["version"] = json!(3);
+        match failure {
+            "cas" => request["expected_revision"] = json!(0),
+            "candidate" => {
+                request["operation"]["step"]["current"]["candidate_id"] = json!("foreign")
+            }
+            "foreign" => request["review_id"] = json!("foreign"),
+            "version" => request["operation"]["step"]["current"]["version"] = json!(7),
+            "history" => request["operation"]["step"]["history"] = json!([]),
+            _ => {
+                request = second_request.clone();
+                request["operation"]["step"]["current"]["body"] = json!("forged retry");
+            }
+        }
+        assert!(
+            f.call(ReviewToolKind::Update, request).await.is_err(),
+            "{failure}"
+        );
+    }
+    assert_eq!(store.load(&persisted.id).unwrap(), persisted);
+    assert_eq!(store.object_history(&persisted.id).unwrap(), journal);
+    let reloaded = f
         .call(
-            ReviewToolKind::Context,
-            json!({"action":"context_sources","phase":"before_review"}),
+            ReviewToolKind::Get,
+            json!({"object_kind":"tour_step","object_id":"page"}),
         )
         .await
         .unwrap();
-    assert!(empty["sources"].as_array().unwrap().is_empty());
-    f.ccx.lock().await.chat_id = "unrelated".into();
-    let args = serde_json::from_value(json!({"action":"context_sources","phase":"before_review"}))
-        .unwrap();
-    assert!(ToolReview(ReviewToolKind::Context)
-        .tool_execute(f.ccx.clone(), &"unrelated-helper".into(), &args)
-        .await
-        .is_err());
-    f.ccx.lock().await.chat_id = "review-tool-smoke".into();
-    f.ccx.lock().await.subchat_depth = 1;
-    assert!(f
-        .call(
-            ReviewToolKind::Context,
-            json!({"action":"context_sources","phase":"before_review"})
-        )
-        .await
-        .is_err());
+    assert_eq!(reloaded, serde_json::to_value(&persisted.tour[0]).unwrap());
+}
+
+#[test]
+fn advertised_workspace_contract_has_no_intake_actions_or_receipts() {
+    let context = ToolReview(ReviewToolKind::Context)
+        .tool_description()
+        .input_schema;
+    let text = context.to_string();
+    assert!(!text.contains("context_question") && !text.contains("context_sources"));
+    assert!(context["properties"].get("context_intake").is_none());
+    let update = ToolReview(ReviewToolKind::Update)
+        .tool_description()
+        .input_schema;
+    assert!(update["properties"].get("context_intake").is_none());
+}
+
+#[test]
+fn reply_description_requires_a_brief_turn_closing() {
+    let description = ToolReview(ReviewToolKind::Reply)
+        .tool_description()
+        .description;
+    assert!(description.contains("only way to answer a discussion"));
+    assert!(description.contains("saved in the thread and delivered to chat as its linked message"));
+    assert!(!description.contains("appears inline") && !description.contains("already shown"));
+    assert!(description.contains("Do not repeat its content"));
+    assert!(description.contains("Continue other requested work"));
+    assert!(description.contains("end the turn with one short sentence, never an empty message"));
 }

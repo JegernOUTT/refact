@@ -1,18 +1,18 @@
 .header {
   position: relative;
   display: flex;
-  flex-wrap: nowrap;
+  flex-wrap: wrap;
   align-items: center;
-  gap: var(--rf-space-2);
+  gap: var(--rf-space-1);
   min-width: 0;
-  overflow-x: auto;
   flex-shrink: 0;
   padding: var(--rf-space-2) var(--rf-space-3);
-  border-bottom: 1px solid var(--rf-border);
+  border-bottom: var(--rf-hairline) solid var(--rf-border);
 }
 
 .identity {
-  flex: 1 0 12rem;
+  flex: 0 1 auto;
+  max-width: min(100%, 48ch);
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -20,12 +20,7 @@
 }
 
 .controls {
-  display: flex;
-  flex-wrap: nowrap;
-  flex-shrink: 0;
-  align-items: center;
-  gap: var(--rf-space-2);
-  min-width: 0;
+  display: contents;
 }
 
 .status {
@@ -34,4 +29,16 @@
   color: var(--rf-color-muted);
   font-size: var(--rf-text-1);
   line-height: var(--rf-line-1);
+}
+
+@media (max-height: 30rem) {
+  .header {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+  }
+
+  .header > *,
+  .controls :where(*) {
+    flex-shrink: 0;
+  }
 }

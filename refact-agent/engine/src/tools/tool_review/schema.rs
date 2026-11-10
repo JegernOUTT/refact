@@ -146,6 +146,7 @@ fn version() -> Value {
             ("version", n()),
             ("title", s()),
             ("body", s()),
+            ("html", nullable(s())),
             ("anchors", arr(anchor())),
             ("blocks", blocks()),
             ("candidate_id", nullable(s())),
@@ -300,25 +301,6 @@ fn operation() -> Value {
     ] {
         alternatives.push(obj(vec![("op", en(&[op])), (key, value)], &["op", key]));
     }
-    alternatives.push(obj(
-        vec![
-            ("op", en(&["propose_tour_revision"])),
-            ("target", discussion_target()),
-            ("thread_id", s()),
-            ("change_request", s()),
-            ("body", s()),
-            ("blocks", blocks()),
-        ],
-        &["op", "target", "thread_id", "change_request", "body"],
-    ));
-    alternatives.push(obj(
-        vec![
-            ("op", en(&["apply_tour_revision"])),
-            ("proposal_id", s()),
-            ("current", version()),
-        ],
-        &["op", "proposal_id", "current"],
-    ));
     json!({"oneOf":alternatives,"description":"Use exact objects from review_get for updates; preserve all history and contributions. put_thread updates existing threads only. Obtain anchors from review_anchor. Executed evidence is server-owned.","examples":[{"op":"rename","title":"Review title"},{"op":"put_tour_step","step":{"id":"orientation","current":{"version":1,"title":"Orientation","body":"Explanation","anchors":[]},"history":[]}}]})
 }
 fn discovery() -> Value {
@@ -374,13 +356,6 @@ fn acquisition() -> Value {
             ("request_key", s()),
             ("root_base_ref", nullable(s())),
             ("comparisons", arr(comparison)),
-            (
-                "member_context_intakes",
-                arr(obj(
-                    vec![("member", s()), ("context_intake", intake())],
-                    &["member", "context_intake"],
-                )),
-            ),
         ],
         &[
             "preparation_token",
@@ -390,58 +365,21 @@ fn acquisition() -> Value {
         ],
     )
 }
-fn intake() -> Value {
-    obj(
-        vec![
-            ("user_message_id", nullable(s())),
-            ("question_tool_call_id", nullable(s())),
-            ("retrieval_tool_call_ids", arr(s())),
-            (
-                "gaps",
-                arr(obj(
-                    vec![
-                        (
-                            "category",
-                            en(&[
-                                "docs",
-                                "mcp",
-                                "web",
-                                "messenger",
-                                "knowledge",
-                                "trajectories",
-                                "tasks",
-                                "memory",
-                            ]),
-                        ),
-                        ("status", en(&["unavailable", "declined", "unknown"])),
-                        ("reason", s()),
-                    ],
-                    &["category", "status", "reason"],
-                )),
-            ),
-            ("summary", s()),
-        ],
-        &["retrieval_tool_call_ids", "gaps", "summary"],
-    )
-}
-#[cfg(test)]
-#[test]
-fn intake_is_top_level_and_receipts_cannot_be_forged() {
-    let schema = advertised(
-        ReviewToolKind::Update,
-        json!({"type":"object","properties":{"expected_revision":n(),"request_key":s()},"required":["expected_revision","request_key","operation"],"additionalProperties":false}),
-    );
-    let mut value = json!({"expected_revision":0,"request_key":"k","context_intake":{"user_message_id":"latest","retrieval_tool_call_ids":[],"gaps":[],"summary":"scope"},"operation":{"op":"put_tour_step","step":{"id":"s","current":{"version":1,"title":"t","body":"b","anchors":[],"blocks":[{"id":"visual","revision":1,"content":{"kind":"html","html":"<p>flow</p>","static_fallback":"Flow"}}]},"history":[]}}});
-    validate(&schema, &value).unwrap();
-    value["operation"]["step"]["current"]["context_intake"] = json!({"id":"forged"});
-    assert!(validate(&schema, &value).is_err());
-}
 pub fn advertised(kind: ReviewToolKind, base: Value) -> Value {
     let mut schema = schema(kind, base);
     if matches!(kind, ReviewToolKind::Context) {
         schema.as_object_mut().unwrap().remove("oneOf");
         schema["additionalProperties"] = json!(false);
-        schema["description"] = json!("context_sources requires phase before_review or before_tour and allows review_id only for before_tour; it returns up to 64 owning-chat completed retrieval references after the latest phase checkpoint, without result contents or arguments. Call it after searches and cite returned tool_call_id in context_intake. Without action, repository, base_ref, candidate_ref and request_key are required. stack_prepare requires discovery; stack_import requires acquisition; stack_inspect takes only action; stack_member and stack_cumulative require member_id; stack_capture requires member_id and request_key; stack_refresh requires expected_revision and request_key. Fields from other actions are rejected.");
+        schema["properties"]["action"] = en(&[
+            "stack_prepare",
+            "stack_import",
+            "stack_inspect",
+            "stack_member",
+            "stack_capture",
+            "stack_cumulative",
+            "stack_refresh",
+        ]);
+        schema["description"] = json!("Without action provide repository, base_ref, candidate_ref and request_key. Gather context with ordinary tools. Stack actions preserve explicit confirmed scope. Fields from other actions are rejected.");
     }
     schema
 }
@@ -467,23 +405,10 @@ pub fn schema(kind: ReviewToolKind, base: Value) -> Value {
                 ("review_id", nullable(s())),
                 ("expected_revision", nullable(n())),
                 ("request_key", s()),
-                ("context_intake", intake()),
             ],
             &["repository", "base_ref", "candidate_ref", "request_key"],
         )];
         for (action, field, shape, required) in [
-            (
-                "context_question",
-                "phase",
-                en(&["before_review", "before_tour"]),
-                true,
-            ),
-            (
-                "context_sources",
-                "phase",
-                en(&["before_review", "before_tour"]),
-                true,
-            ),
             ("stack_prepare", "discovery", discovery(), true),
             ("stack_import", "acquisition", acquisition(), true),
             ("stack_inspect", "", s(), false),
@@ -504,20 +429,6 @@ pub fn schema(kind: ReviewToolKind, base: Value) -> Value {
                 fields.push(("request_key", s()));
                 req.push("request_key");
             }
-            if action == "stack_import" {
-                fields.push(("context_intake", intake()));
-            }
-            if action == "context_sources" {
-                fields.push(("review_id", s()));
-            }
-            if action == "context_question" {
-                fields.extend([
-                    ("repository", s()),
-                    ("base_ref", s()),
-                    ("candidate_ref", s()),
-                    ("review_id", s()),
-                ]);
-            }
             variants.push(obj(fields, &req));
         }
         let mut properties = serde_json::Map::new();
@@ -533,8 +444,6 @@ pub fn schema(kind: ReviewToolKind, base: Value) -> Value {
         properties.insert(
             "action".into(),
             en(&[
-                "context_question",
-                "context_sources",
                 "stack_prepare",
                 "stack_import",
                 "stack_inspect",
@@ -549,7 +458,6 @@ pub fn schema(kind: ReviewToolKind, base: Value) -> Value {
     let mut result = base;
     if matches!(kind, ReviewToolKind::Update) {
         result["properties"]["operation"] = operation();
-        result["properties"]["context_intake"] = nullable(intake());
     }
     if matches!(kind, ReviewToolKind::Reply) {
         result["properties"]["blocks"] = blocks();

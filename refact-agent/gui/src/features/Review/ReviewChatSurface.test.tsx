@@ -25,6 +25,7 @@ import {
   type StackManifest,
 } from "../../services/refact/review";
 import { ReviewChatSurface } from "./ReviewChatSurface";
+import { groupReviewFiles, reviewFiles } from "./model";
 import { anchor, bytes, candidate, makeReview } from "./reviewFixtures";
 
 HTMLElement.prototype.hasPointerCapture = () => false;
@@ -119,6 +120,23 @@ function twoCandidateReview(revision = 3): Review {
 }
 
 describe("ReviewChatSurface", () => {
+  it("renders compact comment navigation with stable labels, titles and disabled state", async () => {
+    serveReview({ review: twoCandidateReview() });
+    render(
+      <ReviewChatSurface chatId="chat-1">
+        <ChatProbe />
+      </ReviewChatSurface>,
+    );
+    await screen.findByRole("region", { name: "Review canvas" });
+    for (const name of ["Previous comment", "Next comment"]) {
+      const button = screen.getByRole("button", { name });
+      expect(button).toHaveAttribute("title", name);
+      expect(button).toBeDisabled();
+      expect(button).toHaveTextContent("");
+      expect(button.querySelector("svg")).not.toBeNull();
+    }
+  });
+
   it("observes width, hides the divider in narrow layouts, and disconnects", async () => {
     serveReview({ review: twoCandidateReview() });
     let notify: ResizeObserverCallback | undefined;
@@ -244,7 +262,6 @@ describe("ReviewChatSurface", () => {
       for (const detail of [
         { reviewId: "r1" },
         { reviewId: "r1", threadId: "missing" },
-        { reviewId: "r1", threadId: "unplaced" },
         {
           reviewId: "r1",
           anchor: { ...anchor("c2", "src/a.ts", "head", 1), status: "stalled" },
@@ -254,6 +271,21 @@ describe("ReviewChatSurface", () => {
         fireEvent(window, new CustomEvent("refact:review-reveal", { detail }));
         expect(screen.getByRole("radio", { name: "Chat" })).toBeChecked();
       }
+      await user.click(composer);
+      fireEvent(
+        window,
+        new CustomEvent("refact:review-reveal", {
+          detail: { reviewId: "r1", threadId: "unplaced" },
+        }),
+      );
+      expect(screen.getByRole("radio", { name: "Canvas" })).toBeChecked();
+      expect(
+        await screen.findByRole("region", { name: "Historical comment" }),
+      ).toBeVisible();
+      expect(composer).toHaveFocus();
+      expect(composer).toHaveValue("retained draft");
+      expect(mounts).toBe(1);
+      await user.click(screen.getByRole("radio", { name: "Chat" }));
       fireEvent(
         window,
         new CustomEvent("refact:review-reveal", {
@@ -464,12 +496,20 @@ describe("ReviewChatSurface", () => {
       ],
     };
     store.dispatch(invalidateReviewForChat("chat-1"));
-    await screen.findByText("Unchecked index");
+    await waitFor(() =>
+      expect(
+        reviewApi.endpoints.getReviewByChat.select({ chatId: "chat-1" })(
+          store.getState(),
+        ).data?.revision,
+      ).toBe(4),
+    );
 
     expect(mounts).toBe(1);
     expect(screen.getByLabelText("Chat composer")).toBe(composer);
     expect(composer).toHaveFocus();
     expect(composer).toHaveValue("draft in progress");
+    await user.click(screen.getByRole("radio", { name: "Review" }));
+    expect(await screen.findByText("Unchecked index")).toBeVisible();
   });
 
   it("discovers a tool-imported stack while mounted without a review event or losing the chat draft", async () => {
@@ -615,6 +655,42 @@ describe("ReviewChatSurface", () => {
     );
   });
 
+  it.each(["full", "since_last"] as const)(
+    "groups files by their %s comparison status without changing order or entries",
+    (mode) => {
+      const file = (path: string, base: string, head: string) => ({
+        path,
+        base: { digest: base, size: 1 },
+        head: { digest: head, size: 1 },
+        base_mode: 1,
+        head_mode: 1,
+      });
+      const previous = candidate("c1", 1, [
+        file("z.ts", "base", "head"),
+        file("a.ts", "base", "base"),
+      ]);
+      const current = candidate("c2", 2, [
+        file("z.ts", "base", "head"),
+        file("a.ts", "base", "next"),
+        file("context.ts", "base", "base"),
+      ]);
+      const review = makeReview({ candidates: [previous, current] });
+      const entries = reviewFiles(review, current, mode, true);
+      const groups = groupReviewFiles(entries);
+      expect(groups.changed.map((entry) => entry.path)).toEqual(
+        mode === "full" ? ["a.ts", "z.ts"] : ["a.ts", "context.ts"],
+      );
+      expect(groups.unchanged.map((entry) => entry.path)).toEqual(
+        mode === "full" ? ["context.ts"] : ["z.ts"],
+      );
+      expect([...groups.changed, ...groups.unchanged]).toEqual(entries);
+      for (const entry of [...groups.changed, ...groups.unchanged]) {
+        expect(entries).toContain(entry);
+      }
+      expect(groupReviewFiles([])).toEqual({ changed: [], unchanged: [] });
+    },
+  );
+
   it("shows distinct basenames while retaining full paths and changed-file ordering", async () => {
     const paths = [
       "refact-agent/engine/src/review/api.rs",
@@ -652,6 +728,7 @@ describe("ReviewChatSurface", () => {
         .getAllByRole("button")
         .map((button) => button.getAttribute("aria-label")),
     ).toEqual(paths.slice(0, 3));
+    expect(screen.queryByRole("list", { name: "Unchanged files" })).toBeNull();
     for (const path of paths.slice(0, 3)) {
       const button = within(list).getByRole("button", {
         name: path,
@@ -684,11 +761,27 @@ describe("ReviewChatSurface", () => {
       within(list)
         .getAllByRole("button")
         .map((button) => button.getAttribute("aria-label")),
-    ).toEqual(paths);
-    await user.click(within(list).getByRole("button", { name: paths[2] }));
+    ).toEqual(paths.slice(0, 3));
+    const unchanged = screen.getByRole("list", { name: "Unchanged files" });
     expect(
-      within(list).getByRole("button", { name: paths[2] }),
+      within(unchanged)
+        .getAllByRole("button")
+        .map((button) => button.getAttribute("aria-label")),
+    ).toEqual(paths.slice(3));
+    await user.click(within(unchanged).getByRole("button", { name: paths[3] }));
+    expect(
+      within(unchanged).getByRole("button", { name: paths[3] }),
     ).toHaveAttribute("aria-current", "true");
+    await user.click(
+      screen.getByRole("button", { name: "More review options" }),
+    );
+    await user.click(
+      screen.getByRole("menuitem", { name: "Hide unchanged files" }),
+    );
+    expect(screen.queryByRole("list", { name: "Unchanged files" })).toBeNull();
+    expect(
+      screen.queryByRole("heading", { name: "Unchanged files" }),
+    ).toBeNull();
   });
 
   it("keeps the last loaded review read-only when refresh fails", async () => {
@@ -861,7 +954,6 @@ describe("ReviewChatSurface", () => {
           <ChatProbe />
         </ReviewChatSurface>,
       );
-      await screen.findByLabelText(/^Head/);
       await user.click(
         await screen.findByRole("button", { name: "Follow tour" }),
       );

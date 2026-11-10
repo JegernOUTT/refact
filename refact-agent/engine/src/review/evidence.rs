@@ -92,7 +92,7 @@ pub async fn prepare_execution(
         "prepared_at_ms".into(),
         chrono::Utc::now().timestamp_millis().to_string(),
     );
-    inputs.insert("prepared_chat".into(), chat);
+    inputs.insert("prepared_chat".into(), chat.clone());
     inputs.insert("request_key".into(), request_key.into());
     inputs.insert(
         "processes_already_registered".into(),
@@ -106,12 +106,14 @@ pub async fn prepare_execution(
     );
     inputs.insert("saved_state_before".into(), snapshot.content_digest.clone());
     let material = Material { id: uuid::Uuid::new_v4().to_string(), kind: MaterialKind::Investigation, candidate_id: candidate, agent_id: agent, description: "Deliberate pre-execution saved local state. External dependencies, effective environment and concurrent mutation exclusion unknown".into(), content_digest: snapshot.content_digest, input_digests: inputs, environment: None, worktree_id: Some(worktree.id), worktree_root: Some(worktree.root.to_string_lossy().into()), artifacts: vec![artifact] };
-    super::runs::apply(
+    let privacy = super::context::chat_source_privacy(&app, &chat).await?;
+    super::runs::apply_with_privacy(
         root,
         &review.id,
         Operation::AddMaterial {
             material: material.clone(),
         },
+        privacy,
     )
     .await?;
     Ok(material)
@@ -282,12 +284,14 @@ pub async fn record_prepared_process_evidence(
     )
     .await?;
     let evidence = Evidence { id: uuid::Uuid::new_v4().to_string(), candidate_id: candidate, material_id: Some(material_id), run_id: agent.and_then(|a| review.runs.iter().find(|r| r.agent_id == a).map(|r| r.id.clone())), source: EvidenceSource::Executed { command: vec![process.meta.command], workdir: process.meta.cwd.unwrap().to_string_lossy().into(), exit_code: match process.status { ExecStatus::Exited { exit_code } => exit_code, _ => None }, stdout: Some(stdout), stderr: Some(stderr) }, summary: format!("{}\nAttribution: runtime-owned result only. Required inputs and effective environment are unknown; a passing experiment does not prove the original candidate. Output may be truncated; inspect retained receipt.", summary.trim()), applicability, created_at_ms: chrono::Utc::now().timestamp_millis() };
-    super::runs::apply(
+    let privacy = super::context::chat_source_privacy(&app, &chat).await?;
+    super::runs::apply_with_privacy(
         root,
         review_id,
         Operation::AddEvidence {
             evidence,
         },
+        privacy,
     )
     .await
 }

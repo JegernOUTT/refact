@@ -328,11 +328,26 @@ async fn registered_child_executor_filters_get_update_and_reply_after_owner_swit
     assert_pinned(&updated);
     assert_eq!(updated["annotations_total"], 1);
     let replied = call(&ccx, ReviewToolKind::Reply, json!({"expected_revision":updated["revision"],"request_key":"child-answer","thread_id":"own-thread","body":"A child answer"})).await.unwrap();
-    assert_pinned(&replied);
+    assert_eq!(replied.as_object().unwrap().len(), 5);
+    assert_eq!(replied["review_id"], review.id);
+    assert_eq!(replied["thread_id"], "own-thread");
     assert_eq!(
-        replied["threads"][0]["contributions"][0]["body"],
-        "A child answer"
+        replied["revision"],
+        updated["revision"].as_u64().unwrap() + 1
     );
+    assert!(!replied.to_string().contains("FOREIGN_B_"));
+    assert!(!replied.to_string().contains("candidates"));
+    let exact = call(
+        &ccx,
+        ReviewToolKind::Get,
+        json!({"object_kind":"thread","object_id":"own-thread"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(exact["contributions"][0]["body"], "A child answer");
+    assert_eq!(replied["contribution_id"], exact["contributions"][0]["id"]);
+    let after = call(&ccx, ReviewToolKind::Get, json!({})).await.unwrap();
+    assert_pinned(&after);
     let stored = store.load(&review.id).unwrap();
     assert_eq!(stored.current_candidate_id.as_deref(), Some(b.id.as_str()));
     assert!(serde_json::to_string(&stored)

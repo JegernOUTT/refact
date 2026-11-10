@@ -1055,7 +1055,7 @@ mod tests {
         let mut source_invocation = ChatMessage::new("assistant".into(), String::new());
         source_invocation.tool_calls = Some(vec![source_call]);
         live.add_message(source_invocation);
-        // Captured native IO fixture, with actual file content; intake validation stays real.
+        // Captured native IO fixture with actual file content.
         let mut source_result = ChatMessage::new(
             "tool".into(),
             fs::read_to_string(source.join("tracked.txt")).unwrap(),
@@ -1076,12 +1076,9 @@ mod tests {
                 .await
                 .unwrap();
         let mut call = deterministic_tool_call("review-activation", "set_review_context");
-        let gaps = ["mcp", "web", "messenger", "knowledge", "trajectories", "tasks", "memory"]
-            .map(|category| serde_json::json!({"category":category,"status":"unavailable","reason":"Not provided by this source-only dispatch fixture"}));
         call.function.arguments = serde_json::json!({
             "repository":session.lock().await.work_project_root,
-            "base_ref":oid,"candidate_ref":oid,"request_key":"dispatch-capture",
-            "context_intake":{"user_message_id":"dispatch-review-user","retrieval_tool_call_ids":["dispatch-source"],"gaps":gaps,"summary":"Inspect local fixture source, without external context or execution claims"}
+            "base_ref":oid,"candidate_ref":oid,"request_key":"dispatch-capture"
         })
         .to_string();
 
@@ -3372,15 +3369,12 @@ pub async fn process_tool_calls_once(
     let chat_id = session_arc.lock().await.chat_id.clone();
     let sealed = crate::agents::seal::is_sealed(&app, &chat_id).await;
     let mut verify_completion = false;
-    let mut proposal_results = Vec::new();
     {
         let mut session = session_arc.lock().await;
         if !was_interrupted || tool_initiated_stop {
-            let start = session.messages.len();
             for result_msg in tool_results {
                 session.add_message(result_msg);
             }
-            proposal_results.extend_from_slice(&session.messages[start..]);
             session.drain_post_tool_side_effects();
         } else {
             session.drain_post_tool_side_effects();
@@ -3406,91 +3400,6 @@ pub async fn process_tool_calls_once(
         }
     }
     session_merge_span.finish_tool(PerfOutcome::Success, 1, tools_to_execute.len() as u64, None);
-
-    if !was_aborted && !was_interrupted && !tool_initiated_stop {
-        let proposal_call = tools_to_execute.iter().any(|call| {
-            call.function.name == "review_update"
-                && call
-                    .function
-                    .parse_args()
-                    .ok()
-                    .and_then(|args| args.get("operation").cloned())
-                    .is_some_and(|operation| operation["op"] == "propose_tour_revision")
-        });
-        if proposal_call {
-            crate::chat::delivery::drain_deliveries_at_boundary(app.clone(), session_arc.clone())
-                .await;
-        }
-        for call in tools_to_execute
-            .iter()
-            .filter(|c| c.function.name == "review_update")
-        {
-            let results = proposal_results
-                .iter()
-                .filter(|m| m.tool_call_id == call.id && m.tool_failed == Some(false))
-                .cloned()
-                .collect::<Vec<_>>();
-            if !results.is_empty()
-                && crate::chat::trajectories::try_save_trajectory_with_intent(
-                    app.clone(),
-                    session_arc.clone(),
-                    TrajectoryCommitIntent::Required,
-                )
-                .await
-                .unwrap_or(false)
-            {
-                let job = app.runtime.tool_jobs.proposal_job(&thread.id, &call.id);
-                if let Err(error) = crate::review::turn_completion::acknowledge(
-                    &app,
-                    &thread.id,
-                    &call.id,
-                    job.as_ref().map(|j| j.job_id.as_str()),
-                    &results,
-                )
-                .await
-                {
-                    tracing::warn!(%error, "proposal result acknowledgement pending");
-                }
-            }
-        }
-        if tools_to_execute.len() == 1 {
-            let call = &tools_to_execute[0];
-            let proposes = call.function.name == "review_update"
-                && call
-                    .function
-                    .parse_args()
-                    .ok()
-                    .and_then(|args| args.get("operation").cloned())
-                    .and_then(|value| {
-                        serde_json::from_value::<refact_review_core::Operation>(value).ok()
-                    })
-                    .is_some_and(|op| {
-                        matches!(
-                            op,
-                            refact_review_core::Operation::ProposeTourRevision { .. }
-                        )
-                    });
-            if proposes {
-                if let Some(job) = app.runtime.tool_jobs.proposal_job(&thread.id, &call.id) {
-                    let waiting = crate::review::turn_completion::await_proposal_result(
-                        &app,
-                        &session_arc,
-                        &job,
-                    );
-                    let interrupt = { session_arc.lock().await.user_interrupt_flag.clone() };
-                    tokio::select! {
-                        result = waiting => if let Err(error) = result { tracing::warn!(%error, "proposal result landing pending"); },
-                        _ = wait_for_tool_abort(session_arc.clone(), interrupt) => return ToolStepOutcome::Stop,
-                    }
-                }
-            }
-        }
-        match crate::review::turn_completion::stop_at_boundary(&app, &session_arc).await {
-            Ok(true) => return ToolStepOutcome::Stop,
-            Ok(false) => {}
-            Err(error) => tracing::warn!(%error, "proposal completion boundary unavailable"),
-        }
-    }
 
     if verify_completion {
         let trigger = completion_trigger.as_deref().unwrap_or("task_done");

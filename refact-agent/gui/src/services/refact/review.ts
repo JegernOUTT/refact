@@ -121,7 +121,7 @@ export type DocumentTarget = {
 };
 
 export type TourVersion = {
-  context_intake?: ContextIntakeReceipt | null;
+  html?: string;
   blocks?: RichBlock[];
   candidate_id?: string | null;
   version: number;
@@ -152,22 +152,6 @@ export type Annotation = {
 };
 
 export type Actor = { kind: ActorKind; id: string };
-
-export type TourRevisionProposal = {
-  id: string;
-  target: DocumentTarget;
-  thread_id: string;
-  proposal_contribution_id: string;
-  change_request: string;
-  proposed_by: Actor;
-  proposed_at_ms: number;
-  acceptance: {
-    actor: Actor;
-    accepted_at_ms: number;
-    contribution_id: string;
-  } | null;
-  fulfilment: { actor: Actor; fulfilled_at_ms: number; version: number } | null;
-};
 
 export type ReviewFileRecord = {
   path: string;
@@ -260,70 +244,7 @@ export type Activity = {
   candidate_id: string | null;
 };
 
-export type ContextIntakeReceipt = {
-  id: string;
-  phase: "before_review" | "before_tour";
-  owner_chat_id: string;
-  repository: string;
-  base_oid: string;
-  head_oid: string;
-  candidate_id: string | null;
-  captured_at_ms: number;
-  input_reference: {
-    kind: "question" | "user_directive";
-    message_id: string | null;
-    tool_call_id: string | null;
-    status: string;
-    content_hash: string;
-  };
-  consultations: {
-    message_id: string;
-    tool_call_id: string;
-    tool_name: string;
-    categories: string[];
-    result_hash: string;
-    observed_at_ms: number | null;
-  }[];
-  gaps: { category: string; status: string; reason: string }[];
-  summary: string;
-  privacy: ReviewFileRecord[];
-};
-
-export const contextIntakeDisplaySchema = z.object({
-  id: z.string().min(1),
-  phase: z.enum(["before_review", "before_tour"]),
-  owner_chat_id: z.string().min(1),
-  repository: z.string().min(1),
-  base_oid: z.string().min(1),
-  head_oid: z.string().min(1),
-  candidate_id: z.string().nullable(),
-  captured_at_ms: z.number().finite().nonnegative(),
-  input_reference: z.object({
-    kind: z.enum(["question", "user_directive"]),
-    message_id: z.string().nullable(),
-    tool_call_id: z.string().nullable(),
-    status: z.string(),
-    content_hash: z.string().min(1),
-  }),
-  consultations: z.array(
-    z.object({
-      message_id: z.string().min(1),
-      tool_call_id: z.string().min(1),
-      tool_name: z.string().min(1),
-      categories: z.array(z.string()),
-      result_hash: z.string().min(1),
-      observed_at_ms: z.number().finite().nonnegative().nullable(),
-    }),
-  ),
-  gaps: z.array(
-    z.object({ category: z.string(), status: z.string(), reason: z.string() }),
-  ),
-  summary: z.string(),
-  privacy: z.array(z.unknown()),
-});
-
 export type Review = {
-  context_intake?: ContextIntakeReceipt | null;
   schema_version: number;
   id: string;
   owner_chat_id: string;
@@ -334,7 +255,6 @@ export type Review = {
   target_reference: string;
   candidates: Candidate[];
   tour: TourStep[];
-  tour_revision_proposals?: TourRevisionProposal[];
   annotations: Annotation[];
   threads: ReviewThread[];
   evidence: Evidence[];
@@ -410,17 +330,6 @@ export type ReviewStackImportRequest = {
   manifest: StackManifest;
   scope_receipt_tool_call_id?: string;
   request_key: string;
-  context_intake?: {
-    user_message_id?: string | null;
-    question_tool_call_id?: string | null;
-    retrieval_tool_call_ids: string[];
-    gaps: { category: string; status: string; reason: string }[];
-    summary: string;
-  };
-  member_context_intakes?: {
-    member: string;
-    context_intake: NonNullable<ReviewStackImportRequest["context_intake"]>;
-  }[];
 };
 export type ReviewStackMemberRequest = {
   chatId: string;
@@ -591,40 +500,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
-const proposalActorSchema = z.object({
-  kind: z.enum(["user", "agent", "system"]),
-  id: z.string(),
-});
-const proposalSchema = z.object({
-  id: z.string(),
-  target: z.object({
-    candidate_id: z.string(),
-    step_id: z.string(),
-    version: revisionSchema,
-    block_id: z.string().nullish(),
-    block_revision: revisionSchema.nullish(),
-  }),
-  thread_id: z.string(),
-  proposal_contribution_id: z.string(),
-  change_request: z.string(),
-  proposed_by: proposalActorSchema,
-  proposed_at_ms: z.number().finite(),
-  acceptance: z
-    .object({
-      actor: proposalActorSchema,
-      accepted_at_ms: z.number().finite(),
-      contribution_id: z.string(),
-    })
-    .nullable(),
-  fulfilment: z
-    .object({
-      actor: proposalActorSchema,
-      fulfilled_at_ms: z.number().finite(),
-      version: revisionSchema,
-    })
-    .nullable(),
-});
-
 export function isReview(value: unknown): value is Review {
   if (!isRecord(value)) return false;
   return (
@@ -634,9 +509,6 @@ export function isReview(value: unknown): value is Review {
     typeof value.schema_version === "number" &&
     Array.isArray(value.candidates) &&
     Array.isArray(value.tour) &&
-    (value.tour_revision_proposals === undefined ||
-      z.array(proposalSchema).safeParse(value.tour_revision_proposals)
-        .success) &&
     Array.isArray(value.annotations) &&
     Array.isArray(value.threads) &&
     Array.isArray(value.evidence) &&
@@ -1143,46 +1015,6 @@ export const reviewApi = createApi({
       ],
     }),
 
-    acceptTourRevisionProposal: builder.mutation<
-      Review,
-      {
-        reviewId: string;
-        proposalId: string;
-        owner_chat_id: string;
-        expected_revision: number;
-        request_key: string;
-        target: DocumentTarget;
-      }
-    >({
-      queryFn: async (
-        { reviewId, proposalId, ...body },
-        api,
-        _opts,
-        baseQuery,
-      ) => {
-        const result = await baseQuery({
-          url: buildApiUrlFromState(
-            api.getState() as RootState,
-            reviewPath(
-              reviewId,
-              `/tour-revision-proposals/${encodeURIComponent(
-                proposalId,
-              )}/accept`,
-            ),
-          ),
-          method: "POST",
-          body,
-        });
-        if (result.error) return { error: result.error };
-        if (!isReview(result.data))
-          return { error: shapeError("Review", result.data) };
-        return { data: result.data };
-      },
-      invalidatesTags: (_result, _error, { reviewId }) => [
-        reviewIdTag(reviewId),
-      ],
-    }),
-
     addReviewComment: builder.mutation<Review, ReviewCommentRequest>({
       queryFn: async ({ reviewId, ...body }, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
@@ -1263,7 +1095,6 @@ export const {
   useResolveAnchorMutation,
   useMutateReviewMutation,
   useAddReviewCommentMutation,
-  useAcceptTourRevisionProposalMutation,
   useCancelReviewRunMutation,
   useReportReviewSelectionMutation,
 } = reviewApi;

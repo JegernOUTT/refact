@@ -669,3 +669,52 @@ fn coherent_handoff_includes_all_member_object_histories_and_settled_deliveries(
     }
     assert_eq!(store.get_for_chat("chat").unwrap(), None);
 }
+
+#[test]
+fn cached_member_and_active_replays_keep_latest_privacy_without_rewriting_content() {
+    let root = tempfile::tempdir().unwrap();
+    let store = ReviewStore::open(root.path()).unwrap();
+    let m = store.create_stack(manifest(), "create").unwrap();
+    let original = store
+        .create_member_review(&m.id, &m.members[0].id, 0, "Member", Origin::Local, "bind")
+        .unwrap();
+    let active = store
+        .set_active_review("chat", &original.id, None, "active")
+        .unwrap();
+    let privacy = vec![refact_privacy::FileRecord {
+        path: "restricted".into(),
+        zone: "private".into(),
+        attribution: refact_privacy::Attribution::Observed,
+    }];
+    let current = store
+        .mutate_with_privacy(
+            &original.id,
+            mutation(
+                0,
+                "later",
+                Operation::Rename {
+                    title: "Later content".into(),
+                },
+            ),
+            privacy.clone(),
+        )
+        .unwrap();
+    let mut expected = original.clone();
+    expected.privacy = privacy.clone();
+    assert_eq!(
+        store
+            .create_member_review(&m.id, &m.members[0].id, 0, "Member", Origin::Local, "bind")
+            .unwrap(),
+        expected
+    );
+    let mut expected = active;
+    expected.privacy = privacy;
+    assert_eq!(
+        store
+            .set_active_review("chat", &original.id, None, "active")
+            .unwrap(),
+        expected
+    );
+    assert_eq!(store.load(&original.id).unwrap(), current);
+    assert_eq!(store.get_for_chat("chat").unwrap(), Some(current));
+}

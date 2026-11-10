@@ -8,7 +8,12 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { Columns2, MessageSquarePlus } from "lucide-react";
+import {
+  ChevronUp,
+  ChevronDown,
+  Columns2,
+  MessageSquarePlus,
+} from "lucide-react";
 
 import {
   Badge,
@@ -46,11 +51,12 @@ import {
 import { ThreadCard, ReviewObjects } from "./ReviewObjects";
 import { ReviewToolbar } from "./ReviewToolbar";
 import { ReviewHandoff } from "./ReviewHandoff";
-import type { RevealRequest } from "./diff/ReviewDiffEditors";
+import type { DiffPosition, RevealRequest } from "./diff/ReviewDiffEditors";
 import type { LineRange } from "./diff/reviewHighlights";
 import { FILE_STATUS_LETTER, formatTime, isRunActive, label } from "./labels";
 import {
   diffPanes,
+  groupReviewFiles,
   findCandidate,
   firstAnchorOf,
   objectAnchor,
@@ -63,6 +69,7 @@ import {
   shortOid,
   stalledTargets,
   type PaneId,
+  type ReviewFileEntry,
   type StalledTarget,
 } from "./model";
 import {
@@ -101,6 +108,58 @@ function targetLink(reference: string): { href: string; label: string } | null {
   } catch {
     return null;
   }
+}
+
+function ReviewFileItem({
+  file: f,
+  selected,
+  onSelect,
+}: {
+  file: ReviewFileEntry;
+  selected: boolean;
+  onSelect: (path: string) => void;
+}) {
+  return (
+    <li>
+      <button
+        type="button"
+        className={styles.navItem}
+        aria-current={selected}
+        aria-label={f.path}
+        title={f.path}
+        onClick={() => onSelect(f.path)}
+      >
+        <span
+          className={styles.statusLetter}
+          data-status={f.status}
+          aria-label={label(f.status)}
+        >
+          {FILE_STATUS_LETTER[f.status]}
+        </span>
+        <span className={styles.fileIdentity}>
+          <span className={styles.fileBasename}>
+            {f.path.split("/").at(-1)}
+          </span>
+          {f.path.includes("/") && (
+            <span className={styles.fileParent}>
+              {f.path.split("/").length > 3 ? "…/" : ""}
+              {f.path.split("/").slice(-3, -1).join("/")}
+            </span>
+          )}
+        </span>
+        {f.findingCount > 0 && (
+          <Badge tone="warning" size="xs">
+            {f.findingCount}
+          </Badge>
+        )}
+        {f.threadCount > 0 && (
+          <Badge tone="accent" size="xs">
+            {f.threadCount}
+          </Badge>
+        )}
+      </button>
+    </li>
+  );
 }
 
 export function ReviewCanvas({
@@ -171,6 +230,8 @@ export function ReviewCanvas({
   const [actionError, setActionError] = useState<string | null>(null);
   const [reveal, setReveal] = useState<RevealRequest | null>(null);
   const revealToken = useRef(0);
+  const diffPositions = useRef(new Map<string, DiffPosition>());
+  const revealedObject = useRef<string | null>(null);
 
   const [resolveAnchor, resolveState] = useResolveAnchorMutation();
   const [mutateReview, mutateState] = useMutateReviewMutation();
@@ -198,12 +259,67 @@ export function ReviewCanvas({
         : [],
     [review, candidate, view.compare, view.showUnchanged],
   );
+  const { changed, unchanged } = useMemo(
+    () => groupReviewFiles(files),
+    [files],
+  );
+  const selectFile = (path: string) => {
+    closeNavigation();
+    dispatch({ type: "select_file", path });
+  };
   const path =
     view.path &&
     (files.some((f) => f.path === view.path) ||
       candidate?.files.some((f) => f.path === view.path))
       ? view.path
       : files.at(0)?.path ?? null;
+
+  const commentThreads = useMemo(
+    () =>
+      [...review.threads].sort((a, b) => {
+        const created = (thread: typeof a) =>
+          Math.min(...thread.contributions.map((c) => c.created_at_ms));
+        return created(a) - created(b) || a.id.localeCompare(b.id);
+      }),
+    [review.threads],
+  );
+  const commentIndex = commentThreads.findIndex(
+    (thread) => thread.id === view.activeObjectId,
+  );
+  const [unlocatedThreadId, setUnlocatedThreadId] = useState<string | null>(
+    null,
+  );
+  const unlocatedThread = review.threads.find(
+    (thread) => thread.id === unlocatedThreadId,
+  );
+  const navigateComment = (direction: number) => {
+    const index =
+      commentIndex < 0
+        ? direction > 0
+          ? 0
+          : commentThreads.length - 1
+        : commentIndex + direction;
+    if (index < 0 || index >= commentThreads.length) return;
+    const thread = commentThreads[index];
+    if (thread.target) {
+      window.dispatchEvent(
+        new CustomEvent("refact:review-reveal", {
+          detail: { reviewId: review.id, threadId: thread.id },
+        }),
+      );
+      return;
+    }
+    const anchor = thread.anchors.find((item) => item.status === "current");
+    dispatch({ type: "set_nav_tab", tab: "files" });
+    if (anchor) {
+      setUnlocatedThreadId(null);
+      revealExactAnchor(anchor);
+    } else {
+      setUnlocatedThreadId(thread.id);
+      setReveal(null);
+    }
+    dispatch({ type: "focus_object", objectId: thread.id, path: null });
+  };
 
   const stalled = useMemo(() => stalledTargets(review), [review]);
   const activeRuns = review.runs.filter((r) => isRunActive(r.status)).length;
@@ -235,17 +351,27 @@ export function ReviewCanvas({
   const currentDiffMode = useRef(view.diffMode);
   currentDiffMode.current = view.diffMode;
   useEffect(() => {
-    if (!revealPane) return;
+    if (!revealPane || revealedObject.current === view.activeObjectId) return;
+    revealedObject.current = view.activeObjectId;
     if (revealPane === "left" && currentDiffMode.current === "unified") {
       dispatch({ type: "set_diff_mode", diffMode: "side-by-side" });
     }
     revealToken.current += 1;
     setReveal({
+      scope: JSON.stringify([review.id, panes, path]),
+      path: path ?? undefined,
       pane: revealPane,
       line: revealLineNumber,
       token: revealToken.current,
     });
-  }, [view.activeObjectId, revealPane, revealLineNumber]);
+  }, [
+    view.activeObjectId,
+    revealPane,
+    revealLineNumber,
+    path,
+    panes,
+    review.id,
+  ]);
 
   // Report the viewed candidate/selection as ephemeral chat context.
   const viewedId = candidate?.id ?? null;
@@ -326,6 +452,20 @@ export function ReviewCanvas({
     dispatch({ type: "select_file", path: anchor.position.path });
     revealToken.current += 1;
     setReveal({
+      scope: JSON.stringify([
+        review.id,
+        exactPane
+          ? panes
+          : {
+              left: { candidateId: anchor.position.candidate_id, side: "base" },
+              right: {
+                candidateId: anchor.position.candidate_id,
+                side: "head",
+              },
+            },
+        anchor.position.path,
+      ]),
+      path: anchor.position.path,
       pane,
       line: anchor.position.start_line,
       token: revealToken.current,
@@ -377,9 +517,14 @@ export function ReviewCanvas({
           });
         } else {
           const anchor = firstAnchorOf(thread.anchors);
-          if (!anchor || anchor.status !== "current") return;
           dispatch({ type: "set_nav_tab", tab: "files" });
-          revealExactAnchor(anchor);
+          if (anchor?.status === "current") {
+            setUnlocatedThreadId(null);
+            revealExactAnchor(anchor);
+          } else {
+            setUnlocatedThreadId(thread.id);
+            setReveal(null);
+          }
         }
         dispatch({ type: "focus_object", objectId: thread.id, path: null });
       } else if ("anchor" in detail && isAnchor(detail.anchor)) {
@@ -468,7 +613,14 @@ export function ReviewCanvas({
     return result.data;
   };
 
-  const navigationIdentity = `${candidateId}:${path}:${view.compare}:${view.diffMode}`;
+  const navigationIdentity = JSON.stringify([
+    review.id,
+    candidateId,
+    panes,
+    path,
+    view.compare,
+    view.diffMode,
+  ]);
   const focusNavigation = useRef({ active, epoch: 0 });
   if (focusNavigation.current.active !== active) {
     focusNavigation.current = {
@@ -649,6 +801,27 @@ export function ReviewCanvas({
                         { value: "files", label: "Review" },
                       ]}
                     />
+                    <IconButton
+                      icon={ChevronUp}
+                      aria-label="Previous comment"
+                      title="Previous comment"
+                      size="sm"
+                      variant="ghost"
+                      disabled={!commentThreads.length || commentIndex === 0}
+                      onClick={() => navigateComment(-1)}
+                    />
+                    <IconButton
+                      icon={ChevronDown}
+                      aria-label="Next comment"
+                      title="Next comment"
+                      size="sm"
+                      variant="ghost"
+                      disabled={
+                        !commentThreads.length ||
+                        commentIndex === commentThreads.length - 1
+                      }
+                      onClick={() => navigateComment(1)}
+                    />
                     <ReviewToolbar
                       compact
                       title={review.title}
@@ -685,18 +858,20 @@ export function ReviewCanvas({
                       sourcesId={`review-${review.id}-sources`}
                       workersId={`review-${review.id}-workers`}
                       activeWorkers={activeRuns}
-                      onCandidate={(value) =>
+                      onCandidate={(value) => {
+                        setReveal(null);
                         dispatch({
                           type: "select_candidate",
                           candidateId:
                             value === review.current_candidate_id
                               ? null
                               : value,
-                        })
-                      }
-                      onCompare={(compare) =>
-                        dispatch({ type: "set_compare", compare })
-                      }
+                        });
+                      }}
+                      onCompare={(compare) => {
+                        setReveal(null);
+                        dispatch({ type: "set_compare", compare });
+                      }}
                       onDiffMode={(diffMode) => {
                         setLayoutChosen(true);
                         dispatch({ type: "set_diff_mode", diffMode });
@@ -714,7 +889,18 @@ export function ReviewCanvas({
                           path: stepId ? tourStepPath(review, stepId) : null,
                         });
                       }}
-                      onUnchanged={() => dispatch({ type: "toggle_unchanged" })}
+                      onUnchanged={() => {
+                        const first = changed.at(0)?.path;
+                        if (
+                          view.showUnchanged &&
+                          first &&
+                          !changed.some((file) => file.path === path)
+                        ) {
+                          setReveal(null);
+                          selectFile(first);
+                        }
+                        dispatch({ type: "toggle_unchanged" });
+                      }}
                       onSources={() => dispatch({ type: "toggle_sources" })}
                       onWorkers={() => dispatch({ type: "toggle_activity" })}
                       handoff={
@@ -839,60 +1025,43 @@ export function ReviewCanvas({
                           className={styles.navList}
                           aria-label="Changed files"
                         >
-                          {files.map((f) => (
-                            <li key={f.path}>
-                              <button
-                                type="button"
-                                className={styles.navItem}
-                                aria-current={f.path === path}
-                                aria-label={f.path}
-                                title={f.path}
-                                onClick={() => {
-                                  closeNavigation();
-                                  dispatch({
-                                    type: "select_file",
-                                    path: f.path,
-                                  });
-                                }}
-                              >
-                                <span
-                                  className={styles.statusLetter}
-                                  data-status={f.status}
-                                  aria-label={label(f.status)}
-                                >
-                                  {FILE_STATUS_LETTER[f.status]}
-                                </span>
-                                <span className={styles.fileIdentity}>
-                                  <span className={styles.fileBasename}>
-                                    {f.path.split("/").at(-1)}
-                                  </span>
-                                  {f.path.includes("/") && (
-                                    <span className={styles.fileParent}>
-                                      {f.path.split("/").length > 3 ? "…/" : ""}
-                                      {f.path
-                                        .split("/")
-                                        .slice(-3, -1)
-                                        .join("/")}
-                                    </span>
-                                  )}
-                                </span>
-                                {f.findingCount > 0 && (
-                                  <Badge tone="warning" size="xs">
-                                    {f.findingCount}
-                                  </Badge>
-                                )}
-                                {f.threadCount > 0 && (
-                                  <Badge tone="accent" size="xs">
-                                    {f.threadCount}
-                                  </Badge>
-                                )}
-                              </button>
-                            </li>
+                          {changed.map((f) => (
+                            <ReviewFileItem
+                              key={f.path}
+                              file={f}
+                              selected={f.path === path}
+                              onSelect={selectFile}
+                            />
                           ))}
-                          {files.length === 0 && (
+                          {changed.length === 0 && (
                             <li className={styles.meta}>No changed files.</li>
                           )}
                         </ul>
+                        {view.showUnchanged && (
+                          <>
+                            <h3 className={styles.sectionLabel}>
+                              Unchanged files
+                            </h3>
+                            <ul
+                              className={styles.navList}
+                              aria-label="Unchanged files"
+                            >
+                              {unchanged.map((f) => (
+                                <ReviewFileItem
+                                  key={f.path}
+                                  file={f}
+                                  selected={f.path === path}
+                                  onSelect={selectFile}
+                                />
+                              ))}
+                              {unchanged.length === 0 && (
+                                <li className={styles.meta}>
+                                  No unchanged files.
+                                </li>
+                              )}
+                            </ul>
+                          </>
+                        )}
                       </>
                     ) : (
                       <>
@@ -1002,15 +1171,23 @@ export function ReviewCanvas({
                           </p>
                         )}
                         <div className={styles.diffArea}>
-                          {panes && (
+                          {panes && view.navTab === "files" && (
                             <ReviewFileDiff
+                              key={navigationIdentity}
+                              navigationKey={navigationIdentity}
+                              positions={diffPositions.current}
                               review={review}
                               panes={panes}
                               diffMode={view.diffMode}
                               preferSingleSided={!layoutChosen}
                               path={path}
                               activeObjectId={view.activeObjectId}
-                              reveal={reveal}
+                              reveal={
+                                reveal?.scope ===
+                                JSON.stringify([review.id, panes, path])
+                                  ? reveal
+                                  : null
+                              }
                               inlineHosts={inlineHosts}
                               onLineCounts={(counts) =>
                                 setLineCounts((current) =>
@@ -1040,6 +1217,24 @@ export function ReviewCanvas({
                             />
                           )}
                         </div>
+                        {unlocatedThread && (
+                          <section
+                            className={styles.objects}
+                            aria-label="Historical comment"
+                          >
+                            <p className={styles.meta}>
+                              Code location unavailable; showing the saved
+                              discussion without guessing a line.
+                            </p>
+                            <ThreadCard
+                              review={review}
+                              thread={unlocatedThread}
+                              active
+                              pending={new Set()}
+                              onFocus={() => undefined}
+                            />
+                          </section>
+                        )}
                         <ReviewObjects
                           review={review}
                           fallbackOnly

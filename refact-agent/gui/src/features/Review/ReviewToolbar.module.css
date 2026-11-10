@@ -67,18 +67,21 @@
   display: inline-flex;
 }
 
-.toolbar[data-compact="true"] {
-  flex-wrap: nowrap;
-  padding: 0;
-  border: 0;
+.toolbar[data-compact="true"],
+.toolbar[data-compact="true"] .identity,
+.toolbar[data-compact="true"] .receipt,
+.toolbar[data-compact="true"] .actions {
+  display: contents;
 }
 
-.toolbar[data-compact="true"] .identity {
-  flex: 0 0 auto;
+.toolbar[data-compact="true"] .candidate {
+  max-width: 18ch;
 }
 
-.toolbar[data-compact="true"] .actions,
-.toolbar[data-compact="true"] .receipt {
-  flex-wrap: nowrap;
-  flex: 0 0 auto;
+.toolbar[data-compact="true"] .candidate > span:first-child {
+  flex-shrink: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }

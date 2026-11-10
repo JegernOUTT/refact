@@ -63,10 +63,6 @@ pub fn router() -> Router<AppState> {
         .route("/reviews/:id/anchors", post(anchor))
         .route("/reviews/:id/mutations", post(mutate))
         .route("/reviews/:id/comments", post(comment))
-        .route(
-            "/reviews/:id/tour-revision-proposals/:proposal_id/accept",
-            post(accept_tour_revision),
-        )
         .route("/reviews/:id/activity", post(activity))
         .route("/reviews/:id/runs/:run_id/cancel", post(cancel))
 }
@@ -102,30 +98,20 @@ async fn stack_prepare(
 async fn stack_import(
     State(app): State<AppState>,
     Path(chat): Path<String>,
-    Json(request): Json<StackImportRequest>,
+    Json(request): Json<RawStackImportRequest>,
 ) -> ApiResult<refact_review_core::StackManifest> {
-    super::stacks::import_with_member_intakes(
+    super::stacks::import(
         &app,
         &chat,
         super::stacks::ImportRequest {
-            manifest: request.request.manifest,
-            scope_receipt_tool_call_id: request.request.scope_receipt_tool_call_id,
-            request_key: request.request.request_key,
+            manifest: request.manifest,
+            scope_receipt_tool_call_id: request.scope_receipt_tool_call_id,
+            request_key: request.request_key,
         },
-        request.context_intake,
-        request.member_context_intakes,
     )
     .await
     .map(Json)
     .map_err(|e| error(StatusCode::CONFLICT, e))
-}
-#[derive(Deserialize)]
-struct StackImportRequest {
-    #[serde(flatten)]
-    request: RawStackImportRequest,
-    context_intake: Option<super::intake::ContextIntakeRequest>,
-    #[serde(default)]
-    member_context_intakes: Vec<super::stack_entry::MemberContextIntake>,
 }
 #[derive(Deserialize)]
 struct RawStackImportRequest {
@@ -306,15 +292,6 @@ async fn mutate(
     Path(id): Path<String>,
     Json(request): Json<Mutation>,
 ) -> ApiResult<Review> {
-    if matches!(
-        request.operation,
-        refact_review_core::Operation::PutTourStep { .. }
-    ) {
-        return Err(error(
-            StatusCode::BAD_REQUEST,
-            "Tour authoring requires the owning chat's runtime-validated context intake",
-        ));
-    }
     let (root, review) = resolve(&app, &id).await?;
     let updated = service::user_mutate(root, review.owner_chat_id, id, request)
         .await
@@ -329,16 +306,6 @@ async fn comment(
 ) -> ApiResult<Review> {
     let (root, review) = resolve(&app, &id).await?;
     service::comment(app, root, review.owner_chat_id, id, request)
-        .await
-        .map(Json)
-        .map_err(core_error)
-}
-async fn accept_tour_revision(
-    State(app): State<AppState>,
-    Path((id, proposal_id)): Path<(String, String)>,
-    Json(request): Json<super::proposals::AcceptRequest>,
-) -> ApiResult<Review> {
-    super::proposals::accept(&app, id, proposal_id, request)
         .await
         .map(Json)
         .map_err(core_error)

@@ -399,6 +399,47 @@ document.getElementById('replay').onclick = () => { pause(); current = 0; output
   review.evidence[0].summary = "Fixture record only; no process was executed";
 }
 
+if (params.get("tour") === "html-pages") {
+  review.tour.forEach((step, index) => {
+    step.current.candidate_id = "c2";
+    step.current.body =
+      "Short static explanation: trim before converting; inspect pinned source.";
+    step.current.blocks = [
+      {
+        id: "code",
+        revision: 1,
+        content: { kind: "code", anchor: anchorAt("c2", "src/parse.ts", 1, 4) },
+      },
+      {
+        id: "diff",
+        revision: 1,
+        content: { kind: "diff", candidate_id: "c2", path: "src/parse.ts" },
+      },
+      {
+        id: "evidence",
+        revision: 1,
+        content: { kind: "evidence", evidence_ids: ["ev-tests"] },
+      },
+    ];
+    step.current.html = `<!doctype html><html><body><h1>${
+      index ? "Bounds matter" : "Trim then convert"
+    }</h1>
+      <style>body{padding:20px}h1{font-size:28px}.flow{display:flex;gap:12px;margin:16px 0}.flow span{padding:16px;border:1px solid var(--rf-border);border-radius:12px;background:var(--rf-surface-2)}refact-slot{margin:18px 0;padding:12px;border:1px solid var(--rf-border);border-radius:8px}</style>
+      <p>A synthetic interactive explanation, backed by captured source.</p>
+      <div class="flow"><span>Input ' 2 , 3 '</span><span id="stage">${
+        index ? "Before: i ≤ length" : "Split → trim → Number"
+      }</span><span>${
+        index ? "After: i &lt; length" : "Result [2, 3]"
+      }</span></div>
+      <button onclick="document.getElementById('stage').textContent='Trimming happens before numeric conversion'">Explain evaluation order</button>
+      <button id="counter" onclick="this.textContent=String(Number(this.textContent)+1)">0</button>
+      <button id="dynamic" onclick="this.insertAdjacentHTML('afterend','<refact-slot data-block=diff></refact-slot>')">Add diff</button>
+      <button id="invalid" onclick="window.refactReview.commentBlock('unknown')">Invalid block</button>
+      <refact-slot data-block="code"></refact-slot><refact-slot data-block="evidence"></refact-slot>
+      <script>window.initializations=(window.initializations||0)+1</script></body></html>`;
+  });
+}
+
 // Opt-in synthetic UI laboratory, never evidence of an actual backend run.
 if (params.get("polish") === "1") {
   const execution = review.evidence[0].source;
@@ -559,6 +600,43 @@ if (params.get("navigation") === "exact") {
   }
 }
 
+if (params.get("diffNavigation") === "1") {
+  const prefix =
+    Array.from({ length: 100 }, (_, i) => `// unchanged ${i}`).join("\n") +
+    "\n";
+  texts.base = prefix + BASE_TEXT;
+  texts.c1 = prefix + C1_HEAD;
+  texts.c2 = prefix + C2_HEAD;
+  texts.readme = prefix + "old context\nkeep\nremove\n";
+  texts["readme-head"] = texts.readme
+    .replace("old context", "new context")
+    .replace("remove", "added\nextra");
+  review.candidates.forEach((c) =>
+    c.files.forEach((f) => {
+      if (f.path === "README.md") f.head = { digest: "readme-head", size: 1 };
+    }),
+  );
+  review.threads[0].anchors = [anchorAt("c2", "src/parse.ts", 103, 103)];
+  review.threads.push({
+    ...review.threads[0],
+    id: "readme-comment",
+    anchors: [anchorAt("c2", "README.md", 101, 101)],
+    contributions: [
+      {
+        ...review.threads[0].contributions[0],
+        id: "readme-contribution",
+        thread_id: "readme-comment",
+        body: "README discussion",
+      },
+    ],
+  });
+  review.threads.push({
+    ...review.threads[0],
+    id: "stalled-comment",
+    anchors: [anchorAt("c2", "src/parse.ts", 108, 108, "stalled")],
+  });
+}
+
 const scenario = params.get("state") ?? "review";
 const state: { review: Review | null; failing: boolean } = {
   review: scenario === "empty" ? null : review,
@@ -573,7 +651,12 @@ function json(body: unknown, status = 200): Response {
 }
 
 function fileText(candidateId: string, path: string, side: "base" | "head") {
-  if (path === "README.md") return texts.readme;
+  if (path === "README.md")
+    return params.get("diffNavigation") === "1" && side === "head"
+      ? texts.readme
+          .replace("old context", "new context")
+          .replace("remove", "added\nextra")
+      : texts.readme;
   return side === "base" ? texts.base : texts[candidateId];
 }
 

@@ -1,6 +1,5 @@
 mod handoff;
-mod intake;
-pub use intake::validate_context_intake;
+mod privacy;
 mod reconcile;
 pub mod rich_blocks;
 mod snapshot;

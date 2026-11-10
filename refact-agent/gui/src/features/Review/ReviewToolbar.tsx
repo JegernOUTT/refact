@@ -120,7 +120,10 @@ export function ReviewToolbar({
       <div className={styles.actions} role="group" aria-label="Review controls">
         {candidate && candidates.length > 1 && (
           <Select value={candidate.id} onValueChange={onCandidate}>
-            <Select.Trigger aria-label="Candidate revision" />
+            <Select.Trigger
+              aria-label="Candidate revision"
+              className={styles.candidate}
+            />
             <Select.Content>
               {candidates.map((item, index) => (
                 <Select.Item key={item.id} value={item.id}>

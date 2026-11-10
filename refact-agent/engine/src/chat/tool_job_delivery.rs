@@ -1280,20 +1280,6 @@ pub(crate) async fn land_deferred_jobs(
         if result.messages.is_empty() {
             continue;
         }
-        let proposal_completions =
-            crate::review::turn_completion::result_completions(app, reference).await;
-        let proposal_result_ids = result
-            .messages
-            .iter()
-            .filter(|m| {
-                m.tool_failed == Some(false)
-                    && m.extra.get("tool_job_result").is_some_and(|v| {
-                        v["original_role"] == "tool"
-                            && v["tool_call_id"].as_str() == Some(reference.tool_call_id.as_str())
-                    })
-            })
-            .map(|m| m.message_id.clone())
-            .collect::<Vec<_>>();
         let sessions = app.chat.sessions.read().await;
         if !sessions
             .get(&reference.chat_id)
@@ -1370,16 +1356,6 @@ pub(crate) async fn land_deferred_jobs(
             let mut landed = pending.clone();
             landed.deferred_job = None;
             landed.messages = result.messages;
-            if snapshot.status == JobStatus::Succeeded
-                && crate::review::turn_completion::owns_result_wake(
-                    session_arc,
-                    &session,
-                    reference,
-                    &proposal_completions,
-                )
-            {
-                landed.wake = false;
-            }
             session.pending_deliveries.retain(|d| d.id != pending.id);
             session.append_delivery(&landed);
             #[cfg(test)]
@@ -1408,32 +1384,6 @@ pub(crate) async fn land_deferred_jobs(
         )
         .await;
         if matches!(save.await, Ok(true)) {
-            if snapshot.status == JobStatus::Succeeded && reference.tool_name == "review_update" {
-                let proposal_result_messages = {
-                    let locked = session_arc.lock().await;
-                    locked
-                        .messages
-                        .iter()
-                        .filter(|m| proposal_result_ids.contains(&m.message_id))
-                        .cloned()
-                        .collect::<Vec<_>>()
-                };
-                if proposal_result_messages.len() == proposal_result_ids.len()
-                    && !proposal_result_messages.is_empty()
-                {
-                    if let Err(error) = crate::review::turn_completion::acknowledge(
-                        app,
-                        &reference.chat_id,
-                        &reference.tool_call_id,
-                        Some(&reference.job_id),
-                        &proposal_result_messages,
-                    )
-                    .await
-                    {
-                        tracing::warn!(%error, "proposal result acknowledgement pending");
-                    }
-                }
-            }
             #[cfg(test)]
             if tests::lose_landing_ack() {
                 return;

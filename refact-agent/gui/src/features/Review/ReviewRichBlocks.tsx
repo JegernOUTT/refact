@@ -127,13 +127,20 @@ function useReviewComposerOwnership() {
 export function BlockQuestion({
   review,
   target,
+  initiallyOpen = false,
 }: {
+  initiallyOpen?: boolean;
   review: Review;
   target: DocumentTarget;
 }) {
   const shared = useContext(DraftContext);
   const renderThread = useContext(RichDiscussionContext);
   const { ownerId: composerId, open, setOpen } = useReviewComposerOwnership();
+  useEffect(() => {
+    if (initiallyOpen) setOpen(true);
+    // Ownership is claimed only on the initial explicit host action.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initiallyOpen]);
   const trigger = useRef<HTMLButtonElement>(null);
   const [local, setLocal] = useState<Draft>({ body: "" });
   const key = `${review.id}:document:${JSON.stringify(targetKey(target))}`;
@@ -478,6 +485,7 @@ function NativeBlock({ review, block }: { review: Review; block: RichBlock }) {
             diffMode={content.kind === "code" ? "unified" : diffMode}
             activeObjectId={null}
             reveal={null}
+            autoRevealFirstChange={false}
             inlineHosts={discussions.inlineHosts}
             onLineCounts={(value) =>
               setCounts((current) =>
@@ -530,7 +538,7 @@ export function ReviewSourceContext({
   );
 }
 
-function RichBlockContent({
+export function RichBlockContent({
   review,
   block,
   bindingKey,

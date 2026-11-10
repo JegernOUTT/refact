@@ -12,7 +12,6 @@ pub(crate) fn migrate(c: &mut Connection) -> Result<()> {
         CREATE TABLE IF NOT EXISTS stack_revisions(stack_id TEXT NOT NULL, revision INTEGER NOT NULL, document TEXT NOT NULL, PRIMARY KEY(stack_id,revision));
         CREATE TABLE IF NOT EXISTS stack_preparations(chat TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, document TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS stack_confirmations(chat TEXT PRIMARY KEY, stack_id TEXT NOT NULL, fingerprint TEXT NOT NULL);
-        CREATE TABLE IF NOT EXISTS stack_request_intakes(scope TEXT NOT NULL, key TEXT NOT NULL, document TEXT NOT NULL, PRIMARY KEY(scope,key));
         CREATE TABLE IF NOT EXISTS stack_requests(scope TEXT NOT NULL, key TEXT NOT NULL, fingerprint TEXT NOT NULL, response TEXT NOT NULL, PRIMARY KEY(scope,key));")?;
     let migrated: bool = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM review_store_migrations WHERE version=1)",
@@ -260,26 +259,6 @@ fn update_in_transaction(
 }
 
 impl ReviewStore {
-    pub fn intakes_for_stack_request(
-        &self,
-        owner: &str,
-        token: &str,
-        key: &str,
-    ) -> Result<Option<Vec<(String, ContextIntakeReceipt)>>> {
-        let c = self
-            .connection
-            .lock()
-            .map_err(|_| invalid("poisoned store"))?;
-        let scope = format!("stack-intakes:{owner}:{token}");
-        let doc: Option<String> = c
-            .query_row(
-                "SELECT document FROM stack_request_intakes WHERE scope=?1 AND key=?2",
-                params![scope, key],
-                |r| r.get(0),
-            )
-            .optional()?;
-        doc.map(|doc| Ok(serde_json::from_str(&doc)?)).transpose()
-    }
     pub fn stack_scope_confirmed(&self, owner: &str) -> Result<bool> {
         let c = self
             .connection
@@ -321,6 +300,22 @@ impl ReviewStore {
         expected_revision: u64,
         request_key: &str,
         candidates: Vec<(String, Candidate)>,
+    ) -> Result<StackManifest> {
+        self.publish_stack_refresh_with_privacy(
+            manifest,
+            expected_revision,
+            request_key,
+            candidates,
+            vec![],
+        )
+    }
+    pub fn publish_stack_refresh_with_privacy(
+        &self,
+        manifest: StackManifest,
+        expected_revision: u64,
+        request_key: &str,
+        candidates: Vec<(String, Candidate)>,
+        privacy: Vec<(String, Vec<refact_privacy::FileRecord>)>,
     ) -> Result<StackManifest> {
         let mut c = self
             .connection
@@ -371,6 +366,8 @@ impl ReviewStore {
         ))?);
         let scope = format!("refresh-stack:{}:{}", manifest.owner_chat_id, manifest.id);
         if let Some(response) = replay(&tx, &scope, request_key, &fp)? {
+            retain_member_privacy(&tx, &response, &privacy)?;
+            tx.commit()?;
             return Ok(response);
         }
         let manifest = update_in_transaction(&tx, manifest, expected_revision)?;
@@ -436,6 +433,7 @@ impl ReviewStore {
                 )?;
             }
         }
+        retain_member_privacy(&tx, &manifest, &privacy)?;
         remember(&tx, &scope, request_key, &fp, &manifest)?;
         tx.commit()?;
         Ok(manifest)
@@ -457,44 +455,6 @@ impl ReviewStore {
             None,
             vec![],
         )
-    }
-
-    pub fn publish_stack_import_with_intakes(
-        &self,
-        manifest: StackManifest,
-        expected_preparation: &str,
-        request_key: &str,
-        candidates: Vec<(String, Candidate)>,
-        intakes: Vec<(String, ContextIntakeReceipt)>,
-    ) -> Result<StackManifest> {
-        self.publish_stack_import_inner(
-            manifest,
-            expected_preparation,
-            request_key,
-            candidates,
-            false,
-            None,
-            intakes,
-        )
-    }
-    pub fn replay_stack_entry_import_with_intakes(
-        &self,
-        owner: &str,
-        token: &str,
-        key: &str,
-        acquisition_fingerprint: &str,
-        intakes: &[(String, ContextIntakeReceipt)],
-    ) -> Result<Option<StackManifest>> {
-        let semantic: Vec<_> = intakes
-            .iter()
-            .map(|(id, receipt)| (id, crate::intake::intake_semantic(receipt)))
-            .collect();
-        let fp = if intakes.is_empty() {
-            acquisition_fingerprint.to_owned()
-        } else {
-            content_hash(&serde_json::to_vec(&(acquisition_fingerprint, semantic))?)
-        };
-        self.replay_stack_entry_import(owner, token, key, &fp)
     }
 
     pub fn replay_stack_entry_import(
@@ -563,14 +523,32 @@ impl ReviewStore {
         )
     }
 
-    pub fn publish_stack_entry_acquisition_with_intakes(
+    pub fn publish_stack_import_with_privacy(
+        &self,
+        manifest: StackManifest,
+        preparation: &str,
+        key: &str,
+        candidates: Vec<(String, Candidate)>,
+        privacy: Vec<(String, Vec<refact_privacy::FileRecord>)>,
+    ) -> Result<StackManifest> {
+        self.publish_stack_import_inner(
+            manifest,
+            preparation,
+            key,
+            candidates,
+            false,
+            None,
+            privacy,
+        )
+    }
+    pub fn publish_stack_entry_acquisition_with_privacy(
         &self,
         manifest: StackManifest,
         token: &str,
         key: &str,
         candidates: Vec<(String, Candidate)>,
-        acquisition_fingerprint: &str,
-        intakes: Vec<(String, ContextIntakeReceipt)>,
+        fingerprint: &str,
+        privacy: Vec<(String, Vec<refact_privacy::FileRecord>)>,
     ) -> Result<StackManifest> {
         self.publish_stack_import_inner(
             manifest,
@@ -578,11 +556,10 @@ impl ReviewStore {
             key,
             candidates,
             true,
-            Some(acquisition_fingerprint),
-            intakes,
+            Some(fingerprint),
+            privacy,
         )
     }
-
     fn publish_stack_import_inner(
         &self,
         mut manifest: StackManifest,
@@ -591,23 +568,9 @@ impl ReviewStore {
         mut candidates: Vec<(String, Candidate)>,
         discovery_only: bool,
         acquisition_fingerprint: Option<&str>,
-        intakes: Vec<(String, ContextIntakeReceipt)>,
+        privacy: Vec<(String, Vec<refact_privacy::FileRecord>)>,
     ) -> Result<StackManifest> {
         validate_manifest(&manifest)?;
-        let semantic_intakes: Vec<_> = intakes
-            .iter()
-            .map(|(id, receipt)| (id, crate::intake::intake_semantic(receipt)))
-            .collect();
-        let intake_acquisition = acquisition_fingerprint
-            .map(|fp| -> Result<String> {
-                Ok(if intakes.is_empty() {
-                    fp.to_owned()
-                } else {
-                    content_hash(&serde_json::to_vec(&(fp, &semantic_intakes))?)
-                })
-            })
-            .transpose()?;
-        let acquisition_fingerprint = intake_acquisition.as_deref();
         check_revision(0, manifest.revision)?;
         if !manifest.scope_choice.confirmed
             || manifest.members.iter().any(|m| m.review_id.is_some())
@@ -633,6 +596,8 @@ impl ReviewStore {
         let acquisition_scope = format!("entry-acquisition:{}:{}", manifest.owner_chat_id, token);
         if let Some(fp) = acquisition_fingerprint {
             if let Some(response) = replay(&tx, &acquisition_scope, request_key, fp)? {
+                retain_member_privacy(&tx, &response, &privacy)?;
+                tx.commit()?;
                 return Ok(response);
             }
         }
@@ -702,28 +667,6 @@ impl ReviewStore {
         if seen != selected {
             return Err(invalid("missing captured member"));
         }
-        if !intakes.is_empty() {
-            let mut seen_intakes = HashSet::new();
-            for (id, receipt) in &intakes {
-                let candidate = candidates
-                    .iter()
-                    .find(|(member_id, _)| member_id == id)
-                    .map(|(_, c)| c)
-                    .ok_or_else(|| invalid("extra context intake"))?;
-                if !seen_intakes.insert(id) {
-                    return Err(invalid("duplicate context intake"));
-                }
-                crate::intake::bind_intake(
-                    receipt,
-                    "before_review",
-                    &manifest.owner_chat_id,
-                    Some(candidate),
-                )?;
-            }
-            if intakes.len() != candidates.len() {
-                return Err(invalid("missing context intake"));
-            }
-        }
         candidates.sort_by(|a, b| a.0.cmp(&b.0));
         let semantic: Vec<_> = candidates
             .iter()
@@ -735,13 +678,11 @@ impl ReviewStore {
             })
             .collect();
         let semantic = (&manifest, expected_preparation, semantic);
-        let fp = content_hash(&if intakes.is_empty() {
-            serde_json::to_vec(&semantic)?
-        } else {
-            serde_json::to_vec(&(semantic, &semantic_intakes))?
-        });
+        let fp = content_hash(&serde_json::to_vec(&semantic)?);
         let scope = format!("publish-stack:{}:{}", manifest.owner_chat_id, manifest.id);
         if let Some(response) = replay(&tx, &scope, request_key, &fp)? {
+            retain_member_privacy(&tx, &response, &privacy)?;
+            tx.commit()?;
             return Ok(response);
         }
         let exists: bool = tx.query_row(
@@ -759,10 +700,7 @@ impl ReviewStore {
                 .find(|m| m.id == member_id)
                 .ok_or(Error::NotFound)?;
             let review = Review {
-                context_intake: intakes
-                    .iter()
-                    .find(|(id, _)| id == &member_id)
-                    .map(|(_, receipt)| receipt.clone()),
+                privacy: vec![],
                 schema_version: SCHEMA_VERSION,
                 id: uuid::Uuid::new_v4().to_string(),
                 owner_chat_id: manifest.owner_chat_id.clone(),
@@ -773,7 +711,6 @@ impl ReviewStore {
                 target_reference: String::new(),
                 candidates: vec![],
                 tour: vec![],
-                tour_revision_proposals: vec![],
                 annotations: vec![],
                 threads: vec![],
                 evidence: vec![],
@@ -832,19 +769,10 @@ impl ReviewStore {
                 )?;
             }
         }
+        retain_member_privacy(&tx, &manifest, &privacy)?;
         save(&tx, &manifest)?;
         tx.execute("INSERT INTO stack_confirmations VALUES(?1,?2,?3) ON CONFLICT(chat) DO UPDATE SET stack_id=excluded.stack_id,fingerprint=excluded.fingerprint", params![manifest.owner_chat_id, manifest.id, expected_preparation])?;
         remember(&tx, &scope, request_key, &fp, &manifest)?;
-        if !intakes.is_empty() {
-            let scope = format!(
-                "stack-intakes:{}:{}",
-                manifest.owner_chat_id, expected_preparation
-            );
-            tx.execute(
-                "INSERT INTO stack_request_intakes VALUES(?1,?2,?3)",
-                params![scope, request_key, serde_json::to_string(&intakes)?],
-            )?;
-        }
         if let Some(fp) = acquisition_fingerprint {
             remember(&tx, &acquisition_scope, request_key, fp, &manifest)?;
         }
@@ -1032,6 +960,8 @@ impl ReviewStore {
             .map_err(|_| invalid("poisoned store"))?;
         let tx = c.transaction_with_behavior(TransactionBehavior::Immediate)?;
         if let Some(r) = replay(&tx, &scope, request_key, &fp)? {
+            let r = crate::privacy::retain(&tx, r, &[])?;
+            tx.commit()?;
             return Ok(r);
         }
         let mut m = load_stack(&tx, stack_id)?;
@@ -1059,7 +989,7 @@ impl ReviewStore {
         // singleton: staging stack candidates must not alter its execution context.
         let r = {
             let r = Review {
-                context_intake: None,
+                privacy: vec![],
                 schema_version: SCHEMA_VERSION,
                 id: uuid::Uuid::new_v4().to_string(),
                 owner_chat_id: m.owner_chat_id.clone(),
@@ -1070,7 +1000,6 @@ impl ReviewStore {
                 target_reference: String::new(),
                 candidates: vec![],
                 tour: vec![],
-                tour_revision_proposals: vec![],
                 annotations: vec![],
                 threads: vec![],
                 evidence: vec![],
@@ -1114,6 +1043,8 @@ impl ReviewStore {
             .map_err(|_| invalid("poisoned store"))?;
         let tx = c.transaction_with_behavior(TransactionBehavior::Immediate)?;
         if let Some(r) = replay(&tx, &scope, request_key, &fp)? {
+            let r = crate::privacy::retain(&tx, r, &[])?;
+            tx.commit()?;
             return Ok(r);
         }
         let r = crate::store::load(&tx, review_id)?;
@@ -1122,4 +1053,37 @@ impl ReviewStore {
         tx.commit()?;
         Ok(r)
     }
+}
+
+fn retain_member_privacy(
+    c: &Connection,
+    manifest: &StackManifest,
+    privacy: &[(String, Vec<refact_privacy::FileRecord>)],
+) -> Result<()> {
+    let mut seen = HashSet::new();
+    for (id, records) in privacy {
+        let member = manifest
+            .members
+            .iter()
+            .find(|m| &m.id == id)
+            .ok_or_else(|| invalid("unknown privacy member"))?;
+        if !seen.insert(id)
+            || (manifest.scope_choice.scope != StackScope::Whole
+                && id != &manifest.scope_choice.selected_member_id)
+        {
+            return Err(invalid("privacy outside selected members"));
+        }
+        let review = crate::store::load(
+            c,
+            member
+                .review_id
+                .as_deref()
+                .ok_or_else(|| invalid("unbound privacy member"))?,
+        )?;
+        if review.owner_chat_id != manifest.owner_chat_id {
+            return Err(invalid("privacy member owner mismatch"));
+        }
+        crate::privacy::retain(c, review, records)?;
+    }
+    Ok(())
 }

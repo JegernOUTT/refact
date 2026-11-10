@@ -73,7 +73,7 @@ async fn flush_with_wake(
         }
         message.extra.insert(
             "review".into(),
-            json!({"id":review.id,"thread_id":thread.id,"contribution_id":contribution.id,"target":thread.target,"blocks":contribution.blocks,"contribution":contribution,"tour_revision_proposal_id":super::proposals::contribution_proposal_id(&review, &contribution.id)}),
+            json!({"id":review.id,"thread_id":thread.id,"contribution_id":contribution.id,"target":thread.target,"blocks":contribution.blocks,"contribution":contribution}),
         );
         let mut paths = Vec::new();
         for anchor in &thread.anchors {
@@ -96,10 +96,7 @@ async fn flush_with_wake(
         }
         let records = crate::privacy::records::declared_file_records(&app.gcx, paths)?;
         crate::privacy::records::merge_records(&mut message, records);
-        crate::privacy::records::merge_records(
-            &mut message,
-            super::intake_runtime::privacy(&review),
-        );
+        crate::privacy::records::merge_records(&mut message, review.privacy.clone());
         if let Some(context) = &contribution.context {
             crate::privacy::records::merge_records(&mut message, context.privacy.clone());
         }
@@ -140,7 +137,7 @@ async fn flush_with_wake(
             } else {
                 "review.comment.reply"
             },
-            allow_wake && super::proposals::contribution_wakes(&review, contribution),
+            allow_wake && user,
         );
         delivery.set_ttl_secs(u64::MAX);
         let receipt = crate::chat::delivery::deliver_to_chat_with_receipt(
@@ -250,7 +247,7 @@ pub async fn context_for_chat(
         .get(&review.id)
         .cloned()
         .filter(|s| review.candidates.iter().any(|c| c.id == s.candidate_id));
-    let payload = json!({"id":review.id,"revision":review.revision,"current_candidate_id":review.current_candidate_id,"selection":selection,"pending_tour_revision_actions":super::proposals::pending(&review),"tour_revision_notice":"Acceptance records pending intent only. Never self-accept or automatically author on load; only owning foreground authoring can fulfil an accepted proposal."});
+    let payload = json!({"id":review.id,"revision":review.revision,"current_candidate_id":review.current_candidate_id,"selection":selection});
     let mut message = crate::chat::internal_roles::event(
         crate::chat::internal_roles::EventSubkind::SystemNotice,
         "review.context",
@@ -274,6 +271,6 @@ pub async fn context_for_chat(
         &mut message,
         crate::privacy::records::declared_file_records(&app.gcx, paths)?,
     );
-    crate::privacy::records::merge_records(&mut message, super::intake_runtime::privacy(&review));
+    crate::privacy::records::merge_records(&mut message, review.privacy.clone());
     Ok(Some(message))
 }

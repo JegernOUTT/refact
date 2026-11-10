@@ -144,7 +144,7 @@ fn thread(body: &str, zone: &str) -> Thread {
 }
 
 #[tokio::test]
-async fn intake_sources_gate_current_and_historical_handoff_without_exporting_privacy_records() {
+async fn source_records_gate_current_and_historical_handoff_without_exporting_privacy_records() {
     let temp = tempfile::tempdir().unwrap();
     let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
         temp.path().join("cache"),
@@ -153,22 +153,15 @@ async fn intake_sources_gate_current_and_historical_handoff_without_exporting_pr
     .await;
     let app = crate::app_state::AppState::from_gcx(gcx).await;
     let source = temp.path().join("intent.md");
-    let intake: ContextIntakeReceipt = serde_json::from_value(json!({
-        "id":"intake", "phase":"before_review", "owner_chat_id":"owner",
-        "repository":temp.path(), "base_oid":"base", "head_oid":"head", "candidate_id":null,
-        "captured_at_ms":1, "input_reference":{"kind":"user_directive","message_id":"user",
-        "tool_call_id":null,"status":"cited_user_intent","content_hash":"a".repeat(64)},
-        "consultations":[],"gaps":[{"category":"docs","status":"unknown","reason":"Partial context"}],
-        "summary":"Context from an intent document", "privacy":[{"path":source,"zone":"normal","attribution":"declared"}]
-    })).unwrap();
+    let record: refact_privacy::FileRecord = serde_json::from_value(json!({
+        "path":source,"zone":"normal","attribution":"declared"
+    }))
+    .unwrap();
     for historical in [false, true] {
         let mut case = snapshot();
         if historical {
-            let step: TourStep = serde_json::from_value(json!({
-                "id":"old", "current":{"version":1,"title":"Old", "body":"Retained",
-                "anchors":[],"context_intake":intake},"history":[]
-            }))
-            .unwrap();
+            let mut old = thread("Historical source-derived reply", "normal");
+            old.contributions[0].context.as_mut().unwrap().privacy = vec![record.clone()];
             case.object_history.push(ObjectRevision {
                 review_id: case.review.id.clone(),
                 revision: 1,
@@ -177,16 +170,18 @@ async fn intake_sources_gate_current_and_historical_handoff_without_exporting_pr
                     id: "owner".into(),
                 },
                 at_ms: 1,
-                object: HistoricalObject::TourStep(step),
+                object: HistoricalObject::Thread(old),
             });
         } else {
-            case.review.context_intake = Some(intake.clone());
+            case.review.privacy = vec![record.clone()];
         }
         app.gcx.privacy_policy_load.write().unwrap().policy =
             std::sync::Arc::new(refact_privacy::PrivacyPolicy::default());
         check_current_source_privacy(&app, &case).unwrap();
         let exported = format_snapshot(&case).unwrap().markdown;
-        assert!(exported.contains("Context from an intent document"));
+        if historical {
+            assert!(exported.contains("Historical source-derived reply"));
+        }
         assert!(!exported.contains(source.to_str().unwrap()));
         assert!(!exported.contains("\"privacy\""));
         app.gcx.privacy_policy_load.write().unwrap().policy =
@@ -196,6 +191,36 @@ async fn intake_sources_gate_current_and_historical_handoff_without_exporting_pr
             });
         assert!(check_current_source_privacy(&app, &case).is_err());
     }
+}
+
+#[test]
+fn retained_review_privacy_withholds_current_and_historical_authored_content() {
+    let mut case = snapshot();
+    case.review
+        .threads
+        .push(thread("Restricted current narrative", "normal"));
+    case.object_history.push(ObjectRevision {
+        review_id: case.review.id.clone(),
+        revision: 1,
+        actor: Actor {
+            kind: ActorKind::Agent,
+            id: "owner".into(),
+        },
+        at_ms: 1,
+        object: HistoricalObject::Thread(thread("Restricted historical narrative", "normal")),
+    });
+    let allowed = format_snapshot(&case).unwrap().markdown;
+    assert!(allowed.contains("Restricted current narrative"));
+    assert!(allowed.contains("Restricted historical narrative"));
+    case.review.privacy = serde_json::from_value(json!([
+        {"path":"/private/source","zone":"blocked","attribution":"declared"}
+    ]))
+    .unwrap();
+    let withheld = format_snapshot(&case).unwrap().markdown;
+    assert!(!withheld.contains("Restricted current narrative"));
+    assert!(!withheld.contains("Restricted historical narrative"));
+    assert!(!withheld.contains("/private/source"));
+    assert!(withheld.contains("[withheld:"));
 }
 
 #[test]

@@ -262,6 +262,8 @@ describe("ReviewStackSurface integration", () => {
     };
     const { calls } = setup(history);
     const { user } = mount();
+    await screen.findByRole("combobox", { name: "Browse stack branch" });
+    await user.click(await screen.findByRole("radio", { name: "Review" }));
     await screen.findByLabelText(/^Head/);
     expect(
       screen.getByRole("radio", { name: "Recorded comparison" }),
@@ -332,6 +334,8 @@ describe("ReviewStackSurface integration", () => {
   it("pins cumulative requests to the stack revision and offers no comment or anchor controls", async () => {
     const { calls } = setup();
     const { user } = mount();
+    await screen.findByRole("combobox", { name: "Browse stack branch" });
+    await user.click(await screen.findByRole("radio", { name: "Review" }));
     await screen.findByLabelText(/^Head/);
     expect(
       screen.getByRole("button", { name: "Refresh stack refs" }),
@@ -365,7 +369,8 @@ describe("ReviewStackSurface integration", () => {
 
   it("renders a selected stack member without an active legacy review", async () => {
     const { calls } = setup();
-    mount(null);
+    const { user } = mount(null);
+    await user.click(await screen.findByRole("radio", { name: "Review" }));
     await screen.findByLabelText(/^Head/);
     expect(
       screen.getByRole("combobox", { name: "Browse stack branch" }),
@@ -376,7 +381,9 @@ describe("ReviewStackSurface integration", () => {
 
   it("retains cached member read-only on a failed refresh", async () => {
     const state = setup();
-    const { store } = mount();
+    const { store, user } = mount();
+    await screen.findByRole("combobox", { name: "Browse stack branch" });
+    await user.click(await screen.findByRole("radio", { name: "Review" }));
     await screen.findByLabelText(/^Head/);
     state.fail();
     store.dispatch(

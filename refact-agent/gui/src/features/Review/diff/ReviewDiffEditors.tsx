@@ -1,4 +1,6 @@
-import { useCallback, useEffect, useMemo, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { getChunks } from "@codemirror/merge";
+import { Button } from "../../../components/ui";
 import { EditorView, ViewPlugin, type ViewUpdate } from "@codemirror/view";
 
 import { DiffEditorsHost } from "../../Workspace/GitPanel/diff/DiffEditorsHost";
@@ -21,7 +23,22 @@ import {
   type InlineHost,
 } from "./inlineDiscussions";
 
-export type RevealRequest = { pane: PaneId; line: number; token: number };
+export type RevealRequest = {
+  pane: PaneId;
+  line: number;
+  token: number;
+  path?: string;
+  scope?: string;
+};
+
+export type DiffPosition = {
+  a?: ReturnType<EditorView["scrollSnapshot"]>;
+  b: ReturnType<EditorView["scrollSnapshot"]>;
+  topA?: number;
+  topB: number;
+  chunk: number;
+  revealToken?: number;
+};
 
 // cm-content follows the longest unwrapped line, not the visible pane. Keep
 // discussion layout independent of that width without changing code scrolling.
@@ -45,10 +62,9 @@ const inlinePaneSize = ViewPlugin.fromClass(
           return {
             gutter,
             width: Math.max(0, view.scrollDOM.clientWidth - gutter),
-            height: view.contentHeight,
           };
         },
-        write: ({ gutter, width, height }, view) => {
+        write: ({ gutter, width }, view) => {
           for (const [name, value] of [
             ["--rf-review-inline-width", width],
             ["--rf-review-gutter-width", gutter],
@@ -57,28 +73,6 @@ const inlinePaneSize = ViewPlugin.fromClass(
             if (view.dom.style.getPropertyValue(name) !== size)
               view.dom.style.setProperty(name, size);
           }
-          // Widget heights are included; retain both pane measurements so a
-          // shorter pane cannot clip the taller one. The flex parent caps it.
-          if (height > 0) {
-            view.dom.dataset.reviewContentHeight = String(height);
-            const area = view.dom.closest<HTMLElement>(`.${styles.diffArea}`);
-            if (area) {
-              const heights = Array.from(
-                area.querySelectorAll<HTMLElement>(".cm-editor"),
-                (editor) => Number(editor.dataset.reviewContentHeight) || 0,
-              );
-              const contentHeight = Math.ceil(Math.max(...heights));
-              const size = `${contentHeight}px`;
-              if (area.style.height !== size) area.style.height = size;
-              const canvas = area.closest<HTMLElement>(`.${styles.canvas}`);
-              if (canvas && canvas.clientHeight > 0) {
-                area.dataset.fit = String(
-                  contentHeight <= canvas.clientHeight * 0.65,
-                );
-              }
-              area.dataset.measured = "true";
-            }
-          }
         },
       });
     }
@@ -86,6 +80,9 @@ const inlinePaneSize = ViewPlugin.fromClass(
 );
 
 export type ReviewDiffEditorsProps = {
+  navigationKey?: string;
+  positions?: Map<string, DiffPosition>;
+  autoRevealFirstChange?: boolean;
   mode: DiffMode;
   left: string;
   right: string;
@@ -101,6 +98,9 @@ export type ReviewDiffEditorsProps = {
 };
 
 export function ReviewDiffEditors({
+  navigationKey,
+  positions,
+  autoRevealFirstChange = true,
   mode,
   left,
   right,
@@ -114,8 +114,17 @@ export function ReviewDiffEditors({
   contentSide,
   onSelection,
 }: ReviewDiffEditorsProps) {
+  const [chunkState, setChunkState] = useState({ index: -1, count: 0 });
+  const chunkIndex = useRef(-1);
+  const binding = useRef<{
+    key: string;
+    positions?: Map<string, DiffPosition>;
+    revealToken?: number;
+  }>();
   const controllerRef = useRef<DiffEditorsController | null>(null);
   const latest = useRef({
+    navigationKey,
+    positions,
     onSelection,
     highlights,
     reveal,
@@ -123,15 +132,95 @@ export function ReviewDiffEditors({
     onCommentLine,
   });
   latest.current = {
+    navigationKey,
+    positions,
     onSelection,
     highlights,
     reveal,
     inlineHosts,
     onCommentLine,
   };
+  const savePosition = () => {
+    const views = controllerRef.current?.views();
+    const current = binding.current;
+    if (!views || !current) return;
+    current.positions?.delete(current.key);
+    current.positions?.set(current.key, {
+      a: views.a?.scrollSnapshot(),
+      b: views.b.scrollSnapshot(),
+      topA: views.a?.scrollDOM.scrollTop,
+      topB: views.b.scrollDOM.scrollTop,
+      chunk: chunkIndex.current,
+      revealToken: current.revealToken,
+    });
+    if (current.positions && current.positions.size > 100) {
+      const oldest = current.positions.keys().next().value;
+      if (oldest !== undefined) current.positions.delete(oldest);
+    }
+  };
+  const manualScroll = useRef(false);
+  const mirroredScroll = useRef(new WeakMap<EditorView, number>());
+  const trackScroll = (view: EditorView, side: "a" | "b") => {
+    const top = view.scrollDOM.scrollTop;
+    const mirrored = mirroredScroll.current.get(view) === top;
+    mirroredScroll.current.delete(view);
+    if (mirrored) return;
+    const views = controllerRef.current?.views();
+    const other = side === "a" ? views?.b : views?.a;
+    if (other && other.scrollDOM.scrollTop !== top) {
+      const before = other.scrollDOM.scrollTop;
+      other.scrollDOM.scrollTop = top;
+      const applied = other.scrollDOM.scrollTop;
+      if (applied !== before) mirroredScroll.current.set(other, applied);
+    }
+    const chunks = getChunks(view.state)?.chunks ?? [];
+    if (chunks.length && manualScroll.current) {
+      const top = view.lineBlockAtHeight(
+        view.scrollDOM.scrollTop + view.scrollDOM.clientHeight / 2,
+      ).from;
+      let index = 0;
+      for (let i = 0; i < chunks.length; i++) {
+        if ((side === "a" ? chunks[i].fromA : chunks[i].fromB) <= top)
+          index = i;
+      }
+      chunkIndex.current = index;
+      setChunkState({ index, count: chunks.length });
+    }
+    saveLatest.current();
+  };
+  const trackLatest = useRef(trackScroll);
+  trackLatest.current = trackScroll;
+  const saveLatest = useRef(savePosition);
+  saveLatest.current = savePosition;
   const extensions = useMemo(
     () => ({
       a: [
+        EditorView.domEventHandlers({
+          wheel: () => {
+            manualScroll.current = true;
+          },
+          pointerdown: () => {
+            manualScroll.current = true;
+          },
+          touchstart: () => {
+            manualScroll.current = true;
+          },
+          keydown: (event) => {
+            if (
+              [
+                "ArrowUp",
+                "ArrowDown",
+                "PageUp",
+                "PageDown",
+                "Home",
+                "End",
+                " ",
+              ].includes(event.key)
+            )
+              manualScroll.current = true;
+          },
+          scroll: (_event, view) => trackLatest.current(view, "a"),
+        }),
         inlinePaneSize,
         inlineDiscussionExtension(
           (line) => latest.current.onCommentLine?.("left", line),
@@ -141,6 +230,32 @@ export function ReviewDiffEditors({
         ),
       ],
       b: [
+        EditorView.domEventHandlers({
+          wheel: () => {
+            manualScroll.current = true;
+          },
+          pointerdown: () => {
+            manualScroll.current = true;
+          },
+          touchstart: () => {
+            manualScroll.current = true;
+          },
+          keydown: (event) => {
+            if (
+              [
+                "ArrowUp",
+                "ArrowDown",
+                "PageUp",
+                "PageDown",
+                "Home",
+                "End",
+                " ",
+              ].includes(event.key)
+            )
+              manualScroll.current = true;
+          },
+          scroll: (_event, view) => trackLatest.current(view, "b"),
+        }),
         inlinePaneSize,
         inlineDiscussionExtension(
           (line) => latest.current.onCommentLine?.("right", line),
@@ -152,23 +267,79 @@ export function ReviewDiffEditors({
     }),
     [],
   );
+  const applyReveal = useCallback((request: RevealRequest) => {
+    manualScroll.current = false;
+    const views = controllerRef.current?.views();
+    if (!views) return;
+    if (binding.current) binding.current.revealToken = request.token;
+    const view = request.pane === "left" ? views.a : views.b;
+    if (view) {
+      const chunks = getChunks(view.state)?.chunks ?? [];
+      const position = view.state.doc.line(
+        Math.max(1, Math.min(request.line, view.state.doc.lines)),
+      ).from;
+      let index = 0;
+      chunks.forEach((chunk, i) => {
+        if ((request.pane === "left" ? chunk.fromA : chunk.fromB) <= position)
+          index = i;
+      });
+      chunkIndex.current = chunks.length ? index : -1;
+      setChunkState({ index: chunkIndex.current, count: chunks.length });
+      revealLine(view, request.line);
+    }
+  }, []);
   const onController = useCallback(
     (controller: DiffEditorsController | null) => {
+      const previous = controllerRef.current;
+      if (previous && binding.current && previous.views().b.dom.isConnected)
+        saveLatest.current();
       controllerRef.current = controller;
       if (!controller) return;
+      const key = latest.current.navigationKey ?? "";
+      binding.current = {
+        key,
+        positions: latest.current.positions,
+        revealToken: latest.current.reveal?.token,
+      };
+      const cached = latest.current.positions?.get(key);
       const views = controller.views();
+      const chunks = getChunks(views.b.state)?.chunks ?? [];
+      chunkIndex.current = cached?.chunk ?? (chunks.length ? 0 : -1);
+      setChunkState({ index: chunkIndex.current, count: chunks.length });
       if (views.a) applyHighlights(views.a, latest.current.highlights.left);
       applyHighlights(views.b, latest.current.highlights.right);
       if (views.a)
         applyInlineHosts(views.a, latest.current.inlineHosts?.left ?? []);
       applyInlineHosts(views.b, latest.current.inlineHosts?.right ?? []);
       const request = latest.current.reveal;
-      if (request) {
-        const view = request.pane === "left" ? views.a : views.b;
-        if (view) revealLine(view, request.line);
+      if (request && request.token !== cached?.revealToken) {
+        applyReveal(request);
+      } else if (cached) {
+        if (views.a && cached.a) views.a.dispatch({ effects: cached.a });
+        views.b.dispatch({ effects: cached.b });
+        views.b.requestMeasure({
+          read: () => cached.topB,
+          write: (top) => {
+            if (views.a) views.a.scrollDOM.scrollTop = top;
+            views.b.scrollDOM.scrollTop = top;
+          },
+        });
+      } else if (chunks.length && autoRevealFirstChange) {
+        const chunk = chunks[0];
+        for (const [view, offset] of [
+          [views.a, chunk.fromA],
+          [views.b, chunk.fromB],
+        ] as const) {
+          if (view)
+            revealLine(
+              view,
+              view.state.doc.lineAt(Math.min(offset, view.state.doc.length))
+                .number,
+            );
+        }
       }
     },
-    [],
+    [applyReveal, autoRevealFirstChange],
   );
 
   useEffect(() => {
@@ -186,29 +357,80 @@ export function ReviewDiffEditors({
   }, [inlineHosts]);
 
   useEffect(() => {
+    manualScroll.current = false;
     const views = controllerRef.current?.views();
-    if (!views || !reveal) return;
-    const view = reveal.pane === "left" ? views.a : views.b;
-    if (view) revealLine(view, reveal.line);
-  }, [reveal]);
+    if (!views || !reveal || reveal.token === binding.current?.revealToken)
+      return;
+    applyReveal(reveal);
+  }, [reveal, applyReveal]);
+
+  const navigateChunk = (direction: number) => {
+    manualScroll.current = false;
+    const views = controllerRef.current?.views();
+    if (!views) return;
+    const chunks = getChunks(views.b.state)?.chunks ?? [];
+    if (!chunks.length) return;
+    const index = Math.max(
+      0,
+      Math.min(chunks.length - 1, chunkIndex.current + direction),
+    );
+    chunkIndex.current = index;
+    saveLatest.current();
+    setChunkState({ index, count: chunks.length });
+    const chunk = chunks[index];
+    for (const [view, offset] of [
+      [views.a, chunk.fromA],
+      [views.b, chunk.fromB],
+    ] as const) {
+      if (view)
+        revealLine(
+          view,
+          view.state.doc.lineAt(Math.min(offset, view.state.doc.length)).number,
+        );
+    }
+  };
 
   return (
-    <DiffEditorsHost
-      mode={mode}
-      left={left}
-      right={right}
-      languagePath={path}
-      leftLabel={leftLabel}
-      rightLabel={rightLabel}
-      collapseUnchanged={false}
-      extensions={extensions}
-      onController={onController}
-      className={
-        contentSide === "base"
-          ? `${styles.diffHost} ${styles.deletedOnly}`
-          : styles.diffHost
-      }
-      testId="review-diff-editors"
-    />
+    <>
+      <div className={styles.fileHeader} role="group" aria-label="Diff hunks">
+        <Button
+          size="sm"
+          variant="ghost"
+          disabled={chunkState.index <= 0}
+          onClick={() => navigateChunk(-1)}
+        >
+          Previous change
+        </Button>
+        <span role="status">
+          {chunkState.count ? chunkState.index + 1 : 0} / {chunkState.count}{" "}
+          changes
+        </span>
+        <Button
+          size="sm"
+          variant="ghost"
+          disabled={chunkState.index >= chunkState.count - 1}
+          onClick={() => navigateChunk(1)}
+        >
+          Next change
+        </Button>
+      </div>
+      <DiffEditorsHost
+        mode={mode}
+        left={left}
+        right={right}
+        languagePath={path}
+        leftLabel={leftLabel}
+        rightLabel={rightLabel}
+        collapseUnchanged={false}
+        extensions={extensions}
+        onController={onController}
+        className={
+          contentSide === "base"
+            ? `${styles.diffHost} ${styles.deletedOnly}`
+            : styles.diffHost
+        }
+        testId="review-diff-editors"
+      />
+    </>
   );
 }

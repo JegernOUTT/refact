@@ -12,6 +12,7 @@ import type { DiffMode } from "../Workspace/GitPanel/diff/diffEditors";
 import {
   ReviewDiffEditors,
   type RevealRequest,
+  type DiffPosition,
 } from "./diff/ReviewDiffEditors";
 import type {
   HighlightKind,
@@ -31,6 +32,9 @@ import styles from "./Review.module.css";
 import type { InlineHost } from "./diff/inlineDiscussions";
 
 export type ReviewFileDiffProps = {
+  navigationKey?: string;
+  positions?: Map<string, DiffPosition>;
+  autoRevealFirstChange?: boolean;
   review: Review;
   panes: DiffPanes;
   diffMode: DiffMode;
@@ -128,6 +132,9 @@ function paneLabel(review: Review, source: PaneSource): string {
 }
 
 export function ReviewFileDiff({
+  navigationKey,
+  positions,
+  autoRevealFirstChange = true,
   review,
   panes,
   diffMode,
@@ -183,6 +190,9 @@ export function ReviewFileDiff({
   const headOnly = preferSingleSided && left.absent && !right.absent;
   return (
     <ReviewDiffEditors
+      navigationKey={navigationKey}
+      positions={positions}
+      autoRevealFirstChange={autoRevealFirstChange}
       mode={baseOnly || headOnly ? "unified" : diffMode}
       left={baseOnly ? "" : left.text}
       right={baseOnly ? left.text : right.text}

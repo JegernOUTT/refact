@@ -76,15 +76,6 @@ pub fn resolve_tour_target<'a>(
     Ok((version, block))
 }
 
-pub fn is_tour_revision_target_current(review: &Review, target: &TourDiscussionTarget) -> bool {
-    resolve_tour_target(review, target).is_ok()
-        && review.current_candidate_id.as_ref() == Some(&target.candidate_id)
-        && review
-            .tour
-            .iter()
-            .any(|step| step.id == target.step_id && step.current.version == target.version)
-}
-
 pub(crate) fn normalize_revisions(next: &mut [RichBlock], previous: &[&RichBlock]) -> Result<()> {
     for block in next {
         let old_anchors: Vec<Anchor> = previous
@@ -207,7 +198,14 @@ pub(crate) fn validate_version(
     review: &Review,
     version: &TourVersion,
 ) -> Result<()> {
-    if !version.blocks.is_empty() && version.candidate_id.is_none() {
+    if version
+        .html
+        .as_ref()
+        .is_some_and(|html| html.trim().is_empty() || html.len() > 1024 * 1024)
+    {
+        return Err(invalid("invalid tour HTML page"));
+    }
+    if (!version.blocks.is_empty() || version.html.is_some()) && version.candidate_id.is_none() {
         return Err(invalid("rich tour requires explicit candidate"));
     }
     let candidate_id = if version.candidate_id.is_some() {

@@ -351,16 +351,38 @@
   overflow: hidden;
 }
 
-.diffArea[data-measured="true"] {
-  flex: 0 0 auto;
-  max-height: 65cqh;
-}
-
 .diffHost {
   flex: 1 1 0;
   min-height: 0;
   height: 100%;
   overflow: hidden;
+}
+
+.diffHost :global(.cm-mergeView) {
+  overflow: hidden;
+}
+
+.diffHost :global(.cm-mergeViewEditors),
+.diffHost :global(.cm-mergeViewEditor),
+.diffHost :global(.cm-mergeViewEditor > .cm-editor) {
+  height: 100%;
+  min-height: 0;
+}
+
+.diffHost :global(.cm-mergeViewEditor) {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.diffHost :global(.cm-mergeViewEditor .cm-editor) {
+  flex: 1 1 0;
+  min-height: 0;
+  max-height: 100%;
+}
+
+.diffHost :global(.cm-scroller) {
+  overflow: auto;
 }
 
 .deletedOnly :global(.cm-changedLine),
@@ -840,10 +862,7 @@
   display: none;
 }
 .unifiedControls {
-  display: flex;
-  align-items: center;
-  gap: var(--rf-space-2);
-  min-width: 0;
+  display: contents;
 }
 .body {
   grid-template-columns: clamp(10rem, 20cqw, 17rem) minmax(0, 1fr);

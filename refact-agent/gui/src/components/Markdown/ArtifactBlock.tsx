@@ -90,6 +90,9 @@ const _ArtifactBlock: React.FC<ArtifactBlockProps> = ({
   const question = useContext(QuestionArtifactContext);
   const policy = useContext(ArtifactPolicyContext);
   const isReview = policy !== null;
+  const pageRef = useRef(policy?.page);
+  pageRef.current = policy?.page;
+  const isPage = !!policy?.page;
   const revealAnchorRef = useRef(policy?.onRevealAnchor);
   revealAnchorRef.current = policy?.onRevealAnchor;
   const revealAnchorCountRef = useRef(policy?.revealAnchorCount);
@@ -162,11 +165,11 @@ const _ArtifactBlock: React.FC<ArtifactBlockProps> = ({
   const wrappedHtml = useMemo(
     () =>
       isReview
-        ? reviewArtifactHtml(code, channel, allowRevealAnchor)
+        ? reviewArtifactHtml(code, channel, allowRevealAnchor, isPage)
         : questionInstance
           ? questionArtifactHtml(code, channel)
           : wrapArtifactHtml(code),
-    [code, channel, questionInstance, isReview, allowRevealAnchor],
+    [code, channel, questionInstance, isReview, allowRevealAnchor, isPage],
   );
 
   useEffect(() => {
@@ -195,6 +198,19 @@ const _ArtifactBlock: React.FC<ArtifactBlockProps> = ({
             if (index !== null) revealAnchorRef.current?.(index);
           }, 150);
         }
+        return;
+      }
+      if (isReview && data.type === "refact-review-block-action") {
+        const page = pageRef.current;
+        if (
+          page &&
+          (data.action === "reveal" || data.action === "comment") &&
+          typeof data.id === "string" &&
+          data.id.length <= 256 &&
+          page.previews.filter((p) => p.id === data.id && p.available)
+            .length === 1
+        )
+          page.onAction(data.action, data.id);
         return;
       }
       const answer = readQuestionArtifactAnswer(data, channel);
@@ -300,6 +316,22 @@ const _ArtifactBlock: React.FC<ArtifactBlockProps> = ({
       "*",
     );
   }, [themeValue, isReview, channel, reviewTheme]);
+
+  const pagePayload = JSON.stringify(policy?.page?.previews ?? []);
+  const postPage = useCallback(() => {
+    if (!isPage) return;
+    iframeRef.current?.contentWindow?.postMessage(
+      {
+        type: "refact-review-page-data",
+        channel,
+        previews: JSON.parse(pagePayload) as unknown,
+      },
+      "*",
+    );
+  }, [channel, isPage, pagePayload]);
+  useEffect(() => {
+    postPage();
+  }, [postPage]);
 
   const questionEnabled = question?.enabled;
   const postQuestionState = useCallback(() => {
@@ -428,7 +460,10 @@ const _ArtifactBlock: React.FC<ArtifactBlockProps> = ({
             referrerPolicy="no-referrer"
             title={policy.title ?? "Tour visual"}
             style={{ height: `${height}px` }}
-            onLoad={postThemeToIframe}
+            onLoad={() => {
+              postThemeToIframe();
+              postPage();
+            }}
           />
         )}
         {error && (

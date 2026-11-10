@@ -196,7 +196,7 @@ fn historical_snapshot_and_anchor_reconciliation_preserve_identity_without_guess
     let step = TourStep {
         id: "stable-step".into(),
         current: TourVersion {
-            context_intake: None,
+            html: None,
             blocks: vec![],
             candidate_id: None,
             version: 1,
@@ -557,7 +557,7 @@ fn corruption_aborts_activation_instead_of_stalling_and_metadata_overlay_is_excl
     let step = TourStep {
         id: "step".into(),
         current: TourVersion {
-            context_intake: None,
+            html: None,
             blocks: vec![],
             candidate_id: None,
             version: 1,
@@ -839,7 +839,7 @@ fn exact_rename_reconciles_but_preexisting_identical_copy_does_not() {
                 step: TourStep {
                     id: "step".into(),
                     current: TourVersion {
-                        context_intake: None,
+                        html: None,
                         blocks: vec![],
                         candidate_id: None,
                         version: 1,
@@ -1110,7 +1110,7 @@ fn rich_topics_keep_exact_removed_block_targets_and_revisions() {
     let mut step = TourStep {
         id: "topic".into(),
         current: TourVersion {
-            context_intake: None,
+            html: None,
             version: 1,
             title: "Topic".into(),
             body: String::new(),
