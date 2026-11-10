@@ -1,4 +1,7 @@
-import type { EventMessage } from "../../../services/refact/types";
+import {
+  eventContentText,
+  type EventMessage,
+} from "../../../services/refact/types";
 import { humanizeIdentifier } from "../../../utils/displayNames";
 import {
   collapseWhitespace,
@@ -8,7 +11,7 @@ import {
 } from "./eventPayload";
 
 function fallbackSummary(event: EventMessage): string {
-  return collapseWhitespace(event.content);
+  return collapseWhitespace(eventContentText(event.content));
 }
 
 function modeSwitchSummary(event: EventMessage): string | null {
@@ -41,7 +44,7 @@ function processCompletedSummary(event: EventMessage): string | null {
 }
 
 function cronFireSummary(event: EventMessage): string | null {
-  const description = collapseWhitespace(event.content);
+  const description = collapseWhitespace(eventContentText(event.content));
   if (description.length > 0) return description;
   const payload = eventPayloadRecord(event);
   const taskId = payloadString(payload, "task_id");
@@ -49,7 +52,7 @@ function cronFireSummary(event: EventMessage): string | null {
 }
 
 function cancellationNoteSummary(event: EventMessage): string | null {
-  const description = collapseWhitespace(event.content);
+  const description = collapseWhitespace(eventContentText(event.content));
   if (description.length > 0) return description;
   const payload = eventPayloadRecord(event);
   const source = payloadString(payload, "source");

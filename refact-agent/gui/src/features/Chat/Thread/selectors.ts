@@ -19,6 +19,7 @@ import {
   DiffMessage,
   EventMessage,
   GoalSnapshot,
+  eventContentText,
   getEventMetadata,
   getGoalMetadata,
   getPlanMetadata,
@@ -1544,7 +1545,7 @@ export const selectGoalWithPlanHistoryById = createSelector(
         continue;
       history.push({
         seq: typeof fields.seq === "number" ? fields.seq : history.length + 1,
-        content: message.content,
+        content: eventContentText(message.content),
       });
     }
     return history.length ? { ...goal, plan: { ...goal.plan, history } } : goal;

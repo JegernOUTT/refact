@@ -1,4 +1,7 @@
-import type { EventMessage } from "../../../services/refact/types";
+import {
+  eventContentText,
+  type EventMessage,
+} from "../../../services/refact/types";
 import { humanizeIdentifier } from "../../../utils/displayNames";
 import { eventSourceLabel, eventSubkindLabel } from "./eventSubkind";
 import {
@@ -176,7 +179,11 @@ function cancellationNoteFields(
   const push = payloadString(payload, "push");
   pushString(fields, "Push mode", push ? humanizeIdentifier(push) : null);
   pushString(fields, "Delivery", payloadString(payload, "delivery_id"), true);
-  pushString(fields, "Discarded", collapseWhitespace(event.content) || null);
+  pushString(
+    fields,
+    "Discarded",
+    collapseWhitespace(eventContentText(event.content)) || null,
+  );
   return fields;
 }
 
@@ -320,7 +327,7 @@ export function eventDetailFields(event: EventMessage): EventDetailField[] {
   return [
     { label: "Source", value: eventSourceLabel(event.source) },
     { label: "Kind", value: eventSubkindLabel(event.subkind) },
-    { label: "Message", value: event.content },
+    { label: "Message", value: eventContentText(event.content) },
     ...typedFields(event, eventPayloadRecord(event)),
   ];
 }

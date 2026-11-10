@@ -1,7 +1,13 @@
 import React, { useCallback, useMemo } from "react";
 import { useAppDispatch } from "../../../hooks/useAppDispatch";
 import { openScheduler } from "../../../features/Pages/pagesSlice";
-import type { EventMessage } from "../../../services/refact/types";
+import {
+  eventContentAttachments,
+  eventContentText,
+  type EventMessage,
+} from "../../../services/refact/types";
+import { DialogImage } from "../../DialogImage";
+import { buildImageDataUrl } from "../../../utils/imageDataUrl";
 import { Button, Icon } from "../../ui";
 import type { EventRunPosition } from "../ChatContentDisplayItems";
 import {
@@ -73,7 +79,8 @@ function isSubagentBrief(event: EventMessage): boolean {
 }
 
 function eventVerb(event: EventMessage): string {
-  if (event.content.trimStart().startsWith(QUESTION_PREFIX)) return "Question";
+  if (eventContentText(event.content).trimStart().startsWith(QUESTION_PREFIX))
+    return "Question";
   if (isSubagentBrief(event)) return "Subagent brief";
   return SOURCE_VERBS[event.source] ?? SUBKIND_VERBS[event.subkind] ?? "Notice";
 }
@@ -113,6 +120,18 @@ function eventFacts(event: EventMessage): TranscriptFact[] {
     }));
 }
 
+function eventImages(event: EventMessage): string[] {
+  return eventContentAttachments(event.content).flatMap((part) => {
+    const url = buildImageDataUrl(part.m_type, part.m_content);
+    return url ? [url] : [];
+  });
+}
+
+function imageCountLabel(count: number): string | null {
+  if (count === 0) return null;
+  return count === 1 ? "1 image" : `${count} images`;
+}
+
 function eventRaw(event: EventMessage): TranscriptRawBlock[] {
   const payload = event.payload;
   if (payload === undefined || payload === null) return [];
@@ -128,6 +147,11 @@ const EventRowComponent: React.FC<EventRowProps> = ({
   const payload = useMemo(() => eventPayloadRecord(event), [event]);
   const facts = useMemo(() => eventFacts(event), [event]);
   const raw = useMemo(() => eventRaw(event), [event]);
+  const message = useMemo(
+    () => eventContentText(event.content).trim(),
+    [event.content],
+  );
+  const images = useMemo(() => eventImages(event), [event]);
   const clock = useMemo(
     () => eventTimestamp(event)?.slice(0, CLOCK_LENGTH) ?? null,
     [event],
@@ -174,13 +198,26 @@ const EventRowComponent: React.FC<EventRowProps> = ({
       icon={<Icon icon={eventSubkindIcon(event.subkind)} size="sm" />}
       verb={eventVerb(event)}
       target={eventTarget(event)}
-      meta={clock}
+      meta={
+        [clock, imageCountLabel(images.length)].filter(Boolean).join(" · ") ||
+        null
+      }
       status={eventStatus(event)}
       summary={facts}
       sectionLabels={{ output: "Message" }}
-      output={
-        event.content.trim() ? (
-          <div className={styles.message}>{event.content.trim()}</div>
+      output={message ? <div className={styles.message}>{message}</div> : null}
+      artifacts={
+        images.length > 0 ? (
+          <div className={styles.images} data-testid="event-images">
+            {images.map((src, index) => (
+              <DialogImage
+                fallback=""
+                key={`${event.message_id ?? "event"}-${index}`}
+                size="8"
+                src={src}
+              />
+            ))}
+          </div>
         ) : null
       }
       actions={actions}

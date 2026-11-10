@@ -2,3 +2,10 @@
   white-space: pre-wrap;
   word-break: break-word;
 }
+
+.images {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  gap: var(--rf-space-2);
+}

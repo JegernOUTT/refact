@@ -1,9 +1,10 @@
-import type {
-  BackgroundAgentMergeStatus,
-  BackgroundAgentSummary,
-  DeliverableStatus,
-  EventMessage,
-  HandoffReport,
+import {
+  eventContentText,
+  type BackgroundAgentMergeStatus,
+  type BackgroundAgentSummary,
+  type DeliverableStatus,
+  type EventMessage,
+  type HandoffReport,
 } from "../../services/refact/types";
 import { isAgentStatus } from "../ChatContent/foldedEventIndex";
 import {
@@ -51,10 +52,10 @@ export function agentFromFinishedEvent(
   const payload = eventPayloadRecord(event) ?? {};
   const text = (field: string) => payloadString(payload, field);
   const status = isAgentStatus(payload.status) ? payload.status : base.status;
-  const summary = eventSection(event.content, "Summary");
+  const summary = eventSection(eventContentText(event.content), "Summary");
   const error =
-    eventSection(event.content, "Error") ??
-    eventSection(event.content, "Reason");
+    eventSection(eventContentText(event.content), "Error") ??
+    eventSection(eventContentText(event.content), "Reason");
   const finishedAt = text("last_update_at");
   return {
     ...base,

@@ -42,9 +42,14 @@ interface AppToolProps {
   toolCall: ToolCall;
   // Only the response already permitted by the owning ToolsContent privacy branch.
   result?: ToolResult;
+  defaultOpen?: boolean;
 }
-export const AppTool: React.FC<AppToolProps> = ({ toolCall, result }) => {
-  const [open, setOpen] = useState(false);
+export const AppTool: React.FC<AppToolProps> = ({
+  toolCall,
+  result,
+  defaultOpen = false,
+}) => {
+  const [open, setOpen] = useState(defaultOpen);
   const unrecorded = useUnrecordedResultState(toolCall.id);
   const model = useMemo(
     () =>

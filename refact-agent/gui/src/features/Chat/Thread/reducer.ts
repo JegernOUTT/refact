@@ -225,6 +225,12 @@ const getThreadMode = ({
   return "agent";
 };
 
+const FLATTENED_EXTRA_KEYS = [
+  "tool_job_result",
+  "delivery",
+  "privacy_shell",
+] as const;
+
 const normalizeMessage = (msg: ChatMessages[number]): ChatMessages[number] => {
   if ("tool_job" in msg) {
     const { tool_job, ...rest } = msg;
@@ -234,6 +240,19 @@ const normalizeMessage = (msg: ChatMessages[number]): ChatMessages[number] => {
     msg = {
       ...rest,
       extra: { ...msg.extra, ...(receipt ? { tool_job: receipt } : {}) },
+    } as ChatMessages[number];
+  }
+  const flatExtra = FLATTENED_EXTRA_KEYS.filter((key) => key in msg);
+  if (flatExtra.length > 0) {
+    const keys = new Set<string>(flatExtra);
+    const entries = Object.entries(msg);
+    const lifted = Object.fromEntries(
+      entries.filter(([key, value]) => keys.has(key) && value !== undefined),
+    );
+    const rest = Object.fromEntries(entries.filter(([key]) => !keys.has(key)));
+    msg = {
+      ...rest,
+      extra: { ...lifted, ...msg.extra },
     } as ChatMessages[number];
   }
   if ((msg.role === "assistant" || msg.role === "user") && "review" in msg) {

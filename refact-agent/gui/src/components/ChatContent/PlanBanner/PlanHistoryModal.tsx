@@ -2,7 +2,11 @@ import React from "react";
 import { Box, Button, Flex, Text } from "@radix-ui/themes";
 import { Dialog } from "../../ui";
 import type { PlanHistoryItem } from "../../../features/Chat/Thread/selectors";
-import { getPlanMetadata, isPlanMessage } from "../../../services/refact/types";
+import {
+  eventContentText,
+  getPlanMetadata,
+  isPlanMessage,
+} from "../../../services/refact/types";
 import { Markdown } from "../../Markdown";
 import styles from "./PlanBanner.module.css";
 import { normalizePlanContent } from "./planContent";
@@ -40,7 +44,9 @@ export const PlanHistoryModal: React.FC<PlanHistoryModalProps> = ({
         <Flex direction="column" gap="3" mt="3" className={styles.historyList}>
           {items.map((item, index) => (
             <Box
-              key={item.message_id ?? `${index}-${item.content}`}
+              key={
+                item.message_id ?? `${index}-${eventContentText(item.content)}`
+              }
               className={styles.historyItem}
             >
               <Text
@@ -52,7 +58,9 @@ export const PlanHistoryModal: React.FC<PlanHistoryModalProps> = ({
                 {itemTitle(item, index)}
               </Text>
               <Box className={styles.historyBody}>
-                <Markdown>{normalizePlanContent(item.content)}</Markdown>
+                <Markdown>
+                  {normalizePlanContent(eventContentText(item.content))}
+                </Markdown>
               </Box>
             </Box>
           ))}

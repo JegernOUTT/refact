@@ -1,16 +1,49 @@
 import { CheckCheck } from "lucide-react";
 import type { NativeToolJobResult } from "../ChatContentDisplayItems";
+import type { ToolResult } from "../../../services/refact/types";
 import { ContextFiles } from "../ContextFiles";
 import { DialogImage } from "../../DialogImage";
 import { buildImageDataUrl } from "../../../utils/imageDataUrl";
 import { ResultView } from "./GenericTool";
 import { ToolCard } from "./ToolCard";
+import { AppTool } from "./AppTool";
+import { isAppToolName } from "./appToolModel";
+import { normalizeToolName } from "../../../utils/toolNameAliases";
+import { useThreadId } from "../../../features/Chat/Thread/ChatThreadContext";
+import { PrivacyToolResult } from "../../../features/Privacy/PrivacyToolResult";
+import {
+  extractPrivacyShellMetadata,
+  isPrivacyRefusalContent,
+} from "../../../services/refact/privacy";
 import styles from "./ToolJobResult.module.css";
 
 // Render the delivered native body directly: never create another tool call or
 // consult the original call's receipt/polling state for this completion actor.
 export function ToolJobResult({ result }: { result: NativeToolJobResult }) {
-  const { message, toolName } = result;
+  const threadId = useThreadId();
+  const { message, toolName, toolCall } = result;
+  const toolResult: ToolResult | undefined =
+    message.role !== "tool"
+      ? undefined
+      : typeof message.content === "string"
+        ? { ...message, content: message.content }
+        : { ...message, content: message.content };
+  if (
+    toolResult &&
+    (extractPrivacyShellMetadata(toolResult.extra) !== null ||
+      isPrivacyRefusalContent(toolResult.content))
+  ) {
+    return (
+      <PrivacyToolResult
+        threadId={threadId}
+        toolCallId={toolResult.tool_call_id}
+        result={toolResult}
+      />
+    );
+  }
+  if (toolResult && toolCall && isAppToolName(normalizeToolName(toolName))) {
+    return <AppTool toolCall={toolCall} result={toolResult} defaultOpen />;
+  }
   return (
     <ToolCard
       icon={<CheckCheck size={14} />}

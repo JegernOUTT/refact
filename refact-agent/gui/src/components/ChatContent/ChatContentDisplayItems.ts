@@ -6,6 +6,8 @@ import {
   DiffMessage,
   ErrorMessage,
   EventMessage,
+  eventContentAttachments,
+  eventContentText,
   getAssistantCompressionMetadata,
   getCompressionReportMetadata,
   isChatContextFileMessage,
@@ -28,6 +30,7 @@ import {
   ToolMessage,
   ChatContextFileMessage,
   isToolContent,
+  ToolCall,
 } from "../../services/refact";
 import { normalizeToolName, isToolName } from "../../utils/toolNameAliases";
 import { isSkillReportContent, parseSkillReport } from "./skillReportUtils";
@@ -38,6 +41,7 @@ const BUDDY_PULSE_TOOL_CALL_ID = "buddy_project_memory_pulse";
 export type NativeToolJobResult = {
   toolName: string;
   message: ToolMessage | ChatContextFileMessage;
+  toolCall?: ToolCall;
 };
 
 function record(value: unknown): Record<string, unknown> | null {
@@ -51,8 +55,14 @@ function record(value: unknown): Record<string, unknown> | null {
 export function nativeToolJobResult(
   message: ChatMessages[number],
 ): NativeToolJobResult | null {
-  const meta = record(message.extra?.tool_job_result);
-  const delivery = record(message.extra?.delivery);
+  const meta = record(
+    message.extra?.tool_job_result ??
+      ("tool_job_result" in message ? message.tool_job_result : undefined),
+  );
+  const delivery = record(
+    message.extra?.delivery ??
+      ("delivery" in message ? message.delivery : undefined),
+  );
   if (
     !meta ||
     meta.actor !== "tool_completion" ||
@@ -88,6 +98,7 @@ export function nativeToolJobResult(
           role: "tool",
           content,
           tool_call_id: meta.tool_call_id,
+          extra: flattenedWireExtra(message),
         },
       };
     }
@@ -99,6 +110,54 @@ export function nativeToolJobResult(
     return { toolName: meta.tool_name, message };
   }
   return null;
+}
+
+const FLATTENED_WIRE_EXTRA_KEYS = [
+  "tool_job_result",
+  "delivery",
+  "privacy_shell",
+] as const;
+
+function flattenedWireExtra(
+  message: ChatMessages[number],
+): Record<string, unknown> | undefined {
+  const lifted = Object.fromEntries(
+    Object.entries(message).filter(
+      ([key, value]) =>
+        (FLATTENED_WIRE_EXTRA_KEYS as readonly string[]).includes(key) &&
+        value !== undefined,
+    ),
+  );
+  if (Object.keys(lifted).length === 0) return message.extra;
+  return { ...lifted, ...message.extra };
+}
+
+type PriorToolCallIndex = {
+  scanned: number;
+  calls: Map<string, ToolCall>;
+};
+
+function originalToolCall(
+  messages: ChatMessages,
+  resultIndex: number,
+  result: NativeToolJobResult,
+  index: PriorToolCallIndex,
+): ToolCall | undefined {
+  for (; index.scanned < resultIndex; index.scanned++) {
+    const message = messages[index.scanned];
+    if (!isAssistantMessage(message)) continue;
+    for (const call of message.tool_calls ?? []) {
+      if (call.id) index.calls.set(call.id, call);
+    }
+  }
+  const toolCallId =
+    "tool_call_id" in result.message ? result.message.tool_call_id : "";
+  const call = toolCallId ? index.calls.get(toolCallId) : undefined;
+  if (!call) return undefined;
+  return normalizeToolName(call.function.name) ===
+    normalizeToolName(result.toolName)
+    ? call
+    : undefined;
 }
 
 type DisplayItemToolJobResult = {
@@ -479,7 +538,11 @@ function hasEventPayload(event: EventMessage): boolean {
 }
 
 function isEmptyEvent(event: EventMessage): boolean {
-  return isBlankText(event.content) && !hasEventPayload(event);
+  return (
+    isBlankText(eventContentText(event.content)) &&
+    eventContentAttachments(event.content).length === 0 &&
+    !hasEventPayload(event)
+  );
 }
 
 function contextFilesRenderNothing(
@@ -675,6 +738,7 @@ function buildDisplayItemsFromIndex(
   const items: DisplayItem[] = [];
   if (startIndex >= messages.length) return items;
   const foldedEvents = foldedEventIndexFor(messages).foldedMessageIndices;
+  const priorToolCalls: PriorToolCallIndex = { scanned: 0, calls: new Map() };
 
   let lastUserIdx = -1;
   let lastAssistantIdx = -1;
@@ -694,11 +758,12 @@ function buildDisplayItemsFromIndex(
 
     const jobResult = nativeToolJobResult(head);
     if (jobResult) {
+      const toolCall = originalToolCall(messages, i, jobResult, priorToolCalls);
       items.push({
         type: "tool_job_result",
         key: getMessageKey(head, i),
         messageIndex: i,
-        result: jobResult,
+        result: toolCall ? { ...jobResult, toolCall } : jobResult,
       });
       continue;
     }
@@ -1258,7 +1323,24 @@ export function tryIncrementalDisplayItemsUpdate(
     );
   }
 
+  const previousToolCalls = new Set(previousMessage.tool_calls ?? []);
+  const updatedToolCalls = new Map(
+    (changedMessage.tool_calls ?? []).map((call) => [call.id, call]),
+  );
   const nextItems = previousItems.map((item) => {
+    if (
+      item.type === "tool_job_result" &&
+      item.result.toolCall &&
+      previousToolCalls.has(item.result.toolCall)
+    ) {
+      return {
+        ...item,
+        result: {
+          ...item.result,
+          toolCall: updatedToolCalls.get(item.result.toolCall.id),
+        },
+      };
+    }
     if (item.type !== "assistant") return item;
     if (item.index !== changedIndex) {
       const shouldStream = isStreaming && item.index === lastAssistantIdx;

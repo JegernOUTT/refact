@@ -1347,9 +1347,11 @@ export type EventMetadata = {
   payload?: unknown;
 };
 
+export type EventContent = string | MultiModalToolContent[];
+
 export type EventMessage = MessageEnvelope & {
   role: "event";
-  content: string;
+  content: EventContent;
   subkind: string;
   source: string;
   payload?: unknown;
@@ -1371,6 +1373,30 @@ export function isEventSubkind(value: unknown): value is EventSubkind {
     value === "goal_delta" ||
     value === "goal_pursuit" ||
     value === "system_notice"
+  );
+}
+
+export function eventContentText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .filter(
+      (part): part is MultiModalToolContent =>
+        isMultiModalToolContent(part) && part.m_type === "text",
+    )
+    .map((part) => part.m_content)
+    .join("\n\n");
+}
+
+export function eventContentAttachments(
+  content: unknown,
+): MultiModalToolContent[] {
+  if (!Array.isArray(content)) return [];
+  return content.filter(
+    (part): part is MultiModalToolContent =>
+      isMultiModalToolContent(part) &&
+      part.m_type !== "text" &&
+      part.m_content.length > 0,
   );
 }
 
@@ -1562,7 +1588,7 @@ export function isVisibleCompressionFailureEvent(
   return (
     metadata?.subkind === "system_notice" &&
     metadata.source === "chat.summarizer" &&
-    message.content.startsWith("Context compression failed:")
+    eventContentText(message.content).startsWith("Context compression failed:")
   );
 }
 

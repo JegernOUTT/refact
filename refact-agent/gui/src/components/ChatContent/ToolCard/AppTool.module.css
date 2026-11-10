@@ -6,6 +6,9 @@
 .section {
   min-width: 0;
 }
+.section > dl {
+  grid-template-columns: minmax(0, 1fr);
+}
 .heading {
   margin: 0 0 var(--rf-space-2);
   color: var(--rf-color-muted);
