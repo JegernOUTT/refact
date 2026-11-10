@@ -263,11 +263,6 @@ impl JobRuntime {
                 snapshot.receipt.job_id.clone(),
             );
             snapshot.receipt.binding.scope_keys = entry.scope_keys;
-            if snapshot.status == JobStatus::Unknown {
-                inner
-                    .scopes
-                    .mark_unknown(&snapshot.receipt.binding.scope_keys);
-            }
             state.records.insert(
                 snapshot.receipt.job_id.clone(),
                 Record {
@@ -587,15 +582,7 @@ impl JobRuntime {
                     Ok(future) => std::panic::AssertUnwindSafe(future).catch_unwind().await,
                     Err(panic) => Err(panic),
                 };
-                // A panic or explicitly unknown outcome cannot prove quiescence.
-                if completed
-                    .as_ref()
-                    .is_ok_and(|(status, _)| status.terminal() && *status != JobStatus::Unknown)
-                {
-                    lease.settle();
-                } else {
-                    drop(lease);
-                }
+                drop(lease);
                 let Some(runtime) = runtime.upgrade() else {
                     return;
                 };
@@ -1036,30 +1023,20 @@ mod tests {
                 assert!(stored.consumed);
                 assert_eq!(stored.snapshot.status, expected_status);
                 assert_eq!(stored.snapshot.revision, expected_revision);
-                if interrupted {
-                    assert!(matches!(
-                        reopened
-                            .begin_scope_change(&receipt.binding.scope_keys)
-                            .await,
-                        Err(super::super::ScopeChangeError::UnknownEffects)
-                    ));
-                    assert!(reopened
-                        .scopes
-                        .acquire(
-                            &receipt.binding.scope_keys,
-                            Arc::new(AtomicBool::new(false))
-                        )
-                        .is_err());
-                } else {
+                drop(
                     reopened
-                        .scopes
-                        .acquire(
-                            &receipt.binding.scope_keys,
-                            Arc::new(AtomicBool::new(false)),
-                        )
-                        .unwrap()
-                        .settle();
-                }
+                        .begin_scope_change(&receipt.binding.scope_keys)
+                        .await
+                        .unwrap(),
+                );
+                reopened
+                    .scopes
+                    .acquire(
+                        &receipt.binding.scope_keys,
+                        Arc::new(AtomicBool::new(false)),
+                    )
+                    .unwrap()
+                    .settle();
                 assert!(reopened.background_terminals().is_empty());
                 reopened.shutdown().await;
                 drop(reopened);
@@ -1311,19 +1288,20 @@ mod tests {
             .unwrap()
             .contains("never replay"));
         assert!(!pending.receipt.binding.scope_keys.is_empty());
-        assert!(matches!(
+        drop(
             restarted
                 .begin_scope_change(&pending.receipt.binding.scope_keys)
-                .await,
-            Err(super::super::ScopeChangeError::UnknownEffects)
-        ));
-        assert!(restarted
+                .await
+                .unwrap(),
+        );
+        restarted
             .scopes
             .acquire(
                 &pending.receipt.binding.scope_keys,
-                Arc::new(AtomicBool::new(false))
+                Arc::new(AtomicBool::new(false)),
             )
-            .is_err());
+            .unwrap()
+            .settle();
         assert!(restarted
             .submit_background(pending.receipt.binding, |_| async {
                 panic!("pending replay")
@@ -1596,7 +1574,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn factory_construction_panic_records_unknown_and_retains_fence() {
+    async fn factory_construction_panic_records_unknown_without_poisoning_scope() {
         let dir = tempfile::tempdir().unwrap();
         let runtime = JobRuntime::open_durable(dir.path().into(), 2, 65536)
             .await
@@ -1623,12 +1601,18 @@ mod tests {
         assert!(runtime.state.lock().unwrap().records[&receipt.job_id]
             .task
             .is_some());
-        assert!(matches!(
+        drop(
             runtime
                 .begin_scope_change(&receipt.binding.scope_keys)
-                .await,
-            Err(super::super::ScopeChangeError::UnknownEffects)
-        ));
+                .await
+                .unwrap(),
+        );
+        assert!(runtime
+            .submit_background(receipt.binding.clone(), |_| async {
+                panic!("must not replay")
+            })
+            .await
+            .is_err());
         runtime.shutdown().await;
         drop(runtime);
         let restarted = JobRuntime::open_durable(dir.path().into(), 2, 65536)
@@ -1638,13 +1622,14 @@ mod tests {
             restarted.background_terminals()[0].status,
             JobStatus::Unknown
         );
-        assert!(restarted
+        restarted
             .scopes
             .acquire(
                 &receipt.binding.scope_keys,
-                Arc::new(AtomicBool::new(false))
+                Arc::new(AtomicBool::new(false)),
             )
-            .is_err());
+            .unwrap()
+            .settle();
         restarted.shutdown().await;
     }
 

@@ -1021,7 +1021,7 @@ pub async fn close_all_chat_sessions(
     app.runtime.tool_jobs.scopes.begin_shutdown();
     if let Err(error) = app.runtime.review_readiness.shutdown().await {
         warn!(%error, "close_all_chat_sessions: readiness shutdown unresolved");
-        return Err(crate::tool_jobs::ScopeChangeError::UnknownEffects);
+        return Err(crate::tool_jobs::ScopeChangeError::Busy);
     }
     app.runtime.tool_jobs.shutdown().await;
     if let Err(error) = app.runtime.tool_jobs.scopes.drain_shutdown().await {
@@ -1597,7 +1597,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn shutdown_leaves_session_open_when_job_effects_are_unknown() {
+    async fn released_job_does_not_prevent_session_shutdown() {
         let workspace = tempfile::tempdir().unwrap();
         let (app, _config_dir) = test_app_with_workspace(workspace.path()).await;
         let chat_id = "shutdown-unknown-effects";
@@ -1617,12 +1617,9 @@ mod tests {
                 Arc::new(std::sync::atomic::AtomicBool::new(false)),
             )
             .unwrap();
-        drop(lease); // Abandoned execution does not prove its effects stopped.
-        assert!(matches!(
-            close_all_chat_sessions(app.clone()).await,
-            Err(crate::tool_jobs::ScopeChangeError::UnknownEffects)
-        ));
-        assert!(!session.lock().await.closed);
+        drop(lease);
+        close_all_chat_sessions(app.clone()).await.unwrap();
+        assert!(session.lock().await.closed);
         assert!(app
             .runtime
             .tool_jobs

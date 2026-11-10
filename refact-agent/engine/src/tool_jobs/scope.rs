@@ -1,4 +1,3 @@
-//! Stable lifecycle domains shared by job admission and scope writers.
 use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -22,16 +21,13 @@ pub enum ScopeKey {
 pub enum ScopeChangeError {
     Closed,
     Busy,
-    UnknownEffects,
     InvalidKey,
 }
 
 #[derive(Default)]
 struct Domain {
-    epoch: u64,
     closed: bool,
     permanent: bool,
-    unknown: bool,
     active: usize,
 }
 struct Registration {
@@ -55,17 +51,13 @@ pub struct ScopeCoordinator {
 pub struct ExecutionLease {
     coordinator: Arc<ScopeCoordinator>,
     id: u64,
-    settled: bool,
 }
 pub struct ScopeChangeGuard {
     coordinator: Arc<ScopeCoordinator>,
     keys: Vec<ScopeKey>,
-    drained: bool,
 }
 
 impl ScopeCoordinator {
-    /// Canonical project/root strings must come from the already-validated scope,
-    /// never a model argument or an ambient current directory.
     fn keys(keys: &[ScopeKey]) -> Result<Vec<ScopeKey>, ScopeChangeError> {
         if keys.is_empty()
             || keys.iter().any(|key| match key {
@@ -118,69 +110,52 @@ impl ScopeCoordinator {
         Ok(ExecutionLease {
             coordinator: self.clone(),
             id,
-            settled: false,
         })
     }
 
-    /// Closes every domain atomically BEFORE cancellation. No caller may hold
-    /// session, context, board or tool-pool locks while awaiting this method.
-    /// Dropping a pending transition leaves admission closed (fail closed).
     pub async fn begin_scope_change(
         self: &Arc<Self>,
         keys: &[ScopeKey],
     ) -> Result<ScopeChangeGuard, ScopeChangeError> {
         let keys = Self::keys(keys)?;
-        {
-            loop {
-                let notified = self.changed.notified();
-                tokio::pin!(notified);
-                notified.as_mut().enable();
-                let acquired = {
-                    let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-                    if state.shutdown {
-                        return Err(ScopeChangeError::Closed);
-                    }
-                    if keys
-                        .iter()
-                        .any(|key| state.domains.get(key).is_some_and(|d| d.unknown))
-                    {
-                        return Err(ScopeChangeError::UnknownEffects);
-                    }
-                    if keys
+        loop {
+            let notified = self.changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            let acquired = {
+                let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                if state.shutdown
+                    || keys
                         .iter()
                         .any(|key| state.domains.get(key).is_some_and(|d| d.permanent))
-                    {
-                        return Err(ScopeChangeError::Closed);
-                    }
-                    if keys
-                        .iter()
-                        .any(|key| state.domains.get(key).is_some_and(|d| d.closed))
-                    {
-                        false
-                    } else {
-                        for key in &keys {
-                            let domain = state.domains.entry(key.clone()).or_default();
-                            domain.closed = true;
-                            domain.epoch += 1;
-                        }
-                        for job in state.jobs.values() {
-                            if job.keys.iter().any(|key| keys.contains(key)) {
-                                job.cancel.store(true, Ordering::Release);
-                            }
-                        }
-                        true
-                    }
-                };
-                if acquired {
-                    break;
+                {
+                    return Err(ScopeChangeError::Closed);
                 }
-                notified.await;
+                if keys
+                    .iter()
+                    .any(|key| state.domains.get(key).is_some_and(|d| d.closed))
+                {
+                    false
+                } else {
+                    for key in &keys {
+                        state.domains.entry(key.clone()).or_default().closed = true;
+                    }
+                    for job in state.jobs.values() {
+                        if job.keys.iter().any(|key| keys.contains(key)) {
+                            job.cancel.store(true, Ordering::Release);
+                        }
+                    }
+                    true
+                }
+            };
+            if acquired {
+                break;
             }
+            notified.await;
         }
-        let mut guard = ScopeChangeGuard {
+        let guard = ScopeChangeGuard {
             coordinator: self.clone(),
             keys,
-            drained: false,
         };
         loop {
             let notified = self.changed.notified();
@@ -188,48 +163,24 @@ impl ScopeCoordinator {
             notified.as_mut().enable();
             {
                 let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-                if guard
-                    .keys
-                    .iter()
-                    .any(|key| state.domains.get(key).is_some_and(|d| d.permanent))
+                if state.shutdown
+                    || guard
+                        .keys
+                        .iter()
+                        .any(|key| state.domains.get(key).is_some_and(|d| d.permanent))
                 {
-                    return Err(ScopeChangeError::UnknownEffects);
+                    return Err(ScopeChangeError::Closed);
                 }
                 if guard
                     .keys
                     .iter()
                     .all(|key| state.domains.get(key).is_none_or(|d| d.active == 0))
                 {
-                    guard.drained = true;
                     return Ok(guard);
                 }
             }
             notified.await;
         }
-    }
-
-    pub(crate) fn mark_unknown(&self, keys: &[ScopeKey]) {
-        let keys = match Self::keys(keys) {
-            Ok(keys) => keys,
-            Err(_) => {
-                self.begin_shutdown();
-                return;
-            }
-        };
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        for key in &keys {
-            let domain = state.domains.entry(key.clone()).or_default();
-            domain.closed = true;
-            domain.permanent = true;
-            domain.unknown = true;
-            domain.epoch += 1;
-        }
-        for job in state.jobs.values() {
-            if job.keys.iter().any(|key| keys.contains(key)) {
-                job.cancel.store(true, Ordering::Release);
-            }
-        }
-        self.changed.notify_waiters();
     }
 
     pub async fn drain_shutdown(&self) -> Result<(), ScopeChangeError> {
@@ -238,32 +189,25 @@ impl ScopeCoordinator {
             let notified = self.changed.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
+            if self
+                .state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .jobs
+                .is_empty()
             {
-                let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-                if state
-                    .domains
-                    .values()
-                    .any(|domain| domain.permanent && domain.unknown)
-                {
-                    return Err(ScopeChangeError::UnknownEffects);
-                }
-                if state.jobs.is_empty() {
-                    return Ok(());
-                }
+                return Ok(());
             }
             notified.await;
         }
     }
 
-    /// Permanently closes admission first, then requests cancellation. Shutdown
-    /// may abort tasks, but must not describe those aborts as proven quiescence.
     pub fn begin_shutdown(&self) {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         state.shutdown = true;
         for domain in state.domains.values_mut() {
             domain.closed = true;
             domain.permanent = true;
-            domain.epoch += 1;
         }
         for job in state.jobs.values() {
             job.cancel.store(true, Ordering::Release);
@@ -273,10 +217,8 @@ impl ScopeCoordinator {
 }
 
 impl ExecutionLease {
-    /// Invoke ONLY after the actual effect-owning future has settled and cleanup
-    /// established quiescence. Dropping an uncompleted future is not settlement.
-    pub fn settle(mut self) {
-        self.settled = true;
+    pub fn settle(self) {
+        drop(self);
     }
 }
 impl Drop for ExecutionLease {
@@ -288,24 +230,18 @@ impl Drop for ExecutionLease {
             .unwrap_or_else(|e| e.into_inner());
         if let Some(job) = state.jobs.remove(&self.id) {
             for key in job.keys {
-                let domain = state.domains.get_mut(&key).expect("registered domain");
-                domain.active -= 1;
-                if !self.settled {
-                    domain.closed = true;
-                    domain.permanent = true;
-                    domain.unknown = true;
-                    domain.epoch += 1;
-                }
+                state
+                    .domains
+                    .get_mut(&key)
+                    .expect("registered domain")
+                    .active -= 1;
             }
         }
         self.coordinator.changed.notify_waiters();
     }
 }
 impl ScopeChangeGuard {
-    /// Closing a chat is permanent; reopening requires a separately authorized
-    /// lifecycle rather than implicitly reusing the old execution generation.
-    pub fn close_permanently(mut self) {
-        self.drained = false;
+    pub fn close_permanently(self) {
         let mut state = self
             .coordinator
             .state
@@ -332,22 +268,12 @@ impl Drop for ScopeChangeGuard {
             .state
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        if !self.drained {
-            for key in &self.keys {
-                if let Some(domain) = state.domains.get_mut(key) {
-                    domain.closed = true;
-                    domain.permanent = true;
-                }
-            }
-            self.coordinator.changed.notify_waiters();
-            return;
-        }
         if state.shutdown {
             return;
         }
         for key in &self.keys {
             if let Some(domain) = state.domains.get_mut(key) {
-                if !domain.permanent && domain.active == 0 {
+                if !domain.permanent {
                     domain.closed = false;
                 }
             }
@@ -367,32 +293,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn recovered_unknown_domains_cancel_existing_work_and_never_reopen() {
-        let coordinator = Arc::new(ScopeCoordinator::default());
-        let cancel = Arc::new(AtomicBool::new(false));
-        let lease = coordinator.acquire(&[key()], cancel.clone()).unwrap();
-        coordinator.mark_unknown(&[key()]);
-        assert!(cancel.load(Ordering::Acquire));
-        lease.settle();
-        assert!(matches!(
-            coordinator.acquire(&[key()], Arc::new(AtomicBool::new(false))),
-            Err(ScopeChangeError::Closed)
-        ));
-        assert!(matches!(
-            coordinator.begin_scope_change(&[key()]).await,
-            Err(ScopeChangeError::UnknownEffects)
-        ));
-        let other = ScopeKey::Chat {
-            project: "/project".into(),
-            chat_id: "other".into(),
-        };
-        coordinator
-            .acquire(&[other], Arc::new(AtomicBool::new(false)))
-            .unwrap()
-            .settle();
-    }
-
-    #[tokio::test]
     async fn transition_cancels_then_drains_and_fences_new_admission() {
         let coordinator = Arc::new(ScopeCoordinator::default());
         let cancel = Arc::new(AtomicBool::new(false));
@@ -403,31 +303,62 @@ mod tests {
         assert!(futures::poll!(&mut transition).is_pending());
         assert!(cancel.load(Ordering::Acquire));
         assert!(matches!(
-            coordinator.acquire(&[key()], cancel.clone()),
+            coordinator.acquire(&keys, cancel.clone()),
             Err(ScopeChangeError::Closed)
         ));
         lease.settle();
         let guard = transition.await.unwrap();
         assert!(matches!(
-            coordinator.acquire(&[key()], cancel.clone()),
+            coordinator.acquire(&keys, cancel.clone()),
             Err(ScopeChangeError::Closed)
         ));
         drop(guard);
-        coordinator.acquire(&[key()], cancel).unwrap().settle();
+        coordinator.acquire(&keys, cancel).unwrap().settle();
     }
+
     #[tokio::test]
-    async fn dropped_work_and_interrupted_transition_never_reopen_domains() {
+    async fn cancelled_transition_can_retry_without_skipping_active_work() {
         let coordinator = Arc::new(ScopeCoordinator::default());
         let cancel = Arc::new(AtomicBool::new(false));
         let lease = coordinator.acquire(&[key()], cancel.clone()).unwrap();
+        let keys = [key()];
+        let mut transition = Box::pin(coordinator.begin_scope_change(&keys));
+        assert!(futures::poll!(transition.as_mut()).is_pending());
+        drop(transition);
+        coordinator
+            .acquire(&keys, Arc::new(AtomicBool::new(false)))
+            .unwrap()
+            .settle();
+        let mut retry = Box::pin(coordinator.begin_scope_change(&keys));
+        assert!(futures::poll!(retry.as_mut()).is_pending());
         drop(lease);
+        let guard = retry.await.unwrap();
+        guard.close_permanently();
         assert!(matches!(
-            coordinator.acquire(&[key()], cancel),
+            coordinator.acquire(&keys, cancel),
             Err(ScopeChangeError::Closed)
         ));
         assert!(matches!(
-            coordinator.begin_scope_change(&[key()]).await,
-            Err(ScopeChangeError::UnknownEffects)
+            coordinator.begin_scope_change(&keys).await,
+            Err(ScopeChangeError::Closed)
+        ));
+    }
+
+    #[tokio::test]
+    async fn released_execution_does_not_poison_scope_but_shutdown_stays_closed() {
+        let coordinator = Arc::new(ScopeCoordinator::default());
+        let cancel = Arc::new(AtomicBool::new(false));
+        drop(coordinator.acquire(&[key()], cancel.clone()).unwrap());
+        drop(coordinator.begin_scope_change(&[key()]).await.unwrap());
+        let lease = coordinator.acquire(&[key()], cancel.clone()).unwrap();
+        let mut shutdown = Box::pin(coordinator.drain_shutdown());
+        assert!(futures::poll!(shutdown.as_mut()).is_pending());
+        assert!(cancel.load(Ordering::Acquire));
+        drop(lease);
+        shutdown.await.unwrap();
+        assert!(matches!(
+            coordinator.acquire(&[key()], cancel),
+            Err(ScopeChangeError::Closed)
         ));
     }
 }

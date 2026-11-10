@@ -42,7 +42,7 @@ impl WorktreeEffectFence for ApplicationEffectFence {
                 .0
                 .begin_scope_change(&keys)
                 .await
-                .map_err(|error| format!("Worktree effect barrier: {error}"))?;
+                .map_err(|error| format!("Worktree change unavailable: {error}"))?;
             Ok(Arc::new(guard) as EffectGuard)
         })
     }
@@ -156,7 +156,7 @@ mod effect_tests {
     }
 
     #[tokio::test]
-    async fn central_delete_drains_jobs_and_unknown_retains_checkout() {
+    async fn central_delete_drains_jobs_without_latching_released_execution() {
         let (_temp, service, scopes) = fixture();
         let created = service
             .create_worktree(crate::worktrees::types::CreateWorktreeRequest::default())
@@ -193,12 +193,14 @@ mod effect_tests {
             root: created.worktree.meta.root.clone(),
         };
         drop(scopes.acquire(&[key], cancel).unwrap());
-        assert!(service
-            .delete_worktree(&created.worktree.meta.id, true, true)
-            .await
-            .unwrap_err()
-            .contains("UnknownEffects"));
-        assert!(created.worktree.meta.root.exists());
+        assert!(
+            service
+                .delete_worktree(&created.worktree.meta.id, true, true)
+                .await
+                .unwrap()
+                .deleted
+        );
+        assert!(!created.worktree.meta.root.exists());
     }
 
     #[tokio::test]
