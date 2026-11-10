@@ -143,7 +143,7 @@ impl Tool for ToolSubagent {
             },
             experimental: false,
             allow_parallel: true,
-            description: "Spawn a background-only, stateful child trajectory for research or implementation. The child inherits all parent-chat tools by default; task wording such as 'read-only' does not restrict capabilities. Use tools and sandbox explicitly for capability boundaries. The child can select a configured model or named model, and may receive a goal with a step budget and optional goal.plan, target files, and an isolated worktree that auto-merges by default. A trajectory link is returned immediately and completion is auto-pushed. Use `agents_overview` and `agent_message` to coordinate with peers.".to_string(),
+            description: "Spawn a background-only, stateful child trajectory for research or implementation. The child inherits all parent-chat tools by default; task wording such as 'read-only' does not restrict capabilities. Use tools and sandbox explicitly for capability boundaries. The child can select a configured model or named model, and may receive a goal with a step budget and optional goal.plan, target files, and an isolated worktree that auto-merges by default. A trajectory link is returned immediately and completion is auto-pushed. Preview reports requested sandbox enforcement support without dispatch; a tools allowlist is not an OS sandbox. Explicit goal budget exhaustion is not a crash and cannot be widened by a child step override. Use `agents_overview` and `agent_message` to coordinate with peers.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -159,7 +159,7 @@ impl Tool for ToolSubagent {
                     "worktree": {"type": "string", "enum": ["inherit", "isolated"], "default": "inherit", "description": "Use the parent worktree or create an isolated worktree."},
                     "push": PushMode::schema(),
                     "auto_merge": {"type": "boolean", "default": true, "description": "Only for worktree=isolated. Squash-merge completion automatically."},
-                    "action": {"type": "string", "enum": ["run", "preview"], "default": "run", "description": "Use `preview` to resolve prompts/context and effective settings without spawning a child."},
+                    "action": {"type": "string", "enum": ["run", "preview"], "default": "run", "description": "Use `preview` to resolve launch settings and requested sandbox support without spawning a child. Unsupported sandbox returns supported=false/reason, not execution."},
                     "profile": {
                         "description": "Optional reusable agent profile: a name string, or {name, revision} to pin an exact revision. The profile supplies defaults (model, tools, role, skills, effort, hooks, path scope, approval, budget); this run may only narrow them. A profile never widens authority.",
                         "oneOf": [
@@ -265,12 +265,26 @@ impl Tool for ToolSubagent {
             let policy = crate::chat::verify_cmd::VerifyCommandPolicy::load(gcx.clone()).await;
             crate::chat::evidence::validate_goal_verify_commands(&goal.criteria, &policy)?;
         }
-        crate::agents::sandbox_contract::preflight(
+        let sandbox_support = crate::agents::sandbox_contract::preflight(
             args.sandbox.clone(),
             crate::exec::command_policy::baseline_sandbox_mode(Some("agent")),
             gcx.terminal_security_config.mode,
             refact_sandbox::sandbox_status(),
-        )?;
+        );
+        if let Err(reason) = &sandbox_support {
+            if !args.preview_only {
+                return Err(reason.clone());
+            }
+            let mut preview = build_launch_preview_tool_result(
+                &args,
+                None,
+                None,
+                Err(reason.as_str()),
+                tool_call_id,
+            );
+            append_sandbox_preview(&mut preview, &args, &sandbox_support);
+            return Ok((false, vec![preview]));
+        }
         let profile = match args.profile.as_ref() {
             Some(reference) => Some(
                 crate::agents::profile::load_profile(gcx.clone(), &reference.name, &limits)
@@ -610,6 +624,7 @@ impl Tool for ToolSubagent {
                     }),
                 );
             }
+            append_sandbox_preview(&mut preview, &args, &sandbox_support);
             return Ok((false, vec![preview]));
         }
 
@@ -684,7 +699,16 @@ fn parse_subagent_args_with_limits(
     limits: &refact_work_core::CoordinationSettings,
 ) -> Result<SubagentArgs, String> {
     let task = parse_required_string(args, "task")?;
-    let expected_result = parse_required_string(args, "expected_result")?;
+    let expected_result = parse_required_string(args, "expected_result").map_err(|error| {
+        format!("{error}. Supply the required root field, for example {{\"task\":\"Inspect the parser\",\"expected_result\":\"Findings with evidence\"}}")
+    })?;
+    if args
+        .get("launch_spec")
+        .and_then(Value::as_object)
+        .is_some_and(|spec| spec.contains_key("context_tokens_cap"))
+    {
+        return Err("launch_spec.context_tokens_cap is not supported; use the root field, for example {\"task\":\"Inspect the parser\",\"expected_result\":\"Findings\",\"context_tokens_cap\":32000}. launch_spec.token_budget bounds initial context entries only, not the child's context window.".into());
+    }
     let target_files = parse_target_files(args)?;
     let tools = parse_optional_csv(args, "tools")?;
     let model_type = parse_optional_string(args, "model_type")?;
@@ -1405,6 +1429,39 @@ fn build_launch_preview_tool_result(
     tool_message(lines.join("\n"), tool_call_id, extra)
 }
 
+fn append_sandbox_preview(
+    preview: &mut ContextEnum,
+    args: &SubagentArgs,
+    support: &Result<(), String>,
+) {
+    if let ContextEnum::ChatMessage(message) = preview {
+        let requested = args
+            .sandbox
+            .as_ref()
+            .map(crate::agents::sandbox_contract::mode_name);
+        message.extra.insert(
+            "sandbox_preflight".into(),
+            json!({
+                "requested": requested,
+                "supported": support.is_ok(),
+                "reason": support.as_ref().err(),
+                "executed": false,
+            }),
+        );
+        if let ChatContent::SimpleText(text) = &mut message.content {
+            text.push_str(&format!(
+                "\n\n## Sandbox Enforcement Preflight (advisory; no execution)\n- requested: {}\n- supported: {}\n",
+                requested.unwrap_or("not specified (engine default; no confinement requested)"),
+                support.is_ok(),
+            ));
+            if let Err(reason) = support {
+                text.push_str(&format!("- reason: {}\n", preview_value(reason)));
+            }
+            text.push_str("A tools allowlist restricts callable tools, not OS execution. This preview grants no authority, starts no child and never downgrades requested confinement; run checks support again before dispatch.");
+        }
+    }
+}
+
 fn preview_value(value: &str) -> String {
     let mut chars = value.trim().chars();
     let mut text = chars
@@ -1562,6 +1619,31 @@ mod tests {
         let mut args = args();
         args.insert("sandbox".to_string(), json!("workspace_write"));
 
+        let mut preview_args = args.clone();
+        preview_args.insert("action".into(), json!("preview"));
+        let (_, contexts) = ToolSubagent {
+            config_path: String::new(),
+        }
+        .tool_execute(ccx.clone(), &"preview".into(), &preview_args)
+        .await
+        .unwrap();
+        let preview = message(contexts);
+        assert_eq!(preview.extra["preview"], true);
+        assert_eq!(preview.extra["sandbox_preflight"]["supported"], false);
+        assert_eq!(preview.extra["sandbox_preflight"]["executed"], false);
+        assert_eq!(
+            preview.extra["sandbox_preflight"]["requested"],
+            "workspace_write"
+        );
+        assert!(preview.extra["sandbox_preflight"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("cannot be enforced"));
+        assert_ne!(preview.tool_failed, Some(true));
+        assert!(preview.extra.get("effective_launch").is_none());
+        assert!(app.agents.list_all().await.is_empty());
+        assert_eq!(app.work_scheduler.snapshot().outstanding, 0);
+
         let error = ToolSubagent {
             config_path: String::new(),
         }
@@ -1695,6 +1777,10 @@ mod tests {
                 <= effective["accepted_byte_limit"].as_u64().unwrap()
         );
         assert_eq!(message.extra["skipped"], json!([]));
+        assert_eq!(message.extra["sandbox_preflight"]["supported"], true);
+        assert_eq!(message.extra["sandbox_preflight"]["executed"], false);
+        assert!(message.extra["sandbox_preflight"]["requested"].is_null());
+        assert!(message.extra["sandbox_preflight"]["reason"].is_null());
         assert_eq!(message.extra["exclusions"], json!([]));
         assert!(app.agents.list_all().await.is_empty());
         let saved_depth = ccx.lock().await.subchat_depth;
@@ -2698,6 +2784,26 @@ mod tests {
             object.insert("goal".to_string(), rejected.clone());
             assert!(parse_subagent_args(&object).is_err(), "{rejected}");
         }
+    }
+
+    #[test]
+    fn malformed_subagent_arguments_point_to_valid_root_fields() {
+        let mut missing = args();
+        missing.remove("expected_result");
+        let error = parse_subagent_args(&missing).err().unwrap();
+        assert!(error.contains("required root field"));
+        assert!(error.contains("\"expected_result\":\"Findings with evidence\""));
+        let mut misplaced = args();
+        misplaced.insert("launch_spec".into(), json!({"context_tokens_cap": 32000}));
+        let error = parse_subagent_args(&misplaced).err().unwrap();
+        assert!(error.contains("use the root field"));
+        assert!(error.contains("token_budget bounds initial context entries only"));
+        misplaced.remove("launch_spec");
+        misplaced.insert("context_tokens_cap".into(), json!(32000));
+        assert_eq!(
+            parse_subagent_args(&misplaced).unwrap().context_tokens_cap,
+            Some(32000)
+        );
     }
 
     #[test]

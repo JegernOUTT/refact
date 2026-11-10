@@ -631,6 +631,11 @@ fn format_status_chip(status: BgAgentStatus) -> &'static str {
 }
 
 pub(crate) fn format_agent_status_chip(record: &BackgroundAgent) -> String {
+    if record.status == BgAgentStatus::Failed
+        && crate::agents::push::budget_stop_feedback(record).is_some()
+    {
+        return "⏸ budget stopped (stored status: failed)".into();
+    }
     record
         .pause_label()
         .map(|label| format!("⏸ {label}"))
@@ -773,6 +778,9 @@ fn format_agent_status_block(record: &BackgroundAgent) -> String {
         .unwrap_or_else(|| "not started".to_string());
     result.push_str(&format!("- Started: {started}\n"));
     result.push_str(&format!("- Step count: {}\n", record.step_count));
+    if let Some(feedback) = crate::agents::push::budget_stop_feedback(record) {
+        result.push_str(&format!("- Stop reason: {feedback}\n"));
+    }
     format_optional_line(&mut result, "Current tool", record.current_tool.as_deref());
     format_optional_line(&mut result, "Model type", record.model_type.as_deref());
     result.push_str(&format!("- Model: {}\n", record.model));
@@ -893,10 +901,10 @@ async fn format_agent_result(
             }
         });
     let mut result = format!("# Agent Result: {}\n", record.title);
-    result.push_str(&format!(
-        "- Status: {}\n",
-        format_status_chip(record.status)
-    ));
+    result.push_str(&format!("- Status: {}\n", format_agent_status_chip(record)));
+    if let Some(feedback) = crate::agents::push::budget_stop_feedback(record) {
+        result.push_str(&format!("- Stop reason: {feedback}\n"));
+    }
     result.push_str(&format!("- Agent ID: {}\n", record.agent_id));
     result.push_str(&format!("- Kind: {}\n", kind_label(record.kind)));
     format_optional_line(&mut result, "Current tool", record.current_tool.as_deref());
@@ -1571,7 +1579,21 @@ impl Tool for ToolAgentResult {
             .await
             .map_err(|error| map_registry_error(&agent_id, error))?;
         let content = format_agent_result(&record, include_details).await?;
-        Ok(tool_message(tool_call_id, content))
+        let mut result = tool_message(tool_call_id, content);
+        let model = ccx.lock().await.current_model.clone();
+        if let Some(partial) =
+            crate::agents::push::saved_budget_partial(&app, &record, &model).await
+        {
+            if let Some(ContextEnum::ChatMessage(message)) = result.1.first_mut() {
+                if let ChatContent::SimpleText(text) = &mut message.content {
+                    text.push_str("\n\n");
+                    text.push_str(&partial.content.content_text_only());
+                }
+                crate::privacy::records::carry_records_into(message, &[partial])
+                    .map_err(|_| "partial findings provenance unavailable")?;
+            }
+        }
+        Ok(result)
     }
 
     fn tool_depends_on(&self) -> Vec<String> {
@@ -1759,6 +1781,164 @@ mod tests {
             },
             _ => panic!("expected chat message"),
         }
+    }
+
+    #[tokio::test]
+    async fn capped_result_returns_saved_partial_and_withholds_blocked_destination() {
+        let (temp, app, ccx) = test_context(PARENT).await;
+        *app.gcx.documents_state.workspace_folders.lock().unwrap() =
+            vec![temp.path().canonicalize().unwrap()];
+        let record = create_agent(&app, PARENT, BgAgentKind::Subagent, "Capped research").await;
+        app.agents
+            .mark_running(&record.agent_id, "subchat-partial".into())
+            .await
+            .unwrap();
+        let stop = crate::agents::types::CapStop {
+            key: refact_work_core::CapKind::GoalTurns,
+            scope: refact_work_core::CapScope::Child,
+            limit: 3,
+            used: 3,
+            resumable: false,
+            run_generation: 1,
+        };
+        app.agents
+            .mark_failed(&record.agent_id, stop.as_error().unwrap())
+            .await
+            .unwrap();
+        let mut caps = crate::caps::CodeAssistantCaps::default();
+        for provider in ["trusted", "blocked"] {
+            let id = format!("{provider}/model");
+            caps.chat_models.insert(
+                id.clone(),
+                Arc::new(crate::caps::ChatModelRecord {
+                    base: crate::caps::BaseModelRecord {
+                        id,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }),
+            );
+        }
+        {
+            let mut state = app.gcx.caps_state.write().await;
+            state.caps = Some(Arc::new(caps));
+            state.last_attempted_ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+        }
+        let mut session = ChatSession::new("subchat-partial".into());
+        session.thread.parent_id = Some(PARENT.into());
+        let mut source = ChatMessage::new("context_file".into(), "source evidence".into());
+        crate::privacy::records::merge_records(
+            &mut source,
+            [refact_privacy::FileRecord {
+                path: "src/private.rs".into(),
+                zone: "private".into(),
+                attribution: refact_privacy::Attribution::Declared,
+            }],
+        );
+        let partial_text = format!("Observed parser finding: {}", "é".repeat(5000));
+        assert_eq!(partial_text.chars().count(), 5025);
+        let messages = vec![
+            source,
+            ChatMessage::new("assistant".into(), partial_text.clone()),
+        ];
+        crate::chat::trajectories::save_trajectory_as_with_intent(
+            app.gcx.clone(),
+            &session.thread,
+            &messages,
+            crate::chat::types::TrajectoryCommitIntent::Required,
+        )
+        .await;
+        let saved =
+            crate::chat::trajectories::load_trajectory_for_chat(app.gcx.clone(), "subchat-partial")
+                .await
+                .expect("saved partial trajectory must be discoverable in the test workspace");
+        assert_eq!(saved.thread.parent_id.as_deref(), Some(PARENT));
+        assert_eq!(
+            saved.messages.last().unwrap().content.content_text_only(),
+            partial_text
+        );
+        app.gcx.privacy_policy_load.write().unwrap().policy =
+            Arc::new(refact_privacy::PrivacyPolicy {
+                zones: vec![refact_privacy::Zone {
+                    name: "private".into(),
+                    patterns: vec!["**/private.rs".into()],
+                    send_to: vec!["trusted".into()],
+                    on_shell_read: refact_privacy::ShellBehavior::Withhold,
+                }],
+                ..Default::default()
+            });
+        let mut tool = ToolAgentResult {
+            config_path: String::new(),
+        };
+        ccx.lock().await.current_model = "trusted/model".into();
+        let allowed = tool
+            .tool_execute(
+                ccx.clone(),
+                &"allowed".into(),
+                &args(&[("agent_id", json!(record.agent_id))]),
+            )
+            .await
+            .unwrap();
+        let ContextEnum::ChatMessage(message) = &allowed.1[0] else {
+            panic!("tool output")
+        };
+        let text = message.content.content_text_only();
+        assert!(
+            text.contains("Budget stop, not a crash or completion: goal.max_turns"),
+            "{text}"
+        );
+        assert!(text.contains("Saved partial findings (not verified completion"));
+        assert!(text.contains("Observed parser finding:"));
+        assert!(text.contains("[truncated, 5025 chars]"));
+        assert!(!text.contains(&partial_text));
+        assert!(text.contains("cannot widen"));
+        assert_eq!(
+            crate::privacy::records::records_to_carry(&[message.clone()])
+                .unwrap()
+                .len(),
+            1
+        );
+        let saved_record = app.agents.get_any(&record.agent_id).await.unwrap();
+        let mut non_cap = saved_record.clone();
+        non_cap.error = Some("provider crash".into());
+        assert!(
+            crate::agents::push::saved_budget_partial(&app, &non_cap, "trusted/model")
+                .await
+                .is_none()
+        );
+        let mut wrong_parent = saved_record.clone();
+        wrong_parent.parent_chat_id = "foreign-parent".into();
+        assert!(
+            crate::agents::push::saved_budget_partial(&app, &wrong_parent, "trusted/model")
+                .await
+                .is_none()
+        );
+        let mut absent = saved_record.clone();
+        absent.child_chat_id = Some("subchat-missing".into());
+        assert!(
+            crate::agents::push::saved_budget_partial(&app, &absent, "trusted/model")
+                .await
+                .is_none()
+        );
+        ccx.lock().await.current_model = "blocked/model".into();
+        let denied = output_text(
+            tool.tool_execute(
+                ccx,
+                &"denied".into(),
+                &args(&[("agent_id", json!(record.agent_id))]),
+            )
+            .await
+            .unwrap(),
+        );
+        assert!(!denied.contains("Observed parser finding:"));
+        assert!(!denied.contains("Saved partial findings"));
+        assert_eq!(
+            app.agents.get_any(&record.agent_id).await.unwrap().status,
+            BgAgentStatus::Failed
+        );
     }
 
     #[tokio::test]

@@ -573,6 +573,17 @@ impl<'de> Deserialize<'de> for ChatMessage {
 }
 
 impl ChatMessage {
+    pub fn is_runtime_context_attachment(&self) -> bool {
+        self.role == "context_file"
+            && matches!(self.content, ChatContent::ContextFiles(_))
+            && self.tool_calls.is_none()
+            && self.tool_failed.is_none()
+            && matches!(
+                self.tool_call_id.as_str(),
+                "project_context" | "memories_context" | "buddy_project_memory_pulse"
+            )
+    }
+
     pub fn new(role: String, content: String) -> Self {
         ChatMessage {
             role,

@@ -15,6 +15,10 @@ pub struct ToolWorkOverview {
     pub config_path: String,
 }
 
+fn render_overview_error(error: WorkError, attaching: bool) -> String {
+    error.for_provenance_request("A narrower root scope, states filter or authorized path may exclude an oversized item; it cannot make that item's complete provenance fit. If the needed item still cannot fit, report request_id to the local operator", attaching).to_string()
+}
+
 pub(crate) fn parse_request(
     args: &HashMap<String, Value>,
 ) -> Result<WorkOverviewRequest, WorkError> {
@@ -38,7 +42,7 @@ impl Tool for ToolWorkOverview {
             name: "work_overview".into(), display_name: "Work Overview".into(),
             source: ToolSource { source_type: ToolSourceType::Builtin, config_path: self.config_path.clone() },
             experimental: false, allow_parallel: true,
-            description: "Discover same-project chats and agents across both runtimes. Root scope means this caller's conversation tree, not another supplied root. Metadata conveys no control authority. Partial coverage is not proof that a file is safe to edit; transcripts are never included.".into(),
+            description: "Discover same-project chats and agents across both runtimes. Root scope means this caller's conversation tree, not another supplied root. Metadata conveys no control authority. Partial coverage is not proof that a file is safe to edit; transcripts are never included. On provenance_capacity, narrower filters may exclude an oversized item; lowering limit or an unchanged retry cannot make its complete provenance fit.".into(),
             input_schema: json!({"type":"object", "additionalProperties":false, "properties":{
                 "scope":{"type":"string","enum":["project","root"]},
                 "path":{"type":"string","description":"Authorized project/checkout file or directory path."},
@@ -69,7 +73,7 @@ impl Tool for ToolWorkOverview {
             .map_err(|e| e.to_string())?;
         let page = service::overview(&app, &caller, request)
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| render_overview_error(e, false))?;
         let mut message = ChatMessage {
             role: "tool".into(),
             tool_call_id: tool_call_id.clone(),
@@ -78,7 +82,8 @@ impl Tool for ToolWorkOverview {
             ),
             ..Default::default()
         };
-        service::attach_provenance(&app, &mut message, &page, None).map_err(|e| e.to_string())?;
+        service::attach_provenance(&app, &mut message, &page, None)
+            .map_err(|e| render_overview_error(e, true))?;
         Ok((false, vec![ContextEnum::ChatMessage(message)]))
     }
     fn tool_depends_on(&self) -> Vec<String> {
@@ -89,6 +94,29 @@ impl Tool for ToolWorkOverview {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn overview_capacity_rendering_preserves_identity_and_does_not_promise_recovery() {
+        use crate::coordination::error::WorkFailureCause;
+        let error = WorkError::projection_failure(WorkFailureCause::ProvenanceCapacity);
+        let request_id = error.request_id.clone();
+        let value: Value = serde_json::from_str(&render_overview_error(error, false)).unwrap();
+        assert_eq!(value["request_id"], request_id);
+        assert_eq!(value["cause"], "provenance_capacity");
+        assert_eq!(value["retryable"], false);
+        let message = value["message"].as_str().unwrap();
+        assert!(message.contains("may exclude an oversized item"));
+        assert!(message.contains("cannot make that item's complete provenance fit"));
+        assert!(
+            message.contains("Reducing limit or repeating an unchanged request does not resolve")
+        );
+        assert!(!message.contains("single work item or fixed"));
+        let denied = WorkError::scope_denied();
+        assert_eq!(
+            render_overview_error(denied.clone(), true),
+            denied.to_string()
+        );
+    }
+
     #[test]
     fn strict_request_rejects_invalid_types_limits_and_spoofed_roots() {
         for value in [

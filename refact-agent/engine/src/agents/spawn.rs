@@ -704,7 +704,7 @@ pub(crate) async fn recovery_unavailable_reason(
         return Some("previous child execution is still active".into());
     }
     let Some(trajectory) =
-        crate::chat::trajectories::load_trajectory_for_chat(app.gcx.clone(), child).await
+        crate::chat::trajectories::load_trajectory_for_recovery(app.gcx.clone(), child).await
     else {
         return Some("saved child trajectory is unavailable".into());
     };
@@ -2670,7 +2670,7 @@ async fn resume_agent_for_parent_run(
         None
     };
     let mut trajectory =
-        crate::chat::trajectories::load_trajectory_for_chat(app.gcx.clone(), &child_chat_id)
+        crate::chat::trajectories::load_trajectory_for_recovery(app.gcx.clone(), &child_chat_id)
             .await
             .ok_or_else(|| "saved child trajectory is unavailable".to_string())?;
     validate_recovery_trajectory(
@@ -3002,7 +3002,7 @@ async fn resume_agent_for_parent_run(
                 }
                 messages.splice(continuation_start..continuation_start, followup_messages);
                 super::launch_spec::clear_current_context(&app.gcx, &messages, &model.base)?;
-                let current = crate::chat::trajectories::load_trajectory_for_chat(
+                let current = crate::chat::trajectories::load_trajectory_for_recovery(
                     app.gcx.clone(),
                     &child_chat_id,
                 )
@@ -3121,7 +3121,7 @@ async fn resume_agent_for_parent_run(
                             &messages,
                             &model.base,
                         )?;
-                        let current = crate::chat::trajectories::load_trajectory_for_chat(
+                        let current = crate::chat::trajectories::load_trajectory_for_recovery(
                             app.gcx.clone(),
                             &child_chat_id,
                         )
@@ -3219,7 +3219,7 @@ async fn resume_agent_for_parent_run(
                         )
                         .await?;
                         live_revision = Some(resume_session_revision(&*session.lock().await)?);
-                        trajectory = crate::chat::trajectories::load_trajectory_for_chat(
+                        trajectory = crate::chat::trajectories::load_trajectory_for_recovery(
                             app.gcx.clone(),
                             &child_chat_id,
                         )
@@ -3680,6 +3680,7 @@ fn reconcile_resume_tool_pairs(
             message.role.as_str(),
             "tool" | "context_file" | "diff" | "plain_text"
         ) && !message.tool_call_id.is_empty()
+            && !message.is_runtime_context_attachment()
         {
             if !pending.remove(&message.tool_call_id) && !seen.contains(&message.tool_call_id) {
                 return Err("saved child has an unmatched tool result".into());
@@ -5109,6 +5110,227 @@ mod resume_validation_tests {
             restored[0].content = ChatContent::SimpleText("changed".into());
             assert_ne!(recovery_messages_revision(&restored).unwrap(), expected);
         }
+    }
+
+    #[test]
+    fn recovery_accepts_only_reserved_context_attachments_without_tool_effects() {
+        for marker in [
+            "project_context",
+            "memories_context",
+            "buddy_project_memory_pulse",
+        ] {
+            let attachment = ChatMessage {
+                role: "context_file".into(),
+                content: ChatContent::ContextFiles(vec![crate::call_validation::ContextFile {
+                    file_name: "runtime.md".into(),
+                    file_content: "context".into(),
+                    ..Default::default()
+                }]),
+                tool_call_id: marker.into(),
+                extra: serde_json::from_value(
+                    serde_json::json!({"source": "untrusted", "privacy": {"zone": "normal"}}),
+                )
+                .unwrap(),
+                ..Default::default()
+            };
+            let original = serde_json::to_value(&attachment).unwrap();
+            let mut signed_call = call();
+            signed_call.thinking_blocks = Some(vec![
+                serde_json::json!({"type":"thinking", "thinking":"saved", "signature":"opaque-signature"}),
+            ]);
+            let signed = serde_json::to_value(&signed_call).unwrap();
+            let mut messages = vec![attachment.clone(), signed_call, result()];
+            reconcile_resume_tool_pairs(&mut messages, false).unwrap();
+            assert_eq!(serde_json::to_value(&messages[0]).unwrap(), original);
+            assert_eq!(serde_json::to_value(&messages[1]).unwrap(), signed);
+            let mut malformed = attachment.clone();
+            malformed.content = ChatContent::SimpleText("not an attachment".into());
+            assert!(reconcile_resume_tool_pairs(&mut vec![malformed], true).is_err());
+            let mut failed = attachment.clone();
+            failed.tool_failed = Some(true);
+            assert!(reconcile_resume_tool_pairs(&mut vec![failed], true).is_err());
+            for role in ["tool", "diff", "plain_text"] {
+                let mut orphan = attachment.clone();
+                orphan.role = role.into();
+                assert!(reconcile_resume_tool_pairs(&mut vec![orphan], true).is_err());
+            }
+            let mut orphan = attachment.clone();
+            orphan.tool_call_id = "actual-orphan".into();
+            assert!(reconcile_resume_tool_pairs(&mut vec![orphan], true).is_err());
+            let mut colliding_call = call();
+            colliding_call.tool_calls.as_mut().unwrap()[0].id = marker.into();
+            assert!(
+                reconcile_resume_tool_pairs(&mut vec![colliding_call, attachment], false).is_err()
+            );
+        }
+        assert!(reconcile_resume_tool_pairs(&mut vec![call(), call()], true).is_err());
+        assert!(reconcile_resume_tool_pairs(
+            &mut vec![call(), ChatMessage::new("user".into(), "later".into())],
+            true
+        )
+        .is_err());
+        let mut incomplete = vec![call()];
+        reconcile_resume_tool_pairs(&mut incomplete, true).unwrap();
+        assert_eq!(incomplete[1].tool_call_id, "one");
+        assert_eq!(
+            incomplete[1].extra["agent_recovery"],
+            serde_json::json!({"outcome":"unknown", "replayed":false})
+        );
+    }
+
+    #[tokio::test]
+    async fn recovery_accepts_context_from_instruction_producer_after_json_reload() {
+        let workspace = tempfile::tempdir().unwrap();
+        let path = workspace.path().join("AGENTS.md");
+        tokio::fs::write(&path, "Project instructions")
+            .await
+            .unwrap();
+        let context = crate::chat::system_context::create_instruction_files_message(&[
+            crate::chat::system_context::InstructionFile {
+                file_name: "AGENTS.md".into(),
+                file_path: path.to_string_lossy().into(),
+                source_tool: "project_context".into(),
+                processed_content: None,
+                importance: 1,
+                max_chars: None,
+            },
+        ])
+        .await
+        .unwrap();
+        let original = serde_json::to_value(&context).unwrap();
+        let mut messages =
+            serde_json::from_value::<Vec<ChatMessage>>(serde_json::json!([context])).unwrap();
+        reconcile_resume_tool_pairs(&mut messages, false).unwrap();
+        assert_eq!(serde_json::to_value(&messages[0]).unwrap(), original);
+    }
+
+    #[tokio::test]
+    async fn recovery_revision_survives_reopen_but_detects_durable_edits() {
+        use crate::agents::types::{BgAgentKind, CreateAgentRequest};
+        use refact_core::chat_types::{PendingDelivery, PushMode};
+        let workspace = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![workspace.path().into()];
+        let app = AppState::from_gcx(gcx.clone()).await;
+        let (record, _, _) = app
+            .agents
+            .create(CreateAgentRequest {
+                parent_chat_id: "recovery-parent".into(),
+                parent_root_chat_id: Some("recovery-parent".into()),
+                parent_tool_call_id: None,
+                kind: BgAgentKind::Subagent,
+                config_name: "subagent".into(),
+                title: "recovery".into(),
+                prompt: "test".into(),
+                target_files: vec![],
+                model: "test".into(),
+                model_type: None,
+                goal_summary: None,
+                plan_present: false,
+                worktree_id: None,
+                worktree_branch: None,
+            })
+            .await
+            .unwrap();
+        let child = "recovery-durable-child";
+        app.agents
+            .mark_running(&record.agent_id, child.into())
+            .await
+            .unwrap();
+        let stopped = app
+            .agents
+            .mark_interrupted(&record.agent_id, "restart".into())
+            .await
+            .unwrap();
+        assert!(!app.agents.has_runtime(&record.agent_id).await);
+        let delivery = PendingDelivery::with_id(
+            "saved-mail",
+            vec![ChatMessage::new("user".into(), "pending".into())],
+            PushMode::Append,
+            "test",
+            true,
+        );
+        let path = workspace
+            .path()
+            .join(".refact/trajectories")
+            .join(format!("{child}.json"));
+        tokio::fs::create_dir_all(path.parent().unwrap())
+            .await
+            .unwrap();
+        let saved = serde_json::json!({
+            "id":child, "model":"test", "mode":"agent", "tool_use":"agent",
+            "created_at":"2024-01-01T00:00:00Z", "updated_at":"2024-01-01T00:00:01Z",
+            "messages":[{"message_id":"saved", "role":"user", "content":"saved"}],
+            "pending_deliveries":[delivery],
+            "goal": refact_chat_api::GoalSnapshot { content: "saved goal".into(), ..Default::default() },
+            "goal_ledger": [{"seq":1, "at_ms":1, "op":"no_progress_noted"}]
+        });
+        tokio::fs::write(&path, serde_json::to_vec(&saved).unwrap())
+            .await
+            .unwrap();
+        let baseline = crate::chat::trajectories::load_trajectory_for_recovery(gcx.clone(), child)
+            .await
+            .unwrap();
+        assert_eq!(baseline.pending_deliveries.len(), 1);
+        assert_eq!(baseline.goal.as_ref().unwrap().content, "saved goal");
+        assert_eq!(baseline.goal_ledger.len(), 1);
+        let revision = resume_trajectory_revision(&baseline).unwrap();
+        app.agents
+            .reopen_for_parent_run(
+                &record.agent_id,
+                "recovery-parent",
+                stopped.change_seq,
+                false,
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(app.agents.has_runtime(&record.agent_id).await);
+        let ordinary = crate::chat::trajectories::load_trajectory_for_chat(gcx.clone(), child)
+            .await
+            .unwrap();
+        assert!(ordinary.pending_deliveries.is_empty());
+        let reloaded = crate::chat::trajectories::load_trajectory_for_recovery(gcx.clone(), child)
+            .await
+            .unwrap();
+        assert_eq!(reloaded.pending_deliveries[0].id, "saved-mail");
+        assert_eq!(resume_trajectory_revision(&reloaded).unwrap(), revision);
+        for field in [
+            "messages",
+            "pending_deliveries",
+            "model",
+            "goal",
+            "goal_ledger",
+        ] {
+            let mut edited = saved.clone();
+            match field {
+                "messages" => {
+                    edited["messages"][0]["content"] = serde_json::json!("concurrent edit")
+                }
+                "pending_deliveries" => {
+                    edited["pending_deliveries"][0]["id"] = serde_json::json!("concurrent-mail")
+                }
+                "goal" => edited["goal"]["content"] = serde_json::json!("concurrent goal"),
+                "goal_ledger" => edited["goal_ledger"][0]["at_ms"] = serde_json::json!(2),
+                _ => edited["model"] = serde_json::json!("different-model"),
+            }
+            tokio::fs::write(&path, serde_json::to_vec(&edited).unwrap())
+                .await
+                .unwrap();
+            let changed =
+                crate::chat::trajectories::load_trajectory_for_recovery(gcx.clone(), child)
+                    .await
+                    .unwrap();
+            assert_ne!(
+                resume_trajectory_revision(&changed).unwrap(),
+                revision,
+                "{field}"
+            );
+        }
+        app.agents
+            .mark_interrupted(&record.agent_id, "test cleanup".into())
+            .await
+            .unwrap();
     }
 
     fn call() -> ChatMessage {

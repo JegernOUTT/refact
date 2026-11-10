@@ -481,7 +481,7 @@ fn validate_complete_groups(selected: &[ChatMessage]) -> Result<(), String> {
                 pending.insert(call.id.as_str());
             }
         }
-        if !message.tool_call_id.is_empty() {
+        if !message.tool_call_id.is_empty() && !message.is_runtime_context_attachment() {
             if !is_tool_result(message) || !calls.contains(message.tool_call_id.as_str()) {
                 return Err("selected context contains an unmatched tool result".into());
             }
@@ -510,7 +510,7 @@ fn completed_prefix(messages: &[ChatMessage]) -> Result<usize, String> {
                 pending.insert(call.id.as_str());
             }
         }
-        if !message.tool_call_id.is_empty() {
+        if !message.tool_call_id.is_empty() && !message.is_runtime_context_attachment() {
             if !is_tool_result(message) || !calls.contains(message.tool_call_id.as_str()) {
                 return Err("parent history contains unmatched tool results".into());
             }
@@ -1615,6 +1615,42 @@ mod tests {
             .skipped
             .iter()
             .any(|entry| entry.reason.contains("duplicate message")));
+    }
+
+    #[test]
+    fn fork_context_markers_do_not_exempt_actual_orphan_results_or_pending_calls() {
+        for marker in [
+            "project_context",
+            "memories_context",
+            "buddy_project_memory_pulse",
+        ] {
+            let attachment = ChatMessage {
+                message_id: "attachment".into(),
+                role: "context_file".into(),
+                content: crate::call_validation::ChatContent::ContextFiles(vec![]),
+                tool_call_id: marker.into(),
+                ..Default::default()
+            };
+            let messages = vec![attachment.clone(), msg("user", "user", "continue")];
+            validate_complete_groups(&messages).unwrap();
+            assert_eq!(completed_prefix(&messages).unwrap(), 2);
+            let mut orphan = attachment.clone();
+            orphan.role = "tool".into();
+            assert!(validate_complete_groups(&[orphan.clone()]).is_err());
+            assert!(completed_prefix(&[orphan]).is_err());
+            let mut orphan = attachment.clone();
+            orphan.tool_call_id = "not-a-reserved-marker".into();
+            orphan.extra.insert("runtime_injected".into(), json!(true));
+            assert!(validate_complete_groups(&[orphan.clone()]).is_err());
+            assert!(completed_prefix(&[orphan]).is_err());
+            let colliding = vec![
+                call_message("call", marker),
+                attachment,
+                msg("later", "user", "later"),
+            ];
+            assert!(validate_complete_groups(&colliding).is_err());
+            assert_eq!(completed_prefix(&colliding).unwrap(), 0);
+        }
     }
 
     #[test]

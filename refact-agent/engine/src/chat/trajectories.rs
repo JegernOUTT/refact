@@ -3328,6 +3328,15 @@ async fn load_trajectory_candidate(
     chat_id: &str,
     candidate: ValidTrajectoryCandidate,
 ) -> Option<LoadedTrajectory> {
+    load_trajectory_candidate_with_delivery_view(gcx, chat_id, candidate, false).await
+}
+
+async fn load_trajectory_candidate_with_delivery_view(
+    gcx: Arc<GlobalContext>,
+    chat_id: &str,
+    candidate: ValidTrajectoryCandidate,
+    durable_deliveries: bool,
+) -> Option<LoadedTrajectory> {
     let app = AppState::from_gcx(gcx.clone()).await;
     let traj_path = candidate.path;
     let mut t = candidate.json;
@@ -3680,7 +3689,7 @@ async fn load_trajectory_candidate(
 
     let pending_deliveries =
         if let Some(agent_id) = app.agents.find_agent_id_by_child_chat_id(chat_id).await {
-            if app.agents.has_runtime(&agent_id).await {
+            if !durable_deliveries && app.agents.has_runtime(&agent_id).await {
                 Vec::new()
             } else {
                 pending_deliveries
@@ -3732,6 +3741,14 @@ pub async fn load_trajectory_for_chat(
 ) -> Option<LoadedTrajectory> {
     let candidate = find_trajectory_or_buddy_file(gcx.clone(), chat_id).await?;
     load_trajectory_candidate(gcx, chat_id, candidate).await
+}
+
+pub(crate) async fn load_trajectory_for_recovery(
+    gcx: Arc<GlobalContext>,
+    chat_id: &str,
+) -> Option<LoadedTrajectory> {
+    let candidate = find_trajectory_or_buddy_file(gcx.clone(), chat_id).await?;
+    load_trajectory_candidate_with_delivery_view(gcx, chat_id, candidate, true).await
 }
 
 pub(crate) async fn rebind_persisted_task_agent(

@@ -147,7 +147,13 @@ async fn provenance_budget_single_detail_capacity_is_typed_not_encoding() {
         serde_json::to_value(error.cause).unwrap(),
         "provenance_capacity"
     );
-    assert!(error.message.contains("narrow"));
+    assert!(!error.retryable);
+    assert!(error
+        .message
+        .contains("provenance was not truncated or omitted"));
+    assert!(error
+        .message
+        .contains("repeating an unchanged request does not resolve"));
     assert!(uuid::Uuid::parse_str(&error.request_id).is_ok());
     assert!(!error.to_string().contains(dir.path().to_str().unwrap()));
 }

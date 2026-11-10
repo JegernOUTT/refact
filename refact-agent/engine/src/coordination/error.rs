@@ -64,17 +64,31 @@ impl WorkError {
             ),
             WorkFailureCause::ProvenanceCapacity => (
                 "unavailable",
-                "a single work item or fixed inspection metadata exceeds the complete provenance capacity; narrow scope or selected paths and fetch a fresh snapshot. If the item still cannot fit, report request_id to the local operator",
+                "complete privacy/provenance cannot fit within the bounded response; provenance was not truncated or omitted. Reducing limit or repeating an unchanged request does not resolve this capacity failure; report request_id to the local operator",
             ),
             WorkFailureCause::ProjectionUnavailable => (
                 "unavailable",
                 "work projection is unavailable; retry with a fresh snapshot, narrow scope or filters, and report request_id to the local operator if it persists",
             ),
         };
-        let mut error = Self::new(code, message, true);
+        let mut error = Self::new(code, message, cause != WorkFailureCause::ProvenanceCapacity);
         error.cause = Some(cause);
         tracing::debug!(request_id = %error.request_id, cause = ?cause, "work projection failure");
         error
+    }
+
+    pub fn for_provenance_request(mut self, guidance: &str, attaching: bool) -> Self {
+        if self.cause != Some(WorkFailureCause::ProvenanceCapacity) {
+            return self;
+        }
+        let phase = if attaching {
+            "while attaching response privacy provenance"
+        } else {
+            "while preparing the requested projection"
+        };
+        self.message = format!("Complete privacy/provenance cannot fit within the bounded response {phase}; provenance was not truncated or omitted. Reducing limit or repeating an unchanged request does not resolve this capacity failure. {guidance}");
+        self.retryable = false;
+        self
     }
 
     pub fn invalid(message: impl Into<String>) -> Self {

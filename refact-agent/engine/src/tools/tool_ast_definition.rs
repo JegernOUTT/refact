@@ -39,6 +39,38 @@ pub struct ToolAstDefinition {
     pub config_path: String,
 }
 
+fn definition_lookup_error(cause: String) -> String {
+    let lower = cause.to_ascii_lowercase();
+    let unhealthy = [
+        "database disk image is malformed",
+        "file is not a database",
+        "database corruption",
+        "database corrupt",
+        "malformed database schema",
+    ]
+    .iter()
+    .any(|message| lower.contains(message));
+    let sanitized = refact_core::string_utils::redact_sensitive(&cause);
+    let sanitized: String = sanitized
+        .chars()
+        .filter(|c| !c.is_control() || c.is_whitespace())
+        .collect();
+    let cause = sanitized.split_whitespace().collect::<Vec<_>>().join(" ");
+    let cause = if cause.chars().count() > 512 {
+        format!(
+            "{}… [cause truncated]",
+            cause.chars().take(512).collect::<String>()
+        )
+    } else {
+        cause
+    };
+    if unhealthy {
+        format!("CodeGraph index/database is unhealthy; definition lookup failed: {cause}. Do not blindly retry this lookup. Use search_pattern with a scoped path and/or glob to locate candidate files, then inspect them; text/path search is not semantic definition resolution. Ask the local operator to investigate the index; no repair was attempted")
+    } else {
+        cause
+    }
+}
+
 fn is_type_definition(def: &AstDefinition) -> bool {
     def.symbol_type == SymbolType::StructDeclaration || !def.this_is_a_class.is_empty()
 }
@@ -64,7 +96,10 @@ async fn type_hierarchy_sections(
         if name.is_empty() || !seen.insert(name.clone()) {
             continue;
         }
-        let hierarchy = service.type_hierarchy(&name).await?;
+        let hierarchy = service
+            .type_hierarchy(&name)
+            .await
+            .map_err(definition_lookup_error)?;
         if hierarchy.trim().is_empty() {
             continue;
         }
@@ -271,13 +306,22 @@ async fn symbol_def_via_codegraph(
             break;
         }
 
-        let defs = service.definitions(symbol).await?;
+        let defs = service
+            .definitions(symbol)
+            .await
+            .map_err(definition_lookup_error)?;
         if defs.is_empty() {
             references.add_symbol(symbol, "not_found", "search_symbol_definition");
             corrections = true;
-            let fuzzy = service.definition_paths_fuzzy(symbol, 20).await?;
+            let fuzzy = service
+                .definition_paths_fuzzy(symbol, 20)
+                .await
+                .map_err(definition_lookup_error)?;
             if fuzzy.is_empty() {
-                let counters = service.fetch_counters().await?;
+                let counters = service
+                    .fetch_counters()
+                    .await
+                    .map_err(definition_lookup_error)?;
                 all_messages.push(format!(
                     "For symbol `{}`:\n⚠️ No definitions found ({} total in codegraph). 💡 Check spelling or use search_pattern() to find text\n",
                     symbol, counters.counter_defs
@@ -503,7 +547,7 @@ impl Tool for ToolAstDefinition {
             },
             experimental: false,
             allow_parallel: true,
-            description: "Find definition of a symbol in the project using the codegraph".to_string(),
+            description: "Find symbol definitions using CodeGraph. If the index/database is unhealthy, use scoped search_pattern/glob and inspect candidates instead; text/path search is not semantic definition resolution".to_string(),
             input_schema: json_schema_from_params(&[("symbols", "string", "Comma-separated list of symbols to search for (functions, methods, classes, type aliases). No spaces allowed in symbol names.")], &["symbols"]),
             output_schema: None,
             annotations: None,
@@ -523,6 +567,88 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
     use std::time::Duration;
+
+    #[test]
+    fn unhealthy_lookup_guidance_distinguishes_sqlite_failures() {
+        for cause in [
+            "codegraph definitions: database disk image is malformed",
+            "file is not a database",
+            "malformed database schema (nodes)",
+        ] {
+            let message = definition_lookup_error(cause.into());
+            assert!(message.contains("index/database is unhealthy"));
+            assert!(message.contains(cause));
+            assert!(message.contains("search_pattern with a scoped path and/or glob"));
+            assert!(message.contains("not semantic definition resolution"));
+            assert!(!message.contains("retry with"));
+        }
+        for cause in [
+            "database is locked",
+            "database is busy",
+            "no such table: nodes",
+            "codegraph database is unavailable: waiting for the store to be reopened",
+            "Blocked by privacy policy",
+        ] {
+            assert_eq!(definition_lookup_error(cause.into()), cause);
+        }
+    }
+
+    #[test]
+    fn malformed_database_cause_is_retained_without_control_characters() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("not-a-database.sqlite");
+        fs::write(&path, b"this is not a sqlite database at all").unwrap();
+        let error = refact_codegraph::CodeGraphService::open(path)
+            .err()
+            .expect("invalid database must fail");
+        let rendered = definition_lookup_error(error.clone());
+        assert!(
+            rendered.contains("index/database is unhealthy"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("not a database"), "{error}: {rendered}");
+        let rendered = definition_lookup_error("database disk image is malformed\n\x1b[31m".into());
+        assert!(!rendered.contains('\n'));
+    }
+
+    #[tokio::test]
+    async fn definition_path_returns_hard_error_for_unhealthy_schema() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("codegraph.sqlite");
+        let service = Arc::new(refact_codegraph::CodeGraphService::open(path.clone()).unwrap());
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch("PRAGMA writable_schema=ON; UPDATE sqlite_master SET sql='CREATE TABLE nodes (' WHERE name='nodes'; PRAGMA schema_version=999;").unwrap();
+        drop(conn);
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let result = symbol_def_via_codegraph(
+            gcx,
+            service,
+            &["shared".into()],
+            "shared",
+            &"call".into(),
+            None,
+            no_abort(),
+        )
+        .await;
+        let error = result
+            .expect_err("corruption must remain a hard tool error, not empty or fallback success");
+        assert!(error.contains("index/database is unhealthy"), "{error}");
+        assert!(error.contains("malformed database schema"), "{error}");
+        assert!(error.contains("search_pattern with a scoped path and/or glob"));
+        assert!(!error.contains("No definitions found"));
+    }
+
+    #[test]
+    fn lookup_error_sanitizes_before_bounding_cause() {
+        let message = definition_lookup_error(format!(
+            "database disk image is malformed\n\x1b{}",
+            "x".repeat(2000)
+        ));
+        assert!(message.contains("[cause truncated]"));
+        assert!(!message.contains('\x1b'));
+        assert!(!message.contains('\n'));
+        assert!(message.len() < 1100);
+    }
 
     fn no_abort() -> Arc<AtomicBool> {
         Arc::new(AtomicBool::new(false))

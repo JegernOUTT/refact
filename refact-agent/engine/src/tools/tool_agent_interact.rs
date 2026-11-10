@@ -198,7 +198,7 @@ async fn records_for_overview(
 /// discover a peer the caller is not allowed to know about.
 fn peer_mail_refusal(agent_id: &str) -> String {
     format!(
-        "Background agent '{agent_id}' is not reachable from this chat. Cross-root mail requires an explicit same-project mail grant; discovery grants no messaging or control authority."
+        "Background agent '{agent_id}' is not reachable from this chat. Use the full exact agent_id, never a shortened overview ID or chat ID. Children contact their parent with to='parent'; relay sibling requests through that parent. Cross-root mail requires an explicit same-project mail grant; discovery grants no messaging or control authority. Nothing was sent; do not auto-retry."
     )
 }
 
@@ -250,7 +250,7 @@ async fn can_message_agent(
         .unwrap_or(target.parent_chat_id.as_str())
         .to_string();
     if target_root == root_chat_id {
-        return Err("You may only message your direct children or descendants.".to_string());
+        return Err("You may only message your direct children or descendants. Children use to='parent' to contact their parent or request sibling relay; sibling discovery grants no direct mail authority. Use the full exact agent_id, not a shortened ID. Nothing was sent.".to_string());
     }
     let Some(source_root) = app.agent_executions.saved_scope(target_agent_id) else {
         return Err(peer_mail_refusal(target_agent_id));
@@ -459,7 +459,7 @@ fn overview_line(record: &BackgroundAgent, depth: usize) -> String {
     format!(
         "{}- {} — {} — {} — step {} — tool: {} — targets: {} — branch: {} — merge: {} — model: {} — tokens: {}{} — questions: {}",
         "  ".repeat(depth),
-        short_id(&record.agent_id),
+        record.agent_id,
         record.title,
         crate::tools::tool_background_agents::format_agent_status_chip(record),
         record.step_count,
@@ -525,11 +525,11 @@ impl Tool for ToolAgentMessage {
             self.config_path.clone(),
             "agent_message",
             "Agent Message",
-            "Send a message to a child or descendant agent; to=parent asks or notifies the parent agent and is only available to background subagents.",
+            "Send to a child/descendant using its full exact agent_id (not a shortened overview ID or chat ID). Children use to='parent' for notes, questions or sibling relay; discovery is not mail authority, and cross-root mail needs an explicit grant. For finished children inspect agent_result, then deliberately inspect agent_lifecycle and continue/recover where allowed; sending never restarts or retries a child.",
             json!({
                 "type": "object",
                 "properties": {
-                    "to": {"type": "string", "description": "A child/descendant agent id, or parent."},
+                    "to": {"type": "string", "description": "Full exact child/descendant agent_id, or 'parent' from a child. Short IDs and chat IDs are not resolved."},
                     "text": {"type": "string", "minLength": 1, "maxLength": refact_work_core::coordination_settings().agent_message_max_chars, "description": "Message text."},
                     "expects_reply": {"type": "boolean", "description": "When messaging parent, create a tracked question."},
                     "push": PushMode::schema(),
@@ -657,7 +657,7 @@ impl Tool for ToolAgentMessage {
             let updated = app
                 .agents
                 .answer_question(&to, &question_id, text.clone())
-                .await?;
+                .await.map_err(|error| format!("{error}. The question was not answered and no message was sent. If the question was withdrawn or the child finished, inspect agent_result and agent_lifecycle before deliberately continuing/recovering where allowed; do not retry the stale reply_to or silently send it as a new message."))?;
             crate::agents::spawn::emit_background_agent_update(app.clone(), &updated).await;
         }
         let message_text = reply_to
@@ -693,7 +693,7 @@ impl Tool for ToolAgentMessage {
                 .finished_status
                 .map(|status| format!("finished (status {})", status.as_str()))
                 .unwrap_or_else(|| "sealed its current delivery turn".into());
-            format!("Agent {to} {state}; message saved as a follow-up for explicit agent_lifecycle action=continue after the run finishes; it has not been delivered and remains subject to its TTL and current authority.")
+            format!("Agent {to} {state}; message saved as a follow-up, not delivered. Inspect agent_result, then agent_lifecycle action=inspect and deliberately continue/recover where allowed. Nothing restarts automatically; the follow-up remains subject to its TTL and current authority.")
         } else {
             delivery_outcome_text(&to, outcome)
         };
@@ -1140,6 +1140,7 @@ mod tests {
             record.questions.push(question);
         }
         assert!(overview_line(&record, 0).ends_with("questions: 1"));
+        assert!(overview_line(&record, 0).contains(&record.agent_id));
         record.questions.pop();
         assert!(overview_line(&record, 0).ends_with("questions: 0"));
     }
@@ -1283,7 +1284,7 @@ mod tests {
         assert_eq!(receipt["accepted"], true);
         let rendered = text(result);
         assert!(rendered.contains("sealed its current delivery turn"));
-        assert!(rendered.contains("has not been delivered"));
+        assert!(rendered.contains("not delivered"));
         assert_eq!(
             app.agents
                 .get_any(&child.agent_id)
@@ -2152,6 +2153,45 @@ mod tests {
                 .contains("subagent question")
         }));
         assert_parent_notice_persisted(&app, "root", "May I edit frogs?").await;
+    }
+
+    #[tokio::test]
+    async fn stale_question_refusal_does_not_send_or_restart_a_child() {
+        let (app, ccx) = test_context("root", "root", None).await;
+        let child = create(&app, "root", "child").await;
+        let (_, question) = app
+            .agents
+            .add_question(&child.agent_id, "Continue?".into())
+            .await
+            .unwrap();
+        app.agents
+            .mark_failed(&child.agent_id, "stopped".into())
+            .await
+            .unwrap();
+        let before = app.agents.get_any(&child.agent_id).await.unwrap();
+        let error = ToolAgentMessage {
+            config_path: String::new(),
+        }
+        .tool_execute(
+            ccx,
+            &"stale".into(),
+            &args(&[
+                ("to", json!(child.agent_id)),
+                ("reply_to", json!(question)),
+                ("text", json!("yes")),
+            ]),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("no message was sent"));
+        assert!(error.contains("inspect agent_result and agent_lifecycle"));
+        assert!(error.contains("do not retry the stale reply_to"));
+        let after = app.agents.get_any(&child.agent_id).await.unwrap();
+        assert_eq!(after.run_generation, before.run_generation);
+        assert_eq!(after.change_seq, before.change_seq);
+        assert!(after.pending_deliveries.is_empty());
+        assert!(after.followups.is_empty());
+        assert!(after.questions[0].answer.is_none());
     }
 
     #[tokio::test]

@@ -26,7 +26,7 @@ impl Tool for ToolWait {
             name:"wait".into(), display_name:"Wait".into(),
             source:ToolSource {source_type:ToolSourceType::Builtin,config_path:self.config_path.clone()},
             experimental:false, allow_parallel:true,
-            description:"Wait for a duration, process, any one authorized child agent, or park the task planner awaiting matching agents. Duration targets require a nonblank target.description (at most 80 trimmed characters); the legacy top-level description remains accepted for duration only. Omit description for non-duration targets. Interruption never cancels the target. Duration ticks are enqueued after the wait tool result. Task agent timeout is 30–1800 seconds in milliseconds.".into(),
+            description:"Wait for a duration, process, any one authorized child agent, or park the task planner awaiting matching agents. Duration targets require a nonblank target.description (at most 80 trimmed characters); the legacy top-level description remains accepted for duration only. Omit description and push for non-duration targets. push belongs at the top level, never inside target. Interruption never cancels the target. Duration ticks are enqueued after the wait tool result. Task agent timeout is 30–1800 seconds in milliseconds.".into(),
             input_schema:json!({"type":"object","additionalProperties":false,"properties":{
                 "target":{"oneOf":[
                     {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"duration"},"duration_ms":{"type":"integer","minimum":100,"maximum":3600000},"tick_interval_ms":{"type":"integer","minimum":5000},"description":{"type":"string","minLength":1,"maxLength":80,"pattern":"\\S","description":"Required nonblank reason for this duration wait, at most 80 trimmed characters."}},"required":["kind","duration_ms","description"]},
@@ -126,6 +126,18 @@ fn parse_wait_request(
     };
     for key in target.keys() {
         if !fields.contains(&key.as_str()) {
+            if key == "push" && kind == "duration" {
+                return Err(format!(
+                    "target.push is not supported; place push at the top level for duration only. Example: {}",
+                    json!({"target":{"kind":"duration","duration_ms":100,"description":"Wait briefly"},"push":"append"})
+                ));
+            }
+            if key == "push" || key == "description" {
+                return Err(format!(
+                    "target.{key} is not applicable to {kind}; description and push apply only to duration (push at the top level). Example: {}",
+                    minimal_wait_example(kind)
+                ));
+            }
             return Err(format!("'{key}' is not applicable to {kind}"));
         }
     }
@@ -133,7 +145,10 @@ fn parse_wait_request(
         return Err("timeout_ms is not applicable to duration".into());
     }
     if kind != "duration" && (args.contains_key("description") || args.contains_key("push")) {
-        return Err("description and push apply only to duration".into());
+        return Err(format!(
+            "description and push apply only to duration; omit both for {kind}. Example: {}",
+            minimal_wait_example(kind)
+        ));
     }
     let mut operation: HashMap<String, Value> = target
         .iter()
@@ -161,6 +176,12 @@ fn parse_wait_request(
         if description.is_empty() {
             return Err("description must be a non-empty string".into());
         }
+        if description.chars().count() > 80 {
+            return Err(format!(
+                "target.description must be at most 80 trimmed characters; shorten the reason. Example: {}",
+                minimal_wait_example("duration")
+            ));
+        }
         operation.insert("description".into(), json!(description));
     }
     for key in ["push", "timeout_ms"] {
@@ -171,9 +192,87 @@ fn parse_wait_request(
     Ok((kind, operation))
 }
 
+fn minimal_wait_example(kind: &str) -> Value {
+    let target = match kind {
+        "duration" => json!({"kind":"duration","duration_ms":100,"description":"Wait briefly"}),
+        "process" => json!({"kind":"process","process_id":"exec_..."}),
+        "agents" => json!({"kind":"agents","agent_ids":["bgagent-..."]}),
+        "task_agents" => json!({"kind":"task_agents"}),
+        _ => unreachable!(),
+    };
+    json!({"target": target})
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn assert_example_parses(error: &str) {
+        let example = error
+            .split("Example: ")
+            .nth(1)
+            .expect("actionable JSON example");
+        let args: HashMap<String, Value> = serde_json::from_str(example).unwrap();
+        parse_wait_request(&args).unwrap();
+    }
+
+    #[test]
+    fn wait_rejects_misplaced_fields_with_valid_examples() {
+        for kind in ["process", "agents", "task_agents"] {
+            for field in ["description", "push"] {
+                for nested in [false, true] {
+                    let mut request = minimal_wait_example(kind);
+                    let value = if field == "push" {
+                        json!("append")
+                    } else {
+                        json!("Wait briefly")
+                    };
+                    if nested {
+                        request["target"][field] = value;
+                    } else {
+                        request[field] = value;
+                    }
+                    let args = serde_json::from_value(request).unwrap();
+                    let error = parse_wait_request(&args).unwrap_err();
+                    assert!(error.contains("only to duration"));
+                    assert_example_parses(&error);
+                }
+            }
+        }
+        let mut request = minimal_wait_example("duration");
+        request["target"]["push"] = json!("append");
+        let error = parse_wait_request(&serde_json::from_value(request).unwrap()).unwrap_err();
+        assert!(error.contains("place push at the top level"));
+        assert_example_parses(&error);
+    }
+
+    #[test]
+    fn wait_duration_description_limit_counts_trimmed_characters() {
+        for legacy in [false, true] {
+            for (length, valid) in [(80, true), (81, false)] {
+                let mut request = minimal_wait_example("duration");
+                let value = json!(format!(" {} ", "é".repeat(length)));
+                if legacy {
+                    request["target"]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("description");
+                    request["description"] = value;
+                } else {
+                    request["target"]["description"] = value;
+                }
+                let args = serde_json::from_value(request).unwrap();
+                let result = parse_wait_request(&args);
+                if valid {
+                    assert_eq!(result.unwrap().1["description"], "é".repeat(length));
+                } else {
+                    let error = result.unwrap_err();
+                    assert!(error.contains("at most 80 trimmed characters"));
+                    assert_example_parses(&error);
+                }
+            }
+        }
+    }
 
     #[test]
     fn parse_wait_request_contract() {

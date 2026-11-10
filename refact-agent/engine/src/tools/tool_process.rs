@@ -297,9 +297,6 @@ impl Tool for ToolProcessStart {
                 None => process_workspace(gcx.clone(), execution_scope.as_ref()).await,
             }
         };
-        if parsed.mode == ExecMode::Service && parsed.service_name.is_none() {
-            return Err("service mode requires service_name".to_string());
-        }
         if let Some(service_name) = parsed.service_name.as_ref() {
             let mut lookup = ExecServiceLookup::new(service_name.clone());
             if !chat_id.is_empty() {
@@ -457,7 +454,7 @@ impl Tool for ToolProcessStart {
             source: source(&self.config_path),
             experimental: false,
             allow_parallel: false,
-            description: "Start a runtime-owned background or service process and return its process ID, initial status, output cursor, and metadata. Processes use a pseudo-terminal (PTY) by default, enabling interactive stdin and combining stdout and stderr into a single stream. Set tty=false to use separate pipe streams.".to_string(),
+            description: "Start a runtime-owned background or service process and return its process ID, initial status, output cursor, and metadata. mode=service requires a nonblank service_name; omit mode for an unnamed background process. Processes use a pseudo-terminal (PTY) by default, enabling interactive stdin and combining stdout and stderr into a single stream. Set tty=false to use separate pipe streams.".to_string(),
             input_schema: process_start_input_schema(),
             output_schema: None,
             annotations: None,
@@ -641,8 +638,9 @@ impl Tool for ToolProcessRead {
             )
         {
             return Err(format!(
-                "stream={} is not available with from_disk=true: persisted logs are combined-only; use stream=combined or stream=all",
-                stream_label(stream)
+                "stream={} is not available with from_disk=true: persisted logs are combined-only; use stream=combined or stream=all. Example: {}. For separate streams, omit from_disk.",
+                stream_label(stream),
+                json!({"process_id": process_id.as_str(), "from_disk": true, "stream": "combined"})
             ));
         }
         let observation =
@@ -725,13 +723,13 @@ impl Tool for ToolProcessRead {
             source: source(&self.config_path),
             experimental: false,
             allow_parallel: true,
-            description: "Read buffered output from a runtime-owned process using a sequence cursor and optional stream/output filters.".to_string(),
+            description: "Read buffered output from a runtime-owned process using a sequence cursor and optional stream/output filters. from_disk=true accepts only combined or all (default combined); omit from_disk for separate stdout/stderr.".to_string(),
             input_schema: json_schema_from_params(
                 &[
                     ("process_id", "string", "Runtime-owned process ID returned by process_start."),
                     ("since_seq", "integer", "Optional output sequence cursor. Default: 0."),
                     ("stream", "string", "Optional stream: stdout, stderr, combined, or all. Default: combined."),
-                    ("from_disk", "boolean", "Optional. If true and persisted output exists, read the full on-disk transcript instead of the in-memory ring."),
+                    ("from_disk", "boolean", "Optional. If true and persisted output exists, read the bounded on-disk tail instead of the in-memory ring. Only stream=combined or all is supported."),
                     ("output_filter", "string", "Optional regex filter for output lines."),
                     ("output_limit", "string", "Optional max lines to show, or all/full for unlimited output."),
                 ],
@@ -778,12 +776,23 @@ impl Tool for ToolProcessKill {
         )
         .await?;
         let snapshot = exec_registry.kill(&process_id).await?;
-        let content = format_process_snapshot("Process killed", &snapshot);
+        let title = if snapshot.status == ExecStatus::Killed {
+            "Process killed"
+        } else if snapshot.status.is_terminal() {
+            "Process kill acknowledged; process already terminal"
+        } else {
+            "Process kill pending; termination not confirmed"
+        };
+        let content = format_process_snapshot(title, &snapshot);
         Ok(tool_result(
             tool_call_id,
             content,
             Some(exec_extra(&snapshot, None, None, None)),
-            tool_failed_for_status(&snapshot.status),
+            if snapshot.status == ExecStatus::Killed {
+                None
+            } else {
+                tool_failed_for_status(&snapshot.status)
+            },
         ))
     }
 
@@ -794,7 +803,7 @@ impl Tool for ToolProcessKill {
             source: source(&self.config_path),
             experimental: false,
             allow_parallel: false,
-            description: "Kill a runtime-owned process by process ID without routing through shell command confirmation.".to_string(),
+            description: "Kill a runtime-owned process by process ID without routing through shell command confirmation. A confirmed killed status acknowledges this operation, not successful workload completion; errors and unconfirmed termination remain explicit.".to_string(),
             input_schema: json_schema_from_params(
                 &[("process_id", "string", "Runtime-owned process ID returned by process_start.")],
                 &["process_id"],
@@ -1181,7 +1190,7 @@ fn process_start_input_schema() -> Value {
             ("description", "string", "Required. A single concise active-voice sentence describing what the command does. Short for simple commands: 'Start development server'. More descriptive for piped/obscure commands: 'Build and tail log output in background'. Never use words like 'complex' or 'risk'."),
             ("workdir", "string", "Optional working directory."),
             ("mode", "string", "Optional mode: background or service. Default: background."),
-            ("service_name", "string", "Optional service name stored in process metadata."),
+            ("service_name", "string", "Required when mode=service; nonblank service name stored in process metadata."),
             ("startup_wait_ms", "integer", "Optional milliseconds to wait before returning the initial snapshot."),
             ("startup_wait_port", "integer", "Optional readiness port stored with startup metadata."),
             ("startup_wait_keyword", "string", "Optional readiness keyword stored with startup metadata."),
@@ -1417,6 +1426,12 @@ async fn parse_start_args(
     let command = parse_required_string(args, "command")?;
     let mode = parse_start_mode(args)?;
     let service_name = parse_optional_string(args, "service_name")?;
+    if mode == ExecMode::Service && service_name.is_none() {
+        return Err(concat!(
+            "service mode requires service_name. Example: ",
+            r#"{"command":"npm run dev","description":"Start development server","mode":"service","service_name":"web"}. For an unnamed background process, omit mode or use mode=background."#
+        ).to_string());
+    }
     let description = parse_optional_string(args, "description")?.ok_or_else(|| {
         "description is required and must be a non-empty single concise sentence".to_string()
     })?;
@@ -2392,6 +2407,14 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(exec(&killed)["status"], "killed");
+        assert_ne!(killed.tool_failed, Some(true));
+        assert_eq!(exec(&killed)["process_id"], process_id.as_str());
+        assert!(text(&killed).starts_with("Process killed\n"));
+        assert_eq!(
+            gcx.exec_registry.get(&process_id).await.unwrap().status,
+            ExecStatus::Killed
+        );
+        assert_eq!(tool_failed_for_status(&ExecStatus::Killed), Some(true));
     }
 
     #[cfg(unix)]
@@ -2516,7 +2539,19 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert_eq!(err, "service mode requires service_name");
+        assert!(err.starts_with("service mode requires service_name. Example: "));
+        let example = err
+            .split("Example: ")
+            .nth(1)
+            .unwrap()
+            .split(". For ")
+            .next()
+            .unwrap();
+        let example: HashMap<String, Value> = serde_json::from_str(example).unwrap();
+        let (gcx, _) = test_ccx().await;
+        let parsed = parse_start_args(gcx, &example, None, None).await.unwrap();
+        assert_eq!(parsed.mode, ExecMode::Service);
+        assert_eq!(parsed.service_name.as_deref(), Some("web"));
     }
 
     #[tokio::test]
@@ -2882,6 +2917,99 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(exec(&killed)["status"], "killed");
+        assert_ne!(killed.tool_failed, Some(true));
+        assert_eq!(exec(&killed)["process_id"], process_id.as_str());
+        assert!(text(&killed).starts_with("Process killed\n"));
+        assert_eq!(
+            gcx.exec_registry.get(&process_id).await.unwrap().status,
+            ExecStatus::Killed
+        );
+        assert_eq!(tool_failed_for_status(&ExecStatus::Killed), Some(true));
+    }
+
+    #[tokio::test]
+    async fn process_kill_missing_or_unmanaged_process_remains_error() {
+        let (gcx, ccx) = test_ccx().await;
+        let id = register_test_process(&gcx, "exec_no_runtime", "chat", None).await;
+        gcx.exec_registry.mark_started(&id).await.unwrap();
+        let mut kill = ToolProcessKill {
+            config_path: String::new(),
+        };
+        for (id, expected) in [
+            (id.as_str(), "process is not running: exec_no_runtime"),
+            ("exec_missing", "process not found: exec_missing"),
+        ] {
+            let error = run_tool(
+                &mut kill,
+                ccx.clone(),
+                make_args_map(vec![("process_id", json!(id))]),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(error, expected);
+        }
+        assert_eq!(
+            gcx.exec_registry.get(&id).await.unwrap().status,
+            ExecStatus::Running
+        );
+    }
+
+    #[tokio::test]
+    async fn process_kill_preserves_existing_failed_workload() {
+        let (gcx, ccx) = test_ccx().await;
+        let id = register_test_process(&gcx, "exec_failed", "chat", None).await;
+        gcx.exec_registry
+            .mark_failed(&id, "workload failed".into())
+            .await
+            .unwrap();
+        let mut kill = ToolProcessKill {
+            config_path: String::new(),
+        };
+        let message = run_tool(
+            &mut kill,
+            ccx,
+            make_args_map(vec![("process_id", json!(id.as_str()))]),
+        )
+        .await
+        .unwrap();
+        assert_eq!(message.tool_failed, Some(true));
+        assert_eq!(exec(&message)["status"], "failed");
+        assert!(text(&message).starts_with("Process kill acknowledged; process already terminal\n"));
+        assert!(text(&message).contains("failure_reason: workload failed"));
+    }
+
+    #[tokio::test]
+    async fn process_read_disk_stream_error_example_is_usable() {
+        let (gcx, ccx) = test_ccx().await;
+        let id = register_test_process(&gcx, "exec_disk_stream", "chat", None).await;
+        let mut read = ToolProcessRead {
+            config_path: String::new(),
+        };
+        for stream in ["stdout", "stderr"] {
+            let error = run_tool(
+                &mut read,
+                ccx.clone(),
+                make_args_map(vec![
+                    ("process_id", json!(id.as_str())),
+                    ("from_disk", json!(true)),
+                    ("stream", json!(stream)),
+                ]),
+            )
+            .await
+            .unwrap_err();
+            assert!(error.contains("persisted logs are combined-only"));
+            let example = error
+                .split("Example: ")
+                .nth(1)
+                .unwrap()
+                .split(". For ")
+                .next()
+                .unwrap();
+            let args: HashMap<String, Value> = serde_json::from_str(example).unwrap();
+            let message = run_tool(&mut read, ccx.clone(), args).await.unwrap();
+            assert_eq!(exec(&message)["stream"], "combined");
+            assert_eq!(exec(&message)["process_id"], id.as_str());
+        }
     }
 
     #[tokio::test]
