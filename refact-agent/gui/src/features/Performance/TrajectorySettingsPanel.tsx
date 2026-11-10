@@ -56,7 +56,6 @@ const SETTINGS_GROUPS: SettingsGroup[] = [
       "max_queue_size",
       "event_channel_capacity",
       "recent_request_ids_capacity",
-      "max_parallel_tools",
       "max_images_per_message",
       "max_file_size",
     ],

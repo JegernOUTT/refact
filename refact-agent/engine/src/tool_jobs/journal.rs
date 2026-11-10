@@ -1,6 +1,6 @@
 //! Local ownership ledger, never an execution queue. No executable authority is stored.
-//! Retention is fail-closed: at 100,000 identities admission stops; neither active nor
-//! unacknowledged records are age-evicted. Exact native payloads remain available locally.
+//! Retention has no count ceiling: every identity is kept for dedup, and neither active
+//! nor unacknowledged records are evicted. Exact native payloads remain available locally.
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -8,8 +8,6 @@ use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 
 use super::runtime::{JobSnapshot, JobStatus};
-
-pub(super) const RETAINED_IDENTITIES: usize = 100_000;
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -145,7 +143,6 @@ impl Journal {
                         return Err("inconsistent tool job journal identity".into());
                     }
                     entries.push(entry);
-                    if entries.len() > RETAINED_IDENTITIES { return Err("tool job journal retention bound exceeded".into()); }
                 }
             }
             // Recovery changes facts only: no leases, futures or scope authority restored.

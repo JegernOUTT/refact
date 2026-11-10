@@ -6,7 +6,6 @@ pub struct ChatLimits {
     pub event_channel_capacity: usize,
     pub recent_request_ids_capacity: usize,
     pub max_images_per_message: usize,
-    pub max_parallel_tools: usize,
     pub max_file_size: usize,
 }
 
@@ -17,7 +16,6 @@ impl Default for ChatLimits {
             event_channel_capacity: 4096,
             recent_request_ids_capacity: 100,
             max_images_per_message: 50,
-            max_parallel_tools: usize::MAX,
             max_file_size: 40_000,
         }
     }
@@ -140,6 +138,5 @@ pub fn apply_live_limits(limits: ChatLimits) {
     config.limits.max_queue_size = limits.max_queue_size;
     config.limits.recent_request_ids_capacity = limits.recent_request_ids_capacity;
     config.limits.max_images_per_message = limits.max_images_per_message;
-    config.limits.max_parallel_tools = limits.max_parallel_tools;
     config.limits.max_file_size = limits.max_file_size;
 }

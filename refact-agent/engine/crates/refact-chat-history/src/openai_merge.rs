@@ -1,13 +1,12 @@
-use serde_json::json;
+use std::collections::BTreeMap;
 
-/// Maximum number of parallel tool calls to prevent memory DoS
-const MAX_TOOL_CALLS: usize = 128;
+use serde_json::json;
 
 /// Accumulator for streaming tool calls that avoids O(n²) string concatenation.
 /// Use `ToolCallAccumulator` for streaming, then call `finalize()` to get the final JSON.
 #[derive(Default)]
 pub struct ToolCallAccumulator {
-    pub entries: Vec<ToolCallEntry>,
+    pub entries: BTreeMap<u64, ToolCallEntry>,
 }
 
 #[derive(Default)]
@@ -16,7 +15,7 @@ pub struct ToolCallEntry {
     pub tool_type: Option<String>,
     pub name: String,
     pub arguments: String, // Mutable String for efficient append
-    pub index: usize,
+    pub index: u64,
     pub initialized: bool, // Track if this entry received meaningful data
     pub extra_content: Option<serde_json::Value>, // Gemini thought_signature etc.
 }
@@ -36,26 +35,12 @@ impl ToolCallAccumulator {
                 i.as_u64()
                     .or_else(|| i.as_str().and_then(|s| s.parse().ok()))
             })
-            .unwrap_or(0) as usize;
+            .unwrap_or(0);
 
-        // Prevent memory DoS from huge indices
-        if index >= MAX_TOOL_CALLS {
-            tracing::warn!(
-                "Tool call index {} exceeds maximum {}, ignoring",
-                index,
-                MAX_TOOL_CALLS
-            );
-            return;
-        }
-
-        while self.entries.len() <= index {
-            self.entries.push(ToolCallEntry {
-                index: self.entries.len(),
-                ..Default::default()
-            });
-        }
-
-        let entry = &mut self.entries[index];
+        let entry = self.entries.entry(index).or_insert_with(|| ToolCallEntry {
+            index,
+            ..Default::default()
+        });
 
         // Track if we received meaningful data (not just an empty delta)
         let mut has_meaningful_data = false;
@@ -121,25 +106,12 @@ impl ToolCallAccumulator {
                 i.as_u64()
                     .or_else(|| i.as_str().and_then(|s| s.parse().ok()))
             })
-            .unwrap_or(0) as usize;
+            .unwrap_or(0);
 
-        if index >= MAX_TOOL_CALLS {
-            tracing::warn!(
-                "Tool call index {} exceeds maximum {}, ignoring finalize",
-                index,
-                MAX_TOOL_CALLS
-            );
-            return;
-        }
-
-        while self.entries.len() <= index {
-            self.entries.push(ToolCallEntry {
-                index: self.entries.len(),
-                ..Default::default()
-            });
-        }
-
-        let entry = &mut self.entries[index];
+        let entry = self.entries.entry(index).or_insert_with(|| ToolCallEntry {
+            index,
+            ..Default::default()
+        });
         let mut has_meaningful_data = false;
 
         if let Some(id) = new_tc.get("id").and_then(|v| v.as_str()) {
@@ -193,7 +165,7 @@ impl ToolCallAccumulator {
     /// Uses stable synthetic IDs based on index for entries without real IDs.
     pub fn finalize(&self) -> Vec<serde_json::Value> {
         self.entries
-            .iter()
+            .values()
             .filter(|entry| entry.initialized && !entry.name.is_empty())
             .map(|entry| {
                 // Use stable synthetic ID based on index, not random UUID
@@ -277,11 +249,9 @@ mod tests {
     #[test]
     fn test_accumulator_filters_phantom_entries() {
         let mut acc = ToolCallAccumulator::default();
-        // Tool call arrives with index 2 first - creates placeholders for 0 and 1
         acc.merge(&json!({"index": 2, "id": "call_real", "function": {"name": "real_func", "arguments": "{}"}}));
 
         let result = acc.finalize();
-        // Should only have 1 entry (the real one), not 3 phantom entries
         assert_eq!(
             result.len(),
             1,
@@ -293,25 +263,42 @@ mod tests {
     }
 
     #[test]
-    fn test_accumulator_rejects_huge_index() {
+    fn test_accumulator_retains_sparse_indices_without_placeholder_allocation() {
         let mut acc = ToolCallAccumulator::default();
-        // Try to create a tool call with a huge index (memory DoS attempt)
-        acc.merge(&json!({"index": 1000000, "id": "call_huge", "function": {"name": "bad", "arguments": "{}"}}));
+        acc.merge(
+            &json!({"index": u64::MAX.to_string(), "function": {"name": "last", "arguments": "{"}}),
+        );
+        acc.merge(&json!({"index": 1000000, "id": "call_sparse", "function": {"name": "sparse", "arguments": "{}"}}));
+        acc.merge(&json!({"index": 0, "function": {"name": "first", "arguments": "{}"}}));
+        acc.set_final(&json!({"index": u64::MAX, "function": {"arguments": "{\"complete\":true}"}, "extra_content": {"thought_signature": "opaque"}}));
 
-        // Should be ignored - no entries created
-        let result = acc.finalize();
-        assert!(result.is_empty(), "Huge index should be rejected");
+        assert_eq!(acc.entries.len(), 3);
+        assert_eq!(
+            acc.finalize(),
+            vec![
+                json!({"id": "pending_call_0", "type": "function", "index": 0, "function": {"name": "first", "arguments": "{}"}}),
+                json!({"id": "call_sparse", "type": "function", "index": 1000000, "function": {"name": "sparse", "arguments": "{}"}}),
+                json!({"id": format!("pending_call_{}", u64::MAX), "type": "function", "index": u64::MAX, "function": {"name": "last", "arguments": "{\"complete\":true}"}, "extra_content": {"thought_signature": "opaque"}}),
+            ]
+        );
     }
 
     #[test]
-    fn test_accumulator_accepts_max_valid_index() {
+    fn test_accumulator_retains_more_than_128_calls_in_index_order() {
         let mut acc = ToolCallAccumulator::default();
-        // Index 127 should be accepted (MAX_TOOL_CALLS = 128)
-        acc.merge(&json!({"index": 127, "id": "call_max", "function": {"name": "valid", "arguments": "{}"}}));
+        let expected: Vec<_> = (0..300)
+            .map(|index| json!({"index": index, "id": format!("call_{index}"), "type": "function", "function": {"name": format!("tool_{index}"), "arguments": "{}"}}))
+            .collect();
+        for call in expected.iter().rev() {
+            if call["index"].as_u64().unwrap() % 2 == 0 {
+                acc.merge(call);
+            } else {
+                acc.set_final(call);
+            }
+        }
 
-        let result = acc.finalize();
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0]["id"], "call_max");
+        assert_eq!(acc.entries.len(), expected.len());
+        assert_eq!(acc.finalize(), expected);
     }
 
     #[test]

@@ -111,18 +111,18 @@ struct Record {
 
 struct State {
     records: HashMap<String, Record>,
+    invocation_ids: HashMap<String, String>,
     closed: bool,
 }
 
-/// Capacity counts only active/unconsumed ownership. Durable identities are retained
-/// separately under a hard admission bound; no active/unacknowledged record is evicted.
+/// Admission has no count ceiling. Every identity is retained for dedup and no
+/// active/unacknowledged record is evicted; only the wake-hint channel is bounded.
 pub struct JobRuntime {
     #[cfg(test)]
     test_inline_budget: std::sync::Mutex<Option<Option<Duration>>>,
     pub scopes: Arc<super::ScopeCoordinator>,
     namespace: std::path::PathBuf,
     state: Mutex<State>,
-    capacity: usize,
     max_result_bytes: usize,
     events: broadcast::Sender<JobEvent>,
     changed: tokio::sync::Notify,
@@ -206,20 +206,20 @@ impl Drop for ForegroundClaim {
 }
 
 impl JobRuntime {
-    pub fn new(capacity: usize, max_result_bytes: usize) -> Arc<Self> {
+    pub fn new(event_capacity: usize, max_result_bytes: usize) -> Arc<Self> {
         Self::with_namespace(
             std::path::PathBuf::from("/isolated-tool-job-runtime"),
-            capacity,
+            event_capacity,
             max_result_bytes,
         )
     }
 
     pub fn with_namespace(
         namespace: std::path::PathBuf,
-        capacity: usize,
+        event_capacity: usize,
         max_result_bytes: usize,
     ) -> Arc<Self> {
-        let (events, _) = broadcast::channel(capacity.max(1));
+        let (events, _) = broadcast::channel(event_capacity.max(1));
         Arc::new(Self {
             #[cfg(test)]
             test_inline_budget: std::sync::Mutex::new(None),
@@ -227,9 +227,9 @@ impl JobRuntime {
             namespace,
             state: Mutex::new(State {
                 records: HashMap::new(),
+                invocation_ids: HashMap::new(),
                 closed: false,
             }),
-            capacity,
             max_result_bytes,
             events,
             changed: tokio::sync::Notify::new(),
@@ -242,7 +242,7 @@ impl JobRuntime {
 
     pub async fn open_durable(
         namespace: std::path::PathBuf,
-        capacity: usize,
+        event_capacity: usize,
         max_result_bytes: usize,
     ) -> Result<Arc<Self>, String> {
         let (journal, entries) =
@@ -252,12 +252,16 @@ impl JobRuntime {
         if entries.iter().any(|entry| entry.scope_keys.is_empty()) {
             return Err("tool job journal lacks original scope provenance".into());
         }
-        let mut runtime = Self::with_namespace(namespace, capacity, max_result_bytes);
+        let mut runtime = Self::with_namespace(namespace, event_capacity, max_result_bytes);
         let inner = Arc::get_mut(&mut runtime).expect("new runtime uniquely owned");
         inner.journal = Some(journal);
         let state = inner.state.get_mut().unwrap_or_else(|e| e.into_inner());
         for entry in entries {
             let mut snapshot = entry.snapshot;
+            state.invocation_ids.insert(
+                super::journal::identity(&snapshot)?,
+                snapshot.receipt.job_id.clone(),
+            );
             snapshot.receipt.binding.scope_keys = entry.scope_keys;
             if snapshot.status == JobStatus::Unknown {
                 inner
@@ -491,6 +495,7 @@ impl JobRuntime {
         if !binding.scope_keys.contains(&chat_key) {
             binding.scope_keys.push(chat_key);
         }
+        let invocation_id = serde_json::to_string(&binding).map_err(|error| error.to_string())?;
         let job_id = format!("tooljob_{}", uuid::Uuid::new_v4());
         let base = format!("/v1/chats/{}/tool-jobs/{job_id}", binding.chat_id);
         let receipt = JobReceipt {
@@ -509,18 +514,7 @@ impl JobRuntime {
             if state.closed {
                 return Err("tool job runtime is shut down".into());
             }
-            if state.records.values().filter(|r| !r.consumed).count() >= self.capacity {
-                return Err("tool job capacity exhausted".into());
-            }
-            if state.records.len() >= super::journal::RETAINED_IDENTITIES {
-                return Err(
-                    "tool job retained identity limit reached; explicit archival required".into(),
-                );
-            }
-            if state.records.values().any(|record| {
-                serde_json::to_value(&record.receipt.binding).ok()
-                    == serde_json::to_value(&receipt.binding).ok()
-            }) {
+            if state.invocation_ids.contains_key(&invocation_id) {
                 return Err(
                     "tool invocation already owned; inspect existing result, do not replay".into(),
                 );
@@ -529,6 +523,7 @@ impl JobRuntime {
                 .scopes
                 .acquire(&receipt.binding.scope_keys, cancel.clone())
                 .map_err(|error| format!("tool job scope unavailable: {error:?}"))?;
+            state.invocation_ids.insert(invocation_id, job_id.clone());
             state.records.insert(
                 job_id.clone(),
                 Record {
@@ -1705,6 +1700,18 @@ mod tests {
             })
             .await
             .is_err());
+        let mut same_invocation = binding();
+        same_invocation.scope_keys = vec![super::super::ScopeKey::Worktree {
+            project: "/other-project".into(),
+            root: "/other-worktree".into(),
+        }];
+        assert!(runtime
+            .submit(same_invocation, Duration::ZERO, |_| async {
+                panic!("scope provenance must not change invocation identity");
+            })
+            .await
+            .is_err());
+        assert_eq!(runtime.state.lock().unwrap().invocation_ids.len(), 1);
         runtime.shutdown().await;
     }
 
@@ -1748,44 +1755,286 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn capacity_shutdown_and_restart_never_replay() {
+    async fn active_jobs_have_no_ceiling_and_shutdown_and_restart_never_replay() {
         let runtime = JobRuntime::new(1, 65536);
-        let (started, ready) = oneshot::channel();
-        let output = runtime
-            .submit(binding(), Duration::ZERO, |cancel| async move {
-                started.send(()).unwrap();
-                while !cancel.load(Ordering::Acquire) {
-                    tokio::task::yield_now().await;
-                }
-                (JobStatus::Unknown, result())
-            })
-            .await
-            .unwrap();
-        ready.await.unwrap();
-        let Submission::Accepted(receipt) = output else {
-            panic!("expected receipt");
-        };
-        let mut other = binding();
-        other.tool_call_id = "other".into();
-        assert!(runtime
-            .submit(other, Duration::ZERO, |_| async {
-                panic!("full runtime must not start work");
-            })
-            .await
-            .is_err());
+        let effects = Arc::new(AtomicUsize::new(0));
+        let mut receipts = Vec::new();
+        for call_id in ["call", "other"] {
+            let mut call = binding();
+            call.tool_call_id = call_id.into();
+            let (started, ready) = oneshot::channel();
+            let counter = effects.clone();
+            let output = runtime
+                .submit(call, Duration::ZERO, move |cancel| {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    async move {
+                        started.send(()).unwrap();
+                        while !cancel.load(Ordering::Acquire) {
+                            tokio::task::yield_now().await;
+                        }
+                        (JobStatus::Unknown, result())
+                    }
+                })
+                .await
+                .unwrap();
+            ready.await.unwrap();
+            let Submission::Accepted(receipt) = output else {
+                panic!("expected receipt");
+            };
+            receipts.push(receipt);
+        }
+        assert_eq!(effects.load(Ordering::SeqCst), 2);
+        for receipt in &receipts {
+            assert!(runtime
+                .submit(receipt.binding.clone(), Duration::ZERO, |_| async {
+                    panic!("pending duplicate must never run");
+                })
+                .await
+                .is_err());
+        }
         runtime.shutdown().await;
-        assert_eq!(
-            runtime.get("chat", &receipt.job_id).unwrap().status,
-            JobStatus::Unknown
-        );
+        for receipt in &receipts {
+            assert_eq!(
+                runtime.get("chat", &receipt.job_id).unwrap().status,
+                JobStatus::Unknown
+            );
+        }
         assert!(runtime
             .submit(binding(), Duration::ZERO, |_| async {
                 panic!("closed runtime must not run");
             })
             .await
             .is_err());
+        let mut fresh = binding();
+        fresh.tool_call_id = "fresh-after-shutdown".into();
+        assert!(runtime
+            .submit(fresh, Duration::ZERO, |_| async {
+                panic!("closed runtime must not run");
+            })
+            .await
+            .is_err());
+        assert_eq!(effects.load(Ordering::SeqCst), 2);
         let restarted = JobRuntime::new(1, 65536);
-        assert!(restarted.get("chat", &receipt.job_id).is_none());
+        for receipt in &receipts {
+            assert!(restarted.get("chat", &receipt.job_id).is_none());
+        }
         restarted.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn admission_accepts_over_256_pending_jobs_and_lag_recovers_from_records() {
+        const JOBS: usize = 300;
+        let runtime = JobRuntime::new(4, 65536);
+        let mut events = runtime.subscribe();
+        let effects = Arc::new(AtomicUsize::new(0));
+        let mut releases = Vec::with_capacity(JOBS);
+        let mut receipts = Vec::with_capacity(JOBS);
+        for index in 0..JOBS {
+            let mut call = binding();
+            call.tool_call_id = format!("pending-{index}");
+            let (started, ready) = oneshot::channel();
+            let (release, released) = oneshot::channel::<()>();
+            let counter = effects.clone();
+            let receipt = runtime
+                .submit_background(call, move |_| {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    async move {
+                        started.send(()).unwrap();
+                        released.await.unwrap();
+                        (
+                            JobStatus::Succeeded,
+                            JobResult {
+                                had_corrections: false,
+                                messages: vec![ChatMessage::new(
+                                    "tool".into(),
+                                    format!("result-{index}"),
+                                )],
+                                context_files: vec![],
+                            },
+                        )
+                    }
+                })
+                .await
+                .unwrap();
+            ready.await.unwrap();
+            releases.push(release);
+            receipts.push(receipt);
+        }
+        assert_eq!(effects.load(Ordering::SeqCst), JOBS);
+        let ids = receipts
+            .iter()
+            .map(|receipt| receipt.job_id.clone())
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(ids.len(), JOBS);
+        {
+            let state = runtime.state.lock().unwrap();
+            assert_eq!(state.records.len(), JOBS);
+            assert!(state
+                .records
+                .values()
+                .all(|record| !record.consumed && !record.status.terminal()));
+        }
+        assert!(runtime.background_terminals().is_empty());
+        for receipt in [&receipts[0], &receipts[JOBS - 1]] {
+            assert!(runtime
+                .submit_background(receipt.binding.clone(), |_| async {
+                    panic!("pending duplicate must never run")
+                })
+                .await
+                .is_err());
+        }
+        let mut extra = binding();
+        extra.tool_call_id = format!("pending-{JOBS}");
+        let extra = runtime
+            .submit_background(extra, |_| async { (JobStatus::Succeeded, result()) })
+            .await
+            .unwrap();
+        let extra = runtime.wait_terminal("chat", &extra.job_id).await.unwrap();
+        runtime
+            .ack_delivered("chat", &extra.receipt.job_id, extra.revision)
+            .await
+            .unwrap();
+        for release in releases {
+            release.send(()).unwrap();
+        }
+        for receipt in &receipts {
+            let terminal = runtime
+                .wait_terminal("chat", &receipt.job_id)
+                .await
+                .unwrap();
+            assert_eq!(terminal.status, JobStatus::Succeeded);
+        }
+        assert!(matches!(
+            events.try_recv(),
+            Err(broadcast::error::TryRecvError::Lagged(_))
+        ));
+        let notices = runtime.background_terminals();
+        assert_eq!(notices.len(), JOBS);
+        assert_eq!(
+            notices
+                .iter()
+                .map(|notice| notice.receipt.job_id.clone())
+                .collect::<std::collections::HashSet<_>>(),
+            ids
+        );
+        for notice in &notices {
+            let index = notice
+                .receipt
+                .binding
+                .tool_call_id
+                .strip_prefix("pending-")
+                .unwrap();
+            assert_eq!(
+                notice.receipt.job_id,
+                receipts[index.parse::<usize>().unwrap()].job_id
+            );
+            assert_eq!(
+                notice.result.as_ref().unwrap().messages[0]
+                    .content
+                    .content_text_only(),
+                format!("result-{index}")
+            );
+            runtime
+                .ack_delivered("chat", &notice.receipt.job_id, notice.revision)
+                .await
+                .unwrap();
+        }
+        assert!(runtime.background_terminals().is_empty());
+        assert_eq!(effects.load(Ordering::SeqCst), JOBS);
+        assert_eq!(runtime.state.lock().unwrap().records.len(), JOBS + 1);
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn journal_retains_over_100k_identities_without_eviction_or_replay() {
+        const SEEDED: usize = 100_001;
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = JobRuntime::open_durable(dir.path().into(), 2, 65536)
+            .await
+            .unwrap();
+        runtime.shutdown().await;
+        drop(runtime);
+        let path = dir.path().join("tool-jobs/ownership.sqlite");
+        tokio::task::spawn_blocking(move || {
+            let mut connection = rusqlite::Connection::open(path).unwrap();
+            let tx = connection.transaction().unwrap();
+            {
+                let mut insert = tx
+                    .prepare("INSERT INTO tool_jobs VALUES (?1, ?2, ?3)")
+                    .unwrap();
+                for index in 0..SEEDED {
+                    let mut call = binding();
+                    call.tool_call_id = format!("seeded-{index}");
+                    let job_id = format!("seeded-job-{index}");
+                    let snapshot = JobSnapshot {
+                        receipt: JobReceipt {
+                            job_id: job_id.clone(),
+                            binding: call.clone(),
+                            status: JobStatus::Accepted,
+                            result_url: "local".into(),
+                            cancel_url: "local".into(),
+                        },
+                        status: JobStatus::Succeeded,
+                        revision: 2,
+                        result: None,
+                        result_unavailable_reason: None,
+                    };
+                    let identity = super::super::journal::identity(&snapshot).unwrap();
+                    let payload = serde_json::to_string(&super::super::journal::Entry {
+                        snapshot,
+                        consumed: true,
+                        inline: false,
+                        internal_readiness: false,
+                        scope_keys: call.scope_keys,
+                    })
+                    .unwrap();
+                    insert
+                        .execute(rusqlite::params![job_id, identity, payload])
+                        .unwrap();
+                }
+            }
+            tx.commit().unwrap();
+        })
+        .await
+        .unwrap();
+        let reopened = JobRuntime::open_durable(dir.path().into(), 2, 65536)
+            .await
+            .unwrap();
+        {
+            let state = reopened.state.lock().unwrap();
+            assert_eq!(state.records.len(), SEEDED);
+            assert_eq!(state.invocation_ids.len(), SEEDED);
+        }
+        for index in [0, SEEDED - 1] {
+            let job_id = format!("seeded-job-{index}");
+            let seeded = reopened.get("chat", &job_id).unwrap();
+            assert_eq!(seeded.status, JobStatus::Succeeded);
+            assert_eq!(seeded.revision, 2);
+            assert!(reopened
+                .submit_background(seeded.receipt.binding, |_| async {
+                    panic!("retained identity must never replay")
+                })
+                .await
+                .is_err());
+        }
+        assert!(reopened.background_terminals().is_empty());
+        let mut fresh = binding();
+        fresh.tool_call_id = format!("seeded-{SEEDED}");
+        let effects = Arc::new(AtomicUsize::new(0));
+        let counter = effects.clone();
+        assert!(matches!(
+            reopened
+                .submit(fresh, Duration::from_secs(60), move |_| {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    async { (JobStatus::Succeeded, result()) }
+                })
+                .await
+                .unwrap(),
+            Submission::Inline(_)
+        ));
+        assert_eq!(effects.load(Ordering::SeqCst), 1);
+        assert_eq!(reopened.state.lock().unwrap().records.len(), SEEDED + 1);
+        assert!(reopened.get("chat", "seeded-job-0").is_some());
+        reopened.shutdown().await;
     }
 }

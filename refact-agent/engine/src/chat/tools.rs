@@ -1164,6 +1164,7 @@ mod tests {
             ),
             ..base
         };
+        app.runtime.tool_jobs.set_test_inline_budget(None);
         let thread = ThreadParams {
             id: "owned-job-dispatch".into(),
             model: "model".into(),
@@ -1192,6 +1193,7 @@ mod tests {
         );
         assert_eq!(messages[0].tool_call_id, "owned-job-call");
         let id = messages[0].extra["tool_job"]["job_id"].as_str().unwrap();
+        wait_for_count(&started, 1).await;
         assert_eq!(started.load(AtomicOrdering::SeqCst), 1);
         barrier.wait().await;
         let snapshot = tokio::time::timeout(
@@ -1271,6 +1273,7 @@ mod tests {
             ),
             ..base
         };
+        app.runtime.tool_jobs.set_test_inline_budget(None);
         let thread = session.lock().await.thread.clone();
         let catalog = app
             .tool_registry
@@ -1312,6 +1315,7 @@ mod tests {
             .as_str()
             .unwrap()
             .to_string();
+        wait_for_count(&started, 1).await;
         assert_eq!(started.load(AtomicOrdering::SeqCst), 1);
         session.lock().await.add_message(messages[0].clone());
         barrier.wait().await;
@@ -1397,6 +1401,7 @@ mod tests {
                 ),
                 ..base
             };
+            app.runtime.tool_jobs.set_test_inline_budget(None);
             let child = format!("subchat-supervised-{}", Uuid::new_v4());
             let (fence, _owner) =
                 crate::buddy::supervision_authority::test_native_job_owner(&child);
@@ -1477,6 +1482,7 @@ mod tests {
             ),
             ..base
         };
+        app.runtime.tool_jobs.set_test_inline_budget(None);
         let calls = [
             deterministic_tool_call("fifo-first", "serial_pause"),
             deterministic_tool_call("fifo-second", "serial_pause"),
@@ -1655,8 +1661,8 @@ mod tests {
 
     #[serial(trajectory_perf)]
     #[tokio::test]
-    async fn more_than_thirty_two_parallel_safe_tools_start_together() {
-        const TOOL_COUNT: usize = 40;
+    async fn more_than_two_hundred_fifty_six_parallel_safe_tools_start_together() {
+        const TOOL_COUNT: usize = 300;
         let started = Arc::new(AtomicUsize::new(0));
         let barrier = Arc::new(tokio::sync::Barrier::new(TOOL_COUNT + 1));
         let registry = BarrierToolRegistry {
@@ -1697,18 +1703,308 @@ mod tests {
             .await
             .insert("unbounded-parallel-tools".to_string(), session.clone());
 
-        let execution = tokio::spawn(process_tool_calls_once(app, session, "agent", None));
-        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        let execution = tokio::spawn(process_tool_calls_once(
+            app.clone(),
+            session.clone(),
+            "agent",
+            None,
+        ));
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
             while started.load(AtomicOrdering::SeqCst) < TOOL_COUNT {
                 tokio::task::yield_now().await;
             }
         })
         .await
         .expect("all parallel-safe tools started before any completed");
+        assert_eq!(started.load(AtomicOrdering::SeqCst), TOOL_COUNT);
+        assert!(
+            !execution.is_finished(),
+            "no tool may finish before every call has started"
+        );
 
         barrier.wait().await;
-        let outcome = execution.await.expect("tool execution task");
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(30), execution)
+            .await
+            .expect("tool execution finished")
+            .expect("tool execution task");
         assert!(matches!(outcome, ToolStepOutcome::Continue));
+        assert_eq!(started.load(AtomicOrdering::SeqCst), TOOL_COUNT);
+        let locked = session.lock().await;
+        let results: Vec<_> = locked
+            .messages
+            .iter()
+            .filter(|message| message.role == "tool")
+            .collect();
+        assert_eq!(results.len(), TOOL_COUNT);
+        for (index, message) in results.iter().enumerate() {
+            assert_eq!(message.tool_call_id, format!("parallel-{index}"));
+            assert_ne!(message.tool_failed, Some(true));
+            assert!(!message.extra.contains_key("tool_job"));
+            assert_eq!(message.content.content_text_only(), "released");
+        }
+        assert_eq!(locked.runtime.state, SessionState::Idle);
+        drop(locked);
+        app.runtime.tool_jobs.shutdown().await;
+    }
+
+    async fn wait_for_count(counter: &AtomicUsize, expected: usize) {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while counter.load(AtomicOrdering::SeqCst) < expected {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("tool invocation started");
+    }
+
+    async fn drive_until(mut condition: impl FnMut() -> bool) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !condition() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "condition not reached"
+            );
+            tokio::task::yield_now().await;
+        }
+    }
+
+    struct GateControl {
+        invocations: AtomicUsize,
+        completed: AtomicUsize,
+        started: AMutex<Option<tokio::sync::oneshot::Sender<()>>>,
+        release: AMutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+    }
+
+    struct GateTool {
+        control: Arc<GateControl>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::tools::tools_description::Tool for GateTool {
+        async fn tool_execute(
+            &mut self,
+            _ccx: Arc<AMutex<AtCommandsContext>>,
+            tool_call_id: &String,
+            _args: &std::collections::HashMap<String, serde_json::Value>,
+        ) -> Result<(bool, Vec<crate::call_validation::ContextEnum>), String> {
+            self.control
+                .invocations
+                .fetch_add(1, AtomicOrdering::SeqCst);
+            if let Some(started) = self.control.started.lock().await.take() {
+                let _ = started.send(());
+            }
+            let release = self
+                .control
+                .release
+                .lock()
+                .await
+                .take()
+                .ok_or("gate tool replayed")?;
+            release
+                .await
+                .map_err(|_| "gate release dropped".to_string())?;
+            self.control.completed.fetch_add(1, AtomicOrdering::SeqCst);
+            let mut message = ChatMessage::new("tool".to_string(), "native result".to_string());
+            message.tool_call_id = tool_call_id.clone();
+            Ok((
+                false,
+                vec![crate::call_validation::ContextEnum::ChatMessage(message)],
+            ))
+        }
+
+        fn tool_description(&self) -> refact_tool_api::ToolDesc {
+            deterministic_tool_desc("gate_tool")
+        }
+
+        async fn match_against_confirm_deny(
+            &self,
+            _ccx: Arc<AMutex<AtCommandsContext>>,
+            _args: &std::collections::HashMap<String, serde_json::Value>,
+        ) -> Result<refact_tool_api::MatchConfirmDeny, String> {
+            Ok(refact_tool_api::MatchConfirmDeny {
+                result: MatchConfirmDenyResult::PASS,
+                command: "gate_tool".to_string(),
+                rule: "gate test".to_string(),
+            })
+        }
+    }
+
+    struct GateDispatch {
+        app: AppState,
+        thread: ThreadParams,
+        control: Arc<GateControl>,
+        events: tokio::sync::broadcast::Receiver<crate::tool_jobs::JobEvent>,
+        release: tokio::sync::oneshot::Sender<()>,
+        origin: tokio::time::Instant,
+        handle: tokio::task::JoinHandle<(usize, bool, Vec<ChatMessage>, Vec<ContextFile>)>,
+    }
+
+    async fn start_gate_dispatch() -> GateDispatch {
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release, release_rx) = tokio::sync::oneshot::channel();
+        let control = Arc::new(GateControl {
+            invocations: AtomicUsize::new(0),
+            completed: AtomicUsize::new(0),
+            started: AMutex::new(Some(started_tx)),
+            release: AMutex::new(Some(release_rx)),
+        });
+        let factory_control = control.clone();
+        let base = AppState::from_gcx(crate::global_context::tests::make_test_gcx().await).await;
+        let mut app = AppState {
+            tool_registry: Arc::new(
+                crate::app_state::AppToolRegistry::with_fixture_tool_factory(
+                    base.gcx.clone(),
+                    Arc::new(move || {
+                        vec![Box::new(GateTool {
+                            control: factory_control.clone(),
+                        })
+                            as Box<dyn crate::tools::tools_description::Tool + Send>]
+                    }),
+                ),
+            ),
+            ..base
+        };
+        app.runtime.tool_jobs = crate::tool_jobs::JobRuntime::new(8, 65536);
+        let thread = ThreadParams {
+            id: "gate-dispatch".into(),
+            model: "model".into(),
+            ..Default::default()
+        };
+        let ccx = build_tool_execution_context(app.clone(), 16384, &[], &thread, None)
+            .await
+            .unwrap();
+        let catalog = app
+            .tool_registry
+            .acquire_tool_catalog("agent", None, None)
+            .await;
+        let events = app.runtime.tool_jobs.subscribe();
+        tokio::time::pause();
+        let origin = tokio::time::Instant::now();
+        let handle = tokio::spawn(execute_single_tool(
+            app.clone(),
+            ccx,
+            0,
+            deterministic_tool_call("gate-call", "gate_tool"),
+            catalog,
+            None,
+            Arc::new(SerialToolRegistry::new()),
+            true,
+            1,
+            "agent",
+            None,
+            None,
+            None,
+            None,
+        ));
+        drive_until(|| control.invocations.load(AtomicOrdering::SeqCst) == 1).await;
+        started_rx.await.expect("gate start signal");
+        assert_eq!(origin.elapsed(), std::time::Duration::ZERO);
+        GateDispatch {
+            app,
+            thread,
+            control,
+            events,
+            release,
+            origin,
+            handle,
+        }
+    }
+
+    #[test]
+    fn shipping_inline_budget_is_one_minute() {
+        assert_eq!(TOOL_JOB_INLINE_BUDGET, std::time::Duration::from_secs(60));
+    }
+
+    #[tokio::test]
+    async fn shipping_dispatch_returns_inline_result_when_tool_finishes_before_sixty_seconds() {
+        let mut run = start_gate_dispatch().await;
+        tokio::time::advance(std::time::Duration::from_secs(59)).await;
+        assert!(!run.handle.is_finished(), "pending through virtual 59s");
+        assert_eq!(run.control.invocations.load(AtomicOrdering::SeqCst), 1);
+        assert_eq!(run.control.completed.load(AtomicOrdering::SeqCst), 0);
+        run.release.send(()).unwrap();
+        drive_until(|| run.handle.is_finished()).await;
+        let (idx, corrections, messages, _) = run.handle.await.unwrap();
+        assert_eq!(idx, 0);
+        assert!(!corrections);
+        assert!(run.origin.elapsed() < std::time::Duration::from_secs(60));
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].tool_call_id, "gate-call");
+        assert_eq!(messages[0].tool_failed, Some(false));
+        assert!(!messages[0].extra.contains_key("tool_job"));
+        assert_eq!(messages[0].content.content_text_only(), "native result");
+        assert_eq!(run.control.invocations.load(AtomicOrdering::SeqCst), 1);
+        assert_eq!(run.control.completed.load(AtomicOrdering::SeqCst), 1);
+        assert!(matches!(
+            run.events.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ));
+        run.app.runtime.tool_jobs.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn shipping_dispatch_hands_off_at_sixty_seconds_and_same_future_completes_once() {
+        let mut run = start_gate_dispatch().await;
+        tokio::time::advance(std::time::Duration::from_secs(59)).await;
+        assert!(!run.handle.is_finished(), "pending through virtual 59s");
+        tokio::time::advance(std::time::Duration::from_millis(1001)).await;
+        drive_until(|| run.handle.is_finished()).await;
+        let (idx, corrections, messages, _) = run.handle.await.unwrap();
+        assert_eq!(idx, 0);
+        assert!(!corrections);
+        assert!(run.origin.elapsed() >= std::time::Duration::from_secs(60));
+        assert!(run.origin.elapsed() <= std::time::Duration::from_millis(60001));
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].tool_call_id, "gate-call");
+        assert_eq!(messages[0].tool_failed, None);
+        assert_eq!(messages[0].extra["tool_job"]["status"], "accepted");
+        assert_eq!(run.control.invocations.load(AtomicOrdering::SeqCst), 1);
+        assert_eq!(run.control.completed.load(AtomicOrdering::SeqCst), 0);
+        let id = messages[0].extra["tool_job"]["job_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let jobs = run.app.runtime.tool_jobs.clone();
+        let chat = run.thread.id.clone();
+        assert_eq!(
+            jobs.get(&chat, &id).unwrap().status,
+            crate::tool_jobs::JobStatus::Running
+        );
+
+        run.release.send(()).unwrap();
+        drive_until(|| {
+            jobs.get(&chat, &id)
+                .is_some_and(|snapshot| snapshot.status == crate::tool_jobs::JobStatus::Succeeded)
+        })
+        .await;
+        let terminal = jobs.get(&chat, &id).unwrap();
+        assert_eq!(
+            terminal.result.unwrap().messages[0]
+                .content
+                .content_text_only(),
+            "native result"
+        );
+        assert_eq!(run.control.invocations.load(AtomicOrdering::SeqCst), 1);
+        assert_eq!(run.control.completed.load(AtomicOrdering::SeqCst), 1);
+        let mut terminal_events = 0;
+        while let Ok(event) = run.events.try_recv() {
+            assert_eq!(event.job_id, id);
+            if event.status == crate::tool_jobs::JobStatus::Succeeded {
+                terminal_events += 1;
+            }
+        }
+        assert_eq!(terminal_events, 1, "exactly one terminal notification");
+        tokio::time::advance(std::time::Duration::from_secs(120)).await;
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(run.control.invocations.load(AtomicOrdering::SeqCst), 1);
+        assert_eq!(run.control.completed.load(AtomicOrdering::SeqCst), 1);
+        assert!(matches!(
+            run.events.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ));
+        jobs.shutdown().await;
     }
 
     #[tokio::test]
@@ -4000,6 +4296,8 @@ async fn execute_single_tool(
     .await
 }
 
+const TOOL_JOB_INLINE_BUDGET: std::time::Duration = std::time::Duration::from_secs(60);
+
 struct ShellOperationGuards(
     std::sync::Mutex<Vec<Option<crate::agents::execution::OperationGuard>>>,
 );
@@ -4204,142 +4502,138 @@ async fn execute_admitted_tool(
     let call_for_error = tool_call.clone();
     let runtime = app.runtime.tool_jobs.clone();
     let result = runtime
-        .submit(
-            binding,
-            std::time::Duration::from_millis(100),
-            move |cancel| async move {
-                // submit acquires the lifecycle lease before this future is created/polled.
-                let _guards = operation_guards;
-                let frozen = ccx
-                    .lock()
-                    .await
-                    .freeze_tool_job(&tool_call.id, cancel.clone());
-                let frozen = match frozen {
-                    Ok(context) => Arc::new(AMutex::new(context)),
-                    Err(error) => {
-                        let (_, _, messages, context_files) =
-                            runner_capacity_error(idx, &tool_call, &error);
-                        return (
-                            crate::tool_jobs::JobStatus::Failed,
-                            crate::tool_jobs::JobResult {
-                                had_corrections: false,
-                                messages,
-                                context_files,
-                            },
-                        );
-                    }
-                };
-                let (_parallel_guard, _serial_guard) = if allow_parallel {
-                    (Some(dispatch_gate.read_owned().await), None)
-                } else {
-                    (None, Some(dispatch_gate.write_owned().await))
-                };
-                let (n_ctx, pp, history) = {
-                    let context = frozen.lock().await;
-                    (
-                        context.n_ctx,
-                        context.postprocess_parameters.clone(),
-                        context.messages.clone(),
-                    )
-                };
-                let session = app.chat.sessions.read().await.get(&chat_id).cloned();
-                let bridge = session.map(|session| spawn_subchat_bridge(frozen.clone(), session));
-                let native_fence = frozen.lock().await.native_job_fence.clone();
-                let owner_abort = native_abort.clone().unwrap_or_else(|| cancel.clone());
-                let invocation = execute_single_tool_owned(
-                    app.clone(),
-                    frozen,
-                    idx,
-                    tool_call.clone(),
-                    catalog,
-                    turn_tool_pool,
-                    serial_registry,
-                    allow_parallel,
-                    batch_size,
-                    &mode_id,
-                    model_id.as_deref(),
-                    native_pause,
-                    native_abort,
-                    expected_execution,
-                );
-                let invocation_result = match native_fence {
-                    Some(fence) => {
-                        fence
-                            .run(&cancel, &owner_abort, async { Ok(invocation.await) })
-                            .await
-                    }
-                    None => Ok(invocation.await),
-                };
-                let (_, corrections, messages, files) = match invocation_result {
-                    Ok(result) => result,
-                    Err(error) => {
-                        if let Some(bridge) = bridge {
-                            bridge.shutdown().await;
-                        }
-                        let (_, _, messages, context_files) = runner_capacity_error(
-                            idx,
-                            &tool_call,
-                            &format!("{error}; effects unknown, never replay"),
-                        );
-                        return (
-                            crate::tool_jobs::JobStatus::Unknown,
-                            crate::tool_jobs::JobResult {
-                                had_corrections: false,
-                                messages,
-                                context_files,
-                            },
-                        );
-                    }
-                };
-                if let Some(bridge) = bridge {
-                    bridge.shutdown().await;
+        .submit(binding, TOOL_JOB_INLINE_BUDGET, move |cancel| async move {
+            // submit acquires the lifecycle lease before this future is created/polled.
+            let _guards = operation_guards;
+            let frozen = ccx
+                .lock()
+                .await
+                .freeze_tool_job(&tool_call.id, cancel.clone());
+            let frozen = match frozen {
+                Ok(context) => Arc::new(AMutex::new(context)),
+                Err(error) => {
+                    let (_, _, messages, context_files) =
+                        runner_capacity_error(idx, &tool_call, &error);
+                    return (
+                        crate::tool_jobs::JobStatus::Failed,
+                        crate::tool_jobs::JobResult {
+                            had_corrections: false,
+                            messages,
+                            context_files,
+                        },
+                    );
                 }
-                let mut exempt = std::collections::HashSet::new();
-                if is_tool_result_truncation_exempt(&tool_call.function.name) {
-                    exempt.insert(tool_call.id.clone());
-                }
-                let mut messages = match ToolBudget::try_from_n_ctx(n_ctx) {
-                    Ok(budget) => {
-                        crate::file_activity::TOOL_ACTOR
-                            .scope(
-                                chat_id,
-                                postprocess_tool_results(
-                                    app.gcx.clone(),
-                                    None,
-                                    messages,
-                                    files,
-                                    budget,
-                                    pp,
-                                    &history,
-                                    &exempt,
-                                ),
-                            )
-                            .await
-                    }
-                    Err(error) => runner_capacity_error(idx, &tool_call, &error).2,
-                };
-                for message in &mut messages {
-                    message
-                        .extra
-                        .insert("tool_job_postprocessed".into(), true.into());
-                }
-                let status = if messages.is_empty() || cancel.load(Ordering::Acquire) {
-                    crate::tool_jobs::JobStatus::Unknown
-                } else if messages.iter().any(|m| m.tool_failed == Some(true)) {
-                    crate::tool_jobs::JobStatus::Failed
-                } else {
-                    crate::tool_jobs::JobStatus::Succeeded
-                };
+            };
+            let (_parallel_guard, _serial_guard) = if allow_parallel {
+                (Some(dispatch_gate.read_owned().await), None)
+            } else {
+                (None, Some(dispatch_gate.write_owned().await))
+            };
+            let (n_ctx, pp, history) = {
+                let context = frozen.lock().await;
                 (
-                    status,
-                    crate::tool_jobs::JobResult {
-                        had_corrections: corrections,
-                        messages,
-                        context_files: Vec::new(),
-                    },
+                    context.n_ctx,
+                    context.postprocess_parameters.clone(),
+                    context.messages.clone(),
                 )
-            },
-        )
+            };
+            let session = app.chat.sessions.read().await.get(&chat_id).cloned();
+            let bridge = session.map(|session| spawn_subchat_bridge(frozen.clone(), session));
+            let native_fence = frozen.lock().await.native_job_fence.clone();
+            let owner_abort = native_abort.clone().unwrap_or_else(|| cancel.clone());
+            let invocation = execute_single_tool_owned(
+                app.clone(),
+                frozen,
+                idx,
+                tool_call.clone(),
+                catalog,
+                turn_tool_pool,
+                serial_registry,
+                allow_parallel,
+                batch_size,
+                &mode_id,
+                model_id.as_deref(),
+                native_pause,
+                native_abort,
+                expected_execution,
+            );
+            let invocation_result = match native_fence {
+                Some(fence) => {
+                    fence
+                        .run(&cancel, &owner_abort, async { Ok(invocation.await) })
+                        .await
+                }
+                None => Ok(invocation.await),
+            };
+            let (_, corrections, messages, files) = match invocation_result {
+                Ok(result) => result,
+                Err(error) => {
+                    if let Some(bridge) = bridge {
+                        bridge.shutdown().await;
+                    }
+                    let (_, _, messages, context_files) = runner_capacity_error(
+                        idx,
+                        &tool_call,
+                        &format!("{error}; effects unknown, never replay"),
+                    );
+                    return (
+                        crate::tool_jobs::JobStatus::Unknown,
+                        crate::tool_jobs::JobResult {
+                            had_corrections: false,
+                            messages,
+                            context_files,
+                        },
+                    );
+                }
+            };
+            if let Some(bridge) = bridge {
+                bridge.shutdown().await;
+            }
+            let mut exempt = std::collections::HashSet::new();
+            if is_tool_result_truncation_exempt(&tool_call.function.name) {
+                exempt.insert(tool_call.id.clone());
+            }
+            let mut messages = match ToolBudget::try_from_n_ctx(n_ctx) {
+                Ok(budget) => {
+                    crate::file_activity::TOOL_ACTOR
+                        .scope(
+                            chat_id,
+                            postprocess_tool_results(
+                                app.gcx.clone(),
+                                None,
+                                messages,
+                                files,
+                                budget,
+                                pp,
+                                &history,
+                                &exempt,
+                            ),
+                        )
+                        .await
+                }
+                Err(error) => runner_capacity_error(idx, &tool_call, &error).2,
+            };
+            for message in &mut messages {
+                message
+                    .extra
+                    .insert("tool_job_postprocessed".into(), true.into());
+            }
+            let status = if messages.is_empty() || cancel.load(Ordering::Acquire) {
+                crate::tool_jobs::JobStatus::Unknown
+            } else if messages.iter().any(|m| m.tool_failed == Some(true)) {
+                crate::tool_jobs::JobStatus::Failed
+            } else {
+                crate::tool_jobs::JobStatus::Succeeded
+            };
+            (
+                status,
+                crate::tool_jobs::JobResult {
+                    had_corrections: corrections,
+                    messages,
+                    context_files: Vec::new(),
+                },
+            )
+        })
         .await;
     match result {
         Ok(crate::tool_jobs::Submission::Inline(result)) => (
@@ -4847,7 +5141,6 @@ async fn execute_tools_inner(
     }
 
     let serial_registry = Arc::new(serial_registry);
-    let max_parallel_tools = refact_chat_history::config::limits().max_parallel_tools;
 
     let mut all_results: Vec<(usize, bool, Vec<ChatMessage>, Vec<ContextFile>)> = Vec::new();
     let mut current_parallel_batch: Vec<(usize, ChatToolCall)> = Vec::new();
@@ -4904,24 +5197,6 @@ async fn execute_tools_inner(
 
         if allow_parallel {
             current_parallel_batch.push((idx, tool_call.clone()));
-            if current_parallel_batch.len() >= max_parallel_tools {
-                let batch_results = execute_parallel_batch(
-                    app.clone(),
-                    ccx.clone(),
-                    &current_parallel_batch,
-                    catalog.clone(),
-                    turn_tool_pool.clone(),
-                    &mut prepared_parallel_slots,
-                    serial_registry.clone(),
-                    mode_id,
-                    model_id,
-                    options.native_pause.clone(),
-                    options.native_abort.clone(),
-                )
-                .await;
-                all_results.extend(batch_results);
-                current_parallel_batch.clear();
-            }
         } else {
             if !current_parallel_batch.is_empty() {
                 let batch_results = execute_parallel_batch(

@@ -22,7 +22,6 @@ function settingsResponse(
     internal_traces_keep_per_folder: 200,
     session_idle_timeout_secs: 1800,
     event_channel_capacity: 4096,
-    max_parallel_tools: null,
     auto_enrichment_total_token_cap: 1600,
     trajectory_writer_enabled: true,
   };
@@ -53,13 +52,6 @@ function settingsResponse(
         minimum: 16,
         maximum: 1000000,
         apply_mode: "restart_required",
-      },
-      {
-        name: "max_parallel_tools",
-        value_type: "integer",
-        minimum: 1,
-        maximum: 10000,
-        apply_mode: "live",
       },
       {
         name: "auto_enrichment_total_token_cap",
@@ -320,7 +312,6 @@ describe("TrajectorySettingsPanel", () => {
         internal_traces_keep_per_folder: 200,
         session_idle_timeout_secs: 2400,
         event_channel_capacity: 4096,
-        max_parallel_tools: null,
         auto_enrichment_total_token_cap: 1600,
         trajectory_writer_enabled: true,
       }),
@@ -365,6 +356,41 @@ describe("TrajectorySettingsPanel", () => {
         session_idle_timeout_secs: 2400,
       }),
     );
+  });
+
+  it("does not offer the retired parallel tool cap while preserving unknown config values", async () => {
+    let savedBody: unknown = null;
+    const response = settingsResponse();
+    const config = { ...response.config, some_future_engine_setting: 42 };
+    server.use(
+      http.get("*/v1/trajectory-settings", () =>
+        HttpResponse.json({ ...response, config, current: config }),
+      ),
+      http.post("*/v1/trajectory-settings", async ({ request }) => {
+        savedBody = await request.json();
+        return HttpResponse.json(response);
+      }),
+    );
+    const { user } = renderPanel();
+
+    const input = await screen.findByRole("spinbutton", {
+      name: "Session idle timeout secs",
+    });
+    expect(
+      screen.queryByRole("spinbutton", { name: "Max parallel tools" }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText("Additional settings")).not.toBeInTheDocument();
+    await user.clear(input);
+    await user.type(input, "2400");
+    await user.click(screen.getByRole("button", { name: "Save settings" }));
+
+    await waitFor(() =>
+      expect(savedBody).toEqual({
+        ...config,
+        session_idle_timeout_secs: 2400,
+      }),
+    );
+    expect(savedBody).not.toHaveProperty("max_parallel_tools");
   });
 
   it("resets the draft to API-provided defaults", async () => {

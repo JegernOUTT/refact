@@ -292,6 +292,8 @@ pub const COORDINATION_SETTINGS_KEY: &str = "coordination";
 
 const RETIRED_COORDINATION_SETTINGS: &[&str] = &["work_stream_max_bytes"];
 
+pub const RETIRED_TRAJECTORY_SETTINGS: &[&str] = &["max_parallel_tools"];
+
 pub fn coordination_field_path(name: &str) -> String {
     format!("{COORDINATION_SETTINGS_KEY}.{name}")
 }
@@ -311,7 +313,6 @@ pub struct TrajectoryRuntimeSettings {
     pub max_queue_size: usize,
     pub event_channel_capacity: usize,
     pub recent_request_ids_capacity: usize,
-    pub max_parallel_tools: Option<usize>,
     pub max_images_per_message: usize,
     pub max_file_size: usize,
     pub auto_enrichment_total_token_cap: usize,
@@ -385,7 +386,6 @@ impl Default for TrajectoryRuntimeSettings {
             max_queue_size: MAX_QUEUE_SIZE_DEFAULT,
             event_channel_capacity: EVENT_CHANNEL_CAPACITY_DEFAULT,
             recent_request_ids_capacity: RECENT_REQUEST_IDS_CAPACITY_DEFAULT,
-            max_parallel_tools: None,
             max_images_per_message: MAX_IMAGES_PER_MESSAGE_DEFAULT,
             max_file_size: MAX_FILE_SIZE_DEFAULT,
             auto_enrichment_total_token_cap: AUTO_ENRICHMENT_TOTAL_TOKEN_CAP_DEFAULT,
@@ -538,7 +538,6 @@ pub fn install_startup(settings: TrajectoryRuntimeSettings) {
             event_channel_capacity: settings.event_channel_capacity,
             recent_request_ids_capacity: settings.recent_request_ids_capacity,
             max_images_per_message: settings.max_images_per_message,
-            max_parallel_tools: settings.max_parallel_tools.unwrap_or(usize::MAX),
             max_file_size: settings.max_file_size,
         },
         ..Default::default()
@@ -563,7 +562,6 @@ pub fn install_live(settings: &TrajectoryRuntimeSettings) {
         event_channel_capacity: active_before.event_channel_capacity,
         recent_request_ids_capacity: settings.recent_request_ids_capacity,
         max_images_per_message: settings.max_images_per_message,
-        max_parallel_tools: settings.max_parallel_tools.unwrap_or(usize::MAX),
         max_file_size: settings.max_file_size,
     });
     refact_chat_api::install_runtime_timeouts(refact_chat_api::RuntimeChatTimeouts {
@@ -664,9 +662,6 @@ pub fn validate(settings: &TrajectoryRuntimeSettings) -> Result<(), String> {
         1,
         100_000,
     )?;
-    if let Some(value) = settings.max_parallel_tools {
-        validate_usize("max_parallel_tools", value, 1, 10_000)?;
-    }
     validate_usize(
         "max_images_per_message",
         settings.max_images_per_message,
@@ -1423,6 +1418,22 @@ trajectory_writer_enabled: false
         );
         assert_eq!(loaded.cat_max_input_paths, defaults.cat_max_input_paths);
         assert!(validate(&loaded).is_ok());
+    }
+
+    #[test]
+    fn legacy_yaml_with_retired_parallel_tool_cap_loads_and_drops_it() {
+        for legacy_value in ["null", "0", "4", "99999999"] {
+            let legacy = format!(
+                "max_queue_size: 7\nmax_parallel_tools: {legacy_value}\nmax_images_per_message: 9\n"
+            );
+            let loaded = parse_persisted(legacy.as_bytes()).unwrap();
+            assert_eq!(loaded.max_queue_size, 7);
+            assert_eq!(loaded.max_images_per_message, 9);
+            let rendered = serde_yaml::to_value(&loaded).unwrap();
+            let mapping = rendered.as_mapping().unwrap();
+            assert!(!mapping.contains_key(serde_yaml::Value::String("max_parallel_tools".into())));
+            assert!(mapping.contains_key(serde_yaml::Value::String("max_queue_size".into())));
+        }
     }
 
     #[test]

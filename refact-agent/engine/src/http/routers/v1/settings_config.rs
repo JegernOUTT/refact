@@ -479,7 +479,6 @@ fn trajectory_settings_fields() -> Vec<TrajectorySettingField> {
         live_usize("max_queue_size", 1, 10_000),
         restart_usize("event_channel_capacity", 16, 1_000_000),
         live_usize("recent_request_ids_capacity", 1, 100_000),
-        live_usize("max_parallel_tools", 1, 10_000),
         live_usize("max_images_per_message", 1, 1_000),
         live_usize("max_file_size", 1_024, 50_000_000),
         live_usize("auto_enrichment_total_token_cap", 64, 32_000),
@@ -603,6 +602,9 @@ pub async fn handle_v1_trajectory_settings_post(
         .ok_or_else(|| server_error("invalid settings mapping"))?
     {
         map.insert(key.clone(), value.clone());
+    }
+    for retired in crate::runtime_settings::RETIRED_TRAJECTORY_SETTINGS {
+        map.remove(serde_yaml::Value::String((*retired).into()));
     }
     let yaml = serde_yaml::to_string(&persisted)
         .map_err(|_| server_error("cannot serialize trajectory settings"))?;
@@ -832,6 +834,73 @@ mod tests {
                 .config,
             valid
         );
+    }
+
+    #[tokio::test]
+    #[serial(runtime_settings)]
+    async fn legacy_parallel_tool_cap_is_ignored_unadvertised_and_dropped_on_save() {
+        crate::runtime_settings::reset_for_test();
+        let temp = tempfile::tempdir().unwrap();
+        let mut gcx = crate::global_context::tests::make_test_gcx().await;
+        Arc::get_mut(&mut gcx).unwrap().config_dir = temp.path().join("config");
+        let app = AppState::from_gcx(gcx).await;
+        let path = crate::runtime_settings::settings_path(&app.paths.config_dir);
+        tokio::fs::create_dir_all(path.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(
+            &path,
+            "max_queue_size: 7\nmax_parallel_tools: 3\nhist_search_preview_chars: 1234\n",
+        )
+        .await
+        .unwrap();
+
+        let loaded = handle_v1_trajectory_settings_get(State(app.clone()))
+            .await
+            .unwrap()
+            .0;
+        assert_eq!(loaded.config.max_queue_size, 7);
+        assert_eq!(loaded.config.hist_search_preview_chars, 1234);
+        assert!(loaded
+            .fields
+            .iter()
+            .all(|field| field.name != "max_parallel_tools"));
+        let rendered = serde_json::to_value(&loaded).unwrap();
+        for key in ["config", "current", "defaults"] {
+            assert!(rendered[key].get("max_parallel_tools").is_none());
+        }
+        let obsolete_post = serde_json::json!({"max_parallel_tools": 2});
+        assert!(handle_v1_trajectory_settings_post(
+            State(app.clone()),
+            hyper::body::Bytes::from(serde_json::to_vec(&obsolete_post).unwrap()),
+        )
+        .await
+        .is_err());
+
+        let mut updated = loaded.config.clone();
+        updated.max_queue_size = 8;
+        let saved = handle_v1_trajectory_settings_post(
+            State(app.clone()),
+            hyper::body::Bytes::from(serde_json::to_vec(&updated).unwrap()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(saved.0.config.max_queue_size, 8);
+        let persisted: serde_yaml::Value =
+            serde_yaml::from_str(&tokio::fs::read_to_string(&path).await.unwrap()).unwrap();
+        let persisted = persisted.as_mapping().unwrap();
+        assert!(!persisted.contains_key(serde_yaml::Value::String("max_parallel_tools".into())));
+        assert_eq!(
+            persisted.get(serde_yaml::Value::String(
+                "hist_search_preview_chars".into()
+            )),
+            Some(&serde_yaml::Value::from(1234))
+        );
+        assert_eq!(
+            persisted.get(serde_yaml::Value::String("max_queue_size".into())),
+            Some(&serde_yaml::Value::from(8))
+        );
+        crate::runtime_settings::reset_for_test();
     }
 
     #[tokio::test]
