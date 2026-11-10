@@ -1,9 +1,11 @@
 import { createRoot } from "react-dom/client";
+import { useState } from "react";
 import { Provider } from "react-redux";
 import { setUpStore } from "../../src/app/store";
 import { Theme } from "../../src/components/Theme";
 import { buildDisplayItems } from "../../src/components/ChatContent/ChatContentDisplayItems";
 import { ToolJobResult } from "../../src/components/ChatContent/ToolCard/ToolJobResult";
+import { ToolContent } from "../../src/components/ChatContent/ToolsContent";
 import { EventRow } from "../../src/components/ChatContent/EventRow/EventRow";
 import { restoreChat, selectThreadById } from "../../src/features/Chat/Thread";
 import type { ChatMessages, ToolCall } from "../../src/services/refact/types";
@@ -48,6 +50,63 @@ const completion = (call: ToolCall, content: unknown) => ({
 });
 
 const store = setUpStore();
+const backgroundCall: ToolCall = {
+  id: "background-call",
+  index: 0,
+  function: { name: "glob", arguments: '{"pattern":"src/*.ts"}' },
+};
+const backgroundMessages: ChatMessages = [
+  { role: "assistant", content: "", tool_calls: [backgroundCall] },
+  {
+    role: "tool",
+    tool_call_id: "background-call",
+    content: "Accepted",
+    extra: {
+      tool_job: {
+        job_id: "background-call",
+        chat_id: "background-regression",
+        tool_call_id: "background-call",
+        tool_name: "glob",
+        status: "accepted",
+        turn_id: "turn",
+        model: "model",
+        result_url: "/result",
+        cancel_url: "/cancel",
+      },
+    },
+  },
+];
+store.dispatch(
+  restoreChat({
+    id: "background-regression",
+    model: "model",
+    messages: backgroundMessages,
+  }),
+);
+function BackgroundResultFixture() {
+  const [delivered, setDelivered] = useState(false);
+  const messages = delivered
+    ? ([
+        ...backgroundMessages,
+        completion(backgroundCall, "## Delayed background output"),
+      ] as ChatMessages)
+    : backgroundMessages;
+  const item = buildDisplayItems(messages, false)[0];
+  return (
+    <section data-testid="background-result-fixture">
+      <button type="button" onClick={() => setDelivered(true)}>
+        Deliver background result
+      </button>
+      {item.type === "assistant" && (
+        <ToolContent
+          threadId="background-regression"
+          toolCalls={[backgroundCall]}
+          jobResultsByToolId={item.jobResultsByToolId}
+        />
+      )}
+    </section>
+  );
+}
 store.dispatch(
   restoreChat({
     id: "app-render-regression",
@@ -92,6 +151,7 @@ if (root) {
     <Provider store={store}>
       <Theme>
         <main>
+          <BackgroundResultFixture />
           {items.map((item) =>
             item.type === "tool_job_result" ? (
               <ToolJobResult key={item.key} result={item.result} />

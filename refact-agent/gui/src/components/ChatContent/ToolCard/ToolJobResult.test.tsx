@@ -53,7 +53,7 @@ function appCompletion(
 }
 
 describe("native tool job result", () => {
-  it("uses a compact tool card with Markdown output once and no human retry/branch/delete actions", () => {
+  it("starts collapsed and toggles native Markdown output without human retry/branch/delete actions", () => {
     const result: NativeToolJobResult = {
       toolName: "code_health",
       message: {
@@ -65,15 +65,86 @@ describe("native tool job result", () => {
     render(<ToolJobResult result={result} />);
     expect(screen.getAllByText("Tool result")).toHaveLength(1);
     expect(screen.getByText("code_health")).toBeTruthy();
+    const toggle = screen.getByRole("button", {
+      name: /Tool result.*code_health/,
+    });
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByTestId("tool-job-result")).toBeNull();
+    expect(toggle.closest('[data-density="compact"]')).toBeTruthy();
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
     expect(
       screen.getAllByRole("heading", { name: "Native completed output" }),
     ).toHaveLength(1);
     expect(
       screen.queryByRole("button", { name: /retry|branch|delete|cancel/i }),
     ).toBeNull();
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    fireEvent.transitionEnd(screen.getByTestId("transcript-panel"));
+    expect(screen.queryByTestId("tool-job-result")).toBeNull();
+    fireEvent.click(toggle);
     expect(
-      screen.getByTestId("tool-job-result").closest('[data-density="compact"]'),
-    ).toBeTruthy();
+      screen.getAllByRole("heading", { name: "Native completed output" }),
+    ).toHaveLength(1);
+  });
+
+  it("keeps failed output collapsed while preserving the failure indicator", () => {
+    render(
+      <ToolJobResult
+        result={{
+          toolName: "process_read",
+          message: {
+            role: "tool",
+            tool_call_id: "call",
+            tool_failed: true,
+            content: "## Failed process output",
+          },
+        }}
+      />,
+    );
+    expect(screen.getByTestId("transcript-status-pill")).toHaveTextContent(
+      "Failed",
+    );
+    const toggle = screen.getByRole("button", {
+      name: /Tool result.*process_read/,
+    });
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByTestId("tool-job-result")).toBeNull();
+    fireEvent.click(toggle);
+    expect(
+      screen.getByRole("heading", { name: "Failed process output" }),
+    ).toBeInTheDocument();
+  });
+
+  it("preserves the user's toggle when the result updates", () => {
+    const result: NativeToolJobResult = {
+      toolName: "process_read",
+      message: {
+        role: "tool",
+        tool_call_id: "call",
+        content: "## Original output",
+      },
+    };
+    const { rerender } = render(<ToolJobResult result={result} />);
+    const updated: NativeToolJobResult = {
+      ...result,
+      message: {
+        role: "tool",
+        tool_call_id: "call",
+        content: "## Updated output",
+      },
+    };
+    rerender(<ToolJobResult result={updated} />);
+    const toggle = screen.getByTestId("transcript-toggle");
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByTestId("tool-job-result")).toBeNull();
+    fireEvent.click(toggle);
+    rerender(<ToolJobResult result={result} />);
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    expect(
+      screen.getByRole("heading", { name: "Original output" }),
+    ).toBeInTheDocument();
   });
 
   it("renders native multimodal text and image without JSON flattening", () => {
@@ -92,6 +163,9 @@ describe("native tool job result", () => {
         }}
       />,
     );
+    expect(screen.queryByTestId("tool-job-result")).toBeNull();
+    expect(document.querySelector("img")).toBeNull();
+    fireEvent.click(screen.getByTestId("transcript-toggle"));
     expect(
       screen.getByRole("heading", { name: "Screenshot result" }),
     ).toBeTruthy();
@@ -120,12 +194,14 @@ describe("native tool job result", () => {
         }}
       />,
     );
+    expect(screen.queryByTestId("context-file")).toBeNull();
+    fireEvent.click(screen.getByTestId("transcript-toggle"));
     expect(screen.getAllByTestId("context-file")).toHaveLength(1);
     expect(screen.getByTitle("src/native.ts")).toBeTruthy();
     expect(await screen.findByText(/native file preview/)).toBeTruthy();
   });
 
-  it("renders flattened App completions as expanded structured cards with the original action", () => {
+  it("starts flattened App completions collapsed and expands structured cards with the original action", () => {
     const { container } = render(
       <ToolJobResult
         result={appCompletion(
@@ -142,9 +218,15 @@ describe("native tool job result", () => {
     expect(screen.getByTestId("app-tool")).toBeInTheDocument();
     expect(screen.getByTestId("transcript-toggle")).toHaveAttribute(
       "aria-expanded",
-      "true",
+      "false",
     );
     expect(screen.getByText("App · Read file")).toBeInTheDocument();
+    expect(screen.queryByText("Resource")).toBeNull();
+    fireEvent.click(screen.getByTestId("transcript-toggle"));
+    expect(screen.getByTestId("transcript-toggle")).toHaveAttribute(
+      "aria-expanded",
+      "true",
+    );
     expect(screen.getByText("Resource")).toBeInTheDocument();
     expect(screen.getByText("app.json")).toBeInTheDocument();
     expect(screen.getByText("app-revision")).toBeInTheDocument();
@@ -170,6 +252,13 @@ describe("native tool job result", () => {
     expect(screen.getByTestId("transcript-meta")).toHaveTextContent(
       "PNG captured",
     );
+    expect(screen.getByTestId("transcript-toggle")).toHaveAttribute(
+      "aria-expanded",
+      "false",
+    );
+    expect(screen.queryByText("capture-revision")).toBeNull();
+    expect(document.querySelector("img")).toBeNull();
+    fireEvent.click(screen.getByTestId("transcript-toggle"));
     expect(screen.getByText("capture-revision")).toBeInTheDocument();
     expect(document.querySelectorAll("img")).toHaveLength(1);
     expect(document.querySelector("img")).toHaveAttribute(
@@ -193,6 +282,12 @@ describe("native tool job result", () => {
     expect(screen.getByTestId("transcript-status-pill")).toHaveTextContent(
       "Tool failed",
     );
+    expect(screen.getByTestId("transcript-toggle")).toHaveAttribute(
+      "aria-expanded",
+      "false",
+    );
+    expect(screen.queryByRole("button", { name: "Raw JSON" })).toBeNull();
+    fireEvent.click(screen.getByTestId("transcript-toggle"));
     fireEvent.click(screen.getByRole("button", { name: "Raw JSON" }));
     expect(screen.getByText(/Error: app not published/)).toBeInTheDocument();
   });

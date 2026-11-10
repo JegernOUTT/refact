@@ -14,6 +14,7 @@ import {
   WebSearchCitation,
 } from "../../services/refact";
 import { ToolContent } from "./ToolsContent";
+import type { ToolJobResultsByToolId } from "./ChatContentDisplayItems";
 import { fallbackCopying } from "../../utils/fallbackCopying";
 import { ReasoningContent } from "./ReasoningContent";
 import { MessageFooter, MessageWrapper } from "./MessageFooter";
@@ -34,6 +35,7 @@ type ChatInputProps = {
   onDelete?: (messageId: string) => void;
   contextFilesByToolId?: Record<string, ChatContextFile[]>;
   diffsByToolId?: Record<string, DiffChunk[]>;
+  jobResultsByToolId?: ToolJobResultsByToolId;
   usage?: Usage | null;
   isStreaming?: boolean;
   threadId?: string;
@@ -53,6 +55,7 @@ const _AssistantInput: React.FC<ChatInputProps> = ({
   onDelete,
   contextFilesByToolId,
   diffsByToolId,
+  jobResultsByToolId,
   usage,
   isStreaming = false,
   threadId,
@@ -232,6 +235,7 @@ const _AssistantInput: React.FC<ChatInputProps> = ({
           toolCalls={toolCalls}
           contextFilesByToolId={contextFilesByToolId}
           diffsByToolId={diffsByToolId}
+          jobResultsByToolId={jobResultsByToolId}
           isActiveAssistant={isStreaming}
           threadId={threadId}
         />

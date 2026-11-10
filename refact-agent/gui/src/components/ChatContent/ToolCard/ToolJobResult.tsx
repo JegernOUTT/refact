@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { CheckCheck } from "lucide-react";
 import type { NativeToolJobResult } from "../ChatContentDisplayItems";
 import type { ToolResult } from "../../../services/refact/types";
@@ -19,8 +20,15 @@ import styles from "./ToolJobResult.module.css";
 
 // Render the delivered native body directly: never create another tool call or
 // consult the original call's receipt/polling state for this completion actor.
-export function ToolJobResult({ result }: { result: NativeToolJobResult }) {
+export function ToolJobResult({
+  result,
+  embedded = false,
+}: {
+  result: NativeToolJobResult;
+  embedded?: boolean;
+}) {
   const threadId = useThreadId();
+  const [open, setOpen] = useState(false);
   const { message, toolName, toolCall } = result;
   const toolResult: ToolResult | undefined =
     message.role !== "tool"
@@ -42,8 +50,34 @@ export function ToolJobResult({ result }: { result: NativeToolJobResult }) {
     );
   }
   if (toolResult && toolCall && isAppToolName(normalizeToolName(toolName))) {
-    return <AppTool toolCall={toolCall} result={toolResult} defaultOpen />;
+    return (
+      <AppTool toolCall={toolCall} result={toolResult} embedded={embedded} />
+    );
   }
+  const body = (
+    <div className={styles.body} data-testid="tool-job-result">
+      {message.role === "context_file" ? (
+        <ContextFiles
+          files={message.content}
+          toolCallId={message.tool_call_id}
+          open
+        />
+      ) : typeof message.content === "string" ? (
+        <ResultView content={message.content} />
+      ) : (
+        message.content.map((part, index) => {
+          if (part.m_type === "text") {
+            return <ResultView key={index} content={part.m_content} />;
+          }
+          const src = buildImageDataUrl(part.m_type, part.m_content);
+          return src ? (
+            <DialogImage key={index} src={src} fallback="" size="8" />
+          ) : null;
+        })
+      )}
+    </div>
+  );
+  if (embedded) return body;
   return (
     <ToolCard
       icon={<CheckCheck size={14} />}
@@ -51,31 +85,10 @@ export function ToolJobResult({ result }: { result: NativeToolJobResult }) {
       verb="Tool result"
       density="compact"
       status={message.role === "tool" && message.tool_failed ? "error" : "idle"}
-      isOpen
-      onToggle={() => undefined}
-      collapsible={false}
+      isOpen={open}
+      onToggle={() => setOpen((previous) => !previous)}
     >
-      <div className={styles.body} data-testid="tool-job-result">
-        {message.role === "context_file" ? (
-          <ContextFiles
-            files={message.content}
-            toolCallId={message.tool_call_id}
-            open
-          />
-        ) : typeof message.content === "string" ? (
-          <ResultView content={message.content} />
-        ) : (
-          message.content.map((part, index) => {
-            if (part.m_type === "text") {
-              return <ResultView key={index} content={part.m_content} />;
-            }
-            const src = buildImageDataUrl(part.m_type, part.m_content);
-            return src ? (
-              <DialogImage key={index} src={src} fallback="" size="8" />
-            ) : null;
-          })
-        )}
-      </div>
+      {body}
     </ToolCard>
   );
 }

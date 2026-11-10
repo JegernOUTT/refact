@@ -52,6 +52,12 @@ import {
 } from "./ToolCard";
 import { MultiModalTool } from "./ToolCard/MultiModalTool";
 import { ToolJobCard } from "./ToolCard/ToolJobCard";
+import { ToolJobResultsContext } from "./ToolCard/ToolJobResultsContext";
+import { ToolJobResult } from "./ToolCard/ToolJobResult";
+import {
+  EMPTY_TOOL_JOB_RESULTS,
+  type ToolJobResultsByToolId,
+} from "./ChatContentDisplayItems";
 import { parseToolJobReceipt } from "../../services/refact/toolJobs";
 import { AppTool } from "./ToolCard/AppTool";
 import { isAppToolName } from "./ToolCard/appToolModel";
@@ -358,6 +364,7 @@ export type ToolContentProps = {
   toolCalls: ToolCall[];
   contextFilesByToolId?: Record<string, ChatContextFile[]>;
   diffsByToolId?: Record<string, DiffChunk[]>;
+  jobResultsByToolId?: ToolJobResultsByToolId;
   isActiveAssistant?: boolean;
   threadId?: string;
 };
@@ -366,6 +373,7 @@ const _ToolContent: React.FC<ToolContentProps> = ({
   toolCalls,
   contextFilesByToolId,
   diffsByToolId,
+  jobResultsByToolId = EMPTY_TOOL_JOB_RESULTS,
   isActiveAssistant = false,
   threadId,
 }) => {
@@ -408,17 +416,41 @@ const _ToolContent: React.FC<ToolContentProps> = ({
 
   return (
     <ChatThreadProvider chatId={toolThreadId}>
-      {processToolCalls(
-        toolCalls,
-        allToolResults,
-        features,
-        [],
-        contextFilesByToolId,
-        diffsByToolId,
-        activeToolCallId,
-        handleOpenTrajectory,
-        toolThreadId,
-      )}
+      <ToolJobResultsContext.Provider value={jobResultsByToolId}>
+        {processToolCalls(
+          toolCalls,
+          allToolResults,
+          features,
+          [],
+          contextFilesByToolId,
+          diffsByToolId,
+          activeToolCallId,
+          handleOpenTrajectory,
+          toolThreadId,
+        )}
+        {Object.entries(jobResultsByToolId).flatMap(([callId, results]) => {
+          const call = toolCalls.find((candidate) => candidate.id === callId);
+          const result = allToolResults.find(
+            (candidate) => candidate.tool_call_id === callId,
+          );
+          const job = parseToolJobReceipt(result?.extra?.tool_job);
+          const attached =
+            call &&
+            job?.status === "accepted" &&
+            job.chat_id === toolThreadId &&
+            job.tool_call_id === callId &&
+            job.tool_name === call.function.name &&
+            extractPrivacyShellMetadata(result?.extra) === null &&
+            !isPrivacyRefusalContent(result?.content);
+          return (results ?? [])
+            .filter(
+              (completion) => !attached || completion.jobId !== job.job_id,
+            )
+            .map((completion, index) => (
+              <ToolJobResult key={`${callId}:${index}`} result={completion} />
+            ));
+        })}
+      </ToolJobResultsContext.Provider>
     </ChatThreadProvider>
   );
 };

@@ -35,6 +35,10 @@ import {
 import { normalizeToolName, isToolName } from "../../utils/toolNameAliases";
 import { isSkillReportContent, parseSkillReport } from "./skillReportUtils";
 import { foldedEventIndexFor } from "./foldedEventIndex";
+import {
+  parseToolJobReceipt,
+  type ToolJobReceipt,
+} from "../../services/refact/toolJobs";
 
 const BUDDY_PULSE_TOOL_CALL_ID = "buddy_project_memory_pulse";
 
@@ -42,7 +46,16 @@ export type NativeToolJobResult = {
   toolName: string;
   message: ToolMessage | ChatContextFileMessage;
   toolCall?: ToolCall;
+  jobId?: string;
 };
+
+export type ToolJobResultsByToolId = Readonly<
+  Record<string, readonly NativeToolJobResult[] | undefined>
+>;
+
+export const EMPTY_TOOL_JOB_RESULTS: ToolJobResultsByToolId = Object.freeze(
+  Object.create(null) as ToolJobResultsByToolId,
+);
 
 function record(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === "object" && !Array.isArray(value)
@@ -50,9 +63,24 @@ function record(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
+const nativeToolJobResultCache = new WeakMap<
+  ChatMessages[number],
+  NativeToolJobResult | null
+>();
+
+export function nativeToolJobResult(
+  message: ChatMessages[number],
+): NativeToolJobResult | null {
+  const cached = nativeToolJobResultCache.get(message);
+  if (cached !== undefined) return cached;
+  const parsed = parseNativeToolJobResult(message);
+  nativeToolJobResultCache.set(message, parsed);
+  return parsed;
+}
+
 // This is presentation validation, not authority. The owning transcript and the
 // backend's fresh delivery clearance determine which chat may receive output.
-export function nativeToolJobResult(
+function parseNativeToolJobResult(
   message: ChatMessages[number],
 ): NativeToolJobResult | null {
   const meta = record(
@@ -93,6 +121,7 @@ export function nativeToolJobResult(
     if (meta.original_role === "tool" && isToolContent(content)) {
       return {
         toolName: meta.tool_name,
+        jobId: meta.job_id,
         message: {
           ...message,
           role: "tool",
@@ -107,7 +136,7 @@ export function nativeToolJobResult(
     meta.original_role === "context_file" &&
     isChatContextFileMessage(message)
   ) {
-    return { toolName: meta.tool_name, message };
+    return { toolName: meta.tool_name, jobId: meta.job_id, message };
   }
   return null;
 }
@@ -132,32 +161,158 @@ function flattenedWireExtra(
   return { ...lifted, ...message.extra };
 }
 
-type PriorToolCallIndex = {
-  scanned: number;
-  calls: Map<string, ToolCall>;
+const toolCallResultCache = new WeakMap<
+  NativeToolJobResult,
+  { call: ToolCall; value: NativeToolJobResult }
+>();
+
+function withToolCall(
+  result: NativeToolJobResult,
+  call: ToolCall,
+): NativeToolJobResult {
+  const cached = toolCallResultCache.get(result);
+  if (cached?.call === call) return cached.value;
+  const value = { ...result, toolCall: call };
+  toolCallResultCache.set(result, { call, value });
+  return value;
+}
+
+type ToolJobIndex = {
+  length: number;
+  last: ChatMessages[number] | undefined;
+  resultByMessageIndex: ReadonlyMap<number, NativeToolJobResult>;
+  attachedMessageIndices: ReadonlySet<number>;
+  byAssistantIndex: ReadonlyMap<number, ToolJobResultsByToolId>;
 };
 
-function originalToolCall(
-  messages: ChatMessages,
-  resultIndex: number,
-  result: NativeToolJobResult,
-  index: PriorToolCallIndex,
-): ToolCall | undefined {
-  for (; index.scanned < resultIndex; index.scanned++) {
-    const message = messages[index.scanned];
-    if (!isAssistantMessage(message)) continue;
-    for (const call of message.tool_calls ?? []) {
-      if (call.id) index.calls.set(call.id, call);
+const toolJobIndexCache = new WeakMap<ChatMessages, ToolJobIndex>();
+
+function sameToolName(left: string | undefined, right: string | undefined) {
+  return normalizeToolName(left) === normalizeToolName(right);
+}
+
+function toolJobIndexFor(messages: ChatMessages): ToolJobIndex {
+  const cached = toolJobIndexCache.get(messages);
+  if (
+    cached?.length === messages.length &&
+    cached.last === messages[messages.length - 1]
+  )
+    return cached;
+  const calls = new Map<string, { call: ToolCall; assistantIndex: number }>();
+  const receipts = new Map<string, ToolJobReceipt>();
+  const resultByMessageIndex = new Map<number, NativeToolJobResult>();
+  const attachedMessageIndices = new Set<number>();
+  const byAssistantIndex = new Map<
+    number,
+    Record<string, NativeToolJobResult[] | undefined>
+  >();
+  for (let i = 0; i < messages.length; i++) {
+    const message = messages[i];
+    if (isAssistantMessage(message)) {
+      if (assistantDisplayClass(message) !== "normal") continue;
+      for (const call of message.tool_calls ?? []) {
+        if (call.id) {
+          calls.set(call.id, { call, assistantIndex: i });
+          receipts.delete(call.id);
+        }
+      }
+      continue;
+    }
+    const base = nativeToolJobResult(message);
+    if (base) {
+      const callId =
+        ("tool_call_id" in base.message ? base.message.tool_call_id : "") ?? "";
+      const owner = callId ? calls.get(callId) : undefined;
+      const matched =
+        owner && sameToolName(owner.call.function.name, base.toolName)
+          ? owner
+          : undefined;
+      if (!matched) {
+        resultByMessageIndex.set(i, base);
+        continue;
+      }
+      const result = withToolCall(base, matched.call);
+      resultByMessageIndex.set(i, result);
+      const receipt = receipts.get(callId);
+      if (
+        receipt &&
+        base.jobId === receipt.job_id &&
+        sameToolName(receipt.tool_name, base.toolName)
+      ) {
+        attachedMessageIndices.add(i);
+        const byToolId =
+          byAssistantIndex.get(matched.assistantIndex) ??
+          (Object.create(null) as Record<
+            string,
+            NativeToolJobResult[] | undefined
+          >);
+        byAssistantIndex.set(matched.assistantIndex, byToolId);
+        (byToolId[callId] ??= []).push(result);
+      }
+      continue;
+    }
+    if (isToolMessage(message) && message.tool_call_id) {
+      const receipt = parseToolJobReceipt(message.extra?.tool_job);
+      if (
+        receipt?.status === "accepted" &&
+        receipt.tool_call_id === message.tool_call_id
+      ) {
+        receipts.set(message.tool_call_id, receipt);
+      }
     }
   }
-  const toolCallId =
-    "tool_call_id" in result.message ? result.message.tool_call_id : "";
-  const call = toolCallId ? index.calls.get(toolCallId) : undefined;
-  if (!call) return undefined;
-  return normalizeToolName(call.function.name) ===
-    normalizeToolName(result.toolName)
-    ? call
-    : undefined;
+  const index: ToolJobIndex = {
+    length: messages.length,
+    last: messages[messages.length - 1],
+    resultByMessageIndex,
+    attachedMessageIndices,
+    byAssistantIndex,
+  };
+  toolJobIndexCache.set(messages, index);
+  return index;
+}
+
+function sameToolJobResults(
+  left: ToolJobResultsByToolId,
+  right: ToolJobResultsByToolId,
+): boolean {
+  if (left === right) return true;
+  const leftKeys = Object.keys(left);
+  if (leftKeys.length !== Object.keys(right).length) return false;
+  return leftKeys.every((key) => {
+    const a = left[key];
+    const b = right[key] as readonly NativeToolJobResult[] | undefined;
+    return (
+      b !== undefined &&
+      a !== undefined &&
+      a.length === b.length &&
+      a.every((value, index) => value === b[index])
+    );
+  });
+}
+
+function withToolJobAttachments(
+  items: DisplayItem[],
+  messages: ChatMessages,
+): DisplayItem[] {
+  const index = toolJobIndexFor(messages);
+  let patched: DisplayItem[] | null = null;
+  for (let k = 0; k < items.length; k++) {
+    const item = items[k];
+    if (item.type === "assistant") {
+      const next =
+        index.byAssistantIndex.get(item.index) ?? EMPTY_TOOL_JOB_RESULTS;
+      if (sameToolJobResults(item.jobResultsByToolId, next)) continue;
+      patched ??= [...items];
+      patched[k] = { ...item, jobResultsByToolId: next };
+    } else if (item.type === "tool_job_result") {
+      const next = index.resultByMessageIndex.get(item.messageIndex);
+      if (!next || next === item.result) continue;
+      patched ??= [...items];
+      patched[k] = { ...item, result: next };
+    }
+  }
+  return patched ?? items;
 }
 
 type DisplayItemToolJobResult = {
@@ -231,6 +386,7 @@ type DisplayItemAssistant = {
   message: AssistantMessage;
   contextFilesByToolId: Record<string, ChatContextFile[]>;
   diffsByToolId: Record<string, DiffChunk[]>;
+  jobResultsByToolId: ToolJobResultsByToolId;
   isStreaming: boolean;
 };
 
@@ -700,7 +856,7 @@ function rebuildDisplayItemsFromStart(
 
   return withEventRunPositions(
     updateAssistantStreamingFlags(
-      [...prefixItems, ...tailItems],
+      withToolJobAttachments([...prefixItems, ...tailItems], nextMessages),
       isStreaming,
       findLastAssistantMessageIndex(nextMessages),
     ),
@@ -738,7 +894,7 @@ function buildDisplayItemsFromIndex(
   const items: DisplayItem[] = [];
   if (startIndex >= messages.length) return items;
   const foldedEvents = foldedEventIndexFor(messages).foldedMessageIndices;
-  const priorToolCalls: PriorToolCallIndex = { scanned: 0, calls: new Map() };
+  const toolJobs = toolJobIndexFor(messages);
 
   let lastUserIdx = -1;
   let lastAssistantIdx = -1;
@@ -756,14 +912,14 @@ function buildDisplayItemsFromIndex(
   for (let i = startIndex; i < messages.length; i++) {
     const head = messages[i];
 
-    const jobResult = nativeToolJobResult(head);
+    const jobResult = toolJobs.resultByMessageIndex.get(i);
     if (jobResult) {
-      const toolCall = originalToolCall(messages, i, jobResult, priorToolCalls);
+      if (toolJobs.attachedMessageIndices.has(i)) continue;
       items.push({
         type: "tool_job_result",
         key: getMessageKey(head, i),
         messageIndex: i,
-        result: toolCall ? { ...jobResult, toolCall } : jobResult,
+        result: jobResult,
       });
       continue;
     }
@@ -972,6 +1128,8 @@ function buildDisplayItemsFromIndex(
           ChatContextFile[]
         >,
         diffsByToolId: diffsByToolId as Record<string, DiffChunk[]>,
+        jobResultsByToolId:
+          toolJobs.byAssistantIndex.get(i) ?? EMPTY_TOOL_JOB_RESULTS,
         isStreaming: isStreaming && i === lastAssistantIdx,
       });
 
@@ -1323,24 +1481,7 @@ export function tryIncrementalDisplayItemsUpdate(
     );
   }
 
-  const previousToolCalls = new Set(previousMessage.tool_calls ?? []);
-  const updatedToolCalls = new Map(
-    (changedMessage.tool_calls ?? []).map((call) => [call.id, call]),
-  );
   const nextItems = previousItems.map((item) => {
-    if (
-      item.type === "tool_job_result" &&
-      item.result.toolCall &&
-      previousToolCalls.has(item.result.toolCall)
-    ) {
-      return {
-        ...item,
-        result: {
-          ...item.result,
-          toolCall: updatedToolCalls.get(item.result.toolCall.id),
-        },
-      };
-    }
     if (item.type !== "assistant") return item;
     if (item.index !== changedIndex) {
       const shouldStream = isStreaming && item.index === lastAssistantIdx;
@@ -1359,7 +1500,7 @@ export function tryIncrementalDisplayItemsUpdate(
     };
   });
 
-  return nextItems;
+  return withToolJobAttachments(nextItems, nextMessages);
 }
 
 function extractUserMessageText(content: UserMessage["content"]): string {

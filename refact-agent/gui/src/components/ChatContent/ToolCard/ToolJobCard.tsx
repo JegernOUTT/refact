@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { Clock3 } from "lucide-react";
+import { useContext, useState } from "react";
+import { Clock3, Wrench } from "lucide-react";
 import { useAppSelector } from "../../../hooks/useAppSelector";
 import { getEngineEndpointIdentity } from "../../../services/refact/apiUrl";
 import {
@@ -11,6 +11,13 @@ import {
 } from "../../../services/refact/toolJobs";
 import type { ToolCall } from "../../../services/refact/types";
 import { ToolCard } from "./ToolCard";
+import { Badge } from "../../ui/Badge";
+import { ArgumentsView } from "./GenericTool";
+import { describeToolCall, parseToolArgs } from "./genericToolTitle";
+import { ToolJobResultsContext } from "./ToolJobResultsContext";
+import { ToolJobResult } from "./ToolJobResult";
+import { isAppToolName } from "./appToolModel";
+import { normalizeToolName } from "../../../utils/toolNameAliases";
 import styles from "./ToolJobCard.module.css";
 
 const labels: Record<ToolJobStatus, string> = {
@@ -55,6 +62,15 @@ export function ToolJobCard({
   receipt: ToolJobReceipt;
   toolCall: ToolCall;
 }) {
+  const completions = useContext(ToolJobResultsContext);
+  const results = (completions[receipt.tool_call_id] ?? []).filter(
+    (result) => result.jobId === receipt.job_id,
+  );
+  const delivered = results.length > 0;
+  const title = describeToolCall(
+    toolCall.function.name ?? receipt.tool_name,
+    toolCall.function.arguments,
+  );
   const endpoint = useAppSelector((state) =>
     getEngineEndpointIdentity(state.config),
   );
@@ -71,7 +87,7 @@ export function ToolJobCard({
   const { currentData, isError, refetch } = useGetToolJobQuery(args, {
     pollingInterval: terminal ? 0 : 3000,
     skipPollingIfUnfocused: true,
-    skip: sourceChanged,
+    skip: sourceChanged || delivered,
   });
   const matching =
     currentData &&
@@ -79,7 +95,16 @@ export function ToolJobCard({
     currentData.receipt.tool_name === receipt.tool_name &&
     currentData.receipt.turn_id === receipt.turn_id &&
     currentData.receipt.model === receipt.model;
-  const status = matching ? currentData.status : receipt.status;
+  const status = delivered
+    ? results.some(
+        (result) =>
+          result.message.role === "tool" && result.message.tool_failed,
+      )
+      ? "failed"
+      : "succeeded"
+    : matching
+      ? currentData.status
+      : receipt.status;
   if (!terminal && matching && isTerminalToolJob(status)) setTerminal(true);
   const visibleStatus =
     cancelRequested && !isTerminalToolJob(status) ? "cancel_requested" : status;
@@ -95,9 +120,14 @@ export function ToolJobCard({
   };
   return (
     <ToolCard
-      icon={<Clock3 size={14} />}
-      summary={receipt.tool_name}
-      verb="Background job"
+      icon={<Wrench size={14} />}
+      summary={title.target}
+      verb={title.verb}
+      meta={
+        <Badge size="xs" tone="muted">
+          Background
+        </Badge>
+      }
       density="compact"
       status={
         visibleStatus === "failed" || visibleStatus === "unknown"
@@ -105,7 +135,9 @@ export function ToolJobCard({
           : "idle"
       }
       statusLabel={
-        sourceChanged || isError ? "Status unavailable" : labels[visibleStatus]
+        !delivered && (sourceChanged || isError)
+          ? "Status unavailable"
+          : labels[visibleStatus]
       }
       isOpen={open}
       onToggle={() => setOpen((value) => !value)}
@@ -131,15 +163,27 @@ export function ToolJobCard({
         ) : undefined
       }
     >
-      <div className={styles.detail}>
-        {cancelError
-          ? "Cancellation could not be confirmed."
-          : visibleStatus === "unknown"
-            ? "The outcome is unknown; do not automatically retry."
-            : isError
-              ? "Unable to check job status."
-              : "Results appear in the conversation when available."}
-      </div>
+      {!isAppToolName(normalizeToolName(toolCall.function.name)) && (
+        <ArgumentsView args={parseToolArgs(toolCall.function.arguments)} />
+      )}
+      {results.map((result, index) => (
+        <ToolJobResult
+          key={result.message.message_id ?? index}
+          result={result}
+          embedded
+        />
+      ))}
+      {!delivered && (
+        <div className={styles.detail}>
+          {cancelError
+            ? "Cancellation could not be confirmed."
+            : visibleStatus === "unknown"
+              ? "The outcome is unknown; do not automatically retry."
+              : isError
+                ? "Unable to check job status."
+                : "Results appear in the conversation when available."}
+        </div>
+      )}
     </ToolCard>
   );
 }

@@ -43,11 +43,13 @@ interface AppToolProps {
   // Only the response already permitted by the owning ToolsContent privacy branch.
   result?: ToolResult;
   defaultOpen?: boolean;
+  embedded?: boolean;
 }
 export const AppTool: React.FC<AppToolProps> = ({
   toolCall,
   result,
   defaultOpen = false,
+  embedded = false,
 }) => {
   const [open, setOpen] = useState(defaultOpen);
   const unrecorded = useUnrecordedResultState(toolCall.id);
@@ -69,6 +71,48 @@ export const AppTool: React.FC<AppToolProps> = ({
       (status === "running" ? "Pending" : "Not recorded");
   const family = normalizeToolName(toolCall.function.name);
   const familyIcon = isAppToolName(family) ? FAMILY_ICONS[family] : AppWindow;
+  const body = (
+    <div
+      className={styles.body}
+      data-testid={embedded ? "app-tool-body" : undefined}
+    >
+      <TranscriptFacts facts={model.facts} />
+      {model.sections.map((section, index) => (
+        <section key={`${section.title}-${index}`} className={styles.section}>
+          <h4 className={styles.heading}>{section.title}</h4>
+          <TranscriptFacts facts={section.rows} />
+        </section>
+      ))}
+      {model.images.length > 0 ? (
+        <div className={styles.images} data-testid="app-tool-images">
+          {model.images.map((src, index) => (
+            <DialogImage key={index} fallback="" size="8" src={src} />
+          ))}
+        </div>
+      ) : null}
+      {result ? (
+        <>
+          <p className={styles.note}>
+            Recorded response, not a live health check. Previews are bounded;
+            endpoints show origins and common sensitive keys are redacted. This
+            is not a complete secret detector.
+          </p>
+          <div className={styles.scrollX}>
+            <TranscriptRaw
+              label="Raw JSON"
+              blocks={[
+                {
+                  label: "Permitted response (defensive redaction)",
+                  value: model.raw,
+                },
+              ]}
+            />
+          </div>
+        </>
+      ) : null}
+    </div>
+  );
+  if (embedded) return body;
   return (
     <div data-testid="app-tool" data-app-family={toolCall.function.name}>
       <ToolCard
@@ -89,45 +133,7 @@ export const AppTool: React.FC<AppToolProps> = ({
         isOpen={open}
         onToggle={() => setOpen((previous) => !previous)}
       >
-        <div className={styles.body}>
-          <TranscriptFacts facts={model.facts} />
-          {model.sections.map((section, index) => (
-            <section
-              key={`${section.title}-${index}`}
-              className={styles.section}
-            >
-              <h4 className={styles.heading}>{section.title}</h4>
-              <TranscriptFacts facts={section.rows} />
-            </section>
-          ))}
-          {model.images.length > 0 ? (
-            <div className={styles.images} data-testid="app-tool-images">
-              {model.images.map((src, index) => (
-                <DialogImage key={index} fallback="" size="8" src={src} />
-              ))}
-            </div>
-          ) : null}
-          {result ? (
-            <>
-              <p className={styles.note}>
-                Recorded response, not a live health check. Previews are
-                bounded; endpoints show origins and common sensitive keys are
-                redacted. This is not a complete secret detector.
-              </p>
-              <div className={styles.scrollX}>
-                <TranscriptRaw
-                  label="Raw JSON"
-                  blocks={[
-                    {
-                      label: "Permitted response (defensive redaction)",
-                      value: model.raw,
-                    },
-                  ]}
-                />
-              </div>
-            </>
-          ) : null}
-        </div>
+        {body}
       </ToolCard>
     </div>
   );

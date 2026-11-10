@@ -586,6 +586,7 @@ export const ChatContent: React.FC<ChatContentProps> = ({
                 onDelete={isCompanionChat ? undefined : handleDelete}
                 contextFilesByToolId={item.contextFilesByToolId}
                 diffsByToolId={item.diffsByToolId}
+                jobResultsByToolId={item.jobResultsByToolId}
                 usage={item.message.usage}
                 isStreaming={item.isStreaming}
                 threadId={renderChatId}
