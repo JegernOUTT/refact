@@ -1666,6 +1666,36 @@ mod tests {
     }
 
     #[test]
+    fn claude_code_request_uses_consistent_client_version() {
+        let request = LlmRequest::new(
+            "claude_code/claude-opus-5-5".to_string(),
+            vec![ChatMessage::new("user".to_string(), "Hello".to_string())],
+        );
+
+        let http = AnthropicAdapter
+            .build_http(&cleared(&request), &claude_code_settings())
+            .unwrap();
+
+        assert_eq!(
+            http.headers.get("user-agent").unwrap().to_str().unwrap(),
+            format!(
+                "claude-cli/{} (external, cli)",
+                claude_code_compat::CC_VERSION
+            )
+        );
+        let billing = http.body["system"][0]["text"].as_str().unwrap();
+        let version_and_fingerprint = billing
+            .strip_prefix("x-anthropic-billing-header: cc_version=")
+            .unwrap()
+            .strip_suffix("; cc_entrypoint=cli; cch=00000;")
+            .unwrap();
+        let (version, fingerprint) = version_and_fingerprint.rsplit_once('.').unwrap();
+        assert_eq!(version, claude_code_compat::CC_VERSION);
+        assert_eq!(fingerprint.len(), 3);
+        assert!(fingerprint.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    }
+
+    #[test]
     fn test_claude_code_request_uses_persisted_identity() {
         let adapter = AnthropicAdapter;
         let identity = ClaudeCodeIdentity {

@@ -6,8 +6,8 @@ use sha2::{Digest, Sha256};
 
 use crate::canonical::ClaudeCodeIdentity;
 
-pub const CC_VERSION: &str = "2.1.281";
-pub const USER_AGENT: &str = "claude-cli/2.1.281 (external, cli)";
+pub const CC_VERSION: &str = "2.1.321";
+pub const USER_AGENT: &str = "claude-cli/2.1.321 (external, cli)";
 pub const STAINLESS_PACKAGE_VERSION: &str = "0.112.1";
 pub const STAINLESS_RUNTIME_VERSION: &str = "v26.3.0";
 pub const SYSTEM_PREFIX: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
@@ -674,8 +674,8 @@ mod tests {
             .collect();
         assert_eq!(parts.len(), 3, "CC_VERSION must be major.minor.patch");
         assert!(
-            (parts[0], parts[1], parts[2]) >= (2, 1, 280),
-            "CC_VERSION {CC_VERSION} is below 2.1.280; Anthropic rejects newer models with older clients"
+            (parts[0], parts[1], parts[2]) >= (2, 1, 290),
+            "CC_VERSION {CC_VERSION} is below 2.1.290; Anthropic rejects newer models with older clients"
         );
     }
 
