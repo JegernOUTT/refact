@@ -660,12 +660,19 @@ async fn emit_created_notice(
     task: &Job,
     summary: &str,
 ) {
-    let session_arc = crate::chat::get_or_create_session_with_trajectory(
+    let session_arc = match crate::chat::get_or_create_session_with_trajectory(
         app.clone(),
         &app.chat.sessions,
         chat_id,
     )
-    .await;
+    .await
+    {
+        Ok(session_arc) => session_arc,
+        Err(error) => {
+            tracing::warn!(%chat_id, %error, "schedule created notice not delivered");
+            return;
+        }
+    };
     let mut session = session_arc.lock().await;
     session.add_message(event(
         EventSubkind::SystemNotice,

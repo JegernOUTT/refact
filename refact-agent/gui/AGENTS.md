@@ -96,6 +96,7 @@ User sends → POST /v1/chats/{chatId}/commands {type: "user_message", content}
 | `background_agent_updated`      | Live background-agent summary update                          |
 | `queue_updated`                 | Command queue changed                                         |
 | `ack`                           | Command acknowledgment                                        |
+| `subscription_closed`           | Multiplexed only, no `seq`: one chat's stream ended/failed    |
 
 ### Delta Operations
 
@@ -108,6 +109,8 @@ User sends → POST /v1/chats/{chatId}/commands {type: "user_message", content}
 ### Sequence Validation
 
 Every event has a `seq` number. `snapshot` resets to 0, each subsequent increments by 1. Gap detected → immediate reconnect for fresh snapshot.
+
+`subscription_closed` (`reason`: `ended` or `unavailable`; `retryable`, which defaults to `true` when absent; `message`; sent only when `/v1/chats/subscribe-many` carries `per_chat_close=1`) is handled before seq validation and never counts as a gap: only that chat's consumers fail, the shared stream stays up, and `retryable: false` stops automatic retries. `SSE connect timeout` before response headers fails every chat. When headers arrive, each chat still waiting for its snapshot gets its own full bootstrap window (`connectTimeoutMs`); a chat that misses it fails alone with `SSE chat snapshot timeout`, and re-subscribing it while still pending re-attaches without a rebuild and starts a fresh window. Per-chat failures do not mark the shared agent roster stale, and a partial chunked snapshot left by a timed-out chat does not turn a normal end of stream into an error. Network/HTTP errors and unexpected EOF still fail every chat. Failing chats back off on their own count, subscribe/unsubscribe bursts coalesce into one rebuild that starts before the old stream is stopped, and a scheduled rebuild is cancelled when the desired chats return to the live connection's set. If a chat's first snapshot completes while it has no consumer (bootstrap timeout backoff, refresh gap), the multiplexer parks that snapshot plus the chat's following events (at most 256 events / 8 MiB per chat, 32 MiB across chats; data that would exceed the total is not parked) and replays them in order to the next consumer on the same connection without a new fetch; overflow, `subscription_closed` or the connection stopping drops the parked data and the next subscribe rebuilds, and an overflow after a consumer attached, or a consumer throwing during the handover, schedules a rebuild for that chat's consumers. A chat closed with `retryable: false` before any snapshot records `subscription_failure` on its runtime, busy or not (busy chats also keep the existing `markThreadSseError` error state); `ChatContent` then shows "This chat could not be opened" with the reason and a Retry that dispatches `requestSseRefresh`, which clears the failure and resubscribes.
 
 ## State Management
 

@@ -968,13 +968,11 @@ pub async fn create_global_context(
         shutdown_flag: Arc::new(AtomicBool::new(false)),
         lsp_tcp_client_count: Arc::new(AtomicUsize::new(0)),
         exec_registry: Arc::new(ExecRegistry::new()),
-        tool_jobs: crate::tool_jobs::JobRuntime::open_durable(
+        tool_jobs: crate::tool_jobs::JobRuntime::with_namespace(
             cache_dir.clone(),
             256,
-            4 * 1024 * 1024,
-        )
-        .await
-        .unwrap_or_else(|error| panic!("tool job ownership journal unavailable: {error}")),
+            crate::tool_jobs::RESULT_RETENTION_BYTES,
+        ),
         review_readiness: Arc::new(Default::default()),
         card_verifier_tasks: Arc::new(AMutex::new(tokio::task::JoinSet::new())),
         trajectory_vectorization_queue: Arc::new(AMutex::new(Default::default())),
@@ -1099,6 +1097,69 @@ pub mod tests {
         let cfg: EngineGlobalConfig =
             serde_yaml::from_str("scheduler:\n  enabled: true\n").unwrap();
         assert!(cfg.hooks.trusted_projects.is_empty());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(runtime_settings)]
+    async fn two_engines_share_one_cache_dir() {
+        let cache = tempfile::tempdir().unwrap();
+        let mut contexts = Vec::new();
+        for _ in 0..2 {
+            let config = tempfile::tempdir().unwrap();
+            let cmdline = CommandLine::from_iter_safe([
+                "two-engines-test",
+                "--http-port",
+                "0",
+                "--lsp-port",
+                "0",
+                "--no-scheduler",
+            ])
+            .unwrap();
+            let (gcx, _) = create_global_context(
+                cache.path().to_path_buf(),
+                config.path().to_path_buf(),
+                cmdline,
+            )
+            .await;
+            contexts.push((gcx, config));
+        }
+        for (gcx, _) in &contexts {
+            let jobs = gcx.tool_jobs.clone();
+            let receipt = jobs
+                .submit_background(
+                    crate::tool_jobs::JobBinding {
+                        scope_keys: vec![],
+                        chat_id: "shared-chat".into(),
+                        tool_call_id: "same-call".into(),
+                        tool_name: "cat".into(),
+                        model: "model".into(),
+                        turn_id: "turn".into(),
+                    },
+                    |_| async {
+                        (
+                            crate::tool_jobs::JobStatus::Succeeded,
+                            crate::tool_jobs::JobResult {
+                                had_corrections: false,
+                                messages: vec![],
+                                context_files: vec![],
+                            },
+                        )
+                    },
+                )
+                .await
+                .unwrap();
+            assert!(jobs
+                .wait_terminal("shared-chat", &receipt.job_id)
+                .await
+                .is_some());
+        }
+        assert!(!Arc::ptr_eq(
+            &contexts[0].0.tool_jobs,
+            &contexts[1].0.tool_jobs
+        ));
+        for (gcx, _) in &contexts {
+            gcx.tool_jobs.shutdown().await;
+        }
     }
 
     #[tokio::test]
@@ -1315,7 +1376,7 @@ pub mod tests {
             shutdown_flag: Arc::new(AtomicBool::new(false)),
             lsp_tcp_client_count: Arc::new(AtomicUsize::new(0)),
             exec_registry: Arc::new(ExecRegistry::new()),
-        tool_jobs: crate::tool_jobs::JobRuntime::with_namespace(cache_dir.clone(), 256, 4 * 1024 * 1024),
+        tool_jobs: crate::tool_jobs::JobRuntime::with_namespace(cache_dir.clone(), 256, crate::tool_jobs::RESULT_RETENTION_BYTES),
         review_readiness: Arc::new(Default::default()),
             card_verifier_tasks: Arc::new(AMutex::new(tokio::task::JoinSet::new())),
             trajectory_vectorization_queue: Arc::new(AMutex::new(Default::default())),

@@ -1047,6 +1047,11 @@ export const selectSnapshotReceived = (state: RootState) =>
 export const selectSnapshotReceivedById = (state: RootState, chatId: string) =>
   state.chat.threads[chatId]?.snapshot_received ?? false;
 
+export const selectSubscriptionFailureById = (
+  state: RootState,
+  chatId: string,
+): string | null => state.chat.threads[chatId]?.subscription_failure ?? null;
+
 export const selectPreventSend = (state: RootState) =>
   selectPreventSendById(state, state.chat.current_thread_id);
 

@@ -176,14 +176,16 @@ async fn chat_worktree_workspace(
     let Some(chat_id) = chat_id.filter(|id| !id.is_empty()) else {
         return Ok(None);
     };
-    if !crate::chat::session_runtime::try_restore_session_if_trajectory_exists(
+    match crate::chat::session_runtime::restore_session_if_trajectory_exists(
         app.clone(),
         &app.chat.sessions,
         chat_id,
     )
     .await
     {
-        return Ok(None);
+        crate::chat::session_runtime::SessionRestore::Open => {}
+        crate::chat::session_runtime::SessionRestore::NoTrajectory => return Ok(None),
+        crate::chat::session_runtime::SessionRestore::Refused(error) => return Err(error.into()),
     }
     let session = app.chat.sessions.read().await.get(chat_id).cloned();
     let Some(session) = session else {
@@ -954,6 +956,42 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    #[serial_test::parallel(exec_http_env)]
+    async fn refused_chat_open_is_propagated_and_never_falls_back_to_main_workspace() {
+        let (temp, app) = test_app().await;
+        let chat_id = "exec-refused-open";
+        let dir = temp.path().join(".refact").join("trajectories");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(format!("{chat_id}.json")),
+            json!({ "id": chat_id, "messages": [] }).to_string(),
+        )
+        .unwrap();
+        app.runtime.tool_jobs.scopes.begin_shutdown();
+        let router = make_refact_http_server(app.clone());
+
+        let (status, body) = json_response(
+            router,
+            post_json(
+                "/v1/exec/spawn",
+                json!({ "command": "echo hi", "pty": false, "chat_id": chat_id }),
+            ),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+        let listed = app
+            .runtime
+            .exec_registry
+            .list(crate::exec::ExecProcessFilter {
+                chat_id: Some(chat_id.to_string()),
+                ..Default::default()
+            })
+            .await;
+        assert!(listed.is_empty(), "nothing may run in the main workspace");
     }
 
     #[tokio::test]

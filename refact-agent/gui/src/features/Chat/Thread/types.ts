@@ -233,6 +233,8 @@ export type ChatThreadRuntime = {
   confirmation: ThreadConfirmation;
   /** Whether the initial snapshot has been received from the backend */
   snapshot_received: boolean;
+  /** Reason the subscription ended for good before any snapshot arrived */
+  subscription_failure?: string | null;
   sse_status_authoritative?: boolean;
   /** Whether the engine is running segment summarization */
   is_compressing?: boolean;

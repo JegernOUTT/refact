@@ -53,19 +53,12 @@ pub(crate) mod tests {
         Arc<tokio::sync::Mutex<super::super::types::ChatSession>>,
         JobReceipt,
     ) {
-        policy_fixture(chat_id, false).await
+        policy_fixture(chat_id).await
     }
 
-    async fn policy_fixture(
-        chat_id: &str,
-        durable: bool,
-    ) -> (
-        tempfile::TempDir,
-        AppState,
-        Arc<tokio::sync::Mutex<super::super::types::ChatSession>>,
-        JobReceipt,
-    ) {
-        let temp = tempfile::tempdir().unwrap();
+    /// An engine over `temp` whose `agent` mode lists `cat`; a second call is a
+    /// fresh engine on the same stored chats.
+    async fn app_in(temp: &tempfile::TempDir) -> AppState {
         let root = temp.path().join("workspace");
         std::fs::create_dir_all(&root).unwrap();
         let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
@@ -102,16 +95,20 @@ pub(crate) mod tests {
                 .unwrap()
                 .as_secs();
         }
-        let mut app = AppState::from_gcx(gcx).await;
-        if durable {
-            app.runtime.tool_jobs = crate::tool_jobs::JobRuntime::open_durable(
-                temp.path().join("durable-jobs"),
-                2,
-                65536,
-            )
-            .await
-            .unwrap();
-        }
+        AppState::from_gcx(gcx).await
+    }
+
+    async fn policy_fixture(
+        chat_id: &str,
+    ) -> (
+        tempfile::TempDir,
+        AppState,
+        Arc<tokio::sync::Mutex<super::super::types::ChatSession>>,
+        JobReceipt,
+    ) {
+        let temp = tempfile::tempdir().unwrap();
+        let app = app_in(&temp).await;
+        let root = temp.path().join("workspace");
         let mut session = super::super::types::ChatSession::new(chat_id.into());
         session.thread.mode = "agent".into();
         session.thread.model = "model".into();
@@ -182,14 +179,14 @@ pub(crate) mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn shipping_startup_recovers_durable_result_and_lost_ack_without_submission() {
+    async fn shipping_bridge_lands_retained_result_and_repairs_lost_ack_without_submission() {
         for lost_ack in [false, true] {
             let chat = if lost_ack {
                 "startup-lost-ack"
             } else {
                 "startup-retained"
             };
-            let (temp, mut app, session, receipt) = policy_fixture(chat, true).await;
+            let (_temp, app, session, receipt) = policy_fixture(chat).await;
             let snapshot = app.runtime.tool_jobs.get(chat, &receipt.job_id).unwrap();
             let delivery_id = format!("tool_job:{}:{}", receipt.job_id, snapshot.revision);
             {
@@ -236,25 +233,7 @@ pub(crate) mod tests {
             .await
             .unwrap();
             assert_eq!(app.runtime.tool_jobs.background_terminals().len(), 1);
-            app.runtime.tool_jobs.shutdown().await;
-            app.chat.sessions.write().await.remove(chat);
-            drop(session);
-            // Dropping the last owner releases the durable journal lock before
-            // reopening it, just as a fresh engine process does.
-            app.runtime.tool_jobs = crate::tool_jobs::JobRuntime::new(2, 65536);
-            app.runtime.tool_jobs = crate::tool_jobs::JobRuntime::open_durable(
-                temp.path().join("durable-jobs"),
-                2,
-                65536,
-            )
-            .await
-            .unwrap();
-            let restored = super::super::session_runtime::get_or_create_session_with_trajectory(
-                app.clone(),
-                &app.chat.sessions,
-                chat,
-            )
-            .await;
+            let restored = session.clone();
             assert_eq!(
                 restored.lock().await.messages.len(),
                 if lost_ack { 2 } else { 1 }
@@ -313,6 +292,369 @@ pub(crate) mod tests {
             app.runtime.tool_jobs.shutdown().await;
             assert!(!restored.lock().await.closed);
         }
+    }
+
+    async fn bridge_scan(app: &AppState) {
+        let done = Arc::new(tokio::sync::Notify::new());
+        BRIDGE_SCAN_DONE.with(|hook| *hook.borrow_mut() = Some(done.clone()));
+        ensure_bridge(app);
+        tokio::time::timeout(Duration::from_secs(10), done.notified())
+            .await
+            .expect("bridge scan");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dropped_tool_job_delivery_is_acknowledged_after_save() {
+        let chat = "dropped-delivery";
+        let (_temp, app, session, receipt) = policy_fixture(chat).await;
+        let revision = app
+            .runtime
+            .tool_jobs
+            .get(chat, &receipt.job_id)
+            .unwrap()
+            .revision;
+        let id = format!("tool_job:{}:{revision}", receipt.job_id);
+        assert!(!session
+            .lock()
+            .await
+            .update_pending_delivery(&id, None, true)
+            .unwrap());
+        assert_eq!(
+            session.lock().await.delivery_status(&id),
+            super::super::types::DeliveryStatus::Failed
+        );
+        let _reset = HookReset;
+        bridge_scan(&app).await;
+        {
+            let locked = session.lock().await;
+            assert!(locked.messages.is_empty());
+            assert!(!locked.trajectory_dirty);
+        }
+        assert!(app.runtime.tool_jobs.background_terminal_refs().is_empty());
+        let done = Arc::new(tokio::sync::Notify::new());
+        BRIDGE_SCAN_DONE.with(|hook| *hook.borrow_mut() = Some(done.clone()));
+        tokio::time::timeout(Duration::from_secs(10), done.notified())
+            .await
+            .unwrap();
+        assert!(session.lock().await.messages.is_empty());
+        app.runtime.tool_jobs.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn released_undelivered_result_lands_one_notice_without_wake_and_is_acknowledged() {
+        let chat = "released-result";
+        let (_temp, app, session, receipt) = policy_fixture(chat).await;
+        app.runtime.tool_jobs.release_results_over(0);
+        let released = app.runtime.tool_jobs.get(chat, &receipt.job_id).unwrap();
+        assert!(released.result.is_none() && released.result_released);
+        assert_eq!(app.runtime.tool_jobs.background_terminal_refs().len(), 1);
+        land_deferred_jobs(&app, &session).await;
+        {
+            let locked = session.lock().await;
+            assert_eq!(locked.messages.len(), 1);
+            let notice = &locked.messages[0];
+            assert_eq!(notice.role, "event");
+            let text = notice.content.content_text_only();
+            assert!(text.contains("`cat`") && text.contains("`call`"));
+            assert!(text.contains("result was not kept") && text.contains("not retried"));
+            assert!(!text.contains("native race result"));
+            assert_eq!(
+                notice.extra["tool_job_result"]["job_id"],
+                receipt.job_id.as_str()
+            );
+            assert!(locked.delivery_wake_sources.is_empty());
+            assert!(locked.pending_deliveries.is_empty());
+        }
+        assert!(app.runtime.tool_jobs.background_terminal_refs().is_empty());
+        let _reset = HookReset;
+        bridge_scan(&app).await;
+        land_deferred_jobs(&app, &session).await;
+        assert_eq!(session.lock().await.messages.len(), 1);
+        app.runtime.tool_jobs.shutdown().await;
+    }
+
+    fn not_kept_notices(session: &super::super::types::ChatSession, job_id: &str) -> usize {
+        session
+            .messages
+            .iter()
+            .filter(|message| {
+                message
+                    .extra
+                    .get("tool_job_result")
+                    .is_some_and(|meta| meta["job_id"] == job_id)
+                    && message
+                        .content
+                        .content_text_only()
+                        .contains("result was not kept")
+            })
+            .count()
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn deferred_envelope_whose_record_is_gone_is_retired_once() {
+        let chat = "stranded-delivery";
+        let (temp, app, session, receipt) = policy_fixture(chat).await;
+        let revision = app
+            .runtime
+            .tool_jobs
+            .get(chat, &receipt.job_id)
+            .unwrap()
+            .revision;
+        let id = format!("tool_job:{}:{revision}", receipt.job_id);
+        let mut other = receipt.clone();
+        other.job_id = "tooljob_other_lost".into();
+        other.binding.tool_call_id = "other-call".into();
+        {
+            let mut locked = session.lock().await;
+            locked.add_message(receipt_message(&receipt));
+            locked.add_message(receipt_message(&other));
+        }
+        app.runtime.tool_jobs.evict_record_for_test(&receipt.job_id);
+        assert!(!app.runtime.tool_jobs.knows(chat, &receipt.job_id));
+        let appended = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count = appended.clone();
+        let reset = HookReset;
+        LANDING_HOOK.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move |stage, _| {
+                if stage == "appended" {
+                    count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+            }))
+        });
+        land_deferred_jobs(&app, &session).await;
+        {
+            let locked = session.lock().await;
+            assert!(
+                locked.pending_deliveries.is_empty(),
+                "a stranded envelope must be retired, not retried"
+            );
+            assert_eq!(not_kept_notices(&locked, &receipt.job_id), 1);
+            let notice = locked.messages.last().unwrap();
+            assert_eq!(notice.role, "event");
+            let text = notice.content.content_text_only();
+            assert!(
+                text.contains("`cat`") && text.contains("`call`") && text.contains("not retried")
+            );
+            assert!(locked.delivery_wake_sources.is_empty());
+            assert_eq!(
+                locked.delivery_status(&id),
+                super::super::types::DeliveryStatus::Delivered
+            );
+        }
+        let stored = super::super::trajectories::load_trajectory_for_chat(app.gcx.clone(), chat)
+            .await
+            .unwrap();
+        assert!(stored.pending_deliveries.is_empty());
+        assert_eq!(
+            stored
+                .messages
+                .iter()
+                .filter(|message| message
+                    .extra
+                    .get("tool_job_result")
+                    .is_some_and(|meta| meta["job_id"] == receipt.job_id.as_str()))
+                .count(),
+            1
+        );
+        land_deferred_jobs(&app, &session).await;
+        {
+            let locked = session.lock().await;
+            assert!(locked.pending_deliveries.is_empty());
+            assert_eq!(not_kept_notices(&locked, &receipt.job_id), 1);
+        }
+        assert_eq!(appended.load(std::sync::atomic::Ordering::SeqCst), 1);
+        drop(reset);
+        app.runtime.tool_jobs.shutdown().await;
+
+        // A fresh engine restoring the stored chat runs the orphan scan.
+        session.lock().await.closed = true;
+        drop(session);
+        drop(app);
+        let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
+            temp.path().join("cache"),
+            temp.path().join("config"),
+        )
+        .await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() =
+            vec![temp.path().join("workspace")];
+        let fresh = AppState::from_gcx(gcx).await;
+        let restored = super::super::session_runtime::get_or_create_session_with_trajectory(
+            fresh.clone(),
+            &fresh.chat.sessions,
+            chat,
+        )
+        .await
+        .unwrap();
+        let locked = restored.lock().await;
+        let orphan_ids = locked
+            .messages
+            .iter()
+            .filter(|message| {
+                message
+                    .extra
+                    .get("event")
+                    .is_some_and(|event| event["source"] == ORPHAN_NOTICE_SOURCE)
+            })
+            .map(|message| message.extra["event"]["payload"]["job_ids"].clone())
+            .collect::<Vec<_>>();
+        assert_eq!(orphan_ids, vec![serde_json::json!(["tooljob_other_lost"])]);
+        assert_eq!(not_kept_notices(&locked, &receipt.job_id), 1);
+        drop(locked);
+        fresh.runtime.tool_jobs.shutdown().await;
+    }
+
+    fn orphan_reports(session: &super::super::types::ChatSession) -> Vec<serde_json::Value> {
+        session
+            .messages
+            .iter()
+            .filter(|message| {
+                message
+                    .extra
+                    .get("event")
+                    .is_some_and(|event| event["source"] == ORPHAN_NOTICE_SOURCE)
+            })
+            .map(|message| message.extra["event"]["payload"]["job_ids"].clone())
+            .collect()
+    }
+
+    async fn restore(
+        app: &AppState,
+        chat: &str,
+    ) -> Arc<tokio::sync::Mutex<super::super::types::ChatSession>> {
+        super::super::session_runtime::get_or_create_session_with_trajectory(
+            app.clone(),
+            &app.chat.sessions,
+            chat,
+        )
+        .await
+        .unwrap()
+    }
+
+    async fn forget(app: &AppState, chat: &str) {
+        let session = app.chat.sessions.write().await.remove(chat).unwrap();
+        session.lock().await.closed = true;
+        app.runtime.tool_jobs.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn restore_reports_unknown_deferred_job_once_and_retires_its_envelope() {
+        let chat = "restored-stale-envelope";
+        let (temp, app, session, receipt) = policy_fixture(chat).await;
+        session.lock().await.add_message(receipt_message(&receipt));
+        super::super::trajectories::try_save_trajectory_with_intent(
+            app.clone(),
+            session.clone(),
+            super::super::types::TrajectoryCommitIntent::Required,
+        )
+        .await
+        .unwrap();
+        assert_eq!(session.lock().await.pending_deliveries.len(), 1);
+        drop(session);
+        forget(&app, chat).await;
+        drop(app);
+
+        let fresh = app_in(&temp).await;
+        assert!(!fresh.runtime.tool_jobs.knows(chat, &receipt.job_id));
+        let restored = restore(&fresh, chat).await;
+        {
+            let locked = restored.lock().await;
+            assert_eq!(
+                orphan_reports(&locked),
+                vec![serde_json::json!([receipt.job_id])]
+            );
+            assert!(
+                locked.pending_deliveries.is_empty(),
+                "the reported call's envelope is retired at restore"
+            );
+            assert_eq!(not_kept_notices(&locked, &receipt.job_id), 0);
+        }
+        let stored = super::super::trajectories::load_trajectory_for_chat(fresh.gcx.clone(), chat)
+            .await
+            .unwrap();
+        assert!(stored.pending_deliveries.is_empty());
+        assert_eq!(
+            stored
+                .messages
+                .iter()
+                .filter(|message| message
+                    .extra
+                    .get("event")
+                    .is_some_and(|event| event["source"] == ORPHAN_NOTICE_SOURCE))
+                .count(),
+            1
+        );
+        let count = restored.lock().await.messages.len();
+        land_deferred_jobs(&fresh, &restored).await;
+        assert_eq!(restored.lock().await.messages.len(), count);
+        drop(restored);
+        forget(&fresh, chat).await;
+        drop(fresh);
+
+        let again = app_in(&temp).await;
+        let reopened = restore(&again, chat).await;
+        {
+            let locked = reopened.lock().await;
+            assert_eq!(locked.messages.len(), count);
+            assert!(locked.pending_deliveries.is_empty());
+        }
+        land_deferred_jobs(&again, &reopened).await;
+        assert_eq!(reopened.lock().await.messages.len(), count);
+        again.runtime.tool_jobs.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn restore_keeps_envelope_when_the_orphan_report_does_not_land() {
+        let chat = "restored-report-refused";
+        let (temp, app, session, receipt) = policy_fixture(chat).await;
+        {
+            let mut locked = session.lock().await;
+            locked.add_message(receipt_message(&receipt));
+            // A closed delivery queue refuses the orphan report at restore.
+            for index in 0..super::super::types::max_queue_size() {
+                let mut filler = super::super::types::PendingDelivery::with_id(
+                    format!("filler-{index}"),
+                    vec![ChatMessage::new("user".into(), "queued".into())],
+                    super::super::types::PushMode::Append,
+                    "test",
+                    false,
+                );
+                filler.after_tool_call_id = Some("never-answered".into());
+                locked.pending_deliveries.push_back(filler);
+            }
+        }
+        super::super::trajectories::try_save_trajectory_with_intent(
+            app.clone(),
+            session.clone(),
+            super::super::types::TrajectoryCommitIntent::Required,
+        )
+        .await
+        .unwrap();
+        drop(session);
+        forget(&app, chat).await;
+        drop(app);
+
+        let fresh = app_in(&temp).await;
+        crate::privacy::load_privacy_if_needed(fresh.gcx.clone()).await;
+        let restored = restore(&fresh, chat).await;
+        let envelope = |session: &super::super::types::ChatSession| {
+            session
+                .pending_deliveries
+                .iter()
+                .filter(|delivery| delivery.deferred_job.is_some())
+                .count()
+        };
+        {
+            let locked = restored.lock().await;
+            assert!(orphan_reports(&locked).is_empty(), "the report was refused");
+            assert_eq!(envelope(&locked), 1, "without a report the envelope stays");
+        }
+
+        land_deferred_jobs(&fresh, &restored).await;
+        let locked = restored.lock().await;
+        assert_eq!(envelope(&locked), 0);
+        assert_eq!(not_kept_notices(&locked, &receipt.job_id), 1);
+        drop(locked);
+        fresh.runtime.tool_jobs.shutdown().await;
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -923,6 +1265,23 @@ pub(crate) mod tests {
     }
 }
 
+fn dropped_delivery(session: &super::types::ChatSession, delivery_id: &str) -> bool {
+    matches!(
+        session.delivery_status(delivery_id),
+        super::types::DeliveryStatus::Failed
+            | super::types::DeliveryStatus::Expired
+            | super::types::DeliveryStatus::Superseded
+            | super::types::DeliveryStatus::Sealed
+    )
+}
+
+async fn open_session(
+    app: &AppState,
+    chat_id: &str,
+) -> Option<Arc<tokio::sync::Mutex<super::types::ChatSession>>> {
+    app.chat.sessions.read().await.get(chat_id).cloned()
+}
+
 pub(crate) fn metadata(
     receipt: &JobReceipt,
     status: JobStatus,
@@ -949,61 +1308,7 @@ pub(crate) async fn checked_snapshot(
         .get_result(chat_id, job_id)
         .await?
         .ok_or("tool job not found")?;
-    let session = app
-        .chat
-        .sessions
-        .read()
-        .await
-        .get(chat_id)
-        .cloned()
-        .ok_or("chat unavailable")?;
-    let thread = {
-        let session = session.lock().await;
-        if session.closed {
-            return Err("chat closed".into());
-        }
-        session.thread.clone()
-    };
-    let catalog = app
-        .tool_registry
-        .acquire_tool_catalog(
-            &thread.mode,
-            Some(&thread.model),
-            thread
-                .worktree
-                .as_ref()
-                .map(|w| w.root.to_string_lossy().into_owned())
-                .as_deref(),
-        )
-        .await;
-    if !catalog
-        .index
-        .tools
-        .iter()
-        .any(|t| t.name == snapshot.receipt.binding.tool_name)
-    {
-        return Err("tool result withheld by current tool authority".into());
-    }
-    let context = Arc::new(tokio::sync::Mutex::new(
-        crate::at_commands::at_commands::AtCommandsContext::new_from_app(
-            app.clone(),
-            8192,
-            1,
-            false,
-            Vec::new(),
-            chat_id.into(),
-            thread.root_chat_id.clone(),
-            thread.model.clone(),
-            thread.task_meta.clone(),
-            thread.worktree.clone(),
-        )
-        .await,
-    ));
-    crate::agents::tool_authority::ensure_context_tool(
-        &context,
-        &snapshot.receipt.binding.tool_name,
-    )
-    .await?;
+    let thread = current_tool_authority(app, chat_id, &snapshot.receipt.binding.tool_name).await?;
     for key in &snapshot.receipt.binding.scope_keys {
         if let crate::tool_jobs::ScopeKey::Worktree {
             project,
@@ -1054,6 +1359,61 @@ pub(crate) async fn checked_snapshot(
     Ok(snapshot)
 }
 
+/// Present tool authority of the open chat for `tool_name`, independent of any job record.
+async fn current_tool_authority(
+    app: &AppState,
+    chat_id: &str,
+    tool_name: &str,
+) -> Result<super::types::ThreadParams, String> {
+    let session = app
+        .chat
+        .sessions
+        .read()
+        .await
+        .get(chat_id)
+        .cloned()
+        .ok_or("chat unavailable")?;
+    let thread = {
+        let session = session.lock().await;
+        if session.closed {
+            return Err("chat closed".into());
+        }
+        session.thread.clone()
+    };
+    let catalog = app
+        .tool_registry
+        .acquire_tool_catalog(
+            &thread.mode,
+            Some(&thread.model),
+            thread
+                .worktree
+                .as_ref()
+                .map(|w| w.root.to_string_lossy().into_owned())
+                .as_deref(),
+        )
+        .await;
+    if !catalog.index.tools.iter().any(|t| t.name == tool_name) {
+        return Err("tool result withheld by current tool authority".into());
+    }
+    let context = Arc::new(tokio::sync::Mutex::new(
+        crate::at_commands::at_commands::AtCommandsContext::new_from_app(
+            app.clone(),
+            8192,
+            1,
+            false,
+            Vec::new(),
+            chat_id.into(),
+            thread.root_chat_id.clone(),
+            thread.model.clone(),
+            thread.task_meta.clone(),
+            thread.worktree.clone(),
+        )
+        .await,
+    ));
+    crate::agents::tool_authority::ensure_context_tool(&context, tool_name).await?;
+    Ok(thread)
+}
+
 pub(crate) fn ensure_bridge(app: &AppState) {
     let mut events = app.runtime.tool_jobs.subscribe();
     let app = app.clone();
@@ -1063,10 +1423,31 @@ pub(crate) fn ensure_bridge(app: &AppState) {
         .install_completion_bridge(move |mut stop| {
             tokio::spawn(async move {
                 loop {
-                    for snapshot in app.runtime.tool_jobs.background_terminals() {
+                    for snapshot in app.runtime.tool_jobs.background_terminal_refs() {
                         let binding = &snapshot.receipt.binding;
                         let job_id = &snapshot.receipt.job_id;
                         let id = format!("tool_job:{}:{}", job_id, snapshot.revision);
+                        if let Some(session) = open_session(&app, &binding.chat_id).await {
+                            let dropped = dropped_delivery(&*session.lock().await, &id);
+                            if dropped {
+                                if matches!(
+                                    super::trajectories::try_save_trajectory_with_intent(
+                                        app.clone(),
+                                        session.clone(),
+                                        super::types::TrajectoryCommitIntent::Required
+                                    )
+                                    .await,
+                                    Ok(true)
+                                ) {
+                                    let _ = app
+                                        .runtime
+                                        .tool_jobs
+                                        .ack_delivered(&binding.chat_id, job_id, snapshot.revision)
+                                        .await;
+                                }
+                                continue;
+                            }
+                        }
                         let mut delivery = super::types::PendingDelivery::with_id(
                             id,
                             vec![],
@@ -1074,7 +1455,7 @@ pub(crate) fn ensure_bridge(app: &AppState) {
                             "tool_job.completed",
                             true,
                         );
-                        // Scope keys remain private to the runtime journal. This public
+                        // Scope keys stay inside the in-memory runtime. This public
                         // reference grants no authority and contains no native output.
                         delivery.deferred_job = Some(refact_core::chat_types::DeferredJobRef {
                             job_id: job_id.clone(),
@@ -1096,13 +1477,7 @@ pub(crate) fn ensure_bridge(app: &AppState) {
                             tracing::debug!(%job_id, %error, "tool job reference remains retained");
                             continue;
                         }
-                        let session = app
-                            .chat
-                            .sessions
-                            .read()
-                            .await
-                            .get(&binding.chat_id)
-                            .cloned();
+                        let session = open_session(&app, &binding.chat_id).await;
                         if let Some(session) = session {
                             land_deferred_jobs(&app, &session).await;
                             let (wake, running, notify) = {
@@ -1192,7 +1567,9 @@ pub(crate) async fn land_deferred_jobs(
             .collect::<Vec<_>>()
     };
     for pending in candidates {
-        let reference = pending.deferred_job.as_ref().unwrap();
+        let Some(reference) = pending.deferred_job.as_ref() else {
+            continue;
+        };
         // Resolve identity before taking synchronous config/session fences.
         let agent_id = app
             .agents
@@ -1214,31 +1591,62 @@ pub(crate) async fn land_deferred_jobs(
             .clone();
         let customization =
             crate::yaml_configs::customization_registry::customization_generation(&app.gcx);
-        let Ok(snapshot) = checked_snapshot(app, &reference.chat_id, &reference.job_id).await
-        else {
-            continue;
-        };
-        let binding = &snapshot.receipt.binding;
-        if snapshot.receipt.job_id != reference.job_id
-            || snapshot.revision != reference.revision
-            || binding.chat_id != reference.chat_id
-            || binding.tool_call_id != reference.tool_call_id
-            || binding.tool_name != reference.tool_name
-            || binding.model != reference.model
-            || binding.turn_id != reference.turn_id
-            || !matches!(
-                snapshot.status,
-                JobStatus::Succeeded
-                    | JobStatus::Failed
-                    | JobStatus::Cancelled
-                    | JobStatus::Unknown
-            )
-        {
-            continue;
-        }
-        let Some(mut result) = snapshot.result else {
-            continue;
-        };
+        let (released, stranded, mut result) =
+            match checked_snapshot(app, &reference.chat_id, &reference.job_id).await {
+                Ok(snapshot) => {
+                    let binding = &snapshot.receipt.binding;
+                    if snapshot.receipt.job_id != reference.job_id
+                        || snapshot.revision != reference.revision
+                        || binding.chat_id != reference.chat_id
+                        || binding.tool_call_id != reference.tool_call_id
+                        || binding.tool_name != reference.tool_name
+                        || binding.model != reference.model
+                        || binding.turn_id != reference.turn_id
+                        || !matches!(
+                            snapshot.status,
+                            JobStatus::Succeeded
+                                | JobStatus::Failed
+                                | JobStatus::Cancelled
+                                | JobStatus::Unknown
+                        )
+                    {
+                        continue;
+                    }
+                    let released = snapshot.result.is_none() && snapshot.result_released;
+                    let Some(result) = snapshot
+                        .result
+                        .or_else(|| released.then(|| not_kept_notice(reference, RELEASED_REASON)))
+                    else {
+                        continue;
+                    };
+                    (released, false, result)
+                }
+                Err(_)
+                    if !app
+                        .runtime
+                        .tool_jobs
+                        .knows(&reference.chat_id, &reference.job_id) =>
+                {
+                    if settled_job_ids(&*session_arc.lock().await, false)
+                        .contains(&reference.job_id)
+                    {
+                        retire_reported_envelopes(app, session_arc).await;
+                        continue;
+                    }
+                    if current_tool_authority(app, &reference.chat_id, &reference.tool_name)
+                        .await
+                        .is_err()
+                    {
+                        continue;
+                    }
+                    tracing::warn!(
+                        delivery_id = %pending.id,
+                        "tool job record no longer kept; landing a not-kept notice"
+                    );
+                    (true, true, not_kept_notice(reference, STRANDED_REASON))
+                }
+                Err(_) => continue,
+            };
         let Some(model) = crate::agents::handoff::parent_destination(app, &reference.chat_id).await
         else {
             continue;
@@ -1356,6 +1764,12 @@ pub(crate) async fn land_deferred_jobs(
             let mut landed = pending.clone();
             landed.deferred_job = None;
             landed.messages = result.messages;
+            if stranded && settled_job_ids(&session, false).contains(&reference.job_id) {
+                landed.messages.clear();
+            }
+            if released {
+                landed.wake = false;
+            }
             session.pending_deliveries.retain(|d| d.id != pending.id);
             session.append_delivery(&landed);
             #[cfg(test)]
@@ -1394,9 +1808,268 @@ pub(crate) async fn land_deferred_jobs(
                 .ack_delivered(&reference.chat_id, &reference.job_id, reference.revision)
                 .await;
         }
-        if pending.wake {
+        if pending.wake && !released {
             notify.notify_one();
         }
+    }
+}
+
+const RELEASED_REASON: &str = "it was released to bound engine memory before it could be delivered";
+const STRANDED_REASON: &str = "the engine no longer holds its record";
+
+/// The one notice for "no result will come for this call; it was not retried".
+fn not_kept_notice(
+    reference: &refact_core::chat_types::DeferredJobRef,
+    reason: &str,
+) -> crate::tool_jobs::JobResult {
+    let mut message = ChatMessage::new(
+        "event".into(),
+        format!(
+            "Background tool `{}` (call `{}`) finished, but its result was not kept: {reason}. The call was not retried.",
+            reference.tool_name, reference.tool_call_id
+        ),
+    );
+    message.extra.insert(
+        "event".into(),
+        serde_json::json!({
+            "subkind": "system_notice",
+            "source": "tool_job.completed",
+            "payload": {
+                "actor": "tool_completion",
+                "job_id": reference.job_id,
+                "result_released": true,
+                "tool_call_id": reference.tool_call_id,
+            },
+        }),
+    );
+    crate::tool_jobs::JobResult {
+        had_corrections: false,
+        messages: vec![message],
+        context_files: vec![],
+    }
+}
+
+const ORPHAN_NOTICE_SOURCE: &str = "tool_job.orphaned";
+const ORPHAN_NOTICE_MAX_CALLS: usize = 20;
+const ORPHAN_NOTICE_MAX_FIELD: usize = 80;
+
+struct OrphanReceipt {
+    job_id: String,
+    tool_name: String,
+    tool_call_id: String,
+}
+
+fn bounded(text: &str) -> String {
+    if text.chars().count() <= ORPHAN_NOTICE_MAX_FIELD {
+        return text.to_string();
+    }
+    let mut cut = text
+        .chars()
+        .take(ORPHAN_NOTICE_MAX_FIELD)
+        .collect::<String>();
+    cut.push('…');
+    cut
+}
+
+fn orphan_receipts(app: &AppState, session: &super::types::ChatSession) -> Vec<OrphanReceipt> {
+    let settled = settled_job_ids(session, true);
+    let mut orphans = Vec::new();
+    let mut reported = std::collections::HashSet::new();
+    for message in &session.messages {
+        let Some(meta) = message.extra.get("tool_job") else {
+            continue;
+        };
+        let (Some(job_id), Some(tool_call_id), Some(tool_name)) = (
+            meta["job_id"].as_str(),
+            meta["tool_call_id"].as_str(),
+            meta["tool_name"].as_str(),
+        ) else {
+            continue;
+        };
+        if message.role != "tool"
+            || meta["status"] != "accepted"
+            || message.tool_call_id != tool_call_id
+            || settled.contains(job_id)
+            || reported.contains(job_id)
+            || app.runtime.tool_jobs.knows(&session.chat_id, job_id)
+        {
+            continue;
+        }
+        reported.insert(job_id);
+        orphans.push(OrphanReceipt {
+            job_id: job_id.to_string(),
+            tool_name: tool_name.to_string(),
+            tool_call_id: tool_call_id.to_string(),
+        });
+    }
+    orphans
+}
+
+/// Jobs the chat already has a result, a not-kept notice or an orphan report for.
+fn settled_job_ids(
+    session: &super::types::ChatSession,
+    include_queued: bool,
+) -> std::collections::HashSet<String> {
+    let mut settled = std::collections::HashSet::new();
+    let pending = session
+        .pending_deliveries
+        .iter()
+        .filter(|_| include_queued)
+        .flat_map(|delivery| delivery.messages.iter());
+    for message in session.messages.iter().chain(pending) {
+        if let Some(job_id) = message
+            .extra
+            .get("tool_job_result")
+            .and_then(|value| value["job_id"].as_str())
+        {
+            settled.insert(job_id.to_string());
+        }
+        if message
+            .extra
+            .get("event")
+            .is_some_and(|event| event["source"] == ORPHAN_NOTICE_SOURCE)
+        {
+            for job_id in message.extra["event"]["payload"]["job_ids"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(serde_json::Value::as_str)
+            {
+                settled.insert(job_id.to_string());
+            }
+        }
+    }
+    settled
+}
+
+fn orphan_notice(orphans: &[OrphanReceipt]) -> ChatMessage {
+    let mut calls = orphans
+        .iter()
+        .take(ORPHAN_NOTICE_MAX_CALLS)
+        .map(|orphan| {
+            format!(
+                "`{}` (call `{}`)",
+                bounded(&orphan.tool_name),
+                bounded(&orphan.tool_call_id)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    if orphans.len() > ORPHAN_NOTICE_MAX_CALLS {
+        calls.push_str(&format!(
+            " and {} more",
+            orphans.len() - ORPHAN_NOTICE_MAX_CALLS
+        ));
+    }
+    let mut message = ChatMessage::new(
+        "event".into(),
+        format!(
+            "These background tool calls have no result: the engine restarted or the result was not kept. They were not retried: {calls}."
+        ),
+    );
+    message.extra.insert(
+        "event".into(),
+        serde_json::json!({
+            "subkind": "system_notice",
+            "source": ORPHAN_NOTICE_SOURCE,
+            "payload": {
+                "actor": "tool_completion",
+                "job_ids": orphans.iter().map(|orphan| orphan.job_id.as_str()).collect::<Vec<_>>(),
+            },
+        }),
+    );
+    message
+}
+
+pub(crate) async fn report_orphan_receipts(
+    app: &AppState,
+    session_arc: &Arc<tokio::sync::Mutex<super::types::ChatSession>>,
+) {
+    let (chat_id, orphans) = {
+        let session = session_arc.lock().await;
+        if session.closed {
+            return;
+        }
+        (session.chat_id.clone(), orphan_receipts(app, &session))
+    };
+    if !orphans.is_empty() {
+        deliver_orphan_notice(app, &chat_id, &orphans).await;
+    }
+    retire_reported_envelopes(app, session_arc).await;
+}
+
+/// Envelopes whose job the runtime does not know can land nothing new once the
+/// chat holds a landed orphan report or not-kept notice for that job.
+async fn retire_reported_envelopes(
+    app: &AppState,
+    session_arc: &Arc<tokio::sync::Mutex<super::types::ChatSession>>,
+) {
+    let (retired, source_root) = {
+        let mut session = session_arc.lock().await;
+        if session.closed {
+            return;
+        }
+        let settled = settled_job_ids(&session, false);
+        let stale = session
+            .pending_deliveries
+            .iter()
+            .filter_map(|delivery| {
+                let reference = delivery.deferred_job.as_ref()?;
+                (settled.contains(&reference.job_id)
+                    && !app
+                        .runtime
+                        .tool_jobs
+                        .knows(&reference.chat_id, &reference.job_id))
+                .then(|| delivery.id.clone())
+            })
+            .collect::<Vec<_>>();
+        let retired = stale
+            .into_iter()
+            .filter(|id| session.update_pending_delivery(id, None, true).is_ok())
+            .map(|id| (id, super::types::DeliveryStatus::Failed))
+            .collect::<Vec<_>>();
+        (
+            retired,
+            crate::coordination::scope::session_source_root(&session),
+        )
+    };
+    if retired.is_empty() {
+        return;
+    }
+    let save = super::delivery::schedule_delivery_save(
+        app.clone(),
+        session_arc.clone(),
+        source_root,
+        retired,
+        vec![],
+    )
+    .await;
+    if !matches!(save.await, Ok(true)) {
+        tracing::warn!("retired tool job envelopes not yet saved");
+    }
+}
+
+async fn deliver_orphan_notice(app: &AppState, chat_id: &str, orphans: &[OrphanReceipt]) {
+    let mut ids = orphans
+        .iter()
+        .map(|orphan| orphan.job_id.as_str())
+        .collect::<Vec<_>>();
+    ids.sort_unstable();
+    let digest = {
+        use sha2::Digest;
+        hex::encode(sha2::Sha256::digest(ids.join("\n").as_bytes()))
+    };
+    let delivery = super::types::PendingDelivery::with_id(
+        format!("{ORPHAN_NOTICE_SOURCE}:{digest}"),
+        vec![orphan_notice(orphans)],
+        super::types::PushMode::Append,
+        ORPHAN_NOTICE_SOURCE,
+        false,
+    );
+    if let Err(error) =
+        super::delivery::deliver_to_open_chat_with_receipt(app.clone(), chat_id, delivery).await
+    {
+        tracing::warn!(%chat_id, %error, "orphaned tool job notice not delivered");
     }
 }
 

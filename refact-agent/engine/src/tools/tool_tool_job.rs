@@ -7,6 +7,8 @@ use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{ChatMessage, ContextEnum};
 use super::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
 
+const NOT_FOUND: &str = "tool job not found: unknown id, or its record is no longer kept (engine restart or retention limit)";
+
 pub struct ToolToolJob {
     pub config_path: String,
 }
@@ -51,17 +53,17 @@ impl Tool for ToolToolJob {
             .runtime
             .tool_jobs
             .get(&chat_id, job_id)
-            .ok_or("tool job not found")?;
+            .ok_or(NOT_FOUND)?;
         if action == "cancel" {
             app.runtime
                 .tool_jobs
                 .cancel(&chat_id, job_id)
-                .ok_or("tool job not found")?;
+                .ok_or(NOT_FOUND)?;
             snapshot = app
                 .runtime
                 .tool_jobs
                 .get(&chat_id, job_id)
-                .ok_or("tool job not found")?;
+                .ok_or(NOT_FOUND)?;
         }
         if action == "wait" {
             let timeout = args
@@ -79,8 +81,8 @@ impl Tool for ToolToolJob {
                     .runtime
                     .tool_jobs
                     .get(&chat_id, job_id)
-                    .ok_or("tool job not found")?;
-                if snapshot.result.is_some() {
+                    .ok_or(NOT_FOUND)?;
+                if snapshot.result.is_some() || snapshot.status.is_terminal() {
                     break;
                 }
                 match tokio::time::timeout_at(deadline, events.recv()).await {
@@ -95,6 +97,19 @@ impl Tool for ToolToolJob {
         if action == "result" {
             snapshot =
                 crate::chat::tool_job_delivery::checked_snapshot(&app, &chat_id, job_id).await?;
+            if snapshot.result.is_none() && snapshot.result_released {
+                let meta = crate::chat::tool_job_delivery::metadata(
+                    &snapshot.receipt,
+                    snapshot.status,
+                    snapshot.revision,
+                    false,
+                );
+                let mut message =
+                    ChatMessage::new("tool".into(), crate::tool_jobs::RESULT_NOT_KEPT.into());
+                message.tool_call_id = call_id.clone();
+                message.extra.insert("tool_job".into(), meta);
+                return Ok((false, vec![ContextEnum::ChatMessage(message)]));
+            }
             if let Some(result) = snapshot.result {
                 let meta = crate::chat::tool_job_delivery::metadata(
                     &snapshot.receipt,

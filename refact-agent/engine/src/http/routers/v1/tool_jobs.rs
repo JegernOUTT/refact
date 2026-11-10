@@ -13,14 +13,16 @@ pub fn router() -> Router<AppState> {
         .route("/chats/:chat_id/tool-jobs/:job_id/cancel", post(cancel))
 }
 
+const NOT_KEPT: &str = "tool job not found: unknown id, or its record is no longer kept (engine restart or retention limit)";
+
 async fn inspect(
     State(app): State<AppState>,
     Path((chat_id, job_id)): Path<(String, String)>,
-) -> Result<Json<crate::tool_jobs::JobSnapshot>, StatusCode> {
+) -> Result<Json<crate::tool_jobs::JobSnapshot>, (StatusCode, &'static str)> {
     crate::chat::tool_job_delivery::checked_snapshot(&app, &chat_id, &job_id)
         .await
         .map(Json)
-        .map_err(|_| StatusCode::NOT_FOUND)
+        .map_err(|_| (StatusCode::NOT_FOUND, NOT_KEPT))
 }
 
 async fn cancel(

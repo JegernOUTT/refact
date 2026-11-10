@@ -55,13 +55,17 @@ mod tests {
         let (_gcx, app) = make_app_with_workspace(dir.path()).await;
         let chat_id = "init-freeze-normal";
         let session_arc =
-            get_or_create_session_with_trajectory(app.clone(), &app.chat.sessions, chat_id).await;
+            get_or_create_session_with_trajectory(app.clone(), &app.chat.sessions, chat_id)
+                .await
+                .unwrap();
         {
             let mut session = session_arc.lock().await;
             session.add_message(ChatMessage::new("user".to_string(), "hello".to_string()));
         }
 
-        persist_init_frozen_prefix(app, chat_id, prefix("frozen system")).await;
+        persist_init_frozen_prefix(app, chat_id, prefix("frozen system"))
+            .await
+            .unwrap();
 
         let path = dir
             .path()
@@ -107,7 +111,9 @@ mod tests {
             .await
             .insert(chat_id.to_string(), session_arc);
 
-        persist_init_frozen_prefix(app, chat_id, prefix("task frozen")).await;
+        persist_init_frozen_prefix(app, chat_id, prefix("task frozen"))
+            .await
+            .unwrap();
 
         let generic_path = dir
             .path()
@@ -135,7 +141,9 @@ mod tests {
         let (_gcx, app) = make_app_with_workspace(dir.path()).await;
         let chat_id = "init-freeze-existing";
         let session_arc =
-            get_or_create_session_with_trajectory(app.clone(), &app.chat.sessions, chat_id).await;
+            get_or_create_session_with_trajectory(app.clone(), &app.chat.sessions, chat_id)
+                .await
+                .unwrap();
         {
             let mut session = session_arc.lock().await;
             session.thread.frozen_request_prefix = Some(prefix("original frozen"));
@@ -143,7 +151,9 @@ mod tests {
             session.increment_version();
         }
 
-        persist_init_frozen_prefix(app.clone(), chat_id, prefix("replacement frozen")).await;
+        persist_init_frozen_prefix(app.clone(), chat_id, prefix("replacement frozen"))
+            .await
+            .unwrap();
         crate::chat::trajectories::maybe_save_trajectory_with_intent(
             app,
             session_arc,
@@ -200,7 +210,9 @@ mod tests {
         .await
         .unwrap();
         let session_arc =
-            get_or_create_session_with_trajectory(app.clone(), &app.chat.sessions, chat_id).await;
+            get_or_create_session_with_trajectory(app.clone(), &app.chat.sessions, chat_id)
+                .await
+                .unwrap();
         {
             let session = session_arc.lock().await;
             assert!(session.thread.buddy_meta.is_some());
@@ -239,9 +251,9 @@ async fn persist_init_frozen_prefix(
     app: AppState,
     chat_id: &str,
     frozen_prefix: refact_chat_api::FrozenRequestPrefix,
-) {
+) -> Result<(), crate::chat::session_runtime::SessionOpenError> {
     let session_arc =
-        get_or_create_session_with_trajectory(app.clone(), &app.chat.sessions, chat_id).await;
+        get_or_create_session_with_trajectory(app.clone(), &app.chat.sessions, chat_id).await?;
     let installed = {
         let mut session = session_arc.lock().await;
         ensure_frozen_prefix(
@@ -259,6 +271,7 @@ async fn persist_init_frozen_prefix(
         )
         .await;
     }
+    Ok(())
 }
 
 pub async fn handle_v1_prepend_system_prompt_and_maybe_more_initial_messages(
@@ -320,7 +333,7 @@ pub async fn handle_v1_prepend_system_prompt_and_maybe_more_initial_messages(
         system_prompt,
         serde_json::Value::Array(canonical_tools.tools),
     );
-    persist_init_frozen_prefix(app.clone(), &post.chat_meta.chat_id, frozen_prefix).await;
+    persist_init_frozen_prefix(app.clone(), &post.chat_meta.chat_id, frozen_prefix).await?;
     let messages_to_stream_back = has_rag_results.in_json;
 
     Ok(Response::builder()

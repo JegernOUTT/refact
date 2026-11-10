@@ -2353,7 +2353,8 @@ mod tests {
             &app.chat.sessions,
             "subchat-child-chat",
         )
-        .await;
+        .await
+        .unwrap();
         app.chat
             .sessions
             .read()

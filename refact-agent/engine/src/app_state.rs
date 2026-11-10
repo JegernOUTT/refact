@@ -189,7 +189,7 @@ impl EngineChatSessionFacade {
             &self.gcx.chat_sessions,
             chat_id,
         )
-        .await;
+        .await?;
         let mut session = session_arc.lock().await;
         if session.closed {
             return Err("chat session is closed".into());
@@ -320,7 +320,7 @@ impl ChatSessionFacade for EngineChatSessionFacade {
         let app = AppState::from_gcx(self.gcx.clone()).await;
         let session_arc =
             chat::get_or_create_session_with_trajectory(app, &self.gcx.chat_sessions, chat_id)
-                .await;
+                .await?;
         let session = session_arc.lock().await;
         Ok(ChatSessionSnapshot {
             messages: session.messages.clone(),
@@ -335,7 +335,7 @@ impl ChatSessionFacade for EngineChatSessionFacade {
         let app = AppState::from_gcx(self.gcx.clone()).await;
         let session_arc =
             chat::get_or_create_session_with_trajectory(app, &self.gcx.chat_sessions, chat_id)
-                .await;
+                .await?;
         let background_agents: Vec<_> = self
             .gcx
             .agents
@@ -363,7 +363,7 @@ impl ChatSessionFacade for EngineChatSessionFacade {
             &self.gcx.chat_sessions,
             &request.chat_id,
         )
-        .await;
+        .await?;
         let _transition = chat::worktree_lifecycle::try_transition_lock(&session_arc)?;
         let sessions = self
             .gcx

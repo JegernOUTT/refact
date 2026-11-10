@@ -2594,7 +2594,8 @@ mod tests {
             &app.chat.sessions,
             &chat_id,
         )
-        .await;
+        .await
+        .unwrap();
         let restored_guard = restored.lock().await;
         let context = active_context(&restored_guard.snapshot_messages())
             .expect("opening must recover the invalid planner before publishing its snapshot");

@@ -46,6 +46,7 @@ import {
 
 const useAppStore = useStore.withTypes<AppStore>();
 export const INTERNAL_NAVIGATION_TIMEOUT_MS = 15_000;
+export type NavigationOutcome = "opened" | "failed" | "superseded" | "busy";
 type LocalTaskChatContext = {
   task: TaskMeta;
   board: TaskBoard;
@@ -145,19 +146,19 @@ export function useInternalNavigation({
       origin: InternalLinkOrigin = {},
       local?: { context: LocalTaskChatContext; owner: boolean },
       directAgent?: NonNullable<ReturnType<typeof knownAgent>>,
-    ): Promise<boolean> => {
+    ): Promise<NavigationOutcome> => {
       const target = parseRefactLink(url);
       if (!target) {
         setError("Unsupported or invalid internal link.");
-        return false;
+        return "failed";
       }
       if (target.type === "worktree" && !onWorktreeOpened) {
         setError(
           "Worktree links cannot be opened here. Use the authorized worktree inspector on the task card or chat.",
         );
-        return false;
+        return "failed";
       }
-      if (inFlight.current) return false;
+      if (inFlight.current) return "busy";
       inFlight.current = true;
       setPending(true);
       setLocalPending(Boolean(local ?? directAgent));
@@ -243,7 +244,7 @@ export function useInternalNavigation({
               ),
             ),
           );
-          if (!checkSource()) return false;
+          if (!checkSource()) return "superseded";
           const record = inventory.worktrees.find(
             (candidate) => candidate.meta.id === target.id,
           );
@@ -257,7 +258,7 @@ export function useInternalNavigation({
             );
           unsubscribe();
           onWorktreeOpened?.(record);
-          return true;
+          return "opened";
         }
         if (target.type === "task") {
           const task = await read(
@@ -265,7 +266,7 @@ export function useInternalNavigation({
               tasksApi.endpoints.getTask.initiate(target.id, queryOptions),
             ),
           );
-          if (!checkSource()) return false;
+          if (!checkSource()) return "superseded";
           if (task.id !== target.id)
             throw new Error(
               "Task response did not match the requested target.",
@@ -276,7 +277,7 @@ export function useInternalNavigation({
                 tasksApi.endpoints.getBoard.initiate(target.id, queryOptions),
               ),
             );
-            if (!checkSource()) return false;
+            if (!checkSource()) return "superseded";
             if (!board.cards.some((card) => card.id === target.cardId))
               throw new Error(`Card not found on this task: ${target.cardId}`);
           }
@@ -300,7 +301,7 @@ export function useInternalNavigation({
               }),
             );
           }
-          return true;
+          return "opened";
         }
 
         const data = await read(
@@ -311,7 +312,7 @@ export function useInternalNavigation({
             ),
           ),
         );
-        if (!checkSource()) return false;
+        if (!checkSource()) return "superseded";
         if (data.id !== target.id)
           throw new Error("Chat response did not match the requested target.");
         if (
@@ -399,7 +400,7 @@ export function useInternalNavigation({
               tasksApi.endpoints.getTask.initiate(taskId, queryOptions),
             ),
           );
-          if (!checkSource()) return false;
+          if (!checkSource()) return "superseded";
           if (validatedTask.id !== taskId)
             throw new Error("Task response did not match the chat.");
           const board = await read(
@@ -407,7 +408,7 @@ export function useInternalNavigation({
               tasksApi.endpoints.getBoard.initiate(taskId, queryOptions),
             ),
           );
-          if (!checkSource()) return false;
+          if (!checkSource()) return "superseded";
           const planners = await read(
             store.dispatch(
               tasksApi.endpoints.listTaskTrajectories.initiate(
@@ -416,7 +417,7 @@ export function useInternalNavigation({
               ),
             ),
           );
-          if (!checkSource()) return false;
+          if (!checkSource()) return "superseded";
           const resolved = resolveChatLink(target.id, planners, board);
           if (
             resolved.kind === "agent" &&
@@ -506,15 +507,15 @@ export function useInternalNavigation({
           store.dispatch(popBackTo({ name: "history" }));
           store.dispatch(push({ name: "chat" }));
         }
-        return true;
+        return "opened";
       } catch (cause) {
-        if (checkSource())
-          setError(
-            deadline.timedOut
-              ? "Could not open link: Navigation timed out. Please try again."
-              : `Could not open link: ${taskErrorMessage(cause)}`,
-          );
-        return false;
+        if (!checkSource()) return "superseded";
+        setError(
+          deadline.timedOut
+            ? "Could not open link: Navigation timed out. Please try again."
+            : `Could not open link: ${taskErrorMessage(cause)}`,
+        );
+        return "failed";
       } finally {
         unsubscribe();
         clearTimeout(timer);
@@ -537,9 +538,14 @@ export function useInternalNavigation({
     ],
   );
 
-  const navigate = useCallback(
+  const navigateWithOutcome = useCallback(
     (url: string, origin: InternalLinkOrigin = {}) =>
       runNavigation(url, origin),
+    [runNavigation],
+  );
+  const navigate = useCallback(
+    async (url: string, origin: InternalLinkOrigin = {}) =>
+      (await runNavigation(url, origin)) === "opened",
     [runNavigation],
   );
   const navigateLocalTaskChat = useCallback(
@@ -559,7 +565,7 @@ export function useInternalNavigation({
         `refact://chat/${chatId}`,
         { taskId, cardId },
         trusted ? { context, owner } : undefined,
-      );
+      ).then((outcome) => outcome === "opened");
     },
     [getLocalContext, runNavigation],
   );
@@ -570,11 +576,12 @@ export function useInternalNavigation({
         { chatId: sourceId },
         undefined,
         knownAgent(chatId, sourceId),
-      ),
+      ).then((outcome) => outcome === "opened"),
     [knownAgent, runNavigation],
   );
   return {
     navigate,
+    navigateWithOutcome,
     navigateKnownAgent,
     navigateLocalTaskChat,
     pending,

@@ -96,17 +96,25 @@ pub async fn set_app_workspace(
         .map_err(|e| AppWorkspaceSetError::Unavailable(e.message))?;
     let sessions = app.chat.sessions.clone();
     let session_arc =
-        crate::chat::get_or_create_session_with_trajectory(app.clone(), &sessions, chat_id).await;
+        crate::chat::get_or_create_session_with_trajectory(app.clone(), &sessions, chat_id)
+            .await
+            .map_err(|error| AppWorkspaceSetError::Unavailable(error.to_string()))?;
     set_app_workspace_in_session(app, session_arc, expected_revision, workspace).await
 }
 
-pub async fn get_app_workspace(app: AppState, chat_id: &str) -> Option<StoredAppWorkspace> {
-    crate::chat::trajectories::validate_trajectory_id(chat_id).ok()?;
+/// `Ok(None)` means the chat has no workspace. A refused open is an error, never an empty workspace.
+pub async fn get_app_workspace(
+    app: AppState,
+    chat_id: &str,
+) -> Result<Option<StoredAppWorkspace>, crate::chat::session_runtime::SessionOpenError> {
+    if crate::chat::trajectories::validate_trajectory_id(chat_id).is_err() {
+        return Ok(None);
+    }
     let sessions = app.chat.sessions.clone();
     let session_arc =
-        crate::chat::get_or_create_session_with_trajectory(app.clone(), &sessions, chat_id).await;
+        crate::chat::get_or_create_session_with_trajectory(app.clone(), &sessions, chat_id).await?;
     let session = session_arc.lock().await;
-    session.thread.app_workspace.clone()
+    Ok(session.thread.app_workspace.clone())
 }
 
 pub(crate) fn stored_app_workspace_from_value(
@@ -242,9 +250,28 @@ mod transport_tests {
                 super::get_app_workspace(app.clone(), "workspace-http")
                     .await
                     .unwrap()
+                    .unwrap()
             )
             .unwrap(),
             expected
+        );
+        app.gcx.apps.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn refused_open_is_an_error_not_an_empty_workspace() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let app = crate::app_state::AppState::from_gcx(gcx).await;
+        assert_eq!(
+            super::get_app_workspace(app.clone(), "fresh-workspace")
+                .await
+                .unwrap(),
+            None
+        );
+        app.runtime.tool_jobs.scopes.begin_shutdown();
+        assert_eq!(
+            super::get_app_workspace(app.clone(), "closing-workspace").await,
+            Err(crate::chat::session_runtime::SessionOpenError::Closed)
         );
         app.gcx.apps.shutdown().await;
     }

@@ -1162,7 +1162,9 @@ async fn workspace_execute(
     mutation_lease: Option<&crate::chat::app_workspace::AppWorkspaceMutationLease>,
 ) -> Result<Value, String> {
     use refact_chat_api::{AppBinding, AppLayoutNode, AppTab, AppWorkspace, SplitDirection};
-    let stored = crate::chat::app_workspace::get_app_workspace(app.clone(), chat_id).await;
+    let stored = crate::chat::app_workspace::get_app_workspace(app.clone(), chat_id)
+        .await
+        .map_err(|error| format!("app workspace unavailable: {error}"))?;
     if action == "get" || action == "list" {
         return match stored {
             Some(stored) => serde_json::to_value(stored),
@@ -1433,6 +1435,46 @@ pub(super) mod tests {
         drop(lease);
         let stored = unpin.await.unwrap();
         assert_eq!(stored.revision, 1);
+        app.gcx.apps.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn workspace_get_and_list_report_a_refused_open_instead_of_empty() {
+        let (app, _ccx, _dir) = approval_fixture().await;
+        let caller = crate::apps::Caller::Tool {
+            chat_id: "closing-chat".into(),
+            model: Some("test/model".into()),
+        };
+        let fresh = workspace_execute(
+            &app,
+            &caller,
+            "fresh-chat",
+            Family::Binding,
+            "list",
+            &args(json!({})),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            fresh,
+            serde_json::to_value(refact_chat_api::AppWorkspace::empty()).unwrap()
+        );
+        app.runtime.tool_jobs.scopes.begin_shutdown();
+        for action in ["get", "list"] {
+            let error = workspace_execute(
+                &app,
+                &caller,
+                "closing-chat",
+                Family::Layout,
+                action,
+                &args(json!({})),
+                None,
+            )
+            .await
+            .expect_err("a refused open must not look like an empty workspace");
+            assert!(error.contains("closing"), "{error}");
+        }
         app.gcx.apps.shutdown().await;
     }
 

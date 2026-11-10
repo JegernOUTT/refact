@@ -60,20 +60,29 @@ impl Tool for ToolValidateGoal {
         };
         let session_arc = match session_arc {
             Some(session) => session,
-            None if crate::chat::try_restore_session_if_trajectory_exists(
+            None => match crate::chat::session_runtime::restore_session_if_trajectory_exists(
                 app.clone(),
                 &app.chat.sessions,
                 &chat_id,
             )
-            .await =>
+            .await
             {
-                let sessions = gcx.chat_sessions.read().await;
-                sessions
-                    .get(&chat_id)
-                    .cloned()
-                    .ok_or_else(|| format!("chat session `{chat_id}` not found"))?
-            }
-            None => return Err(format!("chat session `{chat_id}` not found")),
+                crate::chat::session_runtime::SessionRestore::Open => {
+                    let sessions = gcx.chat_sessions.read().await;
+                    sessions
+                        .get(&chat_id)
+                        .cloned()
+                        .ok_or_else(|| format!("chat session `{chat_id}` not found"))?
+                }
+                crate::chat::session_runtime::SessionRestore::NoTrajectory => {
+                    return Err(format!("chat session `{chat_id}` not found"))
+                }
+                crate::chat::session_runtime::SessionRestore::Refused(error) => {
+                    return Err(format!(
+                        "chat session `{chat_id}` cannot be opened now: {error}"
+                    ))
+                }
+            },
         };
 
         if crate::agents::seal::is_sealed(&app, &chat_id).await {

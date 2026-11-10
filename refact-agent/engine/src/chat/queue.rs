@@ -3293,7 +3293,8 @@ mod tests {
             &app.chat.sessions,
             &chat_id,
         )
-        .await;
+        .await
+        .unwrap();
         {
             let session = restored.lock().await;
             assert_eq!(session.runtime.state, SessionState::Interrupted);

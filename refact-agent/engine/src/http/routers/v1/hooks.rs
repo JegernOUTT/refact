@@ -207,7 +207,9 @@ async fn fire_inline(
 /// busy chat queues it at the next safe boundary instead of racing the history.
 async fn inject_wake(app: &AppState, text: &str, push: PushMode) -> Result<String, String> {
     let chat_id = wake_chat_id(app).await;
-    let _ = get_or_create_session_with_trajectory(app.clone(), &app.chat.sessions, &chat_id).await;
+    get_or_create_session_with_trajectory(app.clone(), &app.chat.sessions, &chat_id)
+        .await
+        .map_err(|error| error.to_string())?;
     let notice = event(
         EventSubkind::SystemNotice,
         "daemon.hooks",

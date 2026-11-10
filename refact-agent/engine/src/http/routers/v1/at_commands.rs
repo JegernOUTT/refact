@@ -558,7 +558,7 @@ pub async fn handle_v1_at_command_execute(
             &sessions,
             &post.chat_id,
         )
-        .await;
+        .await?;
         let mut session = session_arc.lock().await;
         let original_len = post.messages.len();
         for msg in messages.iter().skip(original_len) {

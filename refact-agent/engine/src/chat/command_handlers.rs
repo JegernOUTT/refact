@@ -1489,9 +1489,23 @@ async fn handle_branch_from_chat(
 
     let sessions = app.chat.sessions.clone();
 
-    let source_session_arc =
-        session::get_or_create_session_with_trajectory(app.clone(), &sessions, &source_chat_id)
-            .await;
+    let source_session_arc = match session::get_or_create_session_with_trajectory(
+        app.clone(),
+        &sessions,
+        &source_chat_id,
+    )
+    .await
+    {
+        Ok(source) => source,
+        Err(error) => {
+            reject_guard(
+                &mut *session_arc.lock().await,
+                &context.request_id,
+                error.to_string(),
+            );
+            return QueueCommandOutcome::Continue;
+        }
+    };
 
     if Arc::ptr_eq(&source_session_arc, &session_arc) {
         reject_guard(

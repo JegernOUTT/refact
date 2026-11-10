@@ -382,7 +382,7 @@ pub async fn handle_llm_compress_preview(
         &gcx.chat_sessions,
         &chat_id,
     )
-    .await;
+    .await?;
     let (state, active, messages, live_ids, thread, trajectory_version) = {
         let session = session_arc.lock().await;
         (
@@ -428,7 +428,7 @@ pub async fn handle_llm_compress_apply(
         &gcx.chat_sessions,
         &chat_id,
     )
-    .await;
+    .await?;
     let result: ManualCompressionApplyResult = apply_manual_context_rebuild(
         gcx.clone(),
         &session_arc,
@@ -601,7 +601,7 @@ pub async fn handle_transform_preview(
         &sessions,
         &chat_id,
     )
-    .await;
+    .await?;
 
     let (messages, live_ids, trajectory_version) = {
         let session = session_arc.lock().await;
@@ -651,7 +651,7 @@ pub async fn handle_transform_apply(
         &sessions,
         &chat_id,
     )
-    .await;
+    .await?;
 
     let stats = {
         let mut session = session_arc.lock().await;
@@ -802,7 +802,7 @@ pub async fn handle_mode_transition_apply(
         &sessions,
         &chat_id,
     )
-    .await;
+    .await?;
 
     let reservation = TransitionReservation::acquire(session_arc.clone()).await?;
     let (messages, thread, task_meta, source_goal, session_state, source_version) = {
@@ -1008,7 +1008,7 @@ pub async fn handle_planner_from_transition(
         &sessions,
         &req.source_chat_id,
     )
-    .await;
+    .await?;
 
     let reservation = TransitionReservation::acquire(session_arc.clone()).await?;
     let (messages, thread, source_goal, session_state, source_version) = {

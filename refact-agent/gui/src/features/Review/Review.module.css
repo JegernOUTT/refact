@@ -58,8 +58,8 @@
   grid-template-rows: minmax(0, 1fr);
   grid-template-areas: "chat";
 }
-.surface[data-narrow="true"] .canvasSlot,
-.surface[data-narrow="true"] .chatSlot {
+.surface[data-review="true"][data-narrow="true"] .canvasSlot,
+.surface[data-review="true"][data-narrow="true"] .chatSlot {
   grid-area: chat;
   border: none;
 }

@@ -1485,6 +1485,35 @@ describe("WorktreeControl", () => {
     });
   });
 
+  test("a locked chat (423) is a rejection that shows the engine message", async () => {
+    const record = makeWorktreeRecord("wt-locked", "refact/chat/locked");
+    server.use(
+      worktreesList([record]),
+      http.post("*/v1/chats/:id/commands", () =>
+        HttpResponse.json(
+          { error: "chat is locked by an unknown tool outcome" },
+          { status: 423 },
+        ),
+      ),
+    );
+    const { user, store } = renderControl([record], record.meta);
+    await user.click(screen.getByTestId("worktree-control-trigger"));
+    await user.click(
+      await screen.findByRole("button", {
+        name: "Detach worktree and use main workspace",
+      }),
+    );
+    expect(
+      await screen.findByText(
+        "Worktree update failed: chat is locked by an unknown tool outcome",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/Worktree update unconfirmed/)).toBeNull();
+    expect(selectThreadWorktreeById(store.getState(), "chat-1")).toEqual(
+      record.meta,
+    );
+  });
+
   test("merge cleanup warnings remain inspectable after the registry and chat detach", async () => {
     const record = makeWorktreeRecord("wt-merged", "refact/chat/merged");
     const mergeCalls: JsonObject[] = [];

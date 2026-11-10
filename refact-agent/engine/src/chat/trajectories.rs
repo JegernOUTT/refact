@@ -15605,7 +15605,8 @@ mod tests {
             &app.chat.sessions,
             chat_id,
         )
-        .await;
+        .await
+        .unwrap();
         let mut chat_rx = {
             let session = session_arc.lock().await;
             assert!(session.messages.is_empty());
@@ -15625,7 +15626,8 @@ mod tests {
             &app.chat.sessions,
             chat_id,
         )
-        .await;
+        .await
+        .unwrap();
         assert!(Arc::ptr_eq(&session_arc, &reopened));
         {
             let session = reopened.lock().await;
@@ -15656,7 +15658,8 @@ mod tests {
             &app.chat.sessions,
             chat_id,
         )
-        .await;
+        .await
+        .unwrap();
 
         let path = dir
             .path()
@@ -15751,7 +15754,8 @@ mod tests {
             &app.chat.sessions,
             chat_id,
         )
-        .await;
+        .await
+        .unwrap();
         {
             let session = session_arc.lock().await;
             assert_eq!(session.messages.len(), 1);
@@ -15771,7 +15775,8 @@ mod tests {
             &app.chat.sessions,
             chat_id,
         )
-        .await;
+        .await
+        .unwrap();
         assert!(Arc::ptr_eq(&session_arc, &reopened));
         let session = reopened.lock().await;
         assert_eq!(session.messages.len(), 2);
@@ -19867,7 +19872,8 @@ mod tests {
             &app.chat.sessions,
             chat_id,
         )
-        .await;
+        .await
+        .unwrap();
         {
             let session = session_arc.lock().await;
             let prefix = session.thread.frozen_request_prefix.as_ref().unwrap();
@@ -19943,7 +19949,8 @@ mod tests {
             &app.chat.sessions,
             chat_id,
         )
-        .await;
+        .await
+        .unwrap();
         {
             let session = session_arc.lock().await;
             assert!(session.thread.frozen_request_prefix.is_none());
@@ -20019,7 +20026,8 @@ mod tests {
             &app.chat.sessions,
             chat_id,
         )
-        .await;
+        .await
+        .unwrap();
         {
             let session = session_arc.lock().await;
             assert!(session.messages.is_empty());
@@ -20835,7 +20843,8 @@ mod tests {
                 &app.chat.sessions,
                 chat_id,
             )
-            .await;
+            .await
+            .unwrap();
             {
                 let session = session_arc.lock().await;
                 let prefix = session.thread.frozen_request_prefix.as_ref().unwrap();
@@ -20997,7 +21006,8 @@ mod tests {
             &app.chat.sessions,
             chat_id,
         )
-        .await;
+        .await
+        .unwrap();
         {
             let session = session_arc.lock().await;
             let prefix = session.thread.frozen_request_prefix.as_ref().unwrap();
@@ -21109,7 +21119,8 @@ mod tests {
             &app.chat.sessions,
             chat_id,
         )
-        .await;
+        .await
+        .unwrap();
         assert!(
             crate::chat::session_runtime::board_execution(&app, &session_arc)
                 .await

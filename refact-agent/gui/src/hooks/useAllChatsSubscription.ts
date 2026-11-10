@@ -5,6 +5,7 @@ import { useAppSelector } from "./useAppSelector";
 import {
   applyChatEvent,
   clearSseRefreshRequest,
+  clearThreadSubscriptionFailure,
   markThreadSseError,
 } from "../features/Chat/Thread/actions";
 import {
@@ -17,7 +18,11 @@ import {
   hasUsableEngineEndpoint,
   type EngineApiConfig,
 } from "../services/refact/apiUrl";
-import { createChatEventMultiplexer } from "../services/refact/chatSubscription";
+import {
+  ChatScopedSubscriptionError,
+  ChatSubscriptionClosedError,
+  createChatEventMultiplexer,
+} from "../services/refact/chatSubscription";
 import { invalidateChatParamsSyncState } from "../services/refact/chatCommands";
 import {
   setSseStatus,
@@ -152,10 +157,14 @@ export function useAllChatsSubscription() {
   const timeoutRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(
     new Map(),
   );
-  const groupRetryIdsRef = useRef(new Set<string>());
+  const groupRetryIdsRef = useRef(
+    new Map<string, { dueAt: number; earliestAt: number }>(),
+  );
   const groupRetryTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(
     null,
   );
+  const groupRetryFireAtRef = useRef<number | null>(null);
+  const armGroupRetryTimerRef = useRef<() => void>(() => undefined);
   const lastActivityDispatchRef = useRef<Map<string, number>>(new Map());
   const lastActivityAtRef = useRef<Map<string, number>>(new Map());
   const streamDeltaFlushRef = useRef<Map<string, FlushHandle>>(new Map());
@@ -213,13 +222,13 @@ export function useAllChatsSubscription() {
   const activeChatId = currentThreadId;
 
   const clearPendingTimeout = useCallback((chatId: string) => {
-    groupRetryIdsRef.current.delete(chatId);
-    if (
-      groupRetryIdsRef.current.size === 0 &&
-      groupRetryTimeoutRef.current !== null
-    ) {
-      clearTimeout(groupRetryTimeoutRef.current);
-      groupRetryTimeoutRef.current = null;
+    if (groupRetryIdsRef.current.delete(chatId)) {
+      if (groupRetryTimeoutRef.current !== null) {
+        clearTimeout(groupRetryTimeoutRef.current);
+        groupRetryTimeoutRef.current = null;
+      }
+      groupRetryFireAtRef.current = null;
+      armGroupRetryTimerRef.current();
     }
     const existingTimeout = timeoutRef.current.get(chatId);
     if (existingTimeout) {
@@ -230,7 +239,7 @@ export function useAllChatsSubscription() {
 
   const clearRetryStateForUndesiredChats = useCallback(
     (desired: Set<string>) => {
-      for (const chatId of groupRetryIdsRef.current) {
+      for (const chatId of Array.from(groupRetryIdsRef.current.keys())) {
         if (!desired.has(chatId)) clearPendingTimeout(chatId);
       }
       for (const chatId of Array.from(timeoutRef.current.keys())) {
@@ -509,6 +518,41 @@ export function useAllChatsSubscription() {
   flushPendingStreamDeltaForChatRef.current = flushPendingStreamDeltaForChat;
   clearStreamDeltaFlushForChatRef.current = clearStreamDeltaFlushForChat;
 
+  const armGroupRetryTimer = useCallback(() => {
+    const entries = [...groupRetryIdsRef.current.values()];
+    if (entries.length === 0) return;
+    const fireAt = Math.min(...entries.map((entry) => entry.dueAt));
+    if (
+      groupRetryTimeoutRef.current !== null &&
+      groupRetryFireAtRef.current !== null &&
+      groupRetryFireAtRef.current <= fireAt
+    )
+      return;
+    if (groupRetryTimeoutRef.current !== null)
+      clearTimeout(groupRetryTimeoutRef.current);
+    groupRetryFireAtRef.current = fireAt;
+    groupRetryTimeoutRef.current = setTimeout(
+      () => {
+        groupRetryTimeoutRef.current = null;
+        groupRetryFireAtRef.current = null;
+        const now = Date.now();
+        const due: string[] = [];
+        for (const [id, entry] of groupRetryIdsRef.current) {
+          if (entry.earliestAt <= now) due.push(id);
+        }
+        for (const id of due) groupRetryIdsRef.current.delete(id);
+        for (const id of due) {
+          if (!desiredIdsRef.current.has(id)) continue;
+          if (subscriptionsRef.current.has(id)) continue;
+          subscribeRef.current?.(id);
+        }
+        armGroupRetryTimerRef.current();
+      },
+      Math.max(0, fireAt - Date.now()),
+    );
+  }, []);
+  armGroupRetryTimerRef.current = armGroupRetryTimer;
+
   const scheduleResubscribe = useCallback(
     (chatId: string, useBackoff = false) => {
       clearPendingTimeout(chatId);
@@ -517,18 +561,13 @@ export function useAllChatsSubscription() {
       const delay = useBackoff ? calculateBackoff(retryCount) : 100;
 
       if (useBackoff) {
-        groupRetryIdsRef.current.add(chatId);
-        if (groupRetryTimeoutRef.current !== null) return;
-        groupRetryTimeoutRef.current = setTimeout(() => {
-          groupRetryTimeoutRef.current = null;
-          const chatIds = [...groupRetryIdsRef.current];
-          groupRetryIdsRef.current.clear();
-          for (const id of chatIds) {
-            if (!desiredIdsRef.current.has(id)) continue;
-            if (subscriptionsRef.current.has(id)) continue;
-            subscribeRef.current?.(id);
-          }
-        }, delay);
+        const now = Date.now();
+        const nominal = calculateBackoff(retryCount, { jitter: 0 });
+        groupRetryIdsRef.current.set(chatId, {
+          dueAt: now + delay,
+          earliestAt: now + Math.min(delay, Math.floor(nominal * 0.9)),
+        });
+        armGroupRetryTimer();
         return;
       }
 
@@ -541,7 +580,7 @@ export function useAllChatsSubscription() {
 
       timeoutRef.current.set(chatId, timeoutId);
     },
-    [clearPendingTimeout],
+    [armGroupRetryTimer, clearPendingTimeout],
   );
 
   const subscribeToChat = useCallback(
@@ -558,10 +597,11 @@ export function useAllChatsSubscription() {
       seqMapRef.current.set(chatId, 0n);
 
       dispatch(setSseStatus({ chatId, status: "connecting" }));
+      dispatch(clearThreadSubscriptionFailure({ id: chatId }));
 
       const connection = dispatch(captureAgentRosterConnection());
       const rosterSource = connection.source;
-      let chatDenied = false;
+      let stopRetrying = false;
       multiplexerRef.current ??= createChatEventMultiplexer(
         connection.config,
         connection.config.apiKey ?? undefined,
@@ -645,8 +685,11 @@ export function useAllChatsSubscription() {
         },
         onError: (error) => {
           if (!isCurrentAttempt()) return;
-          chatDenied = isChatAuthorizationDenial(error);
-          dispatch(rejectAgentRosterStream(rosterSource, error));
+          stopRetrying =
+            isChatAuthorizationDenial(error) ||
+            (error instanceof ChatSubscriptionClosedError && !error.retryable);
+          if (!(error instanceof ChatScopedSubscriptionError))
+            dispatch(rejectAgentRosterStream(rosterSource, error));
           invalidateChatParamsSyncState(chatId, configRef.current);
           clearStreamDeltaFlushForChatRef.current?.(chatId);
           flushPendingStreamDeltaForChatRef.current?.(chatId);
@@ -654,7 +697,13 @@ export function useAllChatsSubscription() {
           flushPendingSubchatUpdateForChat(chatId);
           clearBackgroundAgentFlushForChat(chatId);
           flushPendingBackgroundAgentUpdatesForChat(chatId);
-          dispatch(markThreadSseError({ id: chatId, error: error.message }));
+          dispatch(
+            markThreadSseError({
+              id: chatId,
+              error: error.message,
+              final: stopRetrying,
+            }),
+          );
           attemptsRef.current.delete(chatId);
           subscriptionsRef.current.delete(chatId);
           clearChatStreamState(chatId);
@@ -667,7 +716,7 @@ export function useAllChatsSubscription() {
               error: error.message,
             }),
           );
-          if (!chatDenied && !manualCloseRef.current.has(chatId)) {
+          if (!stopRetrying && !manualCloseRef.current.has(chatId)) {
             scheduleResubscribe(chatId, true);
           }
         },
@@ -692,7 +741,7 @@ export function useAllChatsSubscription() {
           const count = (retryCountRef.current.get(chatId) ?? 0) + 1;
           retryCountRef.current.set(chatId, count);
           dispatch(setSseStatus({ chatId, status: "disconnected" }));
-          if (!chatDenied && !manualCloseRef.current.has(chatId)) {
+          if (!stopRetrying && !manualCloseRef.current.has(chatId)) {
             scheduleResubscribe(chatId, true);
           }
         },
@@ -773,6 +822,7 @@ export function useAllChatsSubscription() {
       clearTimeout(groupRetryTimeoutRef.current);
       groupRetryTimeoutRef.current = null;
     }
+    groupRetryFireAtRef.current = null;
     groupRetryIdsRef.current.clear();
     for (const flushHandle of streamDeltaFlushRef.current.values()) {
       cancelScheduledFlush(flushHandle);

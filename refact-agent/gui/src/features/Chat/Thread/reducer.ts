@@ -43,6 +43,7 @@ import {
   setIntegrationData,
   setIsWaitingForResponse,
   markThreadSseError,
+  clearThreadSubscriptionFailure,
   setMaxNewTokens,
   setAutoApproveEditingTools,
   setAutoApproveDangerousCommands,
@@ -1470,6 +1471,8 @@ export const chatReducer = createReducer(initialState, (builder) => {
       rt.session_state === "generating" ||
       rt.session_state === "executing_tools" ||
       rt.session_state === "waiting_ide";
+    if (action.payload.final && !rt.snapshot_received)
+      rt.subscription_failure = action.payload.error;
     if (!wasBusy) return;
 
     rt.streaming = false;
@@ -2479,6 +2482,13 @@ export const chatReducer = createReducer(initialState, (builder) => {
 
   builder.addCase(requestSseRefresh, (state, action) => {
     state.sse_refresh_requested = action.payload.chatId;
+    const rt = getRuntime(state, action.payload.chatId);
+    if (rt?.subscription_failure) rt.subscription_failure = null;
+  });
+
+  builder.addCase(clearThreadSubscriptionFailure, (state, action) => {
+    const rt = getRuntime(state, action.payload.id);
+    if (rt?.subscription_failure) rt.subscription_failure = null;
   });
 
   builder.addCase(markQueuedCommandCancelled, (state, action) => {

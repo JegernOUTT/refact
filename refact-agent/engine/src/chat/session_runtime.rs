@@ -676,52 +676,264 @@ async fn begin_board_operation_inner(
     result
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SessionOpenError {
+    Closed,
+    Busy,
+    Failed(String),
+}
+
+const SESSION_OPEN_FAILED_TEXT: &str = "chat could not be opened";
+pub(crate) const SESSION_OPEN_DRAIN_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(10);
+
+impl SessionOpenError {
+    pub fn status_code(&self) -> axum::http::StatusCode {
+        match self {
+            Self::Closed | Self::Busy => axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            Self::Failed(_) => axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+        }
+    }
+
+    fn failed(chat_id: &str, detail: impl std::fmt::Display) -> Self {
+        let detail = detail.to_string();
+        warn!(%chat_id, %detail, "session open failed");
+        Self::Failed(detail)
+    }
+}
+
+impl std::fmt::Display for SessionOpenError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Closed => f.write_str("chat is closing or the engine is shutting down; retry"),
+            Self::Busy => f.write_str("chat lifecycle change in progress; retry"),
+            Self::Failed(_) => f.write_str(SESSION_OPEN_FAILED_TEXT),
+        }
+    }
+}
+
+impl std::error::Error for SessionOpenError {}
+
+impl From<SessionOpenError> for String {
+    fn from(error: SessionOpenError) -> Self {
+        error.to_string()
+    }
+}
+
+impl From<SessionOpenError> for crate::custom_error::ScratchError {
+    fn from(error: SessionOpenError) -> Self {
+        crate::custom_error::ScratchError::new(error.status_code(), error.to_string())
+    }
+}
+
 pub async fn get_or_create_session_with_trajectory(
     app: AppState,
     sessions: &SessionsMap,
     chat_id: &str,
-) -> Arc<AMutex<ChatSession>> {
+) -> Result<Arc<AMutex<ChatSession>>, SessionOpenError> {
     // Existing open sessions do not require a lifecycle transition. In
     // particular, looking up a session must not cancel its running jobs.
     let existing = sessions.read().await.get(chat_id).cloned();
     if let Some(session) = existing {
-        if !session.lock().await.closed {
+        if !session_restoring(sessions, &session) && !session.lock().await.closed {
             super::trajectories::refresh_session_from_trajectory_if_stale(
                 app.clone(),
                 chat_id,
                 false,
             )
             .await;
-            return session;
+            return Ok(session);
         }
     }
+    Box::pin(open_session_owned(app, sessions, chat_id)).await
+}
 
+async fn open_session_owned(
+    app: AppState,
+    sessions: &SessionsMap,
+    chat_id: &str,
+) -> Result<Arc<AMutex<ChatSession>>, SessionOpenError> {
     // The key is stable across replacement of the session Arc. Never await the
     // drain while holding the sessions map or a session lock: a job may need
-    // either in order to finish.
+    // either in order to finish. Dropping the pending transition reopens the
+    // scope, so a bounded wait or a caller that goes away never leaves it closed.
     let key = app.runtime.tool_jobs.chat_scope_key(chat_id);
-    let _transition = match app
-        .runtime
-        .tool_jobs
-        .scopes
-        .begin_scope_change(&[key])
-        .await
-    {
-        Ok(guard) => guard,
-        Err(error) => {
-            warn!(%chat_id, ?error, "session reopen refused by job lifecycle barrier");
-            // This legacy API cannot return an error. Do not fabricate a new
-            // identity when effects may still be live.
-            return std::future::pending().await;
+    let barrier = tokio::time::timeout(
+        SESSION_OPEN_DRAIN_TIMEOUT,
+        app.runtime
+            .tool_jobs
+            .scopes
+            .begin_scope_change(std::slice::from_ref(&key)),
+    )
+    .await
+    .unwrap_or(Err(crate::tool_jobs::ScopeChangeError::Busy));
+    match barrier {
+        Ok(transition) => {
+            let session = Box::pin(get_or_create_session_under_transition(
+                app, sessions, chat_id, transition,
+            ))
+            .await;
+            Ok(session)
         }
-    };
-    get_or_create_session_under_transition(app, sessions, chat_id).await
+        Err(error) => {
+            warn!(%chat_id, ?error, "session open refused by job lifecycle barrier");
+            Err(match error {
+                crate::tool_jobs::ScopeChangeError::Busy => SessionOpenError::Busy,
+                crate::tool_jobs::ScopeChangeError::Closed => SessionOpenError::Closed,
+                crate::tool_jobs::ScopeChangeError::InvalidKey => {
+                    SessionOpenError::failed(chat_id, "invalid chat identity")
+                }
+            })
+        }
+    }
+}
+
+type RestoreInit = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
+
+struct FinishOnDrop(Option<RestoreInit>, SessionsMap);
+
+impl std::future::Future for FinishOnDrop {
+    type Output = ();
+
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<()> {
+        let Some(init) = self.0.as_mut() else {
+            return std::task::Poll::Ready(());
+        };
+        let ready = init.as_mut().poll(cx);
+        if ready.is_ready() {
+            self.0 = None;
+        }
+        ready
+    }
+}
+
+impl Drop for FinishOnDrop {
+    fn drop(&mut self) {
+        let Some(init) = self.0.take() else {
+            return;
+        };
+        self.1 .2.detach(init);
+    }
+}
+
+pub(crate) const RESTORE_SHUTDOWN_BOUND: std::time::Duration = std::time::Duration::from_secs(5);
+const RESTORE_ABORT_GRACE: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Restored-session initialisation owned by one sessions map: the set of sessions
+/// still initialising and the tasks that finish initialisations whose opener went away.
+#[derive(Default)]
+pub struct RestoreTasks {
+    restoring: std::sync::Mutex<std::collections::HashSet<usize>>,
+    detached: std::sync::Mutex<DetachedRestores>,
+}
+
+#[derive(Default)]
+struct DetachedRestores {
+    tasks: Vec<tokio::task::JoinHandle<()>>,
+    closed: bool,
+}
+
+impl RestoreTasks {
+    fn detached(&self) -> std::sync::MutexGuard<'_, DetachedRestores> {
+        let mut detached = self.detached.lock().unwrap_or_else(|e| e.into_inner());
+        detached.tasks.retain(|task| !task.is_finished());
+        detached
+    }
+
+    fn detach(&self, init: RestoreInit) {
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            warn!("restored chat initialisation abandoned: no runtime");
+            return;
+        };
+        let mut detached = self.detached();
+        if detached.closed {
+            drop(detached);
+            warn!("restored chat initialisation abandoned: shutting down");
+            return;
+        }
+        detached.tasks.push(handle.spawn(init));
+    }
+
+    /// Waits up to `bound` for detached initialisations, then aborts the rest.
+    pub(crate) async fn shutdown(&self, bound: std::time::Duration) {
+        let tasks = {
+            let mut detached = self.detached();
+            detached.closed = true;
+            std::mem::take(&mut detached.tasks)
+        };
+        let mut tasks = tasks;
+        let _ = tokio::time::timeout(bound, futures::future::join_all(tasks.iter_mut())).await;
+        tasks.retain(|task| !task.is_finished());
+        if tasks.is_empty() {
+            return;
+        }
+        for task in &tasks {
+            task.abort();
+        }
+        let aborted = tasks.len();
+        let _ = tokio::time::timeout(
+            RESTORE_ABORT_GRACE,
+            futures::future::join_all(tasks.iter_mut()),
+        )
+        .await;
+        let unfinished = tasks.iter().filter(|task| !task.is_finished()).count();
+        warn!(
+            aborted,
+            unfinished, "restored chat initialisation aborted at shutdown"
+        );
+    }
+
+    #[cfg(test)]
+    pub(crate) fn tracked(&self) -> usize {
+        self.detached().tasks.len()
+    }
+}
+
+fn session_restoring(sessions: &SessionsMap, session: &Arc<AMutex<ChatSession>>) -> bool {
+    sessions
+        .2
+        .restoring
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .contains(&(Arc::as_ptr(session) as usize))
+}
+
+struct RestoringMark(usize, std::sync::Weak<super::session::SessionStore>);
+
+impl RestoringMark {
+    fn new(sessions: &SessionsMap, session: &Arc<AMutex<ChatSession>>) -> Self {
+        let key = Arc::as_ptr(session) as usize;
+        sessions
+            .2
+            .restoring
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(key);
+        Self(key, Arc::downgrade(sessions))
+    }
+}
+
+impl Drop for RestoringMark {
+    fn drop(&mut self) {
+        if let Some(sessions) = self.1.upgrade() {
+            sessions
+                .2
+                .restoring
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&self.0);
+        }
+    }
 }
 
 async fn get_or_create_session_under_transition(
     app: AppState,
     sessions: &SessionsMap,
     chat_id: &str,
+    transition: crate::tool_jobs::ScopeChangeGuard,
 ) -> Arc<AMutex<ChatSession>> {
     let gcx = app.gcx.clone();
     let maybe_existing = {
@@ -753,8 +965,10 @@ async fn get_or_create_session_under_transition(
 
     let trajectory_events_tx = app.chat.trajectory_events_tx.clone();
 
-    let (mut session, is_new, transition_repair_patch) = if let Some(mut loaded) =
-        super::trajectories::load_trajectory_for_chat(gcx.clone(), chat_id).await
+    let (mut session, is_new, transition_repair_patch) = if let Some(mut loaded) = Box::pin(
+        super::trajectories::load_trajectory_for_chat(gcx.clone(), chat_id),
+    )
+    .await
     {
         info!(
             "Loaded trajectory for chat {} with {} messages",
@@ -892,45 +1106,18 @@ async fn get_or_create_session_under_transition(
     #[cfg(test)]
     super::planner_pause_load_race_tests::before_session_insert(&session).await;
 
-    let (session_arc, inserted) = {
+    let (session_arc, inserted, restoring) = {
         let mut sessions_write = sessions.write().await;
         match sessions_write.entry(chat_id.to_string()) {
             std::collections::hash_map::Entry::Vacant(e) => {
                 let arc = Arc::new(AMutex::new(session));
+                let restoring = RestoringMark::new(sessions, &arc);
                 e.insert(arc.clone());
-                (arc, true)
+                (arc, true, Some(restoring))
             }
-            std::collections::hash_map::Entry::Occupied(e) => (e.get().clone(), false),
+            std::collections::hash_map::Entry::Occupied(e) => (e.get().clone(), false, None),
         }
     };
-
-    if inserted {
-        reconcile_loaded_card_pause(&app, &session_arc).await;
-        if !is_new {
-            let task_id = session_arc
-                .lock()
-                .await
-                .thread
-                .task_meta
-                .as_ref()
-                .map(|meta| meta.task_id.clone());
-            if let Some(task_id) = task_id {
-                let _ = crate::tasks::custody::rebind_task_agents(app.gcx.clone(), &task_id).await;
-            }
-            if let Err(reason) = board_execution(&app, &session_arc).await {
-                interrupt_board_execution(&mut *session_arc.lock().await, reason);
-                return session_arc;
-            }
-            let mut session = session_arc.lock().await;
-            if session.runtime.interruption.take().is_some()
-                && !session.runtime.paused
-                && session.runtime.pause_reasons.is_empty()
-                && !session.planner_paused()
-            {
-                session.set_runtime_state(SessionState::Idle, None);
-            }
-        }
-    }
 
     if inserted && is_new {
         let app_hook = AppState::from_gcx(gcx.clone()).await;
@@ -942,54 +1129,203 @@ async fn get_or_create_session_under_transition(
         });
     }
 
-    if inserted && !is_new {
-        if transition_repair_patch.is_none() {
-            migrate_legacy_frozen_prefix_on_open(app.clone(), session_arc.clone()).await;
-        }
-        if let Some(repair_patch) = transition_repair_patch {
-            let repaired_version = {
-                let session = session_arc.lock().await;
-                session.trajectory_version
-            };
-            if let Err(e) = super::trajectories::persist_loaded_trajectory_repair_raw(
-                gcx.clone(),
-                &repair_patch,
-            )
-            .await
-            {
-                warn!(
-                    "Failed to persist repaired trajectory for {}: {}",
-                    chat_id, e
-                );
-            } else {
-                let mut session = session_arc.lock().await;
-                session.complete_trajectory_commit(repaired_version);
-            }
-        }
-        let version = session_arc.lock().await.trajectory_version;
-        match crate::tasks::goal::hydrate_session_task_goal(gcx.clone(), &session_arc).await {
-            Ok(()) if session_arc.lock().await.trajectory_version != version => {
-                super::trajectories::maybe_save_trajectory_with_intent(
-                    app.clone(),
-                    session_arc.clone(),
-                    TrajectoryCommitIntent::Required,
-                )
-                .await;
-            }
-            Ok(()) => {}
-            Err(error) => warn!(%chat_id, %error, "Task goal hydration on open refused"),
-        }
-        compact_reconstruction_privacy_on_open(app.clone(), session_arc.clone()).await;
+    if inserted {
+        let init = initialise_inserted_session(
+            app.clone(),
+            session_arc.clone(),
+            chat_id.to_string(),
+            is_new,
+            transition_repair_patch,
+            transition,
+            restoring,
+        );
+        FinishOnDrop(Some(init), sessions.clone()).await;
     }
 
     session_arc
 }
 
+#[cfg(test)]
+pub(super) mod restore_init_hook {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex, OnceLock};
+
+    pub(crate) struct Hook {
+        pub(crate) inserted: tokio::sync::Notify,
+        pub(crate) release: tokio::sync::Notify,
+    }
+
+    fn hooks() -> &'static Mutex<HashMap<String, Arc<Hook>>> {
+        static HOOKS: OnceLock<Mutex<HashMap<String, Arc<Hook>>>> = OnceLock::new();
+        HOOKS.get_or_init(Default::default)
+    }
+
+    pub(crate) fn install(chat_id: &str) -> Arc<Hook> {
+        let hook = Arc::new(Hook {
+            inserted: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        });
+        hooks()
+            .lock()
+            .unwrap()
+            .insert(chat_id.to_string(), hook.clone());
+        hook
+    }
+
+    pub(super) async fn after_insert(chat_id: &str) {
+        let hook = hooks().lock().unwrap().remove(chat_id);
+        if let Some(hook) = hook {
+            hook.inserted.notify_one();
+            hook.release.notified().await;
+        }
+    }
+}
+
+fn initialise_inserted_session(
+    app: AppState,
+    session_arc: Arc<AMutex<ChatSession>>,
+    chat_id: String,
+    is_new: bool,
+    transition_repair_patch: Option<super::trajectories::TrajectoryRepairPatch>,
+    transition: crate::tool_jobs::ScopeChangeGuard,
+    restoring: Option<RestoringMark>,
+) -> RestoreInit {
+    Box::pin(async move {
+        #[cfg(test)]
+        restore_init_hook::after_insert(&chat_id).await;
+        reconcile_loaded_card_pause(&app, &session_arc).await;
+        if !is_new {
+            let task_id = session_arc
+                .lock()
+                .await
+                .thread
+                .task_meta
+                .as_ref()
+                .map(|meta| meta.task_id.clone());
+            if let Some(task_id) = task_id {
+                let _ = Box::pin(crate::tasks::custody::rebind_task_agents(
+                    app.gcx.clone(),
+                    &task_id,
+                ))
+                .await;
+            }
+            if let Err(reason) = Box::pin(board_execution(&app, &session_arc)).await {
+                interrupt_board_execution(&mut *session_arc.lock().await, reason);
+                drop(restoring);
+                drop(transition);
+                return;
+            }
+            {
+                let mut session = session_arc.lock().await;
+                if session.runtime.interruption.take().is_some()
+                    && !session.runtime.paused
+                    && session.runtime.pause_reasons.is_empty()
+                    && !session.planner_paused()
+                {
+                    session.set_runtime_state(SessionState::Idle, None);
+                }
+            }
+            Box::pin(finish_restored_open(
+                app.clone(),
+                session_arc.clone(),
+                &chat_id,
+                transition_repair_patch,
+            ))
+            .await;
+        }
+        drop(restoring);
+        drop(transition);
+    })
+}
+
+async fn finish_restored_open(
+    app: AppState,
+    session_arc: Arc<AMutex<ChatSession>>,
+    chat_id: &str,
+    transition_repair_patch: Option<super::trajectories::TrajectoryRepairPatch>,
+) {
+    let gcx = app.gcx.clone();
+    if transition_repair_patch.is_none() {
+        Box::pin(migrate_legacy_frozen_prefix_on_open(
+            app.clone(),
+            session_arc.clone(),
+        ))
+        .await;
+    }
+    if let Some(repair_patch) = transition_repair_patch {
+        let repaired_version = {
+            let session = session_arc.lock().await;
+            session.trajectory_version
+        };
+        if let Err(e) = Box::pin(super::trajectories::persist_loaded_trajectory_repair_raw(
+            gcx.clone(),
+            &repair_patch,
+        ))
+        .await
+        {
+            warn!(
+                "Failed to persist repaired trajectory for {}: {}",
+                chat_id, e
+            );
+        } else {
+            let mut session = session_arc.lock().await;
+            session.complete_trajectory_commit(repaired_version);
+        }
+    }
+    let version = session_arc.lock().await.trajectory_version;
+    match Box::pin(crate::tasks::goal::hydrate_session_task_goal(
+        gcx.clone(),
+        &session_arc,
+    ))
+    .await
+    {
+        Ok(()) if session_arc.lock().await.trajectory_version != version => {
+            Box::pin(super::trajectories::maybe_save_trajectory_with_intent(
+                app.clone(),
+                session_arc.clone(),
+                TrajectoryCommitIntent::Required,
+            ))
+            .await;
+        }
+        Ok(()) => {}
+        Err(error) => warn!(%chat_id, %error, "Task goal hydration on open refused"),
+    }
+    Box::pin(compact_reconstruction_privacy_on_open(
+        app.clone(),
+        session_arc.clone(),
+    ))
+    .await;
+    Box::pin(super::tool_job_delivery::report_orphan_receipts(
+        &app,
+        &session_arc,
+    ))
+    .await;
+}
+
+/// Outcome of restoring a chat from its stored trajectory. `Refused` means a trajectory
+/// exists but the open was refused; callers must not treat that like a missing chat.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SessionRestore {
+    Open,
+    NoTrajectory,
+    Refused(SessionOpenError),
+}
+
+/// True only when the chat is open afterwards. Production callers use
+/// `restore_session_if_trajectory_exists`, which keeps a refusal distinct.
 pub async fn try_restore_session_if_trajectory_exists(
     app: AppState,
     sessions: &SessionsMap,
     chat_id: &str,
 ) -> bool {
+    restore_session_if_trajectory_exists(app, sessions, chat_id).await == SessionRestore::Open
+}
+
+pub async fn restore_session_if_trajectory_exists(
+    app: AppState,
+    sessions: &SessionsMap,
+    chat_id: &str,
+) -> SessionRestore {
     let maybe_existing = {
         let sessions_read = sessions.read().await;
         sessions_read.get(chat_id).cloned()
@@ -997,20 +1333,25 @@ pub async fn try_restore_session_if_trajectory_exists(
 
     if let Some(session_arc) = maybe_existing {
         let is_closed = session_arc.lock().await.closed;
-        if !is_closed {
-            return true;
+        if !is_closed && !session_restoring(sessions, &session_arc) {
+            return SessionRestore::Open;
         }
     }
 
-    if super::trajectories::load_trajectory_for_chat(app.gcx.clone(), chat_id)
-        .await
-        .is_none()
+    if Box::pin(super::trajectories::load_trajectory_for_chat(
+        app.gcx.clone(),
+        chat_id,
+    ))
+    .await
+    .is_none()
     {
-        return false;
+        return SessionRestore::NoTrajectory;
     }
 
-    get_or_create_session_with_trajectory(app, sessions, chat_id).await;
-    true
+    match get_or_create_session_with_trajectory(app, sessions, chat_id).await {
+        Ok(_) => SessionRestore::Open,
+        Err(error) => SessionRestore::Refused(error),
+    }
 }
 
 pub async fn close_all_chat_sessions(
@@ -1019,6 +1360,7 @@ pub async fn close_all_chat_sessions(
     // Stop admission globally before taking a session snapshot. Drain without
     // holding session or map locks, since in-flight jobs may need either.
     app.runtime.tool_jobs.scopes.begin_shutdown();
+    app.chat.sessions.2.shutdown(RESTORE_SHUTDOWN_BOUND).await;
     if let Err(error) = app.runtime.review_readiness.shutdown().await {
         warn!(%error, "close_all_chat_sessions: readiness shutdown unresolved");
         return Err(crate::tool_jobs::ScopeChangeError::Busy);
@@ -1089,7 +1431,7 @@ async fn cleanup_idle_session(
         .runtime
         .tool_jobs
         .scopes
-        .begin_scope_change(&[key])
+        .begin_scope_change(std::slice::from_ref(&key))
         .await
     {
         Ok(guard) => guard,
@@ -1539,6 +1881,154 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn open_waiting_on_running_job_returns_busy_and_leaves_scope_open() {
+        let workspace = tempfile::tempdir().unwrap();
+        let (app, _config_dir) = test_app_with_workspace(workspace.path()).await;
+        let chat_id = "busy-open";
+        let key = app.runtime.tool_jobs.chat_scope_key(chat_id);
+        let lease = app
+            .runtime
+            .tool_jobs
+            .scopes
+            .acquire(
+                &[key.clone()],
+                Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            )
+            .unwrap();
+        assert!(SESSION_OPEN_DRAIN_TIMEOUT < std::time::Duration::from_secs(15));
+        tokio::time::pause();
+        let started = tokio::time::Instant::now();
+        let error = get_or_create_session_with_trajectory(app.clone(), &app.chat.sessions, chat_id)
+            .await
+            .err()
+            .expect("an undrained job makes the open busy");
+        assert!(started.elapsed() >= SESSION_OPEN_DRAIN_TIMEOUT);
+        tokio::time::resume();
+        assert_eq!(error, SessionOpenError::Busy);
+        assert_eq!(
+            error.status_code(),
+            axum::http::StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert!(app.chat.sessions.read().await.get(chat_id).is_none());
+        app.runtime
+            .tool_jobs
+            .scopes
+            .acquire(&[key], Arc::new(std::sync::atomic::AtomicBool::new(false)))
+            .expect("a timed-out open leaves the scope open")
+            .settle();
+        lease.settle();
+        let session = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            get_or_create_session_with_trajectory(app.clone(), &app.chat.sessions, chat_id),
+        )
+        .await
+        .expect("open after drain is bounded")
+        .unwrap();
+        assert!(!session.lock().await.closed);
+
+        app.runtime.tool_jobs.scopes.begin_shutdown();
+        let error = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            get_or_create_session_with_trajectory(app.clone(), &app.chat.sessions, "other-chat"),
+        )
+        .await
+        .expect("shutdown refusal is bounded")
+        .err()
+        .unwrap();
+        assert_eq!(error, SessionOpenError::Closed);
+        assert_eq!(
+            error.status_code(),
+            axum::http::StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
+
+    #[tokio::test]
+    async fn dropped_open_waiting_for_drain_leaves_chat_openable() {
+        let workspace = tempfile::tempdir().unwrap();
+        let (app, _config_dir) = test_app_with_workspace(workspace.path()).await;
+        let chat_id = "dropped-open";
+        let key = app.runtime.tool_jobs.chat_scope_key(chat_id);
+        let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let lease = app
+            .runtime
+            .tool_jobs
+            .scopes
+            .acquire(&[key.clone()], cancel.clone())
+            .unwrap();
+        let mut open = Box::pin(get_or_create_session_with_trajectory(
+            app.clone(),
+            &app.chat.sessions,
+            chat_id,
+        ));
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !cancel.load(Ordering::Acquire) {
+                assert!(futures::poll!(&mut open).is_pending());
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("open is waiting on the drain");
+        drop(open);
+        lease.settle();
+        let session = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            get_or_create_session_with_trajectory(app.clone(), &app.chat.sessions, chat_id),
+        )
+        .await
+        .expect("chat stays openable after a dropped open")
+        .unwrap();
+        assert!(!session.lock().await.closed);
+        let reopened =
+            get_or_create_session_with_trajectory(app.clone(), &app.chat.sessions, chat_id)
+                .await
+                .unwrap();
+        assert!(Arc::ptr_eq(&session, &reopened));
+        app.runtime
+            .tool_jobs
+            .scopes
+            .acquire(&[key], Arc::new(std::sync::atomic::AtomicBool::new(false)))
+            .expect("scope usable after the dropped open")
+            .settle();
+    }
+
+    #[tokio::test]
+    async fn concurrent_opens_of_one_chat_yield_one_session() {
+        let workspace = tempfile::tempdir().unwrap();
+        let (app, _config_dir) = test_app_with_workspace(workspace.path()).await;
+        let chat_id = "concurrent-open";
+        let opens = (0..8).map(|_| {
+            let app = app.clone();
+            tokio::spawn(async move {
+                get_or_create_session_with_trajectory(app.clone(), &app.chat.sessions, chat_id)
+                    .await
+            })
+        });
+        let sessions = futures::future::join_all(opens).await;
+        let first = sessions[0].as_ref().unwrap().as_ref().unwrap().clone();
+        for session in &sessions {
+            assert!(Arc::ptr_eq(
+                session.as_ref().unwrap().as_ref().unwrap(),
+                &first
+            ));
+        }
+        assert_eq!(app.chat.sessions.read().await.len(), 1);
+    }
+
+    #[test]
+    fn failed_open_hides_inner_detail_from_public_text() {
+        let error = SessionOpenError::Failed("/secret/path: disk exploded".into());
+        assert_eq!(error.to_string(), SESSION_OPEN_FAILED_TEXT);
+        let public: String = error.clone().into();
+        assert!(!public.contains("secret"));
+        let scratch: crate::custom_error::ScratchError = error.into();
+        assert!(!scratch.message.contains("secret"));
+        assert_eq!(
+            scratch.status_code,
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
+
+    #[tokio::test]
     async fn reopening_closed_session_waits_for_old_job_without_holding_session_lock() {
         let workspace = tempfile::tempdir().unwrap();
         let (app, _config_dir) = test_app_with_workspace(workspace.path()).await;
@@ -1591,6 +2081,7 @@ mod tests {
         let replacement = tokio::time::timeout(std::time::Duration::from_secs(5), reopening)
             .await
             .expect("reopen must finish after drain")
+            .unwrap()
             .unwrap();
         assert!(!Arc::ptr_eq(&old, &replacement));
         assert!(!replacement.lock().await.closed);
@@ -1730,7 +2221,9 @@ mod tests {
         .unwrap();
 
         let session_arc =
-            get_or_create_session_with_trajectory(app.clone(), &app.chat.sessions, chat_id).await;
+            get_or_create_session_with_trajectory(app.clone(), &app.chat.sessions, chat_id)
+                .await
+                .unwrap();
 
         let loaded_roles = {
             let session = session_arc.lock().await;
@@ -1771,7 +2264,9 @@ mod tests {
             .unwrap();
 
         let session_arc =
-            get_or_create_session_with_trajectory(app.clone(), &app.chat.sessions, chat_id).await;
+            get_or_create_session_with_trajectory(app.clone(), &app.chat.sessions, chat_id)
+                .await
+                .unwrap();
 
         let loaded_roles = {
             let session = session_arc.lock().await;
@@ -1957,6 +2452,378 @@ mod tests {
         app.runtime.shutdown_flag.store(true, Ordering::Relaxed);
     }
 
+    fn assistant_calls(ids: &[(&str, &str)]) -> ChatMessage {
+        let mut message = ChatMessage::new("assistant".into(), String::new());
+        message.tool_calls = Some(
+            ids.iter()
+                .map(|(id, name)| ChatToolCall {
+                    id: (*id).into(),
+                    index: None,
+                    function: ChatToolFunction {
+                        arguments: r#"{"command":"touch must-not-exist"}"#.into(),
+                        name: (*name).into(),
+                    },
+                    tool_type: "function".into(),
+                    extra_content: None,
+                    started_at_ms: None,
+                    completed_at_ms: None,
+                })
+                .collect(),
+        );
+        message
+    }
+
+    async fn store_and_forget(app: &crate::app_state::AppState, session: ChatSession) {
+        let chat_id = session.chat_id.clone();
+        let session_arc = Arc::new(AMutex::new(session));
+        session_arc.lock().await.increment_version();
+        super::super::trajectories::try_save_trajectory_with_intent(
+            app.clone(),
+            session_arc,
+            TrajectoryCommitIntent::Required,
+        )
+        .await
+        .unwrap();
+        assert!(app.chat.sessions.read().await.get(&chat_id).is_none());
+    }
+
+    fn orphan_notices(session: &ChatSession) -> Vec<ChatMessage> {
+        session
+            .messages
+            .iter()
+            .filter(|message| {
+                message
+                    .extra
+                    .get("event")
+                    .is_some_and(|event| event["source"] == "tool_job.orphaned")
+            })
+            .cloned()
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn opening_chat_reports_orphaned_receipts_once_and_never_known_jobs() {
+        let workspace = tempfile::tempdir().unwrap();
+        let (app, _config_dir) = test_app_with_workspace(workspace.path()).await;
+        let chat_id = "orphaned-receipts";
+        let known = app
+            .runtime
+            .tool_jobs
+            .submit_background(
+                crate::tool_jobs::JobBinding {
+                    scope_keys: vec![],
+                    chat_id: chat_id.into(),
+                    tool_call_id: "known-call".into(),
+                    tool_name: "shell".into(),
+                    model: "model".into(),
+                    turn_id: "turn".into(),
+                },
+                |_| async {
+                    (
+                        crate::tool_jobs::JobStatus::Succeeded,
+                        crate::tool_jobs::JobResult {
+                            had_corrections: false,
+                            messages: vec![],
+                            context_files: vec![],
+                        },
+                    )
+                },
+            )
+            .await
+            .unwrap();
+        app.runtime
+            .tool_jobs
+            .wait_terminal(chat_id, &known.job_id)
+            .await
+            .unwrap();
+        let receipt = |job_id: &str, call: &str, tool: &str| {
+            super::super::tool_job_delivery::receipt_message(&crate::tool_jobs::JobReceipt {
+                job_id: job_id.into(),
+                binding: crate::tool_jobs::JobBinding {
+                    scope_keys: vec![],
+                    chat_id: chat_id.into(),
+                    tool_call_id: call.into(),
+                    tool_name: tool.into(),
+                    model: "model".into(),
+                    turn_id: "turn".into(),
+                },
+                status: crate::tool_jobs::JobStatus::Accepted,
+                result_url: String::new(),
+                cancel_url: String::new(),
+            })
+        };
+        let mut session = ChatSession::new(chat_id.into());
+        session.add_message(ChatMessage::new("user".into(), "run".into()));
+        session.add_message(assistant_calls(&[
+            ("lost-call", "shell"),
+            ("answered-call", "cat"),
+            ("known-call", "shell"),
+        ]));
+        session.add_message(receipt("tooljob_lost", "lost-call", "shell"));
+        session.add_message(receipt("tooljob_answered", "answered-call", "cat"));
+        session.add_message(receipt(&known.job_id, "known-call", "shell"));
+        let mut landed = ChatMessage::new("event".into(), "answered result".into());
+        landed.extra.insert(
+            "tool_job_result".into(),
+            serde_json::json!({"job_id": "tooljob_answered", "tool_call_id": "answered-call"}),
+        );
+        session.add_message(landed);
+        store_and_forget(&app, session).await;
+
+        let opened =
+            get_or_create_session_with_trajectory(app.clone(), &app.chat.sessions, chat_id)
+                .await
+                .unwrap();
+        let notices = orphan_notices(&*opened.lock().await);
+        assert_eq!(
+            notices.len(),
+            1,
+            "exactly one notice for the orphaned calls"
+        );
+        let text = notices[0].content.content_text_only();
+        assert!(text.contains("`shell` (call `lost-call`)"), "{text}");
+        assert!(text.contains("engine restarted") && text.contains("not retried"));
+        assert!(!text.contains("answered-call") && !text.contains("known-call"));
+        assert_eq!(
+            notices[0].extra["event"]["payload"]["job_ids"],
+            serde_json::json!(["tooljob_lost"])
+        );
+        assert!(opened.lock().await.delivery_wake_sources.is_empty());
+        assert!(!opened
+            .lock()
+            .await
+            .queue_processor_running
+            .load(Ordering::SeqCst));
+        let persisted =
+            super::super::trajectories::load_trajectory_for_chat(app.gcx.clone(), chat_id)
+                .await
+                .unwrap();
+        assert_eq!(
+            persisted
+                .messages
+                .iter()
+                .filter(|message| message
+                    .extra
+                    .get("event")
+                    .is_some_and(|event| event["source"] == "tool_job.orphaned"))
+                .count(),
+            1
+        );
+
+        opened.lock().await.closed = true;
+        app.chat.sessions.write().await.remove(chat_id);
+        drop(opened);
+        let reopened =
+            get_or_create_session_with_trajectory(app.clone(), &app.chat.sessions, chat_id)
+                .await
+                .unwrap();
+        assert_eq!(orphan_notices(&*reopened.lock().await).len(), 1);
+        app.runtime.tool_jobs.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn dropped_open_after_insert_still_finishes_restore_and_reopens_scope() {
+        let workspace = tempfile::tempdir().unwrap();
+        let (app, _config_dir) = test_app_with_workspace(workspace.path()).await;
+        let chat_id = "dropped-after-insert";
+        let mut session = ChatSession::new(chat_id.into());
+        session.add_message(ChatMessage::new("user".into(), "run".into()));
+        session.add_message(assistant_calls(&[("lost-call", "shell")]));
+        session.add_message(super::super::tool_job_delivery::receipt_message(
+            &crate::tool_jobs::JobReceipt {
+                job_id: "tooljob_lost_after_drop".into(),
+                binding: crate::tool_jobs::JobBinding {
+                    scope_keys: vec![],
+                    chat_id: chat_id.into(),
+                    tool_call_id: "lost-call".into(),
+                    tool_name: "shell".into(),
+                    model: "model".into(),
+                    turn_id: "turn".into(),
+                },
+                status: crate::tool_jobs::JobStatus::Accepted,
+                result_url: String::new(),
+                cancel_url: String::new(),
+            },
+        ));
+        store_and_forget(&app, session).await;
+
+        let hook = restore_init_hook::install(chat_id);
+        let mut open = Box::pin(get_or_create_session_with_trajectory(
+            app.clone(),
+            &app.chat.sessions,
+            chat_id,
+        ));
+        tokio::select! {
+            _ = &mut open => panic!("open must still be initialising"),
+            _ = hook.inserted.notified() => {}
+        }
+        drop(open);
+        assert_eq!(app.chat.sessions.2.tracked(), 1);
+        let inserted = app
+            .chat
+            .sessions
+            .read()
+            .await
+            .get(chat_id)
+            .cloned()
+            .expect("session inserted before the caller went away");
+        assert!(orphan_notices(&*inserted.lock().await).is_empty());
+        let key = app.runtime.tool_jobs.chat_scope_key(chat_id);
+        assert!(
+            app.runtime
+                .tool_jobs
+                .scopes
+                .acquire(
+                    &[key.clone()],
+                    Arc::new(std::sync::atomic::AtomicBool::new(false))
+                )
+                .is_err(),
+            "the transition holds the scope until initialisation completes"
+        );
+        let second = tokio::spawn({
+            let app = app.clone();
+            async move {
+                get_or_create_session_with_trajectory(app.clone(), &app.chat.sessions, chat_id)
+                    .await
+            }
+        });
+        // With the clock paused, a sleep completes only once every task is
+        // parked; the second opener is then blocked on the held scope.
+        tokio::time::pause();
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        tokio::time::resume();
+        assert!(
+            !second.is_finished(),
+            "a concurrent open waits for the initialisation"
+        );
+        hook.release.notify_one();
+        let reopened = tokio::time::timeout(std::time::Duration::from_secs(10), second)
+            .await
+            .expect("second open is bounded")
+            .unwrap()
+            .unwrap();
+        assert!(Arc::ptr_eq(&reopened, &inserted));
+        assert_eq!(orphan_notices(&*reopened.lock().await).len(), 1);
+        // The task drops its transition just before it completes.
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while app.chat.sessions.2.tracked() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("finished restores are pruned");
+        app.runtime
+            .tool_jobs
+            .scopes
+            .acquire(&[key], Arc::new(std::sync::atomic::AtomicBool::new(false)))
+            .expect("scope open again after initialisation")
+            .settle();
+        app.runtime.tool_jobs.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn shutdown_joins_pending_detached_restores_within_bound() {
+        let workspace = tempfile::tempdir().unwrap();
+        let (app, _config_dir) = test_app_with_workspace(workspace.path()).await;
+        let mut inserted = Vec::new();
+        let mut hooks = Vec::new();
+        for index in 0..3 {
+            let chat_id = format!("shutdown-during-restore-{index}");
+            let mut session = ChatSession::new(chat_id.clone());
+            session.add_message(ChatMessage::new("user".into(), "run".into()));
+            store_and_forget(&app, session).await;
+            let hook = restore_init_hook::install(&chat_id);
+            let mut open = Box::pin(get_or_create_session_with_trajectory(
+                app.clone(),
+                &app.chat.sessions,
+                &chat_id,
+            ));
+            tokio::select! {
+                _ = &mut open => panic!("open must still be initialising"),
+                _ = hook.inserted.notified() => {}
+            }
+            drop(open);
+            let session = app
+                .chat
+                .sessions
+                .read()
+                .await
+                .get(&chat_id)
+                .cloned()
+                .unwrap();
+            assert!(session_restoring(&app.chat.sessions, &session));
+            inserted.push(session);
+            hooks.push(hook);
+        }
+        assert_eq!(app.chat.sessions.2.tracked(), 3);
+
+        tokio::time::pause();
+        let started = tokio::time::Instant::now();
+        let bound = RESTORE_SHUTDOWN_BOUND + RESTORE_ABORT_GRACE;
+        tokio::time::timeout(bound, close_all_chat_sessions(app.clone()))
+            .await
+            .expect("shutdown returns within the restore bound")
+            .unwrap();
+        assert!(started.elapsed() <= bound);
+        assert_eq!(
+            app.chat.sessions.2.tracked(),
+            0,
+            "no restore task left running"
+        );
+        for session in &inserted {
+            assert!(
+                !session_restoring(&app.chat.sessions, session),
+                "aborting an initialisation drops its mark and its scope transition"
+            );
+            assert!(session.lock().await.closed);
+        }
+    }
+
+    #[tokio::test]
+    async fn opening_stored_chat_with_unanswered_tool_calls_executes_nothing() {
+        let workspace = tempfile::tempdir().unwrap();
+        let (app, _config_dir) = test_app_with_workspace(workspace.path()).await;
+        super::super::tool_job_delivery::ensure_bridge(&app);
+        let chat_id = "unanswered-calls";
+        let mut session = ChatSession::new(chat_id.into());
+        session.thread.mode = "agent".into();
+        session.add_message(ChatMessage::new("user".into(), "run".into()));
+        session.add_message(assistant_calls(&[
+            ("pending-shell", "shell"),
+            ("pending-cat", "cat"),
+        ]));
+        store_and_forget(&app, session).await;
+        let opened =
+            restore_session_if_trajectory_exists(app.clone(), &app.chat.sessions, chat_id).await;
+        assert_eq!(opened, SessionRestore::Open);
+        let session = app
+            .chat
+            .sessions
+            .read()
+            .await
+            .get(chat_id)
+            .cloned()
+            .unwrap();
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        {
+            let locked = session.lock().await;
+            assert!(locked.has_pending_tool_result_window());
+            assert!(!locked.messages.iter().any(|message| message.role == "tool"));
+            assert!(locked.command_queue.is_empty());
+            assert!(!locked.queue_processor_running.load(Ordering::SeqCst));
+            assert!(matches!(
+                locked.runtime.state,
+                SessionState::Idle | SessionState::Completed | SessionState::WaitingUserInput
+            ));
+        }
+        assert_eq!(app.runtime.tool_jobs.jobs_for_chat(chat_id), 0);
+        assert!(!workspace.path().join("must-not-exist").exists());
+        app.runtime.tool_jobs.shutdown().await;
+    }
+
     #[tokio::test]
     async fn cleanup_persists_pending_deliveries_before_removal() {
         let workspace = tempfile::tempdir().unwrap();
@@ -1988,7 +2855,9 @@ mod tests {
             .unwrap();
         assert_eq!(loaded.pending_deliveries, vec![delivery.clone()]);
         let restored =
-            get_or_create_session_with_trajectory(app.clone(), &app.chat.sessions, chat_id).await;
+            get_or_create_session_with_trajectory(app.clone(), &app.chat.sessions, chat_id)
+                .await
+                .unwrap();
         let restored = restored.lock().await.pending_deliveries_for_snapshot();
         assert_eq!(restored.len(), 1);
         assert_eq!(restored[0].id, delivery.id);

@@ -635,6 +635,74 @@ export type SubscriptionOptions = {
 
 const DEFAULT_CONNECT_TIMEOUT_MS = 15_000;
 const DEFAULT_IDLE_TIMEOUT_MS = 45_000;
+const REBUILD_COALESCE_MS = 80;
+const PARKED_MAX_EVENTS = 256;
+const PARKED_MAX_BYTES = 8 * 1024 * 1024;
+const PARKED_MAX_TOTAL_BYTES = 32 * 1024 * 1024;
+
+/** A failure of one chat on the shared stream; other chats are unaffected. */
+export class ChatScopedSubscriptionError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ChatScopedSubscriptionError";
+  }
+}
+
+export class ChatSubscriptionClosedError extends ChatScopedSubscriptionError {
+  readonly reason: string;
+  readonly retryable: boolean;
+  constructor(message: string, reason: string, retryable: boolean) {
+    super(message);
+    this.name = "ChatSubscriptionClosedError";
+    this.reason = reason;
+    this.retryable = retryable;
+  }
+}
+
+type SubscriptionClosedEnvelope = {
+  chat_id: string;
+  type: "subscription_closed";
+  reason?: unknown;
+  retryable?: unknown;
+  message?: unknown;
+};
+
+function isSubscriptionClosedEnvelope(
+  data: unknown,
+): data is SubscriptionClosedEnvelope {
+  if (typeof data !== "object" || data === null) return false;
+  const obj = data as Record<string, unknown>;
+  return obj.type === "subscription_closed" && typeof obj.chat_id === "string";
+}
+
+function subscriptionClosedError(
+  event: SubscriptionClosedEnvelope,
+): ChatSubscriptionClosedError {
+  const message =
+    typeof event.message === "string" && event.message.trim()
+      ? event.message
+      : "Chat subscription closed";
+  const reason = typeof event.reason === "string" ? event.reason : "ended";
+  return new ChatSubscriptionClosedError(
+    message,
+    reason,
+    event.retryable !== false,
+  );
+}
+
+type SnapshotEnvelope = Extract<EventEnvelope, { type: "snapshot" }>;
+
+type StreamCallbacks = ChatSubscriptionCallbacks & {
+  onChatError?: (chatId: string, error: Error) => void;
+  onBootstrap?: (snapshot: SnapshotEnvelope) => void;
+};
+
+type StreamHandle = {
+  stop: () => void;
+  attachable: (chatId: string) => boolean;
+  closed: (chatId: string) => boolean;
+  rearm: (chatId: string) => void;
+};
 
 export function subscribeToChatEvents(
   chatId: string,
@@ -643,21 +711,23 @@ export function subscribeToChatEvents(
   apiKey?: string,
   options: SubscriptionOptions = {},
 ): () => void {
-  return subscribeToEvents([chatId], config, callbacks, apiKey, options, false);
+  return subscribeToEvents([chatId], config, callbacks, apiKey, options, false)
+    .stop;
 }
 
 function subscribeToEvents(
   chatIds: string[],
   config: EngineApiConfig,
-  callbacks: ChatSubscriptionCallbacks,
+  callbacks: StreamCallbacks,
   apiKey: string | undefined,
   options: SubscriptionOptions,
   multiplex: boolean,
-): () => void {
+): StreamHandle {
   const url = multiplex
     ? buildApiUrl(config, "/v1/chats/subscribe-many", {
         chat_ids: JSON.stringify(chatIds),
         snapshot_chunks: 1,
+        per_chat_close: 1,
       })
     : buildApiUrl(config, "/v1/chats/subscribe", {
         chat_id: chatIds[0],
@@ -665,6 +735,9 @@ function subscribeToEvents(
       });
   const acceptedIds = new Set(chatIds);
   const pendingBootstrap = new Set(multiplex ? chatIds : []);
+  const closedChats = new Set<string>();
+  const failedBootstrap = new Set<string>();
+  const chatTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
   const connectTimeoutMs =
     options.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS;
@@ -693,6 +766,12 @@ function subscribeToEvents(
     headers.Authorization = `Bearer ${apiKey}`;
   }
 
+  const clearChatTimer = (chatId: string) => {
+    const timer = chatTimers.get(chatId);
+    if (timer !== undefined) clearTimeout(timer);
+    chatTimers.delete(chatId);
+  };
+
   const clearTimers = () => {
     if (connectTimer) {
       clearTimeout(connectTimer);
@@ -702,6 +781,8 @@ function subscribeToEvents(
       clearTimeout(idleTimer);
       idleTimer = null;
     }
+    for (const timer of chatTimers.values()) clearTimeout(timer);
+    chatTimers.clear();
   };
 
   const armIdleTimer = () => {
@@ -733,14 +814,58 @@ function subscribeToEvents(
     throw new Error(message);
   };
 
+  const failConnect = () => {
+    abortReason = abortReason ?? "SSE connect timeout";
+    clearTimers();
+    emitTerminalError(abortReason);
+    abortController.abort();
+  };
+
+  const failBootstrap = (chatId: string) => {
+    if (!pendingBootstrap.has(chatId) || closedChats.has(chatId)) return;
+    failedBootstrap.add(chatId);
+    callbacks.onChatError?.(
+      chatId,
+      new ChatScopedSubscriptionError("SSE chat snapshot timeout"),
+    );
+  };
+
+  const armChatTimer = (chatId: string) => {
+    clearChatTimer(chatId);
+    chatTimers.set(
+      chatId,
+      setTimeout(() => {
+        chatTimers.delete(chatId);
+        if (!isAborted() && state.connected) failBootstrap(chatId);
+      }, connectTimeoutMs),
+    );
+  };
+
+  const markBootstrapped = (chatId: string) => {
+    pendingBootstrap.delete(chatId);
+    failedBootstrap.delete(chatId);
+    clearChatTimer(chatId);
+  };
+
+  const deliverSnapshot = (snapshot: SnapshotEnvelope) => {
+    const first = pendingBootstrap.has(snapshot.chat_id);
+    markBootstrapped(snapshot.chat_id);
+    if (first && callbacks.onBootstrap) callbacks.onBootstrap(snapshot);
+    else callbacks.onEvent(snapshot);
+  };
+
+  const closeChat = (event: SubscriptionClosedEnvelope) => {
+    const chatId = event.chat_id;
+    if (!acceptedIds.has(chatId) || closedChats.has(chatId)) return;
+    closedChats.add(chatId);
+    markBootstrapped(chatId);
+    snapshots.delete(chatId);
+    callbacks.onChatError?.(chatId, subscriptionClosedError(event));
+  };
+
   connectTimer = setTimeout(() => {
-    if (!state.connected || pendingBootstrap.size > 0) {
-      abortReason =
-        abortReason ??
-        (state.connected ? "SSE chat snapshot timeout" : "SSE connect timeout");
-      emitTerminalError(abortReason);
-      abortController.abort();
-    }
+    connectTimer = null;
+    if (!isAborted() && !state.connected) failConnect();
   }, connectTimeoutMs);
 
   void fetch(url, {
@@ -758,9 +883,11 @@ function subscribeToEvents(
         throw new Error("Response body is null");
       }
 
-      if (!multiplex) clearTimers();
+      clearTimers();
       state.connected = true;
-      if (!multiplex) callbacks.onConnected?.();
+      if (multiplex)
+        for (const chatId of pendingBootstrap) armChatTimer(chatId);
+      else callbacks.onConnected?.();
       armIdleTimer();
 
       const reader = response.body.getReader();
@@ -795,6 +922,11 @@ function subscribeToEvents(
 
           try {
             const parsed = JSON.parse(dataStr) as unknown;
+            if (multiplex && isSubscriptionClosedEnvelope(parsed)) {
+              chunkedSnapshot = undefined;
+              closeChat(parsed);
+              continue;
+            }
             if (!isValidChatEventBasic(parsed)) {
               if (process.env.NODE_ENV === "development") {
                 // eslint-disable-next-line no-console
@@ -820,7 +952,10 @@ function subscribeToEvents(
             )
               continue;
             normalizeSeq(parsed);
-            if (!acceptedIds.has(parsed.chat_id)) {
+            if (
+              !acceptedIds.has(parsed.chat_id) ||
+              closedChats.has(parsed.chat_id)
+            ) {
               continue;
             }
             chunkedSnapshot = snapshots.get(parsed.chat_id);
@@ -889,12 +1024,7 @@ function subscribeToEvents(
                   messages,
                 };
                 chunkedSnapshot = undefined;
-                pendingBootstrap.delete(parsed.chat_id);
-                if (pendingBootstrap.size === 0 && connectTimer !== null) {
-                  clearTimeout(connectTimer);
-                  connectTimer = null;
-                }
-                callbacks.onEvent(snapshot);
+                deliverSnapshot(snapshot);
                 continue;
               }
               if (chunkedSnapshot !== undefined) {
@@ -905,14 +1035,8 @@ function subscribeToEvents(
                 if (parsed.type === "background_agent_updated") continue;
               }
               normalizeExecProcessSpawnedFields(parsed);
-              if (parsed.type === "snapshot") {
-                pendingBootstrap.delete(parsed.chat_id);
-                if (pendingBootstrap.size === 0 && connectTimer !== null) {
-                  clearTimeout(connectTimer);
-                  connectTimer = null;
-                }
-              }
-              callbacks.onEvent(parsed);
+              if (parsed.type === "snapshot") deliverSnapshot(parsed);
+              else callbacks.onEvent(parsed);
             } finally {
               if (chunkedSnapshot)
                 snapshots.set(parsed.chat_id, chunkedSnapshot);
@@ -935,7 +1059,9 @@ function subscribeToEvents(
         }
       }
 
-      if (snapshots.size > 0) {
+      if (
+        [...snapshots.keys()].some((chatId) => !failedBootstrap.has(chatId))
+      ) {
         abortWithTerminalError(
           "SSE stream ended before chunked snapshot completed; reconnecting",
         );
@@ -979,12 +1105,39 @@ function subscribeToEvents(
       disconnect(false);
     });
 
-  return () => {
-    abortReason = null;
-    clearTimers();
-    abortController.abort();
-    disconnect(false);
+  return {
+    stop: () => {
+      abortReason = null;
+      clearTimers();
+      abortController.abort();
+      disconnect(false);
+    },
+    attachable: (chatId) =>
+      !isAborted() &&
+      acceptedIds.has(chatId) &&
+      pendingBootstrap.has(chatId) &&
+      !closedChats.has(chatId),
+    closed: (chatId) => isAborted() || closedChats.has(chatId),
+    rearm: (chatId) => {
+      if (isAborted() || !pendingBootstrap.has(chatId)) return;
+      failedBootstrap.delete(chatId);
+      if (state.connected) armChatTimer(chatId);
+    },
   };
+}
+
+type ParkedEntry =
+  | { kind: "event"; event: EventEnvelope }
+  | { kind: "denied"; event: EventEnvelope };
+
+type ParkedChat = { entries: ParkedEntry[]; bytes: number };
+
+function envelopeBytes(event: EventEnvelope): number {
+  try {
+    return JSON.stringify(event).length;
+  } catch {
+    return PARKED_MAX_BYTES + 1;
+  }
 }
 
 /** One transport per owner; logical consumers retain independent lifecycle state. */
@@ -994,52 +1147,171 @@ export function createChatEventMultiplexer(
   options: SubscriptionOptions = {},
 ) {
   const consumers = new Map<string, Set<ChatSubscriptionCallbacks>>();
-  let stop: (() => void) | undefined;
+  // Consumers waiting for the next rebuild must not see events from the live stream.
+  const awaiting = new Set<ChatSubscriptionCallbacks>();
+  // First snapshots that completed with no consumer attached, kept for the next one.
+  const parked = new Map<string, ParkedChat>();
+  let parkedBytes = 0;
+  let live: { handle: StreamHandle; ids: Set<string> } | undefined;
   let scheduled: ReturnType<typeof setTimeout> | undefined;
   let generation = 0;
-  const all = () => Array.from(consumers.values()).flatMap((set) => [...set]);
+  const attached = (chatId: string) =>
+    [...(consumers.get(chatId) ?? [])].filter((c) => !awaiting.has(c));
+  const all = () =>
+    Array.from(consumers.values())
+      .flatMap((set) => [...set])
+      .filter((c) => !awaiting.has(c));
+  const detach = (retired: ChatSubscriptionCallbacks[]) => {
+    for (const [chatId, set] of consumers) {
+      for (const consumer of retired) set.delete(consumer);
+      if (set.size === 0) consumers.delete(chatId);
+    }
+  };
+  const releaseParked = (chatId: string) => {
+    const entry = parked.get(chatId);
+    if (!entry) return;
+    parked.delete(chatId);
+    parkedBytes -= entry.bytes;
+  };
+  const clearParked = () => {
+    parked.clear();
+    parkedBytes = 0;
+  };
+  const rebuildFor = (chatId: string) => {
+    const waiting = attached(chatId);
+    if (!waiting.length) return;
+    for (const consumer of waiting) awaiting.add(consumer);
+    schedule();
+  };
+  const dropParked = (chatId: string) => {
+    releaseParked(chatId);
+    rebuildFor(chatId);
+  };
+  const park = (chatId: string, entry: ParkedEntry) => {
+    const current = parked.get(chatId) ?? { entries: [], bytes: 0 };
+    const bytes = envelopeBytes(entry.event);
+    if (
+      current.entries.length + 1 > PARKED_MAX_EVENTS ||
+      current.bytes + bytes > PARKED_MAX_BYTES ||
+      parkedBytes + bytes > PARKED_MAX_TOTAL_BYTES
+    ) {
+      dropParked(chatId);
+      return;
+    }
+    current.entries.push(entry);
+    current.bytes += bytes;
+    parkedBytes += bytes;
+    parked.set(chatId, current);
+  };
+  const deliver = (entry: ParkedEntry) => {
+    for (const consumer of attached(entry.event.chat_id)) {
+      if (entry.kind === "denied") {
+        consumer.onAgentRosterDenied?.(entry.event);
+        continue;
+      }
+      if (entry.event.type === "snapshot") consumer.onConnected?.();
+      consumer.onEvent(entry.event);
+    }
+  };
+  const flushParked = (chatId: string) => {
+    const current = generation;
+    queueMicrotask(() => {
+      if (current !== generation) return;
+      const entry = parked.get(chatId);
+      if (!entry || attached(chatId).length === 0) return;
+      releaseParked(chatId);
+      try {
+        for (const item of entry.entries) {
+          if (current !== generation) return;
+          deliver(item);
+        }
+      } catch {
+        if (current === generation) rebuildFor(chatId);
+      }
+    });
+  };
+  const stopAll = () => {
+    generation++;
+    if (scheduled !== undefined) clearTimeout(scheduled);
+    scheduled = undefined;
+    awaiting.clear();
+    clearParked();
+    const previous = live;
+    live = undefined;
+    previous?.handle.stop();
+  };
+  const dropLive = () => {
+    generation++;
+    clearParked();
+    const previous = live;
+    live = undefined;
+    previous?.handle.stop();
+    if (consumers.size && scheduled === undefined) schedule();
+  };
   const rebuild = () => {
     scheduled = undefined;
-    stop?.();
-    stop = undefined;
-    const current = ++generation;
     const ids = [...consumers.keys()];
-    if (!ids.length) return;
+    if (!ids.length) {
+      stopAll();
+      return;
+    }
+    const current = ++generation;
     const active = () => current === generation;
-    stop = subscribeToEvents(
+    awaiting.clear();
+    clearParked();
+    const previous = live;
+    const handle = subscribeToEvents(
       ids,
       config,
       {
         onEvent: (event) => {
           if (!active()) return;
-          for (const consumer of [...(consumers.get(event.chat_id) ?? [])]) {
-            if (event.type === "snapshot") consumer.onConnected?.();
-            consumer.onEvent(event);
+          if (parked.has(event.chat_id)) {
+            park(event.chat_id, { kind: "event", event });
+            return;
           }
+          deliver({ kind: "event", event });
+        },
+        onBootstrap: (snapshot) => {
+          if (!active()) return;
+          if (attached(snapshot.chat_id).length > 0)
+            deliver({ kind: "event", event: snapshot });
+          else park(snapshot.chat_id, { kind: "event", event: snapshot });
         },
         onAgentRosterDenied: (event) => {
           if (!active()) return;
-          for (const consumer of [...(consumers.get(event.chat_id) ?? [])])
-            consumer.onAgentRosterDenied?.(event);
+          if (parked.has(event.chat_id)) {
+            park(event.chat_id, { kind: "denied", event });
+            return;
+          }
+          deliver({ kind: "denied", event });
         },
         onActivity: () => {
           if (active()) for (const consumer of all()) consumer.onActivity?.();
         },
+        onChatError: (chatId, error) => {
+          if (!active()) return;
+          releaseParked(chatId);
+          const retired = attached(chatId);
+          detach(retired);
+          if (consumers.size === 0) stopAll();
+          for (const consumer of retired) consumer.onError(error);
+        },
         onError: (error) => {
           if (!active()) return;
           const retired = all();
-          consumers.clear();
-          generation++;
-          stop?.();
-          stop = undefined;
+          detach(retired);
+          dropLive();
           for (const consumer of retired) consumer.onError(error);
         },
         onDisconnected: () => {
           if (!active()) return;
           const retired = all();
-          consumers.clear();
+          detach(retired);
           generation++;
-          stop = undefined;
+          clearParked();
+          live = undefined;
+          if (consumers.size && scheduled === undefined) schedule();
           for (const consumer of retired) consumer.onDisconnected?.();
         },
       },
@@ -1047,14 +1319,24 @@ export function createChatEventMultiplexer(
       options,
       true,
     );
+    live = { handle, ids: new Set(ids) };
+    previous?.handle.stop();
   };
   const schedule = () => {
-    generation++;
-    stop?.();
-    stop = undefined;
-    if (scheduled !== undefined) clearTimeout(scheduled);
-    if (consumers.size) scheduled = setTimeout(rebuild, 0);
-    else scheduled = undefined;
+    if (scheduled !== undefined) return;
+    scheduled = setTimeout(rebuild, live ? REBUILD_COALESCE_MS : 0);
+  };
+  const cancelNeedlessRebuild = () => {
+    if (scheduled === undefined || !live || awaiting.size > 0) return;
+    const current = live;
+    const ids = [...consumers.keys()];
+    if (
+      ids.length !== current.ids.size ||
+      ids.some((id) => !current.ids.has(id) || current.handle.closed(id))
+    )
+      return;
+    clearTimeout(scheduled);
+    scheduled = undefined;
   };
   return {
     subscribe(
@@ -1062,6 +1344,7 @@ export function createChatEventMultiplexer(
       callbacks: ChatSubscriptionCallbacks,
     ): () => void {
       let set = consumers.get(chatId);
+      const isNewChat = !set;
       if (!set) {
         if (consumers.size >= 128) {
           const timeout = setTimeout(() => {
@@ -1073,14 +1356,24 @@ export function createChatEventMultiplexer(
         consumers.set(chatId, set);
       }
       set.add(callbacks);
-      schedule();
+      if (live?.ids.has(chatId) && parked.has(chatId)) {
+        flushParked(chatId);
+        cancelNeedlessRebuild();
+      } else if (live?.ids.has(chatId) && live.handle.attachable(chatId)) {
+        if (isNewChat) live.handle.rearm(chatId);
+        cancelNeedlessRebuild();
+      } else {
+        if (live) awaiting.add(callbacks);
+        schedule();
+      }
       return () => {
+        awaiting.delete(callbacks);
         const current = consumers.get(chatId);
         if (!current?.delete(callbacks)) return;
-        if (current.size === 0) {
-          consumers.delete(chatId);
-          schedule();
-        }
+        if (current.size === 0) consumers.delete(chatId);
+        if (consumers.size === 0) stopAll();
+        else if (current.size === 0 && live?.ids.has(chatId)) schedule();
+        else cancelNeedlessRebuild();
       };
     },
   };

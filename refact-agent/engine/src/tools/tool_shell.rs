@@ -64,6 +64,22 @@ const TTY_DESCRIPTION: &str = "If true, run the command attached to a pseudo-ter
 const RUN_IN_BACKGROUND_DESCRIPTION: &str = "Set to true to run this command in the background. Returns immediately with a process_id. Use process_read or wait with a process target to retrieve output later. You will receive a process_completed event when the process exits. Do not use '&' at the end of the command.";
 const SHELL_PROGRESS_MAX_CHARS_PER_STREAM: usize = 4 * 1024;
 const SHELL_PROGRESS_MIN_INTERVAL_MS: u64 = 250;
+pub(crate) const SHELL_FOREGROUND_WINDOW: Duration =
+    Duration::from_secs(crate::chat::tools::TOOL_JOB_INLINE_BUDGET.as_secs() - 5);
+const SHELL_OBSERVATION_GRACE_AFTER_EXIT: Duration = Duration::from_secs(3);
+
+#[cfg(test)]
+tokio::task_local! {
+    pub(crate) static TEST_FOREGROUND_WINDOW: Duration;
+}
+
+fn foreground_window() -> Duration {
+    #[cfg(test)]
+    if let Ok(window) = TEST_FOREGROUND_WINDOW.try_with(|window| *window) {
+        return window;
+    }
+    SHELL_FOREGROUND_WINDOW
+}
 
 struct ParsedShellArgs {
     command: String,
@@ -462,7 +478,7 @@ impl Tool for ToolShell {
         let lease = jobs
             .scopes
             .acquire(&scope_keys, abort_flag.clone())
-            .map_err(|error| format!("shell execution scope unavailable: {error:?}"))?;
+            .map_err(shell_scope_refusal)?;
         let scope_guard = Arc::new(ShellScopeGuard(std::sync::Mutex::new(Some(lease))));
         request.execution_guard = Some(scope_guard.clone());
         request = request.with_abort_flag(abort_flag);
@@ -479,22 +495,27 @@ impl Tool for ToolShell {
         };
         if !parsed.run_in_background {
             let process_id = &result.snapshot.meta.process_id;
-            let completed = tokio::time::timeout(Duration::from_millis(100), async {
+            let completed = tokio::time::timeout(foreground_window(), async {
                 let snapshot = exec_registry.wait(process_id).await?;
                 let observation = match exec_registry.observation_reader(process_id).await {
-                    Some(reader) => reader.wait_status().await,
-                    None => result.observation.clone(),
+                    Some(reader) => tokio::time::timeout(
+                        SHELL_OBSERVATION_GRACE_AFTER_EXIT,
+                        reader.wait_status(),
+                    )
+                    .await
+                    .ok(),
+                    None => Some(result.observation.clone()),
                 };
                 Ok::<_, String>((snapshot, observation))
             })
             .await;
             match completed {
-                Ok(Ok((snapshot, observation))) => {
+                Ok(Ok((snapshot, Some(observation)))) => {
                     result.snapshot = snapshot;
                     result.observation = observation;
                 }
                 Ok(Err(error)) => return Err(error),
-                Err(_) => {
+                Ok(Ok((_, None))) | Err(_) => {
                     // Only the caller stops waiting. The registry monitor still owns the same
                     // child, original timeout, output drain, observation and cancellation flag.
                     let snapshot = exec_registry.detach_foreground(process_id).await?;
@@ -751,6 +772,18 @@ impl Tool for ToolShell {
 
     fn has_config_path(&self) -> Option<String> {
         Some(self.config_path.clone())
+    }
+}
+
+fn shell_scope_refusal(error: crate::tool_jobs::ScopeChangeError) -> String {
+    match error {
+        crate::tool_jobs::ScopeChangeError::Closed | crate::tool_jobs::ScopeChangeError::Busy => {
+            "This chat is closing or busy, so the command was not started. Try again in a moment."
+                .to_string()
+        }
+        crate::tool_jobs::ScopeChangeError::InvalidKey => {
+            "The command was not started: its workspace could not be identified.".to_string()
+        }
     }
 }
 
@@ -1402,6 +1435,19 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn closed_or_busy_scope_is_a_plain_sentence_for_the_model() {
+        for error in [
+            crate::tool_jobs::ScopeChangeError::Closed,
+            crate::tool_jobs::ScopeChangeError::Busy,
+        ] {
+            let text = shell_scope_refusal(error);
+            assert!(text.contains("closing or busy"), "{text}");
+            assert!(text.contains("not started") && text.contains("Try again"));
+            assert!(!text.contains("Closed") && !text.contains("Busy"));
+        }
+    }
+
     fn args(entries: Vec<(&str, Value)>) -> HashMap<String, Value> {
         entries
             .into_iter()
@@ -1430,6 +1476,57 @@ mod tests {
             .await,
         ));
         (gcx, ccx)
+    }
+
+    async fn detach_quickly<F: std::future::Future>(future: F) -> F::Output {
+        TEST_FOREGROUND_WINDOW
+            .scope(Duration::from_millis(100), future)
+            .await
+    }
+
+    #[test]
+    fn foreground_window_stays_below_tool_job_inline_budget() {
+        assert!(SHELL_FOREGROUND_WINDOW < crate::chat::tools::TOOL_JOB_INLINE_BUDGET);
+        assert!(
+            SHELL_FOREGROUND_WINDOW + SHELL_OBSERVATION_GRACE_AFTER_EXIT
+                <= crate::chat::tools::TOOL_JOB_INLINE_BUDGET
+        );
+        assert!(SHELL_FOREGROUND_WINDOW >= Duration::from_secs(30));
+    }
+
+    #[tokio::test]
+    async fn foreground_command_longer_than_old_window_returns_inline() {
+        let (gcx, ccx) = ccx_with_gcx_and_abort(None).await;
+        let command = if cfg!(target_os = "windows") {
+            "Start-Sleep -Milliseconds 700; [Console]::Out.Write('late-inline')"
+        } else {
+            "sleep 0.7; printf late-inline"
+        };
+        let started = std::time::Instant::now();
+        let (_, messages) = ToolShell::default()
+            .tool_execute(
+                ccx,
+                &"shell".into(),
+                &args(vec![
+                    ("command", json!(command)),
+                    ("description", json!("Run command slower than old window")),
+                ]),
+            )
+            .await
+            .unwrap();
+        assert!(started.elapsed() >= Duration::from_millis(500));
+        let message = only_chat_message(messages);
+        assert!(exec(&message).get("detached").is_none());
+        assert_eq!(exec(&message)["status"], "exited");
+        assert!(text(&message).contains("late-inline"));
+        let id = process_id(&message);
+        assert!(gcx
+            .exec_registry
+            .get(&id)
+            .await
+            .unwrap()
+            .status
+            .is_terminal());
     }
 
     async fn ccx_with_workspace(
@@ -1741,20 +1838,19 @@ mod tests {
                 context.execution_abort.clone(),
             )
         };
-        let (_, messages) = ToolShell::default()
-            .tool_execute(
-                ccx,
-                &"scope-shell".into(),
-                &args(vec![
-                    ("command", json!("printf ready; sleep 30")),
-                    (
-                        "description",
-                        json!("Hold actual process for scope cancellation"),
-                    ),
-                ]),
-            )
-            .await
-            .unwrap();
+        let (_, messages) = detach_quickly(ToolShell::default().tool_execute(
+            ccx,
+            &"scope-shell".into(),
+            &args(vec![
+                ("command", json!("printf ready; sleep 30")),
+                (
+                    "description",
+                    json!("Hold actual process for scope cancellation"),
+                ),
+            ]),
+        ))
+        .await
+        .unwrap();
         let message = only_chat_message(messages);
         assert_eq!(exec(&message)["detached"], true);
         let id = process_id(&message);
@@ -1792,18 +1888,17 @@ mod tests {
     async fn foreground_shell_detaches_same_id_and_keeps_timeout() {
         let (gcx, ccx) = ccx_with_gcx_and_abort(None).await;
         let mut shell = ToolShell::default();
-        let (_, messages) = shell
-            .tool_execute(
-                ccx,
-                &"shell".into(),
-                &args(vec![
-                    ("command", json!(slow_command())),
-                    ("description", json!("Run foreground timeout test")),
-                    ("timeout", json!(1)),
-                ]),
-            )
-            .await
-            .unwrap();
+        let (_, messages) = detach_quickly(shell.tool_execute(
+            ccx,
+            &"shell".into(),
+            &args(vec![
+                ("command", json!(slow_command())),
+                ("description", json!("Run foreground timeout test")),
+                ("timeout", json!(1)),
+            ]),
+        ))
+        .await
+        .unwrap();
         let message = only_chat_message(messages);
         assert_eq!(exec(&message)["detached"], true);
         assert_eq!(exec(&message)["mode"], "foreground");
@@ -2126,18 +2221,17 @@ mod tests {
         let (gcx, ccx) = ccx_with_gcx_and_abort(Some(abort_flag.clone())).await;
         let mut shell = ToolShell::default();
         let tool_call_id = "shell".to_string();
-        let (_, messages) = shell
-            .tool_execute(
-                ccx.clone(),
-                &tool_call_id,
-                &args(vec![
-                    ("command", json!(slow_command())),
-                    ("description", json!("Run slow command for abort test")),
-                    ("timeout", json!(10)),
-                ]),
-            )
-            .await
-            .unwrap();
+        let (_, messages) = detach_quickly(shell.tool_execute(
+            ccx.clone(),
+            &tool_call_id,
+            &args(vec![
+                ("command", json!(slow_command())),
+                ("description", json!("Run slow command for abort test")),
+                ("timeout", json!(10)),
+            ]),
+        ))
+        .await
+        .unwrap();
         let message = only_chat_message(messages);
         assert_eq!(exec(&message)["detached"], true);
         assert_eq!(message.tool_failed, None);

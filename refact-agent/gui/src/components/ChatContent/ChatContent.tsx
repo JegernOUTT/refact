@@ -11,7 +11,7 @@ import { ChatMessages, UserMessage } from "../../services/refact";
 import { UserInput } from "./UserInput";
 import { ScrollArea } from "../ScrollArea";
 import { Flex, Container, Box, Text } from "@radix-ui/themes";
-import { Button } from "../ui";
+import { Button, ErrorState } from "../ui";
 import styles from "./ChatContent.module.css";
 import { BuddyPulseContent } from "./BuddyPulseContent";
 import { ContextFiles } from "./ContextFiles";
@@ -32,6 +32,7 @@ import {
   selectIsWaitingById,
   selectMessagesById,
   selectSnapshotReceivedById,
+  selectSubscriptionFailureById,
   selectThreadModeById,
   selectThreadPauseById,
   selectThreadTitleById,
@@ -44,6 +45,7 @@ import {
 } from "../../features/Chat/Thread/selectors";
 import {
   createChatWithId,
+  requestSseRefresh,
   switchToThread,
 } from "../../features/Chat/Thread/actions";
 import { GroupedDiffs } from "./DiffContent";
@@ -247,6 +249,9 @@ export const ChatContent: React.FC<ChatContentProps> = ({
   const compressionActive = isCompressing;
   const snapshotReceived = useAppSelector((s) =>
     selectSnapshotReceivedById(s, renderChatId),
+  );
+  const subscriptionFailure = useAppSelector((s) =>
+    selectSubscriptionFailureById(s, renderChatId),
   );
   const threadMode = useAppSelector((s) =>
     selectThreadModeById(s, renderChatId),
@@ -727,6 +732,35 @@ export const ChatContent: React.FC<ChatContentProps> = ({
       isCompanionChat,
     ],
   );
+
+  if (subscriptionFailure && !snapshotReceived && messages.length === 0) {
+    return (
+      <Flex
+        direction="column"
+        className={`${styles.content} ${styles.chatColumn}`}
+        data-element="ChatContent"
+        p="2"
+        gap="1"
+      >
+        <ErrorState
+          variant="full"
+          title="This chat could not be opened"
+          description={subscriptionFailure}
+          data-testid="chat-subscription-failure"
+          retry={
+            <Button
+              variant="soft"
+              onClick={() =>
+                dispatch(requestSseRefresh({ chatId: renderChatId }))
+              }
+            >
+              Retry
+            </Button>
+          }
+        />
+      </Flex>
+    );
+  }
 
   if (showLoading) {
     return (

@@ -2674,7 +2674,8 @@ async fn run_full_soak_sample(
             &fixture.base.app.chat.sessions,
             &chat_id,
         )
-        .await;
+        .await
+        .unwrap();
         let mut sse_rx = session.lock().await.subscribe();
         let checkpoint_started = Instant::now();
         {

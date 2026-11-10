@@ -14,7 +14,8 @@ use crate::app_state::AppState;
 use crate::call_validation::ChatMessage;
 use crate::chat::internal_roles::{event, EventSubkind};
 use crate::chat::get_or_create_session_with_trajectory;
-use crate::chat::try_restore_session_if_trajectory_exists;
+use crate::chat::session_runtime::SessionRestore;
+use crate::chat::session_runtime::restore_session_if_trajectory_exists;
 #[cfg(test)]
 use crate::chat::types::max_queue_size;
 use refact_core::chat_types::{DeliveryOutcome, PushMode};
@@ -277,20 +278,7 @@ impl CronRunner {
             }
             let chat_id = task.chat_id().map(str::to_string);
             if let Some(chat_id) = &chat_id {
-                let app = AppState::from_gcx(self.gcx.clone()).await;
-                let restored =
-                    try_restore_session_if_trajectory_exists(app, &self.gcx.chat_sessions, chat_id)
-                        .await;
-                if !restored {
-                    tracing::warn!(
-                        "skipping missed durable one-shot {}: no trajectory found for chat {}",
-                        task.id,
-                        chat_id
-                    );
-                    let _ = self
-                        .record_run(&task, "deferred", Some("no trajectory found".into()), now)
-                        .await;
-                    self.defer_invalid_target_task(&task, now);
+                if !self.restore_durable_chat_target(&task, chat_id, now).await {
                     continue;
                 }
             } else if !job_is_isolated(&task) && !command_job_has_non_chat_delivery(&task) {
@@ -476,32 +464,7 @@ impl CronRunner {
         match chat_fire_status(&self.gcx, chat_id).await {
             ChatFireStatus::Fireable | ChatFireStatus::Busy => true,
             ChatFireStatus::Missing if task.durable => {
-                let app = AppState::from_gcx(self.gcx.clone()).await;
-                let restored =
-                    try_restore_session_if_trajectory_exists(app, &self.gcx.chat_sessions, chat_id)
-                        .await;
-                if !restored {
-                    tracing::warn!(
-                        "durable task {} deferred: no trajectory found for chat {}",
-                        task.id,
-                        chat_id
-                    );
-                    if let Err(error) = self
-                        .record_run(
-                            &task,
-                            "deferred",
-                            Some("no trajectory found".to_string()),
-                            now,
-                        )
-                        .await
-                    {
-                        tracing::warn!(
-                            "failed to record deferred scheduled task {}: {}",
-                            task.id,
-                            error
-                        );
-                    }
-                    self.defer_invalid_target_task(task, now);
+                if !self.restore_durable_chat_target(task, chat_id, now).await {
                     return false;
                 }
                 match chat_fire_status(&self.gcx, chat_id).await {
@@ -597,31 +560,7 @@ impl CronRunner {
         match chat_fire_status(&self.gcx, chat_id).await {
             ChatFireStatus::Fireable | ChatFireStatus::Busy => true,
             ChatFireStatus::Missing if task.durable => {
-                let app = AppState::from_gcx(self.gcx.clone()).await;
-                let restored =
-                    try_restore_session_if_trajectory_exists(app, &self.gcx.chat_sessions, chat_id)
-                        .await;
-                if restored {
-                    true
-                } else {
-                    if let Err(error) = self
-                        .record_run(
-                            &task,
-                            "deferred",
-                            Some("no trajectory found".to_string()),
-                            now,
-                        )
-                        .await
-                    {
-                        tracing::warn!(
-                            "failed to record deferred scheduled task {}: {}",
-                            task.id,
-                            error
-                        );
-                    }
-                    self.defer_invalid_target_task(task, now);
-                    false
-                }
+                self.restore_durable_chat_target(task, chat_id, now).await
             }
             ChatFireStatus::Missing => {
                 self.handle_unfireable_task(task, now, "chat session not found")
@@ -1056,6 +995,42 @@ impl CronRunner {
         self.defer_task(task, now);
     }
 
+    /// Restores a durable task's chat from its trajectory. A missing trajectory is an
+    /// invalid target; a refused open (jobs still draining, another open of the chat in
+    /// progress, shutdown) is temporary and goes through the ordinary deferral, never a
+    /// tight retry.
+    async fn restore_durable_chat_target(&mut self, task: &Job, chat_id: &str, now: u64) -> bool {
+        let app = AppState::from_gcx(self.gcx.clone()).await;
+        let (reason, temporary) =
+            match restore_session_if_trajectory_exists(app, &self.gcx.chat_sessions, chat_id).await
+            {
+                SessionRestore::Open => return true,
+                SessionRestore::NoTrajectory => ("no trajectory found".to_string(), false),
+                SessionRestore::Refused(error) => {
+                    (format!("chat temporarily unavailable: {error}"), true)
+                }
+            };
+        tracing::warn!(
+            "durable task {} deferred for chat {}: {}",
+            task.id,
+            chat_id,
+            reason
+        );
+        if let Err(error) = self.record_run(task, "deferred", Some(reason), now).await {
+            tracing::warn!(
+                "failed to record deferred scheduled task {}: {}",
+                task.id,
+                error
+            );
+        }
+        if temporary {
+            self.defer_task(task, now);
+        } else {
+            self.defer_invalid_target_task(task, now);
+        }
+        false
+    }
+
     fn defer_invalid_target_task(&mut self, task: &Job, now: u64) {
         self.deferred_until_ms
             .insert(task.id.clone(), now + INVALID_TARGET_DEFER_MS);
@@ -1145,10 +1120,17 @@ impl CronRunner {
             return Ok(true);
         }
         let admission = owner.admit(task, &occurrence)?;
-        admission.started()?;
         if job_is_isolated(&task) {
+            let chat_id = match self.open_isolated_chat(task).await {
+                Ok(chat_id) => chat_id,
+                Err(error) => {
+                    admission.rejected_agent_enqueue()?;
+                    return Err(error);
+                }
+            };
+            admission.started()?;
             let result = self
-                .fire_isolated_with_missed(task, final_fire, fired_at_ms, missed)
+                .deliver_isolated(task, &chat_id, final_fire, fired_at_ms, missed)
                 .await;
             match result.as_ref() {
                 Ok(accepted) => admission.finish(*accepted, None)?,
@@ -1159,6 +1141,7 @@ impl CronRunner {
             }
             return result;
         }
+        admission.started()?;
 
         let chat_id = runnable_chat_id(task).map_err(|reason| {
             format!(
@@ -1339,6 +1322,14 @@ impl CronRunner {
         fired_at_ms: u64,
         missed: bool,
     ) -> Result<bool, String> {
+        let chat_id = self.open_isolated_chat(task).await?;
+        self.deliver_isolated(task, &chat_id, final_fire, fired_at_ms, missed)
+            .await
+    }
+
+    /// Opens the fresh isolated chat. Nothing has run when this fails, so callers
+    /// record the refusal as a rejected enqueue, never as an interrupted effect.
+    async fn open_isolated_chat(&self, task: &Job) -> Result<String, String> {
         runnable_isolated_job(task).map_err(|reason| {
             format!(
                 "Scheduled task {} is not a runnable isolated chat job: {reason}",
@@ -1347,18 +1338,32 @@ impl CronRunner {
         })?;
         let chat_id = format!("cron_{}_{}", task.id, task.fire_count);
         let app = AppState::from_gcx(self.gcx.clone()).await;
-        let session_arc =
-            get_or_create_session_with_trajectory(app.clone(), &app.chat.sessions, &chat_id).await;
+        get_or_create_session_with_trajectory(app.clone(), &app.chat.sessions, &chat_id)
+            .await
+            .map_err(|error| {
+                format!("isolated chat {chat_id} unavailable, nothing was started: {error}")
+            })?;
+        Ok(chat_id)
+    }
+
+    async fn deliver_isolated(
+        &self,
+        task: &Job,
+        chat_id: &str,
+        final_fire: bool,
+        fired_at_ms: u64,
+        missed: bool,
+    ) -> Result<bool, String> {
+        let app = AppState::from_gcx(self.gcx.clone()).await;
         let event_message = if missed {
             cron_fire_message_with_missed(task, final_fire, missed)
         } else {
             cron_fire_message(task, final_fire)
         };
         let prompt = task.prompt().unwrap_or_default().to_string();
-        let _ = session_arc;
         deliver_scheduled_turn(
             &app,
-            &chat_id,
+            chat_id,
             task,
             fired_at_ms,
             self.request_id.as_deref(),
@@ -2987,6 +2992,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn refused_isolated_open_is_a_rejected_enqueue_not_an_interrupted_effect() {
+        let now = now_ms();
+        let (_workspace, gcx) = gcx_with_session(SessionState::Idle).await;
+        let task = isolated_due_task("isolated_open_refused", now);
+        gcx.tool_jobs.scopes.begin_shutdown();
+        let runner = CronRunner::new(Arc::new(InMemoryCronStore::new()), gcx.clone());
+        let error = runner
+            .fire_with_missed(&task, false, now, false)
+            .await
+            .expect_err("the isolated chat cannot be opened during shutdown");
+        assert!(error.contains("nothing was started"), "{error}");
+        let owner = super::super::automation_runtime::execution_owner(&gcx)
+            .await
+            .unwrap();
+        let retry = owner.admit(&task, &occurrence_key(&task));
+        assert!(
+            retry.is_ok(),
+            "a refused open must release the claim, not hold it as unknown: {:?}",
+            retry.err()
+        );
+    }
+
+    #[tokio::test]
     async fn duplicate_job_admission_does_not_consume_remaining_capacity() {
         let now = now_ms();
         let (_workspace, gcx) =
@@ -4056,6 +4084,68 @@ mod tests {
             !sessions.contains_key("missing-traj-chat"),
             "no empty session should be created for a durable task with no trajectory"
         );
+    }
+
+    #[tokio::test]
+    async fn durable_task_with_refused_chat_open_is_deferred_as_temporarily_unavailable() {
+        let now = now_ms();
+        let store = Arc::new(InMemoryCronStore::new());
+        let mut one_shot = one_shot_task("cron_durable_refused", now);
+        one_shot.set_existing_chat(Some("refused-open-chat".to_string()));
+        one_shot.durable = true;
+        store.add(one_shot).await.unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() =
+            vec![workspace.path().to_path_buf()];
+        let dir = workspace.path().join(".refact").join("trajectories");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("refused-open-chat.json"),
+            json!({ "id": "refused-open-chat", "messages": [] }).to_string(),
+        )
+        .unwrap();
+        AppState::from_gcx(gcx.clone())
+            .await
+            .runtime
+            .tool_jobs
+            .scopes
+            .begin_shutdown();
+        let mut runner = CronRunner::new(store.clone(), gcx.clone());
+
+        runner.fire_due_tasks(now).await;
+
+        let stored = store.get("cron_durable_refused").await.unwrap();
+        assert_eq!(stored.fire_count, 0);
+        let last = stored.recent_runs.last().unwrap();
+        assert_eq!(last.status, "deferred");
+        let reason = last.error.clone().unwrap_or_default();
+        assert!(
+            reason.starts_with("chat temporarily unavailable"),
+            "refusal must not be reported as a missing trajectory: {reason}"
+        );
+        assert_eq!(
+            runner.deferred_until_ms.get("cron_durable_refused"),
+            Some(&(now + IDLE_DEFER_MS)),
+            "a refusal uses the ordinary retry deferral, not a tight loop"
+        );
+        let runs = stored.recent_runs.len();
+        runner.fire_due_tasks(now + 1).await;
+        assert_eq!(
+            store
+                .get("cron_durable_refused")
+                .await
+                .unwrap()
+                .recent_runs
+                .len(),
+            runs,
+            "no retry before the deferral expires"
+        );
+        assert!(!gcx
+            .chat_sessions
+            .read()
+            .await
+            .contains_key("refused-open-chat"));
     }
 
     #[tokio::test]

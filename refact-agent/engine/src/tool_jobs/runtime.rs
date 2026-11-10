@@ -38,6 +38,10 @@ pub enum JobStatus {
 }
 
 impl JobStatus {
+    pub fn is_terminal(self) -> bool {
+        self.terminal()
+    }
+
     fn terminal(self) -> bool {
         matches!(
             self,
@@ -71,6 +75,35 @@ pub struct JobSnapshot {
     pub result: Option<JobResult>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result_unavailable_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub result_released: bool,
+}
+
+/// Budget for retained results, measured as their serialized JSON size, not process memory.
+pub const RESULT_RETENTION_BYTES: usize = 256 * 1024 * 1024;
+/// Terminal records beyond this are evicted oldest first, consumed records only.
+pub const TERMINAL_RECORD_CAP: usize = 4096;
+/// Last-resort cap on undelivered terminal records, evicted oldest first.
+pub const UNDELIVERED_RECORD_CAP: usize = 65_536;
+pub const RESULT_NOT_KEPT: &str =
+    "result no longer kept: released to bound engine memory; the call was not retried";
+
+struct ByteCount(usize);
+
+impl std::io::Write for ByteCount {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0 = self.0.saturating_add(buf.len());
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn serialized_size(result: &JobResult) -> usize {
+    let mut count = ByteCount(0);
+    serde_json::to_writer(&mut count, result).map_or(0, |()| count.0)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -86,6 +119,13 @@ pub struct JobEvent {
 pub enum Submission {
     Inline(JobResult),
     Accepted(JobReceipt),
+}
+
+/// Delivery candidate without the native payload; landing loads it through its checked path.
+#[derive(Clone)]
+pub struct TerminalRef {
+    pub receipt: JobReceipt,
+    pub revision: u64,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -106,27 +146,31 @@ struct Record {
     task: Option<JoinHandle<()>>,
     consumed: bool,
     unavailable: Option<String>,
-    archived: bool,
+    result_bytes: usize,
+    released: bool,
+    finished: u64,
+    claiming: bool,
 }
 
 struct State {
     records: HashMap<String, Record>,
     invocation_ids: HashMap<String, String>,
     closed: bool,
+    retained_bytes: usize,
+    finished: u64,
 }
 
-/// Admission has no count ceiling. Every identity is retained for dedup and no
-/// active/unacknowledged record is evicted; only the wake-hint channel is bounded.
 pub struct JobRuntime {
     #[cfg(test)]
     test_inline_budget: std::sync::Mutex<Option<Option<Duration>>>,
     pub scopes: Arc<super::ScopeCoordinator>,
     namespace: std::path::PathBuf,
     state: Mutex<State>,
-    max_result_bytes: usize,
+    retention_bytes: usize,
+    record_cap: usize,
+    undelivered_cap: usize,
     events: broadcast::Sender<JobEvent>,
     changed: tokio::sync::Notify,
-    journal: Option<Arc<super::journal::Journal>>,
     transition: tokio::sync::Mutex<()>,
     bridge: Mutex<Option<(tokio::sync::watch::Sender<bool>, JoinHandle<()>)>>,
     bridge_shutdown: AtomicBool,
@@ -137,63 +181,12 @@ struct ForegroundClaim {
     job_id: String,
 }
 
-/// Owns the admission I/O even if the submitting future is dropped. No effect
-/// factory has been called while this guard is armed.
-struct AdmissionClaim {
-    runtime: Arc<JobRuntime>,
-    job_id: String,
-    chat_id: String,
-    lease: Option<super::ExecutionLease>,
-    persist: Option<JoinHandle<Result<(), String>>>,
-}
-
-impl Drop for AdmissionClaim {
-    fn drop(&mut self) {
-        let Some(lease) = self.lease.take() else {
-            return;
-        };
-        let runtime = self.runtime.clone();
-        let id = self.job_id.clone();
-        let chat_id = self.chat_id.clone();
-        let persist = self.persist.take();
-        tokio::spawn(async move {
-            // Joining is essential: a detached SQLite write must not land after
-            // our terminal write and resurrect a Running record.
-            if let Some(persist) = persist {
-                let _ = persist.await;
-            }
-            let _transition = runtime.transition.lock().await;
-            let mut snapshot = runtime.get(&chat_id, &id).expect("admitted job");
-            snapshot.status = JobStatus::Cancelled;
-            snapshot.revision += 1;
-            snapshot.result_unavailable_reason = Some(
-                "submission dropped before effect construction; invocation never started".into(),
-            );
-            let saved = runtime.persist(snapshot.clone(), true, false).await;
-            lease.settle(); // Proven safe: factory was never called.
-            let mut state = runtime.state.lock().unwrap_or_else(|e| e.into_inner());
-            if saved.is_err() {
-                state.closed = true;
-            }
-            let record = state.records.get_mut(&id).expect("admitted job");
-            record.status = snapshot.status;
-            record.revision = snapshot.revision;
-            record.unavailable = snapshot.result_unavailable_reason;
-            if record.owner != Owner::InternalReadiness {
-                record.owner = Owner::Background;
-            }
-            record.consumed = saved.is_ok();
-            let _ = runtime.events.send(JobRuntime::event(record));
-            runtime.changed.notify_waiters();
-        });
-    }
-}
-
 impl Drop for ForegroundClaim {
     fn drop(&mut self) {
         if let Some(runtime) = self.runtime.upgrade() {
             let mut state = runtime.state.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(record) = state.records.get_mut(&self.job_id) {
+                record.claiming = false;
                 if record.owner == Owner::Undecided {
                     record.owner = Owner::Background;
                     if record.status.terminal() {
@@ -201,23 +194,40 @@ impl Drop for ForegroundClaim {
                     }
                 }
             }
+            runtime.enforce_retention(&mut state);
         }
     }
 }
 
 impl JobRuntime {
-    pub fn new(event_capacity: usize, max_result_bytes: usize) -> Arc<Self> {
+    pub fn new(event_capacity: usize, retention_bytes: usize) -> Arc<Self> {
         Self::with_namespace(
             std::path::PathBuf::from("/isolated-tool-job-runtime"),
             event_capacity,
-            max_result_bytes,
+            retention_bytes,
         )
     }
 
     pub fn with_namespace(
         namespace: std::path::PathBuf,
         event_capacity: usize,
-        max_result_bytes: usize,
+        retention_bytes: usize,
+    ) -> Arc<Self> {
+        Self::with_limits(
+            namespace,
+            event_capacity,
+            retention_bytes,
+            TERMINAL_RECORD_CAP,
+            UNDELIVERED_RECORD_CAP,
+        )
+    }
+
+    pub(crate) fn with_limits(
+        namespace: std::path::PathBuf,
+        event_capacity: usize,
+        retention_bytes: usize,
+        record_cap: usize,
+        undelivered_cap: usize,
     ) -> Arc<Self> {
         let (events, _) = broadcast::channel(event_capacity.max(1));
         Arc::new(Self {
@@ -229,63 +239,18 @@ impl JobRuntime {
                 records: HashMap::new(),
                 invocation_ids: HashMap::new(),
                 closed: false,
+                retained_bytes: 0,
+                finished: 0,
             }),
-            max_result_bytes,
+            retention_bytes,
+            record_cap,
+            undelivered_cap,
             events,
             changed: tokio::sync::Notify::new(),
-            journal: None,
             transition: tokio::sync::Mutex::new(()),
             bridge: Mutex::new(None),
             bridge_shutdown: AtomicBool::new(false),
         })
-    }
-
-    pub async fn open_durable(
-        namespace: std::path::PathBuf,
-        event_capacity: usize,
-        max_result_bytes: usize,
-    ) -> Result<Arc<Self>, String> {
-        let (journal, entries) =
-            super::journal::Journal::open(namespace.join("tool-jobs/ownership.sqlite")).await?;
-        // Legacy terminal payloads are no safer than active entries: without
-        // original domains, attachment checks cannot establish read authority.
-        if entries.iter().any(|entry| entry.scope_keys.is_empty()) {
-            return Err("tool job journal lacks original scope provenance".into());
-        }
-        let mut runtime = Self::with_namespace(namespace, event_capacity, max_result_bytes);
-        let inner = Arc::get_mut(&mut runtime).expect("new runtime uniquely owned");
-        inner.journal = Some(journal);
-        let state = inner.state.get_mut().unwrap_or_else(|e| e.into_inner());
-        for entry in entries {
-            let mut snapshot = entry.snapshot;
-            state.invocation_ids.insert(
-                super::journal::identity(&snapshot)?,
-                snapshot.receipt.job_id.clone(),
-            );
-            snapshot.receipt.binding.scope_keys = entry.scope_keys;
-            state.records.insert(
-                snapshot.receipt.job_id.clone(),
-                Record {
-                    receipt: snapshot.receipt,
-                    status: snapshot.status,
-                    revision: snapshot.revision,
-                    archived: snapshot.result.is_some(),
-                    result: None,
-                    owner: if entry.internal_readiness {
-                        Owner::InternalReadiness
-                    } else if entry.inline {
-                        Owner::Inline
-                    } else {
-                        Owner::Background
-                    },
-                    cancel: Arc::new(AtomicBool::new(false)),
-                    task: None,
-                    consumed: entry.consumed,
-                    unavailable: snapshot.result_unavailable_reason,
-                },
-            );
-        }
-        Ok(runtime)
     }
 
     pub fn install_completion_bridge(
@@ -299,31 +264,84 @@ impl JobRuntime {
         }
     }
 
-    async fn persist(
-        &self,
-        snapshot: JobSnapshot,
-        consumed: bool,
-        inline: bool,
-    ) -> Result<(), String> {
-        if let Some(journal) = &self.journal {
-            let internal_readiness = self
-                .state
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
+    fn enforce_retention(&self, state: &mut State) {
+        self.enforce_retention_within(state, self.retention_bytes);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn release_results_over(&self, budget: usize) {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        self.enforce_retention_within(&mut state, budget);
+    }
+
+    fn enforce_retention_within(&self, state: &mut State, budget: usize) {
+        let order = |state: &State, consumed: bool, payload: bool| {
+            let mut ids = state
                 .records
-                .get(&snapshot.receipt.job_id)
-                .is_some_and(|record| record.owner == Owner::InternalReadiness);
-            journal
-                .save(super::journal::Entry {
-                    internal_readiness,
-                    scope_keys: snapshot.receipt.binding.scope_keys.clone(),
-                    snapshot,
-                    consumed,
-                    inline,
+                .iter()
+                .filter(|(_, record)| {
+                    record.status.terminal()
+                        && !record.claiming
+                        && record.consumed == consumed
+                        && (!payload || record.result.is_some())
                 })
-                .await?;
+                .map(|(id, record)| (record.finished, id.clone()))
+                .collect::<Vec<_>>();
+            ids.sort_unstable();
+            ids.into_iter().map(|(_, id)| id).collect::<Vec<_>>()
+        };
+        if state.retained_bytes > budget {
+            for consumed in [true, false] {
+                for id in order(state, consumed, true) {
+                    if state.retained_bytes <= budget {
+                        break;
+                    }
+                    if let Some(record) = state.records.get_mut(&id) {
+                        record.result = None;
+                        record.released = true;
+                        record.unavailable = Some(RESULT_NOT_KEPT.into());
+                        state.retained_bytes =
+                            state.retained_bytes.saturating_sub(record.result_bytes);
+                        if !record.consumed && record.owner == Owner::Background {
+                            let _ = self.events.send(Self::event(record));
+                        }
+                    }
+                }
+            }
         }
-        Ok(())
+        let (consumed, undelivered) = state
+            .records
+            .values()
+            .filter(|record| record.status.terminal() && !record.claiming)
+            .fold((0usize, 0usize), |(consumed, undelivered), record| {
+                if record.consumed {
+                    (consumed + 1, undelivered)
+                } else {
+                    (consumed, undelivered + 1)
+                }
+            });
+        let consumed_excess = (consumed + undelivered)
+            .saturating_sub(self.record_cap)
+            .min(consumed);
+        let undelivered_excess = undelivered.saturating_sub(self.undelivered_cap);
+        let mut evicted = Vec::new();
+        if consumed_excess > 0 {
+            evicted.extend(order(state, true, false).into_iter().take(consumed_excess));
+        }
+        if undelivered_excess > 0 {
+            evicted.extend(
+                order(state, false, false)
+                    .into_iter()
+                    .take(undelivered_excess),
+            );
+        }
+        for id in evicted {
+            if let Some(record) = state.records.remove(&id) {
+                if record.result.is_some() {
+                    state.retained_bytes = state.retained_bytes.saturating_sub(record.result_bytes);
+                }
+            }
+        }
     }
 
     pub async fn get_result(
@@ -331,16 +349,7 @@ impl JobRuntime {
         chat_id: &str,
         job_id: &str,
     ) -> Result<Option<JobSnapshot>, String> {
-        let Some(mut snapshot) = self.get(chat_id, job_id) else {
-            return Ok(None);
-        };
-        if snapshot.result.is_none() {
-            if let Some(journal) = &self.journal {
-                let stored = journal.load(job_id.to_owned()).await?;
-                snapshot.result = stored.snapshot.result;
-            }
-        }
-        Ok(Some(snapshot))
+        Ok(self.get(chat_id, job_id))
     }
 
     pub async fn ack_delivered(
@@ -350,22 +359,25 @@ impl JobRuntime {
         revision: u64,
     ) -> Result<(), String> {
         let _transition = self.transition.lock().await;
-        let snapshot = self
-            .get_result(chat_id, job_id)
-            .await?
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let record = state
+            .records
+            .get_mut(job_id)
+            .filter(|record| record.receipt.binding.chat_id == chat_id)
             .ok_or("tool job not found")?;
-        if !snapshot.status.terminal() || snapshot.revision != revision {
+        if !record.status.terminal() || record.revision != revision {
             return Err("terminal revision mismatch".into());
         }
-        self.persist(snapshot, true, false).await?;
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        let record = state.records.get_mut(job_id).ok_or("tool job not found")?;
         record.consumed = true;
-        if self.journal.is_some() {
-            record.archived |= record.result.is_some();
-            record.result = None;
-        }
+        self.enforce_retention(&mut state);
         Ok(())
+    }
+
+    fn terminal_ref(record: &Record) -> TerminalRef {
+        TerminalRef {
+            receipt: record.receipt.clone(),
+            revision: record.revision,
+        }
     }
 
     pub fn chat_scope_key(&self, chat_id: &str) -> super::ScopeKey {
@@ -392,7 +404,7 @@ impl JobRuntime {
             binding: record.receipt.binding.clone(),
             status: record.status,
             revision: record.revision,
-            result_available: record.result.is_some() || record.archived,
+            result_available: record.result.is_some(),
         }
     }
 
@@ -535,44 +547,17 @@ impl JobRuntime {
                     task: None,
                     consumed: false,
                     unavailable: None,
-                    archived: false,
+                    result_bytes: 0,
+                    released: false,
+                    finished: 0,
+                    claiming: true,
                 },
             );
         }
-        // Commit durable ownership before constructing or polling any effect.
-        let initial = self
-            .get(&receipt.binding.chat_id, &job_id)
-            .expect("inserted job");
-        let runtime = self.clone();
-        let mut admission = AdmissionClaim {
-            runtime: self.clone(),
-            job_id: job_id.clone(),
-            chat_id: receipt.binding.chat_id.clone(),
-            lease: Some(lease),
-            persist: Some(tokio::spawn(async move {
-                runtime.persist(initial, false, false).await
-            })),
-        };
-        let persistence = admission
-            .persist
-            .as_mut()
-            .expect("admission I/O")
-            .await
-            .map_err(|error| error.to_string())
-            .and_then(|result| result);
-        admission.persist.take();
-        if let Err(error) = persistence {
-            self.state.lock().unwrap_or_else(|e| e.into_inner()).closed = true;
-            return Err(format!(
-                "tool ownership journal unavailable; invocation not started: {error}"
-            ));
-        }
-        let lease = admission.lease.take().expect("admission lease");
         {
             let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
             let runtime = Arc::downgrade(self);
             let id = job_id.clone();
-            let chat_id = receipt.binding.chat_id.clone();
             // Construction itself may perform effects and panic. Keep that
             // failure inside the same owned terminal path as a polling panic.
             let future = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| make(cancel)));
@@ -600,37 +585,28 @@ impl JobRuntime {
                 if !status.terminal() {
                     status = JobStatus::Unknown;
                 }
+                let result_bytes = serialized_size(&result);
                 let _transition = runtime.transition.lock().await;
-                let mut snapshot = runtime.get(&chat_id, &id).expect("owned job");
-                snapshot.status = status;
-                snapshot.result = Some(result.clone());
-                snapshot.revision += 1;
-                let persistence = runtime.persist(snapshot, false, false).await;
-                let oversized = serde_json::to_vec(&result)
-                    .map_or(true, |bytes| bytes.len() > runtime.max_result_bytes);
                 let mut state = runtime.state.lock().unwrap_or_else(|e| e.into_inner());
-                if persistence.is_err() {
-                    state.closed = true;
-                }
+                state.finished += 1;
+                let finished = state.finished;
+                let mut retained = 0;
                 if let Some(record) = state.records.get_mut(&id) {
                     if !record.status.terminal() {
                         record.status = status;
                         record.result = Some(result);
-                        if let Err(error) = persistence {
-                            record.unavailable = Some(format!("terminal journal commit failed; exact result retained in process only: {error}"));
-                        } else if oversized
-                            && runtime.journal.is_some()
-                            && record.owner == Owner::Background
-                        {
-                            record.archived = true;
-                            record.result = None;
-                        }
+                        record.result_bytes = result_bytes;
+                        record.finished = finished;
+                        retained = result_bytes;
                         record.revision += 1;
                         if record.owner == Owner::Background {
                             let _ = runtime.events.send(Self::event(record));
                         }
                     }
                 }
+                state.retained_bytes = state.retained_bytes.saturating_add(retained);
+                runtime.enforce_retention(&mut state);
+                drop(state);
                 runtime.changed.notify_waiters();
                 let _ = tx.send(());
             });
@@ -646,38 +622,60 @@ impl JobRuntime {
             None => false,
         };
         let _transition = self.transition.lock().await;
-        let snapshot = self
-            .get_result(&receipt.binding.chat_id, &job_id)
-            .await?
-            .ok_or("job ownership lost")?;
-        if completed_inline && snapshot.result.is_some() {
-            // A cancelled SQLite await may still commit. Persist a pending
-            // inline handoff, never a consumed result before the return. On
-            // restart this becomes background delivery (stable-ID duplicates
-            // are safe); only explicit delivery acknowledgement consumes it.
-            self.persist(snapshot.clone(), false, true).await?;
-        }
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let record = state.records.get_mut(&job_id).ok_or("job ownership lost")?;
+        record.claiming = false;
         // Completion may race timeout. Claim under the same mutex used by completion.
-        if completed_inline && snapshot.result.is_some() {
-            record.owner = Owner::Inline;
-            record.consumed = true;
-            let result = snapshot.result.expect("checked result");
-            if self.journal.is_some() {
-                record.archived = true;
-                record.result = None;
+        let inline = match record.result.clone() {
+            Some(result) if completed_inline => {
+                record.owner = Owner::Inline;
+                record.consumed = true;
+                Some(result)
             }
-            Ok(Submission::Inline(result))
-        } else {
-            if !internal_readiness {
-                record.owner = Owner::Background;
+            _ => {
+                if !internal_readiness {
+                    record.owner = Owner::Background;
+                }
+                if record.status.terminal() && record.owner == Owner::Background {
+                    let _ = self.events.send(Self::event(record));
+                }
+                None
             }
-            if record.status.terminal() && record.owner == Owner::Background {
-                let _ = self.events.send(Self::event(record));
+        };
+        self.enforce_retention(&mut state);
+        Ok(match inline {
+            Some(result) => Submission::Inline(result),
+            None => Submission::Accepted(receipt),
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn jobs_for_chat(&self, chat: &str) -> usize {
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state
+            .records
+            .values()
+            .filter(|record| record.receipt.binding.chat_id == chat)
+            .count()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn evict_record_for_test(&self, job_id: &str) {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(record) = state.records.remove(job_id) {
+            if record.result.is_some() {
+                state.retained_bytes = state.retained_bytes.saturating_sub(record.result_bytes);
             }
-            Ok(Submission::Accepted(receipt))
         }
+    }
+
+    pub(crate) fn knows(&self, chat_id: &str, job_id: &str) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .records
+            .get(job_id)
+            .is_some_and(|record| record.receipt.binding.chat_id == chat_id)
     }
 
     pub fn get(&self, chat_id: &str, job_id: &str) -> Option<JobSnapshot> {
@@ -692,6 +690,7 @@ impl JobRuntime {
             revision: record.revision,
             result: record.result.clone(),
             result_unavailable_reason: record.unavailable.clone(),
+            result_released: record.released,
         })
     }
 
@@ -712,6 +711,19 @@ impl JobRuntime {
 
     /// Broadcast is only a wake hint. Retained terminal records are the source
     /// of truth, including completion-before-subscribe and lagged receivers.
+    pub(crate) fn background_terminal_refs(&self) -> Vec<TerminalRef> {
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state
+            .records
+            .values()
+            .filter(|record| {
+                record.owner == Owner::Background && record.status.terminal() && !record.consumed
+            })
+            .map(Self::terminal_ref)
+            .collect()
+    }
+
+    #[cfg(test)]
     pub(crate) fn background_terminals(&self) -> Vec<JobSnapshot> {
         let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         state
@@ -726,6 +738,7 @@ impl JobRuntime {
                 revision: record.revision,
                 result: record.result.clone(),
                 result_unavailable_reason: record.unavailable.clone(),
+                result_released: record.released,
             })
             .collect()
     }
@@ -867,256 +880,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn readiness_admission_v13_private_durable_success_and_interrupted_roundtrip() {
-        for interrupted in [false, true] {
-            let dir = tempfile::tempdir().unwrap();
-            let runtime = JobRuntime::open_durable(dir.path().into(), 2, 65536)
-                .await
-                .unwrap();
-            let mut private = binding();
-            private.tool_name = "review_readiness".into();
-            let path = dir.path().join("tool-jobs/ownership.sqlite");
-            let (entered, worker_entered) = oneshot::channel();
-            let (release, released) = oneshot::channel();
-            let receipt = runtime
-                .submit_readiness(private, move |_| {
-                    let payload: String = rusqlite::Connection::open(path)
-                        .unwrap()
-                        .query_row("SELECT payload FROM tool_jobs", [], |row| row.get(0))
-                        .unwrap();
-                    let initial: super::super::journal::Entry =
-                        serde_json::from_str(&payload).unwrap();
-                    assert!(initial.internal_readiness);
-                    assert!(!initial.consumed);
-                    assert!(!initial.scope_keys.is_empty());
-                    assert_eq!(initial.snapshot.status, JobStatus::Running);
-                    assert_eq!(initial.snapshot.revision, 1);
-                    async move {
-                        entered.send(()).unwrap();
-                        released.await.unwrap();
-                        (JobStatus::Succeeded, result())
-                    }
-                })
-                .await
-                .unwrap();
-            worker_entered.await.unwrap();
-            assert!(runtime.background_terminals().is_empty());
-            assert!(runtime
-                .ack_readiness("chat", &receipt.job_id, 1)
-                .await
-                .is_err());
-            let expected_status;
-            let expected_revision;
-            if interrupted {
-                let task = runtime
-                    .state
-                    .lock()
-                    .unwrap()
-                    .records
-                    .get_mut(&receipt.job_id)
-                    .unwrap()
-                    .task
-                    .take()
-                    .unwrap();
-                task.abort();
-                assert!(task.await.unwrap_err().is_cancelled());
-                drop(release);
-                let stored = runtime
-                    .journal
-                    .as_ref()
-                    .unwrap()
-                    .load(receipt.job_id.clone())
-                    .await
-                    .unwrap();
-                assert!(stored.internal_readiness);
-                assert!(!stored.consumed);
-                assert_eq!(stored.snapshot.status, JobStatus::Running);
-                expected_status = JobStatus::Unknown;
-                expected_revision = stored.snapshot.revision + 1;
-            } else {
-                release.send(()).unwrap();
-                let terminal = runtime
-                    .wait_terminal("chat", &receipt.job_id)
-                    .await
-                    .unwrap();
-                assert_eq!(terminal.status, JobStatus::Succeeded);
-                let stored = runtime
-                    .journal
-                    .as_ref()
-                    .unwrap()
-                    .load(receipt.job_id.clone())
-                    .await
-                    .unwrap();
-                assert!(stored.internal_readiness);
-                assert!(!stored.consumed);
-                assert_eq!(stored.snapshot.status, terminal.status);
-                assert_eq!(stored.snapshot.revision, terminal.revision);
-                expected_status = terminal.status;
-                expected_revision = terminal.revision;
-            }
-            runtime.shutdown().await;
-            drop(runtime);
-            for _ in 0..2 {
-                let reopened = JobRuntime::open_durable(dir.path().into(), 2, 65536)
-                    .await
-                    .unwrap();
-                let snapshot = reopened.get("chat", &receipt.job_id).unwrap();
-                assert_eq!(snapshot.status, expected_status);
-                assert_eq!(snapshot.revision, expected_revision);
-                assert_eq!(
-                    snapshot.receipt.binding.scope_keys,
-                    receipt.binding.scope_keys
-                );
-                {
-                    let state = reopened.state.lock().unwrap();
-                    let record = &state.records[&receipt.job_id];
-                    assert!(record.owner == Owner::InternalReadiness);
-                    assert!(record.consumed);
-                }
-                assert!(reopened.background_terminals().is_empty());
-                assert!(reopened
-                    .ack_readiness("chat", &receipt.job_id, expected_revision + 1)
-                    .await
-                    .is_err());
-                assert!(reopened
-                    .ack_readiness("other-chat", &receipt.job_id, expected_revision)
-                    .await
-                    .is_err());
-                reopened
-                    .ack_readiness("chat", &receipt.job_id, expected_revision)
-                    .await
-                    .unwrap();
-                let stored = reopened
-                    .journal
-                    .as_ref()
-                    .unwrap()
-                    .load(receipt.job_id.clone())
-                    .await
-                    .unwrap();
-                assert!(stored.internal_readiness);
-                assert!(stored.consumed);
-                assert_eq!(stored.snapshot.status, expected_status);
-                assert_eq!(stored.snapshot.revision, expected_revision);
-                drop(
-                    reopened
-                        .begin_scope_change(&receipt.binding.scope_keys)
-                        .await
-                        .unwrap(),
-                );
-                reopened
-                    .scopes
-                    .acquire(
-                        &receipt.binding.scope_keys,
-                        Arc::new(AtomicBool::new(false)),
-                    )
-                    .unwrap()
-                    .settle();
-                assert!(reopened.background_terminals().is_empty());
-                reopened.shutdown().await;
-                drop(reopened);
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn readiness_admission_v13_legacy_absent_marker_preserves_public_owner() {
-        let dir = tempfile::tempdir().unwrap();
-        let runtime = JobRuntime::open_durable(dir.path().into(), 2, 65536)
-            .await
-            .unwrap();
-        let mut public = binding();
-        public.tool_name = "review_readiness".into();
-        let receipt = runtime
-            .submit_background(public, |_| async { (JobStatus::Succeeded, result()) })
-            .await
-            .unwrap();
-        let terminal = runtime
-            .wait_terminal("chat", &receipt.job_id)
-            .await
-            .unwrap();
-        runtime.shutdown().await;
-        drop(runtime);
-        let path = dir.path().join("tool-jobs/ownership.sqlite");
-        let id = receipt.job_id.clone();
-        tokio::task::spawn_blocking(move || {
-            let connection = rusqlite::Connection::open(path).unwrap();
-            let payload: String = connection
-                .query_row(
-                    "SELECT payload FROM tool_jobs WHERE job_id=?1",
-                    [&id],
-                    |row| row.get(0),
-                )
-                .unwrap();
-            let mut legacy: serde_json::Value = serde_json::from_str(&payload).unwrap();
-            assert_eq!(legacy["internal_readiness"], false);
-            assert!(!legacy["scope_keys"].as_array().unwrap().is_empty());
-            assert_eq!(legacy["consumed"], false);
-            assert_eq!(
-                legacy.as_object_mut().unwrap().remove("internal_readiness"),
-                Some(false.into())
-            );
-            assert_eq!(
-                connection
-                    .execute(
-                        "UPDATE tool_jobs SET payload=?1 WHERE job_id=?2",
-                        rusqlite::params![legacy.to_string(), id],
-                    )
-                    .unwrap(),
-                1
-            );
-        })
-        .await
-        .unwrap();
-        for consumed in [false, true] {
-            let reopened = JobRuntime::open_durable(dir.path().into(), 2, 65536)
-                .await
-                .unwrap();
-            let snapshot = reopened.get("chat", &receipt.job_id).unwrap();
-            assert_eq!(snapshot.status, terminal.status);
-            assert_eq!(snapshot.revision, terminal.revision);
-            assert_eq!(
-                snapshot.receipt.binding.scope_keys,
-                receipt.binding.scope_keys
-            );
-            {
-                let state = reopened.state.lock().unwrap();
-                let record = &state.records[&receipt.job_id];
-                assert!(record.owner == Owner::Background);
-                assert_eq!(record.consumed, consumed);
-            }
-            let notices = reopened.background_terminals();
-            assert_eq!(notices.len(), usize::from(!consumed));
-            if !consumed {
-                assert_eq!(notices[0].receipt.job_id, receipt.job_id);
-            }
-            assert!(reopened
-                .ack_readiness("chat", &receipt.job_id, terminal.revision)
-                .await
-                .is_err());
-            assert_eq!(
-                reopened.state.lock().unwrap().records[&receipt.job_id].consumed,
-                consumed
-            );
-            reopened
-                .ack_delivered("chat", &receipt.job_id, terminal.revision)
-                .await
-                .unwrap();
-            let stored = reopened
-                .journal
-                .as_ref()
-                .unwrap()
-                .load(receipt.job_id.clone())
-                .await
-                .unwrap();
-            assert!(!stored.internal_readiness);
-            assert!(stored.consumed);
-            assert_eq!(stored.scope_keys, receipt.binding.scope_keys);
-            assert!(reopened.background_terminals().is_empty());
-            reopened.shutdown().await;
-            drop(reopened);
-        }
-    }
-    #[tokio::test]
     async fn completion_bridge_installs_once_and_shutdown_joins() {
         let runtime = JobRuntime::new(2, 65536);
         let stopped = Arc::new(AtomicBool::new(false));
@@ -1196,363 +959,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn durable_restart_unknown_duplicate_and_result_ack_reload() {
-        let dir = tempfile::tempdir().unwrap();
-        let namespace = dir.path().to_path_buf();
-        let runtime = JobRuntime::open_durable(namespace.clone(), 2, 1)
-            .await
-            .unwrap();
-        let receipt = runtime
-            .submit_background(binding(), |_| async { (JobStatus::Succeeded, result()) })
-            .await
-            .unwrap();
-        let terminal = runtime
-            .wait_terminal("chat", &receipt.job_id)
-            .await
-            .unwrap();
-        runtime
-            .ack_delivered("chat", &receipt.job_id, terminal.revision)
-            .await
-            .unwrap();
-        assert!(runtime.background_terminals().is_empty());
-        runtime.shutdown().await;
-        drop(runtime);
-        let runtime = JobRuntime::open_durable(namespace.clone(), 2, 1)
-            .await
-            .unwrap();
-        let reloaded = runtime
-            .get_result("chat", &receipt.job_id)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            reloaded.result.unwrap().messages[0]
-                .content
-                .content_text_only(),
-            "plain, not JSON"
-        );
-        assert!(runtime.background_terminals().is_empty());
-        assert!(runtime
-            .submit_background(binding(), |_| async { panic!("duplicate replay") })
-            .await
-            .is_err());
-        let mut pending_binding = binding();
-        pending_binding.tool_call_id = "pending".into();
-        let pending = JobSnapshot {
-            receipt: JobReceipt {
-                job_id: "pending-job".into(),
-                binding: pending_binding,
-                status: JobStatus::Accepted,
-                result_url: "local".into(),
-                cancel_url: "local".into(),
-            },
-            status: JobStatus::Running,
-            revision: 1,
-            result: None,
-            result_unavailable_reason: None,
-        };
-        runtime.persist(pending, false, false).await.unwrap();
-        runtime.shutdown().await;
-        drop(runtime);
-        let restarted = JobRuntime::open_durable(namespace, 2, 1).await.unwrap();
-        let pending = restarted.get("chat", "pending-job").unwrap();
-        assert_eq!(pending.status, JobStatus::Unknown);
-        assert!(pending
-            .result_unavailable_reason
-            .unwrap()
-            .contains("never replay"));
-        assert!(!pending.receipt.binding.scope_keys.is_empty());
-        drop(
-            restarted
-                .begin_scope_change(&pending.receipt.binding.scope_keys)
-                .await
-                .unwrap(),
-        );
-        restarted
-            .scopes
-            .acquire(
-                &pending.receipt.binding.scope_keys,
-                Arc::new(AtomicBool::new(false)),
-            )
-            .unwrap()
-            .settle();
-        assert!(restarted
-            .submit_background(pending.receipt.binding, |_| async {
-                panic!("pending replay")
-            })
-            .await
-            .is_err());
-        restarted.shutdown().await;
-    }
-
-    #[tokio::test]
-    async fn second_live_journal_owner_is_refused_without_recovery() {
-        let dir = tempfile::tempdir().unwrap();
-        let runtime = JobRuntime::open_durable(dir.path().into(), 2, 65536)
-            .await
-            .unwrap();
-        let receipt = runtime
-            .submit_background(binding(), |_| async {
-                futures::future::pending::<()>().await;
-                (JobStatus::Succeeded, result())
-            })
-            .await
-            .unwrap();
-        assert!(JobRuntime::open_durable(dir.path().into(), 2, 65536)
-            .await
-            .is_err());
-        assert_eq!(
-            runtime
-                .journal
-                .as_ref()
-                .unwrap()
-                .load(receipt.job_id.clone())
-                .await
-                .unwrap()
-                .snapshot
-                .status,
-            JobStatus::Running
-        );
-        // Simulate process loss, then the next exclusive owner may recover.
-        drop(runtime);
-        let restarted = JobRuntime::open_durable(dir.path().into(), 2, 65536)
-            .await
-            .unwrap();
-        assert_eq!(
-            restarted.get("chat", &receipt.job_id).unwrap().status,
-            JobStatus::Unknown
-        );
-        restarted.shutdown().await;
-    }
-
-    #[tokio::test]
-    async fn dropped_durable_admission_joins_io_never_constructs_effect_and_recovers_capacity() {
-        let dir = tempfile::tempdir().unwrap();
-        let runtime = JobRuntime::open_durable(dir.path().into(), 1, 65536)
-            .await
-            .unwrap();
-        let (entered, admission_entered) = oneshot::channel();
-        let (release, released) = oneshot::channel();
-        *runtime
-            .journal
-            .as_ref()
-            .unwrap()
-            .admission_gate
-            .lock()
-            .unwrap() = Some((entered, released));
-        let effects = Arc::new(AtomicUsize::new(0));
-        let counter = effects.clone();
-        let mut submission = Box::pin(runtime.submit(binding(), Duration::ZERO, move |_| {
-            counter.fetch_add(1, Ordering::SeqCst);
-            async { (JobStatus::Succeeded, result()) }
-        }));
-        assert!(futures::poll!(&mut submission).is_pending());
-        admission_entered.await.unwrap();
-        let id = runtime
-            .state
-            .lock()
-            .unwrap()
-            .records
-            .keys()
-            .next()
-            .unwrap()
-            .clone();
-        let keys = runtime.get("chat", &id).unwrap().receipt.binding.scope_keys;
-        drop(submission);
-        assert_eq!(effects.load(Ordering::SeqCst), 0);
-        assert_eq!(runtime.get("chat", &id).unwrap().status, JobStatus::Running);
-        release.send(()).unwrap();
-        let terminal =
-            tokio::time::timeout(Duration::from_secs(5), runtime.wait_terminal("chat", &id))
-                .await
-                .unwrap()
-                .unwrap();
-        assert_eq!(terminal.status, JobStatus::Cancelled);
-        assert!(terminal
-            .result_unavailable_reason
-            .unwrap()
-            .contains("never started"));
-        assert_eq!(effects.load(Ordering::SeqCst), 0);
-        assert_eq!(
-            runtime
-                .journal
-                .as_ref()
-                .unwrap()
-                .load(id.clone())
-                .await
-                .unwrap()
-                .snapshot
-                .status,
-            JobStatus::Cancelled
-        );
-        // No future was constructed, so releasing the fence is provably safe.
-        drop(runtime.begin_scope_change(&keys).await.unwrap());
-        let mut next = binding();
-        next.tool_call_id = "next-after-dropped-admission".into();
-        assert!(matches!(
-            runtime
-                .submit(next, Duration::from_secs(5), |_| async {
-                    (JobStatus::Succeeded, result())
-                })
-                .await
-                .unwrap(),
-            Submission::Inline(_)
-        ));
-        runtime.shutdown().await;
-    }
-
-    #[tokio::test]
-    async fn legacy_entries_without_original_provenance_refuse_all_statuses() {
-        for status in [
-            JobStatus::Accepted,
-            JobStatus::Running,
-            JobStatus::CancelRequested,
-            JobStatus::Succeeded,
-            JobStatus::Failed,
-            JobStatus::Cancelled,
-            JobStatus::Unknown,
-        ] {
-            let dir = tempfile::tempdir().unwrap();
-            let runtime = JobRuntime::open_durable(dir.path().into(), 2, 65536)
-                .await
-                .unwrap();
-            runtime.shutdown().await;
-            drop(runtime);
-            let snapshot = JobSnapshot {
-                receipt: JobReceipt {
-                    job_id: "legacy".into(),
-                    binding: binding(),
-                    status,
-                    result_url: "local".into(),
-                    cancel_url: "local".into(),
-                },
-                status,
-                revision: 1,
-                result: Some(result()),
-                result_unavailable_reason: None,
-            };
-            let identity = super::super::journal::identity(&snapshot).unwrap();
-            let mut payload = serde_json::to_value(super::super::journal::Entry {
-                snapshot,
-                consumed: true,
-                internal_readiness: false,
-                inline: true,
-                scope_keys: vec![],
-            })
-            .unwrap();
-            // Exercise the legacy serde(default), not merely an explicit [].
-            payload.as_object_mut().unwrap().remove("scope_keys");
-            let path = dir.path().join("tool-jobs/ownership.sqlite");
-            tokio::task::spawn_blocking(move || {
-                rusqlite::Connection::open(path)
-                    .unwrap()
-                    .execute(
-                        "INSERT INTO tool_jobs VALUES (?1, ?2, ?3)",
-                        rusqlite::params!["legacy", identity, payload.to_string()],
-                    )
-                    .unwrap();
-            })
-            .await
-            .unwrap();
-            let reopened = JobRuntime::open_durable(dir.path().into(), 2, 65536).await;
-            assert!(matches!(reopened, Err(error) if error.contains("provenance")));
-        }
-    }
-
-    #[tokio::test]
-    async fn dropped_inline_claim_during_blocking_write_retains_restart_notice() {
-        let dir = tempfile::tempdir().unwrap();
-        let runtime = JobRuntime::open_durable(dir.path().into(), 2, 65536)
-            .await
-            .unwrap();
-        let (entered, write_entered) = oneshot::channel();
-        let (release, released) = std::sync::mpsc::channel();
-        *runtime
-            .journal
-            .as_ref()
-            .unwrap()
-            .inline_write_gate
-            .lock()
-            .unwrap() = Some((entered, released));
-        let effects = Arc::new(AtomicUsize::new(0));
-        let counter = effects.clone();
-        let mut submission =
-            Box::pin(
-                runtime.submit(binding(), Duration::from_secs(60), move |_| {
-                    counter.fetch_add(1, Ordering::SeqCst);
-                    async { (JobStatus::Succeeded, result()) }
-                }),
-            );
-        tokio::select! {
-            entered = write_entered => entered.unwrap(),
-            _ = &mut submission => panic!("inline write must block before return"),
-            _ = tokio::time::sleep(Duration::from_secs(5)) => panic!("inline writer did not reach barrier"),
-        }
-        // The real spawn_blocking writer owns the SQLite connection mutex.
-        // Dropping its waiter cannot stop that pending durable commit.
-        drop(submission);
-        let terminal = runtime.background_terminals().pop().unwrap();
-        let id = terminal.receipt.job_id;
-        assert_eq!(terminal.status, JobStatus::Succeeded);
-        release.send(()).unwrap();
-        let stored = runtime
-            .journal
-            .as_ref()
-            .unwrap()
-            .load(id.clone())
-            .await
-            .unwrap();
-        assert!(stored.inline);
-        assert!(!stored.consumed);
-        runtime.shutdown().await;
-        drop(runtime);
-        let restarted = JobRuntime::open_durable(dir.path().into(), 2, 65536)
-            .await
-            .unwrap();
-        let notices = restarted.background_terminals();
-        assert_eq!(notices.len(), 1);
-        assert_eq!(notices[0].receipt.job_id, id);
-        assert_eq!(notices[0].status, JobStatus::Succeeded);
-        assert_eq!(notices[0].revision, terminal.revision);
-        assert_eq!(
-            restarted
-                .get_result("chat", &id)
-                .await
-                .unwrap()
-                .unwrap()
-                .result
-                .unwrap()
-                .messages[0]
-                .content
-                .content_text_only(),
-            "plain, not JSON"
-        );
-        assert!(restarted
-            .submit_background(binding(), |_| async {
-                panic!("must never replay the future")
-            })
-            .await
-            .is_err());
-        assert_eq!(effects.load(Ordering::SeqCst), 1);
-        restarted
-            .ack_delivered("chat", &id, terminal.revision)
-            .await
-            .unwrap();
-        restarted.shutdown().await;
-        drop(restarted);
-        let acknowledged = JobRuntime::open_durable(dir.path().into(), 2, 65536)
-            .await
-            .unwrap();
-        assert!(acknowledged.background_terminals().is_empty());
-        acknowledged.shutdown().await;
-    }
-
-    #[tokio::test]
     async fn factory_construction_panic_records_unknown_without_poisoning_scope() {
-        let dir = tempfile::tempdir().unwrap();
-        let runtime = JobRuntime::open_durable(dir.path().into(), 2, 65536)
-            .await
-            .unwrap();
+        let runtime = JobRuntime::new(2, 65536);
         let effects = Arc::new(AtomicUsize::new(0));
         let counter = effects.clone();
         let receipt = runtime
@@ -1587,16 +995,7 @@ mod tests {
             })
             .await
             .is_err());
-        runtime.shutdown().await;
-        drop(runtime);
-        let restarted = JobRuntime::open_durable(dir.path().into(), 2, 65536)
-            .await
-            .unwrap();
-        assert_eq!(
-            restarted.background_terminals()[0].status,
-            JobStatus::Unknown
-        );
-        restarted
+        runtime
             .scopes
             .acquire(
                 &receipt.binding.scope_keys,
@@ -1604,32 +1003,7 @@ mod tests {
             )
             .unwrap()
             .settle();
-        restarted.shutdown().await;
-    }
-
-    #[tokio::test]
-    async fn malformed_journal_fails_closed() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("tool-jobs/ownership.sqlite");
-        let runtime = JobRuntime::open_durable(dir.path().into(), 2, 1)
-            .await
-            .unwrap();
         runtime.shutdown().await;
-        drop(runtime);
-        tokio::task::spawn_blocking(move || {
-            rusqlite::Connection::open(path)
-                .unwrap()
-                .execute(
-                    "INSERT INTO tool_jobs VALUES ('bad', 'bad', 'not json')",
-                    [],
-                )
-                .unwrap();
-        })
-        .await
-        .unwrap();
-        assert!(JobRuntime::open_durable(dir.path().into(), 2, 1)
-            .await
-            .is_err());
     }
 
     #[tokio::test]
@@ -1904,96 +1278,177 @@ mod tests {
         runtime.shutdown().await;
     }
 
+    fn sized(call: &str, bytes: usize) -> (JobBinding, JobResult) {
+        let mut call_binding = binding();
+        call_binding.tool_call_id = call.into();
+        let result = JobResult {
+            had_corrections: false,
+            messages: vec![ChatMessage::new("tool".into(), "x".repeat(bytes))],
+            context_files: vec![],
+        };
+        (call_binding, result)
+    }
+
+    async fn finish_background(runtime: &Arc<JobRuntime>, call: &str, bytes: usize) -> JobSnapshot {
+        let (call, result) = sized(call, bytes);
+        let receipt = runtime
+            .submit_background(call, move |_| async move { (JobStatus::Succeeded, result) })
+            .await
+            .unwrap();
+        runtime
+            .wait_terminal("chat", &receipt.job_id)
+            .await
+            .unwrap()
+    }
+
     #[tokio::test]
-    async fn journal_retains_over_100k_identities_without_eviction_or_replay() {
-        const SEEDED: usize = 100_001;
-        let dir = tempfile::tempdir().unwrap();
-        let runtime = JobRuntime::open_durable(dir.path().into(), 2, 65536)
+    async fn retention_releases_consumed_payloads_before_undelivered_ones() {
+        let runtime = JobRuntime::with_limits(
+            "/project".into(),
+            64,
+            3000,
+            TERMINAL_RECORD_CAP,
+            UNDELIVERED_RECORD_CAP,
+        );
+        let consumed = finish_background(&runtime, "consumed", 1000).await;
+        runtime
+            .ack_delivered("chat", &consumed.receipt.job_id, consumed.revision)
             .await
             .unwrap();
+        let older = finish_background(&runtime, "older-undelivered", 1000).await;
+        let newer = finish_background(&runtime, "newer-undelivered", 1000).await;
+        assert!(
+            runtime
+                .get("chat", &consumed.receipt.job_id)
+                .unwrap()
+                .result_released
+        );
+        assert!(runtime
+            .get("chat", &older.receipt.job_id)
+            .unwrap()
+            .result
+            .is_some());
+        assert!(runtime
+            .get("chat", &newer.receipt.job_id)
+            .unwrap()
+            .result
+            .is_some());
+        let latest = finish_background(&runtime, "latest-undelivered", 1000).await;
+        let older = runtime.get("chat", &older.receipt.job_id).unwrap();
+        assert!(older.result.is_none() && older.result_released);
+        assert_eq!(
+            older.result_unavailable_reason.as_deref(),
+            Some(RESULT_NOT_KEPT)
+        );
+        assert!(runtime
+            .get("chat", &newer.receipt.job_id)
+            .unwrap()
+            .result
+            .is_some());
+        assert!(runtime
+            .get("chat", &latest.receipt.job_id)
+            .unwrap()
+            .result
+            .is_some());
+        assert!(runtime.state.lock().unwrap().retained_bytes <= 3000);
+        let refs = runtime
+            .background_terminal_refs()
+            .into_iter()
+            .map(|job| job.receipt.job_id)
+            .collect::<std::collections::HashSet<_>>();
+        assert!(refs.contains(&older.receipt.job_id));
         runtime.shutdown().await;
-        drop(runtime);
-        let path = dir.path().join("tool-jobs/ownership.sqlite");
-        tokio::task::spawn_blocking(move || {
-            let mut connection = rusqlite::Connection::open(path).unwrap();
-            let tx = connection.transaction().unwrap();
-            {
-                let mut insert = tx
-                    .prepare("INSERT INTO tool_jobs VALUES (?1, ?2, ?3)")
-                    .unwrap();
-                for index in 0..SEEDED {
-                    let mut call = binding();
-                    call.tool_call_id = format!("seeded-{index}");
-                    let job_id = format!("seeded-job-{index}");
-                    let snapshot = JobSnapshot {
-                        receipt: JobReceipt {
-                            job_id: job_id.clone(),
-                            binding: call.clone(),
-                            status: JobStatus::Accepted,
-                            result_url: "local".into(),
-                            cancel_url: "local".into(),
-                        },
-                        status: JobStatus::Succeeded,
-                        revision: 2,
-                        result: None,
-                        result_unavailable_reason: None,
-                    };
-                    let identity = super::super::journal::identity(&snapshot).unwrap();
-                    let payload = serde_json::to_string(&super::super::journal::Entry {
-                        snapshot,
-                        consumed: true,
-                        inline: false,
-                        internal_readiness: false,
-                        scope_keys: call.scope_keys,
-                    })
-                    .unwrap();
-                    insert
-                        .execute(rusqlite::params![job_id, identity, payload])
-                        .unwrap();
-                }
-            }
-            tx.commit().unwrap();
-        })
-        .await
-        .unwrap();
-        let reopened = JobRuntime::open_durable(dir.path().into(), 2, 65536)
+    }
+
+    #[tokio::test]
+    async fn retention_never_releases_an_inline_result_before_it_is_returned() {
+        let runtime = JobRuntime::with_limits(
+            "/project".into(),
+            8,
+            10,
+            TERMINAL_RECORD_CAP,
+            UNDELIVERED_RECORD_CAP,
+        );
+        let (call, result) = sized("big-inline", 1000);
+        let Submission::Inline(output) = runtime
+            .submit(call, Duration::from_secs(60), move |_| async move {
+                (JobStatus::Succeeded, result)
+            })
+            .await
+            .unwrap()
+        else {
+            panic!("expected inline result");
+        };
+        assert_eq!(output.messages[0].content.content_text_only().len(), 1000);
+        assert_eq!(runtime.state.lock().unwrap().retained_bytes, 0);
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn record_cap_evicts_only_consumed_records_and_undelivered_have_their_own_cap() {
+        let runtime = JobRuntime::with_limits("/project".into(), 64, usize::MAX, 3, 4);
+        let first = finish_background(&runtime, "first", 1).await;
+        let second = finish_background(&runtime, "second", 1).await;
+        runtime
+            .ack_delivered("chat", &second.receipt.job_id, second.revision)
             .await
             .unwrap();
-        {
-            let state = reopened.state.lock().unwrap();
-            assert_eq!(state.records.len(), SEEDED);
-            assert_eq!(state.invocation_ids.len(), SEEDED);
+        let third = finish_background(&runtime, "third", 1).await;
+        runtime
+            .ack_delivered("chat", &third.receipt.job_id, third.revision)
+            .await
+            .unwrap();
+        let fourth = finish_background(&runtime, "fourth", 1).await;
+        assert!(runtime.get("chat", &second.receipt.job_id).is_none());
+        assert!(runtime.get("chat", &third.receipt.job_id).is_some());
+        assert!(runtime.get("chat", &first.receipt.job_id).is_some());
+        let fifth = finish_background(&runtime, "fifth", 1).await;
+        assert!(runtime.get("chat", &third.receipt.job_id).is_none());
+        let sixth = finish_background(&runtime, "sixth", 1).await;
+        assert!(
+            runtime.knows("chat", &first.receipt.job_id),
+            "the ordinary cap must never evict an undelivered record"
+        );
+        assert_eq!(runtime.state.lock().unwrap().records.len(), 4);
+        let seventh = finish_background(&runtime, "seventh", 1).await;
+        assert!(!runtime.knows("chat", &first.receipt.job_id));
+        for kept in [&fourth, &fifth, &sixth, &seventh] {
+            assert!(runtime.get("chat", &kept.receipt.job_id).is_some());
         }
-        for index in [0, SEEDED - 1] {
-            let job_id = format!("seeded-job-{index}");
-            let seeded = reopened.get("chat", &job_id).unwrap();
-            assert_eq!(seeded.status, JobStatus::Succeeded);
-            assert_eq!(seeded.revision, 2);
-            assert!(reopened
-                .submit_background(seeded.receipt.binding, |_| async {
-                    panic!("retained identity must never replay")
-                })
-                .await
-                .is_err());
-        }
-        assert!(reopened.background_terminals().is_empty());
-        let mut fresh = binding();
-        fresh.tool_call_id = format!("seeded-{SEEDED}");
-        let effects = Arc::new(AtomicUsize::new(0));
-        let counter = effects.clone();
-        assert!(matches!(
-            reopened
-                .submit(fresh, Duration::from_secs(60), move |_| {
-                    counter.fetch_add(1, Ordering::SeqCst);
-                    async { (JobStatus::Succeeded, result()) }
-                })
-                .await
-                .unwrap(),
-            Submission::Inline(_)
-        ));
-        assert_eq!(effects.load(Ordering::SeqCst), 1);
-        assert_eq!(reopened.state.lock().unwrap().records.len(), SEEDED + 1);
-        assert!(reopened.get("chat", "seeded-job-0").is_some());
-        reopened.shutdown().await;
+        assert_eq!(runtime.state.lock().unwrap().records.len(), 4);
+        assert_eq!(runtime.state.lock().unwrap().invocation_ids.len(), 7);
+        assert!(runtime
+            .submit_background(first.receipt.binding.clone(), |_| async {
+                panic!("an evicted record must not make its invocation replayable")
+            })
+            .await
+            .is_err());
+        runtime.shutdown().await;
+    }
+
+    #[test]
+    fn retention_size_is_the_serialized_size_without_a_copy() {
+        let (_, result) = sized("measured", 1234);
+        assert_eq!(
+            serialized_size(&result),
+            serde_json::to_vec(&result).unwrap().len()
+        );
+        assert!(serialized_size(&result) > 1234);
+    }
+
+    #[tokio::test]
+    async fn knows_checks_existence_and_chat_without_a_payload() {
+        let runtime = JobRuntime::with_limits(
+            "/project".into(),
+            8,
+            usize::MAX,
+            TERMINAL_RECORD_CAP,
+            UNDELIVERED_RECORD_CAP,
+        );
+        let done = finish_background(&runtime, "known", 10).await;
+        assert!(runtime.knows("chat", &done.receipt.job_id));
+        assert!(!runtime.knows("other-chat", &done.receipt.job_id));
+        assert!(!runtime.knows("chat", "missing"));
+        runtime.shutdown().await;
     }
 }

@@ -1,5 +1,8 @@
 import * as chatSubscription from "../services/refact/chatSubscription";
-import { selectRuntimeById } from "../features/Chat/Thread/selectors";
+import {
+  selectRuntimeById,
+  selectSubscriptionFailureById,
+} from "../features/Chat/Thread/selectors";
 import { createElement, type ReactElement, type ReactNode } from "react";
 import { Provider } from "react-redux";
 import { renderHook, act as rtlAct } from "@testing-library/react";
@@ -18,8 +21,10 @@ import { setUpStore, type AppStore, type RootState } from "../app/store";
 import type { ChatEventEnvelope } from "../services/refact/chatSubscription";
 import {
   newChatAction,
+  createChatWithId,
   updateChatRuntimeFromSessionState,
   applyChatEvent,
+  requestSseRefresh,
 } from "../features/Chat/Thread/actions";
 import {
   agentDisclosureDenied,
@@ -58,6 +63,8 @@ function createSubscriptionStore() {
 afterEach(() => {
   vi.useRealTimers();
   vi.restoreAllMocks();
+  // tinyspy restores an accessor it found deeper than one prototype level as a self-referential own getter.
+  Reflect.deleteProperty(document, "visibilityState");
   vi.clearAllMocks();
   vi.unstubAllGlobals();
 });
@@ -409,6 +416,392 @@ describe("pickDesiredChatSubscriptions", () => {
     expect(mockFetch).toHaveBeenCalledTimes(2);
     expect(store.getState().agentsPanel.denied).toBe(true);
     unmount();
+  });
+});
+
+describe("per-chat isolation on the shared stream", () => {
+  const thread = (id: string) => ({
+    id,
+    title: id,
+    model: "",
+    mode: "agent",
+    tool_use: "agent",
+    boost_reasoning: false,
+    context_tokens_cap: null,
+    include_project_info: true,
+    checkpoints_enabled: true,
+    is_title_generated: false,
+  });
+  const snapshot = (chatId: string, seq = "0") => ({
+    type: "snapshot",
+    chat_id: chatId,
+    seq,
+    thread: thread(chatId),
+    runtime: {
+      state: "idle",
+      paused: false,
+      error: null,
+      queue_size: 0,
+      pause_reasons: [],
+      queued_items: [],
+    },
+    messages: [],
+    background_agents: [],
+  });
+  const setup = (ids: string[]) => {
+    vi.useFakeTimers();
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    const streams: ReadableStreamDefaultController<Uint8Array>[] = [];
+    const signals: AbortSignal[] = [];
+    const fetcher = vi.fn((_url: string, init: RequestInit) => {
+      if (init.signal) signals.push(init.signal);
+      return Promise.resolve(
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              streams.push(controller);
+            },
+          }),
+        ),
+      );
+    });
+    vi.stubGlobal("fetch", fetcher);
+    const store = createSubscriptionStore();
+    ids.forEach((chatId) =>
+      store.dispatch(registerVisibleChatMount({ chatId })),
+    );
+    const view = renderAllChatsSubscription(store);
+    const send = async (index: number, event: object) => {
+      await asyncAct(async () => {
+        streams[index].enqueue(
+          new TextEncoder().encode(`data: ${JSON.stringify(event)}\n\n`),
+        );
+        await vi.advanceTimersByTimeAsync(0);
+      });
+    };
+    const advance = async (ms: number) => {
+      await asyncAct(async () => {
+        await vi.advanceTimersByTimeAsync(ms);
+      });
+    };
+    const status = (chatId: string) =>
+      store.getState().connection.sseConnections[chatId]?.status;
+    return { fetcher, signals, streams, store, send, advance, status, view };
+  };
+
+  it("backs off a repeatedly failing chat on its own count while a sibling stays healthy", async () => {
+    const { fetcher, signals, send, advance, status, view } = setup([
+      "chat-a",
+      "chat-b",
+    ]);
+    await advance(0);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    await send(0, snapshot("chat-a"));
+    let seq = 1;
+    const keepAlive = () =>
+      send(0, {
+        type: "queue_updated",
+        chat_id: "chat-a",
+        seq: String(seq++),
+        queue_size: 0,
+        queued_items: [],
+      });
+    for (const delay of [2000, 4000, 8000, 16000, 30_000, 30_000]) {
+      await advance(15_000);
+      expect(status("chat-b")).toBe("disconnected");
+      await keepAlive();
+      await advance(delay - 1);
+      expect(status("chat-b")).toBe("disconnected");
+      await advance(1);
+      expect(status("chat-b")).toBe("connecting");
+      expect(status("chat-a")).toBe("connected");
+      await keepAlive();
+    }
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(signals[0].aborted).toBe(false);
+    await send(0, snapshot("chat-b", "3"));
+    expect(status("chat-b")).toBe("connected");
+    view.unmount();
+  });
+
+  it("does not retry a chat closed with retryable false, including after EOF", async () => {
+    const { fetcher, streams, send, advance, status, view } = setup([
+      "chat-a",
+      "chat-b",
+    ]);
+    await advance(0);
+    await send(0, snapshot("chat-a"));
+    await send(0, snapshot("chat-b"));
+    await send(0, {
+      chat_id: "chat-b",
+      type: "subscription_closed",
+      reason: "unavailable",
+      retryable: false,
+      message: "Chat no longer exists",
+    });
+    expect(status("chat-b")).toBe("disconnected");
+    expect(status("chat-a")).toBe("connected");
+    await advance(30_000);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    await send(0, {
+      chat_id: "chat-a",
+      type: "subscription_closed",
+      reason: "ended",
+      retryable: false,
+    });
+    await asyncAct(async () => {
+      streams[0].close();
+      await vi.advanceTimersByTimeAsync(60_000);
+    });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(status("chat-a")).toBe("disconnected");
+    expect(status("chat-b")).toBe("disconnected");
+    view.unmount();
+  });
+
+  it("resubscribes a retryable closed chat with a new server stream", async () => {
+    const { fetcher, signals, send, advance, status, view } = setup([
+      "chat-a",
+      "chat-b",
+    ]);
+    await advance(0);
+    await send(0, snapshot("chat-a"));
+    await send(0, snapshot("chat-b"));
+    await send(0, {
+      chat_id: "chat-b",
+      type: "subscription_closed",
+      reason: "ended",
+      retryable: true,
+      message: "stream ended",
+    });
+    expect(status("chat-b")).toBe("disconnected");
+    expect(signals[0].aborted).toBe(false);
+    await advance(1999);
+    expect(status("chat-b")).toBe("disconnected");
+    await advance(1);
+    expect(status("chat-b")).toBe("connecting");
+    await advance(79);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(signals[0].aborted).toBe(false);
+    await advance(1);
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(signals[0].aborted).toBe(true);
+    await send(1, snapshot("chat-a", "1"));
+    await send(1, snapshot("chat-b", "1"));
+    expect(status("chat-b")).toBe("connected");
+    view.unmount();
+  });
+
+  const queued = (chatId: string, seq: string) => ({
+    type: "queue_updated",
+    chat_id: chatId,
+    seq,
+    queue_size: 0,
+    queued_items: [],
+  });
+
+  it("keeps a snapshot that arrives during the retry backoff after a bootstrap timeout", async () => {
+    const { fetcher, signals, store, send, advance, status, view } = setup([
+      "chat-a",
+      "chat-b",
+    ]);
+    await advance(0);
+    await send(0, snapshot("chat-a"));
+    await advance(15_000);
+    expect(status("chat-b")).toBe("disconnected");
+    await send(0, snapshot("chat-b", "4"));
+    await send(0, queued("chat-b", "5"));
+    await send(0, queued("chat-a", "1"));
+    await advance(2000);
+    await send(0, queued("chat-b", "6"));
+    await advance(1000);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(signals[0].aborted).toBe(false);
+    expect(status("chat-b")).toBe("connected");
+    expect(status("chat-a")).toBe("connected");
+    expect(
+      selectRuntimeById(store.getState(), "chat-b")?.last_applied_seq,
+    ).toBe("6");
+    await send(0, queued("chat-a", "2"));
+    expect(
+      selectRuntimeById(store.getState(), "chat-a")?.last_applied_seq,
+    ).toBe("2");
+    view.unmount();
+  });
+
+  it("keeps a first snapshot that arrives inside the refresh gap", async () => {
+    const { fetcher, signals, store, send, advance, status, view } = setup([
+      "chat-a",
+      "chat-b",
+    ]);
+    await advance(0);
+    await send(0, snapshot("chat-a"));
+    syncAct(() => {
+      store.dispatch(requestSseRefresh({ chatId: "chat-b" }));
+    });
+    await send(0, snapshot("chat-b", "2"));
+    await send(0, queued("chat-b", "3"));
+    await advance(1000);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(signals[0].aborted).toBe(false);
+    expect(status("chat-b")).toBe("connected");
+    expect(
+      selectRuntimeById(store.getState(), "chat-b")?.last_applied_seq,
+    ).toBe("3");
+    await send(0, queued("chat-a", "1"));
+    expect(
+      selectRuntimeById(store.getState(), "chat-a")?.last_applied_seq,
+    ).toBe("1");
+    view.unmount();
+  });
+
+  it("keeps a later group retry on time when an earlier one is cleared", async () => {
+    const { fetcher, store, send, advance, status, view } = setup([
+      "chat-a",
+      "chat-b",
+      "chat-c",
+    ]);
+    await advance(0);
+    await send(0, snapshot("chat-a"));
+    await send(0, snapshot("chat-b"));
+    await send(0, snapshot("chat-c"));
+    const close = (chatId: string) =>
+      send(0, {
+        chat_id: chatId,
+        type: "subscription_closed",
+        reason: "ended",
+        retryable: true,
+      });
+    await close("chat-b");
+    await advance(500);
+    await close("chat-a");
+    syncAct(() => {
+      store.dispatch(requestSseRefresh({ chatId: "chat-b" }));
+    });
+    await advance(50);
+    expect(status("chat-b")).toBe("connecting");
+    await advance(80);
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    await send(1, snapshot("chat-b", "1"));
+    await send(1, snapshot("chat-c", "1"));
+    await advance(1999 - 130);
+    expect(status("chat-a")).toBe("disconnected");
+    await advance(1);
+    expect(status("chat-a")).toBe("connecting");
+    await advance(80);
+    expect(fetcher).toHaveBeenCalledTimes(3);
+    const url = new URL(fetcher.mock.calls[2][0], "http://localhost");
+    expect(
+      [
+        ...(JSON.parse(url.searchParams.get("chat_ids") ?? "[]") as string[]),
+      ].sort(),
+    ).toEqual(["chat-a", "chat-b", "chat-c"]);
+    view.unmount();
+  });
+
+  it("records a final close before any snapshot and resumes on retry", async () => {
+    const { fetcher, store, send, advance, status, view } = setup([
+      "chat-a",
+      "chat-b",
+    ]);
+    syncAct(() => {
+      store.dispatch(
+        createChatWithId({ id: "chat-b", openTab: false, activate: false }),
+      );
+    });
+    await advance(0);
+    await send(0, snapshot("chat-a"));
+    await send(0, {
+      chat_id: "chat-b",
+      type: "subscription_closed",
+      reason: "unavailable",
+      retryable: false,
+      message: "Chat no longer exists",
+    });
+    expect(status("chat-b")).toBe("disconnected");
+    expect(selectSubscriptionFailureById(store.getState(), "chat-b")).toBe(
+      "Chat no longer exists",
+    );
+    await advance(30_000);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    syncAct(() => {
+      store.dispatch(requestSseRefresh({ chatId: "chat-b" }));
+    });
+    expect(selectSubscriptionFailureById(store.getState(), "chat-b")).toBe(
+      null,
+    );
+    await advance(130);
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(status("chat-b")).toBe("connecting");
+    await send(1, snapshot("chat-a", "1"));
+    await send(1, snapshot("chat-b", "1"));
+    expect(status("chat-b")).toBe("connected");
+    expect(selectSubscriptionFailureById(store.getState(), "chat-b")).toBe(
+      null,
+    );
+    view.unmount();
+  });
+
+  it("does not record a failure for a retryable close or a chat that already has a snapshot", async () => {
+    const { store, send, advance, view } = setup(["chat-a", "chat-b"]);
+    syncAct(() => {
+      store.dispatch(
+        createChatWithId({ id: "chat-a", openTab: false, activate: false }),
+      );
+      store.dispatch(
+        createChatWithId({ id: "chat-b", openTab: false, activate: false }),
+      );
+    });
+    await advance(0);
+    await send(0, snapshot("chat-a"));
+    await send(0, {
+      chat_id: "chat-b",
+      type: "subscription_closed",
+      reason: "ended",
+      retryable: true,
+      message: "temporary",
+    });
+    await send(0, {
+      chat_id: "chat-a",
+      type: "subscription_closed",
+      reason: "unavailable",
+      retryable: false,
+      message: "gone",
+    });
+    expect(selectSubscriptionFailureById(store.getState(), "chat-b")).toBe(
+      null,
+    );
+    expect(selectSubscriptionFailureById(store.getState(), "chat-a")).toBe(
+      null,
+    );
+    view.unmount();
+  });
+
+  it("keeps the shared agent roster healthy when one chat fails on its own", async () => {
+    const { store, streams, send, advance, status, view } = setup([
+      "chat-a",
+      "chat-b",
+    ]);
+    await advance(0);
+    await send(0, snapshot("chat-a"));
+    await send(0, {
+      chat_id: "chat-b",
+      type: "subscription_closed",
+      reason: "unavailable",
+      retryable: true,
+      message: "chat subscription unavailable: 403 Forbidden",
+    });
+    expect(status("chat-b")).toBe("disconnected");
+    expect(status("chat-a")).toBe("connected");
+    expect(store.getState().agentsPanel.transportStale).toBe(false);
+    expect(store.getState().agentsPanel.denied).toBe(false);
+    await asyncAct(async () => {
+      streams[0].error(new Error("network reset"));
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(status("chat-a")).toBe("disconnected");
+    expect(store.getState().agentsPanel.transportStale).toBe(true);
+    view.unmount();
   });
 });
 

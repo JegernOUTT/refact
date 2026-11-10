@@ -216,19 +216,133 @@ fn record_sse_serialize(
     );
 }
 
+const SUBSCRIPTION_CLOSED_MESSAGE_MAX_CHARS: usize = 160;
+
+#[derive(Serialize)]
+struct SubscriptionClosedEnvelope<'a> {
+    chat_id: &'a str,
+    #[serde(rename = "type")]
+    event_type: &'static str,
+    reason: &'static str,
+    retryable: bool,
+    message: String,
+}
+
+/// Builds the terminal multiplex frame for one chat. The message is derived only from the
+/// HTTP status class, never from the underlying error text, so it cannot leak paths or secrets.
+fn subscription_closed_frame(
+    chat_id: &str,
+    reason: &'static str,
+    retryable: bool,
+    message: String,
+) -> String {
+    let message: String = message
+        .chars()
+        .take(SUBSCRIPTION_CLOSED_MESSAGE_MAX_CHARS)
+        .collect();
+    let json = serde_json::to_string(&SubscriptionClosedEnvelope {
+        chat_id,
+        event_type: "subscription_closed",
+        reason,
+        retryable,
+        message,
+    })
+    .unwrap_or_else(|_| {
+        format!(
+            r#"{{"chat_id":{},"type":"subscription_closed","reason":"{}","retryable":{},"message":"subscription closed"}}"#,
+            serde_json::Value::String(chat_id.to_string()),
+            reason,
+            retryable
+        )
+    });
+    format!("data: {}\n\n", json)
+}
+
+fn subscription_retryable(status: StatusCode) -> bool {
+    matches!(
+        status,
+        StatusCode::REQUEST_TIMEOUT
+            | StatusCode::TOO_MANY_REQUESTS
+            | StatusCode::BAD_GATEWAY
+            | StatusCode::SERVICE_UNAVAILABLE
+            | StatusCode::GATEWAY_TIMEOUT
+    )
+}
+
+fn subscription_unavailable_frame(chat_id: &str, error: &ScratchError) -> String {
+    let status = error.status_code;
+    let retryable = subscription_retryable(status);
+    let message = format!(
+        "chat subscription unavailable: {} {}",
+        status.as_u16(),
+        status.canonical_reason().unwrap_or("error")
+    );
+    subscription_closed_frame(chat_id, "unavailable", retryable, message)
+}
+
+type MultiplexItem = Result<hyper::body::Bytes, Box<dyn std::error::Error + Send + Sync>>;
+
+/// Multiplexes per-chat subscription bodies. With `per_chat_close`, a chat whose stream ends
+/// or cannot be prepared emits exactly one `subscription_closed` frame and finishes without an
+/// `Err` item, so the remaining chats keep streaming and the response reaches EOF once every
+/// chat has finished. Without it, such a chat yields an `Err` item that aborts the response.
+fn multiplex_chat_subscriptions<F, Fut>(
+    chat_ids: Vec<String>,
+    per_chat_close: bool,
+    subscribe: F,
+) -> Body
+where
+    F: Fn(String) -> Fut,
+    Fut: std::future::Future<Output = Result<Response<Body>, ScratchError>> + Send + 'static,
+{
+    use futures::StreamExt;
+    type ChatBodyStream = std::pin::Pin<Box<dyn futures::Stream<Item = MultiplexItem> + Send>>;
+
+    let streams = chat_ids.into_iter().map(|id| {
+        let prepare = subscribe(id.clone());
+        Box::pin(async_stream::stream! {
+            match prepare.await {
+                Ok(response) => {
+                    let mut body = response.into_body();
+                    while let Some(chunk) = body.next().await {
+                        match chunk {
+                            Ok(bytes) => yield Ok::<_, Box<dyn std::error::Error + Send + Sync>>(bytes),
+                            Err(error) if per_chat_close => {
+                                tracing::warn!(chat_id = %id, %error, "multiplex chat subscription body failed");
+                                break;
+                            }
+                            Err(error) => yield Err(Box::new(error) as Box<dyn std::error::Error + Send + Sync>),
+                        }
+                    }
+                    if per_chat_close {
+                        yield Ok(hyper::body::Bytes::from(subscription_closed_frame(
+                            &id,
+                            "ended",
+                            true,
+                            "chat subscription ended".to_string(),
+                        )));
+                    } else {
+                        yield Err(Box::new(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "chat subscription ended")) as Box<dyn std::error::Error + Send + Sync>);
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(chat_id = %id, %error, "multiplex chat subscription preparation failed");
+                    if per_chat_close {
+                        yield Ok(hyper::body::Bytes::from(subscription_unavailable_frame(&id, &error)));
+                    } else {
+                        yield Err(Box::new(std::io::Error::other("chat subscription preparation failed")) as Box<dyn std::error::Error + Send + Sync>);
+                    }
+                }
+            }
+        }) as ChatBodyStream
+    });
+    Body::wrap_stream(futures::stream::select_all(streams))
+}
+
 pub async fn handle_v1_chats_subscribe_many(
     State(app): State<AppState>,
     axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
 ) -> Result<Response<Body>, ScratchError> {
-    use futures::StreamExt;
-    type ChatBodyStream = std::pin::Pin<
-        Box<
-            dyn futures::Stream<
-                    Item = Result<hyper::body::Bytes, Box<dyn std::error::Error + Send + Sync>>,
-                > + Send,
-        >,
-    >;
-
     let chat_ids: Vec<String> = params
         .get("chat_ids")
         .and_then(|value| serde_json::from_str(value).ok())
@@ -248,32 +362,25 @@ pub async fn handle_v1_chats_subscribe_many(
         validate_trajectory_id(id)?;
     }
     let mut seen = std::collections::HashSet::new();
-    let streams = chat_ids.into_iter().filter(|id| seen.insert(id.clone())).map(|id| {
+    let chat_ids: Vec<String> = chat_ids
+        .into_iter()
+        .filter(|id| seen.insert(id.clone()))
+        .collect();
+    let per_chat_close = params
+        .get("per_chat_close")
+        .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"));
+    let body = multiplex_chat_subscriptions(chat_ids, per_chat_close, move |id| {
         let app = app.clone();
         let mut params = params.clone();
         params.insert("chat_id".into(), id);
-        Box::pin(async_stream::stream! {
-            match handle_v1_chat_subscribe(State(app), axum::extract::Query(params)).await {
-                Ok(response) => {
-                    let mut body = response.into_body();
-                    while let Some(chunk) = body.next().await {
-                        yield chunk.map_err(|error| Box::new(error) as Box<dyn std::error::Error + Send + Sync>);
-                    }
-                    yield Err(Box::new(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "chat subscription ended")) as Box<dyn std::error::Error + Send + Sync>);
-                }
-                Err(error) => {
-                    tracing::warn!(%error, "multiplex chat subscription preparation failed");
-                    yield Err(Box::new(std::io::Error::other("chat subscription preparation failed")) as Box<dyn std::error::Error + Send + Sync>);
-                }
-            }
-        }) as ChatBodyStream
+        async move { handle_v1_chat_subscribe(State(app), axum::extract::Query(params)).await }
     });
     Ok(Response::builder()
         .status(StatusCode::OK)
         .header("Content-Type", "text/event-stream")
         .header("Cache-Control", "no-cache")
         .header("Connection", "keep-alive")
-        .body(Body::wrap_stream(futures::stream::select_all(streams)))
+        .body(body)
         .unwrap())
 }
 
@@ -292,7 +399,8 @@ pub async fn handle_v1_chat_subscribe(
 
     let sessions = app.chat.sessions.clone();
 
-    let session_arc = get_or_create_session_with_trajectory(app.clone(), &sessions, &chat_id).await;
+    let session_arc =
+        get_or_create_session_with_trajectory(app.clone(), &sessions, &chat_id).await?;
     if let Err(error) = crate::agents::delivery::recover_runner_deliveries(&app, &chat_id).await {
         tracing::warn!(%chat_id, %error, "runner delivery recovery failed");
     }
@@ -596,7 +704,8 @@ pub async fn handle_v1_chat_command(
     };
     let sessions = app.chat.sessions.clone();
 
-    let session_arc = get_or_create_session_with_trajectory(app.clone(), &sessions, &chat_id).await;
+    let session_arc =
+        get_or_create_session_with_trajectory(app.clone(), &sessions, &chat_id).await?;
     if let Err(error) = crate::agents::delivery::recover_runner_deliveries(&app, &chat_id).await {
         tracing::warn!(%chat_id, %error, "runner delivery recovery failed");
     }
@@ -1324,7 +1433,8 @@ pub async fn handle_v1_chat_cancel_queued(
 
     let sessions = app.chat.sessions.clone();
 
-    let session_arc = get_or_create_session_with_trajectory(app.clone(), &sessions, &chat_id).await;
+    let session_arc =
+        get_or_create_session_with_trajectory(app.clone(), &sessions, &chat_id).await?;
     let mut session = session_arc.lock().await;
 
     let initial_len = session.command_queue.len();
@@ -1515,6 +1625,7 @@ mod tests {
                 r#"["mux-first","mux-second","mux-second"]"#.into(),
             ),
             ("snapshot_chunks".into(), "1".into()),
+            ("per_chat_close".into(), "1".into()),
         ]);
         let mut body =
             handle_v1_chats_subscribe_many(State(app.clone()), axum::extract::Query(params))
@@ -1550,20 +1661,317 @@ mod tests {
         assert_eq!(event["type"], "stream_started");
         assert_eq!(event["seq"], "1");
         first.lock().await.close_event_channel();
+        let closed = next(&mut body).await;
+        assert_eq!(closed["chat_id"], "mux-first");
+        assert_eq!(closed["type"], "subscription_closed");
+        drop(body);
+        assert_eq!(sender.receiver_count(), 0);
+        assert_eq!(first.lock().await.event_tx.receiver_count(), 0);
+    }
+
+    async fn insert_test_session(
+        app: &AppState,
+        chat_id: &str,
+    ) -> Arc<tokio::sync::Mutex<ChatSession>> {
+        let session = Arc::new(tokio::sync::Mutex::new(ChatSession::new(chat_id.into())));
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert(chat_id.into(), session.clone());
+        session
+    }
+
+    /// Reads the next `data:` frame; `None` means the body reached EOF. Panics on a body error.
+    async fn next_mux_frame(body: &mut Body) -> Option<serde_json::Value> {
+        use hyper::body::HttpBody;
         tokio::time::timeout(std::time::Duration::from_secs(10), async {
             loop {
-                match body.data().await {
-                    Some(Ok(_)) => continue,
-                    Some(Err(_)) => break,
-                    None => panic!("constituent EOF must terminate the group with an error"),
+                let bytes = match body.data().await {
+                    None => return None,
+                    Some(Ok(bytes)) => bytes,
+                    Some(Err(error)) => panic!("multiplexed body must not error: {error}"),
+                };
+                let text = std::str::from_utf8(&bytes).unwrap();
+                if let Some(json) = text.strip_prefix("data: ") {
+                    return Some(serde_json::from_str(json.trim()).unwrap());
                 }
             }
         })
         .await
-        .expect("closed chat must not be hidden by sibling heartbeats");
-        drop(body);
-        assert_eq!(sender.receiver_count(), 0);
-        assert_eq!(first.lock().await.event_tx.receiver_count(), 0);
+        .expect("multiplexed frame must arrive")
+    }
+
+    /// After every chat has bootstrapped, any further snapshot is an unexpected re-subscribe.
+    async fn next_mux_frame_after_bootstrap(body: &mut Body) -> Option<serde_json::Value> {
+        let frame = next_mux_frame(body).await?;
+        assert!(
+            !matches!(frame["type"].as_str(), Some("snapshot" | "snapshot_end")),
+            "unexpected snapshot after bootstrap: {frame}"
+        );
+        Some(frame)
+    }
+
+    #[tokio::test]
+    async fn multiplex_ended_chat_closes_only_itself_and_body_reaches_eof() {
+        let workspace = tempfile::tempdir().unwrap();
+        let app = test_app_with_workspace(workspace.path()).await;
+        let ending = insert_test_session(&app, "mux-ending").await;
+        let staying = insert_test_session(&app, "mux-staying").await;
+        let params = HashMap::from([
+            ("chat_ids".into(), r#"["mux-ending","mux-staying"]"#.into()),
+            ("per_chat_close".into(), "true".into()),
+        ]);
+        let mut body =
+            handle_v1_chats_subscribe_many(State(app.clone()), axum::extract::Query(params))
+                .await
+                .unwrap()
+                .into_body();
+
+        let mut snapshots = std::collections::HashSet::new();
+        while snapshots.len() < 2 {
+            let frame = next_mux_frame(&mut body)
+                .await
+                .expect("snapshot before EOF");
+            assert_eq!(frame["type"], "snapshot");
+            snapshots.insert(frame["chat_id"].as_str().unwrap().to_string());
+        }
+        assert_eq!(staying.lock().await.event_tx.receiver_count(), 1);
+
+        ending.lock().await.close_event_channel();
+        let closed = next_mux_frame_after_bootstrap(&mut body)
+            .await
+            .expect("closed frame before EOF");
+        assert_eq!(
+            closed,
+            json!({
+                "chat_id": "mux-ending",
+                "type": "subscription_closed",
+                "reason": "ended",
+                "retryable": true,
+                "message": "chat subscription ended",
+            })
+        );
+
+        let sender = staying.lock().await.event_tx.clone();
+        sender
+            .send(Arc::new(
+                r#"{"chat_id":"mux-staying","seq":"1","type":"stream_started","message_id":"after-close"}"#.into(),
+            ))
+            .unwrap();
+        let event = next_mux_frame_after_bootstrap(&mut body)
+            .await
+            .expect("sibling event after close");
+        assert_eq!(event["chat_id"], "mux-staying");
+        assert_eq!(event["type"], "stream_started");
+        assert_eq!(event["message_id"], "after-close");
+
+        assert_eq!(sender.receiver_count(), 1);
+        drop(sender);
+        staying.lock().await.close_event_channel();
+        let mut closed_by_chat: HashMap<String, usize> = HashMap::new();
+        closed_by_chat.insert("mux-ending".into(), 1);
+        while let Some(frame) = next_mux_frame_after_bootstrap(&mut body).await {
+            if frame["type"] == "subscription_closed" {
+                assert_eq!(frame["reason"], "ended");
+                *closed_by_chat
+                    .entry(frame["chat_id"].as_str().unwrap().to_string())
+                    .or_default() += 1;
+            }
+        }
+        assert_eq!(
+            closed_by_chat,
+            HashMap::from([("mux-ending".into(), 1), ("mux-staying".into(), 1)])
+        );
+    }
+
+    #[tokio::test]
+    async fn multiplex_unavailable_chat_reports_retryability_without_ending_siblings() {
+        let workspace = tempfile::tempdir().unwrap();
+        let app = test_app_with_workspace(workspace.path()).await;
+        let valid = insert_test_session(&app, "mux-valid").await;
+        let subscribe_app = app.clone();
+        let mut body = multiplex_chat_subscriptions(
+            vec![
+                "mux-client-error".to_string(),
+                "mux-server-error".to_string(),
+                "mux-valid".to_string(),
+            ],
+            true,
+            move |id| {
+                let app = subscribe_app.clone();
+                async move {
+                    match id.as_str() {
+                        "mux-client-error" => Err(ScratchError::new(
+                            StatusCode::NOT_FOUND,
+                            "/home/user/secret/path token=abc".into(),
+                        )),
+                        "mux-server-error" => Err(ScratchError::new(
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "/home/user/secret/path token=abc".into(),
+                        )),
+                        _ => {
+                            let params = HashMap::from([("chat_id".to_string(), id)]);
+                            handle_v1_chat_subscribe(State(app), axum::extract::Query(params)).await
+                        }
+                    }
+                }
+            },
+        );
+
+        let mut closed = HashMap::new();
+        let mut valid_snapshot = false;
+        while closed.len() < 2 || !valid_snapshot {
+            let frame = next_mux_frame(&mut body).await.expect("frame before EOF");
+            match frame["type"].as_str() {
+                Some("snapshot") => {
+                    assert_eq!(frame["chat_id"], "mux-valid");
+                    valid_snapshot = true;
+                }
+                Some("subscription_closed") => {
+                    assert_eq!(frame["reason"], "unavailable");
+                    let message = frame["message"].as_str().unwrap();
+                    assert!(!message.contains("/home") && !message.contains("token"));
+                    assert!(message.chars().count() <= SUBSCRIPTION_CLOSED_MESSAGE_MAX_CHARS);
+                    let previous = closed.insert(
+                        frame["chat_id"].as_str().unwrap().to_string(),
+                        frame["retryable"].as_bool().unwrap(),
+                    );
+                    assert!(previous.is_none(), "one closed frame per chat");
+                }
+                other => panic!("unexpected frame type {other:?}"),
+            }
+        }
+        assert_eq!(
+            closed,
+            HashMap::from([
+                ("mux-client-error".to_string(), false),
+                ("mux-server-error".to_string(), true),
+            ])
+        );
+        assert_eq!(valid.lock().await.event_tx.receiver_count(), 1);
+        valid
+            .lock()
+            .await
+            .event_tx
+            .send(Arc::new(
+                r#"{"chat_id":"mux-valid","seq":"1","type":"stream_started","message_id":"still-open"}"#.into(),
+            ))
+            .unwrap();
+        let event = next_mux_frame_after_bootstrap(&mut body)
+            .await
+            .expect("valid chat keeps streaming");
+        assert_eq!(event["message_id"], "still-open");
+        valid.lock().await.close_event_channel();
+        let mut after = Vec::new();
+        while let Some(frame) = next_mux_frame_after_bootstrap(&mut body).await {
+            after.push(frame);
+        }
+        assert_eq!(
+            after,
+            vec![json!({
+                "chat_id": "mux-valid",
+                "type": "subscription_closed",
+                "reason": "ended",
+                "retryable": true,
+                "message": "chat subscription ended",
+            })],
+            "no further frame for the unavailable chats"
+        );
+    }
+
+    #[test]
+    fn subscription_retryability_follows_transient_statuses_and_open_refusals() {
+        for (status, retryable) in [
+            (StatusCode::REQUEST_TIMEOUT, true),
+            (StatusCode::TOO_MANY_REQUESTS, true),
+            (StatusCode::BAD_GATEWAY, true),
+            (StatusCode::SERVICE_UNAVAILABLE, true),
+            (StatusCode::GATEWAY_TIMEOUT, true),
+            (StatusCode::BAD_REQUEST, false),
+            (StatusCode::NOT_FOUND, false),
+            (StatusCode::CONFLICT, false),
+            (StatusCode::INTERNAL_SERVER_ERROR, false),
+            (StatusCode::NOT_IMPLEMENTED, false),
+        ] {
+            assert_eq!(subscription_retryable(status), retryable, "{status}");
+        }
+        use crate::chat::session_runtime::SessionOpenError;
+        for (error, retryable) in [
+            (SessionOpenError::Closed, true),
+            (SessionOpenError::Busy, true),
+            (SessionOpenError::Failed("disk".into()), false),
+        ] {
+            let scratch: ScratchError = error.clone().into();
+            let frame = subscription_unavailable_frame("chat", &scratch);
+            let json: serde_json::Value = serde_json::from_str(
+                frame
+                    .strip_prefix("data: ")
+                    .unwrap()
+                    .trim_end_matches("\n\n"),
+            )
+            .unwrap();
+            assert_eq!(json["retryable"], retryable, "{error:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn multiplex_body_reaches_eof_when_every_chat_is_unavailable() {
+        let mut body = multiplex_chat_subscriptions(
+            vec!["mux-a".to_string(), "mux-b".to_string()],
+            true,
+            |_| async { Err(ScratchError::new(StatusCode::BAD_REQUEST, "bad".into())) },
+        );
+        let mut chats = Vec::new();
+        while let Some(frame) = next_mux_frame(&mut body).await {
+            assert_eq!(frame["type"], "subscription_closed");
+            assert_eq!(frame["retryable"], false);
+            chats.push(frame["chat_id"].as_str().unwrap().to_string());
+        }
+        chats.sort();
+        assert_eq!(chats, vec!["mux-a".to_string(), "mux-b".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn multiplex_without_per_chat_close_aborts_on_ended_or_unavailable_chat() {
+        use hyper::body::HttpBody;
+        let workspace = tempfile::tempdir().unwrap();
+        let app = test_app_with_workspace(workspace.path()).await;
+        let ending = insert_test_session(&app, "legacy-ending").await;
+        let _staying = insert_test_session(&app, "legacy-staying").await;
+        let params = HashMap::from([(
+            "chat_ids".into(),
+            r#"["legacy-ending","legacy-staying"]"#.into(),
+        )]);
+        let mut body =
+            handle_v1_chats_subscribe_many(State(app.clone()), axum::extract::Query(params))
+                .await
+                .unwrap()
+                .into_body();
+        let mut snapshots = 0;
+        while snapshots < 2 {
+            let frame = next_mux_frame(&mut body).await.expect("snapshot");
+            assert_eq!(frame["type"], "snapshot");
+            snapshots += 1;
+        }
+        ending.lock().await.close_event_channel();
+        let item = tokio::time::timeout(std::time::Duration::from_secs(10), body.data())
+            .await
+            .expect("ended chat must surface");
+        assert!(
+            matches!(item, Some(Err(_))),
+            "legacy clients see an aborted body, not a close frame"
+        );
+
+        let mut body = multiplex_chat_subscriptions(
+            vec!["legacy-unavailable".to_string()],
+            false,
+            |_| async { Err(ScratchError::new(StatusCode::NOT_FOUND, "gone".into())) },
+        );
+        let item = tokio::time::timeout(std::time::Duration::from_secs(10), body.data())
+            .await
+            .expect("preparation failure must surface");
+        assert!(matches!(item, Some(Err(_))));
     }
 
     #[tokio::test]

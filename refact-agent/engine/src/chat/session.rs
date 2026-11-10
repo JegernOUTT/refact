@@ -474,6 +474,7 @@ pub type SessionsMap = Arc<SessionStore>;
 pub struct SessionStore(
     ARwLock<HashMap<String, Arc<AMutex<ChatSession>>>>,
     pub(crate) Arc<crate::coordination::catalog_cache::SessionPublications>,
+    pub(crate) super::session_runtime::RestoreTasks,
 );
 
 impl SessionStore {

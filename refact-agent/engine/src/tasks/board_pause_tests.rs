@@ -419,7 +419,8 @@ async fn loaded_agent_restores_planner_pause_from_the_card() {
         &f.app.chat.sessions,
         &f.agent_chat_id,
     )
-    .await;
+    .await
+    .unwrap();
 
     let session = restored.lock().await;
     assert!(session.planner_paused());

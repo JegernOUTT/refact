@@ -54,9 +54,9 @@ async fn deliver_chat(app: &AppState, job: &Job, output: &str) -> Result<(), Str
         }
         AgentTarget::Isolated => {
             let chat_id = isolated_chat_id(job);
-            let _ =
-                get_or_create_session_with_trajectory(app.clone(), &app.chat.sessions, &chat_id)
-                    .await;
+            get_or_create_session_with_trajectory(app.clone(), &app.chat.sessions, &chat_id)
+                .await
+                .map_err(|error| error.to_string())?;
             chat_id
         }
     };

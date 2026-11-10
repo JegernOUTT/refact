@@ -5,9 +5,20 @@ use crate::app_state::AppState;
 
 pub async fn trusted_root(app: &AppState, chat_id: &str) -> std::result::Result<PathBuf, String> {
     let sessions = app.chat.sessions.clone();
-    if !crate::chat::try_restore_session_if_trajectory_exists(app.clone(), &sessions, chat_id).await
+    match crate::chat::session_runtime::restore_session_if_trajectory_exists(
+        app.clone(),
+        &sessions,
+        chat_id,
+    )
+    .await
     {
-        return Err("chat unavailable".into());
+        crate::chat::session_runtime::SessionRestore::Open => {}
+        crate::chat::session_runtime::SessionRestore::NoTrajectory => {
+            return Err("chat unavailable".into());
+        }
+        crate::chat::session_runtime::SessionRestore::Refused(error) => {
+            return Err(format!("chat cannot be opened now: {error}"));
+        }
     }
     let session = sessions
         .read()

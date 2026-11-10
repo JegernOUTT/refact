@@ -356,7 +356,9 @@ const WorktreeControlInstance: React.FC<
         if (!sourceIsCurrent()) return "stale";
         const rejected =
           error instanceof ChatCommandHttpError &&
-          [400, 401, 403, 404, 409, 422].includes(error.status);
+          error.status >= 400 &&
+          error.status < 500 &&
+          error.status !== 408;
         setFeedback(
           rejected
             ? `Worktree update failed: ${worktreeErrorText(error)}`

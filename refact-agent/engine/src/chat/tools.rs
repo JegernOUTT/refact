@@ -4205,7 +4205,7 @@ async fn execute_single_tool(
     .await
 }
 
-const TOOL_JOB_INLINE_BUDGET: std::time::Duration = std::time::Duration::from_secs(60);
+pub(crate) const TOOL_JOB_INLINE_BUDGET: std::time::Duration = std::time::Duration::from_secs(60);
 
 struct ShellOperationGuards(
     std::sync::Mutex<Vec<Option<crate::agents::execution::OperationGuard>>>,

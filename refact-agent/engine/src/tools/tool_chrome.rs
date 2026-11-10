@@ -1168,6 +1168,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(runtime_settings)]
     async fn invalid_help_tool_execution_never_creates_runtime_or_session() {
         let cache = tempfile::tempdir().unwrap();
         let config = tempfile::tempdir().unwrap();

@@ -146,13 +146,22 @@ async fn deliver_to_chat_internal(
             return Err(format!("chat '{chat_id}' is closed"));
         }
     }
-    if open_session.is_none()
-        && !crate::chat::try_restore_session_if_trajectory_exists(app.clone(), &sessions, chat_id)
-            .await
-    {
-        return Err(format!(
-            "chat '{chat_id}' does not exist or cannot be restored"
-        ));
+    if open_session.is_none() {
+        match crate::chat::session_runtime::restore_session_if_trajectory_exists(
+            app.clone(),
+            &sessions,
+            chat_id,
+        )
+        .await
+        {
+            crate::chat::session_runtime::SessionRestore::Open => {}
+            crate::chat::session_runtime::SessionRestore::NoTrajectory => {
+                return Err(format!("chat '{chat_id}' does not exist"));
+            }
+            crate::chat::session_runtime::SessionRestore::Refused(error) => {
+                return Err(format!("chat '{chat_id}' cannot be opened now: {error}"));
+            }
+        }
     }
     let session_arc = match open_session {
         Some(session) => {

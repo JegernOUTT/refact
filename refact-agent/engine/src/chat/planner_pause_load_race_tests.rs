@@ -77,6 +77,7 @@ async fn load_during_lifecycle_change(
                         &chat_id,
                     )
                     .await
+                    .unwrap()
                 })
                 .await
         }

@@ -831,10 +831,11 @@ mod tests {
             .unwrap();
         *gcx.documents_state.workspace_folders.lock().unwrap() = vec![source.clone()];
         let mut app = AppState::from_gcx(gcx).await;
-        app.runtime.tool_jobs =
-            crate::tool_jobs::JobRuntime::open_durable(temp.path().join("jobs"), 8, 65536)
-                .await
-                .unwrap();
+        app.runtime.tool_jobs = crate::tool_jobs::JobRuntime::with_namespace(
+            temp.path().join("jobs"),
+            8,
+            crate::tool_jobs::RESULT_RETENTION_BYTES,
+        );
         let mut session = ChatSession::new("drop-v14".into());
         session.work_project_root = Some(source.clone());
         session.set_runtime_state(crate::chat::types::SessionState::ExecutingTools, None);
@@ -877,24 +878,14 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn readiness_drop_v14_during_initial_persistence_cleans_and_shutdown_joins() {
-        let (temp, app) = drop_fixture().await;
-        let db = rusqlite::Connection::open(temp.path().join("jobs/tool-jobs/ownership.sqlite"))
-            .unwrap();
-        db.execute_batch("BEGIN IMMEDIATE").unwrap();
+    async fn readiness_drop_v14_during_job_admission_cleans_and_shutdown_joins() {
+        let (_temp, app) = drop_fixture().await;
+        let (mut ready, release) = pause_admission("before_submit");
         let mut submitting = Box::pin(prepare_readiness(&app, "drop-v14", "initial"));
         tokio::time::timeout(Duration::from_secs(10), async {
             loop {
                 assert!(futures::poll!(&mut submitting).is_pending());
-                if app
-                    .runtime
-                    .review_readiness
-                    .state
-                    .lock()
-                    .unwrap()
-                    .entries
-                    .contains_key(&("drop-v14".into(), "initial".into()))
-                {
+                if ready.try_recv().is_ok() {
                     break;
                 }
                 tokio::task::yield_now().await;
@@ -902,8 +893,14 @@ mod tests {
         })
         .await
         .unwrap();
-        // Poll the independent owner into the blocked durable admission write.
-        tokio::task::yield_now().await;
+        assert!(app
+            .runtime
+            .review_readiness
+            .state
+            .lock()
+            .unwrap()
+            .entries
+            .contains_key(&("drop-v14".into(), "initial".into())));
         assert!(app
             .runtime
             .review_readiness
@@ -914,7 +911,7 @@ mod tests {
             .values()
             .all(|entry| entry.cancel.is_none()));
         drop(submitting);
-        db.execute_batch("ROLLBACK").unwrap();
+        release.send(()).unwrap();
         tokio::time::timeout(
             Duration::from_secs(10),
             app.runtime.review_readiness.shutdown(),

@@ -1094,8 +1094,10 @@ describe("multiplex chat transport", () => {
       );
       expect(child.onConnected).not.toHaveBeenCalled();
       expect(child.onEvent).not.toHaveBeenCalled();
-      expect(signal.aborted).toBe(true);
+      expect(signal.aborted).toBe(false);
+      expect(healthy.onError).not.toHaveBeenCalled();
       cleanups.forEach((cleanup) => cleanup());
+      expect(signal.aborted).toBe(true);
       expect(vi.getTimerCount()).toBe(0);
     },
   );
@@ -1234,6 +1236,11 @@ describe("multiplex chat transport", () => {
     removeA();
     expect(signals[0].aborted).toBe(false);
     removeDuplicate();
+    expect(signals[0].aborted).toBe(false);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(fetcher).toHaveBeenCalledTimes(2);
     expect(signals[0].aborted).toBe(true);
     send(0, {
       type: "stream_started",
@@ -1242,7 +1249,6 @@ describe("multiplex chat transport", () => {
       message_id: "retired",
     });
     await vi.advanceTimersByTimeAsync(0);
-    expect(fetcher).toHaveBeenCalledTimes(2);
     expect(b).toHaveBeenCalledTimes(1);
     send(1, {
       type: "snapshot",
@@ -1259,5 +1265,838 @@ describe("multiplex chat transport", () => {
     await vi.advanceTimersByTimeAsync(0);
     expect(errors).not.toHaveBeenCalled();
     expect(vi.getTimerCount()).toBe(0);
+  });
+});
+
+describe("multiplex per-chat isolation", () => {
+  type Consumer = {
+    onEvent: ReturnType<typeof vi.fn<(event: ChatEventEnvelope) => void>>;
+    onError: ReturnType<typeof vi.fn<(error: Error) => void>>;
+    onConnected: ReturnType<typeof vi.fn<() => void>>;
+    onDisconnected: ReturnType<typeof vi.fn<() => void>>;
+  };
+  let cleanups: (() => void)[] = [];
+  const consumer = (): Consumer => ({
+    onEvent: vi.fn<(event: ChatEventEnvelope) => void>(),
+    onError: vi.fn<(error: Error) => void>(),
+    onConnected: vi.fn<() => void>(),
+    onDisconnected: vi.fn<() => void>(),
+  });
+  const setup = () => {
+    vi.useFakeTimers();
+    const streams: ReadableStreamDefaultController<Uint8Array>[] = [];
+    const signals: AbortSignal[] = [];
+    const fetcher = vi.fn((_url: string, init: RequestInit) => {
+      if (!init.signal) throw new Error("Missing abort signal");
+      signals.push(init.signal);
+      return Promise.resolve(
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              streams.push(controller);
+            },
+          }),
+        ),
+      );
+    });
+    vi.stubGlobal("fetch", fetcher);
+    const mux = createChatEventMultiplexer({ lspPort: 8001 }, undefined, {
+      connectTimeoutMs: 100,
+      idleTimeoutMs: 10_000,
+    });
+    const send = (index: number, event: object) =>
+      streams[index].enqueue(
+        new TextEncoder().encode(`data: ${JSON.stringify(event)}\n\n`),
+      );
+    const snapshot = (chat_id: string, seq = "1") => ({
+      type: "snapshot",
+      chat_id,
+      seq,
+      messages: [],
+      background_agents: [],
+    });
+    const queue = (chat_id: string, seq: string) => ({
+      type: "queue_updated",
+      chat_id,
+      seq,
+      queue_size: 0,
+      queued_items: [],
+    });
+    return { fetcher, signals, streams, mux, send, snapshot, queue };
+  };
+  afterEach(() => {
+    cleanups.forEach((cleanup) => cleanup());
+    cleanups = [];
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  it("sends the per_chat_close opt-in", async () => {
+    const { fetcher, mux } = setup();
+    cleanups.push(mux.subscribe("a", consumer()));
+    await vi.advanceTimersByTimeAsync(0);
+    const url = new URL(fetcher.mock.calls[0][0], "http://localhost");
+    expect(url.searchParams.get("per_chat_close")).toBe("1");
+    expect(url.searchParams.get("snapshot_chunks")).toBe("1");
+  });
+
+  it("fails only the chat missing its snapshot and keeps the shared fetch", async () => {
+    const { fetcher, signals, mux, send, snapshot, queue } = setup();
+    const a = consumer();
+    const b = consumer();
+    cleanups.push(mux.subscribe("a", a), mux.subscribe("b", b));
+    await vi.advanceTimersByTimeAsync(0);
+    send(0, snapshot("a"));
+    await vi.advanceTimersByTimeAsync(100);
+    expect(b.onError).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ message: "SSE chat snapshot timeout" }),
+    );
+    expect(a.onError).not.toHaveBeenCalled();
+    expect(signals[0].aborted).toBe(false);
+    send(0, queue("a", "2"));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(a.onEvent).toHaveBeenLastCalledWith(
+      expect.objectContaining({ type: "queue_updated", seq: "2" }),
+    );
+
+    const b2 = consumer();
+    cleanups.push(mux.subscribe("b", b2));
+    await vi.advanceTimersByTimeAsync(200);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(b2.onError).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ message: "SSE chat snapshot timeout" }),
+    );
+    const b3 = consumer();
+    cleanups.push(mux.subscribe("b", b3));
+    await vi.advanceTimersByTimeAsync(50);
+    send(0, snapshot("b", "7"));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(b3.onConnected).toHaveBeenCalledOnce();
+    expect(b3.onEvent).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ type: "snapshot", chat_id: "b", seq: "7" }),
+    );
+    await vi.advanceTimersByTimeAsync(200);
+    expect(b3.onError).not.toHaveBeenCalled();
+    expect(b.onEvent).not.toHaveBeenCalled();
+  });
+
+  it("handles subscription_closed for one chat without aborting the others", async () => {
+    const { fetcher, signals, mux, send, snapshot, queue } = setup();
+    const a = consumer();
+    const b = consumer();
+    cleanups.push(mux.subscribe("a", a), mux.subscribe("b", b));
+    await vi.advanceTimersByTimeAsync(0);
+    send(0, snapshot("a"));
+    send(0, snapshot("b"));
+    send(0, {
+      chat_id: "b",
+      type: "subscription_closed",
+      reason: "ended",
+      retryable: false,
+      message: "Chat was deleted",
+      extra_field: { ignored: true },
+    });
+    send(0, queue("b", "2"));
+    send(0, queue("a", "2"));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(b.onError).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({
+        message: "Chat was deleted",
+        retryable: false,
+        reason: "ended",
+      }),
+    );
+    expect(b.onEvent).toHaveBeenCalledOnce();
+    expect(a.onError).not.toHaveBeenCalled();
+    expect(a.onEvent).toHaveBeenLastCalledWith(
+      expect.objectContaining({ type: "queue_updated", seq: "2" }),
+    );
+    expect(signals[0].aborted).toBe(false);
+
+    const b2 = consumer();
+    cleanups.push(mux.subscribe("b", b2));
+    await vi.advanceTimersByTimeAsync(100);
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(signals[0].aborted).toBe(true);
+  });
+
+  it("fails a chat closed before bootstrap immediately with a default message", async () => {
+    const { signals, mux, send, snapshot } = setup();
+    const a = consumer();
+    const b = consumer();
+    cleanups.push(mux.subscribe("a", a), mux.subscribe("b", b));
+    await vi.advanceTimersByTimeAsync(0);
+    send(0, snapshot("a"));
+    send(0, {
+      chat_id: "b",
+      type: "subscription_closed",
+      reason: "unavailable",
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(b.onError).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ message: "Chat subscription closed" }),
+    );
+    await vi.advanceTimersByTimeAsync(500);
+    expect(b.onError).toHaveBeenCalledOnce();
+    expect(a.onError).not.toHaveBeenCalled();
+    expect(signals[0].aborted).toBe(false);
+  });
+
+  it("discards a partial chunked snapshot when its chat is closed", async () => {
+    const { mux, send, snapshot, streams } = setup();
+    const a = consumer();
+    const b = consumer();
+    cleanups.push(mux.subscribe("a", a), mux.subscribe("b", b));
+    await vi.advanceTimersByTimeAsync(0);
+    send(0, snapshot("a"));
+    send(0, {
+      type: "snapshot",
+      chat_id: "b",
+      seq: "5",
+      snapshot_chunked: true,
+      chunk_count: 2,
+      message_count: 2,
+      background_agents: [],
+    });
+    send(0, {
+      type: "snapshot_chunk",
+      chat_id: "b",
+      seq: "5",
+      chunk_index: 0,
+      chunk_count: 2,
+      messages: [{ role: "user", content: "x" }],
+    });
+    send(0, { chat_id: "b", type: "subscription_closed", reason: "ended" });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(b.onError).toHaveBeenCalledOnce();
+    streams[0].close();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(a.onError).not.toHaveBeenCalled();
+    expect(a.onDisconnected).toHaveBeenCalledOnce();
+    expect(b.onEvent).not.toHaveBeenCalled();
+  });
+
+  it("coalesces an unsubscribe followed by a subscribe into one rebuild", async () => {
+    const { fetcher, signals, mux, send, snapshot } = setup();
+    const a = consumer();
+    const b = consumer();
+    cleanups.push(mux.subscribe("a", a));
+    const removeB = mux.subscribe("b", b);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    send(0, snapshot("a"));
+    send(0, snapshot("b"));
+    await vi.advanceTimersByTimeAsync(0);
+    removeB();
+    await vi.advanceTimersByTimeAsync(50);
+    const b2 = consumer();
+    cleanups.push(mux.subscribe("b", b2));
+    expect(signals[0].aborted).toBe(false);
+    await vi.advanceTimersByTimeAsync(29);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(signals[0].aborted).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(signals[0].aborted).toBe(true);
+    send(1, snapshot("a", "2"));
+    send(1, snapshot("b", "3"));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(b2.onEvent).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ seq: "3" }),
+    );
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(signals[1].aborted).toBe(false);
+  });
+
+  const chunkedB = (send: (index: number, event: object) => void) => {
+    send(0, {
+      type: "snapshot",
+      chat_id: "b",
+      seq: "5",
+      snapshot_chunked: true,
+      chunk_count: 2,
+      message_count: 2,
+      background_agents: [],
+    });
+    send(0, {
+      type: "snapshot_chunk",
+      chat_id: "b",
+      seq: "5",
+      chunk_index: 0,
+      chunk_count: 2,
+      messages: [{ role: "user", content: "x" }],
+    });
+  };
+
+  it("ends normally despite a partial snapshot left by a chat that timed out", async () => {
+    const { mux, send, snapshot, streams } = setup();
+    const a = consumer();
+    const b = consumer();
+    cleanups.push(mux.subscribe("a", a), mux.subscribe("b", b));
+    await vi.advanceTimersByTimeAsync(0);
+    send(0, snapshot("a"));
+    chunkedB(send);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(b.onError).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ message: "SSE chat snapshot timeout" }),
+    );
+    streams[0].close();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(a.onError).not.toHaveBeenCalled();
+    expect(a.onDisconnected).toHaveBeenCalledOnce();
+  });
+
+  it("delivers a late chunked snapshot to a chat re-attached after its timeout", async () => {
+    const { fetcher, mux, send, snapshot, streams } = setup();
+    const a = consumer();
+    const b = consumer();
+    cleanups.push(mux.subscribe("a", a), mux.subscribe("b", b));
+    await vi.advanceTimersByTimeAsync(0);
+    send(0, snapshot("a"));
+    chunkedB(send);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(b.onError).toHaveBeenCalledOnce();
+    const b2 = consumer();
+    cleanups.push(mux.subscribe("b", b2));
+    send(0, {
+      type: "snapshot_chunk",
+      chat_id: "b",
+      seq: "5",
+      chunk_index: 1,
+      chunk_count: 2,
+      messages: [{ role: "user", content: "y" }],
+    });
+    send(0, {
+      type: "snapshot_end",
+      chat_id: "b",
+      seq: "5",
+      chunk_count: 2,
+      message_count: 2,
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(b2.onEvent).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({
+        type: "snapshot",
+        messages: [
+          { role: "user", content: "x" },
+          { role: "user", content: "y" },
+        ],
+      }),
+    );
+    streams[0].close();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(a.onError).not.toHaveBeenCalled();
+    expect(b2.onError).not.toHaveBeenCalled();
+    expect(b2.onDisconnected).toHaveBeenCalledOnce();
+  });
+
+  it("still fails when a re-attached chat's snapshot is cut off by the end of stream", async () => {
+    const { mux, send, snapshot, streams } = setup();
+    const a = consumer();
+    const b = consumer();
+    cleanups.push(mux.subscribe("a", a), mux.subscribe("b", b));
+    await vi.advanceTimersByTimeAsync(0);
+    send(0, snapshot("a"));
+    chunkedB(send);
+    await vi.advanceTimersByTimeAsync(100);
+    const b2 = consumer();
+    cleanups.push(mux.subscribe("b", b2));
+    streams[0].close();
+    await vi.advanceTimersByTimeAsync(0);
+    for (const c of [a, b2])
+      expect(c.onError).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({
+          message:
+            "SSE stream ended before chunked snapshot completed; reconnecting",
+        }),
+      );
+  });
+
+  it("starts each chat's bootstrap window when response headers arrive", async () => {
+    vi.useFakeTimers();
+    let stream!: ReadableStreamDefaultController<Uint8Array>;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        () =>
+          new Promise<Response>((resolve) => {
+            setTimeout(() => {
+              resolve(
+                new Response(
+                  new ReadableStream<Uint8Array>({
+                    start(controller) {
+                      stream = controller;
+                    },
+                  }),
+                ),
+              );
+            }, 60);
+          }),
+      ),
+    );
+    const mux = createChatEventMultiplexer({ lspPort: 8001 }, undefined, {
+      connectTimeoutMs: 100,
+      idleTimeoutMs: 10_000,
+    });
+    const a = consumer();
+    const b = consumer();
+    cleanups.push(mux.subscribe("a", a), mux.subscribe("b", b));
+    await vi.advanceTimersByTimeAsync(60);
+    stream.enqueue(
+      new TextEncoder().encode(
+        `data: ${JSON.stringify({
+          type: "snapshot",
+          chat_id: "a",
+          seq: "1",
+          messages: [],
+          background_agents: [],
+        })}\n\n`,
+      ),
+    );
+    await vi.advanceTimersByTimeAsync(99);
+    expect(b.onError).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(b.onError).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ message: "SSE chat snapshot timeout" }),
+    );
+    expect(a.onError).not.toHaveBeenCalled();
+    expect(a.onConnected).toHaveBeenCalledOnce();
+  });
+
+  it("cancels a scheduled rebuild that is no longer needed", async () => {
+    const { fetcher, signals, mux, send, snapshot, queue } = setup();
+    const a = consumer();
+    cleanups.push(mux.subscribe("a", a));
+    await vi.advanceTimersByTimeAsync(0);
+    send(0, snapshot("a"));
+    await vi.advanceTimersByTimeAsync(0);
+    const removeB = mux.subscribe("b", consumer());
+    await vi.advanceTimersByTimeAsync(40);
+    removeB();
+    await vi.advanceTimersByTimeAsync(500);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(signals[0].aborted).toBe(false);
+    send(0, queue("a", "2"));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(a.onEvent).toHaveBeenLastCalledWith(
+      expect.objectContaining({ type: "queue_updated", seq: "2" }),
+    );
+    expect(a.onError).not.toHaveBeenCalled();
+  });
+
+  it("still fails every chat on a connection-level error", async () => {
+    const { mux, send, snapshot, streams } = setup();
+    const a = consumer();
+    const b = consumer();
+    cleanups.push(mux.subscribe("a", a), mux.subscribe("b", b));
+    await vi.advanceTimersByTimeAsync(0);
+    send(0, snapshot("a"));
+    send(0, snapshot("b"));
+    await vi.advanceTimersByTimeAsync(0);
+    streams[0].error(new Error("network reset"));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(a.onError).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ message: "network reset" }),
+    );
+    expect(b.onError).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ message: "network reset" }),
+    );
+  });
+
+  it("parks a first snapshot that completes after a chat's bootstrap timeout and hands it to the next consumer", async () => {
+    const { fetcher, signals, mux, send, snapshot, queue } = setup();
+    const a = consumer();
+    const b = consumer();
+    cleanups.push(mux.subscribe("a", a), mux.subscribe("b", b));
+    await vi.advanceTimersByTimeAsync(0);
+    send(0, snapshot("a"));
+    await vi.advanceTimersByTimeAsync(100);
+    expect(b.onError).toHaveBeenCalledOnce();
+    chunkedB(send);
+    send(0, {
+      type: "snapshot_chunk",
+      chat_id: "b",
+      seq: "5",
+      chunk_index: 1,
+      chunk_count: 2,
+      messages: [{ role: "user", content: "y" }],
+    });
+    send(0, {
+      type: "snapshot_end",
+      chat_id: "b",
+      seq: "5",
+      chunk_count: 2,
+      message_count: 2,
+    });
+    send(0, queue("b", "6"));
+    send(0, queue("a", "2"));
+    send(0, queue("b", "7"));
+    await vi.advanceTimersByTimeAsync(2000);
+    const b2 = consumer();
+    cleanups.push(mux.subscribe("b", b2));
+    await vi.advanceTimersByTimeAsync(0);
+    send(0, queue("b", "8"));
+    await vi.advanceTimersByTimeAsync(500);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(signals[0].aborted).toBe(false);
+    expect(b2.onConnected).toHaveBeenCalledOnce();
+    expect(
+      b2.onEvent.mock.calls.map(([event]) => [event.type, event.seq]),
+    ).toEqual([
+      ["snapshot", "5"],
+      ["queue_updated", "6"],
+      ["queue_updated", "7"],
+      ["queue_updated", "8"],
+    ]);
+    expect(b2.onEvent.mock.calls[0][0]).toEqual(
+      expect.objectContaining({
+        messages: [
+          { role: "user", content: "x" },
+          { role: "user", content: "y" },
+        ],
+      }),
+    );
+    send(0, queue("a", "3"));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(a.onEvent).toHaveBeenLastCalledWith(
+      expect.objectContaining({ type: "queue_updated", seq: "3" }),
+    );
+    expect(a.onError).not.toHaveBeenCalled();
+    expect(b2.onError).not.toHaveBeenCalled();
+    expect(b.onEvent).not.toHaveBeenCalled();
+  });
+
+  it("parks a first snapshot that arrives between an unsubscribe and a resubscribe", async () => {
+    const { fetcher, signals, mux, send, snapshot, queue } = setup();
+    const a = consumer();
+    cleanups.push(mux.subscribe("a", a));
+    const removeB = mux.subscribe("b", consumer());
+    await vi.advanceTimersByTimeAsync(0);
+    send(0, snapshot("a"));
+    await vi.advanceTimersByTimeAsync(0);
+    removeB();
+    send(0, snapshot("b", "4"));
+    send(0, queue("b", "5"));
+    await vi.advanceTimersByTimeAsync(50);
+    const b2 = consumer();
+    cleanups.push(mux.subscribe("b", b2));
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(signals[0].aborted).toBe(false);
+    expect(
+      b2.onEvent.mock.calls.map(([event]) => [event.type, event.seq]),
+    ).toEqual([
+      ["snapshot", "4"],
+      ["queue_updated", "5"],
+    ]);
+    send(0, queue("a", "2"));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(a.onEvent).toHaveBeenLastCalledWith(
+      expect.objectContaining({ type: "queue_updated", seq: "2" }),
+    );
+  });
+
+  it("falls back to a rebuild when parked events exceed the bound", async () => {
+    const { fetcher, signals, mux, send, snapshot, queue } = setup();
+    const a = consumer();
+    cleanups.push(mux.subscribe("a", a));
+    const removeB = mux.subscribe("b", consumer());
+    await vi.advanceTimersByTimeAsync(0);
+    send(0, snapshot("a"));
+    await vi.advanceTimersByTimeAsync(0);
+    removeB();
+    send(0, snapshot("b", "1"));
+    for (let seq = 2; seq <= 300; seq++) send(0, queue("b", String(seq)));
+    await vi.advanceTimersByTimeAsync(10);
+    const b2 = consumer();
+    cleanups.push(mux.subscribe("b", b2));
+    await vi.advanceTimersByTimeAsync(100);
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(signals[0].aborted).toBe(true);
+    expect(b2.onEvent).not.toHaveBeenCalled();
+    send(1, snapshot("b", "400"));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(b2.onEvent).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ type: "snapshot", seq: "400" }),
+    );
+  });
+
+  const parkAfterTimeout = async (ids: string[]) => {
+    const env = setup();
+    const a = consumer();
+    cleanups.push(env.mux.subscribe("a", a));
+    for (const id of ids) cleanups.push(env.mux.subscribe(id, consumer()));
+    await vi.advanceTimersByTimeAsync(0);
+    env.send(0, env.snapshot("a"));
+    await vi.advanceTimersByTimeAsync(100);
+    return { ...env, a };
+  };
+
+  it("rebuilds for a consumer whose parked data overflows before the handover", async () => {
+    const { fetcher, signals, mux, send, snapshot, queue, streams, a } =
+      await parkAfterTimeout(["b"]);
+    send(0, snapshot("b", "1"));
+    for (let seq = 2; seq <= 251; seq++) send(0, queue("b", String(seq)));
+    await vi.advanceTimersByTimeAsync(10);
+    const burst = Array.from(
+      { length: 10 },
+      (_, index) =>
+        `data: ${JSON.stringify(queue("b", String(252 + index)))}\n\n`,
+    ).join("");
+    streams[0].enqueue(new TextEncoder().encode(burst));
+    const b2 = consumer();
+    cleanups.push(mux.subscribe("b", b2));
+    await vi.advanceTimersByTimeAsync(100);
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(signals[0].aborted).toBe(true);
+    expect(b2.onEvent).not.toHaveBeenCalled();
+    send(1, snapshot("b", "500"));
+    send(1, snapshot("a", "500"));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(b2.onEvent).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ type: "snapshot", seq: "500" }),
+    );
+    expect(a.onError).not.toHaveBeenCalled();
+  });
+
+  it("rebuilds for a consumer that throws during the handover and keeps other chats flowing", async () => {
+    const { fetcher, mux, send, snapshot, queue, a } = await parkAfterTimeout([
+      "b",
+    ]);
+    send(0, snapshot("b", "4"));
+    send(0, queue("b", "5"));
+    send(0, queue("b", "6"));
+    await vi.advanceTimersByTimeAsync(10);
+    const b2 = consumer();
+    let calls = 0;
+    b2.onEvent.mockImplementation(() => {
+      calls += 1;
+      if (calls === 2) throw new Error("consumer failed");
+    });
+    cleanups.push(mux.subscribe("b", b2));
+    send(0, queue("a", "2"));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(a.onEvent).toHaveBeenLastCalledWith(
+      expect.objectContaining({ type: "queue_updated", seq: "2" }),
+    );
+    await vi.advanceTimersByTimeAsync(100);
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    send(1, snapshot("b", "9"));
+    send(1, snapshot("a", "9"));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(b2.onEvent).toHaveBeenLastCalledWith(
+      expect.objectContaining({ type: "snapshot", seq: "9" }),
+    );
+    expect(a.onEvent).toHaveBeenLastCalledWith(
+      expect.objectContaining({ type: "snapshot", seq: "9" }),
+    );
+  });
+
+  it("does not park beyond the total bound across chats", async () => {
+    const ids = ["b", "c", "d", "e", "f"];
+    const { fetcher, mux, send, snapshot } = await parkAfterTimeout(ids);
+    const content = "x".repeat(7 * 1024 * 1024);
+    for (const id of ids)
+      send(0, {
+        ...snapshot(id, "3"),
+        messages: [{ role: "user", content }],
+      });
+    await vi.advanceTimersByTimeAsync(10);
+    const b2 = consumer();
+    cleanups.push(mux.subscribe("b", b2));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(b2.onEvent).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ type: "snapshot", chat_id: "b", seq: "3" }),
+    );
+    const f2 = consumer();
+    cleanups.push(mux.subscribe("f", f2));
+    await vi.advanceTimersByTimeAsync(100);
+    expect(f2.onEvent).not.toHaveBeenCalled();
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+
+  it("releases parked data when the chat is closed or the connection stops", async () => {
+    const { fetcher, mux, send, snapshot } = setup();
+    const a = consumer();
+    const removeA = mux.subscribe("a", a);
+    const removeB = mux.subscribe("b", consumer());
+    const removeC = mux.subscribe("c", consumer());
+    await vi.advanceTimersByTimeAsync(0);
+    send(0, snapshot("a"));
+    await vi.advanceTimersByTimeAsync(0);
+    removeB();
+    removeC();
+    send(0, snapshot("b", "3"));
+    send(0, snapshot("c", "3"));
+    send(0, { chat_id: "c", type: "subscription_closed", reason: "ended" });
+    await vi.advanceTimersByTimeAsync(10);
+    const c2 = consumer();
+    const removeC2 = mux.subscribe("c", c2);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(c2.onEvent).not.toHaveBeenCalled();
+    removeC2();
+    removeA();
+    await vi.advanceTimersByTimeAsync(0);
+    const b2 = consumer();
+    cleanups.push(mux.subscribe("b", b2));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(b2.onEvent).not.toHaveBeenCalled();
+  });
+
+  it("accepts snapshot chunks for a timed-out chat that has no consumer without disturbing others", async () => {
+    const { fetcher, signals, mux, send, snapshot, queue, streams } = setup();
+    const a = consumer();
+    const b = consumer();
+    cleanups.push(mux.subscribe("a", a), mux.subscribe("b", b));
+    await vi.advanceTimersByTimeAsync(0);
+    send(0, snapshot("a"));
+    chunkedB(send);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(b.onError).toHaveBeenCalledOnce();
+    send(0, {
+      type: "snapshot_chunk",
+      chat_id: "b",
+      seq: "5",
+      chunk_index: 1,
+      chunk_count: 2,
+      messages: [{ role: "user", content: "y" }],
+    });
+    send(0, queue("a", "2"));
+    send(0, {
+      type: "snapshot_end",
+      chat_id: "b",
+      seq: "5",
+      chunk_count: 2,
+      message_count: 2,
+    });
+    send(0, queue("a", "3"));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(a.onEvent.mock.calls.map(([event]) => event.seq)).toEqual([
+      "1",
+      "2",
+      "3",
+    ]);
+    expect(b.onEvent).not.toHaveBeenCalled();
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(signals[0].aborted).toBe(false);
+    streams[0].close();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(a.onError).not.toHaveBeenCalled();
+    expect(a.onDisconnected).toHaveBeenCalledOnce();
+  });
+
+  const delayedHeaders = (delayMs: number | null) => {
+    vi.useFakeTimers();
+    let stream!: ReadableStreamDefaultController<Uint8Array>;
+    const signals: AbortSignal[] = [];
+    const fetcher = vi.fn(
+      (_url: string, init: RequestInit) =>
+        new Promise<Response>((resolve) => {
+          if (init.signal) signals.push(init.signal);
+          if (delayMs === null) return;
+          setTimeout(() => {
+            resolve(
+              new Response(
+                new ReadableStream<Uint8Array>({
+                  start(controller) {
+                    stream = controller;
+                  },
+                }),
+              ),
+            );
+          }, delayMs);
+        }),
+    );
+    vi.stubGlobal("fetch", fetcher);
+    const mux = createChatEventMultiplexer({ lspPort: 8001 }, undefined, {
+      connectTimeoutMs: 100,
+      idleTimeoutMs: 10_000,
+    });
+    const sendSnapshot = (chat_id: string) =>
+      stream.enqueue(
+        new TextEncoder().encode(
+          `data: ${JSON.stringify({
+            type: "snapshot",
+            chat_id,
+            seq: "1",
+            messages: [],
+            background_agents: [],
+          })}\n\n`,
+        ),
+      );
+    return { fetcher, signals, mux, sendSnapshot };
+  };
+
+  it("re-attaches a chat resubscribed before headers and gives it a full window after them", async () => {
+    const { fetcher, signals, mux, sendSnapshot } = delayedHeaders(60);
+    const a = consumer();
+    cleanups.push(mux.subscribe("a", a));
+    const removeB = mux.subscribe("b", consumer());
+    await vi.advanceTimersByTimeAsync(10);
+    removeB();
+    await vi.advanceTimersByTimeAsync(10);
+    const b2 = consumer();
+    cleanups.push(mux.subscribe("b", b2));
+    await vi.advanceTimersByTimeAsync(40);
+    sendSnapshot("a");
+    await vi.advanceTimersByTimeAsync(99);
+    expect(b2.onError).not.toHaveBeenCalled();
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(signals[0].aborted).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(b2.onError).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ message: "SSE chat snapshot timeout" }),
+    );
+    expect(a.onError).not.toHaveBeenCalled();
+  });
+
+  it("keeps a chat resubscribed before headers under the connect timeout", async () => {
+    const { fetcher, signals, mux } = delayedHeaders(null);
+    const a = consumer();
+    cleanups.push(mux.subscribe("a", a));
+    const removeB = mux.subscribe("b", consumer());
+    await vi.advanceTimersByTimeAsync(10);
+    removeB();
+    await vi.advanceTimersByTimeAsync(10);
+    const b2 = consumer();
+    cleanups.push(mux.subscribe("b", b2));
+    await vi.advanceTimersByTimeAsync(79);
+    expect(b2.onError).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    for (const c of [a, b2])
+      expect(c.onError).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({ message: "SSE connect timeout" }),
+      );
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(signals[0].aborted).toBe(true);
+  });
+
+  it("keeps the connect timeout connection-wide before headers", async () => {
+    vi.useFakeTimers();
+    const signals: AbortSignal[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((_url: string, init: RequestInit) => {
+        if (init.signal) signals.push(init.signal);
+        return new Promise<Response>(() => undefined);
+      }),
+    );
+    const mux = createChatEventMultiplexer({ lspPort: 8001 }, undefined, {
+      connectTimeoutMs: 100,
+    });
+    const a = consumer();
+    const b = consumer();
+    cleanups.push(mux.subscribe("a", a), mux.subscribe("b", b));
+    await vi.advanceTimersByTimeAsync(100);
+    for (const c of [a, b])
+      expect(c.onError).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({ message: "SSE connect timeout" }),
+      );
+    expect(signals[0].aborted).toBe(true);
   });
 });

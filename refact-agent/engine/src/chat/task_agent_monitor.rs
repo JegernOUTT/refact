@@ -237,7 +237,9 @@ pub(crate) async fn notify_planner_blocking_question(
 
     let sessions = app.chat.sessions.clone();
     let planner_session =
-        get_or_create_session_with_trajectory(app.clone(), &sessions, planner_chat_id).await;
+        get_or_create_session_with_trajectory(app.clone(), &sessions, planner_chat_id)
+            .await
+            .map_err(|error| error.to_string())?;
 
     ensure_planner_task_meta(
         app.clone(),
@@ -442,7 +444,9 @@ async fn record_agent_attention_for_claim(
     );
     let sessions = app.chat.sessions.clone();
     let planner_session =
-        get_or_create_session_with_trajectory(app.clone(), &sessions, &planner_chat_id).await;
+        get_or_create_session_with_trajectory(app.clone(), &sessions, &planner_chat_id)
+            .await
+            .map_err(|error| error.to_string())?;
     ensure_planner_task_meta(
         app.clone(),
         &planner_session,
@@ -683,7 +687,9 @@ async fn notify_planner_about_reasoning_token_limit(
 
     let sessions = app.chat.sessions.clone();
     let planner_session =
-        get_or_create_session_with_trajectory(app.clone(), &sessions, planner_chat_id).await;
+        get_or_create_session_with_trajectory(app.clone(), &sessions, planner_chat_id)
+            .await
+            .map_err(|error| error.to_string())?;
 
     if ensure_planner_task_meta(
         app.clone(),
@@ -958,7 +964,9 @@ async fn notify_planner_about_stalled_agent(
 
     let sessions = app.chat.sessions.clone();
     let planner_session =
-        get_or_create_session_with_trajectory(app.clone(), &sessions, planner_chat_id).await;
+        get_or_create_session_with_trajectory(app.clone(), &sessions, planner_chat_id)
+            .await
+            .map_err(|error| error.to_string())?;
 
     if ensure_planner_task_meta(
         app.clone(),
@@ -1497,7 +1505,9 @@ pub(crate) async fn notify_planner_agents_finished(
 
     let planner_chat_id = current_owner(&app, task_id).await?;
     let planner_session =
-        get_or_create_session_with_trajectory(app.clone(), &sessions, &planner_chat_id).await;
+        get_or_create_session_with_trajectory(app.clone(), &sessions, &planner_chat_id)
+            .await
+            .map_err(|error| error.to_string())?;
     ensure_planner_task_meta(
         app.clone(),
         &planner_session,
