@@ -269,6 +269,19 @@ pub struct MCPAuthProbeResult {
     /// a healthy server from a reachable-but-broken endpoint (404/500/...).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub http_status: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discovery_error: Option<String>,
+}
+
+impl MCPAuthProbeResult {
+    pub fn failure_message(&self) -> String {
+        match self.discovery_error.as_deref() {
+            Some(error) => format!(
+                "Server requires authentication (HTTP 401/403); OAuth discovery failed: {error}"
+            ),
+            None => "Server requires authentication (HTTP 401/403); OAuth is not advertised — configure a bearer token".to_string(),
+        }
+    }
 }
 
 pub async fn probe_mcp_auth(
@@ -360,6 +373,7 @@ pub async fn probe_mcp_auth(
             suggested_scopes: vec![],
             www_authenticate,
             http_status: Some(status.as_u16()),
+            discovery_error: None,
         });
     }
 
@@ -397,6 +411,7 @@ pub async fn probe_mcp_auth(
         suggested_scopes,
         www_authenticate,
         http_status: Some(status.as_u16()),
+        discovery_error: None,
     })
 }
 

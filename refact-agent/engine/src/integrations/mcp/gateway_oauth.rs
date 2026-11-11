@@ -229,7 +229,9 @@ fn issuer_metadata_routes(resource: &url::Url, issuer: &url::Url, kind: &str) ->
 fn issuer_in_scope(resource: &url::Url, issuer: &url::Url) -> bool {
     let (prefix, name) = ingress_and_name(resource);
     let path = issuer.path().trim_end_matches('/');
-    path == prefix || (!name.is_empty() && path == format!("{prefix}/{name}"))
+    path == prefix
+        || path == format!("{prefix}/mcp")
+        || (!name.is_empty() && path == format!("{prefix}/{name}"))
 }
 
 async fn fetch_json<T: serde::de::DeserializeOwned>(
@@ -238,11 +240,20 @@ async fn fetch_json<T: serde::de::DeserializeOwned>(
 ) -> Result<Option<T>, String> {
     let response = sender
         .send(reqwest::Method::GET, target, None, None)
-        .await?;
-    if !response.status().is_success() {
+        .await
+        .map_err(|_| {
+            "Managed OAuth metadata request failed; check the gateway connection".to_string()
+        })?;
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
         return Ok(None);
     }
-    Ok(read_json_bounded::<T>(response).await.ok())
+    if !response.status().is_success() {
+        return Err(format!(
+            "Managed OAuth metadata request failed: HTTP {}",
+            response.status().as_u16()
+        ));
+    }
+    read_json_bounded::<T>(response).await.map(Some)
 }
 
 fn same_resource(a: &str, b: &url::Url) -> bool {
@@ -265,12 +276,20 @@ pub async fn discover(
     issuer.set_query(None);
     issuer.set_fragment(None);
     let mut resource_scopes = None;
+    let mut discovery_error = None;
     for candidate in resource_metadata_routes(mcp_url) {
-        if let Some(prm) = fetch_json::<ProtectedResourceMetadata>(sender, &candidate).await? {
+        let metadata = match fetch_json::<ProtectedResourceMetadata>(sender, &candidate).await {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                discovery_error.get_or_insert(error);
+                continue;
+            }
+        };
+        if let Some(prm) = metadata {
             if let Some(resource) = prm.resource.as_deref() {
                 if !same_resource(resource, mcp_url) {
                     return Err(
-                        "Resource metadata does not match the managed MCP server".to_string()
+                        "Resource metadata does not match the managed MCP server; configure MCP Gateway URL to use the gateway's canonical MCP host".to_string()
                     );
                 }
             }
@@ -286,7 +305,9 @@ pub async fn discover(
         return Err("Managed MCP authorization server is not on the approved gateway".to_string());
     }
     if !issuer_in_scope(mcp_url, &issuer) {
-        return Err("Managed MCP authorization server is not on the approved gateway".to_string());
+        return Err(
+            "Managed MCP authorization server is outside the approved gateway ingress".to_string(),
+        );
     }
     issuer.set_query(None);
     issuer.set_fragment(None);
@@ -298,7 +319,14 @@ pub async fn discover(
             "openid-configuration",
         ))
     {
-        if let Some(mut metadata) = fetch_json::<AuthServerMetadata>(sender, &candidate).await? {
+        let metadata = match fetch_json::<AuthServerMetadata>(sender, &candidate).await {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                discovery_error.get_or_insert(error);
+                continue;
+            }
+        };
+        if let Some(mut metadata) = metadata {
             validate_endpoints(&metadata, &gateway)?;
             if let Some(claimed) = metadata.issuer.as_deref() {
                 let claimed = url::Url::parse(claimed)
@@ -309,13 +337,14 @@ pub async fn discover(
                     );
                 }
             }
-            if metadata.scopes_supported.is_none() {
+            if metadata.scopes_supported.as_ref().is_none_or(Vec::is_empty) {
                 metadata.scopes_supported = resource_scopes;
             }
             return Ok(metadata);
         }
     }
-    Err("OAuth metadata not found for managed MCP server".to_string())
+    Err(discovery_error
+        .unwrap_or_else(|| "OAuth metadata not found for managed MCP server".to_string()))
 }
 
 fn validate_endpoints(metadata: &AuthServerMetadata, gateway: &url::Origin) -> Result<(), String> {
@@ -891,13 +920,13 @@ pub(crate) async fn probe_with(
         .filter_map(|v| v.to_str().ok())
         .find_map(super::parse_www_authenticate);
     drop(response);
-    let (oauth_available, suggested_scopes) = if needs_auth {
+    let (oauth_available, suggested_scopes, discovery_error) = if needs_auth {
         match discover(&sender, &target).await {
-            Ok(m) => (true, m.scopes_supported.unwrap_or_default()),
-            Err(_) => (false, vec![]),
+            Ok(m) => (true, m.scopes_supported.unwrap_or_default(), None),
+            Err(error) => (false, vec![], Some(error)),
         }
     } else {
-        (false, vec![])
+        (false, vec![], None)
     };
     Ok(super::MCPAuthProbeResult {
         needs_auth,
@@ -905,6 +934,7 @@ pub(crate) async fn probe_with(
         suggested_scopes,
         www_authenticate,
         http_status: Some(status.as_u16()),
+        discovery_error,
     })
 }
 
@@ -921,6 +951,13 @@ mod tests {
     struct Fake {
         base: String,
         seen: Seen,
+        task: tokio::task::JoinHandle<()>,
+    }
+
+    impl Drop for Fake {
+        fn drop(&mut self) {
+            self.task.abort();
+        }
     }
 
     async fn serve(handler: fn(&str, &str) -> (u16, String)) -> Fake {
@@ -948,14 +985,17 @@ mod tests {
                 },
             )
             .with_state(seen.clone());
-        tokio::spawn(
+        let task = tokio::spawn(async move {
             axum::Server::from_tcp(listener)
                 .unwrap()
-                .serve(app.into_make_service()),
-        );
+                .serve(app.into_make_service())
+                .await
+                .unwrap();
+        });
         Fake {
             base,
             seen,
+            task,
         }
     }
 
@@ -984,6 +1024,187 @@ mod tests {
 
     fn idp(_base: &str, _path: &str) -> (u16, String) {
         (200, r#"{"ok":true}"#.to_string())
+    }
+
+    fn mcp_issuer_gateway(base: &str, path: &str) -> (u16, String) {
+        let prefix = if path.contains("/proxy/") {
+            "/proxy"
+        } else {
+            ""
+        };
+        if path == format!("{prefix}/srv/mcp") {
+            return (401, "{}".into());
+        }
+        if path == format!("/.well-known/oauth-protected-resource{prefix}/srv/mcp") {
+            return (
+                200,
+                format!(
+                    r#"{{"resource":"{base}{prefix}/srv/mcp","authorization_servers":["{base}{prefix}/mcp"],"scopes_supported":["openid","offline"]}}"#
+                ),
+            );
+        }
+        if path == format!("/.well-known/oauth-authorization-server{prefix}/mcp") {
+            return (
+                200,
+                format!(
+                    r#"{{"issuer":"{base}{prefix}/mcp","authorization_endpoint":"{base}{prefix}/authorize/mcp-session","token_endpoint":"{base}{prefix}/token","registration_endpoint":"{base}{prefix}/register","code_challenge_methods_supported":["S256"],"scopes_supported":[]}}"#
+                ),
+            );
+        }
+        match path {
+            "/register" | "/proxy/register" => (201, r#"{"client_id":"gateway-client"}"#.into()),
+            "/token" | "/proxy/token" => (200, r#"{"access_token":"gateway-access","refresh_token":"gateway-refresh","expires_in":3600}"#.into()),
+            _ => (404, "{}".into()),
+        }
+    }
+
+    #[tokio::test]
+    async fn managed_mcp_issuer_supports_probe_login_and_exchange_with_ingress() {
+        for prefix in ["", "/proxy"] {
+            let gw = serve(mcp_issuer_gateway).await;
+            let mcp_url = format!("{}{prefix}/srv/mcp", gw.base);
+            let probe = probe_with(&mcp_url, resolver_for("gw-secret"))
+                .await
+                .unwrap();
+            assert_eq!(probe.http_status, Some(401));
+            assert!(probe.needs_auth && probe.oauth_available);
+            assert_eq!(probe.discovery_error, None);
+            assert_eq!(probe.suggested_scopes, ["openid", "offline"]);
+            let (session, auth_url) = start_flow_with(
+                "/tmp/managed-mcp-issuer.yaml",
+                "identity",
+                &mcp_url,
+                &[],
+                "http://127.0.0.1:1/callback",
+                resolver_for("gw-secret"),
+            )
+            .await
+            .unwrap();
+            let auth_url = url::Url::parse(&auth_url).unwrap();
+            assert_eq!(auth_url.path(), format!("{prefix}/authorize/mcp-session"));
+            let query: HashMap<_, _> = auth_url.query_pairs().into_owned().collect();
+            assert_eq!(query["resource"], mcp_url);
+            assert_eq!(query["scope"], "openid offline");
+            assert_eq!(query["code_challenge_method"], "S256");
+            let (tokens, _) = complete_flow_with(&session, "code", Some(resolver_for("gw-secret")))
+                .await
+                .unwrap();
+            assert_eq!(tokens.access_token, "gateway-access");
+            assert_eq!(tokens.bound_url.as_deref(), Some(mcp_url.as_str()));
+            let seen = gw.seen.lock().unwrap().clone();
+            for expected in [
+                format!("/.well-known/oauth-authorization-server{prefix}/mcp"),
+                format!("{prefix}/register"),
+                format!("{prefix}/token"),
+            ] {
+                assert!(
+                    seen.iter().any(|(path, key)| path == &expected
+                        && key.as_deref() == Some("Bearer gw-secret")),
+                    "{expected}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn managed_probe_preserves_resource_mismatch_without_reflecting_metadata() {
+        let gw = serve(|_, path| match path {
+            "/srv/mcp" => (401, "{}".into()),
+            "/.well-known/oauth-protected-resource/srv/mcp" => (200, r#"{"resource":"https://untrusted.example/secret-value/srv/mcp","authorization_servers":["https://untrusted.example/mcp"]}"#.into()),
+            _ => panic!("unexpected metadata request: {path}"),
+        }).await;
+        let probe = probe_with(&format!("{}/srv/mcp", gw.base), resolver_for("gw-secret"))
+            .await
+            .unwrap();
+        assert!(probe.needs_auth && !probe.oauth_available);
+        let expected = "Resource metadata does not match the managed MCP server; configure MCP Gateway URL to use the gateway's canonical MCP host";
+        assert_eq!(probe.discovery_error.as_deref(), Some(expected));
+        assert_eq!(
+            probe.failure_message(),
+            format!(
+                "Server requires authentication (HTTP 401/403); OAuth discovery failed: {expected}"
+            )
+        );
+        assert_eq!(gw.seen.lock().unwrap().len(), 2);
+        assert!(!serde_json::to_string(&probe)
+            .unwrap()
+            .contains("untrusted.example"));
+    }
+
+    #[tokio::test]
+    async fn managed_probe_distinguishes_invalid_metadata_http_errors_and_missing_metadata() {
+        for (handler, expected) in [
+            (
+                (|_, path| {
+                    if path == "/srv/mcp" {
+                        (401, "{}".into())
+                    } else {
+                        (200, "not json secret-value".into())
+                    }
+                }) as fn(&str, &str) -> (u16, String),
+                "Invalid OAuth response",
+            ),
+            (
+                (|_, path| {
+                    if path == "/srv/mcp" {
+                        (401, "{}".into())
+                    } else {
+                        (503, "secret-value".into())
+                    }
+                }),
+                "Managed OAuth metadata request failed: HTTP 503",
+            ),
+            (
+                (|_, path| {
+                    if path == "/srv/mcp" {
+                        (401, "{}".into())
+                    } else {
+                        (404, "{}".into())
+                    }
+                }),
+                "OAuth metadata not found for managed MCP server",
+            ),
+        ] {
+            let gw = serve(handler).await;
+            let probe = probe_with(&format!("{}/srv/mcp", gw.base), resolver_for("gw-secret"))
+                .await
+                .unwrap();
+            assert!(probe.needs_auth && !probe.oauth_available);
+            assert_eq!(probe.discovery_error.as_deref(), Some(expected));
+            assert!(!probe.failure_message().contains("secret-value"));
+            assert!(!probe.failure_message().contains("configure a bearer token"));
+        }
+    }
+
+    #[tokio::test]
+    async fn managed_discovery_tries_ingress_fallback_after_failed_candidate() {
+        let gw = serve(|base, path| match path {
+            "/.well-known/oauth-protected-resource/proxy/srv/mcp" => (401, "{}".into()),
+            "/proxy/.well-known/oauth-protected-resource/srv/mcp" => (200, format!(r#"{{"resource":"{base}/proxy/srv/mcp","authorization_servers":["{base}/proxy/mcp"]}}"#)),
+            "/.well-known/oauth-authorization-server/proxy/mcp" => (200, "not json".into()),
+            "/proxy/.well-known/oauth-authorization-server/mcp" => (200, format!(r#"{{"issuer":"{base}/proxy/mcp","authorization_endpoint":"{base}/proxy/authorize/mcp-session","token_endpoint":"{base}/proxy/token","code_challenge_methods_supported":["S256"]}}"#)),
+            _ => (404, "{}".into()),
+        }).await;
+        let resource = url::Url::parse(&format!("{}/proxy/srv/mcp", gw.base)).unwrap();
+        let sender = ScopedSender::new(resource.as_str(), resolver_for("gw-secret")).unwrap();
+        let metadata = discover(&sender, &resource).await.unwrap();
+        assert_eq!(metadata.token_endpoint, format!("{}/proxy/token", gw.base));
+        let paths: Vec<_> = gw
+            .seen
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(path, _)| path.clone())
+            .collect();
+        assert_eq!(
+            paths,
+            [
+                "/.well-known/oauth-protected-resource/proxy/srv/mcp",
+                "/proxy/.well-known/oauth-protected-resource/srv/mcp",
+                "/.well-known/oauth-authorization-server/proxy/mcp",
+                "/proxy/.well-known/oauth-authorization-server/mcp",
+            ]
+        );
     }
 
     #[tokio::test]

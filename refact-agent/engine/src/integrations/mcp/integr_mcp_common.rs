@@ -1112,11 +1112,7 @@ pub async fn mcp_session_setup<T: MCPTransportInitializer + Clone + Send + Sync 
                             )
                             .await;
                         } else {
-                            log(
-                                tracing::Level::WARN,
-                                "Server requires authentication (HTTP 401/403) but does not advertise OAuth metadata".to_string(),
-                            )
-                            .await;
+                            log(tracing::Level::WARN, p.failure_message()).await;
                         }
                     }
                     let mut session_locked = session_arc_clone.lock().await;
@@ -1137,7 +1133,7 @@ pub async fn mcp_session_setup<T: MCPTransportInitializer + Clone + Send + Sync 
                             }
                             Some(p) if p.needs_auth => {
                                 mcp_session.connection_status = MCPConnectionStatus::Failed {
-                                    message: "Server requires authentication (HTTP 401/403); OAuth is not advertised — configure a bearer token".to_string(),
+                                    message: p.failure_message(),
                                 };
                                 mcp_session.oauth_probe = Some(p);
                             }
@@ -1838,6 +1834,7 @@ mod tests {
             oauth_available: true,
             suggested_scopes: vec!["mcp.read".to_string()],
             www_authenticate: None,
+            discovery_error: None,
         });
 
         prepare_mcp_session_for_start(session, config.clone(), false);

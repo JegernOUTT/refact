@@ -171,7 +171,7 @@ async fn active_binding(config_path: &str) -> Result<Option<(Binding, LiteLLMPro
     {
         return Err("LiteLLM identity changed; reconfirm this connection".into());
     }
-    if provider.validated_base_url().ok().as_deref()
+    if provider.validated_mcp_base_url().ok().as_deref()
         != Some(binding.selection.bound_base_url.as_str())
         || provider
             .mcp_endpoint(&binding.selection.server_name)
@@ -220,8 +220,10 @@ fn gateway_route_permitted(base_path: &str, name: &str, target_path: &str) -> bo
     for kind in ["oauth-authorization-server", "openid-configuration"] {
         permitted.push(format!("/.well-known/{kind}{base}"));
         permitted.push(format!("/.well-known/{kind}{base}/{name}"));
+        permitted.push(format!("/.well-known/{kind}{base}/mcp"));
         permitted.push(format!("{base}/.well-known/{kind}"));
         permitted.push(format!("{base}/.well-known/{kind}/{name}"));
+        permitted.push(format!("{base}/.well-known/{kind}/mcp"));
     }
     permitted.iter().any(|allowed| allowed == path)
 }
@@ -563,7 +565,7 @@ async fn reconcile(
         return Ok(false);
     }
     let identity = provider.identity_fingerprint(instance).await.ok();
-    let base = provider.validated_base_url().ok();
+    let base = provider.validated_mcp_base_url().ok();
     let mut reconfirm = false;
     for selection in selected {
         let file = path(gcx, instance, &selection)
@@ -937,7 +939,7 @@ pub async fn handle_litellm_mcp_enable(
         server_name: server.name.clone(),
         bound_identity: identity,
         bound_base_url: provider
-            .validated_base_url()
+            .validated_mcp_base_url()
             .map_err(|_| error(StatusCode::CONFLICT, "Invalid LiteLLM endpoint"))?,
     };
     let mut selected = selections(&app.gcx, &params.name).await?;
@@ -996,9 +998,17 @@ mod tests {
     }
 
     async fn binding_fixture_at(endpoint: &str) -> (Arc<GlobalContext>, String, Selection) {
+        binding_fixture_with_gateway(endpoint, None).await
+    }
+
+    async fn binding_fixture_with_gateway(
+        endpoint: &str,
+        gateway: Option<&str>,
+    ) -> (Arc<GlobalContext>, String, Selection) {
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let provider = LiteLLMProvider {
             endpoint: endpoint.into(),
+            mcp_gateway_url: gateway.map(str::to_owned),
             api_key: "private-provider-key".into(),
             enabled: true,
             ..Default::default()
@@ -1008,9 +1018,9 @@ mod tests {
             slug: slug("immutable-id"),
             server_name: "Slack".into(),
             bound_identity: provider.identity_fingerprint("work").await.unwrap(),
-            bound_base_url: provider.validated_base_url().unwrap(),
+            bound_base_url: provider.validated_mcp_base_url().unwrap(),
         };
-        refact_providers::config_store::write_provider_config(&gcx.config_dir, "work", serde_yaml::to_value(json!({"base_provider":"litellm","api_key":"private-provider-key","endpoint":provider.endpoint,"enabled":true})).unwrap()).await.unwrap();
+        refact_providers::config_store::write_provider_config(&gcx.config_dir, "work", serde_yaml::to_value(json!({"base_provider":"litellm","api_key":"private-provider-key","endpoint":provider.endpoint,"mcp_gateway_url":provider.mcp_gateway_url,"enabled":true})).unwrap()).await.unwrap();
         save_selections(&gcx, "work", &[selection.clone()])
             .await
             .unwrap();
@@ -1297,6 +1307,8 @@ mod tests {
             "/proxy/.well-known/oauth-protected-resource/Slack/mcp",
             "/proxy/.well-known/oauth-protected-resource",
             "/.well-known/oauth-authorization-server/proxy",
+            "/.well-known/oauth-authorization-server/proxy/mcp",
+            "/proxy/.well-known/openid-configuration/mcp",
             "/.well-known/openid-configuration/proxy/Slack",
             "/proxy/.well-known/oauth-authorization-server",
         ] {
@@ -1309,6 +1321,8 @@ mod tests {
             "/.well-known/oauth-protected-resource/proxy/Slack/mcp/x",
             "/.well-known/oauth-authorization-server/proxy/Other",
             "/.well-known/oauth-authorization-server/proxy2",
+            "/.well-known/oauth-authorization-server/proxy/mcp/Other",
+            "/proxy/.well-known/openid-configuration/mcpx",
             "/proxy2/Slack/mcp",
             "/proxy/Slack/mcpx",
             "/proxy/Other/token",
@@ -1412,6 +1426,69 @@ mod tests {
         .unwrap()
         .unwrap()
         .is_empty());
+        stop(&gcx, &file, true).await;
+    }
+
+    #[tokio::test]
+    async fn explicit_mcp_gateway_discovery_confines_credentials_and_revokes_changed_binding() {
+        use crate::integrations::mcp::mcp_auth::gateway_oauth::{
+            discover, registry_resolver, ScopedSender,
+        };
+        let (base, seen) = serve_gateway(|base, path| match path {
+            "/.well-known/oauth-protected-resource/proxy/Slack/mcp" => (200, format!(r#"{{"resource":"{base}/proxy/Slack/mcp","authorization_servers":["{base}/proxy/mcp"]}}"#)),
+            "/.well-known/oauth-authorization-server/proxy/mcp" => (200, format!(r#"{{"issuer":"{base}/proxy/mcp","authorization_endpoint":"{base}/proxy/authorize/mcp-session","token_endpoint":"{base}/proxy/token","registration_endpoint":"{base}/proxy/register","code_challenge_methods_supported":["S256"]}}"#)),
+            _ => (404, "{}".into()),
+        }).await;
+        let gateway = format!("{base}/proxy");
+        let api = "https://api.example";
+        let (gcx, file, selection) = binding_fixture_with_gateway(api, Some(&gateway)).await;
+        assert_eq!(selection.bound_base_url, gateway);
+        let url = format!("{gateway}/Slack/mcp");
+        assert_eq!(
+            gateway_transport_url(&file).await.unwrap(),
+            Some(url.clone())
+        );
+        let sender = ScopedSender::new(&url, registry_resolver(&file)).unwrap();
+        let metadata = discover(&sender, &url::Url::parse(&url).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(metadata.token_endpoint, format!("{gateway}/token"));
+        let requests = seen.lock().unwrap().clone();
+        assert_eq!(requests.len(), 2);
+        assert!(requests
+            .iter()
+            .all(|(_, key)| key.as_deref() == Some("Bearer private-provider-key")));
+        assert!(gateway_headers(&file, &format!("{api}/proxy/token"))
+            .await
+            .unwrap()
+            .unwrap()
+            .is_empty());
+        assert!(gateway_headers(&file, &format!("{gateway}/Other/mcp"))
+            .await
+            .is_err());
+        assert!(!tokio::fs::read_to_string(&file)
+            .await
+            .unwrap()
+            .contains("private-provider-key"));
+        let mut changed = super::super::litellm_http::resolve_provider(&gcx, "work")
+            .await
+            .unwrap();
+        changed.mcp_gateway_url = Some(format!("{base}/new-ingress"));
+        gcx.providers
+            .write()
+            .await
+            .add(Box::new(ProviderInstance::new(
+                "work",
+                "litellm",
+                "Work",
+                Box::new(changed),
+            )));
+        assert_eq!(
+            gateway_headers(&file, &url).await.unwrap_err(),
+            "LiteLLM identity changed; reconfirm this connection"
+        );
+        assert!(check_dispatch(&gcx, &file).await.is_err());
+        assert_eq!(seen.lock().unwrap().len(), requests.len());
         stop(&gcx, &file, true).await;
     }
 

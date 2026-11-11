@@ -59,6 +59,8 @@ pub struct LiteLLMProvider {
     pub supports_cache_control: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oauth_callback_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_gateway_url: Option<String>,
 }
 
 impl std::fmt::Debug for LiteLLMProvider {
@@ -72,6 +74,7 @@ impl std::fmt::Debug for LiteLLMProvider {
             .field("enabled", &self.enabled)
             .field("extra_header_names", &header_names)
             .field("supports_cache_control", &self.supports_cache_control)
+            .field("mcp_gateway_url", &self.validated_mcp_base_url().ok())
             .field(
                 "oauth_callback_url",
                 &self
@@ -96,6 +99,7 @@ impl Default for LiteLLMProvider {
             extra_headers: HashMap::new(),
             supports_cache_control: false,
             oauth_callback_url: None,
+            mcp_gateway_url: None,
         }
     }
 }
@@ -1137,6 +1141,13 @@ impl LiteLLMProvider {
         validate_base_url(&self.endpoint)
     }
 
+    pub fn validated_mcp_base_url(&self) -> Result<String, LiteLLMFailure> {
+        match explicit_callback_url(self.mcp_gateway_url.as_deref()) {
+            Some(raw) => validate_mcp_gateway_url(raw),
+            None => self.validated_base_url(),
+        }
+    }
+
     pub fn validated_callback_url(&self, http_port: u16) -> Result<String, LiteLLMFailure> {
         match explicit_callback_url(self.oauth_callback_url.as_deref()) {
             Some(raw) => validate_explicit_callback_url(raw),
@@ -1197,6 +1208,13 @@ impl LiteLLMProvider {
             hasher.update((part.len() as u64).to_le_bytes());
             hasher.update(part.as_bytes());
         }
+        let mcp_base = self.validated_mcp_base_url()?;
+        if mcp_base != base {
+            for part in ["mcp_gateway_url", mcp_base.as_str()] {
+                hasher.update((part.len() as u64).to_le_bytes());
+                hasher.update(part.as_bytes());
+            }
+        }
         let mut headers = self.extra_headers.iter().collect::<Vec<_>>();
         headers.sort();
         for (name, value) in headers {
@@ -1220,7 +1238,10 @@ impl LiteLLMProvider {
 
     pub fn mcp_endpoint(&self, server_name: &str) -> Result<String, LiteLLMFailure> {
         validate_mcp_server_name(server_name)?;
-        Ok(format!("{}/{server_name}/mcp", self.validated_base_url()?))
+        Ok(format!(
+            "{}/{server_name}/mcp",
+            self.validated_mcp_base_url()?
+        ))
     }
 
     async fn native_session(&self, instance_id: &str) -> Result<NativeSession, LiteLLMFailure> {
@@ -1274,6 +1295,57 @@ impl LiteLLMProvider {
 
 fn explicit_callback_url(value: Option<&str>) -> Option<&str> {
     value.map(str::trim).filter(|value| !value.is_empty())
+}
+
+fn validate_mcp_gateway_url(raw: &str) -> Result<String, LiteLLMFailure> {
+    let invalid = || {
+        LiteLLMFailure::new(
+        LiteLLMFeatureState::NotConfigured,
+        "MCP Gateway URL must be HTTPS (HTTP only for loopback), without credentials, query, fragment, encoded characters or unsafe path segments",
+    )
+    };
+    let raw = raw.trim().trim_end_matches('/');
+    if raw
+        .chars()
+        .any(|c| c.is_whitespace() || c.is_control() || matches!(c, '%' | '\\' | '?' | '#'))
+    {
+        return Err(invalid());
+    }
+    let parsed = url::Url::parse(raw).map_err(|_| invalid())?;
+    let loopback = match parsed.host() {
+        Some(url::Host::Domain(domain)) => domain.eq_ignore_ascii_case("localhost"),
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        None => return Err(invalid()),
+    };
+    if (parsed.scheme() != "https" && !(parsed.scheme() == "http" && loopback))
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+        || parsed.cannot_be_a_base()
+    {
+        return Err(invalid());
+    }
+    let authority_and_path = raw.split_once("://").ok_or_else(invalid)?.1;
+    let raw_path = authority_and_path
+        .find('/')
+        .map(|at| &authority_and_path[at..])
+        .unwrap_or("");
+    if !raw_path.is_empty()
+        && (parsed.path() != raw_path
+            || !raw_path[1..].split('/').all(|segment| {
+                !segment.is_empty()
+                    && segment != "."
+                    && segment != ".."
+                    && segment
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '~'))
+            }))
+    {
+        return Err(invalid());
+    }
+    Ok(parsed.as_str().trim_end_matches('/').to_string())
 }
 
 fn validate_explicit_callback_url(raw: &str) -> Result<String, LiteLLMFailure> {
@@ -1419,6 +1491,13 @@ fields:
     f_label: "MCP OAuth Callback URL"
     f_placeholder: "https://refact.example.com/v1/mcp/oauth/callback"
     f_extra: true
+  mcp_gateway_url:
+    f_type: string_long
+    f_desc: "Optional canonical gateway base URL for managed MCP and OAuth traffic only. Leave empty to use Endpoint. Set this when the gateway advertises a different public MCP host; only configure a trusted gateway because your provider API key is sent there. Must use HTTPS (HTTP only for loopback); an ingress path prefix is allowed. Changing it requires reconfirming managed MCP connections. Model, usage and inventory API traffic continues to use Endpoint."
+    f_label: "MCP Gateway URL"
+    f_placeholder: "https://gateway.example.com"
+    f_extra: true
+    f_confirmation: true
 description: |
   LiteLLM Proxy with dynamic discovery of public model aliases and safe model metadata.
 available:
@@ -1438,6 +1517,7 @@ available:
         let mut disabled_models = self.disabled_models.clone();
         let mut custom_models = self.custom_models.clone();
         let mut oauth_callback_url = self.oauth_callback_url.clone();
+        let mut mcp_gateway_url = self.mcp_gateway_url.clone();
         if let Some(value) = yaml.get("api_key").and_then(|v| v.as_str()) {
             if value != "***" {
                 api_key = value.to_string();
@@ -1501,6 +1581,20 @@ available:
             };
         }
 
+        if let Some(value) = yaml.get("mcp_gateway_url") {
+            mcp_gateway_url = if value.is_null() {
+                None
+            } else {
+                let raw = value
+                    .as_str()
+                    .ok_or_else(|| "mcp_gateway_url must be a string".to_string())?;
+                explicit_callback_url(Some(raw))
+                    .map(validate_mcp_gateway_url)
+                    .transpose()
+                    .map_err(|failure| failure.message)?
+            };
+        }
+
         self.endpoint = endpoint;
         self.api_key = api_key;
         self.credential = credential_spec;
@@ -1511,6 +1605,7 @@ available:
         self.disabled_models = disabled_models;
         self.custom_models = custom_models;
         self.oauth_callback_url = oauth_callback_url;
+        self.mcp_gateway_url = mcp_gateway_url;
         Ok(())
     }
 
@@ -1526,7 +1621,8 @@ available:
             "enabled_models": self.enabled_models, "disabled_models": self.disabled_models,
             "custom_models": self.custom_models,
             "extra_headers": headers, "supports_cache_control": self.supports_cache_control,
-            "oauth_callback_url": self.oauth_callback_url.as_deref().unwrap_or("")
+            "oauth_callback_url": self.oauth_callback_url.as_deref().unwrap_or(""),
+            "mcp_gateway_url": self.mcp_gateway_url.as_deref().unwrap_or("")
         })
     }
 
@@ -1731,6 +1827,112 @@ mod tests {
             provider.validated_callback_url(7).unwrap(),
             "http://127.0.0.1:7/v1/mcp/oauth/callback"
         );
+    }
+
+    #[tokio::test]
+    async fn mcp_gateway_override_is_explicit_and_identity_bound_without_changing_api() {
+        let mut provider = LiteLLMProvider {
+            endpoint: "https://api.example/proxy".into(),
+            api_key: "test-key".into(),
+            ..Default::default()
+        };
+        let identity = provider.identity_fingerprint("work").await.unwrap();
+        assert_eq!(
+            provider.mcp_endpoint("Fibery").unwrap(),
+            "https://api.example/proxy/Fibery/mcp"
+        );
+        assert!(serde_json::to_value(&provider)
+            .unwrap()
+            .get("mcp_gateway_url")
+            .is_none());
+        assert_eq!(provider.provider_settings_as_json()["mcp_gateway_url"], "");
+        assert!(provider.provider_schema().contains("MCP Gateway URL"));
+        provider
+            .provider_settings_apply(
+                serde_yaml::from_str("mcp_gateway_url: 'https://api.example/proxy/'").unwrap(),
+            )
+            .unwrap();
+        assert_eq!(
+            provider.identity_fingerprint("work").await.unwrap(),
+            identity
+        );
+        provider
+            .provider_settings_apply(
+                serde_yaml::from_str("mcp_gateway_url: ' https://ui.example/proxy/v1/ '").unwrap(),
+            )
+            .unwrap();
+        assert_eq!(
+            provider.validated_base_url().unwrap(),
+            "https://api.example/proxy"
+        );
+        assert_eq!(
+            provider.mcp_endpoint("Fibery").unwrap(),
+            "https://ui.example/proxy/v1/Fibery/mcp"
+        );
+        assert_eq!(
+            provider.provider_settings_as_json()["mcp_gateway_url"],
+            "https://ui.example/proxy/v1"
+        );
+        assert_ne!(
+            provider.identity_fingerprint("work").await.unwrap(),
+            identity
+        );
+        let roundtrip: LiteLLMProvider =
+            serde_json::from_value(serde_json::to_value(&provider).unwrap()).unwrap();
+        assert_eq!(roundtrip.mcp_gateway_url, provider.mcp_gateway_url);
+        for clear in ["mcp_gateway_url: null", "mcp_gateway_url: '  '"] {
+            provider
+                .provider_settings_apply(serde_yaml::from_str(clear).unwrap())
+                .unwrap();
+            assert_eq!(provider.mcp_gateway_url, None);
+            assert_eq!(
+                provider.identity_fingerprint("work").await.unwrap(),
+                identity
+            );
+            provider.mcp_gateway_url = Some("https://ui.example".into());
+        }
+    }
+
+    #[test]
+    fn mcp_gateway_rejects_unsafe_overrides_atomically_and_at_use() {
+        for bad in [
+            "http://gateway.example",
+            "http://localhost.evil.example",
+            "https://user:secret@example.com",
+            "https://example.com?q=secret",
+            "https://example.com#secret",
+            "https://example.com/%2e%2e",
+            "https://example.com/a/../b",
+            "https://example.com/a//b",
+            "https://example.com/a\\b",
+            "file:///tmp/mcp",
+        ] {
+            let mut provider = LiteLLMProvider::default();
+            assert!(
+                provider
+                    .provider_settings_apply(
+                        serde_yaml::to_value(
+                            json!({"endpoint":"https://changed.example", "mcp_gateway_url":bad})
+                        )
+                        .unwrap()
+                    )
+                    .is_err(),
+                "{bad}"
+            );
+            assert_eq!(provider.endpoint, DEFAULT_ENDPOINT);
+            assert_eq!(provider.mcp_gateway_url, None);
+            provider.mcp_gateway_url = Some(bad.into());
+            assert!(provider.mcp_endpoint("Fibery").is_err(), "{bad}");
+            assert!(!format!("{provider:?}").contains("secret"));
+        }
+        for good in [
+            "http://localhost:4000",
+            "http://127.0.0.1:4000/proxy",
+            "http://[::1]:4000",
+            "https://gateway.example/proxy",
+        ] {
+            assert_eq!(validate_mcp_gateway_url(good).unwrap(), good);
+        }
     }
 
     #[test]
