@@ -546,9 +546,6 @@ impl ExecutionRegistry {
         if intents.contains(agent_id) {
             return Err("resume already being prepared for this child".into());
         }
-        if intents.len() >= crate::file_activity::settings().max_outstanding {
-            return Err("resume preparation capacity unavailable".into());
-        }
         if self
             .board_admission_closed
             .load(std::sync::atomic::Ordering::Acquire)
@@ -585,9 +582,7 @@ impl ExecutionRegistry {
             .launch_provenance
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        if records.len() < settings.max_outstanding {
-            records.insert(agent_id.into(), provenance);
-        }
+        records.insert(agent_id.into(), provenance);
     }
 
     pub fn launch_provenance(
@@ -623,7 +618,6 @@ impl ExecutionRegistry {
     }
 
     pub fn remember_launch_intent(&self, agent_id: &str, slot: LaunchIntentSlot) {
-        let max_outstanding = crate::file_activity::settings().max_outstanding;
         let mut slots = self
             .launch_intents
             .lock()
@@ -632,9 +626,7 @@ impl ExecutionRegistry {
             tracing::warn!(agent_id, "launch intent slot already registered");
             return;
         }
-        if slots.len() < max_outstanding {
-            slots.insert(agent_id.into(), slot);
-        }
+        slots.insert(agent_id.into(), slot);
     }
 
     pub fn launch_intent(&self, agent_id: &str) -> Option<LaunchIntentSlot> {
@@ -670,9 +662,6 @@ impl ExecutionRegistry {
         let mut scopes = self.path_scopes.lock().unwrap_or_else(|e| e.into_inner());
         let effective = match scopes.get(key) {
             Some(accepted) => crate::agents::path_scope::narrow(accepted, &current),
-            None if scopes.len() >= crate::file_activity::settings().max_outstanding => {
-                return current
-            }
             None => current,
         };
         scopes.insert(key.to_string(), effective.clone());

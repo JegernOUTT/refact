@@ -1060,7 +1060,7 @@ mod tests {
         let mut original = crate::runtime_settings::TrajectoryRuntimeSettings::default();
         original.max_queue_size = 777;
         original.hist_search_preview_chars = 12_345;
-        original.coordination.max_pending = 321;
+        original.coordination.max_work_views = 321;
         let path = crate::runtime_settings::settings_path(&app.paths.config_dir);
         tokio::fs::create_dir_all(path.parent().unwrap())
             .await
@@ -1069,7 +1069,7 @@ mod tests {
             .await
             .unwrap();
         let mut coordination = original.coordination.clone();
-        coordination.max_pending = 654;
+        coordination.max_work_views = 654;
         coordination.launch_context_tokens = 48_000;
         coordination.launch_context_entries = 512;
         coordination.launch_context_messages = 2048;
@@ -1114,8 +1114,8 @@ mod tests {
         *mutable.documents_state.workspace_folders.lock().unwrap() = vec![project.clone()];
         let app = AppState::from_gcx(gcx).await;
         let mut global = crate::runtime_settings::TrajectoryRuntimeSettings::default();
-        global.coordination.max_pending = 321;
-        global.coordination.max_active_engine = 48;
+        global.coordination.max_work_views = 321;
+        global.coordination.max_read_stamps = 48_000;
         let global_path = crate::runtime_settings::settings_path(&app.paths.config_dir);
         tokio::fs::create_dir_all(global_path.parent().unwrap())
             .await
@@ -1123,7 +1123,7 @@ mod tests {
         tokio::fs::write(&global_path, serde_yaml::to_string(&global).unwrap())
             .await
             .unwrap();
-        let sparse = serde_json::json!({"max_pending": 654});
+        let sparse = serde_json::json!({"max_work_views": 654});
         let saved = handle_v1_coordination_settings_post(
             State(app.clone()),
             Query(SettingsScopeQuery {
@@ -1135,9 +1135,9 @@ mod tests {
         .unwrap()
         .0;
         assert_eq!(saved.config, sparse);
-        assert_eq!(saved.effective.max_pending, 654);
-        assert_eq!(saved.effective.max_active_engine, 48);
-        assert!(saved.inherited.contains(&"max_active_engine".to_string()));
+        assert_eq!(saved.effective.max_work_views, 654);
+        assert_eq!(saved.effective.max_read_stamps, 48_000);
+        assert!(saved.inherited.contains(&"max_read_stamps".to_string()));
         let empty = handle_v1_coordination_settings_post(
             State(app.clone()),
             Query(SettingsScopeQuery {
@@ -1167,13 +1167,12 @@ mod tests {
         .await
         .unwrap();
         let invalid = serde_json::json!({
-            "max_active_engine": 0,
+            "max_read_stamps": 0,
             "max_active_project": original.coordination.max_active_project,
             "max_active_root": original.coordination.max_active_root,
-            "max_pending": original.coordination.max_pending,
+            "max_work_views": original.coordination.max_work_views,
             "max_outstanding": original.coordination.max_outstanding,
             "max_subchat_depth": original.coordination.max_subchat_depth,
-            "max_read_stamps": original.coordination.max_read_stamps,
             "max_write_records": original.coordination.max_write_records,
             "overview_default_rows": original.coordination.overview_default_rows,
             "overview_max_rows": original.coordination.overview_max_rows,

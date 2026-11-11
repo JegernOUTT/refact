@@ -522,7 +522,7 @@ Inline results return to the caller directly. A background result reaches its ch
 
 The three semantic families expose four tools:
 
-- `wait`: tagged duration/process/agents/task_agents target. Duration uses `duration_ms` (100 ms–1 h), optional tick interval, and top-level description; other targets accept a timeout. Child waits settle on the first terminal authorized child. Task-agent waits are planner-bound and return `parked`, not completion, with a best-effort 30–1800-second deadline. Interruption never cancels target work; duration tick events follow the tool result.
+- `wait`: tagged duration/process/agents/task_agents target. Duration uses `duration_ms` (at least 100 ms), optional tick interval, and top-level description; other targets accept a timeout. Child waits settle on the first terminal authorized child and impose no numeric target-count or timeout ceiling. Task-agent waits are planner-bound and return `parked`, not completion, with an optional best-effort deadline of at least 30 seconds. Durations must be representable by the system clock. Interruption never cancels target work; duration tick events follow the tool result.
 - `schedule`: `action: create|list|update|delete`, using existing cron/interval/one-shot/webhook jobs and durable/session storage. Update supports `run_now`; enable/disable belongs to pause/resume.
 - `pause` / `resume`: tagged `target.kind: goal|child|card|schedule`. Goal `until_ms` is a bounded timed snooze; indefinite/manual/safety holds remain user-resumable only. Child controls require `expected_run_generation` and release only the cooperative parent hold, never recovery. Card controls require planner authority. Schedule controls change future eligibility, not running executions.
 

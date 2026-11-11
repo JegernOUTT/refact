@@ -52,6 +52,28 @@ async fn poll_pending<F: std::future::Future>(mut future: std::pin::Pin<&mut F>)
 }
 
 #[tokio::test]
+async fn default_admission_runs_more_than_the_retired_engine_and_root_caps() {
+    let scheduler = AdmissionScheduler::new(CoordinationSettings::default());
+    let mut permits = Vec::new();
+    for index in 0..80 {
+        permits.push(
+            acquire_now(
+                &scheduler,
+                request(
+                    RuntimeKind::Trajectory,
+                    &format!("unlimited-{index}"),
+                    "one-project",
+                    "one-root",
+                ),
+            )
+            .await,
+        );
+    }
+    assert_eq!(permits.len(), 80);
+    drop(permits);
+}
+
+#[tokio::test]
 async fn repeated_aged_resumes_cannot_starve_fresh_work_in_the_same_root() {
     let sched = AdmissionScheduler::new(CoordinationSettings {
         max_resume_burst: 2,

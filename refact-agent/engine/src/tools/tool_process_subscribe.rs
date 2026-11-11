@@ -25,7 +25,6 @@ use crate::worktrees::scope::ExecutionScope;
 
 const DEFAULT_MAX_DURATION_MS: u64 = 30_000;
 const MIN_MAX_DURATION_MS: u64 = 1_000;
-const MAX_MAX_DURATION_MS: u64 = 600_000;
 const IDLE_FLUSH_INTERVAL: Duration = Duration::from_millis(100);
 const ABORT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const DEFAULT_MAX_EVENTS: usize = 100;
@@ -630,7 +629,7 @@ fn process_subscribe_input_schema() -> Value {
             "process_id": { "type": "string" },
             "push": PushMode::schema(),
             "regex_filter": { "type": "string", "description": "Optional regex. Only matching lines fire notifications. Empty = all lines." },
-            "max_duration_ms": { "type": "integer", "default": DEFAULT_MAX_DURATION_MS, "minimum": MIN_MAX_DURATION_MS, "maximum": MAX_MAX_DURATION_MS },
+            "max_duration_ms": { "type": "integer", "default": DEFAULT_MAX_DURATION_MS, "minimum": MIN_MAX_DURATION_MS },
             "max_events": { "type": "integer", "default": DEFAULT_MAX_EVENTS, "minimum": 1, "maximum": MAX_MAX_EVENTS },
             "max_line_bytes": { "type": "integer", "default": DEFAULT_MAX_LINE_BYTES, "minimum": MIN_MAX_LINE_BYTES, "maximum": MAX_MAX_LINE_BYTES }
         },
@@ -718,10 +717,16 @@ fn parse_max_duration_ms(args: &HashMap<String, Value>) -> Result<u64, String> {
             ));
         }
     };
-    if !(MIN_MAX_DURATION_MS..=MAX_MAX_DURATION_MS).contains(&value) {
+    if value < MIN_MAX_DURATION_MS {
         return Err(format!(
-            "argument `max_duration_ms` must be between {MIN_MAX_DURATION_MS} and {MAX_MAX_DURATION_MS}"
+            "argument `max_duration_ms` must be at least {MIN_MAX_DURATION_MS}"
         ));
+    }
+    if tokio::time::Instant::now()
+        .checked_add(Duration::from_millis(value))
+        .is_none()
+    {
+        return Err("max_duration_ms cannot be represented by the system clock".into());
     }
     Ok(value)
 }
@@ -858,6 +863,17 @@ mod tests {
         } else {
             "sleep 0.1; printf 'READY\nNOT_READY\nREADY\n'".to_string()
         }
+    }
+
+    #[test]
+    fn subscription_accepts_more_than_ten_minutes() {
+        let request = args(vec![("max_duration_ms", json!(3_600_000))]);
+        assert_eq!(parse_max_duration_ms(&request).unwrap(), 3_600_000);
+        assert!(
+            process_subscribe_input_schema()["properties"]["max_duration_ms"]
+                .get("maximum")
+                .is_none()
+        );
     }
 
     fn subscribe_duration_ms() -> u64 {

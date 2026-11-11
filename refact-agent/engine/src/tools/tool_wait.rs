@@ -26,15 +26,15 @@ impl Tool for ToolWait {
             name:"wait".into(), display_name:"Wait".into(),
             source:ToolSource {source_type:ToolSourceType::Builtin,config_path:self.config_path.clone()},
             experimental:false, allow_parallel:true,
-            description:"Wait for a duration, process, any one authorized child agent, or park the task planner awaiting matching agents. Duration targets require a nonblank target.description (at most 80 trimmed characters); the legacy top-level description remains accepted for duration only. Omit description and push for non-duration targets. push belongs at the top level, never inside target. Interruption never cancels the target. Duration ticks are enqueued after the wait tool result. Task agent timeout is 30–1800 seconds in milliseconds.".into(),
+            description:"Wait for a duration, process, any one authorized child agent, or park the task planner awaiting matching agents. Duration targets require a nonblank target.description (at most 80 trimmed characters); the legacy top-level description remains accepted for duration only. Omit description and push for non-duration targets. push belongs at the top level, never inside target. Interruption never cancels the target. Duration ticks are enqueued after the wait tool result. Task agent timeouts are optional, at least 30 seconds, in whole-second milliseconds.".into(),
             input_schema:json!({"type":"object","additionalProperties":false,"properties":{
                 "target":{"oneOf":[
-                    {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"duration"},"duration_ms":{"type":"integer","minimum":100,"maximum":3600000},"tick_interval_ms":{"type":"integer","minimum":5000},"description":{"type":"string","minLength":1,"maxLength":80,"pattern":"\\S","description":"Required nonblank reason for this duration wait, at most 80 trimmed characters."}},"required":["kind","duration_ms","description"]},
+                    {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"duration"},"duration_ms":{"type":"integer","minimum":100},"tick_interval_ms":{"type":"integer","minimum":5000},"description":{"type":"string","minLength":1,"maxLength":80,"pattern":"\\S","description":"Required nonblank reason for this duration wait, at most 80 trimmed characters."}},"required":["kind","duration_ms","description"]},
                     {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"process"},"process_id":{"type":"string","minLength":1}},"required":["kind","process_id"]},
-                    {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"agents"},"agent_ids":{"type":"array","minItems":1,"maxItems":128,"items":{"type":"string","minLength":1}}},"required":["kind","agent_ids"]},
+                    {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"agents"},"agent_ids":{"type":"array","minItems":1,"items":{"type":"string","minLength":1}}},"required":["kind","agent_ids"]},
                     {"type":"object","additionalProperties":false,"properties":task_properties,"required":["kind"]}
                 ]},
-                "timeout_ms":{"type":"integer","minimum":0,"description":"Optional timeout for non-duration targets only. Task agents require 30000–1800000 ms in whole seconds."},
+                "timeout_ms":{"type":"integer","minimum":0,"description":"Optional timeout for non-duration targets only. Task agents require at least 30000 ms in whole seconds."},
                 "push":push_schema
             },"required":["target"]}), output_schema:None,annotations:None,
         }
@@ -60,10 +60,8 @@ impl Tool for ToolWait {
             "task_agents" => {
                 if let Some(value) = operation.remove("timeout_ms") {
                     let ms = value.as_u64().ok_or("timeout_ms must be an integer")?;
-                    if !(30_000..=1_800_000).contains(&ms) {
-                        return Err(
-                            "task_agents timeout_ms must be between 30000 and 1800000".into()
-                        );
+                    if ms < 30_000 {
+                        return Err("task_agents timeout_ms must be at least 30000".into());
                     }
                     if ms % 1000 != 0 {
                         return Err("task_agents timeout_ms must use whole seconds".into());

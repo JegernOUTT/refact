@@ -5,6 +5,17 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::{OnceLock, RwLock};
 
+fn unlimited_admission() -> usize {
+    usize::MAX
+}
+
+fn ignore_retired_admission_limit<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<usize, D::Error> {
+    let _ = <serde::de::IgnoredAny as Deserialize>::deserialize(deserializer)?;
+    Ok(unlimited_admission())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct CoordinationSettings {
@@ -13,8 +24,23 @@ pub struct CoordinationSettings {
     /// Let the task planner read `agent:<id>` memories it does not own. Off by
     /// default; every grant is audited.
     pub memory_supervisor_override: bool,
+    #[serde(
+        default = "unlimited_admission",
+        skip_serializing,
+        deserialize_with = "ignore_retired_admission_limit"
+    )]
     pub max_active_engine: usize,
+    #[serde(
+        default = "unlimited_admission",
+        skip_serializing,
+        deserialize_with = "ignore_retired_admission_limit"
+    )]
     pub max_active_project: usize,
+    #[serde(
+        default = "unlimited_admission",
+        skip_serializing,
+        deserialize_with = "ignore_retired_admission_limit"
+    )]
     pub max_active_root: usize,
     /// Base admission opportunities per eligible root, multiplied by its weight.
     pub root_fairness_quantum: usize,
@@ -30,7 +56,17 @@ pub struct CoordinationSettings {
     /// fair-share turn is taken whatever the classes are, so every class keeps
     /// a minimum share of one opportunity in every `max_priority_burst + 1`.
     pub max_priority_burst: usize,
+    #[serde(
+        default = "unlimited_admission",
+        skip_serializing,
+        deserialize_with = "ignore_retired_admission_limit"
+    )]
     pub max_pending: usize,
+    #[serde(
+        default = "unlimited_admission",
+        skip_serializing,
+        deserialize_with = "ignore_retired_admission_limit"
+    )]
     pub max_outstanding: usize,
     /// Parked runs kept resident. Beyond this bound the least valuable parked
     /// run is checkpointed and evicted, which is not cancellation: it keeps its
@@ -117,7 +153,9 @@ pub struct CoordinationSettings {
     /// change which cards a wave submits.
     pub overlap_ordering_enabled: bool,
     pub agent_wait_default_ms: u64,
+    #[serde(skip)]
     pub agent_wait_max_ms: u64,
+    #[serde(skip)]
     pub agent_wait_max_agents: usize,
     pub subagent_default_steps: usize,
     pub subagent_max_steps: usize,
@@ -309,17 +347,17 @@ impl Default for CoordinationSettings {
             enabled: true,
             auto_inject_enabled: true,
             memory_supervisor_override: false,
-            max_active_engine: 32,
-            max_active_project: 16,
-            max_active_root: 16,
+            max_active_engine: usize::MAX,
+            max_active_project: usize::MAX,
+            max_active_root: usize::MAX,
             root_fairness_quantum: 1,
             root_weights: BTreeMap::new(),
             max_root_weight_entries: 4096,
             max_resume_burst: 4,
             default_priority: WorkPriority::Normal,
             max_priority_burst: 4,
-            max_pending: 1024,
-            max_outstanding: 4096,
+            max_pending: usize::MAX,
+            max_outstanding: usize::MAX,
             max_parked_residency: 256,
             max_subchat_depth: 5,
             max_read_stamps: 16384,
@@ -1295,6 +1333,32 @@ mod tests {
     use super::*;
 
     #[test]
+    fn retired_admission_caps_load_as_unlimited_and_are_not_saved() {
+        let keys = [
+            "max_active_engine",
+            "max_active_project",
+            "max_active_root",
+            "max_pending",
+            "max_outstanding",
+        ];
+        let raw = keys
+            .into_iter()
+            .map(|key| (key.to_string(), serde_json::json!(1)))
+            .collect::<serde_json::Map<_, _>>();
+        let loaded: CoordinationSettings =
+            serde_json::from_value(serde_json::Value::Object(raw)).unwrap();
+        assert_eq!(loaded.max_active_engine, usize::MAX);
+        assert_eq!(loaded.max_active_project, usize::MAX);
+        assert_eq!(loaded.max_active_root, usize::MAX);
+        assert_eq!(loaded.max_pending, usize::MAX);
+        assert_eq!(loaded.max_outstanding, usize::MAX);
+        let saved = serde_json::to_value(loaded).unwrap();
+        for key in keys {
+            assert!(saved.get(key).is_none(), "retired key persisted: {key}");
+        }
+    }
+
+    #[test]
     fn recovery_settings_defaults_and_bounds() {
         let legacy: CoordinationSettings = serde_json::from_str("{}").unwrap();
         assert!(legacy.recovery_auto_retry_enabled);
@@ -1355,7 +1419,7 @@ mod tests {
         for mutate in [
             |settings: &mut CoordinationSettings| settings.max_parked_residency = 0,
             |settings: &mut CoordinationSettings| {
-                settings.max_parked_residency = settings.max_outstanding + 1
+                settings.max_outstanding = settings.max_parked_residency - 1
             },
         ] {
             let mut settings = CoordinationSettings::default();

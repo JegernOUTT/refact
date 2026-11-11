@@ -282,7 +282,7 @@ fn agent_status_schema() -> Value {
 
 fn parse_wait_targets(
     args: &HashMap<String, Value>,
-    max_agents: usize,
+    _max_agents: usize,
 ) -> Result<Vec<String>, String> {
     let mut ids: Vec<String> = match args.get("agent_ids") {
         None | Some(Value::Null) => Vec::new(),
@@ -302,22 +302,11 @@ fn parse_wait_targets(
             return Err(format!("Unknown argument '{key}'"));
         }
     }
-    if ids.len() > max_agents.min(128) {
-        return Err(format!(
-            "`agent_ids` supports at most {} agents per wait",
-            max_agents.min(128)
-        ));
-    }
     ids.dedup();
     let mut seen = std::collections::HashSet::new();
     ids.retain(|id| seen.insert(id.clone()));
     if ids.is_empty() {
         return Err("provide `agent_id` or a nonempty `agent_ids` list".to_string());
-    }
-    if ids.len() > max_agents {
-        return Err(format!(
-            "`agent_ids` supports at most {max_agents} agents per wait"
-        ));
     }
     Ok(ids)
 }
@@ -425,14 +414,17 @@ fn parse_optional_usize(
 fn parse_wait_timeout_ms(
     args: &HashMap<String, Value>,
     default_ms: u64,
-    max_ms: u64,
+    _max_ms: u64,
 ) -> Result<u64, String> {
     let timeout_ms = parse_optional_u64(args, "timeout_ms", default_ms)?;
     if timeout_ms < 1 {
         return Err("timeout_ms must be at least 1ms".to_string());
     }
-    if timeout_ms > max_ms {
-        return Err(format!("timeout_ms must be at most {max_ms}ms"));
+    if tokio::time::Instant::now()
+        .checked_add(std::time::Duration::from_millis(timeout_ms))
+        .is_none()
+    {
+        return Err("timeout_ms cannot be represented by the system clock".into());
     }
     Ok(timeout_ms)
 }
@@ -2257,7 +2249,7 @@ mod tests {
     }
 
     #[test]
-    fn agent_wait_targets_dedupe_and_respect_the_settings_bound() {
+    fn agent_wait_targets_dedupe_without_an_agent_count_or_timeout_ceiling() {
         let max = 3;
         assert_eq!(
             parse_wait_targets(&args(&[("agent_ids", json!(["a", " a ", "b"])),]), max).unwrap(),
@@ -2267,17 +2259,32 @@ mod tests {
         assert!(parse_wait_targets(&args(&[]), max).is_err());
         assert!(parse_wait_targets(&args(&[("agent_ids", json!(["a", 7]))]), max).is_err());
         assert!(parse_wait_targets(&args(&[("agent_ids", json!("a"))]), max).is_err());
-        let over = parse_wait_targets(&args(&[("agent_ids", json!(["a", "b", "c", "d"]))]), max)
-            .unwrap_err();
-        assert!(over.contains("at most 3"), "{over}");
+        assert_eq!(
+            parse_wait_targets(&args(&[("agent_ids", json!(["a", "b", "c", "d"]))]), max)
+                .unwrap()
+                .len(),
+            4
+        );
+        let many = (0..300)
+            .map(|index| format!("agent-{index}"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            parse_wait_targets(&args(&[("agent_ids", json!(many))]), max)
+                .unwrap()
+                .len(),
+            300
+        );
 
         let settings = refact_work_core::coordination_settings();
-        assert!(parse_wait_timeout_ms(
-            &args(&[("timeout_ms", json!(settings.agent_wait_max_ms + 1))]),
-            settings.agent_wait_default_ms,
-            settings.agent_wait_max_ms,
-        )
-        .is_err());
+        assert_eq!(
+            parse_wait_timeout_ms(
+                &args(&[("timeout_ms", json!(settings.agent_wait_max_ms + 1))]),
+                settings.agent_wait_default_ms,
+                settings.agent_wait_max_ms,
+            )
+            .unwrap(),
+            settings.agent_wait_max_ms + 1
+        );
         assert!(parse_wait_timeout_ms(
             &args(&[("timeout_ms", json!(0))]),
             settings.agent_wait_default_ms,

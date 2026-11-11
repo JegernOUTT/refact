@@ -15,7 +15,6 @@ use crate::tools::tool_task_check_agents::{
 };
 
 const WAKE_UP_AFTER_SECS_MIN: u64 = 30;
-const WAKE_UP_AFTER_SECS_MAX: u64 = 1800;
 const MAX_WAITING_CARD_IDS: usize = 50;
 
 pub(crate) fn parse_wake_up_after_secs(
@@ -36,11 +35,14 @@ pub(crate) fn parse_wake_up_after_secs(
             WAKE_UP_AFTER_SECS_MIN
         ));
     }
-    if secs > WAKE_UP_AFTER_SECS_MAX {
-        return Err(format!(
-            "wake_up_after_secs must be at most {} seconds",
-            WAKE_UP_AFTER_SECS_MAX
-        ));
+    if chrono::Duration::try_seconds(
+        i64::try_from(secs)
+            .map_err(|_| "wake_up_after_secs cannot be represented by the system clock")?,
+    )
+    .and_then(|duration| chrono::Utc::now().checked_add_signed(duration))
+    .is_none()
+    {
+        return Err("wake_up_after_secs cannot be represented by the system clock".into());
     }
     Ok(Some(secs))
 }
@@ -332,11 +334,10 @@ mod tests {
     }
 
     #[test]
-    fn wait_agents_rejects_wake_up_secs_above_1800() {
+    fn wait_agents_accepts_wake_up_secs_above_1800() {
         let mut args = HashMap::new();
         args.insert("wake_up_after_secs".to_string(), json!(1801));
-        let err = parse_wake_up_after_secs(&args).unwrap_err();
-        assert!(err.contains("at most 1800"), "got: {}", err);
+        assert_eq!(parse_wake_up_after_secs(&args).unwrap(), Some(1801));
     }
 
     #[test]

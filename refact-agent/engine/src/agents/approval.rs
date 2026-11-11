@@ -192,12 +192,6 @@ pub async fn request(
     if ccx.lock().await.approved_executions.contains_key(&call.id) {
         return Err("command approval already exists for this tool call".into());
     }
-    if execution.is_some()
-        && ccx.lock().await.approved_executions.len()
-            >= crate::file_activity::settings().max_outstanding
-    {
-        return Err("child execution approval history reached its configured bound".into());
-    }
     let pending = PendingApproval {
         id: request_id.clone(),
         child_work_id: agent_id.clone(),

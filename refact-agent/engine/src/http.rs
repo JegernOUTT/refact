@@ -270,10 +270,20 @@ pub async fn start_server(
                 let gui_origins = gui_public_origin_candidates(port);
                 let router = make_refact_http_server(app_state).layer(Extension(gui_origins));
                 let gcx_for_shutdown = gcx.clone();
-                let shutdown = async move {
+                let (stop_listener, listener_stopped) = tokio::sync::oneshot::channel();
+                let (drained, drain_completed) = tokio::sync::oneshot::channel();
+                let shutdown = tokio::spawn(async move {
                     crate::global_context::block_until_signal(ask_shutdown_receiver, shutdown_flag)
                         .await;
+                    let _ = stop_listener.send(());
+                    if let Some(mdns) = mdns {
+                        mdns.shutdown();
+                    }
                     let app = crate::app_state::AppState::from_gcx(gcx_for_shutdown).await;
+                    app.runtime
+                        .tool_jobs
+                        .scopes
+                        .begin_shutdown_requested("signal");
                     if let Err(errors) =
                         crate::chat::trajectories::flush_all_trajectories(app.clone()).await
                     {
@@ -281,10 +291,6 @@ pub async fn start_server(
                             error!("graceful shutdown trajectory flush failed: {}", error);
                         }
                     }
-                    app.runtime
-                        .tool_jobs
-                        .scopes
-                        .begin_shutdown_requested("signal");
                     if let Err(error) = crate::chat::close_all_chat_sessions(app).await {
                         error!(
                             ?error,
@@ -295,20 +301,29 @@ pub async fn start_server(
                         // exit externally, but that is not a successful drain.
                         std::future::pending::<()>().await;
                     }
-                };
+                    let _ = drained.send(());
+                });
                 let server = builder
                     .serve(router.into_make_service_with_connect_info::<SocketAddr>())
-                    .with_graceful_shutdown(shutdown);
+                    .with_graceful_shutdown(async move {
+                        let _ = listener_stopped.await;
+                    });
                 let resp = server
                     .await
                     .map_err(|e| format!("HTTP server error: {}", e));
                 if let Err(e) = resp {
                     error!("server error: {}", e);
+                    shutdown.abort();
+                    let _ = shutdown.await;
                 } else {
-                    info!("clean shutdown");
-                }
-                if let Some(mdns) = mdns {
-                    mdns.shutdown();
+                    let confirmed = drain_completed.await.is_ok();
+                    match shutdown.await {
+                        Ok(()) if confirmed => info!("clean shutdown"),
+                        Ok(()) => error!("shutdown worker exited without confirming its drain"),
+                        Err(error) => {
+                            error!(%error, "shutdown worker failed before drain completed")
+                        }
+                    }
                 }
             }
             Err(e) => {

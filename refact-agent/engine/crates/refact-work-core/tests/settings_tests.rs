@@ -81,6 +81,7 @@ fn project_cap_above_engine_cap_is_invalid() {
 fn pending_above_outstanding_is_invalid() {
     let s = CoordinationSettings {
         max_pending: 8192,
+        max_outstanding: 4096,
         ..CoordinationSettings::default()
     };
     assert!(s

@@ -114,9 +114,6 @@ static COORDINATION_FIELD_BOUNDS: &[CoordinationFieldBound] = &[
     coordination_bool("enabled"),
     coordination_bool("auto_inject_enabled"),
     coordination_bool("memory_supervisor_override"),
-    coordination_integer("max_active_engine", 1, 4_096),
-    coordination_integer("max_active_project", 1, 4_096),
-    coordination_integer("max_active_root", 1, 4_096),
     coordination_integer("root_fairness_quantum", 1, 1_024),
     CoordinationFieldBound {
         name: "root_weights",
@@ -129,8 +126,6 @@ static COORDINATION_FIELD_BOUNDS: &[CoordinationFieldBound] = &[
     coordination_integer("max_resume_burst", 1, 1_024),
     coordination_string_enum("default_priority", refact_work_core::WorkPriority::NAMES),
     coordination_integer("max_priority_burst", 1, 1_024),
-    coordination_integer("max_pending", 1, 1_000_000),
-    coordination_integer("max_outstanding", 1, 4_000_000),
     coordination_integer("max_parked_residency", 1, 4_000_000),
     coordination_integer("max_subchat_depth", 1, 64),
     coordination_integer("max_read_stamps", 64, 1_048_576),
@@ -193,8 +188,6 @@ static COORDINATION_FIELD_BOUNDS: &[CoordinationFieldBound] = &[
     coordination_integer("max_pipeline_depth", 1, 10_000),
     coordination_bool("overlap_ordering_enabled"),
     coordination_integer("agent_wait_default_ms", 1, 3_600_000),
-    coordination_integer("agent_wait_max_ms", 1, 86_400_000),
-    coordination_integer("agent_wait_max_agents", 1, 10_000),
     coordination_integer("subagent_max_steps", 1, 100_000),
     coordination_integer("subagent_default_steps", 1, 100_000),
     coordination_integer("launch_context_tokens", 1, 1_000_000),
@@ -287,10 +280,19 @@ pub fn coordination_field_bounds() -> &'static [CoordinationFieldBound] {
 }
 
 /// Dotted names the GUI addresses coordination leaves by, e.g.
-/// `coordination.max_active_engine`.
+/// `coordination.max_subchat_depth`.
 pub const COORDINATION_SETTINGS_KEY: &str = "coordination";
 
-const RETIRED_COORDINATION_SETTINGS: &[&str] = &["work_stream_max_bytes"];
+const RETIRED_COORDINATION_SETTINGS: &[&str] = &[
+    "work_stream_max_bytes",
+    "max_active_engine",
+    "max_active_project",
+    "max_active_root",
+    "max_pending",
+    "max_outstanding",
+    "agent_wait_max_ms",
+    "agent_wait_max_agents",
+];
 
 pub const RETIRED_TRAJECTORY_SETTINGS: &[&str] = &["max_parallel_tools"];
 
@@ -1305,8 +1307,7 @@ mod tests {
             codegraph_exec_flow_max_nodes: 987,
             vecdb_trajectory_split_bytes: 4_096,
             coordination: CoordinationSettings {
-                max_active_engine: 21,
-                max_pending: 512,
+                max_work_views: 512,
                 lock_timeout_secs: 17,
                 ..CoordinationSettings::default()
             },
@@ -1434,6 +1435,46 @@ trajectory_writer_enabled: false
             assert!(!mapping.contains_key(serde_yaml::Value::String("max_parallel_tools".into())));
             assert!(mapping.contains_key(serde_yaml::Value::String("max_queue_size".into())));
         }
+    }
+
+    #[test]
+    fn retired_execution_caps_are_ignored_and_not_advertised_or_persisted() {
+        let keys = [
+            "max_active_engine",
+            "max_active_project",
+            "max_active_root",
+            "max_pending",
+            "max_outstanding",
+            "agent_wait_max_ms",
+            "agent_wait_max_agents",
+        ];
+        let mut raw = serde_yaml::Mapping::new();
+        for key in keys {
+            raw.insert(
+                serde_yaml::Value::String(key.into()),
+                serde_yaml::Value::from(1),
+            );
+        }
+        let input = serde_yaml::to_string(&serde_yaml::Mapping::from_iter([(
+            serde_yaml::Value::String("coordination".into()),
+            serde_yaml::Value::Mapping(raw),
+        )]))
+        .unwrap();
+        let loaded = parse_persisted(input.as_bytes()).unwrap();
+        assert_eq!(loaded.coordination.max_active_engine, usize::MAX);
+        assert_eq!(loaded.coordination.max_pending, usize::MAX);
+        let persisted = serde_json::to_value(&loaded.coordination).unwrap();
+        for key in keys {
+            assert!(persisted.get(key).is_none(), "{key} persisted");
+            assert!(!coordination_field_bounds()
+                .iter()
+                .any(|bound| bound.name == key));
+        }
+        let overrides =
+            CoordinationOverride::from_iter(keys.map(|key| (key.into(), serde_json::json!(1))));
+        assert!(normalize_coordination_override(overrides)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -1585,7 +1626,6 @@ trajectory_writer_enabled: false
     #[test]
     fn a_sparse_project_override_resolves_over_the_global_settings() {
         let global = CoordinationSettings {
-            max_active_engine: 32,
             capsule_max_rows: 24,
             ..CoordinationSettings::default()
         };
@@ -1611,7 +1651,7 @@ trajectory_writer_enabled: false
 
         let engine = view
             .iter()
-            .find(|field| field.name == "max_active_engine")
+            .find(|field| field.name == "max_subchat_depth")
             .unwrap();
         assert_eq!(engine.source, CoordinationValueSource::Global);
         assert!(engine.inherited);
@@ -1627,12 +1667,12 @@ trajectory_writer_enabled: false
 
         let mut widened = CoordinationOverride::new();
         widened.insert(
-            "max_active_engine".to_string(),
+            "max_subchat_depth".to_string(),
             serde_json::json!(1_000_000),
         );
         let error = normalize_coordination_override(widened).unwrap_err();
         assert!(
-            error.contains("coordination.max_active_engine"),
+            error.contains("coordination.max_subchat_depth"),
             "unexpected error: {error}"
         );
 

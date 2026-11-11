@@ -20,7 +20,6 @@ use crate::postprocessing::pp_command_output::OutputFilter;
 use crate::tools::tools_description::{WaitInterrupt};
 
 const MIN_DURATION_MS: u64 = 100;
-const MAX_DURATION_MS: u64 = 3_600_000;
 const MIN_TICK_INTERVAL_MS: u64 = 5_000;
 
 #[derive(Clone)]
@@ -100,10 +99,14 @@ pub(crate) async fn execute_duration_wait(
 
 fn parse_sleep_request(args: &HashMap<String, Value>) -> Result<SleepRequest, String> {
     let duration_ms = required_u64(args, "duration_ms")?;
-    if !(MIN_DURATION_MS..=MAX_DURATION_MS).contains(&duration_ms) {
-        return Err(format!(
-            "duration_ms must be between {MIN_DURATION_MS} and {MAX_DURATION_MS}"
-        ));
+    if duration_ms < MIN_DURATION_MS {
+        return Err(format!("duration_ms must be at least {MIN_DURATION_MS}"));
+    }
+    if TokioInstant::now()
+        .checked_add(Duration::from_millis(duration_ms))
+        .is_none()
+    {
+        return Err("duration_ms cannot be represented by the system clock".into());
     }
 
     let tick_interval_ms = optional_u64(args, "tick_interval_ms")?;
@@ -112,6 +115,12 @@ fn parse_sleep_request(args: &HashMap<String, Value>) -> Result<SleepRequest, St
             return Err(format!(
                 "tick_interval_ms must be at least {MIN_TICK_INTERVAL_MS}"
             ));
+        }
+        if TokioInstant::now()
+            .checked_add(Duration::from_millis(tick_interval_ms))
+            .is_none()
+        {
+            return Err("tick_interval_ms cannot be represented by the system clock".into());
         }
     }
 
@@ -308,6 +317,13 @@ mod tests {
             Ok(_) => panic!("expected parse_sleep_request to fail"),
             Err(error) => error,
         }
+    }
+
+    #[test]
+    fn duration_wait_accepts_more_than_one_hour() {
+        let mut args = sleep_args(None, "long observation");
+        args.insert("duration_ms".into(), json!(7_200_000));
+        assert_eq!(parse_sleep_request(&args).unwrap().duration_ms, 7_200_000);
     }
 
     #[tokio::test(start_paused = true)]
