@@ -15,8 +15,6 @@ use crate::exec::{
 use crate::files_correction::get_active_project_path;
 use crate::scheduler::types::{CommandSpec, Job};
 
-const DEFAULT_COMMAND_TIMEOUT_SECS: u64 = 300;
-const MAX_COMMAND_TIMEOUT_SECS: u64 = 3600;
 const COMMAND_TRANSCRIPT_MAX_BYTES: usize = 2 * 1024 * 1024;
 
 pub struct CommandRunResult {
@@ -52,10 +50,7 @@ async fn run_command_inner(
         service_name: None,
         workspace: project_root.clone(),
     };
-    let timeout_secs = cmd
-        .timeout_secs
-        .unwrap_or(DEFAULT_COMMAND_TIMEOUT_SECS)
-        .min(MAX_COMMAND_TIMEOUT_SECS);
+    let timeout_secs = cmd.timeout_secs;
     let request = build_exec_request(
         app.gcx.clone(),
         CommandPolicyInput {
@@ -70,11 +65,15 @@ async fn run_command_inner(
     .await
     .map_err(|error| error.message)?
     .request
-    .with_timeout(Duration::from_secs(timeout_secs))
     .with_owner(owner)
     .with_transcript_limit(COMMAND_TRANSCRIPT_MAX_BYTES)
     .with_short_description(sanitize_short_description(&job.description))
     .with_tty(false);
+    let request = if let Some(seconds) = timeout_secs {
+        request.with_timeout(Duration::from_secs(seconds))
+    } else {
+        request
+    };
     let result = app.runtime.exec_registry.spawn(request).await?;
     let process_id = result.snapshot.meta.process_id.clone();
     let completed = app.runtime.exec_registry.wait(&process_id).await?;
@@ -108,7 +107,7 @@ async fn run_command_inner(
     let status = if command_status_is_success(&completed.status) {
         "fired"
     } else {
-        append_status_summary(&mut stderr, &completed.status, timeout_secs);
+        append_status_summary(&mut stderr, &completed.status, timeout_secs.unwrap_or(0));
         "error"
     };
     Ok(CommandRunResult {

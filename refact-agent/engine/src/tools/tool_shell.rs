@@ -143,7 +143,6 @@ pub(crate) async fn approval_request_without_cache(
         )
     };
     let policy = shell_gate::load_policy(gcx.clone()).await;
-    let policy_timeout = policy.execution.foreground_timeout_secs;
     let mut filter = OutputFilter::default();
     filter.limit_lines = policy.execution.output_limit_lines;
     let checkout = command_checkout::resolve(ccx, args).await?;
@@ -194,10 +193,10 @@ pub(crate) async fn approval_request_without_cache(
         if tty {
             request = request.with_pty_size(TOOL_PTY_ROWS, TOOL_PTY_COLS);
         }
-        if !parsed.run_in_background {
-            request = request.with_timeout(Duration::from_secs(
-                parsed.timeout.unwrap_or(policy_timeout),
-            ));
+    }
+    if !parsed.run_in_background {
+        if let Some(timeout) = parsed.timeout {
+            request = request.with_timeout(Duration::from_secs(timeout));
         }
     }
     Ok((request, checkout))
@@ -282,9 +281,7 @@ impl Tool for ToolShell {
                 return Err(error);
             }
         };
-        let timeout = parsed
-            .timeout
-            .unwrap_or(shell_policy.execution.foreground_timeout_secs);
+        let timeout = parsed.timeout;
 
         let mut error_log = Vec::new();
         let env_variables =
@@ -377,9 +374,10 @@ impl Tool for ToolShell {
             request = request.with_pty_size(TOOL_PTY_ROWS, TOOL_PTY_COLS);
         }
         if !parsed.run_in_background {
-            request = request
-                .with_timeout(Duration::from_secs(timeout))
-                .with_abort_flag(abort_flag.clone());
+            request = request.with_abort_flag(abort_flag.clone());
+            if let Some(timeout) = timeout {
+                request = request.with_timeout(Duration::from_secs(timeout));
+            }
         }
         if let Some(progress_tx) = progress_tx {
             request = request.with_output_progress_tx(progress_tx);
@@ -664,7 +662,12 @@ impl Tool for ToolShell {
                 ));
             }
         }
-        append_status_line(&mut out, &result.snapshot.status, duration, timeout);
+        append_status_line(
+            &mut out,
+            &result.snapshot.status,
+            duration,
+            timeout.unwrap_or(0),
+        );
         append_sandbox_denial_hint(&mut out, &result.snapshot.status, sandbox_active);
 
         let mut message = ChatMessage {
@@ -674,7 +677,7 @@ impl Tool for ToolShell {
             tool_call_id: tool_call_id.clone(),
             tool_failed: tool_failed_for_status(&result.snapshot.status),
             output_filter: Some(OutputFilter::no_limits()),
-            extra: exec_extra(&result.snapshot, &read, duration, Some(timeout), tty),
+            extra: exec_extra(&result.snapshot, &read, duration, timeout, tty),
             ..Default::default()
         };
         if let Some(cache) = &cache {
@@ -852,7 +855,7 @@ fn shell_input_schema() -> Value {
             {"type": "integer"},
             {"type": "string"}
         ],
-        "description": "Optional. Timeout in seconds for the command (default: 10). Use higher values for long-running commands. Only applies to foreground commands; rejected when run_in_background=true.",
+        "description": "Optional caller-requested timeout in seconds; omitted means no execution deadline. Only applies to foreground commands; rejected when run_in_background=true.",
     });
     schema["properties"]["tty"] = json!({
         "type": "boolean",
@@ -1496,6 +1499,23 @@ mod tests {
         TEST_FOREGROUND_WINDOW
             .scope(Duration::from_millis(100), future)
             .await
+    }
+
+    #[tokio::test]
+    async fn shell_request_has_no_implicit_timeout_but_preserves_an_explicit_one() {
+        let (_gcx, ccx) = ccx_with_gcx_and_abort(None).await;
+        let base = HashMap::from([
+            ("command".to_string(), json!("echo ready")),
+            ("description".to_string(), json!("Check readiness")),
+        ]);
+        let (request, _) = approval_request_without_cache(&ccx, &base).await.unwrap();
+        assert!(request.timeout.is_none());
+        let mut explicit = base;
+        explicit.insert("timeout".into(), json!(12));
+        let (request, _) = approval_request_without_cache(&ccx, &explicit)
+            .await
+            .unwrap();
+        assert_eq!(request.timeout, Some(Duration::from_secs(12)));
     }
 
     #[test]

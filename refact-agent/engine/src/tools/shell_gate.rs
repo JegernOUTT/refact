@@ -102,7 +102,7 @@ impl Default for ShellLlmValidation {
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ShellExecutionDefaults {
-    #[serde(default = "default_foreground_timeout")]
+    #[serde(skip)]
     pub foreground_timeout_secs: u64,
     #[serde(default = "default_output_limit")]
     pub output_limit_lines: usize,
@@ -195,7 +195,7 @@ fn default_llm_timeout() -> u64 {
 }
 
 fn default_foreground_timeout() -> u64 {
-    10
+    0
 }
 
 fn default_output_limit() -> usize {
