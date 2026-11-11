@@ -7,6 +7,8 @@ use std::sync::Mutex as StdMutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use chrono::Utc;
+use futures::future::{BoxFuture, Shared};
+use futures::FutureExt;
 use refact_core::recovery::{RecoveryRecord, RecoveryState};
 use serde::{Deserialize, Serialize};
 use tokio::fs;
@@ -1015,6 +1017,7 @@ const COORDINATOR_FLUSH_INTERVAL: Duration = Duration::from_millis(250);
 enum TrajectoryIndexMutation {
     Upsert(TrajectoryIndexEntry),
     Remove(HashSet<String>),
+    RecoveryProjection(Arc<RecoveryHydration>),
     Reconcile(Option<TrajectorySourceIdentity>),
 }
 
@@ -1184,6 +1187,11 @@ struct TrajectoryIndexDirectoryState {
     generation: Option<DirectoryGeneration>,
     generation_verified_at: Option<Instant>,
     loaded: bool,
+    load: Option<SharedIndexLoad>,
+    load_generation: u64,
+    recovery_hydration: Option<SharedRecoveryHydration>,
+    recovery_hydration_generation: u64,
+    recovery_checkpoint_required: bool,
     recovery_flush_required: bool,
     last_access: u64,
     next_sequence: u64,
@@ -1223,7 +1231,8 @@ impl TrajectoryIndexDirectoryState {
                 let remove = match mutation {
                     TrajectoryIndexMutation::Upsert(new) => entry.id == new.id,
                     TrajectoryIndexMutation::Remove(ids) => ids.contains(&entry.id),
-                    TrajectoryIndexMutation::Reconcile(_) => return None,
+                    TrajectoryIndexMutation::RecoveryProjection(_)
+                    | TrajectoryIndexMutation::Reconcile(_) => return None,
                 };
                 if remove {
                     removed = removed.checked_add(exact_index_value_size(entry)?)?;
@@ -1246,7 +1255,8 @@ impl TrajectoryIndexDirectoryState {
             let added = match mutation {
                 TrajectoryIndexMutation::Upsert(entry) => exact_index_value_size(entry)?,
                 TrajectoryIndexMutation::Remove(_) => 0,
-                TrajectoryIndexMutation::Reconcile(_) => return None,
+                TrajectoryIndexMutation::RecoveryProjection(_)
+                | TrajectoryIndexMutation::Reconcile(_) => return None,
             };
             size.checked_add(index_size_envelope(index)?)?
                 .checked_add(added)
@@ -1307,6 +1317,10 @@ pub struct TrajectoryIndexCoordinator {
     generation_ttl: Duration,
     listing_counter_scope: TrajectoryIndexListingCounterScope,
 }
+
+type SharedIndexLoad = Shared<BoxFuture<'static, Result<Arc<CoordinatorLoadResult>, String>>>;
+type RecoveryHydration = Vec<(TrajectoryIndexEntry, Option<TrajectoryIndexEntry>)>;
+type SharedRecoveryHydration = Shared<BoxFuture<'static, Result<Arc<RecoveryHydration>, String>>>;
 
 impl Default for TrajectoryIndexCoordinator {
     fn default() -> Self {
@@ -1418,11 +1432,21 @@ impl TrajectoryIndexCoordinator {
             let stale = directories
                 .iter()
                 .filter_map(|(path, state)| {
+                    if Arc::strong_count(state) != 1 {
+                        return None;
+                    }
                     let state = state.try_lock().ok()?;
-                    state
-                        .pending
-                        .is_empty()
-                        .then_some((path.clone(), state.last_access))
+                    (state.pending.is_empty()
+                        && !state.recovery_checkpoint_required
+                        && state
+                            .load
+                            .as_ref()
+                            .is_none_or(|load| load.clone().now_or_never().is_some())
+                        && state
+                            .recovery_hydration
+                            .as_ref()
+                            .is_none_or(|load| load.clone().now_or_never().is_some()))
+                    .then_some((path.clone(), state.last_access))
                 })
                 .min_by_key(|(_, last_access)| *last_access)
                 .map(|(path, _)| path);
@@ -1530,7 +1554,7 @@ impl TrajectoryIndexCoordinator {
         let mut found = Vec::with_capacity(dirs.len());
         for dir in dirs {
             self.record_listing_caller(caller);
-            let entries = match self.list_entries_shared(&dir, None).await {
+            let entries = match self.list_metadata_entries_shared(&dir, None).await {
                 Ok(entries) => entries,
                 Err(error) => {
                     tracing::warn!("Failed to read trajectory index {:?}: {}", dir, error);
@@ -1562,46 +1586,64 @@ impl TrajectoryIndexCoordinator {
         source_hint: Option<TrajectorySourceIdentity>,
     ) -> Result<Arc<AMutex<TrajectoryIndexDirectoryState>>, String> {
         let state = self.directory_state(dir).await?;
-        if state.lock().await.loaded {
-            return Ok(state);
-        }
-
-        let load_span = coordinator_span(PerfComponent::TrajectoryIndexCoordinatorLoad, dir);
-        let index_read_span = coordinator_span(PerfComponent::TrajectoryIndexRead, dir);
-        // A cold flush can contend during this load, before its flush lock span exists.
-        // Capture the recorder here rather than on the blocking worker.
-        let lock_wait_span = coordinator_span(PerfComponent::TrajectoryIndexLockWait, dir);
-        let listing_counter_scope = self.listing_counter_scope.clone();
-        let dir = dir.to_path_buf();
-        let loaded = tokio::task::spawn_blocking(move || {
-            let result = load_trajectory_index_for_coordinator_sync(
-                &dir,
-                source_hint,
-                index_read_span,
-                lock_wait_span,
-                &listing_counter_scope,
-            );
-            let item_count = result
-                .as_ref()
-                .ok()
-                .map(|loaded| loaded.index.entries.len() as u64);
-            finish_coordinator_span(
-                load_span,
-                if result.is_ok() {
-                    PerfOutcome::Success
-                } else {
-                    PerfOutcome::Failure
-                },
-                item_count,
-            );
-            result
-        })
-        .await
-        .map_err(|error| format!("Trajectory index coordinator load task failed: {error}"))??;
+        let (load, generation) = {
+            let mut guard = state.lock().await;
+            if guard.loaded {
+                drop(guard);
+                return Ok(state);
+            }
+            if guard.load.is_none() {
+                let load_span =
+                    coordinator_span(PerfComponent::TrajectoryIndexCoordinatorLoad, dir);
+                let index_read_span = coordinator_span(PerfComponent::TrajectoryIndexRead, dir);
+                let lock_wait_span = coordinator_span(PerfComponent::TrajectoryIndexLockWait, dir);
+                let listing_counter_scope = self.listing_counter_scope.clone();
+                let dir = dir.to_path_buf();
+                let task = tokio::task::spawn_blocking(move || {
+                    let result = load_trajectory_index_for_coordinator_sync(
+                        &dir,
+                        source_hint,
+                        index_read_span,
+                        lock_wait_span,
+                        &listing_counter_scope,
+                    );
+                    let item_count = result
+                        .as_ref()
+                        .ok()
+                        .map(|loaded| loaded.index.entries.len() as u64);
+                    finish_coordinator_span(
+                        load_span,
+                        if result.is_ok() {
+                            PerfOutcome::Success
+                        } else {
+                            PerfOutcome::Failure
+                        },
+                        item_count,
+                    );
+                    result.map(Arc::new)
+                });
+                guard.load = Some(
+                    async move {
+                        task.await.map_err(|error| {
+                            format!("Trajectory index coordinator load task failed: {error}")
+                        })?
+                    }
+                    .boxed()
+                    .shared(),
+                );
+                guard.load_generation = guard.load_generation.wrapping_add(1);
+            }
+            (guard.load.as_ref().unwrap().clone(), guard.load_generation)
+        };
+        let loaded = load.await;
 
         let mut state_guard = state.lock().await;
+        if state_guard.load_generation == generation {
+            state_guard.load = None;
+        }
+        let loaded = loaded?;
         if !state_guard.loaded {
-            let mut index = loaded.index;
+            let mut index = loaded.index.clone();
             state_guard.persisted = Some(index.clone());
             for pending in &state_guard.pending {
                 if !matches!(pending.mutation, TrajectoryIndexMutation::Reconcile(_)) {
@@ -1611,15 +1653,15 @@ impl TrajectoryIndexCoordinator {
             let index = Arc::new(index);
             self.sync_entry_locations(&state_guard.key, &index.entries);
             state_guard.set_index(index);
-            state_guard.generation = Some(loaded.generation);
-            state_guard.generation_verified_at = Some(Instant::now());
+            state_guard.generation = Some(loaded.generation.clone());
+            state_guard.generation_verified_at = Some(loaded.verified_at);
             self.sync_generation_verified_at(&state_guard);
             state_guard.loaded = true;
-            state_guard.journal_cursor = Some(loaded.cursor);
+            state_guard.journal_cursor = Some(loaded.cursor.clone());
             if loaded.needs_flush {
                 push_pending_mutation(
                     &mut state_guard,
-                    TrajectoryIndexMutation::Reconcile(loaded.source_hint),
+                    TrajectoryIndexMutation::Reconcile(loaded.source_hint.clone()),
                 );
                 state_guard.recovery_flush_required = true;
             }
@@ -1816,6 +1858,139 @@ impl TrajectoryIndexCoordinator {
         dir: &Path,
         source_hint: Option<TrajectorySourceIdentity>,
     ) -> Result<Arc<Vec<TrajectoryIndexEntry>>, String> {
+        let entries = self.list_metadata_entries_shared(dir, source_hint).await?;
+        let state = self.directory_state(dir).await?;
+        if entries
+            .iter()
+            .all(|entry| entry.recovery_projection_version == RECOVERY_PROJECTION_VERSION)
+        {
+            let needs_checkpoint = state.lock().await.recovery_checkpoint_required;
+            if needs_checkpoint {
+                self.checkpoint_directory(dir).await?;
+                let current = shared_entries(&state).await?;
+                if current
+                    .iter()
+                    .any(|entry| entry.recovery_projection_version != RECOVERY_PROJECTION_VERSION)
+                {
+                    return Err(
+                        "Trajectory recovery metadata changed while loading; retry required".into(),
+                    );
+                }
+                return Ok(current);
+            }
+            return Ok(entries);
+        }
+        let (hydration, generation) = {
+            let mut guard = state.lock().await;
+            if guard.recovery_hydration.is_none() {
+                let entries = entries.clone();
+                let dir = dir.to_path_buf();
+                let task = tokio::task::spawn_blocking(move || {
+                    #[cfg(test)]
+                    wait_for_index_test_io(&dir, "projection");
+                    entries
+                        .iter()
+                        .filter(|entry| {
+                            entry.recovery_projection_version != RECOVERY_PROJECTION_VERSION
+                        })
+                        .filter_map(|entry| {
+                            if let Some(hydrated) =
+                                hydrate_unchanged_recovery_projection(&dir, entry)
+                            {
+                                return Some((entry.clone(), Some(hydrated)));
+                            }
+                            let Some(path) = recovery_projection_path(&dir, entry) else {
+                                return Some((entry.clone(), None));
+                            };
+                            match read_and_index_single_trajectory_sync(
+                                &dir,
+                                &path,
+                                Some(TrajectorySourceIdentity::from(&entry.source)),
+                            ) {
+                                SingleTrajectoryIndexResult::Indexed(hydrated) => {
+                                    Some((entry.clone(), Some(hydrated)))
+                                }
+                                SingleTrajectoryIndexResult::Skipped => Some((entry.clone(), None)),
+                                SingleTrajectoryIndexResult::TransientFailure => None,
+                            }
+                        })
+                        .collect::<RecoveryHydration>()
+                });
+                guard.recovery_hydration = Some(
+                    async move {
+                        task.await.map(Arc::new).map_err(|error| {
+                            format!("Trajectory recovery projection task failed: {error}")
+                        })
+                    }
+                    .boxed()
+                    .shared(),
+                );
+                guard.recovery_hydration_generation =
+                    guard.recovery_hydration_generation.wrapping_add(1);
+            }
+            (
+                guard.recovery_hydration.as_ref().unwrap().clone(),
+                guard.recovery_hydration_generation,
+            )
+        };
+        let hydrated = hydration.await;
+        let hydrated = match hydrated {
+            Ok(hydrated) => hydrated,
+            Err(error) => {
+                let mut guard = state.lock().await;
+                if guard.recovery_hydration_generation == generation {
+                    guard.recovery_hydration = None;
+                }
+                return Err(error);
+            }
+        };
+        let mut fresh = HashMap::new();
+        for (original, entry) in hydrated.iter() {
+            let current = match entry {
+                Some(entry) => trajectory_index_entry_is_fresh(dir, entry).await,
+                None => {
+                    recovery_projection_path(dir, original).is_none()
+                        || trajectory_index_entry_is_fresh(dir, original).await
+                }
+            };
+            if current {
+                fresh.insert(original.id.as_str(), (original, entry));
+            }
+        }
+        {
+            let mut guard = state.lock().await;
+            let updates: RecoveryHydration = fresh
+                .into_values()
+                .map(|(original, entry)| (original.clone(), entry.clone()))
+                .collect();
+            if !updates.is_empty() {
+                let mutation = TrajectoryIndexMutation::RecoveryProjection(Arc::new(updates));
+                guard.apply_mutation(&mutation)?;
+                push_pending_mutation(&mut guard, mutation);
+                guard.recovery_checkpoint_required = true;
+            }
+            if guard.recovery_hydration_generation == generation {
+                guard.recovery_hydration = None;
+            }
+        }
+        self.checkpoint_directory(dir).await?;
+        let entries = shared_entries(&state).await?;
+        if entries
+            .iter()
+            .any(|entry| entry.recovery_projection_version != RECOVERY_PROJECTION_VERSION)
+        {
+            return Err(
+                "Trajectory recovery metadata changed while loading; retry required".into(),
+            );
+        }
+        Ok(entries)
+    }
+
+    pub async fn list_metadata_entries_shared(
+        &self,
+        dir: &Path,
+        source_hint: Option<TrajectorySourceIdentity>,
+    ) -> Result<Arc<Vec<TrajectoryIndexEntry>>, String> {
         let span = perf_diagnostics::span(PerfComponent::TrajectoryIndexCacheHit, None, None);
         let listing = self.list_entries_shared_inner(dir, source_hint).await;
         match &listing {
@@ -1837,7 +2012,8 @@ impl TrajectoryIndexCoordinator {
         source_hint: Option<TrajectorySourceIdentity>,
     ) -> Result<(Arc<Vec<TrajectoryIndexEntry>>, bool), String> {
         let state = self.ensure_loaded(dir, source_hint.clone()).await?;
-        if state.lock().await.recovery_flush_required {
+        let needs_flush = state.lock().await.recovery_flush_required;
+        if needs_flush {
             self.flush_directory(dir).await?;
         }
         let now = Instant::now();
@@ -1987,6 +2163,8 @@ impl TrajectoryIndexCoordinator {
                 },
                 item_count,
             );
+            #[cfg(test)]
+            wait_for_index_test_io(&flush_dir, "flush");
             result
         })
         .await
@@ -2015,6 +2193,9 @@ impl TrajectoryIndexCoordinator {
         self.sync_generation_verified_at(&state_guard);
         state_guard.publish_flushed_index(index);
         state_guard.recovery_flush_required = false;
+        if outcome.checkpointed && state_guard.pending.is_empty() {
+            state_guard.recovery_checkpoint_required = false;
+        }
         Ok(())
     }
 
@@ -2130,6 +2311,7 @@ pub fn trajectory_file_path_for_entry(dir: &Path, entry: &TrajectoryIndexEntry) 
 struct CoordinatorLoadResult {
     index: TrajectoryIndex,
     generation: DirectoryGeneration,
+    verified_at: Instant,
     needs_flush: bool,
     source_hint: Option<TrajectorySourceIdentity>,
     cursor: TrajectoryIndexJournalCursor,
@@ -2466,6 +2648,8 @@ fn load_trajectory_index_for_coordinator_sync(
     lock_wait_span: Option<perf_diagnostics::PerfSpan>,
     listing_counter_scope: &TrajectoryIndexListingCounterScope,
 ) -> Result<CoordinatorLoadResult, String> {
+    #[cfg(test)]
+    wait_for_index_test_io(dir, "load");
     std::fs::create_dir_all(dir)
         .map_err(|error| format!("Failed to create trajectory directory {:?}: {error}", dir))?;
     with_trajectory_index_file_lock(
@@ -2508,37 +2692,13 @@ fn load_trajectory_index_for_coordinator_locked_sync(
     );
     match index_read {
         Ok(Some(loaded)) => {
-            let needs_recovery_projection = loaded
-                .index
-                .entries
-                .iter()
-                .any(|entry| entry.recovery_projection_version == 0);
-            let (index, cursor, needs_flush) = if needs_recovery_projection {
-                let (index, _) = reconcile_trajectory_index_sync(
-                    dir,
-                    loaded.index,
-                    source_hint.clone(),
-                    listing_counter_scope,
-                )?;
-                let checkpointed = checkpoint_index_sync(
-                    dir,
-                    SyncedPersistedIndex {
-                        index,
-                        cursor: loaded.cursor,
-                        checkpoint_present: loaded.checkpoint_present,
-                        rebuilt: false,
-                    },
-                    None,
-                    listing_counter_scope,
-                )?;
-                (checkpointed.index, checkpointed.cursor, false)
-            } else {
-                (loaded.index, loaded.cursor, !loaded.checkpoint_present)
-            };
+            let (index, cursor, needs_flush) =
+                (loaded.index, loaded.cursor, !loaded.checkpoint_present);
             let generation = directory_generation_sync(dir, index_file_names(&index))?;
             Ok(CoordinatorLoadResult {
                 index,
                 generation,
+                verified_at: Instant::now(),
                 needs_flush,
                 source_hint,
                 cursor,
@@ -2571,6 +2731,7 @@ fn load_trajectory_index_for_coordinator_locked_sync(
             Ok(CoordinatorLoadResult {
                 index,
                 generation,
+                verified_at: Instant::now(),
                 needs_flush: true,
                 source_hint,
                 cursor: TrajectoryIndexJournalCursor::default(),
@@ -2631,6 +2792,25 @@ fn apply_mutation_to_index(
         TrajectoryIndexMutation::Remove(chat_ids) => {
             index.entries.retain(|entry| !chat_ids.contains(&entry.id));
         }
+        TrajectoryIndexMutation::RecoveryProjection(updates) => {
+            let updates: HashMap<_, _> = updates
+                .iter()
+                .map(|(original, entry)| (original.id.as_str(), (original, entry)))
+                .collect();
+            let mut removed = HashSet::new();
+            for current in &mut index.entries {
+                if let Some((original, replacement)) = updates.get(current.id.as_str()) {
+                    if current == *original {
+                        if let Some(replacement) = replacement {
+                            *current = replacement.clone();
+                        } else {
+                            removed.insert(current.id.clone());
+                        }
+                    }
+                }
+            }
+            index.entries.retain(|entry| !removed.contains(&entry.id));
+        }
         TrajectoryIndexMutation::Reconcile(_) => {}
     }
     index.schema_version = TRAJECTORY_INDEX_SCHEMA_VERSION;
@@ -2678,8 +2858,7 @@ fn reconcile_trajectory_index_sync(
 
     for disk in &disk_files {
         if let Some(entry) = entries_by_file.get(&disk.file_name) {
-            if entry.recovery_projection_version == RECOVERY_PROJECTION_VERSION
-                && entry.file_len == disk.file_len
+            if entry.file_len == disk.file_len
                 && entry.file_modified_unix_ms == disk.file_modified_unix_ms
             {
                 entries.push(entry.clone());
@@ -2836,23 +3015,6 @@ fn sync_persisted_index_for_flush_sync(
                         checkpoint_present: true,
                         rebuilt: false,
                     };
-                    if synced
-                        .index
-                        .entries
-                        .iter()
-                        .any(|entry| entry.recovery_projection_version == 0)
-                    {
-                        let (index, _) = reconcile_trajectory_index_sync(
-                            dir,
-                            synced.index,
-                            source_hint,
-                            listing_counter_scope,
-                        )?;
-                        return Ok(SyncedPersistedIndex {
-                            index,
-                            ..synced
-                        });
-                    }
                     return Ok(synced);
                 }
             }
@@ -3412,18 +3574,8 @@ pub(crate) fn entry_from_owned_trajectory_value(
         extra: data.extra.clone(),
     };
 
-    let (recovery_state, recovery_projection_error) = match data.extra.get("recovery") {
-        Some(value) if !value.is_null() => {
-            match serde_json::from_value::<RecoveryRecord>(value.clone()) {
-                Ok(mut record) => {
-                    record.interrupt_on_reload();
-                    (Some(record.state), false)
-                }
-                Err(_) => (None, true),
-            }
-        }
-        _ => (None, false),
-    };
+    let (recovery_state, recovery_projection_error) =
+        recovery_projection_from_value(data.extra.get("recovery"));
 
     Ok(TrajectoryIndexEntry {
         recovery_state,
@@ -3493,6 +3645,76 @@ pub(crate) fn entry_from_owned_trajectory_value(
         file_len,
         file_modified_unix_ms,
     })
+}
+
+fn recovery_projection_from_value(
+    value: Option<&serde_json::Value>,
+) -> (Option<RecoveryState>, bool) {
+    match value {
+        Some(value) if !value.is_null() => {
+            match serde_json::from_value::<RecoveryRecord>(value.clone()) {
+                Ok(mut record) => {
+                    record.interrupt_on_reload();
+                    (Some(record.state), false)
+                }
+                Err(_) => (None, true),
+            }
+        }
+        _ => (None, false),
+    }
+}
+
+#[derive(Deserialize)]
+struct TrajectoryRecoveryProjection {
+    id: String,
+    #[serde(default)]
+    recovery: Option<serde_json::Value>,
+}
+
+fn hydrate_unchanged_recovery_projection(
+    dir: &Path,
+    entry: &TrajectoryIndexEntry,
+) -> Option<TrajectoryIndexEntry> {
+    let path = recovery_projection_path(dir, entry)?;
+    let before = regular_file_generation(&path).ok()??;
+    if before.file_len != entry.file_len
+        || before
+            .file_modified_at
+            .duration_since(UNIX_EPOCH)
+            .ok()?
+            .as_millis()
+            != u128::try_from(entry.file_modified_unix_ms).ok()?
+    {
+        return None;
+    }
+    let content = std::fs::read(&path).ok()?;
+    let projection: TrajectoryRecoveryProjection = serde_json::from_slice(&content).ok()?;
+    if projection.id != entry.id || regular_file_generation(&path).ok()?.as_ref() != Some(&before) {
+        return None;
+    }
+    let (recovery_state, recovery_projection_error) =
+        recovery_projection_from_value(projection.recovery.as_ref());
+    let mut hydrated = entry.clone();
+    hydrated.recovery_state = recovery_state;
+    hydrated.recovery_projection_error = recovery_projection_error;
+    hydrated.recovery_projection_version = RECOVERY_PROJECTION_VERSION;
+    Some(hydrated)
+}
+
+fn recovery_projection_path(dir: &Path, entry: &TrajectoryIndexEntry) -> Option<PathBuf> {
+    validate_trajectory_index_entry(entry).ok()?;
+    let path = trajectory_file_path_for_entry(dir, entry);
+    if path.file_stem()?.to_str()? != entry.id {
+        return None;
+    }
+    let parent = path.parent()?;
+    if parent != dir {
+        let metadata = std::fs::symlink_metadata(parent).ok()?;
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            return None;
+        }
+    }
+    Some(path)
 }
 
 pub async fn read_trajectory_index(dir: &Path) -> Result<Option<TrajectoryIndex>, String> {
@@ -3987,7 +4209,9 @@ pub async fn list_trajectory_entries_with_rollout_shared_for(
 ) -> Result<Arc<Vec<TrajectoryIndexEntry>>, String> {
     coordinator.record_listing_caller(caller);
     if trajectory_index_coordinator_rollout_enabled() {
-        coordinator.list_entries_shared(dir, source_hint).await
+        coordinator
+            .list_metadata_entries_shared(dir, source_hint)
+            .await
     } else {
         list_trajectory_entries_from_index_or_rebuild_with_counter_scope(
             dir,
@@ -4489,12 +4713,24 @@ async fn list_trajectory_entries_from_index_or_rebuild_with_counter_scope(
 
     for disk in &disk_files {
         if let Some(entry) = by_file.get(&disk.file_name) {
-            if entry.recovery_projection_version == RECOVERY_PROJECTION_VERSION
-                && entry.file_len == disk.file_len
+            if entry.file_len == disk.file_len
                 && entry.file_modified_unix_ms == disk.file_modified_unix_ms
             {
-                new_entries.push(entry.clone());
-                continue;
+                if entry.recovery_projection_version == RECOVERY_PROJECTION_VERSION {
+                    new_entries.push(entry.clone());
+                    continue;
+                }
+                let dir = dir.to_path_buf();
+                let entry = entry.clone();
+                if let Ok(Some(hydrated)) = tokio::task::spawn_blocking(move || {
+                    hydrate_unchanged_recovery_projection(&dir, &entry)
+                })
+                .await
+                {
+                    new_entries.push(hydrated);
+                    content_changed = true;
+                    continue;
+                }
             }
         }
         if let Some(skipped) = skipped_by_file.get(&disk.file_name) {
@@ -4632,6 +4868,36 @@ pub fn meta_from_entry(_dir: &Path, entry: &TrajectoryIndexEntry) -> TrajectoryM
         total_cache_creation_tokens: entry.total_cache_creation_tokens,
         total_cost_usd: entry.total_cost_usd,
         source,
+    }
+}
+
+#[cfg(test)]
+struct IndexTestIoGate {
+    started: tokio::sync::Notify,
+    release: StdMutex<std::sync::mpsc::Receiver<()>>,
+    calls: AtomicU64,
+}
+
+#[cfg(test)]
+fn index_test_io_gates() -> &'static StdMutex<HashMap<(PathBuf, &'static str), Arc<IndexTestIoGate>>>
+{
+    static GATES: std::sync::OnceLock<
+        StdMutex<HashMap<(PathBuf, &'static str), Arc<IndexTestIoGate>>>,
+    > = std::sync::OnceLock::new();
+    GATES.get_or_init(|| StdMutex::new(HashMap::new()))
+}
+
+#[cfg(test)]
+fn wait_for_index_test_io(dir: &Path, operation: &'static str) {
+    let gate = index_test_io_gates()
+        .lock()
+        .unwrap()
+        .get(&(dir.to_path_buf(), operation))
+        .cloned();
+    if let Some(gate) = gate {
+        gate.calls.fetch_add(1, Ordering::SeqCst);
+        gate.started.notify_one();
+        let _ = gate.release.lock().unwrap().recv();
     }
 }
 
@@ -5202,6 +5468,485 @@ mod tests {
         assert_eq!(state.lock().await.work_validation_count, 1);
     }
 
+    fn gate_index_io(
+        dir: &Path,
+        operation: &'static str,
+    ) -> (Arc<IndexTestIoGate>, std::sync::mpsc::Sender<()>) {
+        let (release, receiver) = std::sync::mpsc::channel();
+        let gate = Arc::new(IndexTestIoGate {
+            started: tokio::sync::Notify::new(),
+            release: StdMutex::new(receiver),
+            calls: AtomicU64::new(0),
+        });
+        index_test_io_gates()
+            .lock()
+            .unwrap()
+            .insert((dir.to_path_buf(), operation), gate.clone());
+        (gate, release)
+    }
+
+    #[tokio::test]
+    async fn coordinator_cold_load_is_shared_after_waiter_cancellation() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path();
+        write_trajectory(dir, "one", "One", "agent").await;
+        let coordinator = TrajectoryIndexCoordinator::new_with_local_listing_counters();
+        let (gate, release) = gate_index_io(dir, "load");
+        let mut first = Box::pin(coordinator.ensure_loaded(dir, None));
+        assert!(matches!(
+            futures::poll!(&mut first),
+            std::task::Poll::Pending
+        ));
+        tokio::time::timeout(Duration::from_secs(5), gate.started.notified())
+            .await
+            .unwrap();
+        let mut sibling = Box::pin(coordinator.ensure_loaded(dir, None));
+        assert!(matches!(
+            futures::poll!(&mut sibling),
+            std::task::Poll::Pending
+        ));
+        drop(first);
+        drop(sibling);
+        let mut replacement = Box::pin(coordinator.ensure_loaded(dir, None));
+        assert!(matches!(
+            futures::poll!(&mut replacement),
+            std::task::Poll::Pending
+        ));
+        assert_eq!(gate.calls.load(Ordering::SeqCst), 1);
+        drop(release);
+        let state = tokio::time::timeout(Duration::from_secs(5), replacement)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(state.lock().await.loaded);
+        assert_eq!(
+            coordinator
+                .list_metadata_entries_shared(dir, None)
+                .await
+                .unwrap()[0]
+                .id,
+            "one"
+        );
+        assert_eq!(gate.calls.load(Ordering::SeqCst), 1);
+        index_test_io_gates()
+            .lock()
+            .unwrap()
+            .remove(&(dir.to_path_buf(), "load"));
+    }
+
+    #[tokio::test]
+    async fn metadata_listing_and_writes_do_not_wait_for_legacy_recovery_projection() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path();
+        let path = write_trajectory(dir, "one", "One", "agent").await;
+        let mut entry = entry_for_path(dir, &path).await;
+        entry.recovery_projection_version = 0;
+        let index = TrajectoryIndex {
+            schema_version: TRAJECTORY_INDEX_SCHEMA_VERSION,
+            entries: vec![entry.clone()],
+            ..Default::default()
+        };
+        write_trajectory_index_atomic_sync(dir, &index).unwrap();
+        let scope = TrajectoryIndexListingCounterScope::local();
+        let coordinator = TrajectoryIndexCoordinator::with_listing_counter_scope(scope.clone())
+            .with_generation_ttl(Duration::from_secs(30));
+        let metadata = coordinator
+            .list_metadata_entries_shared(dir, None)
+            .await
+            .unwrap();
+        assert_eq!(metadata[0], entry);
+        assert_eq!(scope.snapshot().directory_scans, 0);
+        assert_eq!(scope.snapshot().checkpoint_writes, 0);
+        let (gate, release) = gate_index_io(dir, "projection");
+        let mut strict = Box::pin(coordinator.list_entries_shared(dir, None));
+        assert!(matches!(
+            futures::poll!(&mut strict),
+            std::task::Poll::Pending
+        ));
+        tokio::time::timeout(Duration::from_secs(5), gate.started.notified())
+            .await
+            .unwrap();
+        drop(strict);
+        assert_eq!(
+            coordinator
+                .list_metadata_entries_shared(dir, None)
+                .await
+                .unwrap()[0],
+            entry
+        );
+        let local_path = write_trajectory(dir, "local", "Local", "agent").await;
+        coordinator
+            .upsert(dir, entry_for_path(dir, &local_path).await)
+            .await
+            .unwrap();
+        coordinator.flush_directory(dir).await.unwrap();
+        assert_eq!(
+            read_trajectory_index(dir)
+                .await
+                .unwrap()
+                .unwrap()
+                .entries
+                .len(),
+            2
+        );
+        drop(release);
+        let hydrated = tokio::time::timeout(
+            Duration::from_secs(5),
+            coordinator.list_entries_shared(dir, None),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(hydrated.len(), 2);
+        assert!(hydrated
+            .iter()
+            .all(|entry| entry.recovery_projection_version == RECOVERY_PROJECTION_VERSION));
+        assert_eq!(gate.calls.load(Ordering::SeqCst), 1);
+        let restarted = TrajectoryIndexCoordinator::new();
+        assert!(restarted
+            .list_metadata_entries_shared(dir, None)
+            .await
+            .unwrap()
+            .iter()
+            .all(|entry| entry.recovery_projection_version == RECOVERY_PROJECTION_VERSION));
+        index_test_io_gates()
+            .lock()
+            .unwrap()
+            .remove(&(dir.to_path_buf(), "projection"));
+    }
+
+    #[tokio::test]
+    async fn recovery_projection_skips_invalid_legacy_identity_without_poisoning_valid_chats() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path();
+        let path = write_trajectory(dir, "valid", "Valid", "agent").await;
+        let mut valid = entry_for_path(dir, &path).await;
+        valid.recovery_projection_version = 0;
+        let mut invalid = valid.clone();
+        invalid.id = "invalid".into();
+        invalid.file_name = "invalid.json".into();
+        let bytes = br#"{"messages":[],"recovery":null}"#;
+        let invalid_path = dir.join("invalid.json");
+        fs::write(&invalid_path, bytes).await.unwrap();
+        let (len, modified) = file_metadata(&invalid_path).unwrap();
+        invalid.file_len = len;
+        invalid.file_modified_unix_ms = modified;
+        write_trajectory_index_atomic_sync(
+            dir,
+            &TrajectoryIndex {
+                schema_version: TRAJECTORY_INDEX_SCHEMA_VERSION,
+                entries: vec![valid, invalid],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let coordinator =
+            TrajectoryIndexCoordinator::new().with_generation_ttl(Duration::from_secs(30));
+        assert_eq!(
+            coordinator
+                .list_metadata_entries_shared(dir, None)
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+        let strict = coordinator.list_entries_shared(dir, None).await.unwrap();
+        assert_eq!(strict.len(), 1);
+        assert_eq!(strict[0].id, "valid");
+        assert_eq!(
+            strict[0].recovery_projection_version,
+            RECOVERY_PROJECTION_VERSION
+        );
+        assert!(invalid_path.is_file());
+        assert_eq!(
+            coordinator
+                .list_entries_shared(dir, None)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn cold_load_errors_are_retryable_and_cancelled_completion_keeps_original_freshness() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path();
+        let coordinator = TrajectoryIndexCoordinator::new();
+        fs::create_dir(dir.join(".index.json.lock")).await.unwrap();
+        assert!(coordinator.ensure_loaded(dir, None).await.is_err());
+        fs::remove_dir(dir.join(".index.json.lock")).await.unwrap();
+        write_trajectory(dir, "one", "One", "agent").await;
+        let loaded = load_trajectory_index_for_coordinator_sync(
+            dir,
+            None,
+            None,
+            None,
+            &TrajectoryIndexListingCounterScope::local(),
+        )
+        .unwrap();
+        let original_verified_at = loaded.verified_at;
+        let state = coordinator.directory_state(dir).await.unwrap();
+        {
+            let mut guard = state.lock().await;
+            guard.load_generation += 1;
+            guard.load = Some(
+                futures::future::ready(Ok(Arc::new(loaded)))
+                    .boxed()
+                    .shared(),
+            );
+        }
+        let state = coordinator.ensure_loaded(dir, None).await.unwrap();
+        assert_eq!(
+            state.lock().await.generation_verified_at,
+            Some(original_verified_at)
+        );
+    }
+
+    #[tokio::test]
+    async fn projection_mutation_preserves_foreign_replacement_and_batches_index_updates() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path();
+        let path = write_trajectory(dir, "one", "One", "agent").await;
+        let mut original = entry_for_path(dir, &path).await;
+        original.recovery_projection_version = 0;
+        let mut hydrated = original.clone();
+        hydrated.recovery_projection_version = RECOVERY_PROJECTION_VERSION;
+        let mutation = TrajectoryIndexMutation::RecoveryProjection(Arc::new(vec![(
+            original.clone(),
+            Some(hydrated.clone()),
+        )]));
+        let mut index = TrajectoryIndex {
+            entries: vec![original.clone()],
+            ..Default::default()
+        };
+        apply_mutation_to_index(&mut index, &mutation).unwrap();
+        assert_eq!(index.entries[0], hydrated);
+        let mut foreign = original;
+        foreign.title = "Foreign newer checkpoint".into();
+        index.entries[0] = foreign.clone();
+        apply_mutation_to_index(&mut index, &mutation).unwrap();
+        assert_eq!(index.entries[0], foreign);
+    }
+
+    #[tokio::test]
+    async fn completed_cancelled_loads_do_not_exhaust_directory_cache() {
+        let coordinator = TrajectoryIndexCoordinator::new();
+        let root = PathBuf::from("cancelled-index-load-cache-test");
+        for n in 0..MAX_CACHED_TRAJECTORY_DIRECTORIES {
+            let state = coordinator
+                .directory_state(&root.join(n.to_string()))
+                .await
+                .unwrap();
+            let (sender, receiver) = tokio::sync::oneshot::channel::<()>();
+            let load: SharedIndexLoad = async move {
+                let _ = receiver.await;
+                Err("completed abandoned load".into())
+            }
+            .boxed()
+            .shared();
+            let mut waiter = Box::pin(load.clone());
+            assert!(matches!(
+                futures::poll!(&mut waiter),
+                std::task::Poll::Pending
+            ));
+            drop(waiter);
+            sender.send(()).unwrap();
+            state.lock().await.load = Some(load);
+        }
+        coordinator
+            .directory_state(&root.join("next"))
+            .await
+            .unwrap();
+        assert_eq!(
+            coordinator.directories.lock().await.len(),
+            MAX_CACHED_TRAJECTORY_DIRECTORIES
+        );
+    }
+
+    #[tokio::test]
+    async fn older_checkpoint_cannot_clear_a_newer_projection_durability_requirement() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path();
+        let path = write_trajectory(dir, "one", "One", "agent").await;
+        let mut original = entry_for_path(dir, &path).await;
+        original.recovery_projection_version = 0;
+        write_trajectory_index_atomic_sync(
+            dir,
+            &TrajectoryIndex {
+                schema_version: TRAJECTORY_INDEX_SCHEMA_VERSION,
+                entries: vec![original.clone()],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let coordinator =
+            TrajectoryIndexCoordinator::new().with_generation_ttl(Duration::from_secs(30));
+        coordinator
+            .list_metadata_entries_shared(dir, None)
+            .await
+            .unwrap();
+        let state = coordinator.directory_state(dir).await.unwrap();
+        let pending_path = write_trajectory(dir, "pending", "Pending write", "agent").await;
+        coordinator
+            .upsert(dir, entry_for_path(dir, &pending_path).await)
+            .await
+            .unwrap();
+        let (gate, release) = gate_index_io(dir, "flush");
+        let mut older = Box::pin(coordinator.checkpoint_directory(dir));
+        assert!(matches!(
+            futures::poll!(&mut older),
+            std::task::Poll::Pending
+        ));
+        tokio::time::timeout(Duration::from_secs(5), gate.started.notified())
+            .await
+            .unwrap();
+        let mut hydrated = original.clone();
+        hydrated.recovery_projection_version = RECOVERY_PROJECTION_VERSION;
+        {
+            let mut guard = state.lock().await;
+            let mutation = TrajectoryIndexMutation::RecoveryProjection(Arc::new(vec![(
+                original,
+                Some(hydrated),
+            )]));
+            guard.apply_mutation(&mutation).unwrap();
+            push_pending_mutation(&mut guard, mutation);
+            guard.recovery_checkpoint_required = true;
+        }
+        drop(release);
+        older.await.unwrap();
+        assert!(state.lock().await.recovery_checkpoint_required);
+        index_test_io_gates()
+            .lock()
+            .unwrap()
+            .remove(&(dir.to_path_buf(), "flush"));
+        coordinator.list_entries_shared(dir, None).await.unwrap();
+        assert!(!state.lock().await.recovery_checkpoint_required);
+        let persisted = read_trajectory_index(dir).await.unwrap().unwrap();
+        assert_eq!(
+            persisted
+                .entries
+                .iter()
+                .find(|entry| entry.id == "one")
+                .unwrap()
+                .recovery_projection_version,
+            RECOVERY_PROJECTION_VERSION
+        );
+    }
+
+    #[tokio::test]
+    async fn recovery_projection_fallback_preserves_the_indexed_source_hint() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path();
+        let path = write_trajectory(dir, "one", "Old", "agent").await;
+        let mut entry = entry_for_path(dir, &path).await;
+        entry.source = TrajectoryIndexSource::Buddy;
+        entry.recovery_projection_version = 0;
+        write_trajectory_index_atomic_sync(
+            dir,
+            &TrajectoryIndex {
+                schema_version: TRAJECTORY_INDEX_SCHEMA_VERSION,
+                entries: vec![entry],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let coordinator =
+            TrajectoryIndexCoordinator::new().with_generation_ttl(Duration::from_secs(30));
+        coordinator
+            .list_metadata_entries_shared(dir, None)
+            .await
+            .unwrap();
+        let (gate, release) = gate_index_io(dir, "projection");
+        let mut strict = Box::pin(coordinator.list_entries_shared(dir, None));
+        assert!(matches!(
+            futures::poll!(&mut strict),
+            std::task::Poll::Pending
+        ));
+        tokio::time::timeout(Duration::from_secs(5), gate.started.notified())
+            .await
+            .unwrap();
+        write_trajectory(dir, "one", "New longer title from file", "agent").await;
+        drop(release);
+        let entries = tokio::time::timeout(Duration::from_secs(5), strict)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].source, TrajectoryIndexSource::Buddy);
+        assert_eq!(entries[0].title, "New longer title from file");
+        assert_eq!(
+            entries[0].recovery_projection_version,
+            RECOVERY_PROJECTION_VERSION
+        );
+        index_test_io_gates()
+            .lock()
+            .unwrap()
+            .remove(&(dir.to_path_buf(), "projection"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn recovery_projection_refuses_symlinked_conversation_folders() {
+        let root = tempfile::tempdir().unwrap();
+        let external = tempfile::tempdir().unwrap();
+        let path = write_trajectory(external.path(), "one", "Private", "agent").await;
+        let mut entry = entry_for_path(external.path(), &path).await;
+        entry.file_name = "conversation/one.json".into();
+        entry.recovery_projection_version = 0;
+        std::os::unix::fs::symlink(external.path(), root.path().join("conversation")).unwrap();
+        assert!(recovery_projection_path(root.path(), &entry).is_none());
+        assert!(hydrate_unchanged_recovery_projection(root.path(), &entry).is_none());
+    }
+
+    #[tokio::test]
+    async fn recovery_projection_does_not_replace_a_newer_index_entry() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path();
+        let path = write_trajectory(dir, "one", "Old", "agent").await;
+        let mut entry = entry_for_path(dir, &path).await;
+        entry.recovery_projection_version = 0;
+        write_trajectory_index_atomic_sync(
+            dir,
+            &TrajectoryIndex {
+                schema_version: TRAJECTORY_INDEX_SCHEMA_VERSION,
+                entries: vec![entry],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let coordinator =
+            TrajectoryIndexCoordinator::new().with_generation_ttl(Duration::from_secs(30));
+        coordinator
+            .list_metadata_entries_shared(dir, None)
+            .await
+            .unwrap();
+        let (gate, release) = gate_index_io(dir, "projection");
+        let mut strict = Box::pin(coordinator.list_entries_shared(dir, None));
+        assert!(matches!(
+            futures::poll!(&mut strict),
+            std::task::Poll::Pending
+        ));
+        tokio::time::timeout(Duration::from_secs(5), gate.started.notified())
+            .await
+            .unwrap();
+        write_trajectory(dir, "one", "New authoritative title", "agent").await;
+        let newer = entry_for_path(dir, &path).await;
+        coordinator.upsert(dir, newer.clone()).await.unwrap();
+        drop(release);
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), strict)
+                .await
+                .unwrap()
+                .unwrap()[0],
+            newer
+        );
+        index_test_io_gates()
+            .lock()
+            .unwrap()
+            .remove(&(dir.to_path_buf(), "projection"));
+    }
+
     #[tokio::test]
     async fn current_recovery_projection_hydrates_legacy_once_and_survives_restart() {
         for coordinated in [true, false] {
@@ -5386,8 +6131,8 @@ mod tests {
                         .iter()
                         .find(|entry| entry.id == "foreign")
                         .unwrap()
-                        .recovery_state,
-                    Some(RecoveryState::NeedsAction)
+                        .recovery_projection_version,
+                    0
                 );
                 let path = write_trajectory(&dir, "local", "Local", "agent").await;
                 restarted
