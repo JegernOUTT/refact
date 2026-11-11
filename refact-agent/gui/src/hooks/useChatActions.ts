@@ -37,7 +37,6 @@ import {
   regenerate as regenerateApi,
   updateChatParams,
   setGoal as setGoalApi,
-  setGoalBudget as setGoalBudgetApi,
   updateGoal as updateGoalApi,
   goalControl as goalControlApi,
   abortGeneration,
@@ -49,7 +48,6 @@ import {
   updateQueuedItemPriority,
   updatePendingDelivery as updatePendingDeliveryApi,
   type GoalControlAction,
-  type GoalBudgetCommand,
   type MessageContent,
 } from "../services/refact/chatCommands";
 import type { PushMode } from "../services/refact/chatSubscription";
@@ -264,17 +262,9 @@ export function useChatActions(explicitChatId?: string) {
   );
 
   const setGoal = useCallback(
-    async (content: string, budget?: GoalBudgetCommand) => {
+    async (content: string) => {
       if (!chatId) return;
-      await setGoalApi(chatId, content, config, apiKey ?? undefined, budget);
-    },
-    [chatId, config, apiKey],
-  );
-
-  const setGoalBudget = useCallback(
-    async (budget: GoalBudgetCommand) => {
-      if (!chatId) return;
-      await setGoalBudgetApi(chatId, budget, config, apiKey ?? undefined);
+      await setGoalApi(chatId, content, config, apiKey ?? undefined);
     },
     [chatId, config, apiKey],
   );
@@ -457,7 +447,6 @@ export function useChatActions(explicitChatId?: string) {
     abort,
     setParams,
     setGoal,
-    setGoalBudget,
     updateGoal,
     controlGoal,
     respondToTool,

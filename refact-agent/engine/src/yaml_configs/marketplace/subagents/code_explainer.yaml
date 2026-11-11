@@ -20,7 +20,6 @@ tool:
 subchat:
   stateful: false
   model_type: default
-  max_steps: 10
 
 messages:
   system_prompt: |

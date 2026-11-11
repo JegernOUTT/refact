@@ -798,7 +798,7 @@ pub struct LaunchEffective {
     pub n_ctx: usize,
     pub mode: String,
     pub tools: crate::subchat::ToolsPolicy,
-    pub max_steps: usize,
+    pub max_steps: Option<usize>,
     pub subchat_depth: usize,
     pub stateful: bool,
     pub autonomous_no_confirm: bool,
@@ -899,6 +899,9 @@ pub async fn preview_launch(app: &AppState, req: &SpawnRequest) -> Result<Launch
     let child_chat_id = format!("subchat-preview-{}", Uuid::new_v4());
     let (prepared, payload) =
         prepare_launch(app, req, &child_chat_id, project_root.clone()).await?;
+    let unlimited_steps = req.config_name == "subagent"
+        && req.parent_tool_call_id.is_some()
+        && req.native_supervision_guard.is_none();
     let config = prepared.config;
     Ok(LaunchEffective {
         schema_version: prepared.schema_version,
@@ -908,7 +911,7 @@ pub async fn preview_launch(app: &AppState, req: &SpawnRequest) -> Result<Launch
         model: config.model,
         mode: config.mode,
         tools: config.tools,
-        max_steps: config.max_steps,
+        max_steps: (!unlimited_steps).then_some(config.max_steps),
         subchat_depth: config.subchat_depth,
         stateful: config.stateful,
         autonomous_no_confirm: config.autonomous_no_confirm,
@@ -1589,6 +1592,7 @@ async fn prepare_launch_for_parent_run(
         Ok(SubchatConfig {
             runner_lease_token: None,
             native_job_fence: None,
+            unlimited_configured_steps: false,
             history_source_model: None,
             tool_name: req.config_name.clone(),
             stateful: true,

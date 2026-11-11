@@ -276,7 +276,7 @@ describe("TaskProgressWidget", () => {
     expect(commands[0]).toMatchObject({ type: "goal_control", action: "stop" });
   });
 
-  test("details dialog shows plan and applies limit edits", async () => {
+  test("details dialog shows plan and usage without ordinary limit controls", async () => {
     const commands = captureCommands();
     const { user } = renderWidget(
       makeRuntime({ goal: makeGoal({ plan }), expanded: true }),
@@ -292,20 +292,13 @@ describe("TaskProgressWidget", () => {
       within(dialog).getByText("Add one more verifier test."),
     ).toBeVisible();
 
-    await user.click(within(dialog).getByRole("switch", { name: "Max turns" }));
-    await user.click(
-      within(dialog).getByRole("button", { name: "Apply limits" }),
-    );
-
-    await waitFor(() => expect(commands).toHaveLength(1));
-    expect(commands[0]).toMatchObject({ type: "set_goal_budget" });
-    expect(commands[0].budget).toEqual({
-      max_minutes: 10,
-      max_tokens: 5000,
-      cooldown_ms: 1500,
-      no_progress_token_threshold: 50,
-      no_progress_turns: 2,
-    });
+    expect(
+      within(dialog).queryByRole("switch", { name: "Max turns" }),
+    ).not.toBeInTheDocument();
+    expect(
+      within(dialog).queryByRole("button", { name: "Apply limits" }),
+    ).not.toBeInTheDocument();
+    expect(commands).toHaveLength(0);
   });
 
   test("editor sets a fresh goal and appends updates to an existing one", async () => {
@@ -339,7 +332,7 @@ describe("TaskProgressWidget", () => {
     expect(commands[1]).not.toHaveProperty("content");
   });
 
-  test("a rejected new goal keeps the draft and limits in the editor", async () => {
+  test("a rejected new goal keeps its draft without sending effort limits", async () => {
     const commands: Record<string, unknown>[] = [];
     server.use(
       http.post("*/v1/chats/:id/commands", async ({ request }) => {
@@ -354,7 +347,6 @@ describe("TaskProgressWidget", () => {
     await user.click(screen.getByRole("button", { name: "Create goal" }));
     const dialog = screen.getByRole("dialog", { name: "Set a goal" });
     await user.type(within(dialog).getByLabelText("Goal text"), "Keep it");
-    await user.click(within(dialog).getByRole("switch", { name: "Max turns" }));
     await user.click(within(dialog).getByRole("button", { name: "Set goal" }));
 
     await waitFor(() => expect(within(dialog).getByText(/403/)).toBeVisible());
@@ -362,12 +354,12 @@ describe("TaskProgressWidget", () => {
     expect(commands[0]).toMatchObject({
       type: "set_goal",
       content: "Keep it",
-      budget: { max_turns: 20 },
     });
     expect(within(dialog).getByLabelText("Goal text")).toHaveValue("Keep it");
+    expect(commands[0]).not.toHaveProperty("budget");
     expect(
-      within(dialog).getByRole("switch", { name: "Max turns" }),
-    ).toBeChecked();
+      within(dialog).queryByRole("switch", { name: "Max turns" }),
+    ).not.toBeInTheDocument();
     expect(
       within(dialog).getByRole("button", { name: "Set goal" }),
     ).toBeEnabled();
@@ -410,15 +402,12 @@ describe("TaskProgressWidget", () => {
     }
   });
 
-  test("details limit edits survive goal progress updates", async () => {
+  test("details usage updates without exposing retired limit editors", async () => {
     const { user, store } = renderWidget(
       makeRuntime({ goal: makeGoal(), expanded: true }),
     );
     await user.click(screen.getByRole("button", { name: "Goal details" }));
     const dialog = screen.getByRole("dialog", { name: "Goal details" });
-    await user.click(
-      within(dialog).getByRole("switch", { name: "Max minutes" }),
-    );
 
     act(() => {
       store.dispatch(
@@ -432,11 +421,9 @@ describe("TaskProgressWidget", () => {
       );
     });
 
+    expect(within(dialog).getByText(/4k tokens/)).toBeVisible();
     expect(
-      within(dialog).getByRole("switch", { name: "Max minutes" }),
-    ).not.toBeChecked();
-    expect(
-      within(dialog).getByRole("button", { name: "Apply limits" }),
-    ).toBeEnabled();
+      within(dialog).queryByRole("button", { name: "Apply limits" }),
+    ).not.toBeInTheDocument();
   });
 });

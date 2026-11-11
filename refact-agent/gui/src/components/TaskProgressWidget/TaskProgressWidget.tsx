@@ -45,7 +45,6 @@ import type {
   GoalPlanSnapshot,
   GoalStatus,
 } from "../../services/refact/types";
-import type { GoalBudgetCommand } from "../../services/refact/chatCommands";
 import { Icon } from "../ui";
 import { Markdown } from "../Markdown";
 import {
@@ -57,9 +56,7 @@ import {
   KitIconButton,
   KitNote,
   KitSection,
-  KitSliderRow,
   KitStaticRow,
-  KitToggleRow,
   KitTooltip,
   type KitTone,
 } from "../ComposerKit";
@@ -119,81 +116,6 @@ function formatCount(value: number): string {
   if (value >= 1_000_000) return `${+(value / 1_000_000).toFixed(1)}M`;
   if (value >= 1_000) return `${+(value / 1_000).toFixed(1)}k`;
   return String(value);
-}
-
-type LimitKey = "max_turns" | "max_minutes" | "max_tokens";
-type LimitDraft = Record<LimitKey, number | null>;
-
-const LIMIT_KEYS: readonly LimitKey[] = [
-  "max_turns",
-  "max_minutes",
-  "max_tokens",
-];
-
-const LIMIT_META: Record<
-  LimitKey,
-  {
-    label: string;
-    hint: string;
-    min: number;
-    max: number;
-    step: number;
-    fallback: number;
-    unit: string;
-  }
-> = {
-  max_turns: {
-    label: "Max turns",
-    hint: "Pause the goal after this many turns",
-    min: 1,
-    max: 100,
-    step: 1,
-    fallback: 20,
-    unit: "turns",
-  },
-  max_minutes: {
-    label: "Max minutes",
-    hint: "Pause the goal after this much wall time",
-    min: 5,
-    max: 480,
-    step: 5,
-    fallback: 60,
-    unit: "min",
-  },
-  max_tokens: {
-    label: "Max tokens",
-    hint: "Pause the goal after spending this many tokens",
-    min: 10_000,
-    max: 2_000_000,
-    step: 10_000,
-    fallback: 200_000,
-    unit: "tokens",
-  },
-};
-
-function limitDraftFromGoal(goal: GoalSnapshot | null): LimitDraft {
-  const read = (key: LimitKey) => {
-    const value = goal?.budget[key];
-    return isPositiveLimit(value) ? value : null;
-  };
-  return {
-    max_turns: read("max_turns"),
-    max_minutes: read("max_minutes"),
-    max_tokens: read("max_tokens"),
-  };
-}
-
-function budgetCommandFromDraft(draft: LimitDraft): GoalBudgetCommand {
-  const budget: GoalBudgetCommand = {};
-  for (const key of LIMIT_KEYS) {
-    const value = draft[key];
-    if (value !== null && value > 0) budget[key] = value;
-  }
-  return budget;
-}
-
-function sameDraft(a: LimitDraft, b: LimitDraft): boolean {
-  return LIMIT_KEYS.every((key) => a[key] === b[key]);
 }
 
 type GoalControlAction = "pause" | "resume" | "stop";
@@ -287,24 +209,28 @@ const GoalUsage: React.FC<{ goal: GoalSnapshot }> = ({ goal }) => {
     {
       key: "turns",
       used: progress.turns_used,
-      limit: budget.max_turns,
+      limit: budget.supervised ? budget.max_turns : null,
       text: (used: string, limit?: string) =>
         limit ? `${used}/${limit} turns` : `${used} turns`,
     },
     {
       key: "tokens",
       used: progress.tokens_used,
-      limit: budget.max_tokens,
+      limit: budget.supervised ? budget.max_tokens : null,
       text: (used: string, limit?: string) =>
         limit ? `${used}/${limit} tokens` : `${used} tokens`,
     },
   ];
-  const limits = [
-    budget.max_turns,
-    budget.max_minutes,
-    budget.max_tokens,
-    budget.no_progress_turns,
-  ].filter(isPositiveLimit).length;
+  const limits = (
+    budget.supervised
+      ? [
+          budget.max_turns,
+          budget.max_minutes,
+          budget.max_tokens,
+          budget.no_progress_turns,
+        ]
+      : []
+  ).filter(isPositiveLimit).length;
 
   return (
     <>
@@ -334,47 +260,6 @@ const GoalUsage: React.FC<{ goal: GoalSnapshot }> = ({ goal }) => {
     </>
   );
 };
-
-const LimitRows: React.FC<{
-  draft: LimitDraft;
-  disabled: boolean;
-  onChange: (next: LimitDraft) => void;
-}> = ({ draft, disabled, onChange }) => (
-  <>
-    {LIMIT_KEYS.map((key) => {
-      const meta = LIMIT_META[key];
-      const value = draft[key];
-      return (
-        <React.Fragment key={key}>
-          <KitToggleRow
-            label={meta.label}
-            ariaLabel={meta.label}
-            hint={meta.hint}
-            meta={value === null ? "Unlimited" : undefined}
-            checked={value !== null}
-            disabled={disabled}
-            onCheckedChange={(on) =>
-              onChange({ ...draft, [key]: on ? meta.fallback : null })
-            }
-          />
-          {value !== null ? (
-            <KitSliderRow
-              label="Limit"
-              ariaLabel={`${meta.label} value`}
-              value={value}
-              min={Math.min(meta.min, value)}
-              max={Math.max(meta.max, value)}
-              step={meta.step}
-              editable
-              unit={meta.unit}
-              onValueChange={(next) => onChange({ ...draft, [key]: next })}
-            />
-          ) : null}
-        </React.Fragment>
-      );
-    })}
-  </>
-);
 
 export function GoalPlanSection({ plan }: { plan: GoalPlanSnapshot }) {
   return (
@@ -460,7 +345,7 @@ type GoalEditorDialogProps = {
   goal: GoalSnapshot | null;
   pending: boolean;
   error: string | null;
-  onCreate: (content: string, budget?: GoalBudgetCommand) => Promise<boolean>;
+  onCreate: (content: string) => Promise<boolean>;
   onUpdateText: (content: string) => Promise<boolean>;
 };
 
@@ -474,15 +359,11 @@ const GoalEditorDialog: React.FC<GoalEditorDialogProps> = ({
   onUpdateText,
 }) => {
   const [draft, setDraft] = useState(goal?.content ?? "");
-  const [limits, setLimits] = useState<LimitDraft>(() =>
-    limitDraftFromGoal(goal),
-  );
   const goalContent = goal?.content;
   const wasOpen = useRef(false);
   useEffect(() => {
     if (open && !wasOpen.current) {
       setDraft(goalContent ?? "");
-      setLimits(limitDraftFromGoal(null));
     }
     wasOpen.current = open;
   }, [open, goalContent]);
@@ -493,13 +374,7 @@ const GoalEditorDialog: React.FC<GoalEditorDialogProps> = ({
 
   const handleSave = async () => {
     if (!canSave || pending) return;
-    const budget = budgetCommandFromDraft(limits);
-    const ok = isUpdate
-      ? await onUpdateText(trimmed)
-      : await onCreate(
-          trimmed,
-          Object.keys(budget).length > 0 ? budget : undefined,
-        );
+    const ok = isUpdate ? await onUpdateText(trimmed) : await onCreate(trimmed);
     if (ok) onOpenChange(false);
   };
 
@@ -537,13 +412,6 @@ const GoalEditorDialog: React.FC<GoalEditorDialogProps> = ({
         onChange={(event) => setDraft(event.currentTarget.value)}
         placeholder="Describe what done looks like"
       />
-      {!isUpdate ? (
-        <>
-          <KitDivider />
-          <KitSection>Limits</KitSection>
-          <LimitRows draft={limits} disabled={pending} onChange={setLimits} />
-        </>
-      ) : null}
     </KitDialog>
   );
 };
@@ -554,41 +422,21 @@ type GoalDetailsDialogProps = {
   goal: GoalSnapshot;
   pending: boolean;
   error: string | null;
-  onApplyBudget: (budget: GoalBudgetCommand) => Promise<boolean>;
 };
 
 const GoalDetailsDialog: React.FC<GoalDetailsDialogProps> = ({
   open,
   onOpenChange,
   goal,
-  pending,
   error,
-  onApplyBudget,
 }) => {
-  const savedTurns = goal.budget.max_turns;
-  const savedMinutes = goal.budget.max_minutes;
-  const savedTokens = goal.budget.max_tokens;
-  const saved = useMemo<LimitDraft>(
-    () => ({
-      max_turns: isPositiveLimit(savedTurns) ? savedTurns : null,
-      max_minutes: isPositiveLimit(savedMinutes) ? savedMinutes : null,
-      max_tokens: isPositiveLimit(savedTokens) ? savedTokens : null,
-    }),
-    [savedTurns, savedMinutes, savedTokens],
-  );
-  const [limits, setLimits] = useState<LimitDraft>(saved);
-  useEffect(() => {
-    if (open) setLimits(saved);
-  }, [open, saved]);
-  const dirty = !sameDraft(limits, saved);
-
   return (
     <KitDialog
       data-composer-overlay=""
       open={open}
       onOpenChange={onOpenChange}
       title="Goal details"
-      description="Plan, limits, verifier attempts and events for this goal."
+      description="Plan, usage, verifier attempts and events for this goal."
       meta={
         <KitBadge tone={goalStatusTone(goal.status)}>
           {humanizeIdentifier(goal.status)}
@@ -600,13 +448,6 @@ const GoalDetailsDialog: React.FC<GoalDetailsDialogProps> = ({
       footer={
         <>
           <KitDialogCancel>Close</KitDialogCancel>
-          <KitButton
-            variant="primary"
-            disabled={!dirty || pending}
-            onClick={() => void onApplyBudget(budgetCommandFromDraft(limits))}
-          >
-            Apply limits
-          </KitButton>
         </>
       }
     >
@@ -619,13 +460,12 @@ const GoalDetailsDialog: React.FC<GoalDetailsDialogProps> = ({
       ) : null}
       {goal.plan ? <GoalPlanSection plan={goal.plan} /> : null}
       <KitDivider />
-      <KitSection>Limits</KitSection>
+      <KitSection>Usage</KitSection>
       <KitStaticRow
         label="Usage"
         meta={<GoalUsage goal={goal} />}
         tone="muted"
       />
-      <LimitRows draft={limits} disabled={pending} onChange={setLimits} />
       <KitDivider />
       <KitSection>Verifier attempts · {goal.attempts.length}</KitSection>
       <GoalAttempts attempts={goal.attempts} />
@@ -753,9 +593,9 @@ const TaskProgressWidgetInstance: React.FC = () => {
     current?.version === goal?.version &&
     JSON.stringify(current?.owner) === JSON.stringify(goal?.owner);
 
-  const handleGoalCreate = (content: string, budget?: GoalBudgetCommand) =>
+  const handleGoalCreate = (content: string) =>
     request.run(
-      { type: "set_goal", content, ...(budget ? { budget } : {}) },
+      { type: "set_goal", content },
       (state) => selectGoalById(state, chatId)?.content === content,
     );
 
@@ -769,29 +609,6 @@ const TaskProgressWidgetInstance: React.FC = () => {
         updated.content.endsWith(content)
       );
     });
-
-  const handleGoalBudgetApply = (budget: GoalBudgetCommand) => {
-    const nextBudget: GoalBudgetCommand = Object.fromEntries(
-      Object.entries(goal?.budget ?? {}).filter(
-        ([key, value]) =>
-          typeof value === "number" &&
-          key !== "max_turns" &&
-          key !== "max_minutes" &&
-          key !== "max_tokens",
-      ),
-    );
-    Object.assign(nextBudget, budget);
-    return request.run(
-      { type: "set_goal_budget", budget: nextBudget },
-      (state) => {
-        const updated = selectGoalById(state, chatId);
-        if (!updated || !sameGoal(updated)) return false;
-        return LIMIT_KEYS.every(
-          (key) => (updated.budget[key] ?? 0) === (nextBudget[key] ?? 0),
-        );
-      },
-    );
-  };
 
   const handleGoalControl = (action: GoalControlAction) => {
     const expected =
@@ -938,8 +755,8 @@ const TaskProgressWidgetInstance: React.FC = () => {
       {goal?.status === "budget_exhausted" || goal?.status === "no_progress" ? (
         <p className={styles.feedback}>
           {goal.status === "budget_exhausted"
-            ? "Budget exhausted. Review usage and explicitly adjust budget limits to continue."
-            : "No progress detected. Provide new direction or review the progress budget before continuing."}
+            ? "This historical goal stopped at an effort limit. Ordinary goals no longer have effort limits."
+            : "No progress detected. Provide new direction before continuing."}
         </p>
       ) : null}
       {request.status ? (
@@ -978,7 +795,6 @@ const TaskProgressWidgetInstance: React.FC = () => {
           goal={activeGoal}
           pending={request.blocked}
           error={request.error}
-          onApplyBudget={handleGoalBudgetApply}
         />
       ) : null}
     </div>

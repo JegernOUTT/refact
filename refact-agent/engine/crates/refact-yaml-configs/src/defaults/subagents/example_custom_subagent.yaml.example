@@ -20,7 +20,6 @@ tool:
 
 subchat:
   stateful: false
-  max_steps: 15
   model_type: default
   n_ctx: 100000
   max_new_tokens: 8000
@@ -83,6 +82,3 @@ agent_profile:
     autonomous_no_confirm: false
     auto_approve_editing_tools: false
     auto_approve_dangerous_commands: false
-  budget:
-    max_turns: 20
-  max_steps: 20

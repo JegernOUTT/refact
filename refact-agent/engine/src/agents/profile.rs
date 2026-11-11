@@ -208,12 +208,6 @@ impl AgentProfile {
                 detail: "tool names must not be empty".into(),
             });
         }
-        if spec.max_steps == Some(0) {
-            return Err(ProfileError::ProfileMalformed {
-                name: name.to_string(),
-                detail: "max_steps must be a positive integer".into(),
-            });
-        }
         let revision = content_revision(name, &spec);
         Ok(AgentProfile {
             name: name.to_string(),
@@ -444,7 +438,11 @@ pub fn resolve_profile_instance(
         }
         (None, None) => None,
     };
-    let max_steps = match (profile.step_cap(), narrowing.max_steps) {
+    let supervised = matches!(ceiling, ToolsPolicy::Supervised { .. });
+    let max_steps = match (
+        profile.step_cap().filter(|_| supervised),
+        narrowing.max_steps.filter(|_| supervised),
+    ) {
         (Some(profile_cap), Some(run_cap)) => {
             provenance.contributed.push("max_steps".into());
             if run_cap < profile_cap {
@@ -482,7 +480,13 @@ pub fn resolve_profile_instance(
         max_steps,
         reasoning_effort: profile.spec.reasoning_effort.clone(),
         approval: profile.spec.approval.clone(),
-        budget: profile.spec.budget.clone(),
+        budget: profile.spec.budget.clone().map(|budget| {
+            if supervised {
+                budget
+            } else {
+                budget.without_hard_limits()
+            }
+        }),
         instructions,
         provenance,
     })
@@ -562,7 +566,7 @@ mod tests {
             effective.tools,
             Some(vec!["cat".to_string(), "shell".to_string()])
         );
-        assert_eq!(effective.max_steps, Some(30));
+        assert_eq!(effective.max_steps, None);
         assert!(effective.instructions.unwrap().contains("Careful reviewer"));
 
         let narrowed = resolve_profile_instance(
@@ -579,7 +583,7 @@ mod tests {
         .unwrap();
         assert_eq!(narrowed.tools, Some(vec!["cat".to_string()]));
         assert_eq!(narrowed.model.as_deref(), Some("run/model"));
-        assert_eq!(narrowed.max_steps, Some(10));
+        assert_eq!(narrowed.max_steps, None);
         assert!(narrowed.provenance.narrowed.contains(&"tools".to_string()));
         assert!(narrowed.provenance.narrowed.contains(&"model".to_string()));
     }
@@ -668,7 +672,7 @@ mod tests {
         ));
         assert_eq!(unknown_field.to_json()["code"], "profile_malformed");
         assert!(AgentProfile::parse("bad", &spec_value("tools: [\"\"]\n"), &limits).is_err());
-        assert!(AgentProfile::parse("bad", &spec_value("max_steps: 0\n"), &limits).is_err());
+        assert!(AgentProfile::parse("legacy", &spec_value("max_steps: 0\n"), &limits).is_ok());
         let bounded = refact_work_core::CoordinationSettings {
             agent_profile_max_bytes: 4,
             ..Default::default()

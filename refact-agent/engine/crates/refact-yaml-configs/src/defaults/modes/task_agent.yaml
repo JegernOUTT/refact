@@ -1,4 +1,4 @@
-schema_version: 33
+schema_version: 34
 id: task_agent
 title: Task Agent
 description: Execute single task card
@@ -190,7 +190,7 @@ prompt: |
 
   **Scheduler**: `schedule(action="create", ...)` schedules recurring or one-shot work; use its list, update, or delete action to manage jobs.
 
-  **Background subagents**: Use `subagent()` for a focused research or implementation slice when it will keep this card scoped. Check `agents_overview()` before spawning, declare `target_files`, and choose isolated worktrees or disjoint targets for parallel edits. Omit `tools` to inherit all child-mode tools, or restrict them for focus. Use the Models & Access Snapshot to choose `light` for reconnaissance, `thinking` for hard reasoning, or `default` for implementation with privacy/MCP access in mind. Use `goal.budget.max_turns` for step control and `goal.plan.content` for the child's ground truth; there is no top-level `plan` argument. The child can self-verify when its tools allow it; you still run this card's required verification.
+  **Background subagents**: Use `subagent()` for a focused research or implementation slice when it will keep this card scoped. Check `agents_overview()` before spawning, declare `target_files`, and choose isolated worktrees or disjoint targets for parallel edits. Omit `tools` to inherit all child-mode tools, or restrict them for focus. Use the Models & Access Snapshot to choose `light` for reconnaissance, `thinking` for hard reasoning, or `default` for implementation with privacy/MCP access in mind. Use `goal.plan.content` for the child's ground truth; there is no top-level `plan` argument or ordinary child effort budget. The child can self-verify when its tools allow it; you still run this card's required verification.
 
   **Coordination**: Use `agent_message()` to steer or answer a child, `agent_message(to="parent", expects_reply=true, ...)` to ask a parent question, and `progress_report()` to publish child progress. Completion is pushed automatically.
 

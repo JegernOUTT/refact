@@ -640,6 +640,7 @@ async fn completed_child_continuation_lifetime_and_recovery() {
                 content: "finite task".into(),
                 criteria: Vec::new(),
                 budget: Some(crate::chat::types::GoalBudget {
+                    supervised: true,
                     max_turns: Some(6),
                     explicit: true,
                     ..Default::default()
@@ -696,7 +697,7 @@ async fn completed_child_continuation_lifetime_and_recovery() {
         };
         let receipt: serde_json::Value =
             serde_json::from_str(&message.content.content_text_only()).unwrap();
-        assert_eq!(receipt["can_raise_and_resume"], !finite_goal);
+        assert!(receipt.get("can_raise_and_resume").is_none());
         assert_eq!(receipt["resume_configuration_available"], true);
         let path = fixture
             .cache
@@ -722,7 +723,7 @@ async fn completed_child_continuation_lifetime_and_recovery() {
             };
             let receipt: serde_json::Value =
                 serde_json::from_str(&message.content.content_text_only()).unwrap();
-            assert_eq!(receipt["can_raise_and_resume"], false);
+            assert!(receipt.get("can_raise_and_resume").is_none());
             assert_eq!(receipt["can_resume"], false);
             assert!(receipt["recovery_unavailable_reason"].as_str().is_some());
             assert_eq!(

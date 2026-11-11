@@ -32,6 +32,7 @@ fn tightest_budget(
         }
     }
     crate::chat::types::GoalBudget {
+        supervised: true,
         max_turns: tightest(left.max_turns, right.max_turns),
         max_minutes: tightest(left.max_minutes, right.max_minutes),
         max_tokens: tightest(left.max_tokens, right.max_tokens),

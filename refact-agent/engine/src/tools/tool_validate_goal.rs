@@ -370,6 +370,7 @@ mod tests {
 
     fn finite_budget() -> GoalBudget {
         GoalBudget {
+            supervised: true,
             max_turns: Some(1),
             max_minutes: None,
             max_tokens: None,

@@ -468,28 +468,15 @@ export async function setGoal(
   content: string,
   connection: PortOrConnection,
   apiKey?: string,
-  budget?: GoalBudgetCommand,
+  _budget?: GoalBudgetCommand,
   plan?: { content: string },
 ): Promise<void> {
   const command: ChatCommandBase = {
     type: "set_goal",
     content,
-    ...(budget === undefined ? {} : { budget }),
     ...(plan === undefined ? {} : { plan }),
   };
   await sendChatCommand(chatId, connection, apiKey, command);
-}
-
-export async function setGoalBudget(
-  chatId: string,
-  budget: GoalBudgetCommand,
-  connection: PortOrConnection,
-  apiKey?: string,
-): Promise<void> {
-  await sendChatCommand(chatId, connection, apiKey, {
-    type: "set_goal_budget",
-    budget,
-  });
 }
 
 export async function updateGoal(

@@ -48,10 +48,6 @@ enum AgentLifecycleAction {
         instruction: Option<String>,
         reconcile_incomplete: bool,
     },
-    RaiseAndResume {
-        max_steps: usize,
-        expected_change_seq: u64,
-    },
 }
 
 /// What a lifecycle call actually did. Kept separate from the record's status
@@ -106,7 +102,7 @@ fn agent_lifecycle_schema() -> Value {
         "type": "object", "additionalProperties": false,
         "properties": {
             "agent_id": {"type": "string", "minLength": 1},
-            "action": {"type": "string", "enum": ["inspect", "close", "raise_and_recover", "recover", "continue"], "description": "inspect accepts only agent_id and action. close additionally accepts reason and expected_run_generation. raise_and_recover requires max_steps and expected_change_seq only. recover and continue require expected_change_seq and optionally accept instruction and reconcile_incomplete."},
+            "action": {"type": "string", "enum": ["inspect", "close", "recover", "continue"], "description": "inspect accepts only agent_id and action. close additionally accepts reason and expected_run_generation. recover and continue require expected_change_seq and optionally accept instruction and reconcile_incomplete."},
             "instruction": {"type": "string", "minLength": 1, "description": "Optional exact parent follow-up for recover or continue; appended after preserved child history."},
             "reconcile_incomplete": {"type": "boolean", "default": false, "description": "For recover or continue only: explicitly acknowledge missing tool outcomes as unknown without replaying calls. Inspect side effects before enabling."},
             "reason": {"type": "string", "minLength": 1, "description": "For close only: why this child is being closed."},
@@ -114,13 +110,9 @@ fn agent_lifecycle_schema() -> Value {
                 "type": "integer", "minimum": 1,
                 "description": "For close only: refuse if the child already moved to another generation."
             },
-            "max_steps": {
-                "type": "integer", "minimum": 1,
-                "description": "New per-child total step cap, required for raise_and_recover. Must increase the stopped cap without exceeding the Settings ceiling."
-            },
             "expected_change_seq": {
                 "type": "integer", "minimum": 1,
-                "description": "Exact change_seq returned by inspect, required for raise_and_recover, recover and continue."
+                "description": "Exact change_seq returned by inspect, required for recover and continue."
             }
         },
         "required": ["agent_id", "action"]
@@ -135,12 +127,7 @@ fn parse_agent_lifecycle_args(
         "inspect" => &[],
         "close" => &["reason", "expected_run_generation"],
         "recover" | "continue" => &["instruction", "reconcile_incomplete", "expected_change_seq"],
-        "raise_and_recover" => &["max_steps", "expected_change_seq"],
-        _ => {
-            return Err(
-                "action must be inspect, close, recover, continue or raise_and_recover".into(),
-            )
-        }
+        _ => return Err("action must be inspect, close, recover or continue".into()),
     };
     for key in args.keys() {
         if !matches!(key.as_str(), "agent_id" | "action") && !allowed.contains(&key.as_str()) {
@@ -172,11 +159,6 @@ fn parse_agent_lifecycle_args(
                 .map(|_| positive("expected_run_generation"))
                 .transpose()?,
             reason: text("reason")?,
-        },
-        "raise_and_recover" => AgentLifecycleAction::RaiseAndResume {
-            max_steps: usize::try_from(positive("max_steps")?)
-                .map_err(|_| "max_steps is too large".to_string())?,
-            expected_change_seq: positive("expected_change_seq")?,
         },
         action => {
             let expected_change_seq = positive("expected_change_seq")?;
@@ -1033,7 +1015,7 @@ fn payload_string_list(payload: &Value, key: &str) -> Option<Vec<String>> {
 pub(crate) fn agent_lifecycle_description(config_path: &str) -> ToolDesc {
     let mut description = background_agent_tool_desc(
         config_path.to_string(), "agent_lifecycle", "Agent Lifecycle",
-        "Inspect, close, recover or continue a direct child on its saved history, plan and goal. Recover restarts a stopped or closed child; continue asks a completed child for another turn. raise_and_recover increases a stopped per-child step cap within Settings. Mutations require the inspected revision; incomplete outcomes require explicit reconciliation and are never replayed. Accepted continuations are queued, never completed. Cannot change global Settings, goal budgets, policy or provider quotas.",
+        "Inspect, close, recover or continue a direct child on its saved history, plan and goal. Recover restarts a stopped or closed child; continue asks a completed child for another turn. Mutations require the inspected revision; incomplete outcomes require explicit reconciliation and are never replayed. Accepted continuations are queued, never completed. Cannot change global Settings, policy or provider quotas.",
         agent_lifecycle_schema(),
     );
     description.allow_parallel = false;
@@ -1198,20 +1180,6 @@ pub(crate) async fn agent_lifecycle_execute(
             .await?;
             LifecycleOutcome::Queued
         }
-        AgentLifecycleAction::RaiseAndResume {
-            max_steps,
-            expected_change_seq,
-        } => {
-            record = crate::agents::spawn::resume_capped_agent(
-                app.clone(),
-                &chat_id,
-                &agent_id,
-                max_steps,
-                expected_change_seq,
-            )
-            .await?;
-            LifecycleOutcome::Queued
-        }
     };
     let recovery = crate::agents::spawn::recover_run_config(&app, &chat_id, &agent_id).await;
     let mut recovery_unavailable_reason = recovery.as_ref().err().cloned();
@@ -1238,14 +1206,6 @@ pub(crate) async fn agent_lifecycle_execute(
         None
     };
     let scope_available = recovered.is_some();
-    let settings_ceiling = if let Some(run) = &recovered {
-        crate::runtime_settings::coordination_for_project(&run.root)
-            .await
-            .ok()
-            .map(|limits| limits.subagent_max_steps)
-    } else {
-        None
-    };
     let recovery_available = scope_available && recovery_unavailable_reason.is_none();
     let unlimited_steps = recovered
         .as_ref()
@@ -1275,12 +1235,8 @@ pub(crate) async fn agent_lifecycle_execute(
             "can_close": !record.status.is_terminal(),
             "can_resume": steps_left && record.status.is_terminal() && record.status != BgAgentStatus::Completed,
             "can_continue": steps_left && record.status == BgAgentStatus::Completed,
-            "can_raise_and_resume": !unlimited_steps && recovery_available && record.status == BgAgentStatus::Failed
-                && cap_stop.as_ref().is_some_and(|stop| stop.parent_can_raise_steps()
-                    && settings_ceiling.is_some_and(|ceiling| ceiling > stop.used.max(record.step_count as usize).max(stop.limit))),
-            "max_steps": max_steps,
-            "settings_subagent_max_steps_ceiling": settings_ceiling,
-            "resume_configuration_available": max_steps.is_some(),
+            "max_steps": max_steps.filter(|_| !unlimited_steps),
+            "resume_configuration_available": recovered.is_some(),
             "recovery_unavailable_reason": recovery_unavailable_reason,
             "tool_authority": tool_authority,
             "original_scope_available": scope_available,
@@ -1297,9 +1253,6 @@ pub(crate) async fn agent_lifecycle_match_against_confirm_deny(
         result: match action {
             AgentLifecycleAction::Inspect => MatchConfirmDenyResult::PASS,
             AgentLifecycleAction::Close {
-                ..
-            }
-            | AgentLifecycleAction::RaiseAndResume {
                 ..
             }
             | AgentLifecycleAction::Resume {
@@ -2651,18 +2604,18 @@ mod tests {
         );
         let valid = args(&[
             ("agent_id", json!("bgagent-test")),
-            ("action", json!("raise_and_recover")),
-            ("max_steps", json!(80)),
+            ("action", json!("recover")),
             ("expected_change_seq", json!(5)),
         ]);
         assert_eq!(
             parse_agent_lifecycle_args(&valid).unwrap().1,
-            AgentLifecycleAction::RaiseAndResume {
-                max_steps: 80,
-                expected_change_seq: 5
+            AgentLifecycleAction::Resume {
+                expected_change_seq: 5,
+                instruction: None,
+                reconcile_incomplete: false,
             }
         );
-        for key in ["max_steps", "expected_change_seq"] {
+        for key in ["expected_change_seq"] {
             for value in [
                 json!(0),
                 json!(-1),
@@ -2763,13 +2716,12 @@ mod tests {
             failed.error.as_deref()
         );
         let foreign = create_agent(&app, OTHER_PARENT, BgAgentKind::Subagent, "Hidden").await;
-        for action in ["inspect", "raise_and_recover"] {
+        for action in ["inspect", "recover"] {
             let mut request = args(&[
                 ("agent_id", json!(foreign.agent_id)),
                 ("action", json!(action)),
             ]);
-            if action == "raise_and_recover" {
-                request.insert("max_steps".to_string(), json!(80));
+            if action == "recover" {
                 request.insert("expected_change_seq".to_string(), json!(1));
             }
             let error = agent_lifecycle_execute(ccx.clone(), &"foreign".to_string(), &request)
@@ -2780,7 +2732,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agent_lifecycle_raise_requires_confirmation_by_default() {
+    async fn agent_lifecycle_recovery_requires_confirmation_by_default() {
         use crate::tools::tools_description::MatchConfirmDenyResult;
         let (_temp, _app, ccx) = test_context(PARENT).await;
         let tool = ToolAgentLifecycle {
@@ -2797,8 +2749,7 @@ mod tests {
         assert!(matches!(result.result, MatchConfirmDenyResult::PASS));
         let mutation = args(&[
             ("agent_id", json!("bgagent-test")),
-            ("action", json!("raise_and_recover")),
-            ("max_steps", json!(80)),
+            ("action", json!("recover")),
             ("expected_change_seq", json!(5)),
         ]);
         let result = tool
@@ -2917,14 +2868,16 @@ mod tests {
         .input_schema;
         assert_eq!(
             schema["properties"]["action"]["enum"],
-            json!([
-                "inspect",
-                "close",
-                "raise_and_recover",
-                "recover",
-                "continue"
-            ])
+            json!(["inspect", "close", "recover", "continue"])
         );
+        assert!(schema["properties"].get("max_steps").is_none());
+        assert!(parse_agent_lifecycle_args(&args(&[
+            ("agent_id", json!("bgagent-test")),
+            ("action", json!("raise_and_recover")),
+            ("max_steps", json!(80)),
+            ("expected_change_seq", json!(5)),
+        ]))
+        .is_err());
     }
 
     #[tokio::test]

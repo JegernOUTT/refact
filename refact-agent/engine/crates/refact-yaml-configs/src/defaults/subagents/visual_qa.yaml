@@ -1,4 +1,4 @@
-schema_version: 2
+schema_version: 3
 id: visual_qa
 title: Visual QA
 description: Read-only pre-merge visual regression gate with browser runtime diagnostics
@@ -18,8 +18,6 @@ tool:
 
 subchat:
   stateful: false
-  # Twenty-four steps support a multi-baseline gate plus one diagnostic pass per scenario without an open-ended audit.
-  max_steps: 24
   model_type: thinking
   n_ctx: 128000
   max_new_tokens: 8000

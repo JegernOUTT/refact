@@ -536,6 +536,7 @@ mod tests {
     fn install_goal_records_active_and_budget() {
         let mut session = make_session();
         let budget = GoalBudget {
+            supervised: true,
             max_turns: Some(3),
             max_minutes: Some(4),
             max_tokens: Some(5),

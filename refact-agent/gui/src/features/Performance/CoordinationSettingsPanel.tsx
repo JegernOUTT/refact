@@ -33,6 +33,14 @@ function errorText(error: unknown): string {
 }
 
 const recoveryLabels: Partial<Record<string, [string, string]>> = {
+  subagent_default_steps: [
+    "Application-owned child steps",
+    "Legacy step default for application-owned workers; ordinary subagents run without a lifetime step cap.",
+  ],
+  subagent_max_steps: [
+    "Application-owned child step ceiling",
+    "Retained for protected application and Buddy launches, not ordinary subagents.",
+  ],
   recovery_auto_retry_enabled: [
     "Automatic model recovery",
     "Retry transient model errors automatically.",

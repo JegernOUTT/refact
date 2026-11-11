@@ -438,12 +438,12 @@ pub(crate) fn goal_snapshot_from_messages(
             }),
         sub_goals: prior.map(|goal| goal.sub_goals.clone()).unwrap_or_default(),
     };
-    if !has_prior
+    if (!has_prior || !snapshot.budget.supervised)
         && matches!(
             snapshot.status,
             GoalStatus::BudgetExhausted | GoalStatus::NoProgress
         )
-        && !goal_budget_has_hard_limits(&snapshot.budget)
+        && (!snapshot.budget.supervised || !goal_budget_has_hard_limits(&snapshot.budget))
     {
         snapshot.status = if snapshot.active {
             GoalStatus::Active
@@ -7451,6 +7451,7 @@ mod tests {
 
         fn budget() -> GoalBudget {
             GoalBudget {
+                supervised: true,
                 max_turns: Some(5),
                 max_minutes: Some(2),
                 max_tokens: Some(100),
@@ -8314,6 +8315,7 @@ mod tests {
                 "ship it",
                 true,
                 GoalBudget {
+                    supervised: true,
                     max_cost_cents: Some(10),
                     ..Default::default()
                 },
@@ -8617,6 +8619,7 @@ mod tests {
             None,
             true,
             GoalBudget {
+                supervised: true,
                 max_turns: Some(3),
                 max_minutes: None,
                 max_tokens: None,

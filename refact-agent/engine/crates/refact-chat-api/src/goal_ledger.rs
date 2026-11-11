@@ -97,6 +97,9 @@ pub fn goal_budget_exhaustion_status(
     progress: &GoalProgress,
     now_ms: u64,
 ) -> Option<GoalStatus> {
+    if !budget.supervised {
+        return None;
+    }
     if let Some(no_progress_turns) = budget.no_progress_turns {
         if no_progress_turns > 0 && progress.no_progress_turns >= no_progress_turns {
             return Some(GoalStatus::NoProgress);
@@ -528,6 +531,7 @@ mod tests {
     #[test]
     fn reduce_no_progress_budget_terminates_and_user_reset_heals() {
         let budget = GoalBudget {
+            supervised: true,
             no_progress_turns: Some(2),
             ..Default::default()
         };
@@ -579,6 +583,36 @@ mod tests {
     }
 
     #[test]
+    fn ordinary_explicit_limits_never_exhaust_but_supervised_limits_do() {
+        let mut budget = GoalBudget {
+            max_turns: Some(1),
+            max_minutes: Some(1),
+            max_tokens: Some(1),
+            max_cost_cents: Some(1),
+            no_progress_turns: Some(1),
+            explicit: true,
+            ..Default::default()
+        };
+        let progress = GoalProgress {
+            turns_used: 5,
+            tokens_used: 5,
+            cost_used_cents: 5,
+            no_progress_turns: 5,
+            started_at_ms: 1,
+            ..Default::default()
+        };
+        assert_eq!(
+            goal_budget_exhaustion_status(&budget, &progress, 120_000),
+            None
+        );
+        budget.supervised = true;
+        assert_eq!(
+            goal_budget_exhaustion_status(&budget, &progress, 120_000),
+            Some(GoalStatus::NoProgress)
+        );
+    }
+
+    #[test]
     fn reduce_max_cost_budget_exhausts() {
         let entries = vec![
             entry(
@@ -588,6 +622,7 @@ mod tests {
                     version: 1,
                     active: true,
                     budget: GoalBudget {
+                        supervised: true,
                         max_cost_cents: Some(10),
                         ..Default::default()
                     },

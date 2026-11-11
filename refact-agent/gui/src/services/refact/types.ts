@@ -1186,6 +1186,7 @@ export type GoalStatus =
   | "transferred";
 
 export type GoalBudget = {
+  supervised?: boolean;
   max_turns?: number | null;
   max_minutes?: number | null;
   max_tokens?: number | null;

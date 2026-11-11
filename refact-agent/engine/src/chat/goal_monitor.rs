@@ -632,7 +632,11 @@ fn nudge_context(session: &ChatSession) -> Result<String, String> {
     {
         lines.push(format!("Remaining gaps: {}", bounded_excerpt(&gaps, 300)));
     }
-    let turns = match goal.budget.max_turns.filter(|limit| *limit > 0) {
+    let turns = match goal
+        .budget
+        .max_turns
+        .filter(|limit| goal.budget.supervised && *limit > 0)
+    {
         Some(limit) => format!("{}/{}", goal.progress.turns_used, limit),
         None => goal.progress.turns_used.to_string(),
     };
@@ -645,7 +649,7 @@ fn nudge_context(session: &ChatSession) -> Result<String, String> {
 
 fn goal_is_quiescent(session: &ChatSession) -> bool {
     session.goal.as_ref().is_some_and(|goal| {
-        goal.budget.no_progress_turns.is_none_or(|limit| limit == 0)
+        (!goal.budget.supervised || goal.budget.no_progress_turns.is_none_or(|limit| limit == 0))
             && goal.progress.no_progress_turns >= QUIESCENCE_NUDGES
     })
 }
@@ -662,7 +666,7 @@ pub fn mark_goal_blocked_on_context_limit(session: &mut ChatSession) -> bool {
         if !goal.active || !matches!(goal.status, GoalStatus::Active) {
             return false;
         }
-        goal.budget.no_progress_turns.is_some_and(|limit| limit > 0)
+        goal.budget.supervised && goal.budget.no_progress_turns.is_some_and(|limit| limit > 0)
     };
     while session.goal.as_ref().is_some_and(|goal| {
         matches!(goal.status, GoalStatus::Active)
@@ -850,6 +854,7 @@ mod tests {
             "ship the thing",
             true,
             GoalBudget {
+                supervised: true,
                 max_turns: Some(10),
                 max_minutes: Some(60),
                 max_tokens: Some(10_000),
@@ -877,6 +882,7 @@ mod tests {
             "ship the thing",
             true,
             GoalBudget {
+                supervised: true,
                 max_turns: None,
                 max_minutes: None,
                 max_tokens: None,
@@ -925,6 +931,7 @@ mod tests {
             "ship the thing",
             true,
             GoalBudget {
+                supervised: true,
                 max_turns: None,
                 max_minutes: None,
                 max_tokens: None,
@@ -1228,6 +1235,7 @@ mod tests {
             "ship the thing",
             true,
             GoalBudget {
+                supervised: true,
                 max_turns: None,
                 max_minutes: None,
                 max_tokens: None,

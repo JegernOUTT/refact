@@ -1,4 +1,4 @@
-schema_version: 3
+schema_version: 4
 id: design_review
 title: Design Review
 description: Read-only UI audit grounded in design-system and live-browser measurements
@@ -18,8 +18,6 @@ tool:
 
 subchat:
   stateful: false
-  # One matrix probe covers many viewport/theme/state cells; 18 steps leave room for accessibility, contrast, and visual evidence.
-  max_steps: 18
   model_type: thinking
   n_ctx: 128000
   max_new_tokens: 12000
@@ -46,7 +44,6 @@ messages:
 
     - `chrome({"steps":[{"action":"accessibility_snapshot","locator":{"by":"css","value":"[data-testid=toolbar]"},"boxes":true}]})`
     - `chrome({"steps":[{"action":"capture_element_states","locator":{"by":"ref","value":"e14"},"states":["default","hover","focus","active"]}]})`
-    - `chrome({"steps":[{"action":"click","locator":{"by":"css","value":"#open-drawer"}},{"action":"capture_frames","duration_ms":1200,"frame_count":8,"locator":{"by":"css","value":".drawer"}}]})`
 
     Return exactly one fenced `html` block and nothing after it. The block must be a complete interactive report with a summary, filterable or collapsible findings, and an evidence section. Every finding must contain:
     - severity;

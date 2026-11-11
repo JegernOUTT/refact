@@ -157,10 +157,10 @@ pub(crate) struct SupervisionCompletion {
 }
 
 impl OperatorStore {
-    pub(crate) fn read_document_policy_snapshot(
+    fn read_existing_connection(
         root: &Path,
         identity: &ProjectIdentity,
-    ) -> Result<(super::operator_observability::PolicySnapshot, usize), OperatorStoreError> {
+    ) -> Result<Connection, OperatorStoreError> {
         let root = dunce::canonicalize(root)?;
         if identity.canonical_root != root.to_string_lossy() {
             return Err(OperatorStoreError::ProjectMismatch);
@@ -184,7 +184,6 @@ impl OperatorStore {
             ));
         }
         verify_schema_matches_version(&connection, version)?;
-        validate_document_accounting(&connection)?;
         let binding: String = connection.query_row(
             "SELECT value FROM meta WHERE key='project_identity'",
             [],
@@ -193,6 +192,48 @@ impl OperatorStore {
         if decode::<ProjectIdentity>(&binding)? != *identity {
             return Err(OperatorStoreError::ProjectMismatch);
         }
+        Ok(connection)
+    }
+
+    pub(crate) fn retained_supervision_budget(
+        root: &Path,
+        identity: &ProjectIdentity,
+        chat_id: &str,
+    ) -> Result<Option<refact_chat_api::GoalBudget>, OperatorStoreError> {
+        if !root.join(".refact/buddy/operator.sqlite").try_exists()? {
+            return Ok(None);
+        }
+        let connection = Self::read_existing_connection(root, identity)?;
+        let payload: Option<String> = connection.query_row(
+            "SELECT d.payload FROM operator_documents d WHERE d.namespace='supervision_links' AND NOT EXISTS(SELECT 1 FROM operator_documents newer WHERE newer.namespace=d.namespace AND newer.id=d.id AND newer.revision>d.revision) AND (json_extract(d.payload,'$.chat_id')=?1 OR json_extract(d.payload,'$.child_chat_id')=?1)",
+            [chat_id], |row| row.get(0),
+        ).optional()?;
+        let Some(payload) = payload else {
+            return Ok(None);
+        };
+        let link: super::supervision::SupervisionLink = decode(&payload)?;
+        if link.project != *identity {
+            return Err(OperatorStoreError::ProjectMismatch);
+        }
+        let payload: String = connection.query_row(
+            "SELECT payload FROM operator_documents WHERE namespace='supervision_mandates' AND id=?1 ORDER BY revision DESC LIMIT 1",
+            [&link.mandate_id], |row| row.get(0),
+        )?;
+        let record: super::supervision_authority::MandateRecord = decode(&payload)?;
+        if record.project != *identity || record.mandate.mandate_id != link.mandate_id {
+            return Err(OperatorStoreError::ProjectMismatch);
+        }
+        super::supervision::native_budget(&record)
+            .map(Some)
+            .map_err(|_| OperatorStoreError::CorruptSchema("invalid retained supervision budget"))
+    }
+
+    pub(crate) fn read_document_policy_snapshot(
+        root: &Path,
+        identity: &ProjectIdentity,
+    ) -> Result<(super::operator_observability::PolicySnapshot, usize), OperatorStoreError> {
+        let connection = Self::read_existing_connection(root, identity)?;
+        validate_document_accounting(&connection)?;
         let epoch: Option<String> = connection
             .query_row(
                 "SELECT value FROM meta WHERE key='document_policy_epoch'",

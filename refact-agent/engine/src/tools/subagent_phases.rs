@@ -422,7 +422,7 @@ pub async fn gather_files_phase_with_plan(
         runner,
     } = plan;
 
-    let subchat_config = match &runner {
+    let mut subchat_config = match &runner {
         GatherRunner::Registry {
             subagent_id,
         } => {
@@ -476,6 +476,25 @@ pub async fn gather_files_phase_with_plan(
             .await?
         }
     };
+
+    let (app, parent_id, supervised) = {
+        let context = ccx.lock().await;
+        (
+            context.app.clone(),
+            context.chat_id.clone(),
+            matches!(
+                context.child_tool_ceiling,
+                Some(crate::subchat::ToolsPolicy::Supervised { .. })
+            ),
+        )
+    };
+    let parent = app.chat.sessions.read().await.get(&parent_id).cloned();
+    let buddy = if let Some(parent) = parent {
+        parent.lock().await.thread.buddy_meta.is_some()
+    } else {
+        false
+    };
+    subchat_config.unlimited_configured_steps = !supervised && !buddy;
 
     let mut messages = vec![ChatMessage {
         role: "system".to_string(),

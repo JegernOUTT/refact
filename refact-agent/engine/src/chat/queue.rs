@@ -216,6 +216,7 @@ pub(crate) fn prepare_guarded_command(
                 | ChatCommand::SetParams { .. }
                 | ChatCommand::GoalControl { .. }
                 | ChatCommand::SetGoal { .. }
+                | ChatCommand::SetGoalBudget { .. }
                 | ChatCommand::AnswerQuestions { .. }
                 | ChatCommand::SubmitQuestionResponse { .. }
                 | ChatCommand::UpdateMessage { .. }
@@ -1177,7 +1178,7 @@ fn handle_set_goal_command(
     let budget = match budget {
         Some(mut budget) => {
             budget.explicit = true;
-            budget
+            budget.migrate_legacy_default_hard_limits()
         }
         None => GoalBudget::default(),
     };
@@ -1254,6 +1255,9 @@ fn handle_set_goal_budget_command(
     };
 
     budget.explicit = true;
+    budget = budget
+        .without_hard_limits()
+        .migrate_legacy_default_hard_limits();
     let serialized_budget = serde_json::to_value(&budget)
         .map_err(|error| format!("failed to serialize goal budget: {error}"))?;
     let goal_meta = messages[base_index]
@@ -6058,6 +6062,7 @@ mod tests {
     fn goal_budget_set_goal_command_installs_explicit_budget() {
         let mut session = ChatSession::new("goal-command".to_string());
         let budget = GoalBudget {
+            supervised: false,
             max_turns: Some(3),
             max_minutes: Some(4),
             max_tokens: Some(5),
@@ -6109,6 +6114,7 @@ mod tests {
         let mut session = ChatSession::new("goal-command".to_string());
         handle_set_goal_command(&mut session, "Base".to_string(), None, None, None).unwrap();
         let budget = GoalBudget {
+            supervised: false,
             max_turns: Some(2),
             max_minutes: None,
             max_tokens: Some(1_000),
@@ -6123,7 +6129,7 @@ mod tests {
 
         let expected = GoalBudget {
             explicit: true,
-            ..budget
+            ..budget.without_hard_limits()
         };
         assert_eq!(result, json!({"budget": expected.clone()}));
         assert_eq!(session.goal.as_ref().unwrap().budget, expected);
@@ -6158,12 +6164,12 @@ mod tests {
         );
 
         let goal = reloaded.goal.expect("goal projection");
-        assert_eq!(goal.budget.max_turns, Some(10));
-        assert_eq!(goal.budget.max_minutes, Some(15));
-        assert_eq!(goal.budget.max_tokens, Some(200_000));
-        assert_eq!(goal.budget.no_progress_turns, Some(2));
+        assert_eq!(goal.budget.max_turns, None);
+        assert_eq!(goal.budget.max_minutes, None);
+        assert_eq!(goal.budget.max_tokens, None);
+        assert_eq!(goal.budget.no_progress_turns, None);
         assert!(goal.budget.explicit);
-        assert_eq!(goal.status, GoalStatus::BudgetExhausted);
+        assert_eq!(goal.status, GoalStatus::Active);
     }
 
     #[test]
@@ -6177,6 +6183,7 @@ mod tests {
         handle_set_goal_budget_command(
             &mut session,
             GoalBudget {
+                supervised: false,
                 max_turns: Some(2),
                 max_minutes: None,
                 max_tokens: None,
@@ -6189,25 +6196,16 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(
-            session.goal.as_ref().unwrap().status,
-            GoalStatus::BudgetExhausted
-        );
-        assert_eq!(session.goal_status, Some(GoalStatus::BudgetExhausted));
-        assert!(session.goal_status_changed_since(epoch));
-        assert!(matches!(
-            session.goal_ledger.last().map(|entry| &entry.op),
-            Some(GoalLedgerOp::StatusChanged {
-                to: GoalStatus::BudgetExhausted,
-                ..
-            })
-        ));
+        assert_eq!(session.goal.as_ref().unwrap().status, GoalStatus::Active);
+        assert_eq!(session.goal.as_ref().unwrap().budget.max_turns, None);
+        assert!(!session.goal_status_changed_since(epoch));
     }
 
     #[test]
     fn goal_budget_set_goal_budget_command_clears_limits_and_heals_terminal_status() {
         let mut session = ChatSession::new("goal-command".to_string());
         let budget = GoalBudget {
+            supervised: false,
             max_turns: Some(1),
             max_minutes: None,
             max_tokens: None,

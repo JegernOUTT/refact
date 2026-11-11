@@ -1990,6 +1990,7 @@ mod tests {
             "Please pursue this goal".to_string(),
         ));
         let budget = GoalBudget {
+            supervised: true,
             max_turns: Some(7),
             max_minutes: Some(11),
             max_tokens: Some(13_000),

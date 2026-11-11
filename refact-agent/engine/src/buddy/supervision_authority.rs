@@ -1299,6 +1299,7 @@ mod tests {
                 verify_command: None,
             }],
             budget: Some(refact_chat_api::GoalBudget {
+                supervised: true,
                 max_turns: Some(2),
                 max_tokens: Some(8192),
                 max_minutes: Some(1),

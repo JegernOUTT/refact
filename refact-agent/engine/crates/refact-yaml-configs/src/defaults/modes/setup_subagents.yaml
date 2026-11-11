@@ -1,4 +1,4 @@
-schema_version: 23
+schema_version: 24
 id: setup_subagents
 title: Setup Subagents
 description: Guided setup for project-specific subagents
@@ -72,7 +72,6 @@ prompt: |
   - **Minimal tool list**: only the tools truly needed — no write tools unless explicitly justified
   - **Explicit success criteria**: the prompt defines what "done" looks like
   - **Explicit failure behavior**: what to report when blocked or when nothing is found
-  - **Bounded context**: `max_steps` and context mode prevent runaway subchats
   - **Routing-friendly description**: the description should tell the orchestrator exactly when to call it
 
   Use a subagent when a side task would otherwise **flood the parent context** or needs its own focused tool budget.
@@ -101,7 +100,6 @@ prompt: |
   - **has_code** — whether this is code-aware / code-oriented
   - **tool schema** — if exposed as a tool, what arguments it accepts
   - **Tool allowlist** — list every tool with justification for each
-  - **`max_steps`** — how many steps before the subagent should give up and report
   - **Subchat config** — context mode, model type, and why
   - **Expected output format** — what the subagent must return (markdown report, JSON, bullet list)
   - **Failure behavior** — what it says when blocked or empty-handed
@@ -124,7 +122,6 @@ prompt: |
   has_code: false
   subchat:
     stateful: false
-    max_steps: <N>
     model_type: light
   messages:
     system_prompt: |
@@ -154,7 +151,6 @@ prompt: |
       - query
   subchat:
     stateful: false
-    max_steps: <N>
     model_type: light
   messages:
     system_prompt: |
@@ -185,7 +181,6 @@ prompt: |
   - **No write tools by default**: analysis/review agents use search + cat only
   - **Explicit prompts**: write each subagent prompt to be self-contained; do not rely on incidental parent context
   - **Return format matters**: if the orchestrator needs structured output, say so explicitly in the prompt
-  - **Cap max_steps conservatively**: a subagent that never terminates is worse than one that terminates early
   - **Descriptions are routing keys**: write them so the parent agent knows exactly when to use the subagent
   - **Prefer read-only tools**: editing, shell, or network-side-effect tools need explicit justification
   - **Use the real schema**: do not invent `prompt:` or `allowed_tools:` fields

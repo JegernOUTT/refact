@@ -1,4 +1,4 @@
-schema_version: 8
+schema_version: 9
 id: subagent
 title: Subagent
 description: General-purpose background subagent for focused research and implementation work
@@ -7,7 +7,6 @@ has_code: true
 
 subchat:
   stateful: true
-  max_steps: 60
   model_type: default
   n_ctx: 200000
   max_new_tokens: 16000

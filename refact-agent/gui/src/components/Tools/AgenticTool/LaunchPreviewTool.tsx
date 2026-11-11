@@ -50,7 +50,7 @@ type EffectiveLaunch = {
   model: string;
   mode: string;
   tools: "All" | "None" | { Only: string[] };
-  max_steps: number;
+  max_steps: number | null;
   subchat_depth: number;
   stateful: boolean;
   autonomous_no_confirm: boolean;
@@ -84,7 +84,7 @@ function effectiveLaunch(value: unknown): value is EffectiveLaunch | undefined {
     typeof row.model === "string" &&
     typeof row.mode === "string" &&
     toolsValid &&
-    natural(row.max_steps) &&
+    (row.max_steps === null || natural(row.max_steps)) &&
     natural(row.subchat_depth) &&
     [
       "stateful",
@@ -222,7 +222,7 @@ function launchFacts(launch: EffectiveLaunch): Fact[] {
     },
     { label: "Mode", value: launch.mode },
     { label: "Tool authority", value: toolsLabel(launch.tools) },
-    { label: "Step budget", value: launch.max_steps },
+    { label: "Step budget", value: launch.max_steps ?? "Unlimited" },
     { label: "Nesting depth", value: launch.subchat_depth },
     { label: "Checkout", value: launch.worktree_mode },
     {

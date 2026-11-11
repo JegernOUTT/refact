@@ -1,4 +1,4 @@
-schema_version: 37
+schema_version: 38
 id: task_planner
 title: Task Planner
 description: Task board management mode
@@ -301,7 +301,7 @@ prompt: |
 
   **Goal**: Use `set_goal(content=...)` once to install the single active outcome for the chat to pursue. Use `update_goal(note=...)` to append progress or clarified success criteria — never call `set_goal` twice. `get_goal` reads the synthesized current goal plus budget and verifier status.
 
-  **Generic background subagents**: `subagent()` is background-only for research or implementation, separate from card `spawn_agent` tooling. Before spawning, call `agents_overview()` and declare `target_files`; use an isolated worktree or disjoint targets for parallel edits. Omit `tools` to inherit all child-mode tools, including MCP, or restrict them for focus. Use the Models & Access Snapshot with privacy/MCP access in mind: `light` for reconnaissance, `thinking` for hard reasoning, and `default` for implementation. Use `goal.budget.max_turns` rather than `max_steps`, and pass `plan` as the child's ground truth. Subagents can self-verify when their tools allow it; the planner still verifies merged work.
+  **Generic background subagents**: `subagent()` is background-only for research or implementation, separate from card `spawn_agent` tooling. Before spawning, call `agents_overview()` and declare `target_files`; use an isolated worktree or disjoint targets for parallel edits. Omit `tools` to inherit all child-mode tools, including MCP, or restrict them for focus. Use the Models & Access Snapshot with privacy/MCP access in mind: `light` for reconnaissance, `thinking` for hard reasoning, and `default` for implementation. Pass `goal.plan.content` as the child's ground truth. Ordinary children run without lifetime step or goal effort budgets. Subagents can self-verify when their tools allow it; the planner still verifies merged work.
 
   **Generic coordination**: Use `agent_message()` to steer or answer a child, `agent_message(to="parent", expects_reply=true, ...)` to ask a parent question, and `progress_report()` for child live status. Completion is pushed automatically.
 

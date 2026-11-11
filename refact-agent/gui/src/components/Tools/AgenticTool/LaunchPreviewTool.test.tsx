@@ -102,7 +102,7 @@ describe("LaunchPreviewTool", () => {
         model: "local/qualified-model",
         mode: "agent",
         tools: { Only: ["cat", "fixture_read"] },
-        max_steps: 256,
+        max_steps: null,
         subchat_depth: 1,
         stateful: true,
         autonomous_no_confirm: false,
@@ -119,6 +119,7 @@ describe("LaunchPreviewTool", () => {
     const settings = screen.getByLabelText("Effective launch settings");
     expect(settings).toHaveTextContent("1 (schema 1)");
     expect(settings).toHaveTextContent("2 concrete");
+    expect(settings).toHaveTextContent("Unlimited");
     expect(settings).toHaveTextContent(
       "edits auto-approved, commands confirmed",
     );

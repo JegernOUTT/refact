@@ -574,6 +574,16 @@ async fn handle_set_goal(
             supervision_guard,
             &chat_id,
             || {
+                let budget = budget.map(|budget| {
+                    if supervision_guard.is_some() {
+                        GoalBudget {
+                            supervised: true,
+                            ..budget
+                        }
+                    } else {
+                        budget.without_hard_limits()
+                    }
+                });
                 Ok(handle_set_goal_command(
                     &mut session,
                     content,

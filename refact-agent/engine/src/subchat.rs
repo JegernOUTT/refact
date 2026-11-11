@@ -617,6 +617,8 @@ pub struct SubchatConfig {
     pub root_chat_id: Option<String>,
     pub tools: ToolsPolicy,
     pub max_steps: usize,
+    #[serde(default)]
+    pub unlimited_configured_steps: bool,
     pub prepend_system_prompt: bool,
     pub wrap_up: Option<WrapUpConfig>,
     pub task_meta: Option<TaskMeta>,
@@ -648,10 +650,11 @@ pub struct SubchatConfig {
 
 impl SubchatConfig {
     pub(crate) fn ordinary_background_has_unlimited_steps(&self) -> bool {
-        self.stateful
-            && self.background_agent_id.is_some()
-            && self.parent_tool_call_id.is_some()
-            && self.tool_name == "subagent"
+        (self.unlimited_configured_steps
+            || (self.stateful
+                && self.background_agent_id.is_some()
+                && self.parent_tool_call_id.is_some()
+                && self.tool_name == "subagent"))
             && self.buddy_meta.is_none()
             && !matches!(self.tools, ToolsPolicy::Supervised { .. })
     }
@@ -1489,6 +1492,7 @@ pub async fn resolve_subchat_config_with_parent(
     Ok(SubchatConfig {
         runner_lease_token: None,
         native_job_fence: None,
+        unlimited_configured_steps: false,
         history_source_model: None,
         tool_name: tool_name.to_string(),
         stateful,
@@ -1622,6 +1626,7 @@ pub async fn resolve_subchat_config_with_explicit_params(
     Ok(SubchatConfig {
         runner_lease_token: None,
         native_job_fence: None,
+        unlimited_configured_steps: false,
         history_source_model: None,
         tool_name: attribution_id.to_string(),
         stateful,
@@ -2282,6 +2287,7 @@ pub(crate) mod test_support {
         SubchatConfig {
             runner_lease_token: None,
             native_job_fence: None,
+            unlimited_configured_steps: false,
             history_source_model: None,
             tool_name: "subagent".into(),
             stateful: true,
@@ -2351,10 +2357,25 @@ pub async fn run_subchat(
 
 pub(crate) async fn run_subchat_with_lease(
     gcx: Arc<GlobalContext>,
-    messages: Vec<ChatMessage>,
+    mut messages: Vec<ChatMessage>,
     config: SubchatConfig,
     runner_guard: Option<RunnerLeaseGuard>,
 ) -> Result<SubchatResult, String> {
+    if let ToolsPolicy::Supervised {
+        budget, ..
+    } = &config.tools
+    {
+        for message in &mut messages {
+            if let Some(goal) = message.extra.get_mut("goal").and_then(Value::as_object_mut) {
+                let mut budget = budget.clone();
+                budget.supervised = true;
+                goal.insert(
+                    "budget".into(),
+                    serde_json::to_value(budget).map_err(|error| error.to_string())?,
+                );
+            }
+        }
+    }
     let scope = match background_budget::producer_for(&config.tool_name, config.buddy_meta.as_ref())
     {
         Some(producer) => {
@@ -3278,6 +3299,7 @@ mod cap_history_tests {
                 None,
                 true,
                 crate::chat::types::GoalBudget {
+                    supervised: true,
                     max_turns: Some(6),
                     explicit: true,
                     ..Default::default()
@@ -3497,7 +3519,7 @@ async fn run_subchat_loop(
             if is_goal_cap {
                 "Explicit goal turn budget reached; a step-cap override cannot widen the goal budget."
             } else {
-                "Step limit reached. Parent may use agent_lifecycle action inspect, then raise_and_recover with the current change sequence to continue this child's task."
+                "Application-owned step limit reached; ordinary background children do not have a lifetime step cap."
             },
         ));
         persist_subchat_progress(&ccx, config, progress, &messages).await?;
@@ -3616,11 +3638,13 @@ async fn run_subchat_with_wrap_up(
                 .as_ref()
                 .map_or(false, |tc| !tc.is_empty())
         {
-            if step_n >= wrap_up.depth {
+            if !config.ordinary_background_has_unlimited_steps() && step_n >= wrap_up.depth {
                 break;
             }
             if let Some(msg_usage) = &last_message.usage {
-                if msg_usage.prompt_tokens + msg_usage.completion_tokens > wrap_up.tokens_cnt {
+                if !config.ordinary_background_has_unlimited_steps()
+                    && msg_usage.prompt_tokens + msg_usage.completion_tokens > wrap_up.tokens_cnt
+                {
                     break;
                 }
             }
@@ -5513,6 +5537,7 @@ mod subchat_tests {
         SubchatConfig {
             runner_lease_token: None,
             native_job_fence: None,
+            unlimited_configured_steps: false,
             history_source_model: None,
             tool_name: "subagent".to_string(),
             stateful: false,
@@ -5618,9 +5643,22 @@ mod subchat_tests {
 
     #[tokio::test]
     async fn ordinary_background_runner_continues_past_its_legacy_step_metadata() {
+        verify_unlimited_runner(false).await;
+    }
+
+    #[tokio::test]
+    async fn configured_runner_continues_past_its_legacy_step_metadata() {
+        verify_unlimited_runner(true).await;
+    }
+
+    async fn verify_unlimited_runner(configured: bool) {
         let ccx = abort_test_ccx().await;
         let workspace = tempfile::tempdir().unwrap();
-        let chat_id = "ordinary-unlimited-loop";
+        let chat_id = if configured {
+            "configured-unlimited-loop"
+        } else {
+            "ordinary-unlimited-loop"
+        };
         let gcx = ccx.lock().await.global_context.clone();
         *gcx.documents_state.workspace_folders.lock().unwrap() =
             vec![workspace.path().to_path_buf()];
@@ -5651,6 +5689,10 @@ mod subchat_tests {
         }
         let mut config = test_subchat_config();
         config.stateful = true;
+        config.unlimited_configured_steps = configured;
+        if configured {
+            config.tool_name = "configured_regression".into();
+        }
         config.background_agent_id = Some("ordinary-child".into());
         config.parent_tool_call_id = Some("launch-call".into());
         config.chat_id = Some(chat_id.into());
@@ -6941,6 +6983,7 @@ mod subchat_tests {
         let config = SubchatConfig {
             runner_lease_token: None,
             native_job_fence: None,
+            unlimited_configured_steps: false,
             history_source_model: None,
             tool_name: "subagent".to_string(),
             stateful: true,
@@ -7018,6 +7061,7 @@ mod subchat_tests {
         let config = SubchatConfig {
             runner_lease_token: None,
             native_job_fence: None,
+            unlimited_configured_steps: false,
             history_source_model: None,
             tool_name: "subagent".to_string(),
             stateful: true,
@@ -7280,6 +7324,7 @@ mod subchat_tests {
         let config = SubchatConfig {
             runner_lease_token: None,
             native_job_fence: None,
+            unlimited_configured_steps: false,
             history_source_model: None,
             tool_name: "subagent".to_string(),
             stateful: true,

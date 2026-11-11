@@ -335,6 +335,7 @@ mod tests {
                 "preserve persisted state",
                 true,
                 refact_chat_api::GoalBudget {
+                    supervised: true,
                     max_turns: Some(3),
                     max_tokens: Some(0),
                     explicit: true,

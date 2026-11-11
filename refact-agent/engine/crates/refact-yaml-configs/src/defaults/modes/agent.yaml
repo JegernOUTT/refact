@@ -1,4 +1,4 @@
-schema_version: 36
+schema_version: 37
 id: agent
 title: Agent
 description: Full multi-step workflow with tools and editing capabilities
@@ -43,7 +43,7 @@ prompt: |
   - `target_files`: declare expected edit targets so `agents_overview()` exposes collisions before you spawn work.
   - `tools`: omit to inherit ALL of your child-mode tools, including MCP. Restrict the list for focused research or a tighter implementation boundary.
   - `model_type` / `model_name`: choose a configured model from the Models & Access Snapshot with privacy and MCP access in mind. Use `light` for cheap reconnaissance, `thinking` for hard reasoning, and `default` for implementation; `model_name` selects a concrete model.
-  - `goal`: install a child goal when it needs explicit success criteria; use `goal.budget.max_turns` for its step control. There is no `max_steps` argument.
+  - `goal`: install a child goal when it needs explicit success criteria. Ordinary children have no lifetime step or goal effort budget.
   - `goal.plan`: install the ground-truth specification inside the child goal; there is no top-level `plan` argument.
   - `worktree="isolated"` with `auto_merge=true`: use for parallel edits when target files could collide. Otherwise keep edits disjoint with `target_files`.
 

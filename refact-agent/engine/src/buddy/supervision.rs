@@ -187,6 +187,7 @@ pub fn native_budget(record: &MandateRecord) -> Result<GoalBudget, String> {
         return Err("budget cannot be represented exactly by the native owner".into());
     }
     Ok(GoalBudget {
+        supervised: true,
         max_turns: budget.max_turns,
         max_tokens: budget.max_tokens,
         max_minutes: budget.max_duration_seconds.map(|v| (v / 60) as u32),
@@ -524,7 +525,7 @@ pub(crate) async fn spawn_worker(
         || goal.status != GoalStatus::Paused
         || !goal.active
         || snapshot.thread.model != record.mandate.model_constraints[0]
-        || goal.budget != native_budget(&record)?
+        || !goal.budget.same_limits(&native_budget(&record)?)
     {
         authority::invalidate(&id)?;
         return Err("native goal/model/budget changed or user took over".into());
@@ -1164,7 +1165,9 @@ pub(crate) async fn reconcile(
         && observed.native_goal.as_ref().is_some_and(|g| {
             !matches_intake(&saved.value, g)
                 || g.status != GoalStatus::Paused
-                || g.budget != native_budget(&record).unwrap_or_default()
+                || !g
+                    .budget
+                    .same_limits(&native_budget(&record).unwrap_or_default())
         });
     let mut model_changed = false;
     for chat in std::iter::once(&saved.value.chat_id).chain(saved.value.child_chat_id.iter()) {
@@ -1177,7 +1180,9 @@ pub(crate) async fn reconcile(
         goal.content != saved.value.intake_content
             || goal.criteria != saved.value.intake_criteria
             || Some(goal.version) != saved.value.child_goal_version
-            || goal.budget != native_budget(&record).unwrap_or_default()
+            || !goal
+                .budget
+                .same_limits(&native_budget(&record).unwrap_or_default())
     });
     if saved.value.revoked
         || parent_changed
@@ -1221,7 +1226,9 @@ pub(crate) async fn reconcile(
             w.status.is_terminal() && w.model == record.mandate.model_constraints[0]
         })
         && observed.native_worker_goal.as_ref().is_some_and(|g| {
-            verified_goal(&saved.value, g) && g.budget == native_budget(&record).unwrap_or_default()
+            verified_goal(&saved.value, g)
+                && g.budget
+                    .same_limits(&native_budget(&record).unwrap_or_default())
         })
     {
         if saved.value.delivery_run_id.is_none() {
@@ -2354,6 +2361,96 @@ mod tests {
             authority::invalidate(&self.source.mandate_id).unwrap();
             super::super::supervision_proof::acknowledge_authorized(&self.source.chat_id);
         }
+    }
+
+    #[tokio::test]
+    async fn legacy_supervised_goal_restores_exact_budget_without_granting_authority() {
+        use crate::chat::types::GoalSnapshotBudgetExt;
+        let fx = CandidateFixture::new(true).await;
+        let link = load_link(&fx.runtime, fx.source.mandate_id.clone())
+            .await
+            .unwrap();
+        let record = authority::load(&fx.runtime, fx.source.mandate_id.clone())
+            .await
+            .unwrap();
+        let expected = native_budget(&record.value).unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(workspace.path()).unwrap();
+        let project = crate::buddy::operator_runtime::project_identity(&root).unwrap();
+        let mut record = record.value;
+        record.project = project.clone();
+        let mut link = link.value;
+        link.project = project.clone();
+        link.chat_id = uuid::Uuid::new_v4().to_string();
+        let mut store = super::super::operator_store::OperatorStore::open(&root, &project).unwrap();
+        store
+            .reserve_native_documents(
+                "supervision",
+                &record.mandate.mandate_id,
+                &authority::reservation_slots(&record.mandate.mandate_id),
+            )
+            .unwrap();
+        store
+            .put_native_ordinary_document(
+                "supervision",
+                &record.mandate.mandate_id,
+                authority::MANDATES,
+                &record.mandate.mandate_id,
+                &record,
+                None,
+            )
+            .unwrap();
+        store
+            .put_native_ordinary_document(
+                "supervision",
+                &record.mandate.mandate_id,
+                LINKS,
+                &record.mandate.mandate_id,
+                &link,
+                None,
+            )
+            .unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![root];
+        let mut session = crate::chat::types::ChatSession::new(link.chat_id.clone());
+        session.install_goal("agent", "legacy supervised", true, expected.clone());
+        session.goal_set_status(GoalStatus::Paused);
+        let mut snapshot = crate::chat::trajectories::trajectory_snapshot_from_session(&session);
+        snapshot.goal.as_mut().unwrap().budget.supervised = false;
+        for entry in &mut snapshot.goal_ledger {
+            if let refact_chat_api::GoalLedgerOp::Installed {
+                budget, ..
+            } = &mut entry.op
+            {
+                budget.supervised = false;
+            }
+        }
+        for message in &mut snapshot.messages {
+            if let Some(budget) = message
+                .extra
+                .get_mut("goal")
+                .and_then(|goal| goal.get_mut("budget"))
+                .and_then(serde_json::Value::as_object_mut)
+            {
+                budget.remove("supervised");
+            }
+        }
+        crate::chat::trajectories::save_trajectory_snapshot(gcx.clone(), snapshot)
+            .await
+            .unwrap();
+        let loaded =
+            crate::chat::trajectories::load_trajectory_for_chat(gcx.clone(), &session.chat_id)
+                .await
+                .unwrap();
+        let mut goal = loaded.goal.unwrap();
+        assert_eq!(goal.budget, expected);
+        assert_eq!(goal.status, GoalStatus::Paused);
+        goal.progress.turns_used = expected.max_turns.unwrap();
+        assert_eq!(
+            goal.goal_budget_exhaustion_status_at(0),
+            Some(GoalStatus::BudgetExhausted)
+        );
+        fx.close().await;
     }
 
     #[tokio::test]

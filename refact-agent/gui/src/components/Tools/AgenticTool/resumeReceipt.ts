@@ -27,9 +27,9 @@ type ResumeReceipt = {
   cap_stop: CapStop | null;
   can_resume: boolean;
   can_continue?: boolean;
-  can_raise_and_resume: boolean;
+  can_raise_and_resume?: boolean;
   max_steps: number | null;
-  settings_subagent_max_steps_ceiling: number | null;
+  settings_subagent_max_steps_ceiling?: number | null;
   resume_configuration_available: boolean;
   original_scope_available: boolean;
 };
@@ -112,9 +112,13 @@ export function parseResumeReceipt(
     !(
       row.can_continue === undefined || typeof row.can_continue === "boolean"
     ) ||
-    typeof row.can_raise_and_resume !== "boolean" ||
+    !(
+      row.can_raise_and_resume === undefined ||
+      typeof row.can_raise_and_resume === "boolean"
+    ) ||
     !(row.max_steps === null || natural(row.max_steps)) ||
     !(
+      row.settings_subagent_max_steps_ceiling === undefined ||
       row.settings_subagent_max_steps_ceiling === null ||
       natural(row.settings_subagent_max_steps_ceiling)
     ) ||

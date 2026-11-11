@@ -2114,6 +2114,7 @@ async fn run_verifier_review(
     let config = crate::subchat::SubchatConfig {
         runner_lease_token: None,
         native_job_fence: None,
+        unlimited_configured_steps: false,
         history_source_model: None,
         tool_name: "verifier".to_string(),
         stateful: false,

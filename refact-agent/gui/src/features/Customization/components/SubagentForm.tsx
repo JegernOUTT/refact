@@ -55,6 +55,14 @@ export const SubagentForm: React.FC<SubagentFormProps> = ({
 
   const extra = extractSubagentExtra(config);
   const configId = safeString(config.id);
+  const protectedSteps =
+    configId.startsWith("buddy_") ||
+    [
+      "refact_self_critic",
+      "refact_compile_sniffer",
+      "refact_error_detective",
+    ].includes(configId) ||
+    ["mcp_sampling", "shell_command_validator"].includes(configId);
 
   useEffect(() => {
     if (!extraJsonDirty) {
@@ -139,7 +147,11 @@ export const SubagentForm: React.FC<SubagentFormProps> = ({
         )}
         {activeTab === "tool" && <ToolTab tool={tool} patch={patch} />}
         {activeTab === "subchat" && (
-          <SubchatTab subchat={subchat} patch={patch} />
+          <SubchatTab
+            subchat={subchat}
+            patch={patch}
+            protectedSteps={protectedSteps}
+          />
         )}
         {activeTab === "messages" && (
           <MessagesTab messages={messages} prompts={prompts} patch={patch} />
@@ -326,7 +338,8 @@ const ToolTab: React.FC<{
 const SubchatTab: React.FC<{
   subchat: Record<string, unknown>;
   patch: PatchFn;
-}> = ({ subchat, patch }) => {
+  protectedSteps: boolean;
+}> = ({ subchat, patch, protectedSteps }) => {
   return (
     <>
       <div className={styles.fieldGrid}>
@@ -358,16 +371,18 @@ const SubchatTab: React.FC<{
       </Field>
 
       <div className={styles.fieldGrid}>
-        <Field label="Max Steps">
-          <FieldText
-            type="number"
-            value={safeNumber(subchat.max_steps)?.toString() ?? ""}
-            onChange={(value) =>
-              patch(["subchat", "max_steps"], parseIntSafe(value))
-            }
-            placeholder="Default"
-          />
-        </Field>
+        {protectedSteps ? (
+          <Field label="Max Steps">
+            <FieldText
+              type="number"
+              value={safeNumber(subchat.max_steps)?.toString() ?? ""}
+              onChange={(value) =>
+                patch(["subchat", "max_steps"], parseIntSafe(value))
+              }
+              placeholder="Default"
+            />
+          </Field>
+        ) : null}
         <Field label="N Context">
           <FieldText
             type="number"
@@ -537,16 +552,6 @@ const AdvancedTab: React.FC<{
               value={safeNumber(gatherFiles.max_files)?.toString() ?? ""}
               onChange={(value) =>
                 patch(["gather_files", "max_files"], parseIntSafe(value))
-              }
-              placeholder="Default"
-            />
-          </Field>
-          <Field label="Max Steps">
-            <FieldText
-              type="number"
-              value={safeNumber(gatherFiles.max_steps)?.toString() ?? ""}
-              onChange={(value) =>
-                patch(["gather_files", "max_steps"], parseIntSafe(value))
               }
               placeholder="Default"
             />

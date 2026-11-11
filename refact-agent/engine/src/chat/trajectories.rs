@@ -7,7 +7,7 @@ use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
 use refact_chat_api::FrozenRequestPrefix;
 use serde::de::{Deserializer as _, IgnoredAny, MapAccess, Visitor};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{json, Value};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock, Weak};
@@ -930,13 +930,25 @@ pub(crate) fn trajectory_snapshot_from_session(session: &ChatSession) -> Traject
 
 fn clamp_goal_snapshot_for_load(mut goal: GoalSnapshot) -> GoalSnapshot {
     goal.budget = goal.budget.migrate_legacy_default_hard_limits();
-    if let Some(max_turns) = goal.budget.max_turns.filter(|limit| *limit > 0) {
+    if let Some(max_turns) = goal
+        .budget
+        .max_turns
+        .filter(|limit| goal.budget.supervised && *limit > 0)
+    {
         goal.progress.turns_used = goal.progress.turns_used.min(max_turns);
     }
-    if let Some(max_tokens) = goal.budget.max_tokens.filter(|limit| *limit > 0) {
+    if let Some(max_tokens) = goal
+        .budget
+        .max_tokens
+        .filter(|limit| goal.budget.supervised && *limit > 0)
+    {
         goal.progress.tokens_used = goal.progress.tokens_used.min(max_tokens);
     }
-    if let Some(no_progress_turns) = goal.budget.no_progress_turns.filter(|limit| *limit > 0) {
+    if let Some(no_progress_turns) = goal
+        .budget
+        .no_progress_turns
+        .filter(|limit| goal.budget.supervised && *limit > 0)
+    {
         goal.progress.no_progress_turns = goal.progress.no_progress_turns.min(no_progress_turns);
     }
     if goal.status == GoalStatus::Verifying {
@@ -952,7 +964,7 @@ fn clamp_goal_snapshot_for_load(mut goal: GoalSnapshot) -> GoalSnapshot {
     ) && goal
         .goal_budget_exhaustion_status_at(epoch_ms_now())
         .is_none()
-        && !goal_budget_has_hard_limits_for_load(&goal.budget)
+        && (!goal.budget.supervised || !goal_budget_has_hard_limits_for_load(&goal.budget))
     {
         goal.status = if goal.active {
             GoalStatus::Active
@@ -3394,6 +3406,9 @@ async fn load_trajectory_candidate_with_delivery_view(
     let traj_path = candidate.path;
     let mut t = candidate.json;
 
+    let roots = crate::files_correction::get_unscoped_project_dirs(gcx.clone()).await;
+    let restore_chat_id = chat_id.to_string();
+
     let messages_value = t
         .as_object_mut()
         .and_then(|object| object.remove("messages"))
@@ -3470,6 +3485,38 @@ async fn load_trajectory_candidate_with_delivery_view(
                 } else {
                     Some(filtered)
                 };
+            }
+        }
+        let mut persisted_goal_value = persisted_goal_value;
+        let mut goal_ledger_value = goal_ledger_value;
+        let legacy_budget = persisted_goal_value.as_ref().and_then(|goal| goal.get("budget"))
+            .or_else(|| messages.iter().rev().find_map(|message| message.extra.get("goal").and_then(|goal| goal.get("budget"))));
+        if let Some(budget) = legacy_budget.filter(|budget| budget.get("supervised").is_none()) {
+            let parsed = serde_json::from_value::<refact_chat_api::GoalBudget>(budget.clone()).ok();
+            if let Some(parsed) = parsed.filter(goal_budget_has_hard_limits_for_load) {
+                for root in roots {
+                    let Ok(identity) = crate::buddy::operator_runtime::project_identity(&root) else { continue; };
+                    let native = match crate::buddy::operator_store::OperatorStore::retained_supervision_budget(&root, &identity, &restore_chat_id) {
+                        Ok(native) => native,
+                        Err(error) => { tracing::warn!(%error, "cannot classify retained native goal budget; native runtime grants remain unchanged"); continue; }
+                    };
+                    if native.as_ref().is_some_and(|native| native.same_limits(&parsed)) {
+                        for message in &mut messages {
+                            if let Some(budget) = message.extra.get_mut("goal").and_then(|goal| goal.get_mut("budget")).and_then(Value::as_object_mut) {
+                                budget.insert("supervised".into(), Value::Bool(true));
+                            }
+                        }
+                        if let Some(budget) = persisted_goal_value.as_mut().and_then(|goal| goal.get_mut("budget")).and_then(Value::as_object_mut) {
+                            budget.insert("supervised".into(), Value::Bool(true));
+                        }
+                        for entry in goal_ledger_value.as_mut().and_then(Value::as_array_mut).into_iter().flatten() {
+                            if let Some(budget) = entry.get_mut("budget").and_then(Value::as_object_mut) {
+                                budget.insert("supervised".into(), Value::Bool(true));
+                            }
+                        }
+                        break;
+                    }
+                }
             }
         }
         let persisted_goal: Option<GoalSnapshot> = persisted_goal_value
@@ -20007,7 +20054,7 @@ mod tests {
     }
 
     #[test]
-    fn clamp_goal_snapshot_for_load_preserves_explicit_legacy_budget() {
+    fn clamp_goal_snapshot_for_load_ignores_ordinary_explicit_legacy_limits() {
         let budget = GoalBudget {
             explicit: true,
             ..GoalBudget::legacy_default_hard_limits()
@@ -20043,8 +20090,8 @@ mod tests {
         assert_eq!(loaded.budget.max_tokens, Some(200_000));
         assert_eq!(loaded.budget.no_progress_turns, Some(2));
         assert!(loaded.budget.explicit);
-        assert_eq!(loaded.progress.turns_used, 10);
-        assert_eq!(loaded.status, GoalStatus::BudgetExhausted);
+        assert_eq!(loaded.progress.turns_used, 12);
+        assert_eq!(loaded.status, GoalStatus::Active);
     }
 
     #[tokio::test]

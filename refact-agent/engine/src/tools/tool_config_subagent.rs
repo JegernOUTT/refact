@@ -144,7 +144,38 @@ impl Tool for ToolConfigSubagent {
             ));
         }
 
-        let max_steps = self.config.subchat.max_steps.unwrap_or(10).min(50).max(1);
+        let (app, parent_supervised) = {
+            let context = ccx.lock().await;
+            (
+                context.app.clone(),
+                matches!(
+                    context.child_tool_ceiling,
+                    Some(crate::subchat::ToolsPolicy::Supervised { .. })
+                ),
+            )
+        };
+        let parent = app.chat.sessions.read().await.get(&parent_chat_id).cloned();
+        let parent_protected = parent_supervised
+            || if let Some(parent) = parent {
+                parent.lock().await.thread.buddy_meta.is_some()
+            } else {
+                false
+            };
+        let protected = parent_protected
+            || self.config.id.starts_with("buddy_")
+            || matches!(
+                self.config.id.as_str(),
+                "mcp_sampling"
+                    | "shell_command_validator"
+                    | "refact_self_critic"
+                    | "refact_compile_sniffer"
+                    | "refact_error_detective"
+            );
+        let max_steps = if protected {
+            self.config.subchat.max_steps.unwrap_or(10).min(50).max(1)
+        } else {
+            1
+        };
 
         let title = format!("{}: {}", self.config.title, self.config.id);
 
@@ -154,7 +185,7 @@ impl Tool for ToolConfigSubagent {
             Some(self.config.tools.clone())
         };
 
-        let config = crate::subchat::resolve_subchat_config_with_parent(
+        let mut config = crate::subchat::resolve_subchat_config_with_parent(
             gcx.clone(),
             &self.config.id,
             self.config.subchat.stateful,
@@ -176,6 +207,8 @@ impl Tool for ToolConfigSubagent {
             current_depth + 1,
         )
         .await?;
+
+        config.unlimited_configured_steps = !protected;
 
         let mut messages = Vec::new();
 
@@ -204,7 +237,7 @@ impl Tool for ToolConfigSubagent {
                     "subagent_id": &self.config.id,
                     "title": &self.config.title,
                     "template": "user_template",
-                    "max_steps": max_steps,
+                    "max_steps": protected.then_some(max_steps),
                 }),
                 content,
             ));
@@ -220,7 +253,7 @@ impl Tool for ToolConfigSubagent {
                     "subagent_id": &self.config.id,
                     "title": &self.config.title,
                     "template": "task",
-                    "max_steps": max_steps,
+                    "max_steps": protected.then_some(max_steps),
                 }),
                 task.to_string(),
             ));

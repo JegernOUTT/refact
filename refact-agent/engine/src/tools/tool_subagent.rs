@@ -83,7 +83,7 @@ impl Tool for ToolSubagent {
             "required": ["type"]
         });
         let goal_schema = json!({
-            "description": format!("Optional installed goal: null, a nonempty string, or an object requiring nonempty content. Content must contain non-whitespace text. A budget-only object is invalid; use goal.budget.max_turns for a step limit. For criteria[].verify_command: {}", crate::chat::verify_cmd::VERIFY_COMMAND_DESCRIPTION),
+            "description": format!("Optional installed goal: null, a nonempty string, or an object requiring nonempty content. Content must contain non-whitespace text. For criteria[].verify_command: {}", crate::chat::verify_cmd::VERIFY_COMMAND_DESCRIPTION),
             "oneOf": [
                 {"type": "null"},
                 {"type": "string", "minLength": 1},
@@ -110,24 +110,6 @@ impl Tool for ToolSubagent {
                                     }
                                 }
                             ]
-                        },
-                        "budget": {
-                            "description": "Optional goal pursuit budget; omitted or null uses a resolved profile budget when present, else engine defaults. Within an object, omitted, null or zero hard limits are unlimited; omitted cooldown and token threshold use engine defaults.",
-                            "oneOf": [
-                                {"type": "null"},
-                                {
-                                    "type": "object",
-                                    "properties": {
-                                        "max_turns": {"oneOf": [{"type": "integer", "minimum": 0, "maximum": u32::MAX}, {"type": "null"}], "description": "Maximum goal turns; omitted, null or zero means unlimited."},
-                                        "max_minutes": {"oneOf": [{"type": "integer", "minimum": 0, "maximum": u32::MAX}, {"type": "null"}], "description": "Maximum elapsed minutes; omitted, null or zero means unlimited."},
-                                        "max_tokens": {"oneOf": [{"type": "integer", "minimum": 0, "maximum": u64::MAX}, {"type": "null"}], "description": "Maximum tokens; omitted, null or zero means unlimited."},
-                                        "max_cost_cents": {"oneOf": [{"type": "integer", "minimum": 0, "maximum": u64::MAX}, {"type": "null"}], "description": "Maximum cost in cents; omitted, null or zero means unlimited."},
-                                        "cooldown_ms": {"type": "integer", "minimum": 0, "maximum": u64::MAX, "description": "Goal pursuit nudge cooldown in milliseconds; omitted uses the engine default. Not nullable."},
-                                        "no_progress_token_threshold": {"type": "integer", "minimum": 0, "maximum": u64::MAX, "description": "Completion-token threshold for counting a turn as progress; omitted uses the engine default. Not nullable."},
-                                        "no_progress_turns": {"oneOf": [{"type": "integer", "minimum": 0, "maximum": u32::MAX}, {"type": "null"}], "description": "Consecutive no-progress turn limit; omitted, null or zero disables this limit."}
-                                    }
-                                }
-                            ]
                         }
                     },
                     "required": ["content"]
@@ -143,7 +125,7 @@ impl Tool for ToolSubagent {
             },
             experimental: false,
             allow_parallel: true,
-            description: "Spawn a background-only, stateful child trajectory for research or implementation. The child inherits all parent-chat tools by default; task wording such as 'read-only' does not restrict capabilities. Use tools and sandbox explicitly for capability boundaries. The child can select a configured model or named model, and may receive a goal with a step budget and optional goal.plan, target files, and an isolated worktree that auto-merges by default. A trajectory link is returned immediately and completion is auto-pushed. Preview reports requested sandbox enforcement support without dispatch; a tools allowlist is not an OS sandbox. Explicit goal budget exhaustion is not a crash and cannot be widened by a child step override. Use `agents_overview` and `agent_message` to coordinate with peers.".to_string(),
+            description: "Spawn a background-only, stateful child trajectory for research or implementation. The child inherits all parent-chat tools by default; task wording such as 'read-only' does not restrict capabilities. Use tools and sandbox explicitly for capability boundaries. The child can select a configured model or named model, and may receive a goal and optional goal.plan, target files, and an isolated worktree that auto-merges by default. A trajectory link is returned immediately and completion is auto-pushed. Preview reports requested sandbox enforcement support without dispatch; a tools allowlist is not an OS sandbox. Use `agents_overview` and `agent_message` to coordinate with peers.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -949,7 +931,8 @@ fn parse_goal(args: &HashMap<String, Value>) -> Result<Option<SpawnGoal>, String
                 None | Some(Value::Null) => None,
                 Some(value) => Some(
                     serde_json::from_value::<GoalBudget>(value.clone())
-                        .map_err(|error| format!("argument `goal.budget` is malformed: {error}"))?,
+                        .map_err(|error| format!("argument `goal.budget` is malformed: {error}"))?
+                        .without_hard_limits(),
                 ),
             };
             Ok(Some(SpawnGoal {
@@ -1303,7 +1286,7 @@ fn build_launch_preview_tool_result(
                     "- worktree_mode: {}",
                     preview_value(&effective.worktree_mode)
                 ),
-                format!("- max_steps: {}", effective.max_steps),
+                "- max_steps: unlimited".to_string(),
                 "- goal_budget: not part of the applied snapshot".to_string(),
                 format!("- subchat_depth: {}", effective.subchat_depth),
                 format!("- stateful: {}", effective.stateful),
@@ -1762,12 +1745,7 @@ mod tests {
         assert_eq!(effective["autonomous_no_confirm"], false);
         assert_eq!(effective["auto_approve_editing_tools"], false);
         assert_eq!(effective["auto_approve_dangerous_commands"], false);
-        assert_eq!(
-            effective["max_steps"],
-            crate::runtime_settings::current()
-                .coordination
-                .subagent_default_steps
-        );
+        assert!(effective["max_steps"].is_null());
         assert_eq!(effective["subchat_depth"], 1);
         assert!(effective["messages"].as_u64().unwrap() >= 1);
         assert!(effective["accepted_bytes"].as_u64().unwrap() > 0);
@@ -2057,11 +2035,11 @@ mod tests {
             .unwrap();
         assert!(contributed.iter().any(|entry| entry == "tools"));
         assert!(contributed.iter().any(|entry| entry == "instructions"));
-        assert!(contributed.iter().any(|entry| entry == "max_steps"));
+        assert!(!contributed.iter().any(|entry| entry == "max_steps"));
         let effective_tools = message.extra["effective_tools"].as_array().unwrap();
         assert!(effective_tools.iter().any(|tool| tool == "cat"));
         assert!(!effective_tools.iter().any(|tool| tool == "shell"));
-        assert_eq!(message.extra["effective_launch"]["max_steps"], 4);
+        assert!(message.extra["effective_launch"]["max_steps"].is_null());
         assert!(app.agents.list_all().await.is_empty());
 
         let launched = run_subagent(&app, &ccx, "launch", request.clone())
@@ -2183,7 +2161,7 @@ mod tests {
         assert!(applied.contains("- tools: cat (1)"));
         assert!(text.contains("- model_type: thinking"));
         assert!(applied.contains("- model: test/light"));
-        assert!(applied.contains("- max_steps: 3"));
+        assert!(applied.contains("- max_steps: unlimited"));
         assert!(!applied.contains("shell"));
         let notes = message.extra["profile"]["provenance"]["notes"]
             .as_array()
@@ -2257,25 +2235,7 @@ mod tests {
             criterion["properties"]["verify_command"]["description"],
             crate::chat::verify_cmd::VERIFY_COMMAND_DESCRIPTION
         );
-        let budget = &goal_properties["budget"]["oneOf"][1];
-        for (field, maximum) in [
-            ("max_turns", json!(u32::MAX)),
-            ("max_minutes", json!(u32::MAX)),
-            ("max_tokens", json!(u64::MAX)),
-            ("max_cost_cents", json!(u64::MAX)),
-            ("no_progress_turns", json!(u32::MAX)),
-        ] {
-            let variants = &budget["properties"][field]["oneOf"];
-            assert_eq!(variants[0]["type"], "integer");
-            assert_eq!(variants[0]["minimum"], 0);
-            assert_eq!(variants[0]["maximum"], maximum);
-            assert_eq!(variants[1]["type"], "null");
-        }
-        for field in ["cooldown_ms", "no_progress_token_threshold"] {
-            assert_eq!(budget["properties"][field]["type"], "integer");
-            assert_eq!(budget["properties"][field]["minimum"], 0);
-            assert_eq!(budget["properties"][field]["maximum"], json!(u64::MAX));
-        }
+        assert!(goal_properties.get("budget").is_none());
     }
 
     #[tokio::test]
@@ -2758,7 +2718,7 @@ mod tests {
             goal.criteria[0].verify_command.as_deref(),
             Some("git diff --check")
         );
-        assert_eq!(goal.budget.unwrap().max_turns, Some(3));
+        assert_eq!(goal.budget.unwrap().max_turns, None);
 
         for accepted in [
             Value::Null,

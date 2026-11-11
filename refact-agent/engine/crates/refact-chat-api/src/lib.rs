@@ -265,6 +265,8 @@ pub enum GoalStatus {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GoalBudget {
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub supervised: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_turns: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -296,6 +298,7 @@ fn default_goal_no_progress_token_threshold() -> u64 {
 impl Default for GoalBudget {
     fn default() -> Self {
         Self {
+            supervised: false,
             max_turns: None,
             max_minutes: None,
             max_tokens: None,
@@ -309,8 +312,27 @@ impl Default for GoalBudget {
 }
 
 impl GoalBudget {
+    pub fn without_hard_limits(mut self) -> Self {
+        self.supervised = false;
+        self.max_turns = None;
+        self.max_minutes = None;
+        self.max_tokens = None;
+        self.max_cost_cents = None;
+        self.no_progress_turns = None;
+        self
+    }
+
+    pub fn same_limits(&self, other: &Self) -> bool {
+        let mut left = self.clone();
+        let mut right = other.clone();
+        left.supervised = false;
+        right.supervised = false;
+        left == right
+    }
+
     pub fn legacy_default_hard_limits() -> Self {
         Self {
+            supervised: false,
             max_turns: Some(10),
             max_minutes: Some(15),
             max_tokens: Some(200_000),
@@ -1954,6 +1976,7 @@ mod tests {
 
     fn finite_goal_budget() -> GoalBudget {
         GoalBudget {
+            supervised: true,
             max_turns: Some(10),
             max_minutes: Some(15),
             max_tokens: Some(200_000),
@@ -2493,6 +2516,7 @@ mod tests {
     #[test]
     fn test_set_goal_budget_command_serde_and_queue_preview() {
         let budget = GoalBudget {
+            supervised: false,
             max_turns: Some(4),
             max_minutes: None,
             max_tokens: None,
