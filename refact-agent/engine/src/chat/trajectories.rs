@@ -9,7 +9,7 @@ use serde::de::{Deserializer as _, IgnoredAny, MapAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock, Weak};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::fs;
@@ -206,7 +206,7 @@ const TITLE_GENERATION_SUBAGENT_ID: &str = "title_generation";
 pub const TRAJECTORY_WRITER_ENV: &str = "REFACT_TRAJECTORY_WRITER";
 pub const TRAJECTORY_WATCHER_SELF_WRITE_ENV: &str = "REFACT_TRAJECTORY_WATCHER_SELF_WRITE";
 const TRAJECTORY_FLUSH_TIMEOUT: Duration = Duration::from_secs(5);
-const TRAJECTORY_COMMIT_STALL_TIMEOUT: Duration = Duration::from_secs(60);
+const TRAJECTORY_COMMIT_REPORT_INTERVAL: Duration = Duration::from_secs(60);
 /// How long a `Checkpoint` save may sit in the pending slot before it is written. Every save
 /// rewrites the whole trajectory, so batching a burst into one physical write is what keeps the
 /// cost from growing quadratically with conversation length. Durability-critical intents bypass it.
@@ -2296,9 +2296,54 @@ async fn find_normal_trajectory_file(
     gcx: Arc<GlobalContext>,
     chat_id: &str,
 ) -> Option<ValidTrajectoryCandidate> {
+    find_normal_snapshot_file(gcx, chat_id, None, true).await
+}
+
+async fn find_normal_snapshot_file(
+    gcx: Arc<GlobalContext>,
+    chat_id: &str,
+    root_chat_id: Option<&str>,
+    index_fallback: bool,
+) -> Option<ValidTrajectoryCandidate> {
     validate_trajectory_id(chat_id).ok()?;
     let task_roots = get_all_task_roots(gcx.clone()).await;
-    for path in normal_trajectory_candidate_paths(gcx, chat_id).await {
+    let mut direct = direct_normal_trajectory_candidate_paths(gcx.clone(), chat_id).await;
+    if let Some(root) = root_chat_id.filter(|root| validate_trajectory_id(root).is_ok()) {
+        for dir in get_all_trajectories_dirs(gcx.clone()).await {
+            let folder = dir.join(root);
+            if is_real_dir(&folder).await {
+                if let Some(path) = safe_trajectory_file_in_dir(&folder, chat_id).await {
+                    if !direct.contains(&path) {
+                        direct.push(path);
+                    }
+                }
+            }
+        }
+    }
+    let seen: std::collections::HashSet<_> = direct.iter().cloned().collect();
+    for path in direct {
+        let Some(candidate) = read_valid_trajectory_candidate(path, chat_id).await else {
+            continue;
+        };
+        let Ok(source) = TrajectorySourceIdentity::from_json(&candidate.json) else {
+            continue;
+        };
+        let source = effective_trajectory_source_for_path(source, &candidate.path, &task_roots);
+        if trajectory_source_matches_hint(&source, &TrajectorySourceIdentity::Normal) {
+            return Some(candidate);
+        }
+    }
+    if !index_fallback {
+        return None;
+    }
+    let indexed = indexed_candidate_paths_in_dirs(
+        &gcx,
+        &get_all_trajectories_dirs(gcx.clone()).await,
+        chat_id,
+        trajectory_index::TrajectoryIndexListingCaller::ChatPathLookup,
+    )
+    .await;
+    for path in indexed.into_iter().filter(|path| !seen.contains(path)) {
         let Some(candidate) = read_valid_trajectory_candidate(path, chat_id).await else {
             continue;
         };
@@ -4308,6 +4353,35 @@ struct DetachedTrajectoryWriterState {
     wake: Arc<Notify>,
     worker: Option<tokio::task::JoinHandle<()>>,
     write_cache: Arc<AMutex<DetachedTrajectoryWriteCache>>,
+    progress: Arc<StdMutex<SnapshotWriteProgress>>,
+}
+
+struct SnapshotWriteProgress {
+    chat_id: String,
+    stage: &'static str,
+    started: Instant,
+}
+
+impl Default for SnapshotWriteProgress {
+    fn default() -> Self {
+        Self {
+            chat_id: String::new(),
+            stage: "queued",
+            started: Instant::now(),
+        }
+    }
+}
+
+tokio::task_local! {
+    static SNAPSHOT_WRITE_PROGRESS: Arc<StdMutex<SnapshotWriteProgress>>;
+}
+
+fn snapshot_write_stage(stage: &'static str) {
+    let _ = SNAPSHOT_WRITE_PROGRESS.try_with(|progress| {
+        let mut progress = progress.lock().unwrap_or_else(|error| error.into_inner());
+        progress.stage = stage;
+        progress.started = Instant::now();
+    });
 }
 
 #[derive(Default)]
@@ -4513,6 +4587,7 @@ impl Default for DetachedTrajectoryWriterState {
             wake: Arc::new(Notify::new()),
             worker: None,
             write_cache: Arc::new(AMutex::new(Default::default())),
+            progress: Arc::new(StdMutex::new(Default::default())),
         }
     }
 }
@@ -4782,7 +4857,7 @@ async fn run_detached_trajectory_writer(
     writer: Arc<AMutex<DetachedTrajectoryWriterState>>,
 ) {
     loop {
-        let (version, snapshot, write_cache) = loop {
+        let (version, snapshot, write_cache, progress) = loop {
             let (deadline, wake) = {
                 let mut state = writer.lock().await;
                 if state.pending.is_none() {
@@ -4802,7 +4877,12 @@ async fn run_detached_trajectory_writer(
                             .pending
                             .take()
                             .expect("pending write was just checked");
-                        break (version, snapshot, state.write_cache.clone());
+                        break (
+                            version,
+                            snapshot,
+                            state.write_cache.clone(),
+                            state.progress.clone(),
+                        );
                     }
                 }
             };
@@ -4812,7 +4892,24 @@ async fn run_detached_trajectory_writer(
         };
         #[cfg(test)]
         let hook_chat_id = snapshot.chat_id.clone();
-        let result = save_trajectory_snapshot_inner(gcx.clone(), snapshot, Some(write_cache)).await;
+        progress
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .chat_id = snapshot.chat_id.clone();
+        let result = SNAPSHOT_WRITE_PROGRESS
+            .scope(progress, async {
+                std::panic::AssertUnwindSafe(save_trajectory_snapshot_inner(
+                    gcx.clone(),
+                    snapshot,
+                    Some(write_cache),
+                ))
+                .catch_unwind()
+                .await
+                .unwrap_or_else(|_| {
+                    Err("Trajectory writer panicked before completing its save".into())
+                })
+            })
+            .await;
         #[cfg(test)]
         if result.is_err() {
             wait_for_test_detached_trajectory_writer_failure(&hook_chat_id).await;
@@ -4854,7 +4951,7 @@ async fn wait_for_detached_trajectory_commit(
     target_version: u64,
 ) -> Result<(), String> {
     let mut last_progress = None;
-    let mut deadline = Instant::now() + TRAJECTORY_COMMIT_STALL_TIMEOUT;
+    let mut deadline = tokio::time::Instant::now() + TRAJECTORY_COMMIT_REPORT_INTERVAL;
     loop {
         let notified = {
             let state = writer.lock().await;
@@ -4870,7 +4967,12 @@ async fn wait_for_detached_trajectory_commit(
                 });
                 return Err(error);
             }
-            if !state.in_flight && state.pending.is_none() {
+            if (!state.in_flight && state.pending.is_none())
+                || state
+                    .worker
+                    .as_ref()
+                    .is_some_and(|worker| worker.is_finished())
+            {
                 return Err(state.error.clone().unwrap_or_else(|| {
                     format!(
                         "Detached trajectory writer stopped before committing version {} \
@@ -4886,7 +4988,7 @@ async fn wait_for_detached_trajectory_commit(
             );
             if last_progress != Some(progress) {
                 last_progress = Some(progress);
-                deadline = Instant::now() + TRAJECTORY_COMMIT_STALL_TIMEOUT;
+                deadline = tokio::time::Instant::now() + TRAJECTORY_COMMIT_REPORT_INTERVAL;
             }
             let mut notified = Box::pin(state.notify.clone().notified_owned());
             let already_notified = notified.as_mut().enable();
@@ -4896,19 +4998,23 @@ async fn wait_for_detached_trajectory_commit(
             }
             notified
         };
-        if tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), notified)
-            .await
-            .is_err()
-        {
+        if tokio::time::timeout_at(deadline, notified).await.is_err() {
             let state = writer.lock().await;
-            return Err(format!(
-                "Detached trajectory writer made no progress for {} ms while committing version {} \
-                 (committed {}, last error {:?})",
-                TRAJECTORY_COMMIT_STALL_TIMEOUT.as_millis(),
+            let progress = state
+                .progress
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            warn!(
+                chat_id = %progress.chat_id,
                 target_version,
-                state.committed_version,
-                state.error
-            ));
+                committed_version = state.committed_version,
+                requested_version = state.requested_version,
+                stage = progress.stage,
+                stage_elapsed_ms = progress.started.elapsed().as_millis(),
+                last_error = ?state.error,
+                "Waiting for a live trajectory writer; the save has not been cancelled or retried"
+            );
+            deadline = tokio::time::Instant::now() + TRAJECTORY_COMMIT_REPORT_INTERVAL;
         }
     }
 }
@@ -5287,6 +5393,7 @@ async fn persist_trajectory_snapshot_file_coordinated(
     message_count: usize,
     mut serialize_span: perf_diagnostics::PerfSpan,
 ) -> Result<SnapshotPersistAttempt, String> {
+    snapshot_write_stage("resolve_backing_file");
     let bound_task = crate::tasks::storage::bound_task_matches(
         snapshot
             .task_meta
@@ -5390,6 +5497,7 @@ async fn persist_trajectory_snapshot_file_coordinated(
     preserve_existing_trajectory_metadata(&mut trajectory, existing_trajectory.as_deref());
 
     let tmp_path = unique_trajectory_tmp_path(&file_path);
+    snapshot_write_stage("serialize_file");
     serialize_span.resume();
     let serialize_tmp_path = tmp_path.clone();
     let serialized = tokio::task::spawn_blocking(move || {
@@ -5437,6 +5545,7 @@ async fn persist_trajectory_snapshot_file_coordinated(
         }
     };
     let source_sha256 = write.source_sha256;
+    snapshot_write_stage("publish_file");
     #[cfg(test)]
     wait_for_test_snapshot_prepared(&file_path).await;
     let atomic_write_result = async {
@@ -5554,6 +5663,7 @@ async fn publish_trajectory_snapshot_updates(
     should_generate_title: bool,
     allow_background_generation: bool,
 ) -> Result<(), String> {
+    snapshot_write_stage("publish_index");
     if trajectory_save_projects_index_entry(snapshot) {
         if let Some(dir) = index_dir_for_trajectory_file(gcx.clone(), file_path).await {
             let source_hint = if let Some(task_meta) = snapshot.task_meta.as_ref() {
@@ -5619,10 +5729,12 @@ async fn publish_trajectory_snapshot_updates(
     }
 
     if should_vectorize_trajectory(source, snapshot.link_type.as_deref()) {
+        snapshot_write_stage("enqueue_vectorization");
         enqueue_trajectory_vectorization(gcx.clone(), file_path.to_path_buf()).await;
     }
 
     if trajectory_save_publishes_normal_event(snapshot) {
+        snapshot_write_stage("publish_chat_events");
         let effective_root = snapshot
             .root_chat_id
             .clone()
@@ -5770,9 +5882,18 @@ async fn save_trajectory_snapshot_inner_options(
 ) -> Result<(), String> {
     validate_trajectory_id(&snapshot.chat_id).map_err(|e| e.message)?;
     let chat_id = snapshot.chat_id.clone();
+    snapshot_write_stage("resolve_app");
     let app = AppState::from_gcx(gcx.clone()).await;
+    snapshot_write_stage("resolve_trajectory_path");
     let existing_no_meta_path = if snapshot.task_meta.is_none() && snapshot.buddy_meta.is_none() {
-        find_normal_trajectory_path(gcx.clone(), &snapshot.chat_id).await
+        find_normal_snapshot_file(
+            gcx.clone(),
+            &snapshot.chat_id,
+            snapshot.root_chat_id.as_deref(),
+            !is_internal_trace_link_type(snapshot.link_type.as_deref()),
+        )
+        .await
+        .map(|candidate| candidate.path)
     } else {
         None
     };
@@ -5803,6 +5924,7 @@ async fn save_trajectory_snapshot_inner_options(
         .is_some_and(|task_meta| task_meta.role == "planner");
     let retain_background_messages = should_generate_title || should_generate_task_name;
     let messages = std::mem::take(&mut snapshot.messages);
+    snapshot_write_stage("serialize_messages");
     let (messages_json, background_messages_json, metrics, serialize_span) =
         serialize_trajectory_snapshot_messages(
             messages,
@@ -6008,76 +6130,97 @@ async fn schedule_trajectory_writer(
         try_save_trajectory_legacy_with_intent(app, session_arc.clone(), intent).await?;
         return Ok(session_arc.lock().await.trajectory_committed_version);
     }
-    let should_spawn = {
+    let target_version = {
         let mut session = session_arc.lock().await;
         let target_version = session.trajectory_version;
         if !session.trajectory_dirty {
             return Ok(target_version);
         }
-        if session.trajectory_save_in_flight {
+        if session.trajectory_save_in_flight
+            && session
+                .trajectory_writer_live
+                .as_ref()
+                .is_some_and(|live| live.load(Ordering::Acquire))
+        {
             session.trajectory_save_queued = true;
             return Ok(target_version);
         }
         session.trajectory_save_in_flight = true;
         session.trajectory_save_queued = false;
         session.trajectory_save_error = None;
-        target_version
-    };
-    let gcx = app.gcx.clone();
-    let writer_session_arc = session_arc.clone();
-    tokio::spawn(async move {
-        loop {
-            let snapshot = {
-                let session = writer_session_arc.lock().await;
-                if !session.trajectory_dirty {
-                    None
-                } else {
-                    Some(trajectory_snapshot_from_session(&session))
+        let live = Arc::new(AtomicBool::new(true));
+        session.trajectory_writer_live = Some(live.clone());
+        let liveness = WriterLiveness {
+            live,
+            notify: session.trajectory_commit_notify.clone(),
+        };
+        let gcx = app.gcx.clone();
+        let writer_session = session_arc.clone();
+        session.trajectory_save_task = Some(tokio::spawn(async move {
+            let _liveness = liveness;
+            let result = std::panic::AssertUnwindSafe(async {
+                loop {
+                    let snapshot = {
+                        let mut session = writer_session.lock().await;
+                        if !session.trajectory_dirty {
+                            session.trajectory_save_in_flight = false;
+                            session.trajectory_save_queued = false;
+                            session.trajectory_commit_notify.notify_waiters();
+                            return Ok::<(), String>(());
+                        }
+                        trajectory_snapshot_from_session(&session)
+                    };
+                    commit_trajectory_snapshot_for_session(
+                        gcx.clone(),
+                        writer_session.clone(),
+                        snapshot,
+                        intent,
+                    )
+                    .await?;
+                    let mut session = writer_session.lock().await;
+                    session.trajectory_save_error = None;
+                    if session.trajectory_dirty || session.trajectory_save_queued {
+                        session.trajectory_save_queued = false;
+                        continue;
+                    }
+                    session.trajectory_save_in_flight = false;
+                    session.trajectory_commit_notify.notify_waiters();
+                    return Ok(());
                 }
-            };
-            let Some(snapshot) = snapshot else {
-                let mut session = writer_session_arc.lock().await;
+            })
+            .catch_unwind()
+            .await
+            .unwrap_or_else(|_| {
+                Err("Trajectory writer panicked before completing its save".into())
+            });
+            if let Err(error) = result {
+                warn!("{}", error);
+                let mut session = writer_session.lock().await;
+                session.trajectory_dirty = true;
                 session.trajectory_save_in_flight = false;
                 session.trajectory_save_queued = false;
+                session.trajectory_save_error = Some(error);
                 session.trajectory_commit_notify.notify_waiters();
-                return;
-            };
-
-            let result = commit_trajectory_snapshot_for_session(
-                gcx.clone(),
-                writer_session_arc.clone(),
-                snapshot,
-                intent,
-            )
-            .await;
-            let mut session = writer_session_arc.lock().await;
-            match result {
-                Ok(_) => {
-                    session.trajectory_save_error = None;
-                }
-                Err(error) => {
-                    warn!("{}", error);
-                    session.trajectory_dirty = true;
-                    session.trajectory_save_in_flight = false;
-                    session.trajectory_save_queued = false;
-                    session.trajectory_save_error = Some(error);
-                    session.trajectory_commit_notify.notify_waiters();
-                    return;
-                }
             }
-            if session.trajectory_dirty || session.trajectory_save_queued {
-                session.trajectory_save_queued = false;
-                continue;
-            }
-            session.trajectory_save_in_flight = false;
-            session.trajectory_commit_notify.notify_waiters();
-            return;
-        }
-    });
+        }));
+        target_version
+    };
     if intent.requires_durability() {
-        wait_for_trajectory_commit(session_arc, should_spawn).await?;
+        wait_for_trajectory_commit(session_arc, target_version).await?;
     }
-    Ok(should_spawn)
+    Ok(target_version)
+}
+
+struct WriterLiveness {
+    live: Arc<AtomicBool>,
+    notify: Arc<Notify>,
+}
+
+impl Drop for WriterLiveness {
+    fn drop(&mut self) {
+        self.live.store(false, Ordering::Release);
+        self.notify.notify_waiters();
+    }
 }
 
 async fn wait_for_trajectory_commit(
@@ -6085,15 +6228,25 @@ async fn wait_for_trajectory_commit(
     target_version: u64,
 ) -> Result<(), String> {
     let mut last_progress = None;
-    let mut deadline = Instant::now() + TRAJECTORY_COMMIT_STALL_TIMEOUT;
+    let mut deadline = tokio::time::Instant::now() + TRAJECTORY_COMMIT_REPORT_INTERVAL;
     loop {
         let notified = {
             let session = session_arc.lock().await;
+            let mut notified = Box::pin(session.trajectory_commit_notify.clone().notified_owned());
+            let already_notified = notified.as_mut().enable();
             if session.trajectory_committed_version >= target_version {
                 return Ok(());
             }
             if let Some(error) = session.trajectory_save_error.clone() {
                 return Err(error);
+            }
+            if session.trajectory_writer_live.as_ref().is_some_and(|live| {
+                !session.trajectory_save_in_flight || !live.load(Ordering::Acquire)
+            }) {
+                return Err(format!(
+                    "Trajectory writer stopped before committing version {} (committed {})",
+                    target_version, session.trajectory_committed_version
+                ));
             }
             let progress = (
                 session.trajectory_committed_version,
@@ -6101,28 +6254,23 @@ async fn wait_for_trajectory_commit(
             );
             if last_progress != Some(progress) {
                 last_progress = Some(progress);
-                deadline = Instant::now() + TRAJECTORY_COMMIT_STALL_TIMEOUT;
+                deadline = tokio::time::Instant::now() + TRAJECTORY_COMMIT_REPORT_INTERVAL;
             }
-            let mut notified = Box::pin(session.trajectory_commit_notify.clone().notified_owned());
-            let already_notified = notified.as_mut().enable();
             drop(session);
             if already_notified {
                 continue;
             }
             notified
         };
-        if tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), notified)
-            .await
-            .is_err()
-        {
+        if tokio::time::timeout_at(deadline, notified).await.is_err() {
             let session = session_arc.lock().await;
-            return Err(format!(
-                "Trajectory writer made no progress for {} ms while committing version {} \
-                 (committed {})",
-                TRAJECTORY_COMMIT_STALL_TIMEOUT.as_millis(),
+            warn!(
+                chat_id = %session.chat_id,
                 target_version,
-                session.trajectory_committed_version
-            ));
+                committed_version = session.trajectory_committed_version,
+                "Waiting for trajectory durability; the save has not been cancelled or retried"
+            );
+            deadline = tokio::time::Instant::now() + TRAJECTORY_COMMIT_REPORT_INTERVAL;
         }
     }
 }
@@ -11706,6 +11854,187 @@ mod tests {
         assert_eq!(loaded.messages[0].content.content_text_only(), "message 2");
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn live_detached_writer_does_not_fail_after_the_reporting_interval() {
+        let writer = Arc::new(AMutex::new(DetachedTrajectoryWriterState {
+            in_flight: true,
+            requested_version: 1,
+            ..Default::default()
+        }));
+        let mut waiting = Box::pin(wait_for_detached_trajectory_commit(writer.clone(), 1));
+        assert!(futures::poll!(&mut waiting).is_pending());
+        tokio::time::advance(TRAJECTORY_COMMIT_REPORT_INTERVAL * 2).await;
+        assert!(futures::poll!(&mut waiting).is_pending());
+        {
+            let mut state = writer.lock().await;
+            state.committed_version = 1;
+            state.in_flight = false;
+            state.notify.notify_waiters();
+        }
+        waiting.await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn live_session_writer_does_not_fail_after_the_reporting_interval() {
+        let session = Arc::new(AMutex::new(ChatSession::new("slow-save".into())));
+        session.lock().await.trajectory_save_in_flight = true;
+        let mut waiting = Box::pin(wait_for_trajectory_commit(session.clone(), 1));
+        assert!(futures::poll!(&mut waiting).is_pending());
+        tokio::time::advance(TRAJECTORY_COMMIT_REPORT_INTERVAL * 2).await;
+        assert!(futures::poll!(&mut waiting).is_pending());
+        {
+            let mut state = session.lock().await;
+            state.trajectory_committed_version = 1;
+            state.trajectory_save_in_flight = false;
+            state.trajectory_commit_notify.notify_waiters();
+        }
+        waiting.await.unwrap();
+    }
+
+    #[serial(trajectory_perf)]
+    #[tokio::test]
+    async fn aborted_session_writer_wakes_waiters_and_can_be_rescheduled() {
+        let _lock = serial_test_guard();
+        let _writer = TrajectoryWriterRolloutGuard::set(true);
+        let workspace = tempfile::tempdir().unwrap();
+        let (_gcx, app) = make_app_with_workspace(workspace.path()).await;
+        let session = Arc::new(AMutex::new(ChatSession::new(
+            "aborted-session-writer".into(),
+        )));
+        session
+            .lock()
+            .await
+            .add_message(ChatMessage::new("user".into(), "saved once".into()));
+        let mutex = session.lock().await.trajectory_save_mutex.clone();
+        let held = mutex.lock().await;
+        let version = schedule_trajectory_writer(
+            app.clone(),
+            session.clone(),
+            TrajectoryCommitIntent::Checkpoint,
+        )
+        .await
+        .unwrap();
+        let task = session.lock().await.trajectory_save_task.take().unwrap();
+        let mut waiting = Box::pin(wait_for_trajectory_commit(session.clone(), version));
+        assert!(futures::poll!(&mut waiting).is_pending());
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert!(waiting.await.unwrap_err().contains("writer stopped"));
+        drop(held);
+        schedule_trajectory_writer(app, session.clone(), TrajectoryCommitIntent::Required)
+            .await
+            .unwrap();
+        let state = session.lock().await;
+        assert_eq!(state.trajectory_committed_version, version);
+        assert!(!state.trajectory_dirty);
+        assert_eq!(state.messages.len(), 1);
+    }
+
+    #[serial(trajectory_perf)]
+    #[tokio::test]
+    async fn existing_snapshot_persists_without_waiting_for_the_shared_index() {
+        let _lock = serial_test_guard();
+        let workspace = tempfile::tempdir().unwrap();
+        let (gcx, app) = make_app_with_workspace(workspace.path()).await;
+        let chat_id = "existing-save-with-blocked-index";
+        let dir = get_trajectories_dir(gcx.clone()).await.unwrap();
+        let path = dir.join(format!("{chat_id}.json"));
+        write_trajectory_file(&path, chat_id, "Original", "2024-01-01T00:00:01Z").await;
+        let index_path = dir.join(trajectory_index::TRAJECTORY_INDEX_FILE);
+        tokio::fs::write(&index_path, "{not an index")
+            .await
+            .unwrap();
+        let mut lock = crate::daemon::lock::open_lock(&dir.join(".index.json.lock")).unwrap();
+        let held = crate::daemon::lock::try_lock(&mut lock).unwrap();
+        let before = listing_calls_for(
+            &app,
+            trajectory_index::TrajectoryIndexListingCaller::ChatPathLookup,
+        );
+        let snapshot = test_snapshot(
+            chat_id,
+            "Rebuilt context",
+            vec![ChatMessage::new("user".into(), "retained history".into())],
+        );
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            save_trajectory_snapshot_inner(gcx, snapshot, None),
+        )
+        .await
+        .expect("a direct save must not wait for unrelated index work")
+        .unwrap();
+        let saved: serde_json::Value =
+            serde_json::from_str(&tokio::fs::read_to_string(&path).await.unwrap()).unwrap();
+        assert_eq!(saved["title"], "Rebuilt context");
+        assert_eq!(saved["messages"][0]["content"], "retained history");
+        assert_eq!(
+            listing_calls_for(
+                &app,
+                trajectory_index::TrajectoryIndexListingCaller::ChatPathLookup
+            ),
+            before
+        );
+        assert_eq!(
+            tokio::fs::read_to_string(index_path).await.unwrap(),
+            "{not an index"
+        );
+        drop(held);
+    }
+
+    #[serial(trajectory_perf)]
+    #[tokio::test]
+    async fn internal_snapshot_persists_without_waiting_for_the_shared_index() {
+        let _lock = serial_test_guard();
+        let workspace = tempfile::tempdir().unwrap();
+        let (gcx, app) = make_app_with_workspace(workspace.path()).await;
+        let dir = get_trajectories_dir(gcx.clone()).await.unwrap();
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let index_path = dir.join(trajectory_index::TRAJECTORY_INDEX_FILE);
+        tokio::fs::write(&index_path, "{not an index")
+            .await
+            .unwrap();
+        let mut lock = crate::daemon::lock::open_lock(&dir.join(".index.json.lock")).unwrap();
+        let held = crate::daemon::lock::try_lock(&mut lock).unwrap();
+        let before = listing_calls_for(
+            &app,
+            trajectory_index::TrajectoryIndexListingCaller::ChatPathLookup,
+        );
+        let chat_id = "internal-save-with-blocked-index";
+        let mut snapshot = test_snapshot(
+            chat_id,
+            "Internal",
+            vec![ChatMessage::new("user".into(), "first".into())],
+        );
+        snapshot.root_chat_id = Some("owning-chat".into());
+        snapshot.link_type = Some("internal:test".into());
+        let expected = dir.join("owning-chat").join(format!("{chat_id}.json"));
+        for title in ["First save", "Second save"] {
+            snapshot.title = title.into();
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                save_trajectory_snapshot_inner(gcx.clone(), snapshot.clone(), None),
+            )
+            .await
+            .expect("an internal snapshot must not consult the blocked shared index")
+            .unwrap();
+            let saved: serde_json::Value =
+                serde_json::from_str(&tokio::fs::read_to_string(&expected).await.unwrap()).unwrap();
+            assert_eq!(saved["title"], title);
+            assert_eq!(saved["id"], chat_id);
+        }
+        assert_eq!(
+            listing_calls_for(
+                &app,
+                trajectory_index::TrajectoryIndexListingCaller::ChatPathLookup
+            ),
+            before
+        );
+        assert_eq!(
+            tokio::fs::read_to_string(index_path).await.unwrap(),
+            "{not an index"
+        );
+        drop(held);
+    }
+
     #[serial(trajectory_perf)]
     #[tokio::test]
     async fn trajectory_writer_failure_is_stored_and_reported_to_waiters() {
@@ -13224,6 +13553,10 @@ mod tests {
 
             assert_same_path(&found.path, &expected);
             assert_eq!(found.json["title"], "Direct");
+            let normal = find_normal_trajectory_file(gcx.clone(), chat_id)
+                .await
+                .unwrap();
+            assert_same_path(&normal.path, &expected);
             assert_eq!(
                 listing_calls_for(
                     &app,
@@ -19188,6 +19521,8 @@ mod tests {
             trajectory_version: 5,
             trajectory_committed_version: 0,
             trajectory_save_in_flight: false,
+            trajectory_save_task: None,
+            trajectory_writer_live: None,
             trajectory_save_queued: false,
             trajectory_save_mutex: Arc::new(AMutex::new(())),
             trajectory_commit_notify: Arc::new(Notify::new()),
@@ -19348,6 +19683,8 @@ mod tests {
             trajectory_version: 1,
             trajectory_committed_version: 0,
             trajectory_save_in_flight: false,
+            trajectory_save_task: None,
+            trajectory_writer_live: None,
             trajectory_save_queued: false,
             trajectory_save_mutex: Arc::new(AMutex::new(())),
             trajectory_commit_notify: Arc::new(Notify::new()),

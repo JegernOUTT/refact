@@ -392,6 +392,8 @@ pub struct ChatSession {
     pub trajectory_version: u64,
     pub trajectory_committed_version: u64,
     pub trajectory_save_in_flight: bool,
+    pub(crate) trajectory_save_task: Option<tokio::task::JoinHandle<()>>,
+    pub(crate) trajectory_writer_live: Option<Arc<AtomicBool>>,
     pub trajectory_save_queued: bool,
     pub trajectory_save_mutex: Arc<AMutex<()>>,
     pub trajectory_commit_notify: Arc<Notify>,
