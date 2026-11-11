@@ -79,6 +79,10 @@ impl MCPTransportInitializer for IntegrationMCPHttp {
             return Some(client);
         }
 
+        if crate::providers::litellm_mcp::gateway_is_managed(&self.config_path) {
+            return None;
+        }
+
         let remaining = init_timeout.saturating_sub(started.elapsed().as_secs());
         if remaining < 5 {
             let msg =

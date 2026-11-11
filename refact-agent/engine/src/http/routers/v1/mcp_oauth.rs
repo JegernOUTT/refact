@@ -11,6 +11,7 @@ use tracing::warn;
 use crate::app_state::AppState;
 use crate::global_context::GlobalContext;
 use crate::custom_error::ScratchError;
+use crate::integrations::mcp::mcp_auth::gateway_oauth;
 use crate::integrations::mcp::mcp_auth::{
     MCPOAuthSessionManager, clear_tokens_from_config, ensure_oauth2_pkce_auth_type,
     load_tokens_from_config, save_tokens_to_config,
@@ -143,9 +144,23 @@ pub async fn handle_v1_mcp_oauth_start(
     })?;
 
     validate_mcp_config_path(&gcx, &req.config_path).await?;
+    let managed_identity = gateway_oauth::managed_identity(&req.config_path)
+        .await
+        .map_err(|e| ScratchError::new(StatusCode::CONFLICT, e))?;
 
     let http_port = gcx.cmdline.http_port;
-    let redirect_uri = format!("http://127.0.0.1:{}/v1/mcp/oauth/callback", http_port);
+    let redirect_uri = match managed_identity {
+        Some(_) => crate::providers::litellm_mcp::gateway_callback_url(&req.config_path, http_port)
+            .await
+            .map_err(|e| ScratchError::new(StatusCode::CONFLICT, e))?
+            .ok_or_else(|| {
+                ScratchError::new(
+                    StatusCode::CONFLICT,
+                    "Managed LiteLLM connection is no longer active".to_string(),
+                )
+            })?,
+        None => format!("http://127.0.0.1:{}/v1/mcp/oauth/callback", http_port),
+    };
 
     let config_content = tokio::fs::read_to_string(&req.config_path)
         .await
@@ -216,6 +231,28 @@ pub async fn handle_v1_mcp_oauth_start(
         }
     };
 
+    if let Some(identity) = managed_identity {
+        gateway_oauth::revalidate_binding(&req.config_path, &identity, &mcp_url)
+            .await
+            .map_err(|e| ScratchError::new(StatusCode::CONFLICT, e))?;
+        let (session_id, authorize_url) = gateway_oauth::start_flow(
+            &req.config_path,
+            &identity,
+            &mcp_url,
+            &effective_scopes,
+            &redirect_uri,
+        )
+        .await
+        .map_err(|e| ScratchError::new(StatusCode::BAD_GATEWAY, e))?;
+        return json_response(
+            StatusCode::OK,
+            &McpOAuthStartResponse {
+                session_id,
+                authorize_url,
+            },
+        );
+    }
+
     let scopes: Vec<&str> = effective_scopes.iter().map(|s| s.as_str()).collect();
     let (session_id, authorize_url) = MCPOAuthSessionManager::start_oauth_flow(
         &mcp_url,
@@ -253,6 +290,14 @@ pub async fn handle_v1_mcp_oauth_exchange(
         )
     })?;
 
+    if gateway_oauth::has_session(&req.session_id).await {
+        let (_, config_path) = gateway_oauth::complete_flow(&req.session_id, &req.code)
+            .await
+            .map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, e))?;
+        reload_mcp_integration(gcx, &config_path).await;
+        return json_response(StatusCode::OK, &serde_json::json!({"success": true}));
+    }
+
     let (tokens, config_path) = MCPOAuthSessionManager::exchange_code(&req.session_id, &req.code)
         .await
         .map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, e))?;
@@ -269,6 +314,53 @@ pub async fn handle_v1_mcp_oauth_exchange(
     reload_mcp_integration(gcx, &config_path).await;
 
     json_response(StatusCode::OK, &serde_json::json!({"success": true}))
+}
+
+const SAFE_OAUTH_ERROR_CODES: &[&str] = &[
+    "access_denied",
+    "invalid_request",
+    "unauthorized_client",
+    "unsupported_response_type",
+    "invalid_scope",
+    "server_error",
+    "temporarily_unavailable",
+    "login_required",
+    "consent_required",
+    "interaction_required",
+];
+
+fn sanitized_oauth_error_code(err: &str) -> &'static str {
+    SAFE_OAUTH_ERROR_CODES
+        .iter()
+        .copied()
+        .find(|code| *code == err)
+        .unwrap_or("unknown_error")
+}
+
+async fn callback_provider_error(
+    state: Option<&str>,
+    err: &str,
+) -> Result<Response<Body>, ScratchError> {
+    let code = sanitized_oauth_error_code(err);
+    let managed_session = match state.filter(|s| !s.is_empty()) {
+        Some(state) => gateway_oauth::find_session_by_state(state).await,
+        None => None,
+    };
+    match managed_session {
+        Some(session_id) => {
+            gateway_oauth::cancel(&session_id).await;
+            warn!("Managed LiteLLM MCP OAuth sign-in failed at the authorization server ({code}); pending sign-in cancelled");
+        }
+        None => warn!("MCP OAuth sign-in failed at the authorization server ({code})"),
+    }
+    html_response(
+        "Authentication Failed",
+        "✗ Authentication Failed",
+        "#ef4444",
+        &format!(
+            "The authorization server did not complete sign-in ({code}). Please start the OAuth flow again."
+        ),
+    )
 }
 
 #[derive(Deserialize)]
@@ -289,17 +381,7 @@ pub async fn handle_v1_mcp_oauth_callback(
 ) -> Result<Response<Body>, ScratchError> {
     let gcx = app.gcx.clone();
     if let Some(err) = &query.error {
-        let desc = query
-            .error_description
-            .as_deref()
-            .unwrap_or("Unknown error");
-        warn!("MCP OAuth error from server: {} — {}", err, desc);
-        return html_response(
-            "Authentication Failed",
-            "✗ Authentication Failed",
-            "#ef4444",
-            &format!("{}: {}", err, desc),
-        );
+        return callback_provider_error(query.state.as_deref(), err).await;
     }
 
     let code = match &query.code {
@@ -326,7 +408,11 @@ pub async fn handle_v1_mcp_oauth_callback(
         }
     };
 
-    let session_id = match MCPOAuthSessionManager::find_session_id_by_state(&state).await {
+    let managed_session = gateway_oauth::find_session_by_state(&state).await;
+    let session_id = match managed_session
+        .clone()
+        .or(MCPOAuthSessionManager::find_session_id_by_state(&state).await)
+    {
         Some(id) => id,
         None => {
             return html_response(
@@ -338,28 +424,34 @@ pub async fn handle_v1_mcp_oauth_callback(
         }
     };
 
-    let (tokens, config_path) =
-        match MCPOAuthSessionManager::exchange_code(&session_id, &code).await {
-            Ok(result) => result,
-            Err(e) => {
-                warn!("MCP OAuth exchange failed: {}", e);
-                return html_response(
-                    "Authentication Failed",
-                    "✗ Authentication Failed",
-                    "#ef4444",
-                    &format!("Token exchange failed: {}", e),
-                );
-            }
-        };
+    let exchange = if managed_session.is_some() {
+        gateway_oauth::complete_flow(&session_id, &code).await
+    } else {
+        MCPOAuthSessionManager::exchange_code(&session_id, &code).await
+    };
+    let (tokens, config_path) = match exchange {
+        Ok(result) => result,
+        Err(e) => {
+            warn!("MCP OAuth exchange failed: {}", e);
+            return html_response(
+                "Authentication Failed",
+                "✗ Authentication Failed",
+                "#ef4444",
+                &format!("Token exchange failed: {}", e),
+            );
+        }
+    };
 
-    if let Err(e) = save_tokens_to_config(&config_path, &tokens).await {
-        warn!("MCP OAuth: failed to save tokens: {}", e);
-        return html_response(
-            "Authentication Failed",
-            "✗ Authentication Failed",
-            "#ef4444",
-            "Tokens received but failed to save. Please try again.",
-        );
+    if managed_session.is_none() {
+        if let Err(e) = save_tokens_to_config(&config_path, &tokens).await {
+            warn!("MCP OAuth: failed to save tokens: {}", e);
+            return html_response(
+                "Authentication Failed",
+                "✗ Authentication Failed",
+                "#ef4444",
+                "Tokens received but failed to save. Please try again.",
+            );
+        }
     }
 
     reload_mcp_integration(gcx, &config_path).await;
@@ -391,14 +483,24 @@ pub async fn handle_v1_mcp_oauth_logout(
 
     validate_mcp_config_path(&gcx, &req.config_path).await?;
 
-    clear_tokens_from_config(&req.config_path)
+    let managed = crate::providers::litellm_mcp::logout_gateway(&req.config_path)
         .await
-        .map_err(|e| {
+        .map_err(|_| {
             ScratchError::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Clear tokens: {}", e),
+                StatusCode::CONFLICT,
+                "Cannot sign out managed MCP session".to_string(),
             )
         })?;
+    if !managed {
+        clear_tokens_from_config(&req.config_path)
+            .await
+            .map_err(|e| {
+                ScratchError::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Clear tokens: {}", e),
+                )
+            })?;
+    }
 
     reload_mcp_integration(gcx, &req.config_path).await;
 
@@ -419,7 +521,8 @@ pub async fn handle_v1_mcp_oauth_cancel(
             format!("Invalid JSON: {}", e),
         )
     })?;
-    let cancelled = MCPOAuthSessionManager::cancel_oauth_flow(&req.session_id).await;
+    let cancelled = gateway_oauth::cancel(&req.session_id).await
+        | MCPOAuthSessionManager::cancel_oauth_flow(&req.session_id).await;
     json_response(StatusCode::OK, &serde_json::json!({"cancelled": cancelled}))
 }
 
@@ -550,6 +653,104 @@ mod tests {
     use crate::integrations::mcp::mcp_auth::{
         MCPOAuthTokens, save_tokens_to_config, load_tokens_from_config, clear_tokens_from_config,
     };
+
+    async fn body_text(response: Response<Body>) -> String {
+        String::from_utf8(
+            hyper::body::to_bytes(response.into_body())
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap()
+    }
+
+    async fn fake_gateway() -> String {
+        use axum::http::Uri;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let base_for = base.clone();
+        let app = axum::Router::new().fallback(move |uri: Uri| {
+            let base = base_for.clone();
+            async move {
+                let (status, body) = match uri.path() {
+                    "/.well-known/oauth-protected-resource/srv/mcp" => (200, format!(
+                        r#"{{"resource":"{base}/srv/mcp","authorization_servers":["{base}"]}}"#
+                    )),
+                    "/.well-known/oauth-authorization-server" => (200, format!(
+                        r#"{{"issuer":"{base}","authorization_endpoint":"https://idp.example/authorize","token_endpoint":"{base}/srv/token","registration_endpoint":"{base}/srv/register","code_challenge_methods_supported":["S256"],"scopes_supported":["mcp"]}}"#
+                    )),
+                    "/srv/register" => (201, r#"{"client_id":"cid-1"}"#.to_string()),
+                    _ => (404, "{}".to_string()),
+                };
+                axum::response::Response::builder()
+                    .status(status)
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(body))
+                    .unwrap()
+            }
+        });
+        tokio::spawn(
+            axum::Server::from_tcp(listener)
+                .unwrap()
+                .serve(app.into_make_service()),
+        );
+        base
+    }
+
+    #[tokio::test]
+    async fn test_managed_callback_error_cancels_flow_without_reflection() {
+        let base = fake_gateway().await;
+        let resolver: gateway_oauth::HeaderResolver =
+            Arc::new(|_url: String| Box::pin(async { Ok(Some(std::collections::HashMap::new())) }));
+        let (session_id, auth_url) = gateway_oauth::start_flow_with(
+            "/tmp/managed-callback-error.yaml",
+            "ident",
+            &format!("{base}/srv/mcp"),
+            &[],
+            "https://refact.example.com/v1/mcp/oauth/callback",
+            resolver,
+        )
+        .await
+        .unwrap();
+        let state = url::Url::parse(&auth_url)
+            .unwrap()
+            .query_pairs()
+            .find(|(k, _)| k == "state")
+            .unwrap()
+            .1
+            .to_string();
+        assert!(gateway_oauth::has_session(&session_id).await);
+
+        let response = callback_provider_error(Some(&state), "<script>evil-code</script>")
+            .await
+            .unwrap();
+        let body = body_text(response).await;
+        assert!(body.contains("unknown_error"));
+        assert!(!body.contains("evil-code") && !body.contains("script&gt;"));
+        assert!(!gateway_oauth::has_session(&session_id).await);
+        assert!(gateway_oauth::find_session_by_state(&state).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_generic_callback_error_shows_only_known_codes() {
+        let body = body_text(
+            callback_provider_error(Some("unknown-state"), "access_denied")
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(body.contains("(access_denied)"));
+        let body = body_text(
+            callback_provider_error(None, "token=leaked-secret")
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(body.contains("(unknown_error)"));
+        assert!(!body.contains("leaked-secret"));
+        assert_eq!(sanitized_oauth_error_code("access_denied"), "access_denied");
+        assert_eq!(sanitized_oauth_error_code("ACCESS_DENIED"), "unknown_error");
+    }
 
     #[test]
     fn test_html_escape_script_tags() {

@@ -8,7 +8,14 @@ import {
 } from "./consts";
 import { buildApiUrlFromState } from "./apiUrl";
 import { createApi, fetchBaseQuery } from "@reduxjs/toolkit/query/react";
+import type {
+  FetchArgs,
+  FetchBaseQueryError,
+  FetchBaseQueryMeta,
+} from "@reduxjs/toolkit/query";
 import { capsApi } from "./caps";
+
+type MaybePromise<T> = T | PromiseLike<T>;
 
 export type WireFormat =
   | "openai_chat_completions"
@@ -249,6 +256,211 @@ export type ProviderQuotaResponse = {
 
 export type ProviderQuotaListResponse = {
   quotas: ProviderQuotaSnapshot[];
+};
+
+export type LiteLLMFeatureState =
+  | "ok"
+  | "unsupported"
+  | "permission_denied"
+  | "auth_required"
+  | "not_configured"
+  | "unavailable"
+  | "malformed_response"
+  | "unknown";
+
+export type LiteLLMScope = "key" | "user" | "team";
+
+export type LiteLLMSpend = {
+  value?: number | null;
+  state?: "known" | "absent" | "unknown";
+};
+
+export type LiteLLMMaxBudget = {
+  kind: "unlimited" | "limited" | "unknown" | "denied";
+  value?: number | null;
+};
+
+export type LiteLLMRemaining = {
+  value?: number | null;
+  derived?: boolean;
+  overage?: boolean;
+};
+
+export type LiteLLMModelLimit = {
+  model: string;
+  max_budget?: number | null;
+  budget_duration?: string | null;
+  rpm_limit?: number | null;
+  tpm_limit?: number | null;
+  spend?: number | null;
+};
+
+export type LiteLLMAccountSubject = {
+  scope: LiteLLMScope;
+  id?: string | null;
+  label: string;
+  state: LiteLLMFeatureState;
+  message?: string | null;
+  spend?: LiteLLMSpend;
+  max_budget?: LiteLLMMaxBudget;
+  remaining?: LiteLLMRemaining;
+  currency?: string | null;
+  budget_reset_at?: string | null;
+  budget_duration?: string | null;
+  expires_at?: string | null;
+  blocked?: boolean | null;
+  rpm_limit?: number | null;
+  tpm_limit?: number | null;
+  max_parallel_requests?: number | null;
+  model_limits?: LiteLLMModelLimit[];
+  fetched_at?: string | null;
+  stale?: boolean;
+};
+
+export type LiteLLMObservedHeadroom = {
+  observed_at?: string | null;
+  scope?: "model" | "key" | "upstream" | "unknown";
+  model?: string | null;
+  requests_remaining?: number | null;
+  tokens_remaining?: number | null;
+  requests_limit?: number | null;
+  tokens_limit?: number | null;
+  requests_reset_at?: string | null;
+  tokens_reset_at?: string | null;
+  response_cost?: number | null;
+  key_spend?: number | null;
+  expires_at?: string | null;
+};
+
+export type LiteLLMAccountResponse = {
+  state: LiteLLMFeatureState;
+  message?: string | null;
+  fetched_at?: string | null;
+  stale?: boolean;
+  subjects: LiteLLMAccountSubject[];
+  observed_headroom?: LiteLLMObservedHeadroom | null;
+};
+
+export type LiteLLMUsageTotals = {
+  spend?: number | null;
+  requests?: number | null;
+  prompt_tokens?: number | null;
+  completion_tokens?: number | null;
+  total_tokens?: number | null;
+  successful_requests?: number | null;
+  failed_requests?: number | null;
+};
+
+export type LiteLLMUsageModel = {
+  model: string;
+  spend?: number | null;
+  requests?: number | null;
+  prompt_tokens?: number | null;
+  completion_tokens?: number | null;
+  total_tokens?: number | null;
+};
+
+export type LiteLLMUsageDay = {
+  date: string;
+  spend?: number | null;
+  requests?: number | null;
+  prompt_tokens?: number | null;
+  completion_tokens?: number | null;
+  total_tokens?: number | null;
+  models?: LiteLLMUsageModel[];
+};
+
+export type LiteLLMUsageKey = {
+  label: string;
+  alias?: string | null;
+  current?: boolean;
+  spend?: number | null;
+  requests?: number | null;
+  total_tokens?: number | null;
+};
+
+export type LiteLLMUsageResponse = {
+  state: LiteLLMFeatureState;
+  message?: string | null;
+  fetched_at?: string | null;
+  scope?: LiteLLMScope | null;
+  start?: string | null;
+  end?: string | null;
+  page?: number | null;
+  page_size?: number | null;
+  total_pages?: number | null;
+  has_more?: boolean;
+  totals_source?: "gateway_summary" | "page";
+  partial?: boolean;
+  truncated?: boolean;
+  totals?: LiteLLMUsageTotals | null;
+  daily?: LiteLLMUsageDay[];
+  models?: LiteLLMUsageModel[];
+  api_keys?: LiteLLMUsageKey[];
+};
+
+export type LiteLLMUsageArgs = {
+  providerName: string;
+  start: string;
+  end: string;
+  scope: LiteLLMScope;
+  page: number;
+  pageSize: number;
+};
+
+export type LiteLLMMcpAuthKind =
+  | "none"
+  | "api_key"
+  | "oauth"
+  | "byok"
+  | "unknown";
+
+export type LiteLLMMcpAuthState =
+  | "ok"
+  | "auth_required"
+  | "missing_setup"
+  | "permission_denied"
+  | "unknown";
+
+export type LiteLLMMcpServer = {
+  server_id: string;
+  display_name: string;
+  description?: string | null;
+  transport?: string | null;
+  auth: {
+    kind: LiteLLMMcpAuthKind;
+    state: LiteLLMMcpAuthState;
+    setup_url?: string | null;
+    status_check_state?: LiteLLMFeatureState;
+  };
+  health: "healthy" | "unhealthy" | "unknown";
+  access: "allowed" | "denied" | "unknown";
+  enabled: boolean;
+  connected?: boolean;
+  connection?:
+    | "disabled"
+    | "connecting"
+    | "connected"
+    | "needs_auth"
+    | "failed"
+    | "reconfirm_required";
+  integration_path?: string | null;
+  tools_count?: number | null;
+  removed?: boolean;
+};
+
+export type LiteLLMMcpResponse = {
+  state: LiteLLMFeatureState;
+  message?: string | null;
+  fetched_at?: string | null;
+  stale?: boolean;
+  reconfirm_required?: boolean;
+  servers: LiteLLMMcpServer[];
+};
+
+export type LiteLLMMcpServerArgs = {
+  providerName: string;
+  serverId: string;
 };
 
 export type ClaudeCodeUsageWindow = {
@@ -693,6 +905,53 @@ export function providerIdentitySettings(
   };
 }
 
+type LiteLLMQueryResult<T> =
+  | { data: T; error?: undefined; meta?: FetchBaseQueryMeta }
+  | { data?: undefined; error: FetchBaseQueryError; meta?: FetchBaseQueryMeta };
+
+type LiteLLMBaseQuery = (arg: FetchArgs) => MaybePromise<{
+  data?: unknown;
+  error?: FetchBaseQueryError;
+  meta?: FetchBaseQueryMeta;
+}>;
+
+const LITELLM_TIMEOUT_MS = 15_000;
+
+async function litellmFetch<T>(
+  providerName: string,
+  suffix: string,
+  method: "GET" | "POST",
+  api: { getState: () => unknown },
+  extraOptions: object,
+  baseQuery: LiteLLMBaseQuery,
+  guard: (data: unknown) => data is T,
+): Promise<LiteLLMQueryResult<T>> {
+  const state = api.getState() as RootState;
+  const path = `${PROVIDERS_URL}/${encodeURIComponent(
+    providerName,
+  )}/litellm/${suffix}`;
+  const result = await baseQuery({
+    ...extraOptions,
+    method,
+    url: buildApiUrlFromState(state, path),
+    credentials: "same-origin",
+    redirect: "follow",
+    timeout: LITELLM_TIMEOUT_MS,
+  });
+  if (result.error) return { error: result.error };
+  if (!guard(result.data)) {
+    return {
+      meta: result.meta,
+      error: {
+        error: `Invalid response from ${path}`,
+        data: result.data,
+        status: "CUSTOM_ERROR",
+      },
+    };
+  }
+  return { data: result.data, meta: result.meta };
+}
+
 export const providersApi = createApi({
   reducerPath: "providers",
   tagTypes: [
@@ -702,6 +961,9 @@ export const providersApi = createApi({
     "PROVIDER_MODELS",
     "AVAILABLE_MODELS",
     "QUOTA",
+    "LITELLM_ACCOUNT",
+    "LITELLM_USAGE",
+    "LITELLM_MCP",
     "DEFAULTS",
     "PROJECT_DEFAULTS",
   ],
@@ -1238,6 +1500,105 @@ export const providersApi = createApi({
       },
     }),
 
+    getLiteLLMAccount: builder.query<
+      LiteLLMAccountResponse,
+      { providerName: string }
+    >({
+      providesTags: (_result, _error, { providerName }) => [
+        { type: "LITELLM_ACCOUNT", id: providerName },
+      ],
+      queryFn: (args, api, extraOptions, baseQuery) =>
+        litellmFetch(
+          args.providerName,
+          "account",
+          "GET",
+          api,
+          extraOptions,
+          baseQuery,
+          isLiteLLMAccountResponse,
+        ),
+    }),
+
+    getLiteLLMUsage: builder.query<LiteLLMUsageResponse, LiteLLMUsageArgs>({
+      providesTags: (_result, _error, { providerName }) => [
+        { type: "LITELLM_USAGE", id: providerName },
+      ],
+      queryFn: (args, api, extraOptions, baseQuery) => {
+        const query = new URLSearchParams({
+          start: args.start,
+          end: args.end,
+          scope: args.scope,
+          page: String(args.page),
+          page_size: String(args.pageSize),
+        });
+        return litellmFetch(
+          args.providerName,
+          `usage?${query.toString()}`,
+          "GET",
+          api,
+          extraOptions,
+          baseQuery,
+          isLiteLLMUsageResponse,
+        );
+      },
+    }),
+
+    getLiteLLMMcp: builder.query<LiteLLMMcpResponse, { providerName: string }>({
+      providesTags: (_result, _error, { providerName }) => [
+        { type: "LITELLM_MCP", id: providerName },
+      ],
+      queryFn: (args, api, extraOptions, baseQuery) =>
+        litellmFetch(
+          args.providerName,
+          "mcp",
+          "GET",
+          api,
+          extraOptions,
+          baseQuery,
+          isLiteLLMMcpResponse,
+        ),
+    }),
+
+    rescanLiteLLMMcp: builder.mutation<
+      LiteLLMMcpResponse,
+      { providerName: string }
+    >({
+      invalidatesTags: (_result, _error, { providerName }) => [
+        { type: "LITELLM_MCP", id: providerName },
+      ],
+      queryFn: (args, api, extraOptions, baseQuery) =>
+        litellmFetch(
+          args.providerName,
+          "mcp/rescan",
+          "POST",
+          api,
+          extraOptions,
+          baseQuery,
+          isLiteLLMMcpResponse,
+        ),
+    }),
+
+    setLiteLLMMcpServerEnabled: builder.mutation<
+      LiteLLMMcpResponse,
+      LiteLLMMcpServerArgs & { enabled: boolean }
+    >({
+      invalidatesTags: (_result, _error, { providerName }) => [
+        { type: "LITELLM_MCP", id: providerName },
+      ],
+      queryFn: (args, api, extraOptions, baseQuery) =>
+        litellmFetch(
+          args.providerName,
+          `mcp/${encodeURIComponent(args.serverId)}/${
+            args.enabled ? "enable" : "disable"
+          }`,
+          "POST",
+          api,
+          extraOptions,
+          baseQuery,
+          isLiteLLMMcpResponse,
+        ),
+    }),
+
     getClaudeCodeUsage: builder.query<
       ClaudeCodeUsageResponse,
       ProviderScopedQueryRequiredArg
@@ -1732,6 +2093,9 @@ export const providersApi = createApi({
         { type: "PROVIDERS", id: "LIST" },
         { type: "QUOTA", id: providerName },
         { type: "QUOTA", id: "LIST" },
+        { type: "LITELLM_ACCOUNT", id: providerName },
+        { type: "LITELLM_USAGE", id: providerName },
+        { type: "LITELLM_MCP", id: providerName },
       ],
       queryFn: async (args, api, extraOptions, baseQuery) => {
         const state = api.getState() as RootState;
@@ -2365,6 +2729,77 @@ function isProviderQuotaListResponse(
   return data.quotas.every(isProviderQuotaSnapshot);
 }
 
+const LITELLM_FEATURE_STATES: readonly string[] = [
+  "ok",
+  "unsupported",
+  "permission_denied",
+  "auth_required",
+  "not_configured",
+  "unavailable",
+  "malformed_response",
+  "unknown",
+];
+
+function isLiteLLMFeatureState(data: unknown): data is LiteLLMFeatureState {
+  return typeof data === "string" && LITELLM_FEATURE_STATES.includes(data);
+}
+
+function isLiteLLMAccountResponse(
+  data: unknown,
+): data is LiteLLMAccountResponse {
+  if (typeof data !== "object" || data === null) return false;
+  if (!hasProperty(data, "state") || !isLiteLLMFeatureState(data.state))
+    return false;
+  if (!hasProperty(data, "subjects") || !Array.isArray(data.subjects))
+    return false;
+  return data.subjects.every(
+    (subject: unknown) =>
+      typeof subject === "object" &&
+      subject !== null &&
+      hasProperty(subject, "scope") &&
+      typeof subject.scope === "string" &&
+      hasProperty(subject, "label") &&
+      typeof subject.label === "string" &&
+      hasProperty(subject, "state") &&
+      isLiteLLMFeatureState(subject.state),
+  );
+}
+
+function isLiteLLMUsageResponse(data: unknown): data is LiteLLMUsageResponse {
+  if (typeof data !== "object" || data === null) return false;
+  if (!hasProperty(data, "state") || !isLiteLLMFeatureState(data.state))
+    return false;
+  if (hasProperty(data, "daily") && !Array.isArray(data.daily)) return false;
+  return !hasProperty(data, "models") || Array.isArray(data.models);
+}
+
+function isLiteLLMMcpServer(data: unknown): data is LiteLLMMcpServer {
+  if (typeof data !== "object" || data === null) return false;
+  if (!hasProperty(data, "server_id") || typeof data.server_id !== "string")
+    return false;
+  if (
+    !hasProperty(data, "display_name") ||
+    typeof data.display_name !== "string"
+  )
+    return false;
+  if (!hasProperty(data, "enabled") || typeof data.enabled !== "boolean")
+    return false;
+  return (
+    hasProperty(data, "auth") &&
+    typeof data.auth === "object" &&
+    data.auth !== null
+  );
+}
+
+function isLiteLLMMcpResponse(data: unknown): data is LiteLLMMcpResponse {
+  if (typeof data !== "object" || data === null) return false;
+  if (!hasProperty(data, "state") || !isLiteLLMFeatureState(data.state))
+    return false;
+  if (!hasProperty(data, "servers") || !Array.isArray(data.servers))
+    return false;
+  return data.servers.every(isLiteLLMMcpServer);
+}
+
 function isOAuthStartMode(data: unknown): data is OAuthStartMode {
   return (
     data === "callback" ||
@@ -2478,6 +2913,11 @@ export const {
   useGetOpenRouterHealthQuery,
   useGetProviderQuotaQuery,
   useGetProviderQuotasQuery,
+  useGetLiteLLMAccountQuery,
+  useGetLiteLLMUsageQuery,
+  useGetLiteLLMMcpQuery,
+  useRescanLiteLLMMcpMutation,
+  useSetLiteLLMMcpServerEnabledMutation,
   useGetClaudeCodeUsageQuery,
   useGetOpenAICodexUsageQuery,
   useGetOpenCodeUsageQuery,

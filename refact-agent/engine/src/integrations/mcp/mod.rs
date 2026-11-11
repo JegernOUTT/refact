@@ -2,6 +2,7 @@ pub mod integr_mcp_common;
 pub mod integr_mcp_http;
 pub mod integr_mcp_sse;
 pub mod integr_mcp_stdio;
+pub mod litellm_transport;
 pub mod mcp_auth;
 pub mod mcp_metrics;
 pub mod mcp_naming;

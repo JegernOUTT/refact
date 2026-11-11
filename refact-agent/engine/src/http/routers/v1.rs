@@ -708,6 +708,30 @@ fn providers_routes() -> Router<AppState> {
         .route("/providers/:name/usage", get(handle_v1_provider_usage))
         .route("/providers/:name/quota", get(handle_v1_provider_quota))
         .route(
+            "/providers/:name/litellm/account",
+            get(crate::providers::litellm_http::get_account),
+        )
+        .route(
+            "/providers/:name/litellm/usage",
+            get(crate::providers::litellm_http::get_usage),
+        )
+        .route(
+            "/providers/:name/litellm/mcp",
+            get(crate::providers::litellm_mcp::handle_litellm_mcp_get),
+        )
+        .route(
+            "/providers/:name/litellm/mcp/rescan",
+            post(crate::providers::litellm_mcp::handle_litellm_mcp_rescan),
+        )
+        .route(
+            "/providers/:name/litellm/mcp/:server_id/enable",
+            post(crate::providers::litellm_mcp::handle_litellm_mcp_enable),
+        )
+        .route(
+            "/providers/:name/litellm/mcp/:server_id/disable",
+            post(crate::providers::litellm_mcp::handle_litellm_mcp_disable),
+        )
+        .route(
             "/providers/:name/usage/redeem",
             post(handle_v1_provider_usage_redeem),
         )

@@ -243,6 +243,9 @@ impl Tool for ToolMCP {
                 cgcx.messages.clone(),
             )
         };
+        // Fail closed (no replay) before any peer send if a managed LiteLLM
+        // binding is stale, disabled or its credential identity changed.
+        super::litellm_transport::check_dispatch(&gcx, &self.config_path).await?;
         let (session_maybe, caps_maybe) = {
             let integration_sessions = gcx.integration_sessions.clone();
             let caps_state = gcx.caps_state.clone();

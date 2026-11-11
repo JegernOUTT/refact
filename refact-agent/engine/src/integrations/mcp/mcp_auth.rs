@@ -11,6 +11,11 @@ use oauth2::{StandardTokenResponse, basic::BasicTokenType, TokenResponse};
 use rmcp::transport::auth::{OAuthState, AuthorizationManager, VendorExtraTokenFields};
 use crate::integrations::sessions::IntegrationSession;
 
+/// Managed LiteLLM gateway OAuth (credential-scoped broker flow). Declared here so the
+/// module tree in `mcp/mod.rs` stays untouched.
+#[path = "gateway_oauth.rs"]
+pub mod gateway_oauth;
+
 pub fn deserialize_string_list<'de, D: serde::Deserializer<'de>>(
     d: D,
 ) -> Result<Vec<String>, D::Error> {
@@ -765,6 +770,21 @@ pub async fn mcp_oauth_refresh_task(
 
         if !needs_refresh(&tokens) {
             continue;
+        }
+
+        // Managed LiteLLM configs must never refresh through rmcp's unscoped client;
+        // they refresh on demand via `gateway_oauth::current_gateway_access_token`.
+        match gateway_oauth::managed_identity(&config_path).await {
+            Ok(None) => {}
+            Ok(Some(_)) => return,
+            Err(_) => {
+                let mut session_locked = session_arc.lock().await;
+                if let Some(mcp_session) = session_locked.as_any_mut().downcast_mut::<SessionMCP>()
+                {
+                    mcp_session.auth_status = MCPAuthStatus::NeedsReauth;
+                }
+                return;
+            }
         }
 
         if tokens.refresh_token.is_empty() {

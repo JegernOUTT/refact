@@ -1,5 +1,8 @@
 pub mod bedrock_setup;
 pub mod http;
+pub mod litellm_http;
+pub mod litellm_mcp;
+pub mod litellm_observed;
 pub mod native_auth;
 pub mod oauth_refresh;
 pub mod operator_defaults;

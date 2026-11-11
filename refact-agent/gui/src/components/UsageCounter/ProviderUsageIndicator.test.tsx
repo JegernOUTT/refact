@@ -169,6 +169,104 @@ describe("ProviderUsageIndicator", () => {
     expect(screen.getByLabelText("Account B: Usage unknown")).toBeVisible();
   });
 
+  it.each([
+    {
+      used: 75,
+      limit: 300,
+      remaining: 225,
+      percent: 25,
+      amount: "$75.00 / $300.00",
+    },
+    {
+      used: 0,
+      limit: 300,
+      remaining: 300,
+      percent: 0,
+      amount: "$0.00 / $300.00",
+    },
+    {
+      used: 12.5,
+      limit: 10,
+      remaining: -2.5,
+      percent: 100,
+      amount: "$12.50 / $10.00",
+    },
+  ])(
+    "shows the chat User budget at $percent% used with USD amounts",
+    async ({ used, limit, remaining, percent, amount }) => {
+      renderIndicator({
+        data: {
+          quota: snapshot({
+            base_provider: "litellm",
+            source: "litellm",
+            windows: [
+              {
+                id: "user_budget",
+                label: "User budget",
+                used_percent: percent,
+                used,
+                limit,
+                remaining,
+                status: remaining < 0 ? "over_budget" : undefined,
+              },
+            ],
+            facts: [
+              {
+                id: "scope",
+                label: "Quota scope",
+                value: "Configured LiteLLM user",
+              },
+            ],
+          }),
+        },
+      });
+
+      const trigger = screen.getByRole("button", {
+        name: `Account B: ${percent}% used`,
+      });
+      expect(trigger).toBeVisible();
+      expect(
+        screen.queryByLabelText("Account B: Usage unknown"),
+      ).not.toBeInTheDocument();
+      fireEvent.click(trigger);
+      expect(await screen.findByText("User budget")).toBeVisible();
+      expect(screen.getByText(amount)).toBeVisible();
+      expect(
+        screen.getByRole("progressbar", { name: "User budget" }),
+      ).toHaveAttribute("aria-valuenow", String(percent));
+      expect(screen.getByText("Configured LiteLLM user")).toBeVisible();
+      expect(screen.queryByText("Key budget")).not.toBeInTheDocument();
+      if (remaining < 0) expect(screen.getByText("over_budget")).toBeVisible();
+    },
+  );
+
+  it("shows unlimited user spend without inventing a chat usage percentage", async () => {
+    renderIndicator({
+      data: {
+        quota: snapshot({
+          source: "litellm",
+          facts: [
+            { id: "spend", label: "spend", value: 0.00001234, unit: "USD" },
+            { id: "max_budget", label: "Budget", value: "Unlimited" },
+            {
+              id: "scope",
+              label: "Quota scope",
+              value: "Configured LiteLLM user",
+            },
+          ],
+        }),
+      },
+    });
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Account B: Usage unknown" }),
+    );
+    expect(await screen.findByText("Unlimited")).toBeVisible();
+    expect(screen.getByText(/0\.00001234/)).toBeVisible();
+    expect(screen.getByText("Configured LiteLLM user")).toBeVisible();
+    expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
+  });
+
   it("shows a stale snapshot without hiding its data", () => {
     render(
       <SnapshotRows
@@ -181,6 +279,34 @@ describe("ProviderUsageIndicator", () => {
 
     expect(screen.getByText("Stale")).toBeInTheDocument();
     expect(screen.getByText("Team")).toBeInTheDocument();
+  });
+
+  it("keeps small LiteLLM USD amounts precise and shows an over-limit budget", () => {
+    render(
+      <SnapshotRows
+        snapshot={snapshot({
+          source: "litellm",
+          windows: [
+            {
+              id: "key_budget",
+              label: "Key budget",
+              used_percent: 100,
+              limit: 10,
+              used: 12.5,
+              remaining: -2.5,
+            },
+          ],
+          facts: [
+            { id: "spend", label: "spend", value: 0.00001234, unit: "USD" },
+            { id: "max_budget", label: "Budget", value: "Unlimited" },
+          ],
+        })}
+      />,
+    );
+
+    expect(screen.getByText(/\$12\.50 \/ \$10\.00/)).toBeInTheDocument();
+    expect(screen.getByText(/0\.00001234/)).toBeInTheDocument();
+    expect(screen.getByText("Unlimited")).toBeInTheDocument();
   });
 
   it("shows an error carried by the snapshot", () => {

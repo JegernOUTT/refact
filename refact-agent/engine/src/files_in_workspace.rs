@@ -2024,6 +2024,7 @@ pub async fn on_workspaces_init(gcx: Arc<GlobalContext>) -> i32 {
 
     crate::chat::start_trajectory_watcher(gcx.clone());
 
+    crate::providers::litellm_mcp::reconcile_all(gcx.clone()).await;
     let _ = load_integrations(gcx.clone(), &["**/mcp_*".to_string()]).await;
 
     files_enqueued

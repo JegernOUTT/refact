@@ -509,6 +509,63 @@ fn xai_rate_limit_headers(headers: &reqwest::header::HeaderMap) -> HashMap<Strin
     )
 }
 
+async fn capture_litellm_response_headers(
+    app: &AppState,
+    model_rec: &BaseModelRecord,
+    url: &str,
+    bearer: &str,
+    headers: &reqwest::header::HeaderMap,
+) {
+    if !is_litellm_model(model_rec) {
+        return;
+    }
+    let Some((instance, model)) = model_rec.id.split_once('/') else {
+        return;
+    };
+    let provider = {
+        let registry = app.model.providers.read().await;
+        registry
+            .get(instance)
+            .filter(|provider| provider.base_provider_name() == "litellm")
+            .and_then(|provider| {
+                provider
+                    .as_any()
+                    .downcast_ref::<crate::providers::litellm::LiteLLMProvider>()
+            })
+            .cloned()
+    };
+    let Some(provider) = provider else { return };
+    let Ok(base) = provider.validated_base_url() else {
+        return;
+    };
+    if provider
+        .extra_headers
+        .iter()
+        .any(|(name, value)| model_rec.extra_headers.get(name) != Some(value))
+    {
+        return;
+    }
+    if !["/v1/chat/completions", "/v1/responses", "/v1/completions"]
+        .iter()
+        .any(|path| url == format!("{base}{path}"))
+    {
+        return;
+    }
+    let Ok(current_bearer) = provider.resolve_bearer(instance).await else {
+        return;
+    };
+    if current_bearer.expose() != bearer {
+        return;
+    }
+    crate::providers::litellm_observed::capture(
+        &app.gcx.config_dir,
+        instance,
+        crate::providers::litellm_observed::identity(&base, bearer, &provider.extra_headers),
+        model,
+        headers,
+    );
+}
+
 async fn capture_xai_oauth_rate_limit_headers(
     app: &AppState,
     model_rec: &BaseModelRecord,
@@ -3346,6 +3403,17 @@ async fn send_http_stream_request(
         }
     }
 
+    capture_litellm_response_headers(
+        app,
+        &params.model_rec,
+        &http_parts.url,
+        command_credential
+            .as_deref()
+            .unwrap_or(&params.model_rec.api_key),
+        response.headers(),
+    )
+    .await;
+
     if !status.is_success() {
         let retry_after = response
             .headers()
@@ -4022,6 +4090,86 @@ mod tests {
             wire_format: WireFormat::OpenaiChatCompletions,
             ..Default::default()
         }
+    }
+
+    #[tokio::test]
+    async fn litellm_response_sample_is_bound_to_the_actual_request_identity() {
+        use crate::providers::traits::ProviderTrait;
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let app = AppState::from_gcx(gcx.clone()).await;
+        let provider = crate::providers::litellm::LiteLLMProvider {
+            endpoint: "https://proxy.example/gateway".to_string(),
+            api_key: "inference-secret".to_string(),
+            enabled: true,
+            ..Default::default()
+        };
+        gcx.providers.write().await.add(Box::new(
+            crate::providers::instance::ProviderInstance::new(
+                "litellm_work",
+                "litellm",
+                "Work",
+                Box::new(provider.clone()),
+            ),
+        ));
+        let mut model = model_record("litellm_work");
+        model.extra_headers.insert(
+            crate::caps::caps::MODEL_BASE_PROVIDER_HEADER.to_string(),
+            "litellm".to_string(),
+        );
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("x-ratelimit-remaining-tokens", "12".parse().unwrap());
+        let fingerprint = crate::providers::litellm_observed::identity(
+            &provider.endpoint,
+            "inference-secret",
+            &HashMap::new(),
+        );
+        let url = provider.build_runtime().unwrap().chat_endpoint;
+        capture_litellm_response_headers(&app, &model, &url, "wrong-secret", &headers).await;
+        assert!(crate::providers::litellm_observed::get(
+            &gcx.config_dir,
+            "litellm_work",
+            &fingerprint
+        )
+        .is_none());
+        capture_litellm_response_headers(
+            &app,
+            &model,
+            "https://other.example/v1/chat/completions",
+            "inference-secret",
+            &headers,
+        )
+        .await;
+        assert!(crate::providers::litellm_observed::get(
+            &gcx.config_dir,
+            "litellm_work",
+            &fingerprint
+        )
+        .is_none());
+        capture_litellm_response_headers(&app, &model, &url, "inference-secret", &headers).await;
+        assert_eq!(
+            crate::providers::litellm_observed::get(&gcx.config_dir, "litellm_work", &fingerprint)
+                .unwrap()
+                .tokens_remaining,
+            Some(12)
+        );
+        let mut changed = provider;
+        changed.api_key = "new-secret".to_string();
+        gcx.providers.write().await.add(Box::new(
+            crate::providers::instance::ProviderInstance::new(
+                "litellm_work",
+                "litellm",
+                "Work",
+                Box::new(changed),
+            ),
+        ));
+        headers.insert("x-ratelimit-remaining-tokens", "99".parse().unwrap());
+        capture_litellm_response_headers(&app, &model, &url, "inference-secret", &headers).await;
+        assert_eq!(
+            crate::providers::litellm_observed::get(&gcx.config_dir, "litellm_work", &fingerprint)
+                .unwrap()
+                .tokens_remaining,
+            Some(12)
+        );
     }
 
     pub(super) fn adapter_settings(model: &BaseModelRecord) -> AdapterSettings {

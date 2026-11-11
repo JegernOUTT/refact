@@ -18,6 +18,7 @@ import {
   type ProviderQuotaWindow,
 } from "../../services/refact/providers";
 import { useGetProviderQuotaQuery } from "../../services/refact";
+import { formatUsd } from "../../features/Providers/ProviderForm/LiteLLM/litellmFormat";
 import { useCapsForToolUse, useGetConfiguredProvidersQuery } from "../../hooks";
 import {
   clampPercent,
@@ -94,12 +95,15 @@ function formatAmount(value: number): string {
   );
 }
 
-function windowValue(window: ProviderQuotaWindow): string {
+function windowValue(
+  window: ProviderQuotaWindow,
+  money: (value: number) => string = formatAmount,
+): string {
   if (window.used != null && window.limit != null) {
-    return `${formatAmount(window.used)} / ${formatAmount(window.limit)}`;
+    return `${money(window.used)} / ${money(window.limit)}`;
   }
   if (window.remaining != null) {
-    return `${formatAmount(window.remaining)} remaining`;
+    return `${money(window.remaining)} remaining`;
   }
   if (window.used_percent != null) {
     return formatUsagePercent(window.used_percent);
@@ -127,10 +131,13 @@ function windowMeta(window: ProviderQuotaWindow): string | undefined {
   return meta || undefined;
 }
 
-function factValue(fact: ProviderQuotaFact): string {
+function factValue(fact: ProviderQuotaFact, preciseUsd = false): string {
+  if (fact.value == null) return "Not reported";
+  if (preciseUsd && typeof fact.value === "number" && fact.unit === "USD") {
+    return formatUsd(fact.value);
+  }
   let value: string;
-  if (fact.value == null) value = "Not reported";
-  else if (typeof fact.value === "boolean") value = fact.value ? "Yes" : "No";
+  if (typeof fact.value === "boolean") value = fact.value ? "Yes" : "No";
   else if (typeof fact.value === "number") value = formatAmount(fact.value);
   else value = fact.value;
   return fact.unit ? `${value} ${fact.unit}` : value;
@@ -175,11 +182,12 @@ export const SnapshotRows: React.FC<{ snapshot: ProviderQuotaSnapshot }> = ({
     ) : null}
     {snapshot.windows.map((window) => {
       const meta = windowMeta(window);
+      const money = snapshot.source === "litellm" ? formatUsd : formatAmount;
       return (
         <React.Fragment key={`window:${window.id}`}>
           <KitKeyValue
             label={sentenceCase(window.label)}
-            value={windowValue(window)}
+            value={windowValue(window, money)}
           />
           {window.used_percent != null ? (
             <KitProgress
@@ -196,7 +204,7 @@ export const SnapshotRows: React.FC<{ snapshot: ProviderQuotaSnapshot }> = ({
       <KitKeyValue
         key={`fact:${fact.id}`}
         label={sentenceCase(fact.label)}
-        value={factValue(fact)}
+        value={factValue(fact, snapshot.source === "litellm")}
       />
     ))}
     {snapshot.available &&

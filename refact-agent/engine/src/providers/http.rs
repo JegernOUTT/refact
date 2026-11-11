@@ -58,7 +58,6 @@ use super::google_gemini::GoogleGeminiProvider;
 use super::claude_code::ClaudeCodeProvider;
 use super::openai_codex::{OpenAICodexProvider, UsageRequestError};
 use super::opencode::OpenCodeProvider;
-use crate::providers::litellm::{LiteLLMBudgetQueryResult, LiteLLMProvider};
 use crate::providers::quota::{
     ProviderQuotaCache, ProviderQuotaFact, ProviderQuotaFactValue, ProviderQuotaSnapshot,
     ProviderQuotaSource, ProviderQuotaWindow,
@@ -598,8 +597,9 @@ fn settings_with_forced_identity(
 
 fn provider_from_yaml(
     instance_id: &str,
-    yaml: serde_yaml::Value,
+    mut yaml: serde_yaml::Value,
 ) -> Result<Box<dyn ProviderTrait>, ScratchError> {
+    config_store::strip_legacy_litellm_fields(instance_id, &mut yaml);
     let identity = provider_identity_from_yaml(instance_id, &yaml)
         .map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, e))?;
     let mut provider = create_provider(&identity.base_provider).ok_or_else(|| {
@@ -1010,6 +1010,9 @@ pub async fn handle_v1_provider_update(
     reload_provider_from_disk(gcx.clone(), &identity.instance_id, &config_dir).await?;
     refact_providers::credential::invalidate(&identity.instance_id);
     invalidate_provider_quota(&gcx, &identity.instance_id).await;
+    if identity.base_provider == "litellm" {
+        super::litellm_mcp::on_provider_saved(gcx.clone(), &identity.instance_id).await;
+    }
 
     invalidate_caps(gcx).await;
 
@@ -1092,6 +1095,9 @@ pub async fn handle_v1_provider_delete(
     }
     refact_providers::credential::invalidate(&params.name);
     invalidate_provider_quota(&gcx, &params.name).await;
+    if base_provider == "litellm" {
+        super::litellm_mcp::on_provider_deleted(gcx.clone(), &params.name).await;
+    }
 
     invalidate_caps(gcx).await;
 
@@ -2119,6 +2125,7 @@ const DERIVED_SETTINGS_KEYS: &[&str] = &[
     "api_key_ready",
     "claude_cli_path",
     "readonly",
+    "mcp_servers",
 ];
 
 fn strip_derived_fields(value: serde_yaml::Value) -> serde_yaml::Value {
@@ -2471,6 +2478,14 @@ async fn reload_provider_from_disk(
     if !provider_file_exists(config_dir, provider_name) {
         return Ok(());
     }
+    config_store::migrate_legacy_litellm_config(config_dir, provider_name)
+        .await
+        .map_err(|_| {
+            ScratchError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Provider configuration migration failed".to_string(),
+            )
+        })?;
 
     let provider_path = provider_file_path(config_dir, provider_name);
     let content = tokio::fs::read_to_string(provider_path)
@@ -4020,6 +4035,7 @@ fn quota_snapshot_from_details(
         facts,
         fetched_at: ProviderQuotaCache::now_iso_timestamp(),
         stale: false,
+        litellm: None,
     }
 }
 
@@ -4028,6 +4044,17 @@ async fn fetch_provider_quota(
     provider_name: &str,
     base_provider: &str,
 ) -> ProviderQuotaSnapshot {
+    if base_provider == "litellm" {
+        return match super::litellm_http::account(&gcx, provider_name, false).await {
+            Ok(details) => super::litellm_http::quota(provider_name, details),
+            Err(error) => ProviderQuotaSnapshot::error(
+                provider_name,
+                base_provider,
+                ProviderQuotaSource::Litellm,
+                error.message,
+            ),
+        };
+    }
     let result: Result<(ProviderQuotaSource, Value), String> = match base_provider {
         "claude_code" => fetch_claude_code_usage_with_refresh(gcx, provider_name)
             .await
@@ -4106,30 +4133,6 @@ async fn fetch_provider_quota(
                 None => Err(format!("Provider '{provider_name}' is not available")),
             }
         }
-        "litellm" => {
-            let provider = {
-                let registry = gcx.providers.read().await;
-                registry
-                    .get(provider_name)
-                    .map(|provider| provider.clone_box())
-            };
-            match provider
-                .and_then(|provider| provider.as_any().downcast_ref::<LiteLLMProvider>().cloned())
-            {
-                Some(provider) => match provider.query_budget(&gcx.http_client).await {
-                    LiteLLMBudgetQueryResult::Available(value) => serde_json::to_value(value)
-                        .map(|value| (ProviderQuotaSource::Litellm, value))
-                        .map_err(|error| error.to_string()),
-                    LiteLLMBudgetQueryResult::Unavailable(_) => {
-                        return ProviderQuotaSnapshot::unavailable(provider_name, base_provider);
-                    }
-                    LiteLLMBudgetQueryResult::Error(error) => {
-                        Err(format!("LiteLLM budget query failed: {error:?}"))
-                    }
-                },
-                None => Err(format!("Provider '{provider_name}' is not available")),
-            }
-        }
         _ => return ProviderQuotaSnapshot::unavailable(provider_name, base_provider),
     };
     match result {
@@ -4160,6 +4163,17 @@ async fn provider_quota_cached(
     base_provider: &str,
     refresh: bool,
 ) -> ProviderQuotaSnapshot {
+    if base_provider == "litellm" {
+        return match super::litellm_http::account(&gcx, provider_name, refresh).await {
+            Ok(details) => super::litellm_http::quota(provider_name, details),
+            Err(error) => ProviderQuotaSnapshot::error(
+                provider_name,
+                base_provider,
+                ProviderQuotaSource::Litellm,
+                error.message,
+            ),
+        };
+    }
     if base_provider == "claude_code"
         && ensure_claude_subscription(&gcx, provider_name)
             .await
@@ -4211,6 +4225,7 @@ fn stale_quota_fallback(
 
 async fn invalidate_provider_quota(gcx: &Arc<GlobalContext>, provider_name: &str) {
     gcx.quota_cache.lock().await.invalidate(provider_name);
+    super::litellm_http::invalidate(gcx, provider_name);
 }
 
 pub async fn handle_v1_provider_quota(
@@ -4303,10 +4318,15 @@ async fn openai_codex_redeem_response(
 pub async fn handle_v1_provider_usage(
     State(app): State<AppState>,
     Path(params): Path<ProviderPathParams>,
+    Query(query): Query<super::litellm_http::UsageQuery>,
 ) -> Result<Response<Body>, ScratchError> {
     let gcx = app.gcx.clone();
     validate_instance_id_for_http(&params.name)?;
     let identity = resolve_provider_identity(&gcx, &params.name).await?;
+    if identity.base_provider == "litellm" {
+        let data = super::litellm_http::usage(&gcx, &params.name, query).await?;
+        return json_response(StatusCode::OK, &json!({"data": data}));
+    }
     if !usage_base_provider_supported(&identity.base_provider) {
         return Err(ScratchError::new(
             StatusCode::BAD_REQUEST,
@@ -5109,6 +5129,17 @@ credential:
         assert_eq!(merged["credential"]["command"], "new-helper");
         assert!(merged["credential"].get("cwd").is_none());
         assert!(merged["credential"].get("env_passthrough").is_none());
+    }
+
+    #[test]
+    fn provider_update_cannot_forge_managed_litellm_selections() {
+        let submitted = serde_yaml::from_str("api_key: inference\nmcp_servers:\n  - server_id: forged\n    bound_identity: borrowed\n").unwrap();
+        let stripped = strip_derived_fields(submitted);
+        assert!(stripped.get("mcp_servers").is_none());
+        assert_eq!(
+            stripped.get("api_key").and_then(serde_yaml::Value::as_str),
+            Some("inference")
+        );
     }
 
     #[test]

@@ -638,6 +638,35 @@ pub(crate) async fn serve_streamable_http_transport(
     let mut config = StreamableHttpClientTransportConfig::with_uri(url.trim());
     config.retry_config = Arc::new(retry_config);
 
+    if crate::providers::litellm_mcp::gateway_is_managed(&config_path) {
+        let mut retry_config = ExponentialBackoff::default();
+        retry_config.max_times = Some(0);
+        config.retry_config = Arc::new(retry_config);
+        let client = build_reqwest_client_for_mcp(
+            url.trim(),
+            &super::integr_mcp_http::default_http_headers(),
+            &MCPAuthSettings::default(),
+            transport_name,
+            logs.clone(),
+            &debug_name,
+        )
+        .await?;
+        let client = super::litellm_transport::GatewayClient::new(
+            client,
+            &config_path,
+            super::litellm_transport::ProviderGatewaySource,
+        );
+        let transport = StreamableHttpClientTransport::with_client(client, config);
+        return serve_client_with_timeout(
+            rmcp::serve_client(handler, transport),
+            init_timeout,
+            transport_name,
+            logs,
+            &debug_name,
+        )
+        .await;
+    }
+
     if auth.auth_type == AuthType::Oauth2Pkce {
         let auth_client = build_auth_client_for_mcp(
             url.trim(),
@@ -649,6 +678,11 @@ pub(crate) async fn serve_streamable_http_transport(
             session,
         )
         .await?;
+        let auth_client = super::litellm_transport::GatewayClient::new(
+            auth_client,
+            &config_path,
+            super::litellm_transport::ProviderGatewaySource,
+        );
         let transport = StreamableHttpClientTransport::with_client(auth_client, config);
         serve_client_with_timeout(
             rmcp::serve_client(handler, transport),
@@ -668,6 +702,13 @@ pub(crate) async fn serve_streamable_http_transport(
             &debug_name,
         )
         .await?;
+        // Trusted managed-LiteLLM credentials are injected per outgoing request
+        // (never stored in `headers`/cfg); no-op for manual configs.
+        let client = super::litellm_transport::GatewayClient::new(
+            client,
+            &config_path,
+            super::litellm_transport::ProviderGatewaySource,
+        );
         let transport = StreamableHttpClientTransport::with_client(client, config);
         serve_client_with_timeout(
             rmcp::serve_client(handler, transport),
@@ -1041,7 +1082,17 @@ pub async fn mcp_session_setup<T: MCPTransportInitializer + Clone + Send + Sync 
                         Some((url, headers, auth))
                             if matches!(auth.auth_type, AuthType::None | AuthType::Bearer) =>
                         {
-                            match probe_mcp_auth(&url, &headers, &auth).await {
+                            let probe = match super::mcp_auth::gateway_oauth::probe_gateway_auth(
+                                &config_path,
+                                &url,
+                            )
+                            .await
+                            {
+                                Ok(Some(probe)) => Ok(probe),
+                                Ok(None) => probe_mcp_auth(&url, &headers, &auth).await,
+                                Err(error) => Err(error),
+                            };
+                            match probe {
                                 Ok(p) => Some(p),
                                 Err(e) => {
                                     log(tracing::Level::WARN, format!("Auth probe failed: {}", e))

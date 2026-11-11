@@ -76,6 +76,8 @@ pub struct ProviderQuotaSnapshot {
     pub facts: Vec<ProviderQuotaFact>,
     pub fetched_at: String,
     pub stale: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub litellm: Option<serde_json::Value>,
 }
 
 impl ProviderQuotaSnapshot {
@@ -91,6 +93,7 @@ impl ProviderQuotaSnapshot {
             facts: Vec::new(),
             fetched_at: ProviderQuotaCache::now_iso_timestamp(),
             stale: false,
+            litellm: None,
         }
     }
 
@@ -111,6 +114,7 @@ impl ProviderQuotaSnapshot {
             facts: Vec::new(),
             fetched_at: ProviderQuotaCache::now_iso_timestamp(),
             stale: false,
+            litellm: None,
         }
     }
 }

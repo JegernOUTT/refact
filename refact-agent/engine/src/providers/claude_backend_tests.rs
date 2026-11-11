@@ -66,9 +66,13 @@ async fn native_backends_reject_oauth_codes_and_do_not_fetch_subscription_usage(
         .await;
         assert_eq!(status["settings"]["oauth_connected"], false);
         let usage = json_body(
-            handle_v1_provider_usage(State(app.clone()), path())
-                .await
-                .unwrap(),
+            handle_v1_provider_usage(
+                State(app.clone()),
+                path(),
+                Query(super::super::litellm_http::UsageQuery::default()),
+            )
+            .await
+            .unwrap(),
         )
         .await;
         assert!(usage["error"].as_str().unwrap().contains("unsupported"));
@@ -278,9 +282,13 @@ async fn console_persistence_is_mode_bound_and_logout_preserves_subscription() {
         })
     };
     let usage = json_body(
-        handle_v1_provider_usage(State(app.clone()), path())
-            .await
-            .unwrap(),
+        handle_v1_provider_usage(
+            State(app.clone()),
+            path(),
+            Query(super::super::litellm_http::UsageQuery::default()),
+        )
+        .await
+        .unwrap(),
     )
     .await;
     assert!(usage["error"].as_str().unwrap().contains("unsupported"));

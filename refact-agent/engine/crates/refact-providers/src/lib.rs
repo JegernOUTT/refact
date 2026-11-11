@@ -29,6 +29,8 @@ pub mod google_gemini;
 pub mod groq;
 pub mod kimi;
 pub mod litellm;
+pub mod litellm_account;
+pub mod litellm_usage;
 pub mod lmstudio;
 pub mod minimax;
 pub mod ollama;

@@ -5,6 +5,7 @@ import { v4 as uuidv4 } from "uuid";
 import { SchemaField } from "./SchemaField";
 import { ProviderOAuth } from "./ProviderOAuth";
 import { BedrockSetup } from "./BedrockSetup";
+import { LiteLLMSections } from "./LiteLLM/LiteLLMSections";
 import { Spinner } from "../../../components/Spinner";
 
 import { useProviderForm } from "./useProviderForm";
@@ -567,8 +568,9 @@ export const ProviderForm: React.FC<ProviderFormProps> = ({
     ? effectiveClaudeBackend(baseProvider, formValues)
     : undefined;
   const skipQuota =
-    (baseProvider === "claude_code" || baseProvider === "anthropic") &&
-    (!formValues || claudeBackend !== "oauth");
+    baseProvider === "litellm" ||
+    ((baseProvider === "claude_code" || baseProvider === "anthropic") &&
+      (!formValues || claudeBackend !== "oauth"));
   const [forceQuotaRefresh, setForceQuotaRefresh] = React.useState(false);
   const { data: openRouterHealth } = useGetOpenRouterHealthQuery(
     { providerName: currentProvider.name, useInstanceRoute: true },
@@ -624,7 +626,7 @@ export const ProviderForm: React.FC<ProviderFormProps> = ({
           ) : null}
         </div>
 
-        {!skipQuota ? (
+        {!skipQuota && baseProvider !== "litellm" ? (
           <ProviderQuotaPanel
             snapshot={quotaResponse?.quota}
             loading={quotaLoading}
@@ -793,8 +795,18 @@ export const ProviderForm: React.FC<ProviderFormProps> = ({
           ) : null}
         </div>
 
-        {hasCredentials ||
-        (claudeBackend !== undefined && claudeBackend !== "oauth") ? (
+        {baseProvider === "litellm" ? (
+          <LiteLLMSections
+            providerName={currentProvider.name}
+            hasCredentials={hasCredentials}
+            models={
+              hasCredentials ? (
+                <ProviderModelsList provider={currentProvider} />
+              ) : null
+            }
+          />
+        ) : hasCredentials ||
+          (claudeBackend !== undefined && claudeBackend !== "oauth") ? (
           <ProviderModelsList provider={currentProvider} />
         ) : null}
       </div>

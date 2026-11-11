@@ -181,7 +181,7 @@ pub async fn load_providers_from_config(
             }
         };
 
-        let yaml: serde_yaml::Value = match serde_yaml::from_str(&content) {
+        let mut yaml: serde_yaml::Value = match serde_yaml::from_str(&content) {
             Ok(v) => v,
             Err(e) => {
                 tracing::warn!("Failed to parse provider config {}: {}", path.display(), e);
@@ -196,6 +196,21 @@ pub async fn load_providers_from_config(
                 continue;
             }
         };
+        if crate::config_store::strip_legacy_litellm_fields(instance_id, &mut yaml) {
+            if let Err(e) = crate::config_store::migrate_legacy_litellm_config_at(
+                config_dir,
+                instance_id,
+                &path,
+            )
+            .await
+            {
+                tracing::warn!(
+                    "Failed to remove legacy LiteLLM admin fields from {}: {}",
+                    path.display(),
+                    e
+                );
+            }
+        }
         let duplicate_key = identity.instance_id.to_ascii_lowercase();
         if !seen_stems.insert(duplicate_key) {
             tracing::warn!(
@@ -331,6 +346,30 @@ mod tests {
         assert_eq!(openai_work.base_provider_name(), "openai");
         assert_eq!(openai_work.display_name(), "Work OpenAI");
         assert_eq!(registry.instances_for_base("openai").len(), 3);
+    }
+
+    #[tokio::test]
+    async fn yml_litellm_admin_fields_are_purged_from_disk_on_load() {
+        let temp = tempfile::tempdir().unwrap();
+        write_provider_config(
+            &temp,
+            "work_proxy.yml",
+            "base_provider: litellm\nadmin_url: https://admin\nadmin_api_key: admin-secret\napi_key: keep-me\nendpoint: http://localhost:4000\nenabled: true\n",
+        )
+        .await;
+
+        let registry = load_registry(&temp).await;
+
+        assert!(registry.has_instance("work_proxy"));
+        let path = temp.path().join("providers.d").join("work_proxy.yml");
+        let text = tokio::fs::read_to_string(&path).await.unwrap();
+        assert!(!text.contains("admin_url") && !text.contains("admin-secret"));
+        assert!(text.contains("keep-me") && text.contains("endpoint"));
+        assert!(!temp
+            .path()
+            .join("providers.d")
+            .join("work_proxy.yaml")
+            .exists());
     }
 
     #[tokio::test]

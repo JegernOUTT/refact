@@ -197,6 +197,85 @@ async fn write_provider_config_value(path: &Path, value: &serde_yaml::Value) -> 
     Ok(())
 }
 
+const LEGACY_LITELLM_FIELDS: &[&str] = &["admin_url", "admin_api_key"];
+
+fn is_litellm_config(instance_id: &str, value: &serde_yaml::Value) -> bool {
+    match value.get("base_provider").and_then(|v| v.as_str()) {
+        Some(base) => base.trim() == "litellm",
+        None => instance_id == "litellm",
+    }
+}
+
+pub fn strip_legacy_litellm_fields(instance_id: &str, value: &mut serde_yaml::Value) -> bool {
+    if !is_litellm_config(instance_id, value) {
+        return false;
+    }
+    let Some(mapping) = value.as_mapping_mut() else {
+        return false;
+    };
+    let mut changed = false;
+    for field in LEGACY_LITELLM_FIELDS {
+        changed |= mapping.remove(*field).is_some();
+    }
+    changed
+}
+
+pub async fn migrate_legacy_litellm_config(
+    config_dir: &Path,
+    instance_id: &str,
+) -> Result<bool, String> {
+    let path = provider_config_path(config_dir, instance_id);
+    migrate_legacy_litellm_config_at(config_dir, instance_id, &path).await
+}
+
+pub async fn migrate_legacy_litellm_config_at(
+    config_dir: &Path,
+    instance_id: &str,
+    path: &Path,
+) -> Result<bool, String> {
+    validate_provider_instance_id(instance_id)?;
+    let providers_dir = config_dir.join("providers.d");
+    let ext = path.extension().and_then(|e| e.to_str());
+    if path.parent() != Some(providers_dir.as_path())
+        || path.file_stem().and_then(|s| s.to_str()) != Some(instance_id)
+        || !matches!(ext, Some("yaml") | Some("yml"))
+    {
+        return Err("Provider config path does not match instance".to_string());
+    }
+    let path = path.to_path_buf();
+    let lock = provider_config_lock(&path);
+    let _guard = lock.lock().await;
+    let _file_guard = lock_provider_config_file(config_dir, instance_id).await?;
+    let Some(mut value) = read_provider_config_value(&path).await? else {
+        return Ok(false);
+    };
+    if !strip_legacy_litellm_fields(instance_id, &mut value) {
+        return Ok(false);
+    }
+    write_provider_config_value(&path, &value).await?;
+    Ok(true)
+}
+
+async fn write_sanitized(
+    path: &Path,
+    instance_id: &str,
+    value: &serde_yaml::Value,
+) -> Result<(), String> {
+    let mut value = value.clone();
+    strip_legacy_litellm_fields(instance_id, &mut value);
+    write_provider_config_value(path, &value).await
+}
+
+fn sanitized_existing(
+    instance_id: &str,
+    existing: Option<serde_yaml::Value>,
+) -> Option<serde_yaml::Value> {
+    existing.map(|mut value| {
+        strip_legacy_litellm_fields(instance_id, &mut value);
+        value
+    })
+}
+
 #[allow(dead_code)]
 pub async fn write_provider_config(
     config_dir: &Path,
@@ -208,7 +287,7 @@ pub async fn write_provider_config(
     let lock = provider_config_lock(&path);
     let _guard = lock.lock().await;
     let _file_guard = lock_provider_config_file(config_dir, instance_id).await?;
-    write_provider_config_value(&path, &settings).await
+    write_sanitized(&path, instance_id, &settings).await
 }
 
 pub async fn delete_provider_config(config_dir: &Path, instance_id: &str) -> Result<(), String> {
@@ -255,8 +334,9 @@ where
             return Err(map_store_error(mapped));
         }
     };
-    let updated = update(existing)?;
-    write_provider_config_value(&path, &updated)
+    let mut updated = update(sanitized_existing(instance_id, existing))?;
+    strip_legacy_litellm_fields(instance_id, &mut updated);
+    write_sanitized(&path, instance_id, &updated)
         .await
         .map_err(map_store_error)?;
     Ok(updated)
@@ -287,10 +367,11 @@ where
     let _guard = lock.lock().await;
     let _file_guard = lock_provider_config_file(config_dir, instance_id).await?;
     let existing = read_provider_config_value(&path).await?;
-    let Some(updated) = update(existing)? else {
+    let Some(mut updated) = update(sanitized_existing(instance_id, existing))? else {
         return Ok(None);
     };
-    write_provider_config_value(&path, &updated).await?;
+    strip_legacy_litellm_fields(instance_id, &mut updated);
+    write_sanitized(&path, instance_id, &updated).await?;
     Ok(Some(updated))
 }
 
@@ -339,5 +420,63 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
+    }
+}
+
+#[cfg(test)]
+mod litellm_migration_tests {
+    use super::*;
+
+    #[test]
+    fn strips_only_litellm_legacy_fields_and_keeps_others() {
+        let mut value: serde_yaml::Value = serde_yaml::from_str(
+            "base_provider: litellm\nadmin_url: https://a\nadmin_api_key: secret\napi_key: keep\nservers: [{server_id: s}]\n",
+        )
+        .unwrap();
+        assert!(strip_legacy_litellm_fields("work_proxy", &mut value));
+        let text = serde_yaml::to_string(&value).unwrap();
+        assert!(!text.contains("admin") && !text.contains("secret"));
+        assert!(text.contains("api_key: keep") && text.contains("server_id"));
+        let mut other: serde_yaml::Value =
+            serde_yaml::from_str("admin_api_key: unrelated\n").unwrap();
+        assert!(!strip_legacy_litellm_fields("custom", &mut other));
+        assert!(other.get("admin_api_key").is_some());
+    }
+
+    #[tokio::test]
+    async fn migration_and_updates_purge_legacy_secret_from_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = provider_config_path(dir.path(), "litellm");
+        tokio::fs::create_dir_all(path.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(
+            &path,
+            "admin_api_key: secret\nendpoint: http://localhost:4000\nextra: 1\n",
+        )
+        .await
+        .unwrap();
+        assert!(migrate_legacy_litellm_config(dir.path(), "litellm")
+            .await
+            .unwrap());
+        let text = tokio::fs::read_to_string(&path).await.unwrap();
+        assert!(!text.contains("secret") && text.contains("extra"));
+        assert!(!migrate_legacy_litellm_config(dir.path(), "litellm")
+            .await
+            .unwrap());
+
+        update_provider_config(dir.path(), "litellm", |existing| {
+            let mut value = existing.unwrap();
+            assert!(value.get("admin_api_key").is_none());
+            value
+                .as_mapping_mut()
+                .unwrap()
+                .insert("admin_url".into(), "https://x".into());
+            Ok(value)
+        })
+        .await
+        .unwrap();
+        let text = tokio::fs::read_to_string(&path).await.unwrap();
+        assert!(!text.contains("admin_url") && text.contains("extra"));
     }
 }

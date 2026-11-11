@@ -1,0 +1,166 @@
+.section {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: var(--rf-space-3);
+}
+
+.tabs {
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.header {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--rf-space-2);
+  flex-wrap: wrap;
+}
+
+.title {
+  color: var(--rf-color-fg);
+  font-size: var(--rf-text-3);
+  font-weight: var(--rf-weight-semibold);
+}
+
+.meta {
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-2);
+  line-height: var(--rf-line-2);
+  overflow-wrap: anywhere;
+}
+
+.badges,
+.actions {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: var(--rf-space-2);
+  flex-wrap: wrap;
+}
+
+.card {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: var(--rf-space-2);
+  padding: var(--rf-space-3);
+  border: 1px solid var(--rf-border);
+  border-radius: var(--rf-radius-ctl);
+}
+
+.notice {
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-2);
+  line-height: var(--rf-line-2);
+  overflow-wrap: anywhere;
+}
+
+.noticeDanger {
+  composes: notice;
+  color: var(--rf-color-danger);
+}
+
+.facts {
+  display: grid;
+  min-width: 0;
+  margin: 0;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 11rem), 1fr));
+  gap: var(--rf-space-2) var(--rf-space-3);
+}
+
+.fact {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.fact dt {
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-1);
+}
+
+.fact dd {
+  margin: 0;
+  color: var(--rf-color-fg);
+  font-size: var(--rf-text-2);
+  overflow-wrap: anywhere;
+}
+
+.filters {
+  display: flex;
+  min-width: 0;
+  align-items: flex-end;
+  gap: var(--rf-space-3);
+  flex-wrap: wrap;
+}
+
+.filterField {
+  display: flex;
+  min-width: min(100%, 9rem);
+  flex-direction: column;
+  gap: var(--rf-space-1);
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-2);
+}
+
+.tableWrap {
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--rf-text-2);
+}
+
+.table th,
+.table td {
+  padding: var(--rf-space-1) var(--rf-space-2);
+  border-bottom: 1px solid var(--rf-border);
+  text-align: left;
+  white-space: nowrap;
+}
+
+.table th {
+  color: var(--rf-color-muted);
+  font-weight: var(--rf-weight-semibold);
+}
+
+.numeric {
+  text-align: right !important;
+  font-variant-numeric: tabular-nums;
+}
+
+.serverList {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: var(--rf-space-3);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.serverHead {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--rf-space-2);
+  flex-wrap: wrap;
+}
+
+.serverName {
+  min-width: 0;
+  color: var(--rf-color-fg);
+  font-size: var(--rf-text-3);
+  font-weight: var(--rf-weight-semibold);
+  overflow-wrap: anywhere;
+}
