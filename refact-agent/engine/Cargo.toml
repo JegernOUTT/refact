@@ -215,6 +215,37 @@ opt-level = 3
 [profile.dev.package.tree-sitter-typescript]
 opt-level = 3
 
+# JSON and map crates under the trajectory, request-body and tool-schema paths.
+[profile.dev.package.serde]
+opt-level = 3
+
+[profile.dev.package.serde_core]
+opt-level = 3
+
+[profile.dev.package.serde_json]
+opt-level = 3
+
+[profile.dev.package.foldhash]
+opt-level = 3
+
+[profile.dev.package.indexmap]
+opt-level = 3
+
+[profile.dev.package.hashbrown]
+opt-level = 3
+
+[profile.dev.package.equivalent]
+opt-level = 3
+
+[profile.dev.package.itoa]
+opt-level = 3
+
+[profile.dev.package.memchr]
+opt-level = 3
+
+[profile.dev.package.zmij]
+opt-level = 3
+
 [package]
 name = "refact-lsp"
 version = "8.7.0"

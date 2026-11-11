@@ -1,9 +1,15 @@
-import { RootState } from "../../app/store";
+import type { RootState } from "../../app/store";
 import { CAPS_URL } from "./consts";
 import { createApi, fetchBaseQuery } from "@reduxjs/toolkit/query/react";
-import { CodeChatModel, CodeCompletionModel, EmbeddingModel } from "./models";
+import type {
+  CodeChatModel,
+  CodeCompletionModel,
+  EmbeddingModel,
+} from "./models";
 import { buildApiUrlFromState } from "./apiUrl";
 import type { ModelPricing } from "./providers";
+
+const CAPS_STALE_AFTER_SECONDS = 30;
 
 export const capsApi = createApi({
   reducerPath: "caps",
@@ -47,7 +53,7 @@ export const capsApi = createApi({
       },
     }),
   }),
-  refetchOnMountOrArgChange: true,
+  refetchOnMountOrArgChange: CAPS_STALE_AFTER_SECONDS,
 });
 
 export const capsEndpoints = capsApi.endpoints;

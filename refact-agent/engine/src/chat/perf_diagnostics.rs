@@ -89,6 +89,7 @@ pub enum PerfComponent {
     StreamFirstContentDelta,
     TrajectorySaveMutexWait,
     TrajectoryMetricScan,
+    TrajectoryIndexProjection,
     ToolIntegrationToolsBuild,
     ToolAvailabilityVecdbWait,
     ToolAvailabilityCodegraphWait,
@@ -141,7 +142,7 @@ pub enum PerfComponent {
 }
 
 impl PerfComponent {
-    pub const ALL: [Self; 123] = [
+    pub const ALL: [Self; 124] = [
         Self::TrajectorySnapshot,
         Self::TrajectorySerialize,
         Self::TrajectoryAtomicWrite,
@@ -216,6 +217,7 @@ impl PerfComponent {
         Self::StreamFirstContentDelta,
         Self::TrajectorySaveMutexWait,
         Self::TrajectoryMetricScan,
+        Self::TrajectoryIndexProjection,
         Self::ToolIntegrationToolsBuild,
         Self::ToolAvailabilityVecdbWait,
         Self::ToolAvailabilityCodegraphWait,
@@ -343,6 +345,7 @@ impl PerfComponent {
             Self::TrajectoryIndexCheckpoint => "trajectory.index_checkpoint",
             Self::TrajectorySaveMutexWait => "trajectory.save_mutex_wait",
             Self::TrajectoryMetricScan => "trajectory.metric_scan",
+            Self::TrajectoryIndexProjection => "trajectory.index_projection",
             Self::ToolIntegrationToolsBuild => "tool.integration_tools_build",
             Self::ToolAvailabilityVecdbWait => "tool.availability_vecdb_wait",
             Self::ToolAvailabilityCodegraphWait => "tool.availability_codegraph_wait",

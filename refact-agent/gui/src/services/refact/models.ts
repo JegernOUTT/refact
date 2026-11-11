@@ -10,6 +10,7 @@ import { hasProperty } from "../../utils";
 import { isDetailMessage } from "./commands";
 import { buildApiUrlFromState } from "./apiUrl";
 import type { ModelPricing } from "./providers";
+import { capsApi } from "./caps";
 
 export const modelsApi = createApi({
   reducerPath: "models",
@@ -178,6 +179,7 @@ export const modelsApi = createApi({
         if (result.error) {
           return { error: result.error };
         }
+        api.dispatch(capsApi.util.invalidateTags(["CAPS"]));
 
         // TODO: this doesn't really work, RTK Query gets FETCH_ERROR is request is failed and is dropping off actual response from the LSP :/
         if (isDetailMessage(result.data)) {
@@ -213,6 +215,7 @@ export const modelsApi = createApi({
         if (result.error) {
           return { error: result.error };
         }
+        api.dispatch(capsApi.util.invalidateTags(["CAPS"]));
         if (isDetailMessage(result.data)) {
           return {
             meta: result.meta,

@@ -798,16 +798,24 @@ pub fn trajectory_event_is_displayable_chat(event: &TrajectoryEvent) -> bool {
     true
 }
 
+#[cfg(test)]
 pub(crate) fn trajectory_list_data_is_displayable_chat(data: &TrajectoryListData) -> bool {
-    if data.extra.get("buddy_meta").is_some_and(|v| !v.is_null()) {
+    trajectory_metadata_is_displayable_chat(data.mode.as_deref(), &data.extra)
+}
+
+pub(crate) fn trajectory_metadata_is_displayable_chat(
+    mode: Option<&str>,
+    extra: &serde_json::Map<String, serde_json::Value>,
+) -> bool {
+    if extra.get("buddy_meta").is_some_and(|v| !v.is_null()) {
         return false;
     }
-    if matches!(data.mode.as_deref(), Some("task_agent" | "task_planner")) {
+    if matches!(mode, Some("task_agent" | "task_planner")) {
         return false;
     }
 
-    let parent_id = data.extra.get("parent_id").and_then(|v| v.as_str());
-    let link_type = data.extra.get("link_type").and_then(|v| v.as_str());
+    let parent_id = extra.get("parent_id").and_then(|v| v.as_str());
+    let link_type = extra.get("link_type").and_then(|v| v.as_str());
     if is_internal_trace_link_type(link_type) {
         return false;
     }
@@ -2583,15 +2591,13 @@ async fn read_existing_trajectory_object(
     if !trajectory_root_id_matches(&json, chat_id, path) {
         return Err(trajectory_id_mismatch_error(path));
     }
-    json.as_object()
-        .cloned()
-        .ok_or_else(|| {
-            format!(
-                "Existing trajectory JSON root must be an object for {}",
-                path.display()
-            )
-        })
-        .map(Some)
+    match json {
+        serde_json::Value::Object(object) => Ok(Some(object)),
+        _ => Err(format!(
+            "Existing trajectory JSON root must be an object for {}",
+            path.display()
+        )),
+    }
 }
 
 /// Per-thread trajectory metadata read counter. `cargo test` gives every test
@@ -2754,7 +2760,7 @@ fn is_known_trajectory_top_level_key(key: &str) -> bool {
 
 fn preserve_existing_trajectory_metadata(
     trajectory: &mut serde_json::Value,
-    existing: Option<serde_json::Map<String, serde_json::Value>>,
+    existing: Option<&serde_json::Map<String, serde_json::Value>>,
 ) {
     let Some(existing) = existing else {
         return;
@@ -2763,11 +2769,11 @@ fn preserve_existing_trajectory_metadata(
         return;
     };
     for (key, value) in existing {
-        let preserve_browser_meta = key == "browser_meta" && !trajectory_object.contains_key(&key);
+        let preserve_browser_meta = key == "browser_meta" && !trajectory_object.contains_key(key);
         let preserve_unknown =
-            !is_known_trajectory_top_level_key(&key) && !trajectory_object.contains_key(&key);
+            !is_known_trajectory_top_level_key(key) && !trajectory_object.contains_key(key);
         if preserve_browser_meta || preserve_unknown {
-            trajectory_object.insert(key, value);
+            trajectory_object.insert(key.clone(), value.clone());
         }
     }
 }
@@ -4307,7 +4313,7 @@ struct DetachedTrajectoryWriterState {
 #[derive(Default)]
 struct DetachedTrajectoryWriteCache {
     backing_path: Option<PathBuf>,
-    existing_metadata: Option<serde_json::Map<String, serde_json::Value>>,
+    existing_metadata: Option<Arc<serde_json::Map<String, serde_json::Value>>>,
     source: Option<TrajectorySourceIdentity>,
     backing_stamp: Option<TrajectoryFileStamp>,
 }
@@ -4327,7 +4333,7 @@ struct TrajectoryFileStamp {
 #[derive(Clone)]
 struct TrajectoryMetadataCacheEntry {
     chat_id: String,
-    metadata: serde_json::Map<String, serde_json::Value>,
+    metadata: Arc<serde_json::Map<String, serde_json::Value>>,
     stamp: TrajectoryFileStamp,
     last_access: u64,
 }
@@ -4361,10 +4367,11 @@ fn preservable_trajectory_metadata(
     source
         .iter()
         .filter(|(key, _)| {
-            // `created_at` is a known key but must survive re-saves, so it is cached too.
+            // Every key a re-save reads from existing metadata: `id` (write-cache identity check),
+            // `created_at`, `app_workspace`, `browser_meta` and unknown keys. Never `messages`.
             matches!(
                 key.as_str(),
-                "browser_meta" | "created_at" | "app_workspace"
+                "id" | "browser_meta" | "created_at" | "app_workspace"
             ) || !is_known_trajectory_top_level_key(key)
         })
         .map(|(key, value)| (key.clone(), value.clone()))
@@ -4424,7 +4431,7 @@ async fn trajectory_stamp_matches(path: &Path, expected: &TrajectoryFileStamp) -
 async fn cached_existing_trajectory_object(
     path: &Path,
     chat_id: &str,
-) -> Result<Option<serde_json::Map<String, serde_json::Value>>, String> {
+) -> Result<Option<Arc<serde_json::Map<String, serde_json::Value>>>, String> {
     let cache_key = trajectory_metadata_cache_key(path);
     let stamp = trajectory_file_stamp(path).await;
     if let Some(stamp) = stamp.as_ref() {
@@ -4444,14 +4451,16 @@ async fn cached_existing_trajectory_object(
         }
     }
 
-    let metadata = read_existing_trajectory_object(path, chat_id).await?;
+    let metadata = read_existing_trajectory_object(path, chat_id)
+        .await?
+        .map(|metadata| Arc::new(preservable_trajectory_metadata(&metadata)));
     match (metadata.as_ref(), stamp) {
         (Some(metadata), Some(stamp)) => {
             store_trajectory_metadata_cache_entry(
                 path,
                 TrajectoryMetadataCacheEntry {
                     chat_id: chat_id.to_string(),
-                    metadata: preservable_trajectory_metadata(metadata),
+                    metadata: metadata.clone(),
                     stamp,
                     last_access: 0,
                 },
@@ -4472,19 +4481,22 @@ fn cache_written_trajectory_metadata(
     chat_id: &str,
     trajectory: &serde_json::Value,
     stamp: Option<TrajectoryFileStamp>,
-) -> Option<TrajectoryFileStamp> {
-    let metadata = preservable_trajectory_metadata(trajectory.as_object()?);
+) -> Option<(
+    TrajectoryFileStamp,
+    Arc<serde_json::Map<String, serde_json::Value>>,
+)> {
+    let metadata = Arc::new(preservable_trajectory_metadata(trajectory.as_object()?));
     let stamp = stamp?;
     store_trajectory_metadata_cache_entry(
         path,
         TrajectoryMetadataCacheEntry {
             chat_id: chat_id.to_string(),
-            metadata,
+            metadata: metadata.clone(),
             stamp: stamp.clone(),
             last_access: 0,
         },
     );
-    Some(stamp)
+    Some((stamp, metadata))
 }
 
 impl Default for DetachedTrajectoryWriterState {
@@ -5129,10 +5141,11 @@ async fn serialize_trajectory_snapshot_messages(
                 })
             })
             .collect();
-        messages_json.map(|messages_json| (messages, messages_json))
+        drop(messages);
+        messages_json
     })
     .await;
-    let (messages, messages_json) = match message_serialization {
+    let messages_json = match message_serialization {
         Ok(Ok(result)) => {
             serialize_span.pause();
             result
@@ -5165,7 +5178,7 @@ async fn serialize_trajectory_snapshot_messages(
         .then(|| perf_diagnostics::span(PerfComponent::TrajectoryMetricScan, Some(chat_id), None));
     let metric_scan = tokio::task::spawn_blocking(move || {
         let background_messages_json = retain_background_messages.then(|| messages_json.clone());
-        let metrics = collect_metrics.then(|| scan_trajectory_metrics(&messages));
+        let metrics = collect_metrics.then(|| scan_saved_trajectory_metrics(&messages_json));
         (messages_json, background_messages_json, metrics)
     })
     .await;
@@ -5374,7 +5387,7 @@ async fn persist_trajectory_snapshot_file_coordinated(
             .as_ref()
             .and_then(|existing| existing.get(super::app_workspace::APP_WORKSPACE_KEY)),
     );
-    preserve_existing_trajectory_metadata(&mut trajectory, existing_trajectory);
+    preserve_existing_trajectory_metadata(&mut trajectory, existing_trajectory.as_deref());
 
     let tmp_path = unique_trajectory_tmp_path(&file_path);
     serialize_span.resume();
@@ -5503,9 +5516,8 @@ async fn persist_trajectory_snapshot_file_coordinated(
         backing_stamp,
     );
     if let Some(write_cache) = write_cache {
-        let metadata = trajectory.as_object().cloned();
         let mut write_cache = write_cache.lock().await;
-        if let (Some(metadata), Some(stamp)) = (metadata, backing_stamp) {
+        if let Some((stamp, metadata)) = backing_stamp {
             write_cache.backing_path = Some(file_path.clone());
             write_cache.existing_metadata = Some(metadata);
             write_cache.source = Some(source);
@@ -5542,7 +5554,7 @@ async fn publish_trajectory_snapshot_updates(
     should_generate_title: bool,
     allow_background_generation: bool,
 ) -> Result<(), String> {
-    if !is_internal_trace_link_type(snapshot.link_type.as_deref()) {
+    if trajectory_save_projects_index_entry(snapshot) {
         if let Some(dir) = index_dir_for_trajectory_file(gcx.clone(), file_path).await {
             let source_hint = if let Some(task_meta) = snapshot.task_meta.as_ref() {
                 Some(TrajectorySourceIdentity::from_task_meta(task_meta))
@@ -5551,13 +5563,46 @@ async fn publish_trajectory_snapshot_updates(
             } else {
                 Some(TrajectorySourceIdentity::Normal)
             };
-            trajectory_index::upsert_trajectory_index_entry_from_committed_value(
+            let projection_metrics = metrics
+                .as_ref()
+                .ok_or("Missing saved trajectory metrics")?
+                .clone();
+            let projection_span = perf_diagnostics::span(
+                PerfComponent::TrajectoryIndexProjection,
+                Some(&snapshot.chat_id),
+                Some(file_path),
+            );
+            let dir_owned = dir.clone();
+            let path_owned = file_path.to_path_buf();
+            let entry = tokio::task::spawn_blocking(move || {
+                trajectory_index::entry_from_saved_trajectory(
+                    &dir_owned,
+                    &path_owned,
+                    trajectory,
+                    source_hint,
+                    source_sha256,
+                    message_count,
+                    &projection_metrics,
+                )
+            })
+            .await
+            .map_err(|e| format!("Trajectory index projection task failed: {e}"))
+            .and_then(|entry| entry);
+            projection_span.finish(
+                if entry.is_ok() {
+                    PerfOutcome::Success
+                } else {
+                    PerfOutcome::Failure
+                },
+                None,
+                Some(message_count as u64),
+                Some(snapshot.version),
+                None,
+            );
+            trajectory_index::upsert_trajectory_index_entry_with_rollout(
                 &app.chat.trajectory_index_coordinator,
                 &dir,
-                file_path,
-                trajectory,
-                source_hint,
-                Some(source_sha256),
+                entry?,
             )
             .await?;
         }
@@ -5577,7 +5622,7 @@ async fn publish_trajectory_snapshot_updates(
         enqueue_trajectory_vectorization(gcx.clone(), file_path.to_path_buf()).await;
     }
 
-    if snapshot.task_meta.is_none() && snapshot.buddy_meta.is_none() {
+    if trajectory_save_publishes_normal_event(snapshot) {
         let effective_root = snapshot
             .root_chat_id
             .clone()
@@ -5704,6 +5749,19 @@ pub(crate) async fn save_tool_refresh_snapshot(
     save_trajectory_snapshot_inner_options(gcx, snapshot, None, false).await
 }
 
+fn trajectory_save_projects_index_entry(snapshot: &TrajectorySnapshot) -> bool {
+    !is_internal_trace_link_type(snapshot.link_type.as_deref())
+}
+
+fn trajectory_save_publishes_normal_event(snapshot: &TrajectorySnapshot) -> bool {
+    snapshot.task_meta.is_none() && snapshot.buddy_meta.is_none()
+}
+
+fn trajectory_save_needs_metrics(snapshot: &TrajectorySnapshot) -> bool {
+    trajectory_save_projects_index_entry(snapshot)
+        || trajectory_save_publishes_normal_event(snapshot)
+}
+
 async fn save_trajectory_snapshot_inner_options(
     gcx: Arc<GlobalContext>,
     mut snapshot: TrajectorySnapshot,
@@ -5734,7 +5792,7 @@ async fn save_trajectory_snapshot_inner_options(
     }
 
     let message_count = snapshot.messages.len();
-    let collect_metrics = snapshot.task_meta.is_none() && snapshot.buddy_meta.is_none();
+    let collect_metrics = trajectory_save_needs_metrics(&snapshot);
     let should_generate_title = allow_background_generation
         && is_placeholder_title(&snapshot.title)
         && !snapshot.is_title_generated
@@ -8530,7 +8588,7 @@ pub(crate) fn calculate_task_progress_from_messages(
     (0, 0, 0)
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub(crate) struct TokenTotals {
     pub(crate) prompt_tokens: u64,
     pub(crate) completion_tokens: u64,
@@ -8593,11 +8651,79 @@ pub(crate) fn calculate_token_totals_from_messages(messages: &[serde_json::Value
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub(crate) struct TrajectoryMetrics {
     pub(crate) line_changes: (i64, i64),
     pub(crate) task_progress: (i32, i32, i32),
     pub(crate) token_totals: TokenTotals,
+    pub(crate) measured_tokens: Option<u64>,
+}
+
+fn scan_saved_trajectory_metrics(messages: &[serde_json::Value]) -> TrajectoryMetrics {
+    let mut metrics = TrajectoryMetrics::default();
+    let mut successful_tool_ids = std::collections::HashSet::new();
+    let mut tasks_set_calls = Vec::new();
+    for msg in messages {
+        let one = std::slice::from_ref(msg);
+        let lines = calculate_line_changes_from_messages(one);
+        metrics.line_changes.0 += lines.0;
+        metrics.line_changes.1 += lines.1;
+        let tokens = calculate_token_totals_from_messages(one);
+        let totals = &mut metrics.token_totals;
+        totals.prompt_tokens += tokens.prompt_tokens;
+        totals.completion_tokens += tokens.completion_tokens;
+        totals.total_tokens += tokens.total_tokens;
+        totals.cache_read_tokens += tokens.cache_read_tokens;
+        totals.cache_creation_tokens += tokens.cache_creation_tokens;
+        if let Some(cost) = tokens.cost_usd {
+            *totals.cost_usd.get_or_insert(0.0) += cost;
+        }
+        if let Some(tokens) = msg
+            .get("usage")
+            .and_then(|u| u.get("total_tokens"))
+            .and_then(|v| v.as_u64())
+        {
+            metrics.measured_tokens =
+                Some(metrics.measured_tokens.unwrap_or(0).saturating_add(tokens));
+        }
+        match msg.get("role").and_then(|v| v.as_str()) {
+            Some("tool")
+                if !msg
+                    .get("tool_failed")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false) =>
+            {
+                if let Some(id) = msg.get("tool_call_id").and_then(|v| v.as_str()) {
+                    successful_tool_ids.insert(id);
+                }
+            }
+            Some("assistant") => {
+                for call in msg
+                    .get("tool_calls")
+                    .and_then(|v| v.as_array())
+                    .into_iter()
+                    .flatten()
+                {
+                    let function = &call["function"];
+                    if function["name"].as_str() == Some("tasks_set") {
+                        let id = call["id"].as_str().unwrap_or("");
+                        if !id.is_empty() {
+                            tasks_set_calls
+                                .push((id, function["arguments"].as_str().unwrap_or("")));
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    metrics.task_progress = tasks_set_calls
+        .into_iter()
+        .rev()
+        .filter(|(id, _)| successful_tool_ids.contains(id))
+        .find_map(|(_, args)| task_progress_from_tasks_set_arguments(args))
+        .unwrap_or_default();
+    metrics
 }
 
 fn task_progress_from_tasks_set_arguments(arguments: &str) -> Option<(i32, i32, i32)> {
@@ -8651,11 +8777,17 @@ where
     let mut total_added: i64 = 0;
     let mut total_removed: i64 = 0;
     let mut token_totals = TokenTotals::default();
+    let mut measured_tokens: Option<u64> = None;
     let mut successful_tool_ids: std::collections::HashSet<&str> = std::collections::HashSet::new();
     let mut tasks_set_calls: Vec<(&str, &str)> = Vec::new();
 
     for msg in messages {
         if let Some(usage) = msg.usage.as_ref() {
+            measured_tokens = Some(
+                measured_tokens
+                    .unwrap_or(0)
+                    .saturating_add(usage.total_tokens as u64),
+            );
             token_totals.prompt_tokens += usage.prompt_tokens as u64;
             token_totals.completion_tokens += usage.completion_tokens as u64;
             token_totals.total_tokens += usage.total_tokens as u64;
@@ -8704,6 +8836,7 @@ where
         line_changes: (total_added, total_removed),
         task_progress,
         token_totals,
+        measured_tokens,
     }
 }
 
@@ -11057,6 +11190,161 @@ mod tests {
         assert_eq!(loaded.messages[0].content.content_text_only(), "Second");
     }
 
+    fn legacy_expected_trajectory_bytes(
+        snapshot: &TrajectorySnapshot,
+        written_updated_at: &str,
+        previous_full_object: Option<&serde_json::Map<String, serde_json::Value>>,
+    ) -> String {
+        let messages_json = snapshot
+            .messages
+            .iter()
+            .map(|message| serde_json::to_value(message).unwrap())
+            .collect();
+        let mut expected = trajectory_value_from_snapshot(snapshot, messages_json).unwrap();
+        expected["updated_at"] = json!(written_updated_at);
+        if let Some(created_at) = previous_full_object
+            .and_then(|existing| existing.get("created_at"))
+            .and_then(|value| value.as_str())
+            .filter(|value| parsed_rfc3339_utc(value).is_some())
+        {
+            expected["created_at"] = json!(created_at);
+        }
+        super::super::app_workspace::keep_newest_app_workspace_in_trajectory(
+            &mut expected,
+            previous_full_object
+                .and_then(|existing| existing.get(super::super::app_workspace::APP_WORKSPACE_KEY)),
+        );
+        preserve_existing_trajectory_metadata(&mut expected, previous_full_object);
+        serde_json::to_string_pretty(&expected).unwrap()
+    }
+
+    #[tokio::test]
+    async fn write_cache_multi_save_bytes_match_full_metadata_pipeline() {
+        let workspace = tempfile::tempdir().unwrap();
+        let (gcx, _) = make_app_with_workspace(workspace.path()).await;
+        let chat_id = "write-cache-byte-identity";
+        let path = workspace
+            .path()
+            .join(".refact")
+            .join("trajectories")
+            .join(chat_id)
+            .join(format!("{chat_id}.json"));
+        tokio::fs::create_dir_all(path.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(
+            &path,
+            serde_json::to_string_pretty(&json!({
+                "id": chat_id,
+                "title": "Seed",
+                "created_at": "2022-02-02T02:02:02+00:00",
+                "messages": [{"role": "user", "content": "seed message"}],
+                "custom_future_field": {"nested": {"value": 7}},
+                "browser_meta": {"browser_runtime_id": "seed-browser"},
+                "zz_unknown_scalar": "keep"
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+        let write_cache = Arc::new(AMutex::new(DetachedTrajectoryWriteCache::default()));
+        let mut messages = Vec::new();
+        for step in 0..5usize {
+            if step == 3 {
+                let mut external: serde_json::Value =
+                    serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
+                external["external_after_two_saves"] = json!([step]);
+                tokio::fs::write(&path, serde_json::to_string_pretty(&external).unwrap())
+                    .await
+                    .unwrap();
+            }
+            let previous: serde_json::Map<String, serde_json::Value> =
+                serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
+            messages.push(ChatMessage::new(
+                if step % 2 == 0 { "user" } else { "assistant" }.to_string(),
+                format!("message {step} \"quoted\" ✓"),
+            ));
+            let mut snapshot = test_snapshot(chat_id, &format!("Title {step}"), messages.clone());
+            snapshot.version = step as u64 + 1;
+            if step == 4 {
+                snapshot.parent_id = Some("parent-chat".to_string());
+            }
+            save_trajectory_snapshot_inner(
+                gcx.clone(),
+                snapshot.clone(),
+                Some(write_cache.clone()),
+            )
+            .await
+            .unwrap();
+
+            let written = tokio::fs::read_to_string(&path).await.unwrap();
+            let written_value: serde_json::Value = serde_json::from_str(&written).unwrap();
+            let expected = legacy_expected_trajectory_bytes(
+                &snapshot,
+                written_value["updated_at"].as_str().unwrap(),
+                Some(&previous),
+            );
+            assert_eq!(written, expected, "save {step} bytes differ");
+            assert_eq!(written_value["created_at"], "2022-02-02T02:02:02+00:00");
+            assert_eq!(written_value["custom_future_field"]["nested"]["value"], 7);
+            assert_eq!(
+                written_value["browser_meta"]["browser_runtime_id"],
+                "seed-browser"
+            );
+            if step >= 3 {
+                assert_eq!(written_value["external_after_two_saves"], json!([3]));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn write_cache_retains_preservable_metadata_without_messages() {
+        let workspace = tempfile::tempdir().unwrap();
+        let (gcx, _) = make_app_with_workspace(workspace.path()).await;
+        let chat_id = "write-cache-no-messages";
+        let write_cache = Arc::new(AMutex::new(DetachedTrajectoryWriteCache::default()));
+        save_trajectory_snapshot_inner(
+            gcx.clone(),
+            test_snapshot(
+                chat_id,
+                "First",
+                vec![ChatMessage::new(
+                    "user".to_string(),
+                    "large payload".to_string(),
+                )],
+            ),
+            Some(write_cache.clone()),
+        )
+        .await
+        .unwrap();
+        let path = workspace
+            .path()
+            .join(".refact")
+            .join("trajectories")
+            .join(chat_id)
+            .join(format!("{chat_id}.json"));
+        let written: serde_json::Value =
+            serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
+        assert!(written["messages"]
+            .as_array()
+            .is_some_and(|m| !m.is_empty()));
+
+        let cache = write_cache.lock().await;
+        let metadata = cache.existing_metadata.as_ref().expect("cached metadata");
+        assert!(!metadata.contains_key("messages"));
+        assert!(!metadata.contains_key("title"));
+        assert_eq!(metadata.get("id"), Some(&json!(chat_id)));
+        assert_eq!(metadata.get("created_at"), written.get("created_at"));
+        let global = trajectory_metadata_cache()
+            .lock()
+            .unwrap()
+            .get(&trajectory_metadata_cache_key(&path))
+            .map(|entry| entry.metadata.clone())
+            .expect("global metadata cache entry");
+        assert!(Arc::ptr_eq(&global, metadata));
+    }
+
     #[tokio::test]
     async fn trajectory_writer_cache_rejects_replaced_trajectory_for_another_chat() {
         let workspace = tempfile::tempdir().unwrap();
@@ -12002,6 +12290,7 @@ mod tests {
         assert!(components.contains("trajectory.snapshot"));
         assert!(components.contains("trajectory.serialize"));
         assert!(components.contains("trajectory.atomic_write"));
+        assert!(components.contains("trajectory.index_projection"));
         assert!(components.contains("trajectory.commit"));
         assert_eq!(
             events
@@ -16569,6 +16858,297 @@ mod tests {
                 ..Default::default()
             },
         ]
+    }
+
+    fn reference_metrics_from_values(messages: &[serde_json::Value]) -> TrajectoryMetrics {
+        TrajectoryMetrics {
+            line_changes: calculate_line_changes_from_messages(messages),
+            task_progress: calculate_task_progress_from_messages(messages),
+            token_totals: calculate_token_totals_from_messages(messages),
+            measured_tokens: messages
+                .iter()
+                .filter_map(|message| message.get("usage"))
+                .filter_map(|usage| usage.get("total_tokens").and_then(|value| value.as_u64()))
+                .reduce(u64::saturating_add),
+        }
+    }
+
+    fn assert_metrics_eq(actual: &TrajectoryMetrics, expected: &TrajectoryMetrics, label: &str) {
+        assert_eq!(actual.line_changes, expected.line_changes, "{label}");
+        assert_eq!(actual.task_progress, expected.task_progress, "{label}");
+        assert_eq!(actual.measured_tokens, expected.measured_tokens, "{label}");
+        let (a, e) = (&actual.token_totals, &expected.token_totals);
+        assert_eq!(a.prompt_tokens, e.prompt_tokens, "{label}");
+        assert_eq!(a.completion_tokens, e.completion_tokens, "{label}");
+        assert_eq!(a.total_tokens, e.total_tokens, "{label}");
+        assert_eq!(a.cache_read_tokens, e.cache_read_tokens, "{label}");
+        assert_eq!(a.cache_creation_tokens, e.cache_creation_tokens, "{label}");
+        assert_eq!(a.cost_usd, e.cost_usd, "{label}");
+    }
+
+    fn projection_rich_messages() -> Vec<ChatMessage> {
+        let mut rich = metric_scan_fixture_messages();
+        rich.push(ChatMessage {
+            role: "context_file".to_string(),
+            content: ChatContent::ContextFiles(vec![crate::call_validation::ContextFile {
+                file_name: "src/lib.rs".to_string(),
+                file_content: "fn main() {\n    println!(\"hi\");\n}\n".to_string(),
+                line1: 1,
+                line2: 3,
+                file_rev: Some("rev-1".to_string()),
+                symbols: vec![],
+                gradient_type: 0,
+                usefulness: 50.0,
+                skip_pp: false,
+            }]),
+            ..Default::default()
+        });
+        rich
+    }
+
+    fn projection_recovery_record() -> refact_core::recovery::RecoveryRecord {
+        serde_json::from_value(json!({
+            "operation_id": "op", "run_id": "run", "revision": 1,
+            "state": "waiting", "policy": refact_core::recovery::RecoveryPolicy::default(),
+            "policy_source": "global", "manual": false, "retries_used": 0,
+            "latest_error": {"category": "Network", "title": "Unavailable",
+                "explanation": "Unavailable", "suggested_action": "Retry",
+                "is_retryable": true, "raw_error": "diagnostic"},
+            "next_retry_at_ms": 5, "attempts": []
+        }))
+        .unwrap()
+    }
+
+    fn find_saved_trajectory_file(root: &Path, id: &str) -> PathBuf {
+        let name = format!("{id}.json");
+        let found: Vec<PathBuf> = walkdir::WalkDir::new(root)
+            .into_iter()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_type().is_file() && entry.file_name() == name.as_str())
+            .map(|entry| entry.into_path())
+            .collect();
+        assert_eq!(
+            found.len(),
+            1,
+            "expected exactly one file for {id}: {found:?}"
+        );
+        found.into_iter().next().unwrap()
+    }
+
+    #[serial(trajectory_perf)]
+    #[tokio::test]
+    async fn saved_index_projection_matches_committed_value() {
+        let _lock = serial_test_guard();
+        let (_guard, sink, _recorder) = install_perf_recorder();
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, app) = make_app_with_workspace(dir.path()).await;
+        let task_id = "projection-parity-task";
+        tokio::fs::create_dir_all(dir.path().join(".refact").join("tasks").join(task_id))
+            .await
+            .unwrap();
+        let mut rich = projection_rich_messages();
+        let mut goal_session = ChatSession::new("projection-goal".into());
+        goal_session.install_goal(
+            "agent",
+            "Finish implementation",
+            true,
+            GoalBudget::default(),
+        );
+        goal_session.goal.as_mut().unwrap().progress.turns_used = 2;
+        rich.extend(goal_session.messages.clone());
+        let resaved_id = "projection-parity-2";
+        let cases: Vec<(String, Vec<ChatMessage>)> = vec![
+            ("projection-parity-0".into(), Vec::new()),
+            (
+                "projection-parity-1".into(),
+                vec![
+                    ChatMessage::new("user".into(), "hello".into()),
+                    ChatMessage::new("assistant".into(), "world".into()),
+                ],
+            ),
+            (resaved_id.into(), rich.clone()),
+            ("projection-parity-3".into(), rich.clone()),
+            ("projection-parity-4".into(), rich.clone()),
+            (resaved_id.into(), rich[..5].to_vec()),
+        ];
+        let mut saves = 0usize;
+        for (i, (id, messages)) in cases.into_iter().enumerate() {
+            let mut snapshot = test_snapshot(&id, "Parity", messages);
+            if i >= 2 {
+                snapshot.goal = goal_session.goal.clone();
+                snapshot.goal_ledger = goal_session.goal_ledger.clone();
+                snapshot.parent_id = Some("parent-chat".into());
+                snapshot.root_chat_id = Some("root-chat".into());
+                snapshot.link_type = Some("subchat".into());
+                snapshot.waiting_for_card_ids = vec!["card-1".into()];
+                snapshot.worktree = Some(trajectory_worktree_sample_with_id("parity-worktree"));
+                snapshot.recovery = Some(projection_recovery_record());
+            }
+            if i == 3 {
+                snapshot.buddy_meta = Some(buddy_thread_meta());
+            }
+            if i == 4 {
+                snapshot.parent_id = None;
+                snapshot.link_type = None;
+                snapshot.task_meta = Some(task_meta(
+                    task_id,
+                    "agents",
+                    Some("parity-agent"),
+                    Some("T-1"),
+                    None,
+                ));
+            }
+            if i == 5 {
+                let path = find_saved_trajectory_file(dir.path(), &id);
+                let mut existing: serde_json::Value =
+                    serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
+                existing["created_at"] = json!("2023-05-06T07:08:09+00:00");
+                existing["custom_future_field"] = json!({"nested": [1, 2, 3]});
+                tokio::fs::write(&path, serde_json::to_string_pretty(&existing).unwrap())
+                    .await
+                    .unwrap();
+                snapshot.created_at = "2024-09-09T00:00:00Z".to_string();
+            }
+            save_trajectory_snapshot(gcx.clone(), snapshot)
+                .await
+                .unwrap();
+            saves += 1;
+            let path = find_saved_trajectory_file(dir.path(), &id);
+            let index_dir = index_dir_for_trajectory_file(gcx.clone(), &path)
+                .await
+                .unwrap();
+            let bytes = tokio::fs::read(&path).await.unwrap();
+            let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            let hash: [u8; 32] = trajectory_index::source_sha256(&bytes);
+            let expected = trajectory_index::entry_from_owned_trajectory_value(
+                &index_dir,
+                &path,
+                value.clone(),
+                Some(TrajectorySourceIdentity::Normal),
+                Some(hash),
+            )
+            .unwrap();
+            let saved_messages = value["messages"].as_array().unwrap().clone();
+            let saved_metrics = scan_saved_trajectory_metrics(&saved_messages);
+            let direct = trajectory_index::entry_from_saved_trajectory(
+                &index_dir,
+                &path,
+                value.clone(),
+                Some(TrajectorySourceIdentity::Normal),
+                hash,
+                saved_messages.len(),
+                &saved_metrics,
+            )
+            .unwrap();
+            assert_eq!(
+                serde_json::to_value(&direct).unwrap(),
+                serde_json::to_value(&expected).unwrap(),
+                "direct projection, case {i}"
+            );
+            let entries = app
+                .chat
+                .trajectory_index_coordinator
+                .snapshot(&index_dir, None)
+                .await
+                .unwrap();
+            let actual = entries
+                .entries
+                .iter()
+                .find(|entry| entry.id == id)
+                .expect("saved index entry");
+            assert_eq!(
+                serde_json::to_value(actual).unwrap(),
+                serde_json::to_value(&expected).unwrap(),
+                "saved index entry, case {i}"
+            );
+            if i >= 2 {
+                assert_eq!(
+                    actual.recovery_state,
+                    Some(refact_core::recovery::RecoveryState::NeedsAction)
+                );
+            }
+            if (2..=4).contains(&i) {
+                assert_eq!(actual.total_lines_added, 4);
+                assert_eq!(actual.tasks_done, 1);
+                assert!(value["messages"].to_string().contains("plan it"));
+                assert!(value["messages"].to_string().contains("println!"));
+            }
+            if i == 4 {
+                assert!(matches!(
+                    actual.source,
+                    trajectory_index::TrajectoryIndexSource::Task { .. }
+                ));
+            }
+            if i == 5 {
+                assert_eq!(actual.created_at, "2023-05-06T07:08:09+00:00");
+                assert_eq!(value["custom_future_field"], json!({"nested": [1, 2, 3]}));
+                assert_eq!(actual.message_count, 5);
+                assert_eq!(actual.total_lines_added, 4);
+            }
+        }
+        let projections = sink
+            .events()
+            .into_iter()
+            .filter(|event| event.component == "trajectory.index_projection")
+            .collect::<Vec<_>>();
+        assert_eq!(projections.len(), saves);
+        assert!(projections.iter().all(|event| event.outcome == "success"));
+    }
+
+    #[tokio::test]
+    async fn internal_trace_normal_chat_event_carries_real_metrics() {
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, app) = make_app_with_workspace(dir.path()).await;
+        let mut rx = app.chat.trajectory_events_tx.subscribe();
+        let chat_id = "internal-trace-event-metrics";
+        let mut snapshot = test_snapshot(chat_id, "Trace", metric_scan_fixture_messages());
+        snapshot.link_type = Some(internal_trace_link_type("metrics-probe"));
+        assert!(is_internal_trace_link_type(snapshot.link_type.as_deref()));
+        assert!(snapshot.task_meta.is_none() && snapshot.buddy_meta.is_none());
+        save_trajectory_snapshot(gcx, snapshot).await.unwrap();
+
+        let event = wait_for_trajectory_event(&mut rx, chat_id).await;
+        assert_eq!(event.event_type, "updated");
+        assert_eq!(event.total_lines_added, Some(4));
+        assert_eq!(event.total_lines_removed, Some(2));
+        assert_eq!(event.tasks_total, Some(3));
+        assert_eq!(event.tasks_done, Some(1));
+        assert_eq!(event.tasks_failed, Some(1));
+        assert_eq!(event.total_prompt_tokens, Some(301));
+        assert_eq!(event.total_tokens, Some(453));
+        assert_eq!(event.total_cost_usd, Some(0.03));
+    }
+
+    #[test]
+    fn saved_trajectory_metric_scan_matches_value_reference() {
+        let fixture = metric_scan_fixture_messages();
+        let rich = projection_rich_messages();
+        let mut cases: Vec<(String, Vec<ChatMessage>)> = vec![
+            ("empty".into(), Vec::new()),
+            ("fixture".into(), fixture.clone()),
+            ("rich".into(), rich),
+        ];
+        for tail in [2usize, 4, 5, 8] {
+            cases.push((format!("truncated-{tail}"), fixture[..tail].to_vec()));
+        }
+        cases.push(("rewritten".into(), fixture[5..].to_vec()));
+        for (label, messages) in cases {
+            let values: Vec<serde_json::Value> = messages
+                .iter()
+                .map(|message| serde_json::to_value(message).unwrap())
+                .collect();
+            let saved = scan_saved_trajectory_metrics(&values);
+            assert_metrics_eq(&saved, &reference_metrics_from_values(&values), &label);
+            assert_metrics_eq(&saved, &scan_trajectory_metrics(&messages), &label);
+        }
+        let values: Vec<serde_json::Value> = fixture
+            .iter()
+            .map(|message| serde_json::to_value(message).unwrap())
+            .collect();
+        let saved = scan_saved_trajectory_metrics(&values);
+        assert_eq!(saved.line_changes, (4, 2));
+        assert_eq!(saved.task_progress, (3, 1, 1));
+        assert_eq!(saved.measured_tokens, Some(453));
     }
 
     #[test]

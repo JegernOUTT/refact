@@ -219,6 +219,7 @@ impl PerformanceTelemetry {
                     PerfComponent::SseLagged,
                     PerfComponent::TrajectorySaveMutexWait,
                     PerfComponent::TrajectoryMetricScan,
+                    PerfComponent::TrajectoryIndexProjection,
                 ]),
                 tool_stages: self.aggregate_components(&[
                     PerfComponent::ToolConfirmationWait,

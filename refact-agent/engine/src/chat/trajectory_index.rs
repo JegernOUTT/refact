@@ -19,7 +19,7 @@ use uuid::Uuid;
 use crate::chat::trajectories::{
     TrajectoryData, TrajectoryListCandidate, TrajectoryMeta, calculate_line_changes_from_messages,
     calculate_task_progress_from_messages, calculate_token_totals_from_messages,
-    trajectory_list_data_is_displayable_chat, trajectory_meta_title,
+    trajectory_metadata_is_displayable_chat, trajectory_meta_title,
 };
 use crate::chat::types::{TrajectorySourceIdentity, WorktreeMeta};
 use crate::chat::perf_diagnostics::{self, PerfComponent, PerfOutcome};
@@ -3500,6 +3500,67 @@ pub(crate) fn entry_from_owned_trajectory_value(
     let source = source_from_hint_or_value(&value, source_hint);
     let data = serde_json::from_value::<TrajectoryData>(value)
         .map_err(|e| format!("Failed to parse trajectory {:?}: {e}", path))?;
+    let metrics = crate::chat::trajectories::TrajectoryMetrics {
+        line_changes: calculate_line_changes_from_messages(&data.messages),
+        task_progress: calculate_task_progress_from_messages(&data.messages),
+        token_totals: calculate_token_totals_from_messages(&data.messages),
+        measured_tokens: data
+            .messages
+            .iter()
+            .filter_map(|message| message.get("usage"))
+            .filter_map(|usage| usage.get("total_tokens").and_then(|value| value.as_u64()))
+            .reduce(u64::saturating_add),
+    };
+    let message_count = data.messages.len();
+    entry_from_trajectory_metadata(
+        dir,
+        path,
+        data,
+        source,
+        source_hash,
+        message_count,
+        &metrics,
+    )
+}
+
+pub(crate) fn entry_from_saved_trajectory(
+    dir: &Path,
+    path: &Path,
+    mut value: serde_json::Value,
+    source_hint: Option<TrajectorySourceIdentity>,
+    source_hash: [u8; 32],
+    message_count: usize,
+    metrics: &crate::chat::trajectories::TrajectoryMetrics,
+) -> Result<TrajectoryIndexEntry, String> {
+    let source = source_from_hint_or_value(&value, source_hint);
+    // Use the final committed metadata (including preserved fields and timestamps), but never
+    // deserialize or clone the message payload that the save has already scanned.
+    value
+        .as_object_mut()
+        .ok_or("Trajectory is not an object")?
+        .insert("messages".into(), serde_json::json!([]));
+    let data = serde_json::from_value::<TrajectoryData>(value)
+        .map_err(|e| format!("Failed to parse trajectory metadata {:?}: {e}", path))?;
+    entry_from_trajectory_metadata(
+        dir,
+        path,
+        data,
+        source,
+        Some(source_hash),
+        message_count,
+        metrics,
+    )
+}
+
+fn entry_from_trajectory_metadata(
+    dir: &Path,
+    path: &Path,
+    data: TrajectoryData,
+    source: TrajectorySourceIdentity,
+    source_hash: Option<[u8; 32]>,
+    message_count: usize,
+    metrics: &crate::chat::trajectories::TrajectoryMetrics,
+) -> Result<TrajectoryIndexEntry, String> {
     if data.id.is_empty() || data.created_at.is_empty() {
         return Err(format!(
             "Trajectory {:?} is missing required metadata",
@@ -3532,11 +3593,9 @@ pub(crate) fn entry_from_owned_trajectory_value(
         ));
     }
     let (file_len, file_modified_unix_ms) = file_metadata(path)?;
-    let (total_lines_added, total_lines_removed) =
-        calculate_line_changes_from_messages(&data.messages);
-    let (tasks_total, tasks_done, tasks_failed) =
-        calculate_task_progress_from_messages(&data.messages);
-    let token_totals = calculate_token_totals_from_messages(&data.messages);
+    let (total_lines_added, total_lines_removed) = metrics.line_changes;
+    let (tasks_total, tasks_done, tasks_failed) = metrics.task_progress;
+    let token_totals = &metrics.token_totals;
     let parent_id = data
         .extra
         .get("parent_id")
@@ -3567,12 +3626,7 @@ pub(crate) fn entry_from_owned_trajectory_value(
         .get("waiting_for_card_ids")
         .and_then(|v| serde_json::from_value::<Vec<String>>(v.clone()).ok())
         .unwrap_or_default();
-    let list_data = crate::chat::trajectories::TrajectoryListData {
-        id: data.id.clone(),
-        updated_at: data.updated_at.clone(),
-        mode: Some(data.mode.clone()),
-        extra: data.extra.clone(),
-    };
+    let displayable_chat = trajectory_metadata_is_displayable_chat(Some(&data.mode), &data.extra);
 
     let (recovery_state, recovery_projection_error) =
         recovery_projection_from_value(data.extra.get("recovery"));
@@ -3589,12 +3643,7 @@ pub(crate) fn entry_from_owned_trajectory_value(
                 .get("version")
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0),
-            measured_tokens: data
-                .messages
-                .iter()
-                .filter_map(|message| message.get("usage"))
-                .filter_map(|usage| usage.get("total_tokens").and_then(|value| value.as_u64()))
-                .reduce(u64::saturating_add),
+            measured_tokens: metrics.measured_tokens,
             needs_compaction: false,
         }),
         work_ref: Some(WorkReference {
@@ -3623,7 +3672,7 @@ pub(crate) fn entry_from_owned_trajectory_value(
         title: trajectory_meta_title(&data.title),
         model: data.model,
         mode: data.mode,
-        message_count: data.messages.len(),
+        message_count,
         parent_id,
         link_type,
         root_chat_id,
@@ -3640,7 +3689,7 @@ pub(crate) fn entry_from_owned_trajectory_value(
         total_cache_read_tokens: token_totals.cache_read_tokens,
         total_cache_creation_tokens: token_totals.cache_creation_tokens,
         total_cost_usd: token_totals.cost_usd,
-        displayable_chat: trajectory_list_data_is_displayable_chat(&list_data),
+        displayable_chat,
         waiting_for_card_ids,
         file_len,
         file_modified_unix_ms,

@@ -1,5 +1,7 @@
+import { useEffect } from "react";
 import { QueryStatus } from "@reduxjs/toolkit/query";
 import { useAppSelector } from "./useAppSelector";
+import { useAppDispatch } from "./useAppDispatch";
 import { selectConfig } from "../features/Config/configSlice";
 import { getIsAuthError } from "../features/Errors/errorsSlice";
 import { selectBackendStatus } from "../features/Connection";
@@ -11,6 +13,7 @@ const EMPTY_CAPS_POLLING_INTERVAL_MS = 2000;
 const STARTUP_CAPS_POLLING_INTERVAL_MS = 5000;
 
 export const useGetCapsQuery = (_args?: undefined) => {
+  const dispatch = useAppDispatch();
   const isAuthError = useAppSelector(getIsAuthError);
   const config = useAppSelector(selectConfig);
   const backendStatus = useAppSelector(selectBackendStatus);
@@ -33,11 +36,27 @@ export const useGetCapsQuery = (_args?: undefined) => {
       : 0;
   const caps = capsApi.useGetCapsQuery(undefined, {
     pollingInterval,
-    refetchOnFocus: true,
-    refetchOnReconnect: true,
     skip,
     skipPollingIfUnfocused: true,
   });
+
+  useEffect(() => {
+    if (skip) return;
+    const refetch = () => {
+      void dispatch(
+        capsApi.endpoints.getCaps.initiate(undefined, {
+          subscribe: false,
+          forceRefetch: true,
+        }),
+      );
+    };
+    window.addEventListener("focus", refetch);
+    window.addEventListener("online", refetch);
+    return () => {
+      window.removeEventListener("focus", refetch);
+      window.removeEventListener("online", refetch);
+    };
+  }, [dispatch, skip]);
 
   return caps;
 };

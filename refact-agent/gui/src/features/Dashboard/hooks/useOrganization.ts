@@ -1,13 +1,28 @@
-import { createContext, useContext, useMemo, useRef } from "react";
+import { createContext, useContext, useEffect, useMemo, useRef } from "react";
+import type { RootState } from "../../../app/store";
 import { useAppSelector } from "../../../hooks";
 import { buildApiUrlFromState } from "../../../services/refact/apiUrl";
 import {
   type Assignments,
+  organizationApi,
   organizationItemKey,
   useOrganizationItemsQuery,
   useOrganizationTaxonomyQuery,
 } from "../../../services/refact/organization";
+import { selectApiKey } from "../../Config/configSlice";
+import { selectBackendStatus } from "../../Connection";
 import { selectStreamItems } from "../streamSelectors";
+
+const organizationTaxonomySelect =
+  organizationApi.endpoints.organizationTaxonomy.select;
+const organizationItemsSelect =
+  organizationApi.endpoints.organizationItems.select;
+
+const isUnauthorized = (error: unknown) =>
+  !!error &&
+  typeof error === "object" &&
+  "status" in error &&
+  error.status === 401;
 
 export function useOrganizationData() {
   const scope = useAppSelector(
@@ -30,20 +45,52 @@ export function useOrganizationData() {
     ],
     [items],
   );
+  const apiKey = useAppSelector(selectApiKey);
+  const backendStatus = useAppSelector(selectBackendStatus);
+  const topicsArgs = useMemo(
+    () => ({ scope, kind: "topics" }) as const,
+    [scope],
+  );
+  const tagsArgs = useMemo(() => ({ scope, kind: "tags" }) as const, [scope]);
+  const itemsArgs = useMemo(() => ({ scope, items: keys }), [scope, keys]);
+  const selectSuspended = useMemo(() => {
+    const selectTopics = organizationTaxonomySelect(topicsArgs);
+    const selectTags = organizationTaxonomySelect(tagsArgs);
+    const selectItems = organizationItemsSelect(itemsArgs);
+    return (state: RootState) =>
+      isUnauthorized(selectTopics(state).error) ||
+      isUnauthorized(selectTags(state).error) ||
+      (itemsArgs.items.length > 0 && isUnauthorized(selectItems(state).error));
+  }, [topicsArgs, tagsArgs, itemsArgs]);
+  const suspended = useAppSelector(selectSuspended);
   const options = {
-    pollingInterval: 30000,
-    refetchOnFocus: true,
+    pollingInterval: suspended ? 0 : 30000,
+    refetchOnFocus: !suspended,
     refetchOnMountOrArgChange: true,
   };
-  const topics = useOrganizationTaxonomyQuery(
-    { scope, kind: "topics" },
-    options,
-  );
-  const tags = useOrganizationTaxonomyQuery({ scope, kind: "tags" }, options);
-  const assignments = useOrganizationItemsQuery(
-    { scope, items: keys },
-    { ...options, skip: keys.length === 0 },
-  );
+  const topics = useOrganizationTaxonomyQuery(topicsArgs, options);
+  const tags = useOrganizationTaxonomyQuery(tagsArgs, options);
+  const assignments = useOrganizationItemsQuery(itemsArgs, {
+    ...options,
+    skip: keys.length === 0,
+  });
+  const retry = () => {
+    void topics.refetch();
+    void tags.refetch();
+    if (keys.length) void assignments.refetch();
+  };
+  const latestRetry = useRef(retry);
+  useEffect(() => {
+    latestRetry.current = retry;
+  });
+  const lastAccess = useRef({ online: backendStatus === "online", apiKey });
+  useEffect(() => {
+    const online = backendStatus === "online";
+    const previous = lastAccess.current;
+    lastAccess.current = { online, apiKey };
+    if ((online && !previous.online) || apiKey !== previous.apiKey)
+      latestRetry.current();
+  }, [backendStatus, apiKey]);
   const retained = useRef<{ scope: string; data: Assignments | undefined }>({
     scope,
     data: undefined,
@@ -69,11 +116,7 @@ export function useOrganizationData() {
     assignments: { ...assignments, currentData: assignmentData },
     byKey,
     error: topics.isError || tags.isError || assignments.isError,
-    retry: () => {
-      void topics.refetch();
-      void tags.refetch();
-      if (keys.length) void assignments.refetch();
-    },
+    retry,
   };
 }
 
