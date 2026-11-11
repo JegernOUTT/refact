@@ -201,6 +201,12 @@ struct MergeTargetSeal {
     roots: Vec<PathBuf>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SharedRoots {
+    Fenced,
+    Left,
+}
+
 #[derive(Clone)]
 struct EffectToken {
     records: Vec<WorktreeMeta>,
@@ -210,6 +216,7 @@ struct EffectToken {
     target: Option<MergeTargetSeal>,
     target_materialized: Arc<AtomicBool>,
     legacy_removed: Arc<AtomicBool>,
+    fenced_roots: Vec<PathBuf>,
     _guard: EffectGuard,
 }
 
@@ -327,7 +334,8 @@ impl WorktreeService {
         ids: &[String],
         include_source: bool,
     ) -> Result<Self, String> {
-        self.fence_worktrees_inner(ids, include_source, None).await
+        self.fence_worktrees_inner(ids, include_source, None, SharedRoots::Fenced)
+            .await
     }
 
     async fn fence_worktrees_inner(
@@ -335,6 +343,7 @@ impl WorktreeService {
         ids: &[String],
         include_source: bool,
         target: Option<MergeTargetSeal>,
+        shared: SharedRoots,
     ) -> Result<Self, String> {
         if ids.is_empty() {
             return Err("Effect fencing requires registered worktree identities".into());
@@ -361,6 +370,21 @@ impl WorktreeService {
                 records.push(record.meta.clone());
             }
         }
+        let mut roots = match shared {
+            SharedRoots::Fenced => {
+                let mut roots: Vec<_> = records.iter().map(|meta| meta.root.clone()).collect();
+                if include_source {
+                    roots.push(self.source_workspace_root.clone());
+                }
+                if let Some(target) = &target {
+                    roots.extend(target.roots.iter().cloned());
+                }
+                roots
+            }
+            SharedRoots::Left => vec![records[0].root.clone()],
+        };
+        roots.sort();
+        roots.dedup();
         if let Some(token) = &self.effect_token {
             if (!include_source || token.includes_source)
                 && records.iter().all(|meta| token.records.contains(meta))
@@ -369,6 +393,7 @@ impl WorktreeService {
                         sealed.branch == target.branch && sealed.common_dir == target.common_dir
                     })
                 })
+                && roots.iter().all(|root| token.fenced_roots.contains(root))
             {
                 self.validate_effect_token().await?;
                 return Ok(self.clone());
@@ -383,17 +408,8 @@ impl WorktreeService {
         let fence = self.effect_fence.as_ref().ok_or(
             "Worktree mutation requires an application effect coordinator; checkout retained",
         )?;
-        let mut roots: Vec<_> = records.iter().map(|meta| meta.root.clone()).collect();
-        if include_source {
-            roots.push(self.source_workspace_root.clone());
-        }
-        if let Some(target) = &target {
-            roots.extend(target.roots.iter().cloned());
-        }
-        roots.sort();
-        roots.dedup();
         let guard = fence
-            .begin(self.source_workspace_root.clone(), roots)
+            .begin(self.source_workspace_root.clone(), roots.clone())
             .await?;
         let service = Self {
             effect_token: Some(Arc::new(EffectToken {
@@ -404,6 +420,7 @@ impl WorktreeService {
                 target,
                 target_materialized: Arc::new(AtomicBool::new(false)),
                 legacy_removed: Arc::new(AtomicBool::new(false)),
+                fenced_roots: roots,
                 _guard: guard,
             })),
             ..self.clone()
@@ -412,11 +429,29 @@ impl WorktreeService {
         Ok(service)
     }
 
-    /// Prepare both trusted source and registered target domains before permits.
     pub async fn fence_merge_worktree(
         &self,
         id: &str,
         target_branch: Option<&str>,
+    ) -> Result<Self, String> {
+        self.fence_merge_worktree_with(id, target_branch, SharedRoots::Left)
+            .await
+    }
+
+    pub async fn fence_recovery_worktree(
+        &self,
+        id: &str,
+        target_branch: Option<&str>,
+    ) -> Result<Self, String> {
+        self.fence_merge_worktree_with(id, target_branch, SharedRoots::Fenced)
+            .await
+    }
+
+    async fn fence_merge_worktree_with(
+        &self,
+        id: &str,
+        target_branch: Option<&str>,
+        shared: SharedRoots,
     ) -> Result<Self, String> {
         let requested_target = target_branch.map(str::to_string);
         let registry = self.load_registry_unlocked().await?;
@@ -438,7 +473,8 @@ impl WorktreeService {
                 .map(|r| r.meta.id.clone()),
         );
         let target = self.capture_merge_target(target.clone()).await?;
-        self.fence_worktrees_inner(&ids, true, Some(target)).await
+        self.fence_worktrees_inner(&ids, true, Some(target), shared)
+            .await
     }
 
     /// Fence a board-authorized legacy merge, not a session binding. Callers must
@@ -469,18 +505,13 @@ impl WorktreeService {
                 .await?;
             records.push(record.meta.clone());
         }
-        let mut roots: Vec<_> = records.iter().map(|m| m.root.clone()).collect();
-        roots.push(meta.root.clone());
-        roots.push(self.source_workspace_root.clone());
-        roots.extend(target.roots.iter().cloned());
-        roots.sort();
-        roots.dedup();
+        let roots = vec![meta.root.clone()];
         let fence = self
             .effect_fence
             .as_ref()
             .ok_or("Legacy merge requires application effect coordinator")?;
         let guard = fence
-            .begin(self.source_workspace_root.clone(), roots)
+            .begin(self.source_workspace_root.clone(), roots.clone())
             .await?;
         let service = Self {
             effect_token: Some(Arc::new(EffectToken {
@@ -491,6 +522,7 @@ impl WorktreeService {
                 target: Some(target),
                 target_materialized: Arc::new(AtomicBool::new(false)),
                 legacy_removed: Arc::new(AtomicBool::new(false)),
+                fenced_roots: roots,
                 _guard: guard,
             })),
             ..self.clone()
@@ -2306,7 +2338,8 @@ impl WorktreeService {
                 Err(e) => {
                     self.validate_merge_phase()?;
                     let conflict_files = git::conflict_files_for_path(target_root);
-                    let mut cleanup_warnings = git::reset_hard(target_root, &target_pre_merge_head);
+                    let mut cleanup_warnings =
+                        git::reset_keeping_local_changes(target_root, &target_pre_merge_head);
                     let reset_ok = cleanup_warnings.is_empty();
                     let stash_restored =
                         restore_target_stash(target_root, stash, &mut cleanup_warnings);
@@ -4021,6 +4054,93 @@ mod worktree_registry_tests {
             .unwrap_err()
             .contains("identity changed after effect drain"));
         assert!(created.worktree.meta.root.exists());
+    }
+
+    #[tokio::test]
+    async fn merge_fences_only_its_source_and_token_reuse_requires_a_fenced_root() {
+        #[derive(Debug, Default)]
+        struct RecordingFence(std::sync::Mutex<Vec<Vec<PathBuf>>>);
+        impl WorktreeEffectFence for RecordingFence {
+            fn begin(
+                &self,
+                _project: PathBuf,
+                roots: Vec<PathBuf>,
+            ) -> std::pin::Pin<
+                Box<dyn std::future::Future<Output = Result<EffectGuard, String>> + Send + '_>,
+            > {
+                self.0.lock().unwrap().push(roots);
+                Box::pin(async { Ok(Arc::new(()) as EffectGuard) })
+            }
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("repo");
+        std::fs::create_dir(&source).unwrap();
+        init_repo(&source);
+        let fence = Arc::new(RecordingFence::default());
+        let service = test_service(temp.path().join("cache"), source)
+            .unwrap()
+            .with_effect_fence(fence.clone());
+        let merged = service
+            .create_worktree(CreateWorktreeRequest {
+                branch: Some("refact/chat/merge-source".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let landing = service
+            .create_worktree(CreateWorktreeRequest {
+                branch: Some("refact/chat/merge-target".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let merged_id = merged.worktree.meta.id.clone();
+        let landing_id = landing.worktree.meta.id.clone();
+        let source_root = merged.worktree.meta.root.clone();
+        let target_root = landing.worktree.meta.root.clone();
+        let project = service.source_workspace_root().to_path_buf();
+
+        let merging = service
+            .fence_merge_worktree(&merged_id, Some("refact/chat/merge-target"))
+            .await
+            .unwrap();
+        assert_eq!(*fence.0.lock().unwrap(), vec![vec![source_root.clone()]]);
+        merging
+            .fence_worktrees(&[merged_id.clone()], false)
+            .await
+            .unwrap();
+        for (ids, include_source) in [
+            (vec![landing_id.clone()], false),
+            (vec![merged_id.clone()], true),
+        ] {
+            let error = merging
+                .fence_worktrees(&ids, include_source)
+                .await
+                .unwrap_err();
+            assert!(
+                error.contains("does not cover requested checkout domains"),
+                "{error}"
+            );
+        }
+        assert_eq!(fence.0.lock().unwrap().len(), 1);
+
+        let recovering = service
+            .fence_recovery_worktree(&merged_id, Some("refact/chat/merge-target"))
+            .await
+            .unwrap();
+        let fenced = fence.0.lock().unwrap().last().cloned().unwrap();
+        for root in [&source_root, &target_root, &project] {
+            assert!(fenced.contains(root), "{root:?} missing from {fenced:?}");
+        }
+        recovering
+            .fence_worktrees(&[merged_id], true)
+            .await
+            .unwrap();
+        recovering
+            .fence_worktrees(&[landing_id], false)
+            .await
+            .unwrap();
+        assert_eq!(fence.0.lock().unwrap().len(), 2);
     }
 
     #[tokio::test]

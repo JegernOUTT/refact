@@ -1308,7 +1308,8 @@ async fn apply_process_privacy(
         derived_zones,
         message,
     )
-    .await?
+    .await
+    .map_err(crate::privacy::records::unstable_context_notice)?
     {
         crate::privacy::records::ShellReadDecision::Pass => Ok(()),
         crate::privacy::records::ShellReadDecision::Ask => Ok(()),

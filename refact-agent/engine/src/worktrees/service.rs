@@ -40,7 +40,7 @@ impl WorktreeEffectFence for ApplicationEffectFence {
             }
             let guard = self
                 .0
-                .begin_scope_change(&keys)
+                .begin_scope_change_named(&keys, "worktree mutation/delete")
                 .await
                 .map_err(|error| format!("Worktree change unavailable: {error}"))?;
             Ok(Arc::new(guard) as EffectGuard)
@@ -88,7 +88,7 @@ mod effect_tests {
     }
 
     #[tokio::test]
-    async fn merge_drains_unregistered_target_primary_namespace_before_effects() {
+    async fn merge_preserves_target_and_main_jobs_and_admits_new_work() {
         let (temp, service, scopes) = fixture();
         let target = temp.path().join("primary-target");
         assert!(std::process::Command::new("git")
@@ -127,6 +127,22 @@ mod effect_tests {
         };
         let cancel = Arc::new(AtomicBool::new(false));
         let lease = scopes.acquire(&[key.clone()], cancel.clone()).unwrap();
+        let main_key = ScopeKey::Worktree {
+            project: service.source_workspace_root().into(),
+            root: service.source_workspace_root().into(),
+        };
+        let main_cancel = Arc::new(AtomicBool::new(false));
+        let main_lease = scopes
+            .acquire(&[main_key.clone()], main_cancel.clone())
+            .unwrap();
+        let service = service
+            .fence_merge_worktree(&created.worktree.meta.id, Some("landing"))
+            .await
+            .unwrap();
+        scopes
+            .acquire(&[main_key.clone()], Arc::new(AtomicBool::new(false)))
+            .unwrap()
+            .settle();
         let merging = service.merge_worktree(
             &created.worktree.meta.id,
             crate::worktrees::types::MergeWorktreeRequest {
@@ -135,20 +151,17 @@ mod effect_tests {
                 ..Default::default()
             },
         );
-        tokio::pin!(merging);
-        tokio::select! {
-            result = &mut merging => panic!("merge before primary target drain: {result:?}"),
-            _ = async { while !cancel.load(Ordering::Acquire) { tokio::task::yield_now().await; } } => {}
-        }
-        assert!(!target.join("candidate.txt").exists());
-        for key in [key, managed_key] {
-            assert!(matches!(
-                scopes.acquire(&[key], Arc::new(AtomicBool::new(false))),
-                Err(ScopeChangeError::Closed)
-            ));
+        assert!(merging.await.unwrap().merged);
+        assert!(!cancel.load(Ordering::Acquire));
+        assert!(!main_cancel.load(Ordering::Acquire));
+        main_lease.settle();
+        for key in [key, managed_key, main_key] {
+            scopes
+                .acquire(&[key], Arc::new(AtomicBool::new(false)))
+                .unwrap()
+                .settle();
         }
         lease.settle();
-        assert!(merging.await.unwrap().merged);
         assert_eq!(
             std::fs::read_to_string(target.join("candidate.txt")).unwrap(),
             "candidate\n"
@@ -179,7 +192,7 @@ mod effect_tests {
         assert!(created.worktree.meta.root.exists());
         assert!(matches!(
             scopes.acquire(&[key.clone()], cancel.clone()),
-            Err(ScopeChangeError::Closed)
+            Err(ScopeChangeError::Busy)
         ));
         lease.settle();
         assert!(deleting.await.unwrap().deleted);
@@ -215,7 +228,7 @@ mod effect_tests {
             root: created.worktree.meta.root.clone(),
         };
         let fenced = service
-            .fence_merge_worktree(&created.worktree.meta.id, Some("main"))
+            .fence_worktrees(&[created.worktree.meta.id.clone()], true)
             .await
             .unwrap()
             .acquire_merge_permit()
@@ -243,7 +256,7 @@ mod effect_tests {
         let cancel = Arc::new(AtomicBool::new(false));
         assert!(matches!(
             scopes.acquire(&[key.clone()], cancel.clone()),
-            Err(ScopeChangeError::Closed)
+            Err(ScopeChangeError::Busy)
         ));
         {
             let (lock, changed) = &*barrier;

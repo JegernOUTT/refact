@@ -248,11 +248,9 @@ impl WorktreeService {
             .effect_fence
             .as_ref()
             .ok_or("Archive recovery requires application effect coordinator")?;
+        let roots = vec![identity.record.meta.root.clone()];
         let guard = fence
-            .begin(
-                self.source_workspace_root.clone(),
-                vec![identity.record.meta.root.clone()],
-            )
+            .begin(self.source_workspace_root.clone(), roots.clone())
             .await?;
         let service = Self {
             effect_token: Some(Arc::new(EffectToken {
@@ -263,6 +261,7 @@ impl WorktreeService {
                 target: None,
                 target_materialized: Arc::new(AtomicBool::new(false)),
                 legacy_removed: Arc::new(AtomicBool::new(false)),
+                fenced_roots: roots,
                 _guard: guard,
             })),
             ..self.clone()

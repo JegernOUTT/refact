@@ -478,12 +478,6 @@ pub async fn prepare_readiness(
             tests::admission_hook("before_submit").await;
             let receipt = jobs
                 .submit_readiness(job_binding, move |cancel| {
-                    // Register the admission lease synchronously before the owner can be polled.
-                    let lease = worker_app
-                        .runtime
-                        .tool_jobs
-                        .scopes
-                        .acquire(&keys, cancel.clone());
                     {
                         let mut state = worker_registry
                             .state
@@ -502,8 +496,18 @@ pub async fn prepare_readiness(
                         }
                     }
                     async move {
+                        let lease = worker_app
+                            .runtime
+                            .tool_jobs
+                            .scopes
+                            .acquire_wait(&keys, cancel.clone())
+                            .await;
                         let result = match lease {
                             Ok(lease) => {
+                                lease.label(format!(
+                                    "tool=review_readiness chat={} job={:?}",
+                                    worker_key.0, worker_key
+                                ));
                                 use futures::FutureExt;
                                 let result = std::panic::AssertUnwindSafe(build_batch(
                                     &worker_app,
@@ -533,6 +537,9 @@ pub async fn prepare_readiness(
                                     lease.settle();
                                 }
                                 result
+                            }
+                            Err(crate::tool_jobs::ScopeChangeError::Closed) => {
+                                Err(worker_app.runtime.tool_jobs.scopes.shutdown_description())
                             }
                             Err(e) => Err(format!("Review admission scope unavailable: {e}")),
                         };

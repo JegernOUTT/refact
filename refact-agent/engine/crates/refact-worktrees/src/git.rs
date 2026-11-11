@@ -1163,13 +1163,22 @@ pub fn apply_and_drop_stash(
     Ok(warnings)
 }
 
-pub fn reset_hard(root: &Path, rev: &str) -> Vec<String> {
+pub fn reset_keeping_local_changes(root: &Path, rev: &str) -> Vec<String> {
     let mut warnings = Vec::new();
-    if let Err(e) = run_git(root, &["reset", "--hard", rev]) {
+    if let Err(e) = run_git(root, &["reset", "--merge", "HEAD"]) {
         warnings.push(format!(
-            "Failed to reset target workspace to {}: {}",
-            rev, e
+            "Failed to clear unfinished merge state in target workspace: {}",
+            e
         ));
+        return warnings;
+    }
+    if rev != "HEAD" {
+        if let Err(e) = run_git(root, &["reset", "--keep", rev]) {
+            warnings.push(format!(
+                "Failed to reset target workspace to {}: {}",
+                rev, e
+            ));
+        }
     }
     warnings
 }
@@ -1180,7 +1189,7 @@ pub fn restore_stashed_changes(
 ) -> RestoreStashedChangesResult {
     let mut warnings = Vec::new();
     let mut critical_ok = true;
-    let reset_warnings = reset_hard(root, "HEAD");
+    let reset_warnings = reset_keeping_local_changes(root, "HEAD");
     if !reset_warnings.is_empty() {
         critical_ok = false;
     }
@@ -1199,7 +1208,7 @@ pub fn restore_stashed_changes(
             warnings,
         };
     }
-    let reset_warnings = reset_hard(root, &stash.original_head);
+    let reset_warnings = reset_keeping_local_changes(root, &stash.original_head);
     if !reset_warnings.is_empty() {
         critical_ok = false;
     }
@@ -1396,7 +1405,7 @@ pub fn cleanup_failed_merge(root: &Path) -> Vec<String> {
             warnings.push(format!("Failed to abort merge: {}", e));
         }
     } else {
-        warnings.extend(reset_hard(root, "HEAD"));
+        warnings.extend(reset_keeping_local_changes(root, "HEAD"));
     }
     warnings
 }
@@ -1559,5 +1568,99 @@ mod diff_metadata_tests {
             ]
         );
         assert!(diff_for_path(root, Some("unknown-base"), None, 100).is_err());
+    }
+}
+
+#[cfg(test)]
+mod rollback_tests {
+    use super::*;
+
+    fn git(root: &Path, args: &[&str]) -> String {
+        run_git(root, args).unwrap()
+    }
+
+    fn read(root: &Path, name: &str) -> String {
+        std::fs::read_to_string(root.join(name)).unwrap()
+    }
+
+    fn repo_with_conflicting_branch() -> tempfile::TempDir {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        git(root, &["init"]);
+        git(root, &["checkout", "-b", "main"]);
+        git(root, &["config", "core.autocrlf", "false"]);
+        git(root, &["config", "user.email", "rollback@example.test"]);
+        git(root, &["config", "user.name", "Rollback Test"]);
+        for name in ["merged.txt", "clean.txt", "other.txt"] {
+            std::fs::write(root.join(name), "base\n").unwrap();
+        }
+        git(root, &["add", "."]);
+        git(root, &["commit", "-m", "base"]);
+        git(root, &["checkout", "-b", "feature"]);
+        std::fs::write(root.join("merged.txt"), "feature\n").unwrap();
+        std::fs::write(root.join("clean.txt"), "feature\n").unwrap();
+        git(root, &["commit", "-am", "feature"]);
+        git(root, &["checkout", "main"]);
+        std::fs::write(root.join("merged.txt"), "main\n").unwrap();
+        git(root, &["commit", "-am", "main"]);
+        temp
+    }
+
+    #[test]
+    fn failed_squash_cleanup_keeps_edits_the_merge_did_not_touch() {
+        let temp = repo_with_conflicting_branch();
+        let root = temp.path();
+        std::fs::write(root.join("other.txt"), "another chat\n").unwrap();
+        assert!(run_git(root, &["merge", "--squash", "feature"]).is_err());
+        assert!(!has_merge_in_progress(root));
+        assert_eq!(read(root, "clean.txt"), "feature\n");
+
+        assert_eq!(cleanup_failed_merge(root), Vec::<String>::new());
+        assert_eq!(read(root, "other.txt"), "another chat\n");
+        assert_eq!(read(root, "merged.txt"), "main\n");
+        assert_eq!(read(root, "clean.txt"), "base\n");
+        assert_eq!(git(root, &["status", "--porcelain"]).trim(), "M other.txt");
+    }
+
+    #[test]
+    fn failed_squash_cleanup_refuses_to_overwrite_an_edit_on_a_merged_file() {
+        let temp = repo_with_conflicting_branch();
+        let root = temp.path();
+        assert!(run_git(root, &["merge", "--squash", "feature"]).is_err());
+        std::fs::write(root.join("clean.txt"), "another chat\n").unwrap();
+
+        let warnings = cleanup_failed_merge(root);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert_eq!(read(root, "clean.txt"), "another chat\n");
+    }
+
+    #[test]
+    fn undoing_a_merge_commit_keeps_unrelated_edits_and_stops_on_a_collision() {
+        let temp = repo_with_conflicting_branch();
+        let root = temp.path();
+        let before = git(root, &["rev-parse", "HEAD"]).trim().to_string();
+        std::fs::write(root.join("clean.txt"), "merged\n").unwrap();
+        git(root, &["commit", "-am", "merge commit stand-in"]);
+        std::fs::write(root.join("other.txt"), "another chat\n").unwrap();
+
+        assert_eq!(
+            reset_keeping_local_changes(root, &before),
+            Vec::<String>::new()
+        );
+        assert_eq!(git(root, &["rev-parse", "HEAD"]).trim(), before);
+        assert_eq!(read(root, "clean.txt"), "base\n");
+        assert_eq!(read(root, "other.txt"), "another chat\n");
+
+        std::fs::write(root.join("clean.txt"), "merged again\n").unwrap();
+        git(root, &["add", "clean.txt"]);
+        git(root, &["commit", "-m", "second stand-in"]);
+        let merged = git(root, &["rev-parse", "HEAD"]).trim().to_string();
+        std::fs::write(root.join("clean.txt"), "another chat\n").unwrap();
+
+        let warnings = reset_keeping_local_changes(root, &before);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert_eq!(git(root, &["rev-parse", "HEAD"]).trim(), merged);
+        assert_eq!(read(root, "clean.txt"), "another chat\n");
+        assert_eq!(read(root, "other.txt"), "another chat\n");
     }
 }

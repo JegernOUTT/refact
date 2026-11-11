@@ -477,8 +477,18 @@ impl Tool for ToolShell {
         scope_keys.dedup();
         let lease = jobs
             .scopes
-            .acquire(&scope_keys, abort_flag.clone())
-            .map_err(shell_scope_refusal)?;
+            .acquire_wait(&scope_keys, abort_flag.clone())
+            .await
+            .map_err(|error| {
+                if error == crate::tool_jobs::ScopeChangeError::Closed {
+                    jobs.scopes.shutdown_description()
+                } else {
+                    shell_scope_refusal(error)
+                }
+            })?;
+        lease.label(format!(
+            "tool=shell chat={chat_id} job={tool_call_id} monitor"
+        ));
         let scope_guard = Arc::new(ShellScopeGuard(std::sync::Mutex::new(Some(lease))));
         request.execution_guard = Some(scope_guard.clone());
         request = request.with_abort_flag(abort_flag);
@@ -784,6 +794,9 @@ fn shell_scope_refusal(error: crate::tool_jobs::ScopeChangeError) -> String {
         crate::tool_jobs::ScopeChangeError::InvalidKey => {
             "The command was not started: its workspace could not be identified.".to_string()
         }
+        crate::tool_jobs::ScopeChangeError::Cancelled => {
+            "The command was not started: aborted while waiting for tool admission.".to_string()
+        }
     }
 }
 
@@ -814,7 +827,8 @@ async fn apply_shell_privacy(
         derived_zones,
         message,
     )
-    .await?
+    .await
+    .map_err(crate::privacy::records::unstable_context_notice)?
     {
         crate::privacy::records::ShellReadDecision::Pass => Ok(()),
         crate::privacy::records::ShellReadDecision::Ask => Ok(()),

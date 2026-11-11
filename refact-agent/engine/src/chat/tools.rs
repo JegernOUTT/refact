@@ -4410,139 +4410,147 @@ async fn execute_admitted_tool(
     let model_id = model_id.map(str::to_owned);
     let call_for_error = tool_call.clone();
     let runtime = app.runtime.tool_jobs.clone();
+    let admission_abort = ccx.lock().await.abort_flag.clone();
+    let admission_shutdown = app.runtime.shutdown_flag.clone();
     let result = runtime
-        .submit(binding, TOOL_JOB_INLINE_BUDGET, move |cancel| async move {
-            // submit acquires the lifecycle lease before this future is created/polled.
-            let _guards = operation_guards;
-            let frozen = ccx
-                .lock()
-                .await
-                .freeze_tool_job(&tool_call.id, cancel.clone());
-            let frozen = match frozen {
-                Ok(context) => Arc::new(AMutex::new(context)),
-                Err(error) => {
-                    let (_, _, messages, context_files) =
-                        runner_capacity_error(idx, &tool_call, &error);
-                    return (
-                        crate::tool_jobs::JobStatus::Failed,
-                        crate::tool_jobs::JobResult {
-                            had_corrections: false,
-                            messages,
-                            context_files,
-                        },
-                    );
-                }
-            };
-            let (_parallel_guard, _serial_guard) = if allow_parallel {
-                (Some(dispatch_gate.read_owned().await), None)
-            } else {
-                (None, Some(dispatch_gate.write_owned().await))
-            };
-            let (n_ctx, pp, history) = {
-                let context = frozen.lock().await;
-                (
-                    context.n_ctx,
-                    context.postprocess_parameters.clone(),
-                    context.messages.clone(),
-                )
-            };
-            let session = app.chat.sessions.read().await.get(&chat_id).cloned();
-            let bridge = session.map(|session| spawn_subchat_bridge(frozen.clone(), session));
-            let native_fence = frozen.lock().await.native_job_fence.clone();
-            let owner_abort = native_abort.clone().unwrap_or_else(|| cancel.clone());
-            let invocation = execute_single_tool_owned(
-                app.clone(),
-                frozen,
-                idx,
-                tool_call.clone(),
-                catalog,
-                turn_tool_pool,
-                serial_registry,
-                allow_parallel,
-                batch_size,
-                &mode_id,
-                model_id.as_deref(),
-                native_pause,
-                native_abort,
-                expected_execution,
-            );
-            let invocation_result = match native_fence {
-                Some(fence) => {
-                    fence
-                        .run(&cancel, &owner_abort, async { Ok(invocation.await) })
-                        .await
-                }
-                None => Ok(invocation.await),
-            };
-            let (_, corrections, messages, files) = match invocation_result {
-                Ok(result) => result,
-                Err(error) => {
-                    if let Some(bridge) = bridge {
-                        bridge.shutdown().await;
-                    }
-                    let (_, _, messages, context_files) = runner_capacity_error(
-                        idx,
-                        &tool_call,
-                        &format!("{error}; effects unknown, never replay"),
-                    );
-                    return (
-                        crate::tool_jobs::JobStatus::Unknown,
-                        crate::tool_jobs::JobResult {
-                            had_corrections: false,
-                            messages,
-                            context_files,
-                        },
-                    );
-                }
-            };
-            if let Some(bridge) = bridge {
-                bridge.shutdown().await;
-            }
-            let mut exempt = std::collections::HashSet::new();
-            if is_tool_result_truncation_exempt(&tool_call.function.name) {
-                exempt.insert(tool_call.id.clone());
-            }
-            let mut messages = match ToolBudget::try_from_n_ctx(n_ctx) {
-                Ok(budget) => {
-                    crate::file_activity::TOOL_ACTOR
-                        .scope(
-                            chat_id,
-                            postprocess_tool_results(
-                                app.gcx.clone(),
-                                None,
+        .submit_with_abort(
+            binding,
+            TOOL_JOB_INLINE_BUDGET,
+            admission_abort,
+            admission_shutdown,
+            move |cancel| async move {
+                // submit acquires the lifecycle lease before this future is created/polled.
+                let _guards = operation_guards;
+                let frozen = ccx
+                    .lock()
+                    .await
+                    .freeze_tool_job(&tool_call.id, cancel.clone());
+                let frozen = match frozen {
+                    Ok(context) => Arc::new(AMutex::new(context)),
+                    Err(error) => {
+                        let (_, _, messages, context_files) =
+                            runner_capacity_error(idx, &tool_call, &error);
+                        return (
+                            crate::tool_jobs::JobStatus::Failed,
+                            crate::tool_jobs::JobResult {
+                                had_corrections: false,
                                 messages,
-                                files,
-                                budget,
-                                pp,
-                                &history,
-                                &exempt,
-                            ),
-                        )
-                        .await
+                                context_files,
+                            },
+                        );
+                    }
+                };
+                let (_parallel_guard, _serial_guard) = if allow_parallel {
+                    (Some(dispatch_gate.read_owned().await), None)
+                } else {
+                    (None, Some(dispatch_gate.write_owned().await))
+                };
+                let (n_ctx, pp, history) = {
+                    let context = frozen.lock().await;
+                    (
+                        context.n_ctx,
+                        context.postprocess_parameters.clone(),
+                        context.messages.clone(),
+                    )
+                };
+                let session = app.chat.sessions.read().await.get(&chat_id).cloned();
+                let bridge = session.map(|session| spawn_subchat_bridge(frozen.clone(), session));
+                let native_fence = frozen.lock().await.native_job_fence.clone();
+                let owner_abort = native_abort.clone().unwrap_or_else(|| cancel.clone());
+                let invocation = execute_single_tool_owned(
+                    app.clone(),
+                    frozen,
+                    idx,
+                    tool_call.clone(),
+                    catalog,
+                    turn_tool_pool,
+                    serial_registry,
+                    allow_parallel,
+                    batch_size,
+                    &mode_id,
+                    model_id.as_deref(),
+                    native_pause,
+                    native_abort,
+                    expected_execution,
+                );
+                let invocation_result = match native_fence {
+                    Some(fence) => {
+                        fence
+                            .run(&cancel, &owner_abort, async { Ok(invocation.await) })
+                            .await
+                    }
+                    None => Ok(invocation.await),
+                };
+                let (_, corrections, messages, files) = match invocation_result {
+                    Ok(result) => result,
+                    Err(error) => {
+                        if let Some(bridge) = bridge {
+                            bridge.shutdown().await;
+                        }
+                        let (_, _, messages, context_files) = runner_capacity_error(
+                            idx,
+                            &tool_call,
+                            &format!("{error}; effects unknown, never replay"),
+                        );
+                        return (
+                            crate::tool_jobs::JobStatus::Unknown,
+                            crate::tool_jobs::JobResult {
+                                had_corrections: false,
+                                messages,
+                                context_files,
+                            },
+                        );
+                    }
+                };
+                if let Some(bridge) = bridge {
+                    bridge.shutdown().await;
                 }
-                Err(error) => runner_capacity_error(idx, &tool_call, &error).2,
-            };
-            for message in &mut messages {
-                message
-                    .extra
-                    .insert("tool_job_postprocessed".into(), true.into());
-            }
-            let status = if messages.is_empty() || cancel.load(Ordering::Acquire) {
-                crate::tool_jobs::JobStatus::Unknown
-            } else if messages.iter().any(|m| m.tool_failed == Some(true)) {
-                crate::tool_jobs::JobStatus::Failed
-            } else {
-                crate::tool_jobs::JobStatus::Succeeded
-            };
-            (
-                status,
-                crate::tool_jobs::JobResult {
-                    had_corrections: corrections,
-                    messages,
-                    context_files: Vec::new(),
-                },
-            )
-        })
+                let mut exempt = std::collections::HashSet::new();
+                if is_tool_result_truncation_exempt(&tool_call.function.name) {
+                    exempt.insert(tool_call.id.clone());
+                }
+                let mut messages = match ToolBudget::try_from_n_ctx(n_ctx) {
+                    Ok(budget) => {
+                        crate::file_activity::TOOL_ACTOR
+                            .scope(
+                                chat_id,
+                                postprocess_tool_results(
+                                    app.gcx.clone(),
+                                    None,
+                                    messages,
+                                    files,
+                                    budget,
+                                    pp,
+                                    &history,
+                                    &exempt,
+                                ),
+                            )
+                            .await
+                    }
+                    Err(error) => runner_capacity_error(idx, &tool_call, &error).2,
+                };
+                for message in &mut messages {
+                    message
+                        .extra
+                        .insert("tool_job_postprocessed".into(), true.into());
+                }
+                let status = if messages.is_empty() || cancel.load(Ordering::Acquire) {
+                    crate::tool_jobs::JobStatus::Unknown
+                } else if messages.iter().any(|m| m.tool_failed == Some(true)) {
+                    crate::tool_jobs::JobStatus::Failed
+                } else {
+                    crate::tool_jobs::JobStatus::Succeeded
+                };
+                (
+                    status,
+                    crate::tool_jobs::JobResult {
+                        had_corrections: corrections,
+                        messages,
+                        context_files: Vec::new(),
+                    },
+                )
+            },
+        )
         .await;
     match result {
         Ok(crate::tool_jobs::Submission::Inline(result)) => (
@@ -4818,7 +4826,13 @@ async fn execute_single_tool_owned(
         Some(runner) => {
             match runner_capacity_wait(&app, &ccx, &runner, runner.begin_operation()).await {
                 Ok(guard) => Some(guard),
-                Err(error) => return runner_capacity_error(idx, &tool_call, &error),
+                Err(error) => {
+                    return runner_capacity_error(
+                        idx,
+                        &tool_call,
+                        &format!("Execution capacity unavailable: {error}"),
+                    )
+                }
             }
         }
         None => None,
@@ -4882,7 +4896,11 @@ async fn execute_single_tool_owned(
         if let Err(error) =
             runner_capacity_wait(&app, &ccx, &runner, runner.suspend_for_wait()).await
         {
-            return runner_capacity_error(idx, &tool_call, &error);
+            return runner_capacity_error(
+                idx,
+                &tool_call,
+                &format!("Execution capacity unavailable: {error}"),
+            );
         }
     }
     if let ControlVerdict::Deny(reason) = post_verdict {
@@ -5007,7 +5025,7 @@ fn runner_capacity_error(
         vec![ChatMessage {
             message_id: Uuid::new_v4().to_string(),
             role: "tool".into(),
-            content: ChatContent::SimpleText(format!("Execution capacity unavailable: {error}")),
+            content: ChatContent::SimpleText(format!("Tool call failed: {error}")),
             tool_call_id: call.id.clone(),
             tool_failed: Some(true),
             ..Default::default()

@@ -778,7 +778,8 @@ async fn open_session_owned(
         Err(error) => {
             warn!(%chat_id, ?error, "session open refused by job lifecycle barrier");
             Err(match error {
-                crate::tool_jobs::ScopeChangeError::Busy => SessionOpenError::Busy,
+                crate::tool_jobs::ScopeChangeError::Busy
+                | crate::tool_jobs::ScopeChangeError::Cancelled => SessionOpenError::Busy,
                 crate::tool_jobs::ScopeChangeError::Closed => SessionOpenError::Closed,
                 crate::tool_jobs::ScopeChangeError::InvalidKey => {
                     SessionOpenError::failed(chat_id, "invalid chat identity")
@@ -1360,8 +1361,29 @@ pub async fn close_all_chat_sessions(
     // Stop admission globally before taking a session snapshot. Drain without
     // holding session or map locks, since in-flight jobs may need either.
     app.runtime.tool_jobs.scopes.begin_shutdown();
-    app.chat.sessions.2.shutdown(RESTORE_SHUTDOWN_BOUND).await;
-    if let Err(error) = app.runtime.review_readiness.shutdown().await {
+    let restores = app.chat.sessions.2.shutdown(RESTORE_SHUTDOWN_BOUND);
+    tokio::pin!(restores);
+    loop {
+        tokio::select! {
+            _ = &mut restores => break,
+            _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {
+                warn!("shutdown waiting for restored chat initialisation");
+                app.runtime.tool_jobs.scopes.log_blockers(None, "shutdown restores");
+            }
+        }
+    }
+    let readiness = app.runtime.review_readiness.shutdown();
+    tokio::pin!(readiness);
+    let readiness = loop {
+        tokio::select! {
+            result = &mut readiness => break result,
+            _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {
+                warn!("shutdown waiting for review readiness owners");
+                app.runtime.tool_jobs.scopes.log_blockers(None, "shutdown readiness");
+            }
+        }
+    };
+    if let Err(error) = readiness {
         warn!(%error, "close_all_chat_sessions: readiness shutdown unresolved");
         return Err(crate::tool_jobs::ScopeChangeError::Busy);
     }

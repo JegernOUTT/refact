@@ -77,7 +77,9 @@ impl WorktreeService {
             .await
             .map_err(|e| e.to_string())??;
         let service = if let Some(token) = &self.effect_token {
-            if !token.records.contains(&record.meta) {
+            if !token.records.contains(&record.meta)
+                || !token.fenced_roots.contains(&record.meta.root)
+            {
                 return Err("Existing effect token does not cover sync source identity".into());
             }
             self.clone()
@@ -89,11 +91,9 @@ impl WorktreeService {
                 .effect_fence
                 .as_ref()
                 .ok_or("Sync mutation requires an application effect coordinator")?;
+            let roots = vec![record.meta.root.clone()];
             let guard = fence
-                .begin(
-                    self.source_workspace_root.clone(),
-                    vec![record.meta.root.clone()],
-                )
+                .begin(self.source_workspace_root.clone(), roots.clone())
                 .await?;
             Self {
                 effect_token: Some(Arc::new(EffectToken {
@@ -104,6 +104,7 @@ impl WorktreeService {
                     target: None,
                     target_materialized: Arc::new(AtomicBool::new(false)),
                     legacy_removed: Arc::new(AtomicBool::new(false)),
+                    fenced_roots: roots,
                     _guard: guard,
                 })),
                 ..self.clone()

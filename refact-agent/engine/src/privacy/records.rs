@@ -7,6 +7,7 @@ use refact_privacy::{
     Attribution, Destination, DestinationId, DestinationKind, FileRecord, PrivacyRecord,
     ShellBehavior,
 };
+use refact_privacy::gate::PRIVACY_CONTEXT_CHANGED;
 use refact_exec::ObservationStatus;
 use refact_chat_api::{
     ToolEnrichment, ToolEnrichmentKind, ToolEnrichmentProvenance, ToolEnrichmentReference,
@@ -37,6 +38,42 @@ pub struct DerivedZone {
 }
 
 pub type DerivedPrivacyZones = Arc<RwLock<HashMap<PathBuf, DerivedZone>>>;
+
+const STABLE_CONTEXT_ATTEMPTS: usize = 8;
+
+fn with_stable_context<T>(mut attempt: impl FnMut() -> Result<T, String>) -> Result<T, String> {
+    let mut remaining = STABLE_CONTEXT_ATTEMPTS;
+    loop {
+        match attempt() {
+            Err(error) if error == PRIVACY_CONTEXT_CHANGED && remaining > 1 => {
+                remaining -= 1;
+                std::thread::yield_now();
+            }
+            result => return result,
+        }
+    }
+}
+
+fn with_stable_paths<T>(
+    paths: impl IntoIterator<Item = PathBuf>,
+    mut attempt: impl FnMut(&mut dyn Iterator<Item = PathBuf>) -> Result<T, String>,
+) -> Result<T, String> {
+    let mut pending = paths.into_iter();
+    let mut seen: Vec<PathBuf> = Vec::new();
+    with_stable_context(|| {
+        let replay = seen.clone();
+        let fresh = pending.by_ref().inspect(|path| seen.push(path.clone()));
+        attempt(&mut replay.into_iter().chain(fresh))
+    })
+}
+
+pub fn unstable_context_notice(error: String) -> String {
+    if error == PRIVACY_CONTEXT_CHANGED {
+        "Output withheld by user privacy policy — privacy context kept changing, so verification could not complete. The command already ran; read its output again once worktree operations settle instead of re-running it.".to_string()
+    } else {
+        error
+    }
+}
 
 pub fn new_derived_privacy_zones() -> DerivedPrivacyZones {
     Arc::new(RwLock::new(HashMap::new()))
@@ -134,11 +171,12 @@ pub(crate) async fn filter_path_enrichment_for_model_context(
     let mut metadata = collected.metadata;
     let mut references = Vec::new();
     let mut seen = HashSet::new();
-    let compiled_policy = {
-        let policy = gcx.privacy_policy_load.read().unwrap().policy.clone();
-        policy.compile().ok()
-    };
-    let worktree_mappings = registered_worktree_path_mappings(gcx.cache_dir.as_path());
+    let snapshot = with_stable_context(|| super::classification_cache::snapshot(&gcx)).ok();
+    let compiled_policy = snapshot.as_ref().map(|snapshot| snapshot.compiled.clone());
+    let worktree_mappings = snapshot
+        .as_ref()
+        .map(|snapshot| snapshot.mappings.clone())
+        .unwrap_or_else(|| registered_worktree_path_mappings(gcx.cache_dir.as_path()));
     for candidate in collected.candidates {
         if check_file_privacy_for_model_context(gcx.clone(), &candidate.canonical_path)
             .await
@@ -506,7 +544,7 @@ pub async fn apply_shell_observation(
             classify_observed_access(gcx, &policy, access, derived_zones).await?
         }
         ObservationStatus::Unavailable(reason) => {
-            let snapshot = super::classification_cache::snapshot(gcx)?;
+            let snapshot = with_stable_context(|| super::classification_cache::snapshot(gcx))?;
             let compiled = &snapshot.compiled;
             let heuristic =
                 crate::privacy::heuristic::attribute_shell_command(command, cwd, &compiled);
@@ -526,7 +564,7 @@ pub async fn apply_shell_observation(
     };
     merge_records(message, records.clone());
 
-    let current = super::classification_cache::snapshot(gcx)?;
+    let current = with_stable_context(|| super::classification_cache::snapshot(gcx))?;
     let offending: Vec<(&FileRecord, ShellBehavior)> = records
         .iter()
         .filter_map(|record| {
@@ -881,20 +919,22 @@ fn file_record(
     attribution: Attribution,
     derived_zones: &DerivedPrivacyZones,
 ) -> Result<FileRecord, String> {
-    let snapshot = super::classification_cache::snapshot(gcx)?;
-    let classified = snapshot.classify(gcx, path);
-    let record = FileRecord {
-        path: refact_core::chat_types::normalize_file_name(path.to_string_lossy().into_owned()),
-        zone: finish_record_zone(
-            &snapshot.compiled,
-            &classified.candidates,
-            classified.zone,
-            derived_zones,
-        ),
-        attribution,
-    };
-    snapshot.finish(gcx)?;
-    Ok(record)
+    with_stable_context(|| {
+        let snapshot = super::classification_cache::snapshot(gcx)?;
+        let classified = snapshot.classify(gcx, path);
+        let record = FileRecord {
+            path: refact_core::chat_types::normalize_file_name(path.to_string_lossy().into_owned()),
+            zone: finish_record_zone(
+                &snapshot.compiled,
+                &classified.candidates,
+                classified.zone,
+                derived_zones,
+            ),
+            attribution: attribution.clone(),
+        };
+        snapshot.finish(gcx)?;
+        Ok(record)
+    })
 }
 
 pub fn declared_file_record(gcx: &Arc<GlobalContext>, path: &Path) -> Result<FileRecord, String> {
@@ -957,10 +997,12 @@ pub fn declared_file_records(
     gcx: &Arc<GlobalContext>,
     paths: impl IntoIterator<Item = PathBuf>,
 ) -> Result<Vec<FileRecord>, String> {
-    let mut batch = BatchDeclaredRecords::new(gcx)?;
-    let records = batch.classify_declared_paths(gcx, paths);
-    batch.finish(gcx)?;
-    Ok(records)
+    with_stable_paths(paths, |paths| {
+        let mut batch = BatchDeclaredRecords::new(gcx)?;
+        let records = batch.classify_declared_paths(gcx, paths);
+        batch.finish(gcx)?;
+        Ok(records)
+    })
 }
 
 /// Private request-local configuration, not a permission or topology cache.
@@ -1084,27 +1126,31 @@ fn observed_file_records_with_derived(
     paths: impl IntoIterator<Item = PathBuf>,
     derived_zones: &DerivedPrivacyZones,
 ) -> Result<Vec<FileRecord>, String> {
-    let snapshot = super::classification_cache::snapshot(gcx)?;
-    let mut records = Vec::new();
-    let mut seen = HashSet::new();
-    for path in paths {
-        let classified = snapshot.classify(gcx, &path);
-        let record = FileRecord {
-            path: refact_core::chat_types::normalize_file_name(path.to_string_lossy().into_owned()),
-            zone: finish_record_zone(
-                &snapshot.compiled,
-                &classified.candidates,
-                classified.zone,
-                derived_zones,
-            ),
-            attribution: Attribution::Observed,
-        };
-        if seen.insert(record.clone()) {
-            records.push(record);
+    with_stable_paths(paths, |paths| {
+        let snapshot = super::classification_cache::snapshot(gcx)?;
+        let mut records = Vec::new();
+        let mut seen = HashSet::new();
+        for path in paths {
+            let classified = snapshot.classify(gcx, &path);
+            let record = FileRecord {
+                path: refact_core::chat_types::normalize_file_name(
+                    path.to_string_lossy().into_owned(),
+                ),
+                zone: finish_record_zone(
+                    &snapshot.compiled,
+                    &classified.candidates,
+                    classified.zone,
+                    derived_zones,
+                ),
+                attribution: Attribution::Observed,
+            };
+            if seen.insert(record.clone()) {
+                records.push(record);
+            }
         }
-    }
-    snapshot.finish(gcx)?;
-    Ok(records)
+        snapshot.finish(gcx)?;
+        Ok(records)
+    })
 }
 
 fn is_taintable_write_target(path: &Path) -> bool {
@@ -1139,7 +1185,7 @@ fn inherit_observed_write_zones(
     writes: impl IntoIterator<Item = PathBuf>,
     derived_zones: &DerivedPrivacyZones,
 ) -> Result<(), String> {
-    let snapshot = super::classification_cache::snapshot(gcx)?;
+    let snapshot = with_stable_context(|| super::classification_cache::snapshot(gcx))?;
     let compiled = &snapshot.compiled;
     let Some(zone_name) = strictest_named_zone(
         &compiled,
@@ -1597,8 +1643,63 @@ mod tests {
         assert_eq!(std::fs::read_link(&root).unwrap(), first);
     }
 
+    #[test]
+    fn stable_context_retries_only_context_churn_and_gives_up_deterministically() {
+        let mut calls = 0;
+        let recovered = with_stable_context(|| {
+            calls += 1;
+            if calls < 3 {
+                Err(PRIVACY_CONTEXT_CHANGED.to_string())
+            } else {
+                Ok(calls)
+            }
+        });
+        assert_eq!(recovered, Ok(3));
+
+        let mut calls = 0;
+        let exhausted: Result<(), String> = with_stable_context(|| {
+            calls += 1;
+            Err(PRIVACY_CONTEXT_CHANGED.to_string())
+        });
+        assert_eq!(exhausted.unwrap_err(), PRIVACY_CONTEXT_CHANGED);
+        assert_eq!(calls, STABLE_CONTEXT_ATTEMPTS);
+
+        let mut calls = 0;
+        let other: Result<(), String> = with_stable_context(|| {
+            calls += 1;
+            Err("privacy policy unavailable".to_string())
+        });
+        assert_eq!(other.unwrap_err(), "privacy policy unavailable");
+        assert_eq!(calls, 1);
+    }
+
+    #[test]
+    fn stable_paths_replays_lazy_input_without_producing_it_twice() {
+        let mut produced = 0;
+        let paths = (0..3).map(|index| {
+            produced += 1;
+            PathBuf::from(format!("path-{index}"))
+        });
+        let mut attempts = 0;
+        let collected = with_stable_paths(paths, |paths| {
+            attempts += 1;
+            if attempts == 1 {
+                assert_eq!(paths.next(), Some(PathBuf::from("path-0")));
+                return Err(PRIVACY_CONTEXT_CHANGED.to_string());
+            }
+            Ok(paths.collect::<Vec<_>>())
+        })
+        .unwrap();
+        assert_eq!(attempts, 2);
+        assert_eq!(
+            collected,
+            ["path-0", "path-1", "path-2"].map(PathBuf::from).to_vec()
+        );
+        assert_eq!(produced, 3);
+    }
+
     #[tokio::test]
-    async fn declared_batch_rejects_workspace_roots_changed_by_lazy_input() {
+    async fn declared_batch_reclassifies_when_lazy_input_changes_workspace_roots() {
         let temp = tempfile::tempdir().unwrap();
         let first = temp.path().join("first");
         let second = temp.path().join("second");
@@ -1615,10 +1716,9 @@ mod tests {
             secret
         });
 
-        assert_eq!(
-            declared_file_records(&gcx, paths).unwrap_err(),
-            "privacy context changed"
-        );
+        let records = declared_file_records(&gcx, paths).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].zone, "blocked");
     }
 
     #[tokio::test]

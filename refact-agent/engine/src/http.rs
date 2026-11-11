@@ -281,10 +281,14 @@ pub async fn start_server(
                             error!("graceful shutdown trajectory flush failed: {}", error);
                         }
                     }
+                    app.runtime
+                        .tool_jobs
+                        .scopes
+                        .begin_shutdown_requested("signal");
                     if let Err(error) = crate::chat::close_all_chat_sessions(app).await {
                         error!(
                             ?error,
-                            "graceful shutdown blocked: job effects remain unresolved"
+                            "graceful shutdown blocked: job effects remain unresolved; tool admission is closed, restart the engine"
                         );
                         // The graceful-shutdown future must not resolve as if all
                         // effects had stopped. The process can still be forced to

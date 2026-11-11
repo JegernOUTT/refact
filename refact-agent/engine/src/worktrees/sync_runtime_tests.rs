@@ -319,7 +319,7 @@ async fn http_sync_drains_source_jobs_but_status_does_not_cancel() {
     ));
     assert!(matches!(
         scopes.acquire(&[key], cancel),
-        Err(ScopeChangeError::Closed)
+        Err(ScopeChangeError::Busy)
     ));
     lease.settle();
     assert_eq!(starting.await.unwrap()["status"], "conflicts");

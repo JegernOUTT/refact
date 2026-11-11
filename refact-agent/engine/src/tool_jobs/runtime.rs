@@ -434,7 +434,31 @@ impl JobRuntime {
             .unwrap_or(Some(budget));
         #[cfg(not(test))]
         let budget = Some(budget);
-        self.submit_owned(binding, budget, false, make).await
+        self.submit_owned(binding, budget, false, None, make).await
+    }
+
+    pub(crate) async fn submit_with_abort<F, Make>(
+        self: &Arc<Self>,
+        binding: JobBinding,
+        budget: Duration,
+        abort: Arc<AtomicBool>,
+        shutdown: Arc<AtomicBool>,
+        make: Make,
+    ) -> Result<Submission, String>
+    where
+        F: Future<Output = (JobStatus, JobResult)> + Send + 'static,
+        Make: FnOnce(Arc<AtomicBool>) -> F,
+    {
+        #[cfg(test)]
+        let budget = self
+            .test_inline_budget
+            .lock()
+            .unwrap()
+            .unwrap_or(Some(budget));
+        #[cfg(not(test))]
+        let budget = Some(budget);
+        self.submit_owned(binding, budget, false, Some((abort, shutdown)), make)
+            .await
     }
 
     pub(crate) async fn submit_background<F, Make>(
@@ -446,7 +470,7 @@ impl JobRuntime {
         F: Future<Output = (JobStatus, JobResult)> + Send + 'static,
         Make: FnOnce(Arc<AtomicBool>) -> F,
     {
-        match self.submit_owned(binding, None, false, make).await? {
+        match self.submit_owned(binding, None, false, None, make).await? {
             Submission::Accepted(receipt) => Ok(receipt),
             Submission::Inline(_) => unreachable!("background submission never claims inline"),
         }
@@ -461,7 +485,7 @@ impl JobRuntime {
         F: Future<Output = (JobStatus, JobResult)> + Send + 'static,
         Make: FnOnce(Arc<AtomicBool>) -> F,
     {
-        match self.submit_owned(binding, None, true, make).await? {
+        match self.submit_owned(binding, None, true, None, make).await? {
             Submission::Accepted(receipt) => Ok(receipt),
             Submission::Inline(_) => unreachable!(),
         }
@@ -486,11 +510,38 @@ impl JobRuntime {
         self.ack_delivered(chat_id, job_id, revision).await
     }
 
+    fn check_admission_abort(
+        &self,
+        abort: Option<&(Arc<AtomicBool>, Arc<AtomicBool>)>,
+    ) -> Result<(), String> {
+        if let Some((abort, shutdown)) = abort {
+            if self.scopes.is_shutdown() {
+                return Err(self.scopes.shutdown_description());
+            }
+            if shutdown.load(Ordering::Relaxed) {
+                return Err("Engine shutdown requested; tool calls are refused. Restart the engine if it does not exit".into());
+            }
+            if abort.load(Ordering::Relaxed) {
+                return Err("Aborted while waiting for tool admission".into());
+            }
+        }
+        Ok(())
+    }
+
+    fn scope_error(&self, error: super::scope::ScopeChangeError) -> String {
+        if error == super::scope::ScopeChangeError::Closed {
+            self.scopes.shutdown_description()
+        } else {
+            format!("Tool execution scope unavailable: {error}")
+        }
+    }
+
     async fn submit_owned<F, Make>(
         self: &Arc<Self>,
         binding: JobBinding,
         budget: Option<Duration>,
         internal_readiness: bool,
+        abort: Option<(Arc<AtomicBool>, Arc<AtomicBool>)>,
         make: Make,
     ) -> Result<Submission, String>
     where
@@ -514,9 +565,21 @@ impl JobRuntime {
         };
         let cancel = Arc::new(AtomicBool::new(false));
         let (tx, mut rx) = oneshot::channel();
-        let transition = self.transition.lock().await;
-        let lease;
-        {
+        let (transition, lease) = loop {
+            let waiting = self.scopes.wait_open(&receipt.binding.scope_keys);
+            tokio::pin!(waiting);
+            loop {
+                self.check_admission_abort(abort.as_ref())?;
+                tokio::select! {
+                    result = &mut waiting => {
+                        result.map_err(|error| self.scope_error(error))?;
+                        break;
+                    },
+                    _ = tokio::time::sleep(refact_work_core::coordination_settings().lock_poll_interval()) => {}
+                }
+            }
+            let transition = self.transition.lock().await;
+            self.check_admission_abort(abort.as_ref())?;
             let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
             if state.closed {
                 return Err("tool job runtime is shut down".into());
@@ -526,10 +589,18 @@ impl JobRuntime {
                     "tool invocation already owned; inspect existing result, do not replay".into(),
                 );
             }
-            lease = self
+            let lease = match self
                 .scopes
                 .acquire(&receipt.binding.scope_keys, cancel.clone())
-                .map_err(|error| format!("tool job scope unavailable: {error:?}"))?;
+            {
+                Ok(lease) => lease,
+                Err(super::scope::ScopeChangeError::Busy) => continue,
+                Err(error) => return Err(self.scope_error(error)),
+            };
+            lease.label(format!(
+                "tool={} chat={} job={}",
+                receipt.binding.tool_name, receipt.binding.chat_id, job_id
+            ));
             state.invocation_ids.insert(invocation_id, job_id.clone());
             state.records.insert(
                 job_id.clone(),
@@ -553,7 +624,8 @@ impl JobRuntime {
                     claiming: true,
                 },
             );
-        }
+            break (transition, lease);
+        };
         {
             let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
             let runtime = Arc::downgrade(self);
@@ -762,9 +834,16 @@ impl JobRuntime {
             self.bridge_shutdown.store(true, Ordering::Release);
             bridge.take()
         };
-        if let Some((stop, task)) = bridge {
+        if let Some((stop, mut task)) = bridge {
             let _ = stop.send(true);
-            let _ = task.await;
+            loop {
+                tokio::select! {
+                    _ = &mut task => break,
+                    _ = tokio::time::sleep(Duration::from_secs(5)) => {
+                        self.scopes.log_blockers(None, "shutdown completion bridge");
+                    }
+                }
+            }
         }
         let transition = self.transition.lock().await;
         self.scopes.begin_shutdown();
@@ -783,8 +862,15 @@ impl JobRuntime {
         drop(transition);
         // Cooperative cancellation only: joining retains spawn_blocking/owned
         // effect lifetimes. Abort is not proof that their side effects ceased.
-        for task in tasks {
-            let _ = task.await;
+        for mut task in tasks {
+            loop {
+                tokio::select! {
+                    _ = &mut task => break,
+                    _ = tokio::time::sleep(Duration::from_secs(5)) => {
+                        self.scopes.log_blockers(None, "shutdown tool jobs");
+                    }
+                }
+            }
         }
         let _ = self.scopes.drain_shutdown().await;
     }
@@ -835,6 +921,151 @@ mod tests {
             messages: vec![ChatMessage::new("tool".into(), "plain, not JSON".into())],
             context_files: vec![],
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn aborted_turn_waiter_never_constructs_execution() {
+        let runtime = JobRuntime::new(4, 65536);
+        let binding = binding();
+        let _guard = runtime
+            .scopes
+            .begin_scope_change(&binding.scope_keys)
+            .await
+            .unwrap();
+        let abort = Arc::new(AtomicBool::new(false));
+        let mut pending = Box::pin(runtime.submit_with_abort(
+            binding,
+            Duration::ZERO,
+            abort.clone(),
+            Arc::new(AtomicBool::new(false)),
+            |_| async {
+                panic!("aborted admission must not execute");
+            },
+        ));
+        assert!(futures::poll!(&mut pending).is_pending());
+        abort.store(true, Ordering::Release);
+        assert!(pending
+            .await
+            .err()
+            .unwrap()
+            .contains("Aborted while waiting for tool admission"));
+        assert!(runtime.state.lock().unwrap().records.is_empty());
+        assert!(runtime.state.lock().unwrap().invocation_ids.is_empty());
+    }
+
+    #[tokio::test]
+    async fn abort_after_admission_returns_owned_inline_result_only() {
+        let runtime = JobRuntime::new(4, 65536);
+        runtime.set_test_inline_budget(Some(Duration::from_secs(3600)));
+        let abort = Arc::new(AtomicBool::new(false));
+        let (release, released) = oneshot::channel();
+        let mut pending = Box::pin(runtime.submit_with_abort(
+            binding(),
+            Duration::ZERO,
+            abort.clone(),
+            Arc::new(AtomicBool::new(false)),
+            |_| async move {
+                released.await.unwrap();
+                (JobStatus::Succeeded, result())
+            },
+        ));
+        assert!(futures::poll!(&mut pending).is_pending());
+        assert_eq!(runtime.state.lock().unwrap().records.len(), 1);
+        abort.store(true, Ordering::Release);
+        release.send(()).unwrap();
+        assert!(matches!(pending.await.unwrap(), Submission::Inline(_)));
+        assert!(runtime
+            .state
+            .lock()
+            .unwrap()
+            .records
+            .values()
+            .all(|record| record.consumed));
+        assert!(runtime.background_terminal_refs().is_empty());
+    }
+
+    #[tokio::test]
+    async fn fence_cancellation_unwinds_nested_admission_without_deadlock() {
+        let runtime = JobRuntime::new(4, 65536);
+        let (enter, entered) = oneshot::channel();
+        let nested_runtime = runtime.clone();
+        let outer = runtime
+            .submit_background(binding(), move |outer_cancel| async move {
+                entered.await.unwrap();
+                let mut nested_binding = binding();
+                nested_binding.tool_call_id = "nested".into();
+                let nested = nested_runtime
+                    .submit_with_abort(
+                        nested_binding,
+                        Duration::ZERO,
+                        outer_cancel,
+                        Arc::new(AtomicBool::new(false)),
+                        |_| async {
+                            panic!("cancelled nested admission must not execute");
+                        },
+                    )
+                    .await;
+                assert!(nested
+                    .err()
+                    .unwrap()
+                    .contains("Aborted while waiting for tool admission"));
+                (JobStatus::Cancelled, result())
+            })
+            .await
+            .unwrap();
+        let keys = binding().scope_keys;
+        let mut fence = Box::pin(runtime.scopes.begin_scope_change(&keys));
+        assert!(futures::poll!(&mut fence).is_pending());
+        enter.send(()).unwrap();
+        let guard = fence.await.unwrap();
+        runtime.wait_terminal("chat", &outer.job_id).await.unwrap();
+        assert_eq!(runtime.state.lock().unwrap().records.len(), 1);
+        drop(guard);
+    }
+
+    #[tokio::test]
+    async fn fenced_duplicate_submissions_execute_once_and_drop_leaves_no_record() {
+        let runtime = JobRuntime::new(4, 65536);
+        let binding = binding();
+        let guard = runtime
+            .scopes
+            .begin_scope_change(&binding.scope_keys)
+            .await
+            .unwrap();
+        let runs = Arc::new(AtomicUsize::new(0));
+        let first_runs = runs.clone();
+        let mut first = Box::pin(
+            runtime.submit_background(binding.clone(), move |_| async move {
+                first_runs.fetch_add(1, Ordering::SeqCst);
+                (JobStatus::Succeeded, result())
+            }),
+        );
+        let second_runs = runs.clone();
+        let mut second = Box::pin(runtime.submit_background(
+            binding.clone(),
+            move |_| async move {
+                second_runs.fetch_add(1, Ordering::SeqCst);
+                (JobStatus::Succeeded, result())
+            },
+        ));
+        let mut dropped = Box::pin(runtime.submit_background(binding.clone(), |_| async {
+            panic!("dropped waiter must never execute");
+        }));
+        assert!(futures::poll!(&mut first).is_pending());
+        assert!(futures::poll!(&mut second).is_pending());
+        assert!(futures::poll!(&mut dropped).is_pending());
+        drop(dropped);
+        assert!(runtime.state.lock().unwrap().records.is_empty());
+        assert!(runtime.state.lock().unwrap().invocation_ids.is_empty());
+        drop(guard);
+        let receipt = first.await.unwrap();
+        assert!(second.await.unwrap_err().contains("already owned"));
+        runtime
+            .wait_terminal("chat", &receipt.job_id)
+            .await
+            .unwrap();
+        assert_eq!(runs.load(Ordering::SeqCst), 1);
+        assert_eq!(runtime.state.lock().unwrap().records.len(), 1);
     }
 
     #[tokio::test]

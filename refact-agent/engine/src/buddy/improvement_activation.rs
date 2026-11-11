@@ -154,11 +154,17 @@ impl LandingAdapter {
         }
         let authority = LandingAuthority::capture(self, spec, draft, context, recovery).await?;
         authority.validate().await.map_err(store_error)?;
-        let service = self
-            .worktrees
-            .fence_merge_worktree(&draft.worktree_id, Some(&draft.exact.target_branch))
-            .await
-            .map_err(store_error)?;
+        let target = Some(draft.exact.target_branch.as_str());
+        let service = if recovery.is_some() {
+            self.worktrees
+                .fence_recovery_worktree(&draft.worktree_id, target)
+                .await
+        } else {
+            self.worktrees
+                .fence_merge_worktree(&draft.worktree_id, target)
+                .await
+        }
+        .map_err(store_error)?;
         let service = service.acquire_merge_permit().await.map_err(store_error)?;
         let service = service
             .for_merge_target(&draft.exact.target_branch)
