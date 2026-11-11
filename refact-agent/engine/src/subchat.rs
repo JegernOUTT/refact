@@ -35,6 +35,8 @@ use crate::worktrees::service::WorktreeService;
 use crate::worktrees::types::WorktreeReference;
 use refact_privacy::{Destination, DestinationId, DestinationKind, PrivacyAuditError, PrivacyAudited};
 
+pub(crate) mod background_budget;
+
 const MAX_CONTEXT_LIMIT_COMPACT_ATTEMPTS: usize = 1;
 const MAX_EMPTY_CHOICE_RETRIES: usize = 2;
 const OUTPUT_LIMIT_ERROR_PREFIX: &str = "output limit reached with no visible content";
@@ -2341,6 +2343,47 @@ pub async fn run_subchat(
 pub(crate) async fn run_subchat_with_lease(
     gcx: Arc<GlobalContext>,
     messages: Vec<ChatMessage>,
+    config: SubchatConfig,
+    runner_guard: Option<RunnerLeaseGuard>,
+) -> Result<SubchatResult, String> {
+    let scope = match background_budget::producer_for(&config.tool_name, config.buddy_meta.as_ref())
+    {
+        Some(producer) => {
+            let root = config
+                .worktree
+                .as_ref()
+                .map(|worktree| worktree.source_workspace_root.clone())
+                .or_else(|| {
+                    gcx.documents_state
+                        .workspace_folders
+                        .lock()
+                        .unwrap()
+                        .first()
+                        .cloned()
+                });
+            let Some(root) = root else {
+                return Err(format!(
+                    "{}: no trusted workspace root for automatic producer {producer} (invalid request, not retried)",
+                    background_budget::BUDGET_ERROR_PREFIX
+                ));
+            };
+            Some(background_budget::BackgroundScope {
+                producer,
+                workspace_root: background_budget::canonical_root(root).await?,
+            })
+        }
+        None => None,
+    };
+    background_budget::with_scope(
+        scope,
+        run_subchat_with_lease_scoped(gcx, messages, config, runner_guard),
+    )
+    .await
+}
+
+async fn run_subchat_with_lease_scoped(
+    gcx: Arc<GlobalContext>,
+    messages: Vec<ChatMessage>,
     mut config: SubchatConfig,
     mut runner_guard: Option<RunnerLeaseGuard>,
 ) -> Result<SubchatResult, String> {
@@ -4216,6 +4259,7 @@ pub(crate) async fn subchat_stream(
     let model_rec = resolve_chat_model(caps, model_id)?;
 
     let tokenizer_arc = crate::tokens::cached_tokenizer(gcx.clone(), &model_rec.base).await?;
+    let budget_tokenizer = tokenizer_arc.clone();
     let t = HasTokenizerAndEot::new(tokenizer_arc);
 
     let capped_n_ctx = if model_rec.base.n_ctx > 0 {
@@ -4375,9 +4419,7 @@ pub(crate) async fn subchat_stream(
             policy = overrides.resolve(policy)?;
         }
     }
-    if !allow_provider_retries || policy.mode == refact_core::recovery::RecoveryMode::Off {
-        policy.max_retries = 0;
-    }
+    background_budget::apply_recovery_policy(&mut policy, allow_provider_retries);
     let recovery_budget = Arc::new(refact_core::recovery::RecoveryBudget::new(policy));
     let mut attempt = 0usize;
     let mut last_retry_reason: Option<String> = None;
@@ -4407,6 +4449,21 @@ pub(crate) async fn subchat_stream(
         let call_ts_start = chrono::Utc::now().to_rfc3339();
         let call_start = std::time::Instant::now();
         let sends_before_attempt = recovery_budget.sends_used();
+        let budget_reservation = match background_budget::current_scope() {
+            Some(scope) => {
+                let input = background_budget::estimate_request_input_tokens(
+                    &budget_tokenizer,
+                    &llm_request,
+                );
+                let envelope = background_budget::check_envelope(
+                    input,
+                    llm_request.params.max_tokens.max(max_new_tokens),
+                    capped_n_ctx,
+                )?;
+                Some(background_budget::reserve(&scope, envelope).await?)
+            }
+            None => None,
+        };
         let stream_result = async {
             run_llm_stream(
                 AppState::from_gcx(gcx.clone()).await,
@@ -4437,6 +4494,18 @@ pub(crate) async fn subchat_stream(
         };
         let duration_ms = call_start.elapsed().as_millis() as u64;
         let call_ts_end = chrono::Utc::now().to_rfc3339();
+        if let Some(reservation) = budget_reservation {
+            let actual = attempt_result
+                .as_ref()
+                .ok()
+                .and_then(|choices| choices.first())
+                .and_then(|choice| choice.usage.clone());
+            let extra_sends = recovery_budget
+                .sends_used()
+                .saturating_sub(sends_before_attempt)
+                .saturating_sub(1) as u64;
+            background_budget::settle(reservation, actual, extra_sends).await;
+        }
 
         let (provider, model_short) = split_model_provider(model_id);
         let mut monitor_error: Option<String> = None;
@@ -4595,6 +4664,7 @@ pub(crate) async fn subchat_stream(
                         add_subchat_usage(&mut discarded_usage, usage);
                     }
                     if allow_provider_retries
+                        && background_budget::current_scope().is_none()
                         && semantic_retries < MAX_EMPTY_CHOICE_RETRIES
                         && !abort_flag.load(Ordering::Relaxed)
                     {

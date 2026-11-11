@@ -77,6 +77,8 @@ pub struct AutonomousBuddyChatSpec {
     /// records; the model's prose never replaces them.
     pub(crate) source_check: Option<crate::buddy::workflow_deliverables::SourceCheck>,
     pub(crate) memory_operation_evidence: Vec<refact_buddy_core::operator_types::EvidenceRef>,
+    memory_operation_remaining: usize,
+    memory_operation_invalid: usize,
     pub(crate) candidate_binding:
         Option<crate::buddy::workflow_deliverables::NativeCandidateBinding>,
 }
@@ -106,6 +108,8 @@ impl AutonomousBuddyChatSpec {
             priority: "normal".to_string(),
             source_check: None,
             memory_operation_evidence: Vec::new(),
+            memory_operation_remaining: 0,
+            memory_operation_invalid: 0,
             candidate_binding: None,
         }
     }
@@ -2327,9 +2331,12 @@ pub fn sum_llm_usage(messages: &[ChatMessage]) -> (u64, u64, u64) {
         if msg.role != "assistant" {
             continue;
         }
-        llm_calls += 1;
         if let Some(usage) = &msg.usage {
-            tokens_in = tokens_in.saturating_add(usage.prompt_tokens as u64);
+            llm_calls += 1;
+            tokens_in = tokens_in
+                .saturating_add(usage.prompt_tokens as u64)
+                .saturating_add(usage.cache_creation_tokens.unwrap_or(0) as u64)
+                .saturating_add(usage.cache_read_tokens.unwrap_or(0) as u64);
             tokens_out = tokens_out.saturating_add(usage.completion_tokens as u64);
         }
     }
@@ -2530,7 +2537,7 @@ fn autonomous_outcome_start(
 ) -> crate::buddy::outcome_runtime::WorkflowOutcomeStart {
     let mut start = runtime.start_workflow(&spec.workflow_id, started_at.to_string());
     start.run_id = run_chat_id.to_string();
-    start.input_fingerprint = spec.signal_hash.clone();
+    start.input_fingerprint = autonomous_input_fingerprint(spec);
     start.coverage = match spec.source_check.as_ref() {
         Some(check) => check.coverage(),
         None => format!("Assessment of workflow signal {}", spec.workflow_id),
@@ -3024,21 +3031,7 @@ async fn build_autonomous_messages(
         refact_buddy_core::autonomous_workflows::workflow_action_family(&spec.workflow_id),
         refact_buddy_core::autonomous_workflows::WorkflowActionFamily::MemoryLifecycle
     ) {
-        let operation_ids: Vec<_> = spec
-            .memory_operation_evidence
-            .iter()
-            .filter_map(|evidence| evidence.source.source_id.strip_prefix("memory-lifecycle:"))
-            .map(str::to_string)
-            .collect();
-        if operation_ids.is_empty() {
-            system_prompt.push_str("\nNo engine-recorded memory lifecycle operation is eligible for a proposal in this run.");
-        } else {
-            system_prompt.push_str(
-                "\nThe only eligible engine-recorded memory operation ids for this run are: ",
-            );
-            system_prompt.push_str(&operation_ids.join(", "));
-            system_prompt.push('.');
-        }
+        system_prompt.push_str(&memory_operation_instruction(spec));
     }
     let user_prompt = render_autonomous_template(&user_template, spec);
     let messages = vec![
@@ -3048,27 +3041,85 @@ async fn build_autonomous_messages(
     Ok((messages, max_steps, subagent_config.tools))
 }
 
+const MEMORY_OPERATION_BATCH_LIMIT: usize = 32;
+const MEMORY_OPERATION_ID_MAX_BYTES: usize = 200;
+
+fn valid_memory_operation_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= MEMORY_OPERATION_ID_MAX_BYTES
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b':' | b'.'))
+}
+
+fn autonomous_input_fingerprint(spec: &AutonomousBuddyChatSpec) -> String {
+    if !matches!(
+        refact_buddy_core::autonomous_workflows::workflow_action_family(&spec.workflow_id),
+        refact_buddy_core::autonomous_workflows::WorkflowActionFamily::MemoryLifecycle
+    ) {
+        return spec.signal_hash.clone();
+    }
+    let mut parts = vec![spec.signal_hash.as_str(), "memory-operation-batch-v1"];
+    for evidence in &spec.memory_operation_evidence {
+        parts.push(evidence.source.source_id.as_str());
+        parts.push(evidence.source.source_version.as_str());
+    }
+    signal_hash(parts)
+}
+
+fn memory_operation_instruction(spec: &AutonomousBuddyChatSpec) -> String {
+    let mut instruction = format!(
+        "\nMemory operation coverage: selected {}; remaining {}; invalid or unavailable {}. Unselected operations are not eligible for a proposal in this run.",
+        spec.memory_operation_evidence.len(), spec.memory_operation_remaining,
+        spec.memory_operation_invalid,
+    );
+    let operation_ids: Vec<_> = spec
+        .memory_operation_evidence
+        .iter()
+        .filter_map(|evidence| evidence.source.source_id.strip_prefix("memory-lifecycle:"))
+        .collect();
+    if operation_ids.is_empty() {
+        instruction.push_str("\nNo engine-recorded memory lifecycle operation is eligible for a proposal in this run.");
+    } else {
+        instruction.push_str(
+            "\nThe only eligible engine-recorded memory operation ids for this run are: ",
+        );
+        instruction.push_str(&operation_ids.join(", "));
+        instruction.push('.');
+    }
+    instruction
+}
+
 async fn capture_memory_proposal_input(spec: &mut AutonomousBuddyChatSpec) {
     if matches!(
         refact_buddy_core::autonomous_workflows::workflow_action_family(&spec.workflow_id),
         refact_buddy_core::autonomous_workflows::WorkflowActionFamily::MemoryLifecycle
     ) {
-        spec.memory_operation_evidence =
-            eligible_memory_operation_evidence(&spec.project_root).await;
+        let operations = if spec.project_root.trim().is_empty() {
+            Vec::new()
+        } else {
+            crate::buddy::storage::load_memory_ops(Path::new(&spec.project_root))
+                .await
+                .ops
+        };
+        let (evidence, remaining, invalid) = select_memory_operation_evidence(&operations);
+        spec.memory_operation_evidence = evidence;
+        spec.memory_operation_remaining = remaining;
+        spec.memory_operation_invalid = invalid;
     }
 }
 
-async fn eligible_memory_operation_evidence(
-    project_root: &str,
-) -> Vec<refact_buddy_core::operator_types::EvidenceRef> {
+fn select_memory_operation_evidence(
+    operations: &[crate::buddy::memory_lifecycle::MemoryLifecycleOp],
+) -> (
+    Vec<refact_buddy_core::operator_types::EvidenceRef>,
+    usize,
+    usize,
+) {
     use crate::buddy::memory_lifecycle::{MemoryOpStatus, MemoryOpType};
-    if project_root.trim().is_empty() {
-        return Vec::new();
-    }
-    let mut evidence: Vec<_> = crate::buddy::storage::load_memory_ops(Path::new(project_root))
-        .await
-        .ops
-        .into_iter()
+    let mut invalid = 0;
+    let mut candidates: Vec<_> = operations
+        .iter()
         .filter(|operation| {
             matches!(
                 operation.status,
@@ -3078,9 +3129,29 @@ async fn eligible_memory_operation_evidence(
                 MemoryOpType::CreateMemory | MemoryOpType::Archive | MemoryOpType::MergeArchive
             )
         })
+        .filter(|operation| {
+            let valid = valid_memory_operation_id(&operation.op_id);
+            invalid += usize::from(!valid);
+            valid
+        })
+        .collect();
+    candidates.sort_by(|left, right| left.op_id.cmp(&right.op_id));
+    candidates.dedup_by(|left, right| left.op_id == right.op_id);
+    let remaining = candidates
+        .len()
+        .saturating_sub(MEMORY_OPERATION_BATCH_LIMIT);
+    let evidence = candidates
+        .into_iter()
+        .take(MEMORY_OPERATION_BATCH_LIMIT)
         .filter_map(|operation| {
             let digest =
-                crate::buddy::workflow_deliverables::memory_operation_digest(&operation).ok()?;
+                match crate::buddy::workflow_deliverables::memory_operation_digest(operation) {
+                    Ok(digest) => digest,
+                    Err(_) => {
+                        invalid += 1;
+                        return None;
+                    }
+                };
             Some(refact_buddy_core::operator_types::EvidenceRef {
                 evidence_id: format!("memory-lifecycle:{}", operation.op_id),
                 source: refact_buddy_core::operator_types::NativeSourceIdentity {
@@ -3094,9 +3165,7 @@ async fn eligible_memory_operation_evidence(
             })
         })
         .collect();
-    evidence.sort_by(|left, right| left.evidence_id.cmp(&right.evidence_id));
-    evidence.dedup_by(|left, right| left.evidence_id == right.evidence_id);
-    evidence
+    (evidence, remaining, invalid)
 }
 
 /// Id of an isolated worktree that is *already registered* to this exact report chat, if any.
@@ -5984,6 +6053,182 @@ mod tests {
         );
     }
 
+    fn memory_batch_fixture(id: &str) -> crate::buddy::memory_lifecycle::MemoryLifecycleOp {
+        use crate::buddy::memory_lifecycle::{MemoryLifecycleOp, MemoryOpType, MemorySource};
+        MemoryLifecycleOp::pending(
+            id,
+            MemorySource::MemoryGarden,
+            MemoryOpType::Archive,
+            vec!["/fixture/memory.md".into()],
+            "fixture",
+            0.9,
+            "2026-01-01T00:00:00Z",
+        )
+    }
+
+    #[tokio::test]
+    async fn memory_operation_batch_bounds_ten_thousand_ops_and_exact_authority() {
+        let operations: Vec<_> = (0..10_000)
+            .rev()
+            .map(|index| memory_batch_fixture(&format!("op-{index:05}")))
+            .collect();
+        let mut spec = AutonomousBuddyChatSpec::new(
+            MEMORY_GARDENER_WORKFLOW_ID,
+            "Fixture",
+            "Inspect",
+            "Observed",
+        );
+        let (evidence, remaining, invalid) = select_memory_operation_evidence(&operations);
+        assert_eq!((evidence.len(), remaining, invalid), (32, 9968, 0));
+        spec.memory_operation_evidence = evidence;
+        spec.memory_operation_remaining = remaining;
+        spec.memory_operation_invalid = invalid;
+        let instruction = memory_operation_instruction(&spec);
+        let ids: Vec<_> = instruction
+            .split("ids for this run are: ")
+            .nth(1)
+            .unwrap()
+            .strip_suffix('.')
+            .unwrap()
+            .split(", ")
+            .collect();
+        let expected: Vec<_> = (0..32).map(|index| format!("op-{index:05}")).collect();
+        assert_eq!(ids, expected);
+        assert!(instruction.len() < 1000);
+        assert!(instruction.contains("selected 32; remaining 9968; invalid or unavailable 0"));
+        let authority = autonomous_evidence_refs(&spec, None).await;
+        assert_eq!(authority, spec.memory_operation_evidence);
+        assert_eq!(authority.len(), ids.len());
+        for (evidence, id) in authority.iter().zip(ids) {
+            assert_eq!(evidence.source.source_id, format!("memory-lifecycle:{id}"));
+            assert_eq!(
+                evidence.digest.as_ref(),
+                Some(&evidence.source.source_version)
+            );
+        }
+        assert!(!authority
+            .iter()
+            .any(|item| item.source.source_id == "memory-lifecycle:op-00032"));
+        assert_eq!(operations.len(), 10_000);
+    }
+
+    #[test]
+    fn memory_operation_batch_rejects_unsafe_ids_and_bounds_maximum_ids() {
+        let oversized = "x".repeat(MEMORY_OPERATION_ID_MAX_BYTES + 1);
+        let operations: Vec<_> = ["", "unsafe, id", "newline\nid", "slash/id", "é", &oversized]
+            .into_iter()
+            .map(memory_batch_fixture)
+            .collect();
+        let (evidence, remaining, invalid) = select_memory_operation_evidence(&operations);
+        assert!(evidence.is_empty());
+        assert_eq!((remaining, invalid), (0, 6));
+        let mut spec = AutonomousBuddyChatSpec::new(
+            MEMORY_GARDENER_WORKFLOW_ID,
+            "Fixture",
+            "Inspect",
+            "Observed",
+        );
+        spec.memory_operation_invalid = invalid;
+        let instruction = memory_operation_instruction(&spec);
+        assert!(instruction.contains("selected 0; remaining 0; invalid or unavailable 6"));
+        assert!(!instruction.contains(&oversized));
+        assert!(!instruction.contains("ids for this run are:"));
+        assert_eq!(select_memory_operation_evidence(&[]), (vec![], 0, 0));
+        let operations: Vec<_> = (0..40)
+            .map(|index| memory_batch_fixture(&format!("{index:03}{}", "x".repeat(197))))
+            .collect();
+        let (evidence, remaining, invalid) = select_memory_operation_evidence(&operations);
+        assert_eq!((evidence.len(), remaining, invalid), (32, 8, 0));
+        spec.memory_operation_evidence = evidence;
+        spec.memory_operation_remaining = remaining;
+        spec.memory_operation_invalid = invalid;
+        assert!(memory_operation_instruction(&spec).len() < 7000);
+    }
+
+    #[test]
+    fn memory_operation_batch_excludes_ineligible_statuses_and_types() {
+        use crate::buddy::memory_lifecycle::{MemoryOpStatus, MemoryOpType};
+        let mut approved = memory_batch_fixture("approved");
+        approved.status = MemoryOpStatus::Approved;
+        let mut applied = memory_batch_fixture("applied");
+        applied.status = MemoryOpStatus::Applied;
+        let mut wrong_type = memory_batch_fixture("wrong-type");
+        wrong_type.op_type = MemoryOpType::UpdateMemory;
+        let (evidence, remaining, invalid) = select_memory_operation_evidence(&[
+            approved,
+            applied,
+            wrong_type,
+            memory_batch_fixture("pending"),
+        ]);
+        let ids: Vec<_> = evidence
+            .iter()
+            .map(|item| item.source.source_id.as_str())
+            .collect();
+        assert_eq!(
+            ids,
+            ["memory-lifecycle:approved", "memory-lifecycle:pending"]
+        );
+        assert_eq!((remaining, invalid), (0, 0));
+    }
+
+    #[test]
+    fn memory_operation_batch_identity_is_stable_content_and_scope_bound() {
+        let mut operations: Vec<_> = (0..40)
+            .map(|index| memory_batch_fixture(&format!("op-{index:03}")))
+            .collect();
+        let mut spec = AutonomousBuddyChatSpec::new(
+            MEMORY_GARDENER_WORKFLOW_ID,
+            "Fixture",
+            "Inspect",
+            "Observed",
+        );
+        let original_signal = spec.signal_hash.clone();
+        spec.memory_operation_evidence = select_memory_operation_evidence(&operations).0;
+        let fingerprint = autonomous_input_fingerprint(&spec);
+        operations.reverse();
+        spec.memory_operation_evidence = select_memory_operation_evidence(&operations).0;
+        for evidence in &mut spec.memory_operation_evidence {
+            evidence.observed_at = "2026-02-01T00:00:00Z".into();
+        }
+        assert_eq!(autonomous_input_fingerprint(&spec), fingerprint);
+        operations[0].evidence = "unselected change".into();
+        spec.memory_operation_evidence = select_memory_operation_evidence(&operations).0;
+        assert_eq!(autonomous_input_fingerprint(&spec), fingerprint);
+        operations.last_mut().unwrap().target_paths = vec!["/another-project/memory.md".into()];
+        spec.memory_operation_evidence = select_memory_operation_evidence(&operations).0;
+        let changed = autonomous_input_fingerprint(&spec);
+        assert_ne!(changed, fingerprint);
+        assert_eq!(spec.signal_hash, original_signal);
+        spec.memory_operation_evidence.pop();
+        let narrower = autonomous_input_fingerprint(&spec);
+        assert_ne!(narrower, changed);
+        spec.memory_operation_evidence.clear();
+        assert_ne!(autonomous_input_fingerprint(&spec), narrower);
+    }
+
+    #[test]
+    fn autonomous_usage_counts_only_assistant_usage_and_all_input_categories() {
+        let usage = crate::call_validation::ChatUsage {
+            prompt_tokens: 11,
+            completion_tokens: 7,
+            total_tokens: 999,
+            cache_creation_tokens: Some(13),
+            cache_read_tokens: Some(17),
+            metering_usd: None,
+        };
+        let mut measured = ChatMessage::new("assistant".into(), "answer".into());
+        measured.usage = Some(usage.clone());
+        let mut tool = ChatMessage::new("tool".into(), "tool answer".into());
+        tool.usage = Some(usage);
+        let synthetic = ChatMessage::new("assistant".into(), "notice".into());
+        assert_eq!(sum_llm_usage(&[synthetic.clone(), tool]), (0, 0, 0));
+        assert_eq!(
+            sum_llm_usage(&[measured.clone(), synthetic, measured]),
+            (2, 82, 14)
+        );
+        assert_eq!(sum_llm_usage(&[]), (0, 0, 0));
+    }
+
     #[tokio::test]
     async fn both_memory_workflows_retain_only_their_pre_generation_operation_snapshot() {
         use crate::buddy::memory_lifecycle::{MemoryLifecycleOp, MemoryOpType, MemorySource};
@@ -6025,9 +6270,13 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            eligible_memory_operation_evidence(&root.path().to_string_lossy())
-                .await
-                .len(),
+            select_memory_operation_evidence(
+                &crate::buddy::storage::load_memory_ops(root.path())
+                    .await
+                    .ops
+            )
+            .0
+            .len(),
             2
         );
         for spec in specs {

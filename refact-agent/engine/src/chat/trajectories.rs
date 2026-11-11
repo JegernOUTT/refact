@@ -544,7 +544,9 @@ async fn complete_trajectory_self_write(handle: Option<TrajectorySelfWriteHandle
         .filter(|stamp| stamp.len == handle.byte_len)
         .map(|stamp| TrajectoryWriteFingerprint {
             file_len: stamp.len,
-            file_modified_unix_ms: stamp.modified_unix_ms,
+            file_modified_unix_ms: (stamp.modified_unix_nanos / 1_000_000)
+                .try_into()
+                .unwrap_or(i64::MAX),
             content_hash: handle.content_hash,
         });
     let mut registry = trajectory_self_writes()
@@ -4313,7 +4315,13 @@ struct DetachedTrajectoryWriteCache {
 #[derive(Clone, PartialEq, Eq)]
 struct TrajectoryFileStamp {
     len: u64,
-    modified_unix_ms: i64,
+    modified_unix_nanos: u128,
+    #[cfg(unix)]
+    device: u64,
+    #[cfg(unix)]
+    inode: u64,
+    #[cfg(not(unix))]
+    content_hash: [u8; 16],
 }
 
 #[derive(Clone)]
@@ -4390,16 +4398,22 @@ async fn trajectory_file_stamp(path: &Path) -> Option<TrajectoryFileStamp> {
     if metadata.file_type().is_symlink() || !metadata.is_file() {
         return None;
     }
+    #[cfg(unix)]
+    use std::os::unix::fs::MetadataExt;
     Some(TrajectoryFileStamp {
         len: metadata.len(),
-        modified_unix_ms: metadata
+        modified_unix_nanos: metadata
             .modified()
             .ok()?
             .duration_since(UNIX_EPOCH)
             .ok()?
-            .as_millis()
-            .try_into()
-            .ok()?,
+            .as_nanos(),
+        #[cfg(unix)]
+        device: metadata.dev(),
+        #[cfg(unix)]
+        inode: metadata.ino(),
+        #[cfg(not(unix))]
+        content_hash: md5::compute(fs::read(path).await.ok()?).0,
     })
 }
 
@@ -4453,13 +4467,14 @@ async fn cached_existing_trajectory_object(
     Ok(metadata)
 }
 
-async fn cache_written_trajectory_metadata(
+fn cache_written_trajectory_metadata(
     path: &Path,
     chat_id: &str,
     trajectory: &serde_json::Value,
+    stamp: Option<TrajectoryFileStamp>,
 ) -> Option<TrajectoryFileStamp> {
     let metadata = preservable_trajectory_metadata(trajectory.as_object()?);
-    let stamp = trajectory_file_stamp(path).await?;
+    let stamp = stamp?;
     store_trajectory_metadata_cache_entry(
         path,
         TrajectoryMetadataCacheEntry {
@@ -5058,6 +5073,10 @@ fn trajectory_value_from_snapshot(
     if let Some(ref link_type) = snapshot.link_type {
         trajectory["link_type"] = serde_json::Value::String(link_type.clone());
     }
+    if is_internal_trace_link_type(snapshot.link_type.as_deref()) {
+        trajectory["memo_extracted"] = json!(true);
+        trajectory["memo_extraction_skip_reason"] = json!("skipped: internal trace");
+    }
 
     let effective_root = snapshot
         .root_chat_id
@@ -5184,7 +5203,68 @@ async fn serialize_trajectory_snapshot_messages(
     ))
 }
 
+#[cfg(test)]
+fn test_snapshot_prepared_hooks(
+) -> &'static StdMutex<std::collections::HashMap<PathBuf, (Arc<Notify>, Arc<Notify>)>> {
+    static HOOKS: OnceLock<
+        StdMutex<std::collections::HashMap<PathBuf, (Arc<Notify>, Arc<Notify>)>>,
+    > = OnceLock::new();
+    HOOKS.get_or_init(|| StdMutex::new(std::collections::HashMap::new()))
+}
+
+#[cfg(test)]
+async fn wait_for_test_snapshot_prepared(path: &Path) {
+    let hook = test_snapshot_prepared_hooks().lock().unwrap().remove(path);
+    if let Some((prepared, release)) = hook {
+        prepared.notify_one();
+        release.notified().await;
+    }
+}
+
 async fn persist_trajectory_snapshot_file(
+    gcx: Arc<GlobalContext>,
+    snapshot: &TrajectorySnapshot,
+    write_cache: Option<&Arc<AMutex<DetachedTrajectoryWriteCache>>>,
+    existing_no_meta_path: Option<PathBuf>,
+    source: TrajectorySourceIdentity,
+    trajectory: serde_json::Value,
+    message_count: usize,
+    serialize_span: perf_diagnostics::PerfSpan,
+) -> Result<(PathBuf, String, serde_json::Value, [u8; 32]), String> {
+    let mut first_span = Some(serialize_span);
+    for _ in 0..4 {
+        let span = first_span.take().unwrap_or_else(|| {
+            perf_diagnostics::span(
+                PerfComponent::TrajectorySerialize,
+                Some(&snapshot.chat_id),
+                None,
+            )
+        });
+        match persist_trajectory_snapshot_file_coordinated(
+            gcx.clone(),
+            snapshot,
+            write_cache,
+            existing_no_meta_path.clone(),
+            source.clone(),
+            trajectory.clone(),
+            message_count,
+            span,
+        )
+        .await?
+        {
+            SnapshotPersistAttempt::Saved(saved) => return Ok(saved),
+            SnapshotPersistAttempt::Conflict => continue,
+        }
+    }
+    Err("Trajectory changed during all four snapshot commit attempts".into())
+}
+
+enum SnapshotPersistAttempt {
+    Saved((PathBuf, String, serde_json::Value, [u8; 32])),
+    Conflict,
+}
+
+async fn persist_trajectory_snapshot_file_coordinated(
     gcx: Arc<GlobalContext>,
     snapshot: &TrajectorySnapshot,
     write_cache: Option<&Arc<AMutex<DetachedTrajectoryWriteCache>>>,
@@ -5193,7 +5273,7 @@ async fn persist_trajectory_snapshot_file(
     mut trajectory: serde_json::Value,
     message_count: usize,
     mut serialize_span: perf_diagnostics::PerfSpan,
-) -> Result<(PathBuf, String, serde_json::Value, [u8; 32]), String> {
+) -> Result<SnapshotPersistAttempt, String> {
     let bound_task = crate::tasks::storage::bound_task_matches(
         snapshot
             .task_meta
@@ -5225,11 +5305,11 @@ async fn persist_trajectory_snapshot_file(
                 == Some(snapshot.chat_id.as_str())
                 && trajectory_stamp_matches(&path, &stamp).await =>
         {
-            Some((path, metadata))
+            Some((path, metadata, stamp))
         }
         _ => None,
     };
-    let file_path_result = if let Some((path, _)) = cached_path_and_metadata.as_ref() {
+    let file_path_result = if let Some((path, _, _)) = cached_path_and_metadata.as_ref() {
         Ok(path.clone())
     } else if let Some(ref task_meta) = snapshot.task_meta {
         safe_new_task_trajectory_file(gcx.clone(), task_meta, &snapshot.chat_id).await
@@ -5258,7 +5338,10 @@ async fn persist_trajectory_snapshot_file(
             return Err(error);
         }
     };
-    let existing_trajectory = match cached_path_and_metadata.map(|(_, metadata)| metadata) {
+    let observed_stamp = trajectory_file_stamp(&file_path).await;
+    let existing_trajectory = match cached_path_and_metadata.and_then(|(_, metadata, stamp)| {
+        (Some(&stamp) == observed_stamp.as_ref()).then_some(metadata)
+    }) {
         Some(existing_trajectory) => Some(existing_trajectory),
         None => match cached_existing_trajectory_object(&file_path, &snapshot.chat_id).await {
             Ok(existing_trajectory) => existing_trajectory,
@@ -5333,40 +5416,69 @@ async fn persist_trajectory_snapshot_file(
         Some(&snapshot.chat_id),
         Some(&file_path),
     );
-    let source_sha256 = write_result
-        .as_ref()
-        .map_err(Clone::clone)?
-        .source_sha256
-        .clone();
-    let atomic_write_result = if bound_task {
-        let task_meta = snapshot
-            .task_meta
-            .as_ref()
-            .ok_or("Accepted task snapshot missing identity")?;
-        let (_, guard) =
-            crate::tasks::storage::locked_task_dir(gcx.clone(), &task_meta.task_id).await?;
+    let write = match write_result {
+        Ok(write) => write,
+        Err(error) => {
+            let _ = fs::remove_file(&tmp_path).await;
+            return Err(error);
+        }
+    };
+    let source_sha256 = write.source_sha256;
+    #[cfg(test)]
+    wait_for_test_snapshot_prepared(&file_path).await;
+    let atomic_write_result = async {
+        let task_guard = if bound_task {
+            let task_meta = snapshot
+                .task_meta
+                .as_ref()
+                .ok_or("Accepted task snapshot missing identity")?;
+            Some(
+                crate::tasks::storage::locked_task_dir(gcx.clone(), &task_meta.task_id)
+                    .await?
+                    .1,
+            )
+        } else {
+            None
+        };
         super::trajectory_archive::with_trajectory_mutation_lock(async {
-            crate::tasks::storage::validate_task_trajectory_publication(
-                gcx.clone(),
-                &guard,
-                task_meta,
-                &snapshot.chat_id,
-                &file_path,
-            )
-            .await?;
-            atomic_finish_trajectory_write(
-                &file_path,
-                &tmp_path,
-                write_result,
-                Some(source.clone()),
-            )
-            .await
+            if let Some(guard) = task_guard.as_ref() {
+                crate::tasks::storage::validate_task_trajectory_publication(
+                    gcx.clone(),
+                    guard,
+                    snapshot.task_meta.as_ref().unwrap(),
+                    &snapshot.chat_id,
+                    &file_path,
+                )
+                .await?;
+            }
+            if trajectory_file_stamp(&file_path).await != observed_stamp {
+                return Ok(None);
+            }
+            let self_write = if trajectory_watcher_self_write_rollout_enabled() {
+                register_trajectory_self_write(
+                    &file_path,
+                    source.clone(),
+                    write.byte_len,
+                    write.content_hash,
+                )
+                .await
+            } else {
+                None
+            };
+            if let Err(error) = atomic_write_file_coordinated(&tmp_path, &file_path).await {
+                discard_trajectory_self_write(self_write);
+                return Err(error);
+            }
+            let stamp = trajectory_file_stamp(&file_path).await;
+            complete_trajectory_self_write(self_write).await;
+            Ok(Some(stamp))
         })
         .await
-    } else {
-        atomic_finish_trajectory_write(&file_path, &tmp_path, write_result, Some(source.clone()))
-            .await
-    };
+    }
+    .await;
+    if !matches!(&atomic_write_result, Ok(Some(_))) {
+        let _ = fs::remove_file(&tmp_path).await;
+    }
     atomic_write_span.finish(
         if atomic_write_result.is_ok() {
             PerfOutcome::Success
@@ -5378,12 +5490,18 @@ async fn persist_trajectory_snapshot_file(
         Some(snapshot.version),
         None,
     );
-    atomic_write_result?;
+    let Some(backing_stamp) = atomic_write_result? else {
+        return Ok(SnapshotPersistAttempt::Conflict);
+    };
     #[cfg(test)]
     record_trajectory_physical_write(&snapshot.chat_id);
 
-    let backing_stamp =
-        cache_written_trajectory_metadata(&file_path, &snapshot.chat_id, &trajectory).await;
+    let backing_stamp = cache_written_trajectory_metadata(
+        &file_path,
+        &snapshot.chat_id,
+        &trajectory,
+        backing_stamp,
+    );
     if let Some(write_cache) = write_cache {
         let metadata = trajectory.as_object().cloned();
         let mut write_cache = write_cache.lock().await;
@@ -5401,7 +5519,12 @@ async fn persist_trajectory_snapshot_file(
         "Saved trajectory for chat {} ({} messages) to {:?}",
         snapshot.chat_id, message_count, file_path
     );
-    Ok((file_path, updated_at, trajectory, source_sha256))
+    Ok(SnapshotPersistAttempt::Saved((
+        file_path,
+        updated_at,
+        trajectory,
+        source_sha256,
+    )))
 }
 
 async fn publish_trajectory_snapshot_updates(
@@ -10438,6 +10561,278 @@ mod tests {
         );
 
         assert!(enqueued.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn internal_trace_saves_keep_terminal_memo_markers_and_messages() {
+        let workspace = tempfile::tempdir().unwrap();
+        let (gcx, _) = make_app_with_workspace(workspace.path()).await;
+        let chat_id = "internal-memo-terminal";
+        let mut snapshot = test_snapshot(
+            chat_id,
+            "Trace",
+            vec![ChatMessage::new("user".into(), "original input".into())],
+        );
+        snapshot.link_type = Some(internal_trace_link_type("memo_extraction"));
+        save_trajectory_snapshot(gcx.clone(), snapshot.clone())
+            .await
+            .unwrap();
+        let path = find_normal_trajectory_path(gcx.clone(), chat_id)
+            .await
+            .unwrap();
+        let mut first: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).await.unwrap()).unwrap();
+        assert_eq!(first["memo_extracted"], true);
+        assert_eq!(
+            first["memo_extraction_skip_reason"],
+            "skipped: internal trace"
+        );
+        first["memo_extracted"] = json!(false);
+        first["local_annotation"] = json!("keep this metadata");
+        fs::write(&path, serde_json::to_vec(&first).unwrap())
+            .await
+            .unwrap();
+
+        snapshot.messages.push(ChatMessage::new(
+            "assistant".into(),
+            "completed helper response".into(),
+        ));
+        snapshot.version += 1;
+        save_trajectory_snapshot(gcx, snapshot).await.unwrap();
+        let saved: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).await.unwrap()).unwrap();
+        assert_eq!(saved["memo_extracted"], true);
+        assert_eq!(
+            saved["memo_extraction_skip_reason"],
+            "skipped: internal trace"
+        );
+        assert_eq!(saved["local_annotation"], "keep this metadata");
+        assert_eq!(saved["messages"].as_array().unwrap().len(), 2);
+        assert_eq!(saved["messages"][0]["content"], "original input");
+        assert_eq!(saved["messages"][1]["content"], "completed helper response");
+    }
+
+    #[tokio::test]
+    async fn snapshot_commit_retries_after_concurrent_memo_marker() {
+        let workspace = tempfile::tempdir().unwrap();
+        let (gcx, _) = make_app_with_workspace(workspace.path()).await;
+        let chat_id = "snapshot-memo-race";
+        let mut snapshot = test_snapshot(
+            chat_id,
+            "Conversation",
+            vec![ChatMessage::new("user".into(), "before".into())],
+        );
+        save_trajectory_snapshot_inner(gcx.clone(), snapshot.clone(), None)
+            .await
+            .unwrap();
+        let path = find_normal_trajectory_path(gcx.clone(), chat_id)
+            .await
+            .unwrap();
+        let prepared = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        test_snapshot_prepared_hooks()
+            .lock()
+            .unwrap()
+            .insert(path.clone(), (prepared.clone(), release.clone()));
+        snapshot
+            .messages
+            .push(ChatMessage::new("assistant".into(), "after".into()));
+        let saving = tokio::spawn(save_trajectory_snapshot_inner(gcx, snapshot, None));
+        tokio::time::timeout(Duration::from_secs(10), prepared.notified())
+            .await
+            .unwrap();
+        crate::chat::trajectory_archive::with_trajectory_mutation_lock(async {
+            let mut fresh: serde_json::Value =
+                serde_json::from_slice(&fs::read(&path).await.unwrap()).unwrap();
+            fresh["memo_extracted"] = json!(true);
+            fresh["memo_extraction_skip_reason"] = json!("concurrent completion");
+            let tmp = unique_trajectory_tmp_path(&path);
+            fs::write(&tmp, serde_json::to_vec_pretty(&fresh).unwrap())
+                .await
+                .unwrap();
+            atomic_write_file(&tmp, &path).await.unwrap();
+        })
+        .await;
+        release.notify_one();
+        saving.await.unwrap().unwrap();
+        let saved: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).await.unwrap()).unwrap();
+        assert_eq!(saved["memo_extracted"], true);
+        assert_eq!(
+            saved["memo_extraction_skip_reason"],
+            "concurrent completion"
+        );
+        assert_eq!(saved["messages"].as_array().unwrap().len(), 2);
+        assert_eq!(trajectory_physical_writes_for_chat(chat_id), 2);
+        let mut entries = fs::read_dir(path.parent().unwrap()).await.unwrap();
+        while let Some(entry) = entries.next_entry().await.unwrap() {
+            assert!(!entry.file_name().to_string_lossy().contains(".tmp."));
+        }
+    }
+
+    #[tokio::test]
+    async fn snapshot_serializes_while_global_mutation_lock_is_held() {
+        let workspace = tempfile::tempdir().unwrap();
+        let (gcx, _) = make_app_with_workspace(workspace.path()).await;
+        let snapshot = test_snapshot("snapshot-global-throughput", "Conversation", Vec::new());
+        save_trajectory_snapshot_inner(gcx.clone(), snapshot.clone(), None)
+            .await
+            .unwrap();
+        let path = find_normal_trajectory_path(gcx.clone(), &snapshot.chat_id)
+            .await
+            .unwrap();
+        let prepared = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        test_snapshot_prepared_hooks()
+            .lock()
+            .unwrap()
+            .insert(path.clone(), (prepared.clone(), release.clone()));
+        let locked = Arc::new(Notify::new());
+        let unlock = Arc::new(Notify::new());
+        let holder = tokio::spawn({
+            let locked = locked.clone();
+            let unlock = unlock.clone();
+            async move {
+                crate::chat::trajectory_archive::with_trajectory_mutation_lock(async {
+                    locked.notify_one();
+                    unlock.notified().await;
+                })
+                .await
+            }
+        });
+        locked.notified().await;
+        let saving = tokio::spawn(save_trajectory_snapshot_inner(gcx, snapshot, None));
+        let result = tokio::time::timeout(Duration::from_secs(10), prepared.notified()).await;
+        unlock.notify_one();
+        release.notify_one();
+        holder.await.unwrap();
+        result.unwrap();
+        saving.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn snapshot_commit_conflicts_are_bounded_and_clean_temps() {
+        let workspace = tempfile::tempdir().unwrap();
+        let (gcx, _) = make_app_with_workspace(workspace.path()).await;
+        let snapshot = test_snapshot("snapshot-conflict-limit", "Conversation", Vec::new());
+        save_trajectory_snapshot_inner(gcx.clone(), snapshot.clone(), None)
+            .await
+            .unwrap();
+        let path = find_normal_trajectory_path(gcx.clone(), &snapshot.chat_id)
+            .await
+            .unwrap();
+        let prepared = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        test_snapshot_prepared_hooks()
+            .lock()
+            .unwrap()
+            .insert(path.clone(), (prepared.clone(), release.clone()));
+        let saving = tokio::spawn(save_trajectory_snapshot_inner(gcx, snapshot, None));
+        for attempt in 0..4 {
+            tokio::time::timeout(Duration::from_secs(10), prepared.notified())
+                .await
+                .unwrap();
+            crate::chat::trajectory_archive::with_trajectory_mutation_lock(async {
+                let mut fresh: serde_json::Value =
+                    serde_json::from_slice(&fs::read(&path).await.unwrap()).unwrap();
+                fresh["concurrent_generation"] = json!(attempt);
+                let tmp = unique_trajectory_tmp_path(&path);
+                fs::write(&tmp, serde_json::to_vec_pretty(&fresh).unwrap())
+                    .await
+                    .unwrap();
+                atomic_write_file(&tmp, &path).await.unwrap();
+            })
+            .await;
+            if attempt < 3 {
+                test_snapshot_prepared_hooks()
+                    .lock()
+                    .unwrap()
+                    .insert(path.clone(), (prepared.clone(), release.clone()));
+            }
+            release.notify_one();
+        }
+        let error = saving.await.unwrap().unwrap_err();
+        assert!(error.contains("all four snapshot commit attempts"));
+        assert_eq!(
+            trajectory_physical_writes_for_chat("snapshot-conflict-limit"),
+            1
+        );
+        let mut entries = fs::read_dir(path.parent().unwrap()).await.unwrap();
+        while let Some(entry) = entries.next_entry().await.unwrap() {
+            assert!(!entry.file_name().to_string_lossy().contains(".tmp."));
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn same_length_atomic_replacement_invalidates_metadata_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("same-length.json");
+        let before = br#"{"id":"same-length","memo_extracted":false}"#;
+        let after = br#"{"id":"same-length","memo_extracted": true}"#;
+        assert_eq!(before.len(), after.len());
+        fs::write(&path, before).await.unwrap();
+        cached_existing_trajectory_object(&path, "same-length")
+            .await
+            .unwrap();
+        let old = trajectory_file_stamp(&path).await.unwrap();
+        let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+        let tmp = unique_trajectory_tmp_path(&path);
+        fs::write(&tmp, after).await.unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&tmp)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(modified))
+            .unwrap();
+        atomic_write_file(&tmp, &path).await.unwrap();
+        let new = trajectory_file_stamp(&path).await.unwrap();
+        assert_eq!(old.len, new.len);
+        assert_eq!(old.modified_unix_nanos, new.modified_unix_nanos);
+        assert_ne!(old.inode, new.inode);
+        let metadata = cached_existing_trajectory_object(&path, "same-length")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(metadata["memo_extracted"], true);
+    }
+
+    #[tokio::test]
+    async fn ordinary_trajectory_save_preserves_memo_completion_metadata() {
+        let workspace = tempfile::tempdir().unwrap();
+        let (gcx, _) = make_app_with_workspace(workspace.path()).await;
+        let chat_id = "ordinary-memo-terminal";
+        let mut snapshot = test_snapshot(
+            chat_id,
+            "Conversation",
+            vec![ChatMessage::new("user".into(), "original input".into())],
+        );
+        save_trajectory_snapshot(gcx.clone(), snapshot.clone())
+            .await
+            .unwrap();
+        let path = find_normal_trajectory_path(gcx.clone(), chat_id)
+            .await
+            .unwrap();
+        let mut trajectory: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).await.unwrap()).unwrap();
+        assert!(trajectory.get("memo_extracted").is_none());
+        trajectory["memo_extracted"] = json!(true);
+        trajectory["memo_extraction_skip_reason"] = json!("skipped: no reusable memory candidates");
+        fs::write(&path, serde_json::to_vec(&trajectory).unwrap())
+            .await
+            .unwrap();
+        snapshot.title = "Updated conversation title".into();
+        snapshot.version += 1;
+        save_trajectory_snapshot(gcx, snapshot).await.unwrap();
+        let saved: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).await.unwrap()).unwrap();
+        assert_eq!(saved["memo_extracted"], true);
+        assert_eq!(
+            saved["memo_extraction_skip_reason"],
+            "skipped: no reusable memory candidates"
+        );
+        assert_eq!(saved["title"], "Updated conversation title");
+        assert_eq!(saved["messages"][0]["content"], "original input");
     }
 
     #[tokio::test]
