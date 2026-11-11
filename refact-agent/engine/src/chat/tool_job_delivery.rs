@@ -610,6 +610,7 @@ pub(crate) mod tests {
             let mut locked = session.lock().await;
             locked.add_message(receipt_message(&receipt));
             // A closed delivery queue refuses the orphan report at restore.
+            locked.test_queue_capacity = Some(super::super::types::max_queue_size());
             for index in 0..super::super::types::max_queue_size() {
                 let mut filler = super::super::types::PendingDelivery::with_id(
                     format!("filler-{index}"),
@@ -635,7 +636,22 @@ pub(crate) mod tests {
 
         let fresh = app_in(&temp).await;
         crate::privacy::load_privacy_if_needed(fresh.gcx.clone()).await;
-        let restored = restore(&fresh, chat).await;
+        let loaded = super::super::trajectories::load_trajectory_for_chat(fresh.gcx.clone(), chat)
+            .await
+            .unwrap();
+        let mut fixture = super::super::types::ChatSession::new(chat.into());
+        fixture.thread = loaded.thread;
+        fixture.messages = loaded.messages;
+        fixture.pending_deliveries = loaded.pending_deliveries.into();
+        fixture.test_queue_capacity = Some(super::super::types::max_queue_size());
+        let restored = Arc::new(tokio::sync::Mutex::new(fixture));
+        fresh
+            .chat
+            .sessions
+            .write()
+            .await
+            .insert(chat.into(), restored.clone());
+        report_orphan_receipts(&fresh, &restored).await;
         let envelope = |session: &super::super::types::ChatSession| {
             session
                 .pending_deliveries
@@ -649,6 +665,7 @@ pub(crate) mod tests {
             assert_eq!(envelope(&locked), 1, "without a report the envelope stays");
         }
 
+        restored.lock().await.test_queue_capacity = None;
         land_deferred_jobs(&fresh, &restored).await;
         let locked = restored.lock().await;
         assert_eq!(envelope(&locked), 0);

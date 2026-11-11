@@ -16,7 +16,7 @@ use crate::coordination::peer_authority::{PeerAuthority, PeerGrantRegistry};
 pub fn limits_from_settings() -> QuestionLimits {
     let settings = refact_work_core::coordination_settings();
     QuestionLimits {
-        max_pending: settings.max_pending_questions,
+        max_pending: usize::MAX,
         default_expiry_secs: settings.question_default_expiry_secs,
         max_expiry_secs: settings.question_max_expiry_secs,
     }

@@ -19398,6 +19398,7 @@ mod tests {
 
         let (tx, _rx) = broadcast::channel(16);
         let session = ChatSession {
+            test_queue_capacity: None,
             execution_abort: Arc::new(AtomicBool::new(false)),
             review_readiness_pending: None,
             review_readiness_resume_nonce: None,
@@ -19593,6 +19594,7 @@ mod tests {
 
         let (tx, _rx) = broadcast::channel(16);
         let mut session = ChatSession {
+            test_queue_capacity: None,
             execution_abort: Arc::new(AtomicBool::new(false)),
             review_readiness_pending: None,
             review_readiness_resume_nonce: None,

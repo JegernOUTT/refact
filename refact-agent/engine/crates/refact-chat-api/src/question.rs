@@ -963,7 +963,12 @@ impl QuestionRegistry {
             .filter(|entry| entry.state != QuestionState::Pending)
             .map(|entry| (entry.asked_at, entry.id.clone()))
             .collect();
-        let excess = settled.len().saturating_sub(self.limits.max_pending);
+        let retention = if self.limits.max_pending == usize::MAX {
+            QuestionLimits::default().max_pending
+        } else {
+            self.limits.max_pending
+        };
+        let excess = settled.len().saturating_sub(retention);
         if excess == 0 {
             return;
         }
@@ -1144,6 +1149,36 @@ mod tests {
 
     fn ask(kind: QuestionKind, correlation: &str) -> AskQuestion {
         AskQuestion::new(kind, "asker", "answerer", correlation, "Continue?")
+    }
+
+    #[test]
+    fn unlimited_pending_questions_keep_bounded_settled_history() {
+        let registry = QuestionRegistry::new(QuestionLimits {
+            max_pending: usize::MAX,
+            ..QuestionLimits::default()
+        })
+        .unwrap();
+        let now = Utc::now();
+        let mut ids = Vec::new();
+        for index in 0..300 {
+            ids.push(
+                registry
+                    .ask(ask(QuestionKind::UserInput, &format!("many-{index}")), now)
+                    .unwrap()
+                    .id,
+            );
+        }
+        assert!(ids
+            .iter()
+            .all(|id| registry.get(id).unwrap().state == QuestionState::Pending));
+        for id in &ids {
+            registry.answer(id, "answerer", "yes".into(), now).unwrap();
+        }
+        registry
+            .ask(ask(QuestionKind::UserInput, "prune-after-settlement"), now)
+            .unwrap();
+        let retained = ids.iter().filter(|id| registry.get(id).is_some()).count();
+        assert_eq!(retained, QuestionLimits::default().max_pending);
     }
 
     #[test]

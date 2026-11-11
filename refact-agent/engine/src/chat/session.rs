@@ -108,6 +108,7 @@ fn is_active_compression_phase(phase: Option<CompressionPhase>) -> bool {
 
 /// A chat session's pending-delivery queue is bounded by the session queue cap
 /// and by the coordination delivery cap; the tighter of the two wins.
+#[cfg(test)]
 fn max_pending_deliveries(settings: &refact_work_core::CoordinationSettings) -> usize {
     max_queue_size().min(settings.delivery_max_pending)
 }
@@ -895,9 +896,28 @@ impl ChatSession {
         self.execution_abort = Arc::new(AtomicBool::new(self.abort_flag.load(Ordering::SeqCst)));
     }
 
+    fn command_queue_at_capacity(&self) -> bool {
+        #[cfg(test)]
+        if let Some(capacity) = self.test_queue_capacity {
+            return self.command_queue.len() >= capacity;
+        }
+        false
+    }
+
+    fn delivery_queue_at_capacity(&self, pending: usize) -> bool {
+        #[cfg(test)]
+        if let Some(capacity) = self.test_queue_capacity {
+            return pending >= capacity;
+        }
+        let _ = pending;
+        false
+    }
+
     pub fn new(chat_id: String) -> Self {
         let (event_tx, _) = broadcast::channel(limits().event_channel_capacity);
         Self {
+            #[cfg(test)]
+            test_queue_capacity: None,
             delivery_save_id: Uuid::new_v4(),
             chat_id: chat_id.clone(),
             runner_lease: None,
@@ -1067,6 +1087,8 @@ impl ChatSession {
             &crate::file_activity::settings(),
         );
         Self {
+            #[cfg(test)]
+            test_queue_capacity: None,
             delivery_save_id: Uuid::new_v4(),
             chat_id,
             runner_lease: None,
@@ -2708,8 +2730,7 @@ impl ChatSession {
             super::queue::reject_guard(self, &request.client_request_id, error);
             return EnqueueCommandOutcome::Rejected;
         }
-        if self.command_queue.len() >= max_queue_size()
-            && !self.command_is_critical_for_queue(&request.command)
+        if self.command_queue_at_capacity() && !self.command_is_critical_for_queue(&request.command)
         {
             return EnqueueCommandOutcome::Full;
         }
@@ -3297,7 +3318,7 @@ impl ChatSession {
         let preempt_now = delivery.deferred_job.is_none()
             && delivery.push == PushMode::Preempt
             && self.delivery_envelope_boundary_open(&delivery);
-        if pending_count >= max_pending_deliveries(&settings) && !preempt_now {
+        if self.delivery_queue_at_capacity(pending_count) && !preempt_now {
             return Err("chat delivery queue is full".to_string());
         }
         self.supersede_pending(&delivery);
@@ -4300,8 +4321,7 @@ impl ChatSession {
             self.queue_notify.notify_one();
             return EnqueueCommandOutcome::Accepted;
         }
-        if self.command_queue.len() >= max_queue_size()
-            && !self.command_is_critical_for_queue(&request.command)
+        if self.command_queue_at_capacity() && !self.command_is_critical_for_queue(&request.command)
         {
             return EnqueueCommandOutcome::Full;
         }
@@ -5168,7 +5188,42 @@ mod tests {
     use std::time::Instant;
 
     fn make_session() -> ChatSession {
-        ChatSession::new("test-chat".to_string())
+        let mut session = ChatSession::new("test-chat".to_string());
+        session.test_queue_capacity = Some(max_queue_size());
+        session
+    }
+
+    #[test]
+    fn new_sessions_accept_commands_and_deliveries_beyond_retired_count_caps() {
+        let mut session = ChatSession::new("unlimited-counts".into());
+        assert!(session.test_queue_capacity.is_none());
+        session.start_stream().unwrap();
+        session.active_compression_attempt = Some(1);
+        for index in 0..150 {
+            assert_eq!(
+                session.enqueue_accepted_command(CommandRequest {
+                    native_approval_guard: None,
+                    supervision_guard: None,
+                    client_request_id: format!("command-{index}"),
+                    priority: false,
+                    command: ChatCommand::SetParams {
+                        patch: json!({"temperature": 0.2})
+                    },
+                }),
+                EnqueueCommandOutcome::Accepted
+            );
+            assert_eq!(
+                session
+                    .enqueue_delivery(delivery_fixture(
+                        &format!("delivery-{index}"),
+                        PushMode::WhenIdle
+                    ))
+                    .unwrap(),
+                DeliveryOutcome::Queued
+            );
+        }
+        assert_eq!(session.command_queue.len(), 150);
+        assert_eq!(session.pending_deliveries.len(), 150);
     }
 
     #[test]

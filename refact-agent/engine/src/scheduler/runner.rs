@@ -2610,6 +2610,7 @@ mod tests {
         {
             let session_arc = session(&gcx).await;
             let mut session = session_arc.lock().await;
+            session.test_queue_capacity = Some(max_queue_size());
             for idx in 0..max_queue_size() {
                 session.pending_deliveries.push_back(
                     refact_core::chat_types::PendingDelivery::with_id(
@@ -2741,6 +2742,7 @@ mod tests {
         {
             let session_arc = session(&gcx).await;
             let mut session = session_arc.lock().await;
+            session.test_queue_capacity = Some(max_queue_size());
             for idx in 0..max_queue_size() {
                 session.pending_deliveries.push_back(
                     refact_core::chat_types::PendingDelivery::with_id(
@@ -2782,6 +2784,7 @@ mod tests {
         {
             let session_arc = session(&gcx).await;
             let mut session = session_arc.lock().await;
+            session.test_queue_capacity = Some(max_queue_size());
             for idx in 0..max_queue_size() {
                 session.pending_deliveries.push_back(
                     refact_core::chat_types::PendingDelivery::with_id(

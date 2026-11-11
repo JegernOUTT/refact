@@ -283,7 +283,7 @@ async fn message_to_completed_child_is_saved_and_delivered_on_continue() {
 }
 
 #[tokio::test]
-async fn followup_queue_is_bounded_and_reports_drops() {
+async fn followup_queue_ignores_count_quota_but_preserves_byte_bound_and_drop_reports() {
     let fixture = repo_fixture().await;
     let child = child(&fixture.app).await;
     fixture
@@ -300,19 +300,19 @@ async fn followup_queue_is_bounded_and_reports_drops() {
             first_id = receipt["delivery_id"].as_str().unwrap().into();
         }
         if index == settings.agent_followup_max_count {
-            assert!(text.contains("dropped 1 oldest"), "{text}");
-            assert_eq!(receipt["dropped_followups"], json!([first_id]));
+            assert!(!text.contains("dropped 1 oldest"), "{text}");
+            assert_eq!(receipt["dropped_followups"], json!([]));
         }
     }
     let after = fixture.app.agents.get_any(&child.agent_id).await.unwrap();
-    assert_eq!(after.followups.len(), settings.agent_followup_max_count);
+    assert_eq!(after.followups.len(), settings.agent_followup_max_count + 1);
     assert_eq!(
         fixture
             .app
             .agents
             .delivery_status(&child.agent_id, &first_id)
             .await,
-        DeliveryStatus::Failed
+        DeliveryStatus::Pending
     );
     let large = "🦀".repeat(settings.agent_message_max_chars);
     let mut dropped = false;

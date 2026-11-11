@@ -105,6 +105,7 @@ pub struct CoordinationSettings {
     pub approval_timeout_secs: u64,
     #[serde(skip)]
     pub max_pending_approvals: usize,
+    #[serde(skip)]
     pub max_pending_questions: usize,
     pub question_default_expiry_secs: u64,
     pub question_max_expiry_secs: u64,
@@ -127,8 +128,10 @@ pub struct CoordinationSettings {
     pub attention_default_timeout_secs: u64,
     pub delivery_default_ttl_secs: u64,
     pub delivery_max_ttl_secs: u64,
+    #[serde(skip)]
     pub delivery_max_pending: usize,
     pub delivery_status_retention: usize,
+    #[serde(skip)]
     pub agent_followup_max_count: usize,
     pub agent_followup_max_bytes: usize,
     pub agent_message_max_chars: usize,

@@ -713,6 +713,7 @@ mod tests {
         {
             let mut guard = session.lock().await;
             guard.start_stream().unwrap();
+            guard.test_queue_capacity = Some(100);
             let mut index = 0;
             while guard
                 .enqueue_delivery(delivery(&format!("filler-{index}")))

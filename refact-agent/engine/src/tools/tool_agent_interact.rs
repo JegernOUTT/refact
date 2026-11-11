@@ -885,14 +885,8 @@ async fn mailbox_rows(app: &AppState, chat_id: &str, agent_id: Option<&str>) -> 
     let mut seen = HashSet::new();
     let mut rows: Vec<MailboxRow> = pending
         .into_iter()
-        .take(settings.delivery_max_pending)
         .map(|delivery| (delivery, false))
-        .chain(
-            followups
-                .into_iter()
-                .take(settings.agent_followup_max_count)
-                .map(|delivery| (delivery, true)),
-        )
+        .chain(followups.into_iter().map(|delivery| (delivery, true)))
         .filter_map(|(delivery, followup)| {
             if !seen.insert(delivery.id.clone()) {
                 return None;

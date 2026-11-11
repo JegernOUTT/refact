@@ -2251,9 +2251,6 @@ impl BackgroundAgentRegistry {
                     record_dropped_delivery(record, id, DeliveryStatus::Superseded);
                 }
             }
-            if record.pending_deliveries.len() >= settings.delivery_max_pending {
-                return Err("agent delivery queue is full".to_string());
-            }
             record.pending_deliveries.push(delivery);
             Ok(())
         })
@@ -2529,9 +2526,6 @@ impl BackgroundAgentRegistry {
             .await
             .ok_or_else(|| "agent is not running in this process".to_string())?;
         let mut inbox = inbox.lock().await;
-        if inbox.len() >= refact_work_core::coordination_settings().delivery_max_pending {
-            return Err("agent inbox is full".to_string());
-        }
         inbox.push_back(msg);
         Ok(())
     }
@@ -2581,9 +2575,6 @@ impl BackgroundAgentRegistry {
             .any(|queued| queued.control_id == note.control_id)
         {
             return Ok(false);
-        }
-        if notes.len() >= MAX_NATIVE_NOTES {
-            return Err("native note queue capacity reached".to_string());
         }
         notes.push_back(note);
         Ok(true)
@@ -3020,13 +3011,6 @@ fn normalize_delivery_state(records: &mut HashMap<String, BackgroundAgent>) {
         for id in superseded {
             record_dropped_delivery(record, id, DeliveryStatus::Superseded);
         }
-        if record.pending_deliveries.len() > settings.delivery_max_pending {
-            let overflow = record.pending_deliveries.len() - settings.delivery_max_pending;
-            let dropped: Vec<_> = record.pending_deliveries.drain(..overflow).collect();
-            for delivery in dropped {
-                record_dropped_delivery(record, delivery.id, DeliveryStatus::Failed);
-            }
-        }
         if record.delivery_ids.len() > settings.delivery_status_retention {
             let overflow = record.delivery_ids.len() - settings.delivery_status_retention;
             record.delivery_ids.drain(..overflow);
@@ -3102,9 +3086,7 @@ fn trim_followups(record: &mut BackgroundAgent) -> Vec<String> {
         total.saturating_add(followup_bytes(delivery))
     });
     let mut dropped = Vec::new();
-    while record.followups.len() > settings.agent_followup_max_count
-        || bytes > settings.agent_followup_max_bytes
-    {
+    while bytes > settings.agent_followup_max_bytes {
         let delivery = record.followups.remove(0);
         bytes = bytes.saturating_sub(followup_bytes(&delivery));
         dropped.push(delivery.id.clone());
@@ -3735,23 +3717,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn inbox_drops_oldest_message_after_capacity() {
+    async fn inbox_preserves_messages_beyond_the_retired_count_quota() {
         let (_temp, registry) = registry().await;
         let (record, _, _) = registry.create(request("parent")).await.unwrap();
-        let capacity = refact_work_core::coordination_settings().delivery_max_pending;
-        for index in 0..capacity {
+        for index in 0..4200 {
             registry
                 .push_inbox(&record.agent_id, inbox_message(index.to_string()))
                 .await
                 .unwrap();
         }
-        assert!(registry
-            .push_inbox(&record.agent_id, inbox_message("overflow"))
-            .await
-            .is_err());
         let inbox = registry.drain_inbox(&record.agent_id).await;
-        assert_eq!(inbox.len(), capacity);
+        assert_eq!(inbox.len(), 4200);
         assert_eq!(inbox[0].text, "0");
+        assert_eq!(inbox[4199].text, "4199");
     }
 
     fn delivery(push: PushMode) -> PendingDelivery {
@@ -5298,7 +5276,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn native_notes_dedupe_by_control_identity_and_reject_at_capacity() {
+    async fn native_notes_dedupe_without_a_count_quota() {
         let (_temp, registry) = registry().await;
         let (record, _, _) = registry.create(request("parent")).await.unwrap();
         let note = |control: &str| {
@@ -5323,17 +5301,17 @@ mod tests {
         assert!(registry
             .push_native_note(&record.agent_id, note("overflow"))
             .await
-            .is_err());
+            .unwrap());
         assert_eq!(
             registry
                 .pause_status(&record.agent_id)
                 .await
                 .unwrap()
                 .queued_native_notes,
-            MAX_NATIVE_NOTES
+            MAX_NATIVE_NOTES + 1
         );
         let drained = registry.drain_native_notes(&record.agent_id).await;
-        assert_eq!(drained.len(), MAX_NATIVE_NOTES);
+        assert_eq!(drained.len(), MAX_NATIVE_NOTES + 1);
         assert_eq!(drained[0].control_id, "c1");
         assert!(registry
             .drain_native_notes(&record.agent_id)

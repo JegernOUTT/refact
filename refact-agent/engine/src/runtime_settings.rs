@@ -154,7 +154,6 @@ static COORDINATION_FIELD_BOUNDS: &[CoordinationFieldBound] = &[
     coordination_integer("lock_timeout_secs", 1, 3_600),
     coordination_integer("lock_poll_interval_ms", 1, 60_000),
     coordination_integer("approval_timeout_secs", 1, 604_800),
-    coordination_integer("max_pending_questions", 1, 100_000),
     coordination_integer("question_default_expiry_secs", 1, 31_536_000),
     coordination_integer("question_max_expiry_secs", 1, 31_536_000),
     coordination_bool("deadlock_detection_enabled"),
@@ -168,9 +167,7 @@ static COORDINATION_FIELD_BOUNDS: &[CoordinationFieldBound] = &[
     coordination_integer("attention_default_timeout_secs", 1, 31_536_000),
     coordination_integer("delivery_default_ttl_secs", 1, 2_592_000),
     coordination_integer("delivery_max_ttl_secs", 1, 2_592_000),
-    coordination_integer("delivery_max_pending", 1, 1_000_000),
     coordination_integer("delivery_status_retention", 1, 4_000_000),
-    coordination_integer("agent_followup_max_count", 1, 100_000),
     coordination_integer("agent_followup_max_bytes", 1, 64 * 1024 * 1024),
     coordination_integer("agent_message_max_chars", 1, 4_000_000),
     coordination_integer("peer_grant_default_ttl_secs", 1, 2_592_000),
@@ -292,6 +289,9 @@ const RETIRED_COORDINATION_SETTINGS: &[&str] = &[
     "max_pending_approvals",
     "max_wave_width",
     "team_member_max_count",
+    "max_pending_questions",
+    "delivery_max_pending",
+    "agent_followup_max_count",
 ];
 
 pub const RETIRED_TRAJECTORY_SETTINGS: &[&str] = &["max_parallel_tools"];

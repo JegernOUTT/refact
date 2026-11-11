@@ -308,6 +308,8 @@ pub(crate) struct ReviewReadinessContinuation {
 }
 
 pub struct ChatSession {
+    #[cfg(test)]
+    pub(crate) test_queue_capacity: Option<usize>,
     pub(crate) review_readiness_pending: Option<ReviewReadinessContinuation>,
     pub(crate) review_readiness_resume_nonce: Option<String>,
     pub(crate) verifier_readiness_pending:
