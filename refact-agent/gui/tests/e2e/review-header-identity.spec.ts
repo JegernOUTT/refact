@@ -98,10 +98,12 @@ for (const { width, height } of [
       };
     });
     console.log(JSON.stringify(geometry));
-    expect(geometry.controls.length).toBeGreaterThan(10);
+    expect(geometry.controls.length).toBeGreaterThanOrEqual(9);
     const receipt = await header.evaluate((element) =>
       Array.from(
-        element.querySelectorAll<HTMLElement>('a[href], [aria-label^="Base "]'),
+        element.querySelectorAll<HTMLElement>(
+          'a[href], [class*="_reference_"]',
+        ),
       ).map((node) => ({
         width: Math.ceil(node.getBoundingClientRect().width),
         content: node.scrollWidth,

@@ -9,6 +9,10 @@ export const REVIEW_THEME_TOKENS = [
   "--rf-color-accent",
   "--rf-color-accent-soft",
   "--rf-color-danger",
+  "--rf-color-danger-soft",
+  "--rf-color-success",
+  "--rf-color-success-soft",
+  "--rf-color-warning",
   "--rf-surface-1",
   "--rf-surface-2",
   "--rf-border",
@@ -84,11 +88,29 @@ export function reviewArtifactHtml(
 html { font-family: var(--rf-font-ui); font-size: var(--rf-text-2); line-height: var(--rf-line-2); color: var(--rf-color-fg); }
 html body { margin: 0; background: transparent; color: var(--rf-color-fg); font-family: var(--rf-font-ui); font-size: var(--rf-text-2); line-height: var(--rf-line-2); }
 :where(button, input, select, textarea) { box-sizing: border-box; font: inherit; color: inherit; background: var(--rf-surface-1); border: 1px solid var(--rf-border); border-radius: var(--rf-radius-ctl); }
-:where(button, input:not([type=checkbox]):not([type=radio]), select) { height: var(--rf-control-h); padding: 0 var(--rf-space-2); }
-:where(button) { font-weight: var(--rf-weight-medium); cursor: pointer; }
+:where(input:not([type=checkbox]):not([type=radio]), select) { height: var(--rf-control-h); padding: 0 var(--rf-space-2); }
+:where(button) { min-height: var(--rf-control-h); padding: var(--rf-space-1) var(--rf-space-2); font-weight: var(--rf-weight-medium); cursor: pointer; }
 :where(a) { color: var(--rf-color-accent); }
 :where(code, pre) { font-family: var(--rf-font-mono); }
 html[data-refact-reduced-motion=true] *, html[data-refact-reduced-motion=true] *::before, html[data-refact-reduced-motion=true] *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
+refact-slot { display: block; margin: var(--rf-space-3) 0; }
+.rf-insert { border: 1px solid var(--rf-border); border-radius: var(--rf-radius-ctl); overflow: hidden; background: var(--rf-surface-1); }
+.rf-insert-head { display: flex; align-items: center; justify-content: space-between; gap: var(--rf-space-2); padding: var(--rf-space-2) var(--rf-space-3); border-bottom: 1px solid var(--rf-border); background: var(--rf-surface-2); color: var(--rf-color-muted); font-family: var(--rf-font-mono); font-size: 0.85em; }
+.rf-insert-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rf-insert-actions { display: flex; flex: none; gap: var(--rf-space-2); }
+.rf-insert-actions button { min-height: 0; padding: 0 var(--rf-space-2); font-size: 0.95em; }
+.rf-insert-body { overflow: auto; max-height: 28em; font-family: var(--rf-font-mono); font-size: 0.85em; line-height: 1.55; }
+.rf-line { display: flex; min-width: max-content; white-space: pre; }
+.rf-line-n { flex: none; min-width: 4ch; padding: 0 var(--rf-space-2); text-align: right; color: var(--rf-color-muted); user-select: none; }
+.rf-line-t { flex: auto; padding-right: var(--rf-space-3); }
+.rf-line[data-kind=add] { background: var(--rf-color-success-soft); }
+.rf-line[data-kind=del] { background: var(--rf-color-danger-soft); }
+.rf-line[data-kind=gap] { background: var(--rf-surface-2); color: var(--rf-color-muted); }
+.rf-line[data-hl=true] { background: var(--rf-color-accent-soft); box-shadow: inset 3px 0 0 var(--rf-color-accent); }
+.rf-tok-k { color: var(--rf-color-accent); }
+.rf-tok-s { color: var(--rf-color-success); }
+.rf-tok-n { color: var(--rf-color-warning); }
+.rf-tok-c { color: var(--rf-color-muted); font-style: italic; }
 `;
   doc.head.append(style);
   const bridge = doc.createElement("script");
@@ -119,9 +141,42 @@ html[data-refact-reduced-motion=true] *, html[data-refact-reduced-motion=true] *
     function action(kind, id) {
       if (typeof id === 'string' && id.length <= 256) parent.postMessage({type: 'refact-review-block-action', channel: channel, action: kind, id: id}, '*');
     }
+    function wanted(spec) {
+      var set = {};
+      String(spec || '').split(',').forEach(function(part) {
+        var m = /^\\s*L?(\\d+)(?:\\s*[-:]\\s*L?(\\d+))?\\s*$/i.exec(part);
+        if (!m) return;
+        var a = Number(m[1]), b = Number(m[2] || m[1]);
+        for (var n = a; n <= b && n - a < 2000; n++) set[n] = true;
+      });
+      return set;
+    }
+    function paint(slot, scroll) {
+      var set = wanted(slot.getAttribute('data-highlight'));
+      var first = null;
+      slot.querySelectorAll('.rf-line').forEach(function(line) {
+        var on = line.getAttribute('data-kind') !== 'del' && set[Number(line.getAttribute('data-n'))] === true;
+        line.setAttribute('data-hl', String(on));
+        if (on && !first) first = line;
+      });
+      var body = slot.querySelector('.rf-insert-body');
+      if (scroll && first && body) body.scrollTop = Math.max(0, first.offsetTop - body.offsetTop - body.clientHeight / 3);
+    }
+    function find(id) {
+      var found = [];
+      document.querySelectorAll('refact-slot').forEach(function(slot) { if (slot.getAttribute('data-block') === id) found.push(slot); });
+      return found;
+    }
     window.refactReview = Object.freeze({
       revealBlock: function(id) { action('reveal', id); },
-      commentBlock: function(id) { action('comment', id); }
+      reveal: function(id) { action('reveal', id); },
+      commentBlock: function(id) { action('comment', id); },
+      highlight: function(id, lines) {
+        find(String(id)).forEach(function(slot) {
+          slot.setAttribute('data-highlight', String(lines == null ? '' : lines).slice(0, 512));
+          paint(slot, true);
+        });
+      }
     });
     function slots() {
       var seen = new Set();
@@ -134,22 +189,63 @@ html[data-refact-reduced-motion=true] *, html[data-refact-reduced-motion=true] *
         if (rendered.get(slot) === signature) return;
         rendered.set(slot, signature);
         slot.replaceChildren();
-        slot.style.display = 'block';
-        var title = document.createElement('strong');
-        title.textContent = p ? p.title : 'Block unavailable (unknown or duplicate slot)';
-        slot.append(title);
-        var pre = document.createElement('pre');
-        pre.style.cssText = 'white-space:pre;overflow:auto;max-height:320px';
-        pre.textContent = p ? p.text : 'No registered preview is available.';
-        slot.append(pre);
-        if (!p || !p.available) return;
-        ['reveal', 'comment'].forEach(function(kind) {
-          var button = document.createElement('button');
-          button.type = 'button';
-          button.textContent = kind === 'reveal' ? 'Reveal' : 'Comment';
-          button.onclick = function() { action(kind, id); };
-          slot.append(button);
-        });
+        var box = document.createElement('div');
+        box.className = 'rf-insert';
+        var head = document.createElement('div');
+        head.className = 'rf-insert-head';
+        var title = document.createElement('span');
+        title.className = 'rf-insert-title';
+        title.textContent = slot.getAttribute('data-title') || (p ? p.title : 'Block unavailable (unknown or duplicate slot)');
+        head.append(title);
+        var body = document.createElement('div');
+        body.className = 'rf-insert-body';
+        if (p && Array.isArray(p.lines)) {
+          p.lines.forEach(function(item) {
+            var line = document.createElement('div');
+            line.className = 'rf-line';
+            line.setAttribute('data-kind', item.kind);
+            if (item.n != null) line.setAttribute('data-n', String(item.n));
+            var n = document.createElement('span');
+            n.className = 'rf-line-n';
+            n.textContent = item.n == null ? '' : String(item.n);
+            var t = document.createElement('span');
+            t.className = 'rf-line-t';
+            t.textContent = item.kind === 'add' ? '+ ' : item.kind === 'del' ? '- ' : item.kind === 'gap' ? '' : '  ';
+            if (Array.isArray(item.tokens)) {
+              item.tokens.forEach(function(token) {
+                if (!Array.isArray(token) || typeof token[1] !== 'string') return;
+                var span = document.createElement('span');
+                if (/^[kscn]$/.test(token[0])) span.className = 'rf-tok-' + token[0];
+                span.textContent = token[1];
+                t.append(span);
+              });
+            } else {
+              t.append(String(item.text));
+            }
+            line.append(n, t);
+            body.append(line);
+          });
+        } else {
+          var pre = document.createElement('pre');
+          pre.style.cssText = 'margin:0;padding:var(--rf-space-2) var(--rf-space-3);white-space:pre-wrap';
+          pre.textContent = p ? p.text : 'No registered preview is available.';
+          body.append(pre);
+        }
+        if (p && p.available) {
+          var actions = document.createElement('span');
+          actions.className = 'rf-insert-actions';
+          ['reveal', 'comment'].forEach(function(kind) {
+            var button = document.createElement('button');
+            button.type = 'button';
+            button.textContent = kind === 'reveal' ? 'Open' : 'Comment';
+            button.onclick = function() { action(kind, id); };
+            actions.append(button);
+          });
+          head.append(actions);
+        }
+        box.append(head, body);
+        slot.append(box);
+        paint(slot, false);
       });
     }
     window.addEventListener('message', function(event) {

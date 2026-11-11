@@ -154,6 +154,7 @@ impl ReviewStore {
             runs: vec![],
             materials: vec![],
             activity: vec![],
+            remote_links: vec![],
         };
         let document = serde_json::to_string(&r)?;
         tx.execute(
@@ -650,6 +651,39 @@ fn apply(c: &Connection, r: &mut Review, op: &Operation) -> Result<()> {
                 }
             }
             put(&mut r.runs, run, |x| &x.id);
+        }
+        Operation::PutRemoteLink {
+            link,
+        } => {
+            let known = match link.kind {
+                RemoteLinkKind::Contribution => r
+                    .threads
+                    .iter()
+                    .flat_map(|t| &t.contributions)
+                    .any(|c| c.id == link.local_id),
+                RemoteLinkKind::Annotation => r.annotations.iter().any(|a| a.id == link.local_id),
+            };
+            if !known || link.source.trim().is_empty() {
+                return Err(invalid(
+                    "remote link names an unknown local object or source",
+                ));
+            }
+            if link.state != RemoteLinkState::Requested
+                && link.remote_id.as_deref().is_none_or(str::is_empty)
+            {
+                return Err(invalid("remote link requires the remote identity"));
+            }
+            match r
+                .remote_links
+                .iter_mut()
+                .find(|old| old.kind == link.kind && old.local_id == link.local_id)
+            {
+                Some(old) if old.state == RemoteLinkState::Imported => {
+                    return Err(invalid("imported remote identity is immutable"))
+                }
+                Some(old) => *old = link.clone(),
+                None => r.remote_links.push(link.clone()),
+            }
         }
     }
     Ok(())

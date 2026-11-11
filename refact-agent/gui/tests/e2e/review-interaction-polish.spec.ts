@@ -237,9 +237,7 @@ test("native code, diff, metadata, source and evidence controls", async ({
   );
   await shot(page, "evidence-after");
   await sources.getByRole("button", { name: "README.md", exact: true }).click();
-  await expect(
-    page.getByRole("radio", { name: "Review", exact: true }),
-  ).toBeChecked();
+  await expect(page.getByRole("radio", { name: /^Changes/ })).toBeChecked();
   await expect(
     page.getByRole("textbox", { name: "Head bbbbbbbb" }),
   ).toContainText("Parser now trims whitespace.");
@@ -339,7 +337,9 @@ test("pending update, explicit apply and historical version use shared select", 
   await page.getByRole("button", { name: /Apply updated topic/ }).click();
   await page.evaluate(() => window.__reviewFixture?.publishTopic());
   await expect(
-    page.getByRole("heading", { name: "Later investigation" }),
+    page
+      .getByRole("list", { name: "Tour steps" })
+      .getByRole("button", { name: "Later investigation" }),
   ).toBeAttached();
 });
 
@@ -417,9 +417,7 @@ test("read-only error recovery and native anchor handoff remain operable", async
     page.getByRole("radio", { name: "Tour", exact: true }),
   ).toBeChecked();
   await frame.locator("#valid-anchor").click();
-  await expect(
-    page.getByRole("radio", { name: "Review", exact: true }),
-  ).toBeChecked();
+  await expect(page.getByRole("radio", { name: /^Changes/ })).toBeChecked();
   await expect(
     page.getByRole("textbox", { name: "Head bbbbbbbb" }),
   ).toBeVisible();

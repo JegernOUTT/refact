@@ -380,6 +380,129 @@ pub async fn import(
         )
         .map_err(|e| e.to_string())?
     };
+    publish(app, chat, root, token, manifest, scope, request).await
+}
+
+pub struct OpenMember {
+    pub key: String,
+    pub branch_ref: String,
+    pub pr: Option<u64>,
+    pub base_oid: String,
+    pub head_oid: String,
+    pub branch_is_head: bool,
+}
+
+pub struct OpenStack {
+    pub repository: String,
+    pub title: String,
+    pub reference: String,
+    pub selected: String,
+    pub identity: Option<(String, String)>,
+    pub members: Vec<OpenMember>,
+    pub request_key: String,
+}
+
+/// Whole-stack review is the product default, so opening one needs no scope question.
+/// A strictly linear chain of live branch heads keeps its cumulative comparison.
+pub async fn open_whole(
+    app: &AppState,
+    chat: &str,
+    request: OpenStack,
+) -> std::result::Result<StackManifest, String> {
+    let root = super::service::trusted_root(app, chat).await?;
+    crate::files_in_workspace::check_file_privacy_for_model_context(app.gcx.clone(), &root).await?;
+    let live = request.members.iter().enumerate().all(|(index, member)| {
+        member.branch_is_head
+            && (index == 0 || request.members[index - 1].head_oid == member.base_oid)
+    });
+    let root_base = request
+        .members
+        .first()
+        .map(|member| member.base_oid.clone())
+        .ok_or("`stack` must list at least one pull request")?;
+    let comparisons = request
+        .members
+        .iter()
+        .map(|member| MemberComparison {
+            member: member.key.clone(),
+            base_ref: member.base_oid.clone(),
+            head_ref: member.head_oid.clone(),
+        })
+        .collect();
+    let mut parent = None;
+    let members = request
+        .members
+        .into_iter()
+        .map(|member| DiscoveryMember {
+            pr_identity: member.pr.zip(request.identity.clone()).map(
+                |(number, (host, repository))| PrIdentity {
+                    host,
+                    repository,
+                    number,
+                },
+            ),
+            parent: parent.replace(member.key.clone()),
+            key: member.key,
+            branch_ref: member.branch_ref,
+        })
+        .collect();
+    let manifest = discovery(
+        DiscoveryRequest {
+            title: request.title,
+            source: StackSource {
+                kind: "provided_manifest".into(),
+                reference: Some(request.reference),
+            },
+            selected_member: request.selected,
+            comparison_mode: if live {
+                ComparisonMode::LiveChain
+            } else {
+                ComparisonMode::RecordedComparisons
+            },
+            members,
+        },
+        chat,
+        request.repository,
+    )?;
+    let token = format!(
+        "entry:{}:{}",
+        uuid::Uuid::new_v4(),
+        content_hash(&serde_json::to_vec(&manifest).map_err(|e| e.to_string())?)
+    );
+    let (owner, saved, nonce) = (chat.to_string(), manifest.clone(), token.clone());
+    super::service::with_store(root.clone(), move |s| {
+        s.put_stack_preparation(&owner, &nonce, &saved)
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    let acquisition = AcquisitionRequest {
+        preparation_token: token.clone(),
+        scope_receipt_tool_call_id: String::new(),
+        request_key: request.request_key,
+        root_base_ref: live.then_some(root_base),
+        comparisons,
+    };
+    publish(
+        app,
+        chat,
+        root,
+        token,
+        manifest,
+        StackScope::Whole,
+        acquisition,
+    )
+    .await
+}
+
+async fn publish(
+    app: &AppState,
+    chat: &str,
+    root: std::path::PathBuf,
+    token: String,
+    manifest: StackManifest,
+    scope: StackScope,
+    request: AcquisitionRequest,
+) -> std::result::Result<StackManifest, String> {
     let acquisition_fingerprint =
         content_hash(&serde_json::to_vec(&(&request, &scope)).map_err(|e| e.to_string())?);
     let replay_owner = chat.to_string();

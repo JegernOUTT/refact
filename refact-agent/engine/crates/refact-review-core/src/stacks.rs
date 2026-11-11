@@ -717,6 +717,7 @@ impl ReviewStore {
                 runs: vec![],
                 materials: vec![],
                 activity: vec![],
+                remote_links: vec![],
             };
             tx.execute(
                 "INSERT INTO reviews VALUES(?1,?2,?3)",
@@ -1006,6 +1007,7 @@ impl ReviewStore {
                 runs: vec![],
                 materials: vec![],
                 activity: vec![],
+                remote_links: vec![],
             };
             tx.execute(
                 "INSERT INTO reviews VALUES(?1,?2,?3)",

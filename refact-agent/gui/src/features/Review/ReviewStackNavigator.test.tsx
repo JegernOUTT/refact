@@ -130,35 +130,30 @@ describe("Review stack DTO guards", () => {
 });
 
 describe("ReviewStackNavigator", () => {
-  it("labels recorded history with saved refs and refuses whole-stack comparison", async () => {
+  it("shows a captured stack by position and offers no stack comparison", async () => {
     const stack = manifest();
     stack.members[1].reason = "entry:recorded_comparisons:history";
     stack.members[1].declared_base_ref = "saved-base";
-    const onComparisonChange = vi.fn();
+    stack.members[1].pr_identity = {
+      host: "github.com",
+      repository: "acme/widgets",
+      number: 12,
+    };
     const { user } = render(
       <ReviewStackNavigator
         stack={stack}
         selectedMemberId="b"
         onSelect={vi.fn()}
         comparison="cumulative"
-        onComparisonChange={onComparisonChange}
+        onComparisonChange={vi.fn()}
       />,
     );
-    expect(
-      screen.getByRole("radio", { name: "Recorded comparison" }),
-    ).toBeChecked();
-    expect(screen.queryByRole("radio", { name: "Parent-relative" })).toBeNull();
-    expect(screen.getByText(/Recorded comparison history/)).toHaveAttribute(
+    expect(screen.queryByRole("radio")).toBeNull();
+    expect(screen.getByText("2 of 3")).toHaveAttribute(
       "title",
       expect.stringContaining("Base: saved-base (base)\nHead: head"),
     );
-    const whole = screen.getByRole("radio", { name: "Whole stack" });
-    expect(whole).toBeDisabled();
-    expect(
-      screen.getByTitle(/Whole stack comparison is unavailable/),
-    ).toBeInTheDocument();
-    await user.click(whole);
-    expect(onComparisonChange).not.toHaveBeenCalled();
+    expect(screen.getByRole("combobox")).toHaveTextContent("#12 branch-b");
     screen.getByRole("combobox").focus();
     await user.keyboard("{Enter}");
     expect(

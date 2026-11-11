@@ -193,15 +193,13 @@ export function ReviewStackSurface({
   chatId,
   review,
   stale,
-  ready,
 }: {
   chatId: string;
   review: Review | null;
   stale: boolean;
-  ready: boolean;
 }) {
   const { currentData: stack, error: stackError } =
-    useGetReviewStackByChatQuery({ chatId }, { skip: !ready });
+    useGetReviewStackByChatQuery({ chatId });
   const [chosenMember, setChosenMember] = useState<string | null>(null);
   const [pendingNavigation, setPendingNavigation] = useState<{
     token: number;
@@ -257,9 +255,6 @@ export function ReviewStackSurface({
     (member) => member.reason?.startsWith("entry:recorded_comparisons:"),
   );
   const effectiveComparison = recorded ? "parent" : comparison;
-  const refreshLabel = recorded
-    ? "Refresh is unavailable for immutable recorded comparison history"
-    : "Refresh local stack refs";
   const memberId = stack.members.some((member) => member.id === chosenMember)
     ? chosenMember
     : active?.id ?? stack.scope_choice.selected_member_id;
@@ -285,40 +280,33 @@ export function ReviewStackSurface({
           )
         }
       />
-      <Tooltip>
-        <Tooltip.Trigger asChild>
-          <IconButton
-            icon={RefreshCw}
-            aria-label="Refresh stack refs"
-            size="sm"
-            variant="ghost"
-            disabled={recorded || stale || refreshState.isLoading}
-            title={refreshLabel}
-            loading={refreshState.isLoading}
-            onClick={() =>
-              !recorded &&
-              void refresh({
-                chatId,
-                expected_revision: stack.revision,
-                request_key: newRequestKey(),
-              })
-            }
-          />
-        </Tooltip.Trigger>
-        <Tooltip.Content>{refreshLabel}</Tooltip.Content>
-      </Tooltip>
+      {!recorded && (
+        <Tooltip>
+          <Tooltip.Trigger asChild>
+            <IconButton
+              icon={RefreshCw}
+              aria-label="Refresh stack refs"
+              size="sm"
+              variant="ghost"
+              disabled={stale || refreshState.isLoading}
+              title="Refresh local stack refs"
+              loading={refreshState.isLoading}
+              onClick={() =>
+                void refresh({
+                  chatId,
+                  expected_revision: stack.revision,
+                  request_key: newRequestKey(),
+                })
+              }
+            />
+          </Tooltip.Trigger>
+          <Tooltip.Content>Refresh local stack refs</Tooltip.Content>
+        </Tooltip>
+      )}
     </div>
   );
-  const status = (
-    <span
-      title={`Scope: ${stack.scope_choice.scope} · Browsing ${
-        stack.members.find((member) => member.id === memberId)?.branch_ref ??
-        "none"
-      } · Execution: ${active?.branch_ref ?? "none"}`}
-    >
-      Scope: {stack.scope_choice.scope}
-      {active?.id !== memberId && " · browsing only"}
-    </span>
+  const status = stack.scope_choice.scope === "single" && (
+    <span>Only this PR is in scope</span>
   );
   return (
     <StackHeaderContext.Provider

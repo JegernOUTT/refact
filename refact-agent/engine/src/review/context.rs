@@ -815,7 +815,13 @@ pub async fn set_context(
             params: serde_json::json!({"worktree":worktree}),
         });
         let mut message = crate::chat::queue::worktree_activation_message(&worktree);
-        crate::privacy::records::merge_records(&mut message, origin_records.clone());
+        crate::privacy::records::merge_records(
+            &mut message,
+            origin_records
+                .iter()
+                .filter(|record| record.zone != "normal")
+                .cloned(),
+        );
         s.add_message(message);
         s.increment_version();
         s.touch();

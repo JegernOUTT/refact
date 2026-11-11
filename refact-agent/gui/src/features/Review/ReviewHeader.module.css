@@ -10,13 +10,28 @@
   border-bottom: var(--rf-hairline) solid var(--rf-border);
 }
 
+.identitySlot {
+  display: flex;
+  flex: 0 1 auto;
+  max-width: 100%;
+  min-width: 0;
+}
+
 .identity {
   flex: 0 1 auto;
-  max-width: min(100%, 48ch);
+  max-width: 48ch;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* A wide canvas keeps one row: the title gives way before a control wraps. */
+@container (min-width: 840px) {
+  .identitySlot {
+    flex: 1 1 20ch;
+    max-width: max-content;
+  }
 }
 
 .controls {

@@ -192,6 +192,16 @@ pub async fn resolve_review(
     }
     found.ok_or_else(|| "review not found".into())
 }
+/// Guarded provenance of everything retained by the review. Unguarded files are
+/// declared per message, only where a message actually carries their content.
+pub(crate) fn guarded_records(review: &Review) -> Vec<refact_privacy::FileRecord> {
+    review
+        .privacy
+        .iter()
+        .filter(|record| record.zone != "normal")
+        .cloned()
+        .collect()
+}
 pub fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -356,10 +366,41 @@ async fn add_comment(
             return Err(invalid("reply thread is outside inspected candidate"));
         }
     }
+    let mut attempts = 0;
+    let review = loop {
+        match append_comment(
+            root.clone(),
+            owner.clone(),
+            review_id.clone(),
+            actor.clone(),
+            req.clone(),
+            privacy.clone(),
+        )
+        .await
+        {
+            Err(Error::Conflict {
+                ..
+            }) if attempts < 8 => attempts += 1,
+            result => break result?,
+        }
+    };
+    crate::review::chat_bridge::invalidate(&app, &review).await;
+    if let Err(e) = crate::review::chat_bridge::flush(&app, root, &review).await {
+        tracing::warn!(error=%e, "review comment remains pending delivery");
+    }
+    Ok(review)
+}
+
+async fn append_comment(
+    root: PathBuf,
+    owner_copy: String,
+    rid: String,
+    actor: Actor,
+    req: CommentRequest,
+    privacy: Vec<refact_privacy::FileRecord>,
+) -> Result<Review> {
     let key = req.request_key.clone();
-    let rid = review_id.clone();
-    let owner_copy = owner.clone();
-    let review = with_store(root.clone(), move |s| {
+    with_store(root, move |s| {
         let r = s.load(&rid)?;
         if r.owner_chat_id != owner_copy {
             return Err(Error::NotFound);
@@ -440,6 +481,18 @@ async fn add_comment(
             privacy: privacy.clone(),
         });
         let contribution_id = reply_contribution_id(&rid, &key);
+        if let Some(existing) = r
+            .threads
+            .iter()
+            .flat_map(|t| &t.contributions)
+            .find(|c| c.id == contribution_id)
+        {
+            return if existing.body == req.body && existing.actor == actor {
+                Ok(r)
+            } else {
+                Err(Error::IdempotencyConflict)
+            };
+        }
         if let Some(candidate) = context.as_ref().and_then(|c| c.candidate_id.as_deref()) {
             validate_block_candidate(&r, &req.blocks, candidate)?;
         }
@@ -473,7 +526,7 @@ async fn add_comment(
         s.mutate_with_privacy(
             &rid,
             Mutation {
-                expected_revision: req.expected_revision,
+                expected_revision: r.revision,
                 request_key: key,
                 actor,
                 at_ms: now_ms(),
@@ -482,12 +535,7 @@ async fn add_comment(
             privacy,
         )
     })
-    .await?;
-    crate::review::chat_bridge::invalidate(&app, &review).await;
-    if let Err(e) = crate::review::chat_bridge::flush(&app, root, &review).await {
-        tracing::warn!(error=%e, "review comment remains pending delivery");
-    }
-    Ok(review)
+    .await
 }
 pub async fn comment(
     app: AppState,
@@ -720,11 +768,9 @@ pub async fn model_mutate_with_privacy(
             step,
         } = &mut mutation.operation
         {
-            if agent_id != owner
-                || s.get_for_chat(&owner)?.as_ref().map(|active| &active.id) != Some(&r.id)
-            {
+            if agent_id != owner {
                 return Err(invalid(
-                    "only the owning foreground active tour author may update the tour",
+                    "only the owning foreground chat may update the tour",
                 ));
             }
             if step
@@ -878,11 +924,20 @@ async fn safe_mutate(
 ) -> Result<Review> {
     mutation.actor = actor;
     mutation.at_ms = now_ms();
-    let mutation = mutation.clone();
+    let mut mutation = mutation.clone();
     with_store(root, move |s| {
         let r = s.load(&review_id)?;
         if r.owner_chat_id != owner {
             return Err(Error::NotFound);
+        }
+        // Contributions are append-only and server-owned; a client never has to echo them.
+        if let Operation::PutThread {
+            thread,
+        } = &mut mutation.operation
+        {
+            if let Some(old) = r.threads.iter().find(|old| old.id == thread.id) {
+                thread.contributions = old.contributions.clone();
+            }
         }
         validate_operation(&r, &mutation.operation)?;
         s.mutate(&review_id, mutation)

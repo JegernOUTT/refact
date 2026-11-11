@@ -31,7 +31,7 @@ export type Applicability =
   | "historical"
   | "no_longer_applicable"
   | "unknown";
-export type ActorKind = "user" | "agent" | "system";
+export type ActorKind = "user" | "agent" | "system" | "external";
 export type MaterialKind = "imported" | "investigation" | "repair";
 export type RunStatus =
   | "queued"
@@ -261,6 +261,29 @@ export type Review = {
   runs: Run[];
   materials: Material[];
   activity: Activity[];
+  remote_links?: RemoteLink[];
+};
+
+/** Ties one local comment or finding to its counterpart on the pull request. */
+export type RemoteLink = {
+  kind: "contribution" | "annotation";
+  local_id: string;
+  state: "imported" | "requested" | "published";
+  source: string;
+  remote_id?: string;
+  remote_thread_id?: string;
+  url?: string;
+  author?: string;
+  at_ms: number;
+};
+
+export type ReviewSyncReport = {
+  available: boolean;
+  reason?: string;
+  pull_request?: string;
+  imported: number;
+  published: number;
+  failed?: { id: string; reason: string }[];
 };
 
 const revisionSchema = z.number().int().nonnegative().safe();
@@ -444,6 +467,8 @@ export type ReviewCommentRequest = {
   annotation_id?: string;
   anchor?: Anchor;
   body: string;
+  /** Also post the comment to the pull request. */
+  publish?: boolean;
 };
 
 export type ReviewCancelRunRequest = {
@@ -515,6 +540,15 @@ export function isReview(value: unknown): value is Review {
     Array.isArray(value.runs) &&
     Array.isArray(value.materials) &&
     Array.isArray(value.activity)
+  );
+}
+
+function isSyncReport(value: unknown): value is ReviewSyncReport {
+  return (
+    isRecord(value) &&
+    typeof value.available === "boolean" &&
+    typeof value.imported === "number" &&
+    typeof value.published === "number"
   );
 }
 
@@ -1033,6 +1067,76 @@ export const reviewApi = createApi({
       ],
     }),
 
+    /** Every file of one captured comparison; the polled review lists only changed and referenced ones. */
+    getReviewCandidateFiles: builder.query<
+      CandidateFile[],
+      { reviewId: string; candidateId: string }
+    >({
+      queryFn: async ({ reviewId, candidateId }, api, _opts, baseQuery) => {
+        const state = api.getState() as RootState;
+        const result = await baseQuery({
+          url: buildApiUrlFromState(
+            state,
+            reviewPath(
+              reviewId,
+              `/candidates/${encodeURIComponent(candidateId)}/files`,
+            ),
+          ),
+        });
+        if (result.error) return { error: result.error };
+        const raw: unknown = result.data;
+        if (
+          !Array.isArray(raw) ||
+          !raw.every((file) => isRecord(file) && typeof file.path === "string")
+        )
+          return { error: shapeError("files", raw) };
+        return { data: raw as CandidateFile[] };
+      },
+    }),
+
+    sendReviewItemToPr: builder.mutation<
+      Review,
+      { reviewId: string; id: string }
+    >({
+      queryFn: async ({ reviewId, id }, api, _opts, baseQuery) => {
+        const state = api.getState() as RootState;
+        const result = await baseQuery({
+          url: buildApiUrlFromState(state, reviewPath(reviewId, "/outbox")),
+          method: "POST",
+          body: { id },
+        });
+        if (result.error) return { error: result.error };
+        const raw: unknown = result.data;
+        if (!isReview(raw)) return { error: shapeError("Review", raw) };
+        return { data: raw };
+      },
+      invalidatesTags: (_result, _error, { reviewId }) => [
+        reviewIdTag(reviewId),
+      ],
+    }),
+
+    syncReviewComments: builder.mutation<
+      ReviewSyncReport,
+      { reviewId: string; quiet: boolean }
+    >({
+      queryFn: async ({ reviewId, quiet }, api, _opts, baseQuery) => {
+        const state = api.getState() as RootState;
+        const result = await baseQuery({
+          url: buildApiUrlFromState(state, reviewPath(reviewId, "/pr-sync")),
+          method: "POST",
+          body: { quiet },
+        });
+        if (result.error) return { error: result.error };
+        const raw: unknown = result.data;
+        if (!isSyncReport(raw)) return { error: shapeError("sync", raw) };
+        return { data: raw };
+      },
+      invalidatesTags: (result, _error, { reviewId }) =>
+        result && result.imported + result.published > 0
+          ? [reviewIdTag(reviewId)]
+          : [],
+    }),
+
     reportReviewSelection: builder.mutation<null, ReviewSelectionRequest>({
       queryFn: async ({ reviewId, ...body }, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
@@ -1095,6 +1199,9 @@ export const {
   useResolveAnchorMutation,
   useMutateReviewMutation,
   useAddReviewCommentMutation,
+  useGetReviewCandidateFilesQuery,
+  useSendReviewItemToPrMutation,
+  useSyncReviewCommentsMutation,
   useCancelReviewRunMutation,
   useReportReviewSelectionMutation,
 } = reviewApi;

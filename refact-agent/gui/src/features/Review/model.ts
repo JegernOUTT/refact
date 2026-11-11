@@ -69,13 +69,41 @@ export function findCandidate(
   return review.candidates.find((c) => c.id === candidateId) ?? null;
 }
 
+function sameCapture(a: Candidate, b: Candidate): boolean {
+  return (
+    a.content_digest === b.content_digest &&
+    a.base_oid === b.base_oid &&
+    a.head_oid === b.head_oid
+  );
+}
+
+/** Captures worth choosing between: a repeat of the same content is listed once. */
+export function distinctCandidates(
+  review: Review,
+  viewedId: string | null,
+): Candidate[] {
+  const ordered = orderedCandidates(review);
+  return ordered.filter(
+    (candidate, index) =>
+      candidate.id === viewedId ||
+      !ordered.slice(index + 1).some((later) => sameCapture(candidate, later)),
+  );
+}
+
+/** The capture before this one whose content differs from it. */
 export function previousCandidate(
   review: Review,
   candidateId: string,
 ): Candidate | null {
   const ordered = orderedCandidates(review);
   const index = ordered.findIndex((c) => c.id === candidateId);
-  return index > 0 ? ordered[index - 1] : null;
+  if (index < 0) return null;
+  return (
+    ordered
+      .slice(0, index)
+      .reverse()
+      .find((earlier) => !sameCapture(earlier, ordered[index])) ?? null
+  );
 }
 
 /** Anchors attached to a review object positioned in a given candidate/path. */
@@ -296,8 +324,27 @@ export function firstAnchorOf(anchors: Anchor[]): Anchor | null {
   return anchors.find((a) => a.status === "current") ?? anchors.at(0) ?? null;
 }
 
+/** `crypto.randomUUID` exists only in secure contexts; the GUI is also served over plain HTTP. */
 export function newRequestKey(): string {
-  return crypto.randomUUID();
+  if (
+    typeof crypto !== "undefined" &&
+    typeof crypto.randomUUID === "function"
+  ) {
+    return crypto.randomUUID();
+  }
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0"));
+  return [
+    hex.slice(0, 4),
+    hex.slice(4, 6),
+    hex.slice(6, 8),
+    hex.slice(8, 10),
+    hex.slice(10),
+  ]
+    .map((group) => group.join(""))
+    .join("-");
 }
 
 export function shortOid(oid: string): string {

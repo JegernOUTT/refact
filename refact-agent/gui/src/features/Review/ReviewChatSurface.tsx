@@ -40,6 +40,8 @@ export type ReviewChatSurfaceProps = {
 };
 
 const REVIEW_POLL_MS = 15000;
+const MIN_CHAT_WIDTH = 272;
+const MAX_DEFAULT_CHAT_WIDTH = 460;
 const REVIEW_ARTIFACT_POLICY: ArtifactPolicy = {
   mode: "review-seamless",
 };
@@ -57,7 +59,7 @@ export function ReviewChatSurface({
   const canvasSlotId = useId();
   const [focusedSurface, setFocusedSurface] = useState("chat");
   const [containerWidth, setContainerWidth] = useState(0);
-  const [chatWidth, setChatWidth] = useState(320);
+  const [chosenChatWidth, setChatWidth] = useState<number | null>(null);
   useEffect(() => {
     const element = containerRef.current;
     if (!element || typeof ResizeObserver === "undefined") return;
@@ -78,7 +80,6 @@ export function ReviewChatSurface({
     useGetReviewByChatQuery(
       { chatId },
       {
-        skip: !ready,
         refetchOnMountOrArgChange: true,
         refetchOnFocus: true,
         refetchOnReconnect: true,
@@ -90,7 +91,6 @@ export function ReviewChatSurface({
   const stackQuery = useGetReviewStackByChatQuery(
     { chatId },
     {
-      skip: !ready,
       refetchOnMountOrArgChange: true,
       refetchOnFocus: true,
       refetchOnReconnect: true,
@@ -100,7 +100,8 @@ export function ReviewChatSurface({
   );
   const stack =
     stackQuery.data?.owner_chat_id === chatId ? stackQuery.data : null;
-  const available = ready ? data : cached;
+  // The canvas does not wait for the chat transcript; it stays read-only until it arrives.
+  const available = data ?? cached;
   const review = available?.owner_chat_id === chatId ? available : null;
   const stale =
     review !== null &&
@@ -126,8 +127,11 @@ export function ReviewChatSurface({
     },
     [review?.id, stack],
   );
-  const maxWidth = Math.max(272, containerWidth - 400);
-  const width = Math.min(maxWidth, Math.max(272, chatWidth));
+  const maxWidth = Math.max(MIN_CHAT_WIDTH, containerWidth - 400);
+  const chatWidth =
+    chosenChatWidth ??
+    Math.min(MAX_DEFAULT_CHAT_WIDTH, Math.round(containerWidth * 0.3));
+  const width = Math.min(maxWidth, Math.max(MIN_CHAT_WIDTH, chatWidth));
   const splitStyle = { "--review-chat-width": `${width}px` } as CSSProperties;
 
   return (
@@ -174,7 +178,7 @@ export function ReviewChatSurface({
         {resizable && (
           <ReviewSplitHandle
             value={width}
-            min={272}
+            min={MIN_CHAT_WIDTH}
             max={maxWidth}
             onChange={setChatWidth}
             controls={chatSlotId}
@@ -219,7 +223,6 @@ export function ReviewChatSurface({
                         !ready ||
                         (stack !== null && stackQuery.error !== undefined)
                       }
-                      ready={ready}
                     />
                   </ReviewSurfaceActiveContext.Provider>
                 </ReviewAcceptedNavigationContext.Provider>

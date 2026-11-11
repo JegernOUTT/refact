@@ -978,7 +978,7 @@ mod tests {
             "tool_job",
             "wait",
             "worktree_merge",
-            "set_review_context",
+            "review_open",
             "subagent",
             "spawn_agent",
             "merge_agent",
@@ -1032,7 +1032,7 @@ mod tests {
                     base.gcx.clone(),
                     Arc::new(|| {
                         vec![Box::new(crate::tools::tool_review::ToolReview(
-                            crate::tools::tool_review::ReviewToolKind::Context,
+                            crate::tools::tool_review::ReviewToolKind::Open,
                         ))]
                     }),
                 ),
@@ -1075,10 +1075,10 @@ mod tests {
             build_tool_execution_context(app.clone(), 4096, &[], &thread, Some(abort.clone()))
                 .await
                 .unwrap();
-        let mut call = deterministic_tool_call("review-activation", "set_review_context");
+        let mut call = deterministic_tool_call("review-activation", "review_open");
         call.function.arguments = serde_json::json!({
             "repository":session.lock().await.work_project_root,
-            "base_ref":oid,"candidate_ref":oid,"request_key":"dispatch-capture"
+            "base":oid,"head":oid
         })
         .to_string();
 
@@ -1100,7 +1100,7 @@ mod tests {
                     "agent",
                     None,
                     ExecuteToolsOptions {
-                        allowed_tools: vec!["set_review_context".into()],
+                        allowed_tools: vec!["review_open".into()],
                         execution_context: Some(context.clone()),
                         ..Default::default()
                     },
@@ -1118,10 +1118,10 @@ mod tests {
                 messages[0].extra["tool_execution_policy"]["foreground_reason"],
                 "scope_writer"
             );
-            let value: serde_json::Value =
-                serde_json::from_str(&messages[0].content.content_text_only()).unwrap();
-            let review_id = value["review"]["id"].as_str().unwrap();
-            let candidate_id = value["candidate_id"].as_str().unwrap();
+            let review_id = messages[0].extra["review"]["id"].as_str().unwrap();
+            let candidate_id = messages[0].extra["review"]["candidate_id"]
+                .as_str()
+                .unwrap();
             assert!(!review_id.is_empty());
             assert!(!candidate_id.is_empty());
             let identity = (review_id.to_string(), candidate_id.to_string());
@@ -4145,7 +4145,7 @@ fn tool_job_foreground_reason(name: &str) -> Option<&'static str> {
         "worktree_create"
         | "worktree_merge"
         | "worktree_sync"
-        | "set_review_context"
+        | "review_open"
         | "add_workspace_folder"
         | "task_update"
         | "task_manage"

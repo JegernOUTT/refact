@@ -84,7 +84,7 @@ describe("Review header file visibility controls", () => {
     const { user } = renderWithProviders(
       <ReviewCanvas review={makeReview()} />,
     );
-    await user.click(screen.getByRole("radio", { name: "Review" }));
+    await user.click(screen.getByRole("radio", { name: /^Changes/ }));
     await user.click(
       screen.getByRole("button", { name: "More review options" }),
     );
@@ -121,7 +121,7 @@ describe("Review header file visibility controls", () => {
     const review = makeReview();
     review.candidates[0].files = review.candidates[0].files.slice(0, 1);
     const { user } = renderWithProviders(<ReviewCanvas review={review} />);
-    await user.click(screen.getByRole("radio", { name: "Review" }));
+    await user.click(screen.getByRole("radio", { name: /^Changes/ }));
     await user.click(
       screen.getByRole("button", { name: "More review options" }),
     );

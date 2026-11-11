@@ -47,7 +47,11 @@ export function ReviewHeader({
       }}
     >
       {stackControls && <div className={styles.controls}>{stackControls}</div>}
-      {identity && <div className={styles.identity}>{identity}</div>}
+      {identity && (
+        <div className={styles.identitySlot}>
+          <div className={styles.identity}>{identity}</div>
+        </div>
+      )}
       {status && <div className={styles.status}>{status}</div>}
       {reviewControls && (
         <div className={styles.controls}>{reviewControls}</div>

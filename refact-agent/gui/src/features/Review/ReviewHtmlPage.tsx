@@ -1,9 +1,10 @@
 /* eslint-disable react-refresh/only-export-components */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { createTwoFilesPatch } from "diff";
+import { createTwoFilesPatch, structuredPatch, type parsePatch } from "diff";
 import { ArtifactBlock } from "../../components/Markdown/ArtifactBlock";
 import {
   ArtifactPolicyProvider,
+  type ReviewSlotLine,
   type ReviewSlotPreview,
 } from "../../components/Markdown/ArtifactPolicyContext";
 import { Button, Dialog } from "../../components/ui";
@@ -16,6 +17,7 @@ import {
   type ReviewFileView,
 } from "../../services/refact/review";
 import { BlockQuestion, RichBlockContent } from "./ReviewRichBlocks";
+import { codeTokens, lineCommentOf } from "./codeTokens";
 
 /** A registered reference is the only authority for a file query. Frame paths are never accepted. */
 export function previewReference(
@@ -91,6 +93,105 @@ export function filePreview(block: RichBlock, file: ReviewFileView): string {
     : patch;
 }
 
+const MAX_INSERT_LINES = 400;
+
+/** Numbered lines of a code or diff insert, or null when only the text preview applies. */
+export function fileLines(
+  block: RichBlock,
+  file: ReviewFileView,
+): ReviewSlotLine[] | null {
+  const c = block.content;
+  const comment = lineCommentOf(file.path);
+  if (c.kind === "code") {
+    const side = file[c.anchor.position.side];
+    const { start_line: start, end_line: end } = c.anchor.position;
+    if (side.kind !== "text") return null;
+    const lines = side.text.split("\n");
+    if (
+      !Number.isSafeInteger(start) ||
+      !Number.isSafeInteger(end) ||
+      start < 1 ||
+      end < start ||
+      end > lines.length
+    )
+      return null;
+    return lines
+      .slice(start - 1, Math.min(end, start - 1 + MAX_INSERT_LINES))
+      .map((text, index) => ({
+        n: start + index,
+        kind: "ctx",
+        text,
+        tokens: codeTokens(text, comment),
+      }));
+  }
+  if (c.kind !== "diff") return null;
+  if (file.base.kind === "binary" || file.head.kind === "binary") return null;
+  const before = file.base.kind === "text" ? file.base.text : "";
+  const after = file.head.kind === "text" ? file.head.text : "";
+  if (before.length + after.length > 400_000) return null;
+  const options = { context: 3, timeout: 200, maxEditLength: 4000 };
+  const patch = structuredPatch(
+    file.path,
+    file.path,
+    before,
+    after,
+    "",
+    "",
+    options,
+  ) as unknown as ReturnType<typeof parsePatch>[number] | undefined;
+  if (!patch) return null;
+  const range = c.anchors?.at(0)?.position;
+  const out: ReviewSlotLine[] = [];
+  for (const hunk of patch.hunks) {
+    if (range) {
+      const [from, count] =
+        range.side === "base"
+          ? [hunk.oldStart, hunk.oldLines]
+          : [hunk.newStart, hunk.newLines];
+      if (from + count - 1 < range.start_line || from > range.end_line)
+        continue;
+    }
+    out.push({
+      n: null,
+      kind: "gap",
+      text: `@@ -${hunk.oldStart},${hunk.oldLines} +${hunk.newStart},${hunk.newLines} @@`,
+    });
+    let oldLine = hunk.oldStart;
+    let newLine = hunk.newStart;
+    for (const line of hunk.lines) {
+      const text = line.slice(1);
+      const tokens = codeTokens(text, comment);
+      if (line.startsWith("+"))
+        out.push({ n: newLine++, kind: "add", text, tokens });
+      else if (line.startsWith("-"))
+        out.push({ n: oldLine++, kind: "del", text, tokens });
+      else if (!line.startsWith("\\")) {
+        out.push({ n: newLine++, kind: "ctx", text, tokens });
+        oldLine++;
+      }
+    }
+    if (out.length >= MAX_INSERT_LINES) break;
+  }
+  return out.length > 0 ? out.slice(0, MAX_INSERT_LINES) : null;
+}
+
+function insertTitle(block: RichBlock, fallback: string): string {
+  const c = block.content;
+  const range =
+    c.kind === "code" ? c.anchor : c.kind === "diff" ? c.anchors?.at(0) : null;
+  const lines = range
+    ? ` · L${range.position.start_line}${
+        range.position.end_line !== range.position.start_line
+          ? `–${range.position.end_line}`
+          : ""
+      }`
+    : "";
+  return `${fallback}${lines}${c.kind === "diff" ? " · changes" : ""}`.slice(
+    0,
+    512,
+  );
+}
+
 function PreviewData({
   review,
   candidateId,
@@ -157,11 +258,16 @@ function PreviewData({
         0,
         12000,
       )}\n[Preview truncated: showing 12000 characters; open native Review for full content]`;
+    const lines =
+      available && ref && query.currentData?.path === ref.path
+        ? fileLines(block, query.currentData) ?? undefined
+        : undefined;
     onData({
       id: block.id,
-      title: (ref?.path ?? c.kind).slice(0, 512),
+      title: insertTitle(block, ref?.path ?? c.kind),
       text,
       available,
+      lines,
     });
   }, [
     review,
@@ -330,11 +436,13 @@ function HtmlPageInstance({
           <div ref={focusThread}>
             <Dialog.Title>
               {opened?.action === "comment"
-                ? "Comment on block"
-                : "Native Review block"}
+                ? "Ask about this code"
+                : data[selected?.id ?? ""]?.title ?? "Code from the change"}
             </Dialog.Title>
             <Dialog.Description>
-              Candidate-pinned source and discussion · {selected?.id}
+              {opened?.action === "comment"
+                ? "Your question goes to the review chat and is answered here."
+                : "The code as captured for this review, with its discussion."}
             </Dialog.Description>
             {selected && opened?.action === "reveal" && (
               <RichBlockContent

@@ -18,7 +18,6 @@ function documentView(review: ReturnType<typeof makeReview>) {
         review={review}
         stepId="alpha"
         active
-        follow
         onManualScroll={vi.fn()}
         onRevealAnchor={vi.fn()}
       />
@@ -89,7 +88,6 @@ describe("living review document", () => {
             review={review}
             stepId="alpha"
             active
-            follow
             onManualScroll={vi.fn()}
             onRevealAnchor={vi.fn()}
             revealTarget={{ target, token: 1, threadId: "historical-thread" }}
@@ -106,38 +104,68 @@ describe("living review document", () => {
     ).not.toBeNull();
   });
 
-  it("renders arbitrary topics together and announces newly published sections", () => {
+  it("shows one page at a time and pages through the tour by callback", async () => {
     const review = makeReview({
       tour: [
         topic("alpha", "Cache lifecycle"),
         topic("beta", "Failure recovery"),
       ],
     });
-    const { rerender, container } = render(documentView(review));
-    const document = container.querySelector("[data-review-document]");
-    expect(document).not.toBeNull();
+    const onSelectStep = vi.fn();
+    const view = (stepId: string | null) => (
+      <ReviewDocumentState>
+        <ReviewDocument
+          review={review}
+          stepId={stepId}
+          active
+          onSelectStep={onSelectStep}
+          onManualScroll={vi.fn()}
+          onRevealAnchor={vi.fn()}
+        />
+      </ReviewDocumentState>
+    );
+    const { rerender, user } = render(view(null));
     expect(
-      within(document as HTMLElement).getByRole("heading", {
-        name: "Cache lifecycle",
-      }),
+      screen.getByRole("heading", { name: "Cache lifecycle" }),
     ).toBeInTheDocument();
     expect(
-      within(document as HTMLElement).getByRole("heading", {
-        name: "Failure recovery",
-      }),
+      screen.queryByRole("heading", { name: "Failure recovery" }),
+    ).not.toBeInTheDocument();
+    const pager = screen.getByRole("navigation", { name: "Tour pages" });
+    expect(within(pager).getByText("Page 1 of 2")).toBeInTheDocument();
+    expect(
+      within(pager).getByRole("button", { name: "Previous" }),
+    ).toBeDisabled();
+    await user.click(
+      within(pager).getByRole("button", { name: "Failure recovery" }),
+    );
+    expect(onSelectStep).toHaveBeenCalledWith("beta");
+    rerender(view("beta"));
+    expect(
+      screen.getByRole("heading", { name: "Failure recovery" }),
     ).toBeInTheDocument();
-    rerender(
-      documentView({
-        ...review,
-        tour: [...review.tour, topic("gamma", "Transport boundaries")],
-      }),
+    expect(screen.getByText("Page 2 of 2")).toBeInTheDocument();
+  });
+
+  it("says the tour is still being written instead of showing an empty page", () => {
+    render(
+      <ReviewDocumentState>
+        <ReviewDocument
+          review={makeReview({ tour: [] })}
+          stepId={null}
+          active
+          working
+          onManualScroll={vi.fn()}
+          onRevealAnchor={vi.fn()}
+        />
+      </ReviewDocumentState>,
     );
     expect(
-      screen.getByRole("heading", { name: "Transport boundaries" }),
+      screen.getByRole("heading", { name: "The tour is being written" }),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "1 new topic" }),
-    ).toBeInTheDocument();
+      screen.queryByRole("navigation", { name: "Tour pages" }),
+    ).not.toBeInTheDocument();
   });
 
   it("offers a newer version rather than replacing the version being read", async () => {

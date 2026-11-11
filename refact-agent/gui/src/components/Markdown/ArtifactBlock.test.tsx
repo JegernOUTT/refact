@@ -3,6 +3,7 @@ import { act } from "react-dom/test-utils";
 import { fireEvent, screen } from "@testing-library/react";
 import { render } from "../../utils/test-utils";
 import { Markdown } from "./Markdown";
+import { ArtifactBlock } from "./ArtifactBlock";
 import { ArtifactPolicyProvider } from "./ArtifactPolicyContext";
 import { reviewArtifactHtml, reviewThemePayload } from "./artifactPolicy";
 
@@ -188,6 +189,33 @@ describe("Review artifact policy", () => {
     vi.useRealTimers();
   });
 
+  it("lets a tour page flow at its full height while an embedded visual stays bounded", async () => {
+    render(
+      <ArtifactPolicyProvider
+        value={{
+          mode: "review-seamless",
+          page: { previews: [], onAction: () => undefined },
+        }}
+      >
+        <ArtifactBlock code="<p>page</p>" />
+      </ArtifactPolicyProvider>,
+    );
+    const frame = await screen.findByTitle<HTMLIFrameElement>("Tour visual");
+    const channel = /var channel="([^"]+)"/.exec(frame.srcdoc)?.[1];
+    expect(channel).toBeTruthy();
+    vi.useFakeTimers();
+    fireEvent(
+      window,
+      new MessageEvent("message", {
+        source: frame.contentWindow,
+        data: { type: "refact-artifact-resize", height: 5000, channel },
+      }),
+    );
+    await act(() => vi.advanceTimersByTime(50));
+    expect(frame.style.height).toBe("5000px");
+    vi.useRealTimers();
+  });
+
   it("bounds finite heights and ignores invalid or unbound resize messages", async () => {
     render(
       <ArtifactPolicyProvider value={policy}>
@@ -221,7 +249,7 @@ describe("Review artifact policy", () => {
   it("only sends allowlisted resolved theme values and updates without replacing source", async () => {
     const tokens = {
       "--rf-color-fg": "resolved-color",
-      "--secret": "hidden",
+      "--secret": "private-token-value",
       "--rf-font-ui": "url(https://example.test)",
     };
     expect(
@@ -266,7 +294,7 @@ describe("Review artifact policy", () => {
     );
     expect(frame.srcdoc).toBe(source);
     expect(source).not.toContain("window.refactReview =");
-    expect(source).not.toContain("hidden");
+    expect(source).not.toContain("private-token-value");
   });
 
   it("preserves automatic chat preview", async () => {

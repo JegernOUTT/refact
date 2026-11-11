@@ -4,7 +4,7 @@ test("Review diff fills its pane and exposes keyboard hunk and comment navigatio
   page,
 }) => {
   await page.goto("/tests/e2e/review-canvas.html");
-  await page.getByRole("radio", { name: "Review", exact: true }).press("Space");
+  await page.getByRole("radio", { name: /^Changes/ }).press("Space");
   const host = page
     .getByTestId("review-diff-editors")
     .filter({ visible: true });
@@ -45,16 +45,14 @@ test("Review diff fills its pane and exposes keyboard hunk and comment navigatio
     page.locator('[data-review-thread-id="thread-1"][data-active="true"]'),
   ).toBeVisible();
   await page.evaluate(() => window.__reviewFixture?.publishTopic());
-  await expect(
-    page.getByRole("radio", { name: "Review", exact: true }),
-  ).toBeChecked();
+  await expect(page.getByRole("radio", { name: /^Changes/ })).toBeChecked();
 });
 
 test("unchanged files remain separate from changed files when shown and selected", async ({
   page,
 }) => {
   await page.goto("/tests/e2e/review-canvas.html");
-  await page.getByRole("radio", { name: "Review", exact: true }).press("Space");
+  await page.getByRole("radio", { name: /^Changes/ }).press("Space");
   const changed = page.getByRole("list", {
     name: "Changed files",
     exact: true,
@@ -102,7 +100,8 @@ test("long files restore scroll and traverse cross-file and historical comments"
   page,
 }) => {
   await page.goto("/tests/e2e/review-canvas.html?diffNavigation=1");
-  await page.getByRole("radio", { name: "Review", exact: true }).press("Space");
+  await page.getByRole("radio", { name: /^Changes/ }).press("Space");
+  await page.getByRole("radio", { name: "Split" }).locator("..").click();
   const files = page.getByRole("list", { name: "Changed files" });
   await expect(files.getByRole("button")).toHaveCount(2);
   const host = page
@@ -206,7 +205,7 @@ test("shows an empty unchanged-files item when every file changed", async ({
   page,
 }) => {
   await page.goto("/tests/e2e/review-canvas.html?diffNavigation=1");
-  await page.getByRole("radio", { name: "Review", exact: true }).press("Space");
+  await page.getByRole("radio", { name: /^Changes/ }).press("Space");
   await page.getByRole("button", { name: "More review options" }).click();
   await page.getByRole("menuitem", { name: "Show unchanged files" }).click();
   const unchanged = page.getByRole("list", {
@@ -223,7 +222,8 @@ test("split panes share wheel, hunk and discussion scrolling", async ({
   page,
 }) => {
   await page.goto("/tests/e2e/review-canvas.html?diffNavigation=1");
-  await page.getByRole("radio", { name: "Review", exact: true }).press("Space");
+  await page.getByRole("radio", { name: /^Changes/ }).press("Space");
+  await page.getByRole("radio", { name: "Split" }).locator("..").click();
   const host = page
     .getByTestId("review-diff-editors")
     .filter({ visible: true });

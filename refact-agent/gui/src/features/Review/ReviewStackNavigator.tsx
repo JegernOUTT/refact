@@ -30,6 +30,10 @@ function unavailableReason(stack: StackManifest, member: StackMember) {
   return null;
 }
 
+function prNumber(member: StackMember) {
+  return member.pr_identity ? `#${member.pr_identity.number} ` : "";
+}
+
 /** Parent links, not array indices, determine fork indentation. Cycle-safe for untrusted input. */
 function depthOf(member: StackMember, members: Map<string, StackMember>) {
   const seen = new Set([member.id]);
@@ -57,12 +61,12 @@ export function ReviewStackNavigator({
   const recorded = stack.members.some(
     (member) => member.reason?.startsWith("entry:recorded_comparisons:"),
   );
-  const comparisonLabel = recorded ? "Recorded comparison" : "Parent-relative";
-  const cumulativeReason = recorded
-    ? "Whole stack comparison is unavailable for recorded comparison history"
-    : stack.scope_choice.scope === "whole"
+  const cumulativeReason =
+    stack.scope_choice.scope === "whole"
       ? "Whole stack"
       : "Whole stack comparison is outside selected scope";
+  const position =
+    stack.members.findIndex((member) => member.id === selectedMemberId) + 1;
   const execution = activeReviewId
     ? stack.members.find((member) => member.review_id === activeReviewId)
     : undefined;
@@ -91,7 +95,7 @@ export function ReviewStackNavigator({
           placeholder="Browse branch"
           title={selected?.branch_ref}
         >
-          {selected?.branch_ref}
+          {selected && `${prNumber(selected)}${selected.branch_ref}`}
         </Select.Trigger>
         <Select.Content
           maxHeight="min(60vh, 400px)"
@@ -132,6 +136,7 @@ export function ReviewStackNavigator({
                 <span className={styles.member}>
                   <span className={styles.branch}>
                     {member.parent_member_id ? "↳ " : ""}
+                    {prNumber(member)}
                     {member.branch_ref}
                   </span>
                   {isExecution && (
@@ -152,11 +157,11 @@ export function ReviewStackNavigator({
         </Select.Content>
       </Select>
       <span className={styles.metadata} title={metadata}>
-        {recorded
-          ? "Recorded comparison history"
-          : `${stack.members.length} branches · r${stack.revision}`}
+        {position > 0
+          ? `${position} of ${stack.members.length}`
+          : `${stack.members.length} in the stack`}
       </span>
-      {execution && (
+      {execution && execution.id !== selectedMemberId && (
         <span
           className={styles.execution}
           title={`Current execution member: ${execution.branch_ref}`}
@@ -165,47 +170,47 @@ export function ReviewStackNavigator({
           ●
         </span>
       )}
-      <SegmentedControl
-        size="sm"
-        layout="content"
-        aria-label="Stack comparison"
-        value={recorded ? "parent" : comparison}
-        onValueChange={(value) => {
-          if (recorded && value === "cumulative") return;
-          if (value === "parent" || value === "cumulative")
-            onComparisonChange(value);
-        }}
-        options={[
-          {
-            value: "parent",
-            label: (
-              <Tooltip content={comparisonLabel}>
-                <span>
-                  <Icon icon={Route} size="sm" />
-                </span>
-              </Tooltip>
-            ),
-            iconOnly: true,
-            ariaLabel: comparisonLabel,
-          },
-          {
-            value: "cumulative",
-            disabled:
-              recorded ||
-              !stack.scope_choice.confirmed ||
-              stack.scope_choice.scope !== "whole",
-            label: (
-              <Tooltip content={cumulativeReason}>
-                <span title={cumulativeReason}>
-                  <Icon icon={Layers} size="sm" />
-                </span>
-              </Tooltip>
-            ),
-            iconOnly: true,
-            ariaLabel: "Whole stack",
-          },
-        ]}
-      />
+      {!recorded && (
+        <SegmentedControl
+          size="sm"
+          layout="content"
+          aria-label="Stack comparison"
+          value={comparison}
+          onValueChange={(value) => {
+            if (value === "parent" || value === "cumulative")
+              onComparisonChange(value);
+          }}
+          options={[
+            {
+              value: "parent",
+              label: (
+                <Tooltip content="Parent-relative">
+                  <span>
+                    <Icon icon={Route} size="sm" />
+                  </span>
+                </Tooltip>
+              ),
+              iconOnly: true,
+              ariaLabel: "Parent-relative",
+            },
+            {
+              value: "cumulative",
+              disabled:
+                !stack.scope_choice.confirmed ||
+                stack.scope_choice.scope !== "whole",
+              label: (
+                <Tooltip content={cumulativeReason}>
+                  <span title={cumulativeReason}>
+                    <Icon icon={Layers} size="sm" />
+                  </span>
+                </Tooltip>
+              ),
+              iconOnly: true,
+              ariaLabel: "Whole stack",
+            },
+          ]}
+        />
+      )}
     </nav>
   );
 }

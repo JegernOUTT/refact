@@ -20,9 +20,7 @@ test("negative HTML anchor index is inert while its valid sibling reveals code",
     page.getByRole("radio", { name: "Tour", exact: true }),
   ).toBeChecked();
   await frame.locator("#valid-anchor").click();
-  await expect(
-    page.getByRole("radio", { name: "Review", exact: true }),
-  ).toBeChecked();
+  await expect(page.getByRole("radio", { name: /^Changes/ })).toBeChecked();
   await expect(
     page.getByRole("textbox", { name: "Head bbbbbbbb" }),
   ).toBeVisible();
@@ -77,7 +75,9 @@ for (const version of [1, 2]) {
       await expect(topic.getByRole("combobox")).toContainText("v2 · latest");
       await page.evaluate(() => window.__reviewFixture?.publishTopic());
       await expect(
-        page.getByRole("heading", { name: "Later investigation" }),
+        page
+          .getByRole("list", { name: "Tour steps" })
+          .getByRole("button", { name: "Later investigation" }),
       ).toBeAttached();
       await expect(topic.getByRole("combobox")).toContainText("v2 · latest");
     }
@@ -141,12 +141,13 @@ test("living topics remain visible and updates are offered explicitly", async ({
   await expect(
     page.getByRole("heading", { name: "Input trimming" }),
   ).toBeVisible();
+  const pages = page.getByRole("list", { name: "Tour steps" });
   await expect(
-    page.getByRole("heading", { name: "Loop bound fix" }),
+    pages.getByRole("button", { name: "Loop bound fix" }),
   ).toBeAttached();
   await page.evaluate(() => window.__reviewFixture?.publishTopic());
   await expect(
-    page.getByRole("heading", { name: "Later investigation" }),
+    pages.getByRole("button", { name: "Later investigation" }),
   ).toBeAttached();
   await page.evaluate(() => window.__reviewFixture?.updateTopic());
   await expect(
@@ -172,7 +173,10 @@ test("interactive HTML survives a same-content topic update", async ({
   await expect(counter).toHaveText("1");
   const iframe = page.locator('iframe[title="Tour visual"]');
   const original = await iframe.elementHandle();
-  await page.getByText("Review", { exact: true }).first().click();
+  await page
+    .getByRole("radio", { name: /^Changes/ })
+    .locator("..")
+    .click();
   await page.getByText("Tour", { exact: true }).first().click();
   expect(
     await original?.evaluate(

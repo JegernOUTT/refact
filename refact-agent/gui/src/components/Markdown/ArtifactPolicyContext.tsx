@@ -1,11 +1,20 @@
 import { createContext } from "react";
 import type { ReviewArtifactTheme } from "./artifactPolicy";
 
+export type ReviewSlotLine = {
+  n: number | null;
+  kind: "ctx" | "add" | "del" | "gap";
+  text: string;
+  /** Optional tint: `[kind, text]` spans whose texts join back to `text`. */
+  tokens?: [string, string][];
+};
+
 export type ReviewSlotPreview = {
   id: string;
   title: string;
   text: string;
   available: boolean;
+  lines?: ReviewSlotLine[];
 };
 
 export type ArtifactPolicy = {

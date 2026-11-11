@@ -3,12 +3,13 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use std::collections::HashSet;
 use hyper::StatusCode;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use refact_review_core::{Error, Mutation, Review};
 use crate::app_state::AppState;
-use super::{chat_bridge, service};
+use super::{authoring, chat_bridge, remote, service};
 
 type ApiResult<T> = Result<Json<T>, (StatusCode, Json<Value>)>;
 fn error(status: StatusCode, detail: impl ToString) -> (StatusCode, Json<Value>) {
@@ -34,11 +35,90 @@ async fn resolve(
         .await
         .map_err(|e| error(StatusCode::NOT_FOUND, e))
 }
+/// What the canvas reads on every poll. Provenance lists stay in the store, and of the
+/// unchanged files only those the review points at are listed; the rest load on demand.
+pub(crate) fn slim(mut review: Review) -> Review {
+    review.privacy.clear();
+    for material in &mut review.materials {
+        if let Some(labels) = material.input_digests.get_mut("derived_origin_labels") {
+            labels.clear();
+        }
+    }
+    for contribution in review
+        .threads
+        .iter_mut()
+        .flat_map(|thread| thread.contributions.iter_mut())
+    {
+        if let Some(context) = &mut contribution.context {
+            context.privacy.clear();
+        }
+    }
+    let mut keep: HashSet<String> = review
+        .candidates
+        .iter()
+        .flat_map(|candidate| &candidate.files)
+        .filter(|file| file.base != file.head || file.base_mode != file.head_mode)
+        .map(|file| file.path.clone())
+        .collect();
+    let blocks = review
+        .tour
+        .iter()
+        .flat_map(|step| std::iter::once(&step.current).chain(&step.history))
+        .flat_map(|version| &version.blocks)
+        .chain(
+            review
+                .threads
+                .iter()
+                .flat_map(|thread| &thread.contributions)
+                .flat_map(|contribution| &contribution.blocks),
+        );
+    let mut anchors: Vec<&refact_review_core::Anchor> = Vec::new();
+    for block in blocks {
+        anchors.extend(refact_review_core::rich_blocks::block_anchors(block));
+        if let refact_review_core::RichBlockContent::Diff {
+            path, ..
+        } = &block.content
+        {
+            keep.insert(path.clone());
+        }
+    }
+    for step in &review.tour {
+        anchors.extend(
+            std::iter::once(&step.current)
+                .chain(&step.history)
+                .flat_map(|v| &v.anchors),
+        );
+    }
+    anchors.extend(review.annotations.iter().flat_map(|item| &item.anchors));
+    anchors.extend(review.threads.iter().flat_map(|thread| &thread.anchors));
+    for evidence in &review.evidence {
+        if let refact_review_core::EvidenceSource::Source {
+            path,
+            anchor,
+        } = &evidence.source
+        {
+            keep.insert(path.clone());
+            anchors.extend(anchor);
+        }
+    }
+    for anchor in anchors {
+        keep.insert(anchor.position.path.clone());
+        keep.extend(anchor.history.iter().map(|position| position.path.clone()));
+    }
+    for candidate in &mut review.candidates {
+        candidate.files.retain(|file| keep.contains(&file.path));
+    }
+    review
+}
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/reviews/by-chat/:chat_id", get(by_chat))
         .route("/reviews/:id", get(get_review))
         .route("/reviews/:id/files", get(file))
+        .route(
+            "/reviews/:id/candidates/:candidate_id/files",
+            get(candidate_files),
+        )
         .route("/reviews/:id/history", get(history))
         .route("/reviews/:id/handoff", get(handoff))
         .route("/review-stacks/by-chat/:chat", get(stack_by_chat))
@@ -64,6 +144,8 @@ pub fn router() -> Router<AppState> {
         .route("/reviews/:id/mutations", post(mutate))
         .route("/reviews/:id/comments", post(comment))
         .route("/reviews/:id/activity", post(activity))
+        .route("/reviews/:id/outbox", post(outbox))
+        .route("/reviews/:id/pr-sync", post(sync_comments))
         .route("/reviews/:id/runs/:run_id/cancel", post(cancel))
 }
 async fn handoff(
@@ -164,7 +246,7 @@ async fn stack_member(
 ) -> ApiResult<Option<Review>> {
     super::stacks::member(&app, &chat, member)
         .await
-        .map(Json)
+        .map(|review| Json(review.map(slim)))
         .map_err(|e| error(StatusCode::NOT_FOUND, e))
 }
 async fn stack_cumulative(
@@ -200,7 +282,7 @@ async fn by_chat(
             tracing::warn!(error=%e,"review delivery pending");
         }
     }
-    Ok(Json(review))
+    Ok(Json(review.map(slim)))
 }
 async fn get_review(State(app): State<AppState>, Path(id): Path<String>) -> ApiResult<Review> {
     let (root, review) = resolve(&app, &id).await?;
@@ -210,7 +292,7 @@ async fn get_review(State(app): State<AppState>, Path(id): Path<String>) -> ApiR
     if let Err(e) = chat_bridge::flush_read_only(&app, root, &review).await {
         tracing::warn!(error=%e,"review delivery pending");
     }
-    Ok(Json(review))
+    Ok(Json(slim(review)))
 }
 async fn delivery_status(
     State(app): State<AppState>,
@@ -276,6 +358,19 @@ async fn file(
         .map(Json)
         .map_err(core_error)
 }
+/// Every file of one captured comparison, for browsing the unchanged ones.
+async fn candidate_files(
+    State(app): State<AppState>,
+    Path((id, candidate_id)): Path<(String, String)>,
+) -> ApiResult<Vec<refact_review_core::CandidateFile>> {
+    let (_, review) = resolve(&app, &id).await?;
+    review
+        .candidates
+        .into_iter()
+        .find(|candidate| candidate.id == candidate_id)
+        .map(|candidate| Json(candidate.files))
+        .ok_or_else(|| error(StatusCode::NOT_FOUND, "candidate not found"))
+}
 async fn anchor(
     State(app): State<AppState>,
     Path(id): Path<String>,
@@ -297,18 +392,50 @@ async fn mutate(
         .await
         .map_err(core_error)?;
     chat_bridge::invalidate(&app, &updated).await;
-    Ok(Json(updated))
+    Ok(Json(slim(updated)))
+}
+#[derive(Deserialize)]
+struct CommentBody {
+    #[serde(flatten)]
+    request: service::CommentRequest,
+    /// Also post this comment to the pull request.
+    #[serde(default)]
+    publish: bool,
 }
 async fn comment(
     State(app): State<AppState>,
     Path(id): Path<String>,
-    Json(request): Json<service::CommentRequest>,
+    Json(body): Json<CommentBody>,
 ) -> ApiResult<Review> {
     let (root, review) = resolve(&app, &id).await?;
-    service::comment(app, root, review.owner_chat_id, id, request)
-        .await
-        .map(Json)
-        .map_err(core_error)
+    let contribution = service::reply_contribution_id(&id, &body.request.request_key);
+    let saved = service::comment(
+        app.clone(),
+        root.clone(),
+        review.owner_chat_id,
+        id,
+        body.request,
+    )
+    .await
+    .map_err(core_error)?;
+    // Questions about a tour page are for the owning chat, never for the pull request.
+    let tour_question = saved.threads.iter().any(|thread| {
+        thread.target.is_some() && thread.contributions.iter().any(|c| c.id == contribution)
+    });
+    if !body.publish || tour_question {
+        return Ok(Json(slim(saved)));
+    }
+    let mut target = remote::target_of(&app, root, saved).await;
+    // A failed post leaves the comment marked; the next sync sends it.
+    match authoring::comments::request(&target, remote::SOURCE, &contribution).await {
+        Ok(marked) => {
+            target.review = marked;
+            remote::sync(&mut target, remote::Direction::PUSH).await;
+        }
+        Err(e) => tracing::warn!(error=%e, "review comment was not marked for the pull request"),
+    }
+    chat_bridge::invalidate(&app, &target.review).await;
+    Ok(Json(slim(target.review)))
 }
 async fn activity(
     State(app): State<AppState>,
@@ -370,5 +497,74 @@ async fn cancel(
         .await
         .map_err(|e| error(StatusCode::CONFLICT, e))?;
     chat_bridge::invalidate(&app, &settled).await;
-    Ok(Json(settled))
+    Ok(Json(slim(settled)))
+}
+#[derive(Deserialize)]
+struct OutboxRequest {
+    id: String,
+    #[serde(default)]
+    source: Option<String>,
+}
+/// The user sends one finding or comment to the PR. The engine posts it to a GitHub pull
+/// request itself; for any other source the owning chat is asked to post it.
+async fn outbox(
+    State(app): State<AppState>,
+    Path(id): Path<String>,
+    Json(request): Json<OutboxRequest>,
+) -> ApiResult<Review> {
+    let (root, review) = resolve(&app, &id).await?;
+    let mut target = remote::target_of(&app, root, review).await;
+    let source = request.source.as_deref().unwrap_or(remote::SOURCE);
+    target.review = authoring::comments::request(&target, source, &request.id)
+        .await
+        .map_err(|e| error(StatusCode::BAD_REQUEST, e))?;
+    let report = remote::sync(&mut target, remote::Direction::PUSH).await;
+    chat_bridge::invalidate(&app, &target.review).await;
+    if !report.available {
+        let key = format!("{}:outbox:{}", target.review.id, request.id);
+        if let Err(e) = chat_bridge::notify(
+            &app,
+            &target.review,
+            &key,
+            "review.outbox",
+            "The user marked a review item for the PR and it could not be posted automatically. Call review_outbox, post what is waiting to the source, then record it as published.",
+        )
+        .await
+        {
+            tracing::warn!(error=%e, "review outbox notice pending");
+        }
+    }
+    Ok(Json(slim(target.review)))
+}
+#[derive(Deserialize, Default)]
+struct SyncRequest {
+    /// Background refresh from an open canvas: never wakes the chat.
+    #[serde(default)]
+    quiet: bool,
+}
+/// Brings new PR comments in and sends out what is marked for the PR.
+async fn sync_comments(
+    State(app): State<AppState>,
+    Path(id): Path<String>,
+    request: Option<Json<SyncRequest>>,
+) -> ApiResult<remote::SyncReport> {
+    let (root, review) = resolve(&app, &id).await?;
+    let quiet = request.is_some_and(|Json(request)| request.quiet);
+    let mut target = remote::target_of(&app, root, review).await;
+    let report = remote::sync(&mut target, remote::Direction::BOTH).await;
+    if !report.available && !quiet {
+        let key = format!("{}:sync:{}", target.review.id, service::now_ms());
+        if let Err(e) = chat_bridge::notify(
+            &app,
+            &target.review,
+            &key,
+            "review.sync",
+            "The user asked to refresh the PR discussion and it could not be fetched automatically. Fetch the PR's comments and pass them to review_import_comments; then post anything review_outbox lists as waiting.",
+        )
+        .await
+        {
+            tracing::warn!(error=%e, "review sync notice pending");
+        }
+    }
+    Ok(Json(report))
 }

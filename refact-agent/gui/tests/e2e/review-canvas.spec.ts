@@ -60,7 +60,5 @@ test("reduced motion defaults to readable static without starting iframe scripts
   await frame
     .getByRole("button", { name: "Show parser source" })
     .press("Enter");
-  await expect(
-    page.getByRole("radio", { name: "Review", exact: true }),
-  ).toBeChecked();
+  await expect(page.getByRole("radio", { name: /^Changes/ })).toBeChecked();
 });

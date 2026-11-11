@@ -886,18 +886,10 @@ async fn get_builtin_tools(
         Box::new(crate::tools::tool_worktree_merge::ToolWorktreeMerge::new()),
     ];
 
-    let review_tools: Vec<Box<dyn Tool + Send>> = [
-        super::tool_review::ReviewToolKind::Context,
-        super::tool_review::ReviewToolKind::Get,
-        super::tool_review::ReviewToolKind::Anchor,
-        super::tool_review::ReviewToolKind::Update,
-        super::tool_review::ReviewToolKind::Reply,
-        super::tool_review::ReviewToolKind::PrepareExecution,
-        super::tool_review::ReviewToolKind::RecordEvidence,
-    ]
-    .into_iter()
-    .map(|kind| Box::new(super::tool_review::ToolReview(kind)) as Box<dyn Tool + Send>)
-    .collect();
+    let review_tools: Vec<Box<dyn Tool + Send>> = super::tool_review::ReviewToolKind::ALL
+        .into_iter()
+        .map(|kind| Box::new(super::tool_review::ToolReview(kind)) as Box<dyn Tool + Send>)
+        .collect();
 
     let mut tool_groups = vec![
         ToolGroup {

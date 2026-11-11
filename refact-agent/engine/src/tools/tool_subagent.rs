@@ -665,11 +665,8 @@ impl Tool for ToolSubagent {
                 );
             }
         }
-        let review_launch = crate::review::runs::prepare_launch(&app, &mut req).await?;
+        crate::review::runs::prepare_launch(&app, &mut req).await?;
         let handle = spawn_background_agent(app.clone(), req).await?;
-        if let Some(binding) = review_launch {
-            crate::review::runs::record_launch(&app, binding, &handle).await?;
-        }
         Ok((
             false,
             vec![build_background_start_tool_result(
@@ -747,8 +744,10 @@ fn parse_subagent_args_with_limits(
         .transpose()?;
     let worktree =
         parse_optional_string(args, "worktree")?.unwrap_or_else(|| "inherit".to_string());
-    let auto_merge_present =
-        args.contains_key("auto_merge") && !args.get("auto_merge").is_some_and(Value::is_null);
+    // `auto_merge: false` on an inherited checkout asks for nothing, so it is not an error.
+    let auto_merge_present = args
+        .get("auto_merge")
+        .is_some_and(|value| !value.is_null() && value != &Value::Bool(false));
     let worktree_mode = match worktree.as_str() {
         "inherit" => {
             if auto_merge_present {

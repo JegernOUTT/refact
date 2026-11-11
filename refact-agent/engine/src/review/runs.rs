@@ -4,29 +4,23 @@
 mod candidate_fence_tests {
     use super::*;
     #[test]
-    fn injected_review_contract_is_bounded_and_carries_argument_and_refutation_guidance() {
-        // Prompt wiring/content regression only, not proof of model review quality.
-        assert!(REVIEW_CRITICISM_CONTRACT.len() < 3000);
+    fn worker_contract_is_bounded_and_keeps_workspace_writes_with_the_owning_chat() {
+        // Prompt wiring regression only, not proof of model review quality.
+        assert!(REVIEW_WORKER_CONTRACT.len() < 2000);
         for required in [
-            "captured base",
-            "ADVERSARIAL refutation",
-            "caller prevents trigger",
-            "trust-boundary validation",
-            "Delta",
-            "Trigger",
-            "Impact",
-            "Counterevidence",
-            "Remedy",
-            "Evidence status",
-            "There is no finding quota",
-            "Only review_record_evidence",
-            "owning foreground chat authors Tour",
+            "read and report",
+            "writes the\nreview workspace",
+            "path:start-end",
+            "refute",
+            "no finding quota",
+            "introduces or worsens",
         ] {
             assert!(
-                REVIEW_CRITICISM_CONTRACT.contains(required),
+                REVIEW_WORKER_CONTRACT.contains(required),
                 "missing {required}"
             );
         }
+        assert!(!REVIEW_WORKER_CONTRACT.contains("review_"));
     }
 
     #[tokio::test]
@@ -297,19 +291,11 @@ use crate::{
     app_state::AppState,
     at_commands::at_commands::AtCommandsContext,
     agents::{
-        spawn::{SpawnRequest, SpawnHandle, SpawnWorktreeMode},
+        spawn::{SpawnRequest, SpawnWorktreeMode},
         types::{BackgroundAgent, BgAgentStatus},
     },
     worktrees::{service::WorktreeService, types::WorktreeMeta},
 };
-
-pub struct LaunchBinding {
-    root: PathBuf,
-    review_id: String,
-    owner: String,
-    candidate: String,
-    material: Material,
-}
 
 pub async fn bound_review(
     ccx: Arc<Mutex<AtCommandsContext>>,
@@ -580,10 +566,12 @@ fn candidate_for_identity(
         .ok_or("No pinned run".into())
 }
 
+/// A review chat launches plain workers into its own investigation checkout.
+/// Workers read and report; only the owning chat writes the review workspace.
 pub async fn prepare_launch(
     app: &AppState,
     req: &mut SpawnRequest,
-) -> std::result::Result<Option<LaunchBinding>, String> {
+) -> std::result::Result<(), String> {
     let session = app
         .chat
         .sessions
@@ -592,12 +580,11 @@ pub async fn prepare_launch(
         .get(&req.parent_chat_id)
         .cloned();
     let Some(session) = session else {
-        return Ok(None);
+        return Ok(());
     };
     if crate::coordination::scope::session_source_root(&*session.lock().await).is_none() {
-        return Ok(None);
+        return Ok(());
     }
-
     let root = super::service::trusted_root(app, &req.parent_chat_id).await?;
     if let Some(agent) = app
         .agents
@@ -611,134 +598,49 @@ pub async fn prepare_launch(
                 .map_err(|e| e.to_string())?
         {
             if parent_review.runs.iter().any(|r| r.agent_id == agent) {
-                return Err("Nested review delegation requires a separately pinned child scope; launch from the owning review chat".into());
+                return Err("Review workers cannot launch further workers; report to the review chat that launched you".into());
             }
         }
     }
-    let Some(review) = super::service::get_for_chat(root.clone(), req.parent_chat_id.clone())
+    let Some(review) = super::service::get_for_chat(root, req.parent_chat_id.clone())
         .await
         .map_err(|e| e.to_string())?
     else {
-        return Ok(None);
+        return Ok(());
     };
-    super::context::verify_binding_for_chat(app, &req.parent_chat_id).await?;
-    let candidate = review
-        .current_candidate_id
-        .clone()
-        .ok_or("No active review candidate")?;
-    let source = req
-        .parent_worktree
-        .as_ref()
-        .ok_or("Review execution checkout missing")?
-        .root
-        .clone();
-    let (snapshot, files, artifact) =
-        super::evidence::capture_saved_state(root.clone(), source).await?;
-    for file in &snapshot.files {
-        crate::files_in_workspace::check_file_privacy_for_model_context(
-            app.gcx.clone(),
-            &PathBuf::from(&snapshot.repository).join(&file.path),
-        )
-        .await?;
+    if review.current_candidate_id.is_none()
+        || !req
+            .parent_worktree
+            .as_ref()
+            .is_some_and(|worktree| worktree.kind == "review")
+    {
+        return Ok(());
     }
-    let worktree = WorktreeService::new_async(app.gcx.cache_dir.clone(), root.clone())
-        .await?
-        .create_review_snapshot(&req.parent_chat_id, &review.id, files)
-        .await?
-        .worktree
-        .meta;
-    let mut inputs = std::collections::BTreeMap::new();
-    inputs.insert("saved_state".into(), snapshot.content_digest.clone());
-    inputs.insert(
-        "execution_commit".into(),
-        worktree
-            .base_commit
-            .clone()
-            .ok_or("Missing review snapshot commit")?,
-    );
-    let parent_labels = session.lock().await.derived_privacy_zones.clone();
-    let remapped = {
-        let labels = parent_labels
-            .read()
-            .map_err(|_| "Parent privacy labels unavailable")?;
-        snapshot
-            .files
-            .iter()
-            .filter_map(|f| {
-                labels
-                    .get(&PathBuf::from(&snapshot.repository).join(&f.path))
-                    .map(|label| (f.path.clone(), label.clone()))
-            })
-            .collect::<std::collections::BTreeMap<_, _>>()
-    };
-    inputs.insert(
-        "derived_origin_labels".into(),
-        serde_json::to_string(&remapped).map_err(|e| e.to_string())?,
-    );
-    let material = Material {
-        id: uuid::Uuid::new_v4().to_string(),
-        kind: MaterialKind::Investigation,
-        candidate_id: candidate.clone(),
-        agent_id: None,
-        description:
-            "Accepted isolated reviewer input; saved local state, not immutable imported comparison"
-                .into(),
-        content_digest: snapshot.content_digest,
-        input_digests: inputs,
-        environment: None,
-        worktree_id: Some(worktree.id.clone()),
-        worktree_root: Some(worktree.root.to_string_lossy().into()),
-        artifacts: vec![artifact],
-    };
-    // Persist the exact scope before accepted launch; this also fences queued setup.
-    let binding = LaunchBinding {
-        root: root.clone(),
-        review_id: review.id.clone(),
-        owner: review.owner_chat_id.clone(),
-        candidate: candidate.clone(),
-        material: material.clone(),
-    };
-    apply(
-        root,
-        &review.id,
-        Operation::AddMaterial {
-            material,
-        },
-    )
-    .await?;
-    req.parent_worktree = Some(worktree);
     req.worktree_mode = SpawnWorktreeMode::Inherit;
-    req.prompt.push_str(&format!("\n\n# Runtime Review Binding\nReview {}. Inspect only candidate {} using your accepted isolated checkout. It includes saved investigation state; it is NOT proof of the original imported candidate. Candidate updates in the owning chat do not retarget this run. Retain repairs as material; never merge or publish automatically.\n", review.id, candidate));
-    req.prompt.push_str(REVIEW_CRITICISM_CONTRACT);
-    Ok(Some(binding))
+    req.prompt.push_str(REVIEW_WORKER_CONTRACT);
+    Ok(())
 }
 
-// Content guidance only; candidate/material/checkout authority remains runtime-owned above.
-const REVIEW_CRITICISM_CONTRACT: &str = r#"
+// Content guidance only; checkout and candidate authority stay runtime-owned.
+const REVIEW_WORKER_CONTRACT: &str = r#"
 
-# Review criticism contract
-Actually inspect applicable scoped repository rules, relevant docs/specifications, nearby prior art,
-callers and tests before judging. Cite actual rules and source anchors; disclose unavailable sources.
-Compare the pinned candidate with its captured base: identify introduced or worsened behavior, not
-unrelated existing debt. Find ordinary bugs and concrete performance regressions, not just architecture
-concerns. Proactively challenge unnecessary defensive checks, speculative fallbacks, silent recovery,
-repeated conversions, missed reuse and overabstracted AI scaffolding. Stricter is not automatically better.
-Verify trust boundaries/caller guarantees and existing helper semantics, errors and side effects before
-calling checks redundant or recommending reuse. For performance establish reachability, workload,
-frequency and scaling cost; distinguish hot paths from cold setup. There is no finding quota.
+# Review worker
+You are a worker for a code review. You read and report; the chat that launched you writes the
+review workspace. Do not edit files, install packages, start long jobs or contact remote services
+unless your task says so.
 
-Discover independently before exchanging findings. Then perform a separate ADVERSARIAL refutation pass
-on every claim: already in base? caller prevents trigger? suggested reuse really equivalent? necessary
-trust-boundary validation? Seek the strongest source counterevidence. Preserve supported, refuted and
-unresolved outcomes as attributed canonical annotations/replies, including disagreements; never vote.
-Use supported/refuted assessments only when established; unresolved is disputed or unassessed with limits.
-Each final finding body must explicitly state Delta, Trigger (reachable input/state/caller), Impact,
-Counterevidence (sources inspected and attempted refutation), Remedy (smallest fix and inspected existing
-reuse or why lookalikes differ), and Evidence status (source-supported vs actually executed, exact
-candidate/material, unavailable checks). Use review_anchor and registered evidence IDs; retain run
-attribution and existing histories/contributions. Do not fabricate execution or promote investigation
-results into proof of imported content. Only review_record_evidence records execution-registry results.
-Contribute findings, source evidence and canonical replies; the owning foreground chat authors Tour.
+Work from the checkout you are in. For exact changes read the Git objects named in your task
+(`git diff <base> <head> -- <path>`, `git show <sha>:<path>`) rather than unrelated working-tree
+state. Compare against the base: report what this change introduces or worsens, not old debt.
+
+Report in plain Markdown, most important first.
+- Review task: one section per finding with `path:start-end` on the changed side, what is wrong,
+  the input or call path that triggers it, the impact, what you checked that could refute it, and
+  the smallest fix. Try to refute each finding before reporting it. There is no finding quota:
+  say plainly when you found nothing.
+- Context task: the facts you found, each with its source (`path:start-end`, URL or command), and
+  what you looked for but could not find.
+Say what you actually ran versus what you only read. Keep the report under about 800 words.
 "#;
 
 pub async fn is_pinned_launch(
@@ -772,9 +674,9 @@ pub async fn is_pinned_launch(
     Ok(valid)
 }
 
-/// Install the registry identity before the runner can perform any review tools.
+/// Bind the accepted worker to the owning chat's investigation checkout before it runs.
 pub async fn record_accepted_launch(
-    app: &AppState,
+    _app: &AppState,
     req: &SpawnRequest,
     record: &BackgroundAgent,
 ) -> std::result::Result<(), String> {
@@ -792,23 +694,28 @@ pub async fn record_accepted_launch(
     else {
         return Err("Accepted review checkout has no retained owning review".into());
     };
-    let Some(mut material) = review
-        .materials
-        .iter()
-        .find(|m| {
-            m.worktree_id.as_deref() == Some(&worktree.id)
-                && m.description
-                    .starts_with("Accepted isolated reviewer input")
-        })
-        .cloned()
-    else {
-        return Err("Review launch requires a separately retained isolated input".into());
-    };
     if record.parent_chat_id != review.owner_chat_id {
         return Err("Review registry owner mismatch".into());
     }
+    let Some(mut material) = review
+        .materials
+        .iter()
+        .rev()
+        .find(|m| {
+            m.kind == MaterialKind::Investigation
+                && m.agent_id.is_none()
+                && m.id.starts_with("activation:")
+                && m.worktree_id.as_deref() == Some(&worktree.id)
+                && m.worktree_root.as_deref() == worktree.root.to_str()
+        })
+        .cloned()
+    else {
+        return Err("Review launch requires the chat's investigation checkout".into());
+    };
     material.id = uuid::Uuid::new_v4().to_string();
     material.agent_id = Some(record.agent_id.clone());
+    material.description = "Worker bound to the owning chat's investigation checkout".into();
+    material.artifacts.clear();
     let candidate = material.candidate_id.clone();
     apply(
         root.clone(),
@@ -827,54 +734,6 @@ pub async fn record_accepted_launch(
     )
     .await?;
     Ok(())
-}
-
-pub async fn record_launch(
-    app: &AppState,
-    mut binding: LaunchBinding,
-    handle: &SpawnHandle,
-) -> std::result::Result<Review, String> {
-    let existing = super::service::load_owned(
-        binding.root.clone(),
-        binding.owner.clone(),
-        binding.review_id.clone(),
-    )
-    .await
-    .map_err(|e| e.to_string())?;
-    if existing
-        .runs
-        .iter()
-        .any(|r| r.agent_id == handle.agent_id && r.candidate_id == binding.candidate)
-    {
-        return Ok(existing);
-    }
-
-    let record = app.agents.get_any(&handle.agent_id).await?;
-    if record.parent_chat_id != binding.owner
-        || record.child_chat_id.as_deref() != Some(&handle.child_chat_id)
-    {
-        return Err("Accepted reviewer owner mismatch".into());
-    }
-    binding.material.agent_id = Some(record.agent_id.clone());
-    // Material identities are immutable; add a runtime-linked copy rather than rewriting launch input.
-    binding.material.id = uuid::Uuid::new_v4().to_string();
-    apply(
-        binding.root.clone(),
-        &binding.review_id,
-        Operation::AddMaterial {
-            material: binding.material,
-        },
-    )
-    .await?;
-    let run = runtime_run(&record, uuid::Uuid::new_v4().to_string(), binding.candidate);
-    apply(
-        binding.root,
-        &binding.review_id,
-        Operation::PutRun {
-            run,
-        },
-    )
-    .await
 }
 
 fn runtime_run(record: &BackgroundAgent, id: String, candidate_id: String) -> Run {
@@ -971,24 +830,35 @@ pub(crate) async fn apply_with_privacy(
     operation: Operation,
     privacy: Vec<refact_privacy::FileRecord>,
 ) -> std::result::Result<Review, String> {
-    let id = review_id.to_owned();
-    super::service::with_store(root, move |store| {
-        let review = store.load(&id)?;
-        store.mutate_with_privacy(
-            &id,
-            Mutation {
-                expected_revision: review.revision,
-                request_key: uuid::Uuid::new_v4().to_string(),
-                actor: Actor {
-                    kind: ActorKind::System,
-                    id: "review-runtime".into(),
+    // Runtime bookkeeping commutes with authoring; a concurrent writer is never a failure.
+    let mut attempts = 0;
+    loop {
+        let id = review_id.to_owned();
+        let operation = operation.clone();
+        let privacy = privacy.clone();
+        let result = super::service::with_store(root.clone(), move |store| {
+            let review = store.load(&id)?;
+            store.mutate_with_privacy(
+                &id,
+                Mutation {
+                    expected_revision: review.revision,
+                    request_key: uuid::Uuid::new_v4().to_string(),
+                    actor: Actor {
+                        kind: ActorKind::System,
+                        id: "review-runtime".into(),
+                    },
+                    at_ms: chrono::Utc::now().timestamp_millis(),
+                    operation,
                 },
-                at_ms: chrono::Utc::now().timestamp_millis(),
-                operation,
-            },
-            privacy,
-        )
-    })
-    .await
-    .map_err(|e| e.to_string())
+                privacy,
+            )
+        })
+        .await;
+        match result {
+            Err(Error::Conflict {
+                ..
+            }) if attempts < 16 => attempts += 1,
+            other => return other.map_err(|e| e.to_string()),
+        }
+    }
 }

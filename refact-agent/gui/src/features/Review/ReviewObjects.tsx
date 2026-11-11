@@ -1,5 +1,6 @@
 import { useContext, useEffect, useId, useRef, useState } from "react";
 import {
+  AtSign,
   Bot,
   CircleUserRound,
   MessageCircle,
@@ -31,7 +32,10 @@ import {
   label,
 } from "./labels";
 import { anchorsIn, firstAnchorOf } from "./model";
+import { PrState } from "./ReviewRemote";
+import { externalAuthor } from "./remote";
 import styles from "./Review.module.css";
+import remoteStyles from "./ReviewRemote.module.css";
 
 function useReviewComposerOwnership() {
   const composer = useContext(ReviewComposerContext);
@@ -90,15 +94,36 @@ function rangeLabel(annotationOrThread: { anchors: Annotation["anchors"] }) {
   return `${label(side)} ${lines}`;
 }
 
+function Location({
+  anchors,
+  onShow,
+}: {
+  anchors: Annotation["anchors"];
+  onShow: () => void;
+}) {
+  const anchor = firstAnchorOf(anchors);
+  if (!anchor) return null;
+  const { path, start_line, end_line } = anchor.position;
+  return (
+    <button type="button" className={remoteStyles.location} onClick={onShow}>
+      {path}:{start_line}
+      {end_line !== start_line ? `-${end_line}` : ""}
+    </button>
+  );
+}
+
 export function AnnotationCard({
   review,
   annotation,
   active,
+  location = false,
   onFocus,
 }: {
   review: Review;
   annotation: Annotation;
   active: boolean;
+  /** Name the file: the card is shown outside that file's diff. */
+  location?: boolean;
   onFocus: () => void;
 }) {
   const {
@@ -142,6 +167,7 @@ export function AnnotationCard({
           </Badge>
         )}
       </div>
+      {location && <Location anchors={annotation.anchors} onShow={onFocus} />}
       <span className={styles.meta}>
         {label(annotation.kind)} · {rangeLabel(annotation)} · confidence{" "}
         {label(annotation.confidence).toLowerCase()}
@@ -153,6 +179,9 @@ export function AnnotationCard({
         reviewId={review.id}
         current={{ kind: "annotation", value: annotation }}
       />
+      {annotation.kind === "finding" && (
+        <PrState review={review} kind="annotation" localId={annotation.id} />
+      )}
       {!hasThread && anchor && (
         <>
           {visitedReply && (
@@ -230,12 +259,15 @@ export function ThreadCard({
   thread,
   active,
   pending,
+  location = false,
   onFocus,
 }: {
   review: Review;
   thread: ReviewThread;
   active: boolean;
   pending: ReadonlySet<string>;
+  /** Name the file or tour page: the card is shown outside its own context. */
+  location?: boolean;
   onFocus: () => void;
 }) {
   const {
@@ -253,6 +285,9 @@ export function ThreadCard({
   const annotation = thread.annotation_id
     ? review.annotations.find((a) => a.id === thread.annotation_id)
     : undefined;
+  const tourPage = thread.target
+    ? review.tour.find((step) => step.id === thread.target?.step_id)
+    : undefined;
   return (
     <article
       className={styles.object}
@@ -262,9 +297,19 @@ export function ThreadCard({
     >
       <div className={styles.objectHead}>
         <button type="button" className={styles.objectTitle} onClick={onFocus}>
-          {annotation ? `Re: ${annotation.title}` : "Comment thread"}
+          {annotation
+            ? `Re: ${annotation.title}`
+            : tourPage
+              ? `On the tour: ${tourPage.current.title}`
+              : thread.anchors.length > 0
+                ? "Comment thread"
+                : "General comment"}
         </button>
-        <span className={styles.meta}>{rangeLabel(thread)}</span>
+        {location ? (
+          <Location anchors={thread.anchors} onShow={onFocus} />
+        ) : (
+          <span className={styles.meta}>{rangeLabel(thread)}</span>
+        )}
         {thread.resolved && (
           <Badge tone="muted" size="xs">
             Resolved
@@ -286,13 +331,19 @@ export function ThreadCard({
                     ? CircleUserRound
                     : c.actor.kind === "agent"
                       ? Bot
-                      : Settings2
+                      : c.actor.kind === "external"
+                        ? AtSign
+                        : Settings2
                 }
                 size="sm"
               />
               <span className={styles.meta}>
                 <strong className={styles.actorName}>
-                  {c.actor.kind === "user" ? "You" : label(c.actor.kind)}
+                  {c.actor.kind === "user"
+                    ? "You"
+                    : c.actor.kind === "external"
+                      ? externalAuthor(c.actor)
+                      : label(c.actor.kind)}
                 </strong>{" "}
                 · {formatTime(c.created_at_ms)}
                 {c.context?.candidate_id &&
@@ -305,6 +356,14 @@ export function ThreadCard({
                 {pending.has(c.id) &&
                   " · Saved to review · awaiting chat delivery"}
               </span>
+              {!thread.target && c.actor.kind !== "system" && (
+                <PrState
+                  review={review}
+                  kind="contribution"
+                  localId={c.id}
+                  sendable={c.actor.kind !== "external"}
+                />
+              )}
             </span>
             {c.blocks?.length ? (
               <RichAncestorThreads.Provider value={excluded}>
@@ -320,11 +379,6 @@ export function ThreadCard({
             )}
           </div>
         ))}
-      <ObjectHistory
-        reviewId={review.id}
-        current={{ kind: "thread", value: thread }}
-        compact
-      />
       {visitedReply && (
         <div hidden={!replying}>
           <SharedReviewComposer
@@ -333,6 +387,7 @@ export function ThreadCard({
             threadId={thread.id}
             ownerId={ownerId}
             open={replying}
+            publishable={!thread.target}
             focusOnOpen={focusOnOpen}
             onClose={() => {
               restoreFocus.current = true;
@@ -341,8 +396,13 @@ export function ThreadCard({
           />
         </div>
       )}
-      {!replying && (
-        <div className={styles.composerActions}>
+      <div className={styles.composerActions}>
+        <ObjectHistory
+          reviewId={review.id}
+          current={{ kind: "thread", value: thread }}
+          compact
+        />
+        {!replying && (
           <Button
             type="button"
             variant="ghost"
@@ -356,8 +416,8 @@ export function ThreadCard({
           >
             <Icon icon={Reply} size="sm" /> Reply
           </Button>
-        </div>
-      )}
+        )}
+      </div>
     </article>
   );
 }

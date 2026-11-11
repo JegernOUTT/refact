@@ -57,6 +57,14 @@
   flex-shrink: 0;
 }
 
+/* The closing actions wrap together, never one by one. */
+.trailing {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: var(--rf-space-1);
+}
+
 @container (max-width: 640px) {
   .actions {
     flex: 1 1 100%;
@@ -84,4 +92,19 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.comparison {
+  flex: 0 0 auto;
+  color: var(--rf-color-muted);
+  font-family: var(--rf-font-mono);
+  font-size: var(--rf-text-1);
+  line-height: var(--rf-line-1);
+  white-space: nowrap;
+}
+
+@container (max-width: 640px) {
+  .comparison {
+    display: none;
+  }
 }

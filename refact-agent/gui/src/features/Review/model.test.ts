@@ -1,15 +1,26 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { decodeFileSide } from "../../services/refact/review";
 import {
   diffPanes,
+  distinctCandidates,
   fileStatus,
+  newRequestKey,
   paneFor,
+  previousCandidate,
   reattachOperation,
   reviewFiles,
   stalledTargets,
 } from "./model";
 import { anchor, candidate, makeReview } from "./reviewFixtures";
+
+function sameAs(other: ReturnType<typeof candidate>) {
+  return {
+    base_oid: other.base_oid,
+    head_oid: other.head_oid,
+    content_digest: other.content_digest,
+  };
+}
 
 describe("review model", () => {
   it("lists changed files first and hides unchanged unless requested", () => {
@@ -22,6 +33,27 @@ describe("review model", () => {
       "modified",
       "unchanged",
     ]);
+  });
+
+  it("lists a repeated capture once and compares against the last different one", () => {
+    const first = candidate("c1", 1, []);
+    const changed = candidate("c2", 2, []);
+    const repeat = { ...candidate("c3", 3, []), ...sameAs(changed) };
+    const review = makeReview({
+      candidates: [first, changed, repeat],
+      current_candidate_id: "c3",
+    });
+    expect(distinctCandidates(review, "c3").map((c) => c.id)).toEqual([
+      "c1",
+      "c3",
+    ]);
+    expect(distinctCandidates(review, "c2").map((c) => c.id)).toEqual([
+      "c1",
+      "c2",
+      "c3",
+    ]);
+    expect(previousCandidate(review, "c3")?.id).toBe("c1");
+    expect(previousCandidate(review, "c1")).toBeNull();
   });
 
   it("treats a mode-only change as modified", () => {
@@ -120,5 +152,25 @@ describe("review model", () => {
       kind: "binary",
       size: 3,
     });
+  });
+
+  it("makes request keys on plain-HTTP origins where randomUUID is absent", () => {
+    const original = Object.getOwnPropertyDescriptor(crypto, "randomUUID");
+    Object.defineProperty(crypto, "randomUUID", {
+      configurable: true,
+      value: undefined,
+    });
+    try {
+      const keys = new Set(Array.from({ length: 50 }, () => newRequestKey()));
+      expect(keys.size).toBe(50);
+      for (const key of keys)
+        expect(key).toMatch(
+          /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+        );
+    } finally {
+      if (original) Object.defineProperty(crypto, "randomUUID", original);
+      else Reflect.deleteProperty(crypto, "randomUUID");
+      vi.restoreAllMocks();
+    }
   });
 });

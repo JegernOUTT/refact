@@ -931,81 +931,30 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(inactive.id, a.review.id);
+        use crate::tools::tool_review::{ReviewToolKind, ToolReview};
         use crate::tools::tools_description::Tool;
-        use crate::call_validation::ChatMessage;
-        let mut directive = ChatMessage::new(
-            "user".into(),
-            "Explain both captured members without further questions".into(),
-        );
-        directive.message_id = "stack-context-user".into();
-        let mut imported = ChatMessage::new("tool".into(), "Published members".into());
-        imported.message_id = "stack-import-result".into();
-        imported.tool_call_id = "stack-import-call".into();
-        imported.tool_failed = Some(false);
-        let mut invocation =
-            ChatMessage::new("assistant".into(), "Read the inactive member".into());
-        invocation.tool_calls = Some(vec![serde_json::from_value(json!({
-            "id":"stack-import-call","type":"function","function":{"name":"set_review_context","arguments":"{}"}
-        })).unwrap()]);
-        {
-            let mut live = session.lock().await;
-            live.messages.extend([directive, invocation, imported]);
-        }
-        let read_args =
-            json!({"review_id":inactive.id,"path":"file","candidate_id":a.candidate_id});
-        let mut read_invocation =
-            ChatMessage::new("assistant".into(), "Inspect candidate source".into());
-        read_invocation.tool_calls = Some(vec![serde_json::from_value(json!({
-            "id":"inactive-source-read","type":"function","function":{"name":"review_get","arguments":read_args.to_string()}
-        })).unwrap()]);
-        session.lock().await.add_message(read_invocation);
-        let (_, results) =
-            crate::tools::tool_review::ToolReview(crate::tools::tool_review::ReviewToolKind::Get)
-                .tool_execute(
-                    ccx.clone(),
-                    &"inactive-source-read".into(),
-                    &serde_json::from_value(read_args).unwrap(),
-                )
-                .await
-                .unwrap();
-        for result in results {
-            if let crate::call_validation::ContextEnum::ChatMessage(mut message) = result {
-                message.tool_failed = Some(false);
-                session.lock().await.add_message(message);
-            }
-        }
-        let args = serde_json::from_value(json!({
-            "review_id":inactive.id,"expected_revision":inactive.revision,"request_key":"inactive-tour",
-            "operation":{"op":"put_tour_step","step":{"id":"orientation","current":{"version":1,"title":"Inactive member tour","body":"Persisted without changing execution","anchors":[],"blocks":[{"id":"narration","revision":1,"content":{"kind":"markdown","body":"Member A narrative"}}]},"history":[]}}
-        })).unwrap();
-        let inactive_before = store.load(&inactive.id).unwrap();
-        let error = crate::tools::tool_review::ToolReview(
-            crate::tools::tool_review::ReviewToolKind::Update,
-        )
-        .tool_execute(ccx.clone(), &"inactive-authoring".into(), &args)
-        .await
-        .unwrap_err();
-        assert!(
-            error.contains("owning foreground active tour author"),
-            "{error}"
-        );
-        assert_eq!(
-            store.load(&inactive.id).unwrap(),
-            inactive_before,
-            "inactive tour authoring must not mutate the member or its provenance"
-        );
+        // Reading and authoring another stack member never moves the execution checkout.
+        let read = serde_json::from_value(json!({"member":first,"path":"file"})).unwrap();
+        ToolReview(ReviewToolKind::Read)
+            .tool_execute(ccx.clone(), &"inactive-source-read".into(), &read)
+            .await
+            .unwrap();
+        let page = |member: &str| {
+            serde_json::from_value(json!({
+                "member":member,"id":"orientation","title":"Member tour",
+                "summary":"Persisted without changing execution","html":"<p>narrative</p>"
+            }))
+            .unwrap()
+        };
+        ToolReview(ReviewToolKind::Tour)
+            .tool_execute(ccx.clone(), &"inactive-authoring".into(), &page(&first))
+            .await
+            .unwrap();
+        assert_eq!(store.load(&inactive.id).unwrap().tour.len(), 1);
         assert_eq!(session.lock().await.thread.worktree, execution_before);
-
-        // Reading an inactive stack member is allowed; authoring its Tour is not.
-        // The owning foreground author can still author the active member without
-        // changing execution attachment or the previously inspected member.
         let active = store.load(&b.review.id).unwrap();
-        let args = serde_json::from_value(json!({
-            "review_id":active.id,"expected_revision":active.revision,"request_key":"active-tour",
-            "operation":{"op":"put_tour_step","step":{"id":"orientation","current":{"version":1,"title":"Active member tour","body":"Persisted without changing execution","anchors":[],"blocks":[{"id":"narration","revision":1,"content":{"kind":"markdown","body":"Member B narrative"}}]},"history":[]}}
-        })).unwrap();
-        crate::tools::tool_review::ToolReview(crate::tools::tool_review::ReviewToolKind::Update)
-            .tool_execute(ccx.clone(), &"active-authoring".into(), &args)
+        ToolReview(ReviewToolKind::Tour)
+            .tool_execute(ccx.clone(), &"active-authoring".into(), &page(&second))
             .await
             .unwrap();
         let authored = store.load(&active.id).unwrap();

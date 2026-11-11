@@ -20,10 +20,11 @@ for (const { width, height, theme, motion } of [
     await expect(
       page.getByRole("heading", { name: "Input trimming" }),
     ).toBeVisible();
-    await page.getByText("Review", { exact: true }).first().click();
-    await expect(
-      page.getByRole("radio", { name: "Review", exact: true }),
-    ).toBeChecked();
+    await page
+      .getByRole("radio", { name: /^Changes/ })
+      .locator("..")
+      .click();
+    await expect(page.getByRole("radio", { name: /^Changes/ })).toBeChecked();
     await page.getByRole("radio", { name: "Unified" }).locator("..").click();
     await expect(page.getByRole("radio", { name: "Unified" })).toBeChecked();
     await page.getByRole("radio", { name: "Split" }).locator("..").click();
@@ -92,7 +93,7 @@ test("candidate selector returns from history and sources reveal a file", async 
   await expect(
     page.getByRole("button", { name: "Back to current" }),
   ).toBeVisible();
-  await expect(page.getByRole("radio", { name: "Since last" })).toBeDisabled();
+  await expect(page.getByRole("radio", { name: "Since last" })).toHaveCount(0);
   await page.getByRole("button", { name: "Back to current" }).click();
   await expect(
     page.getByRole("button", { name: "Back to current" }),
@@ -108,9 +109,7 @@ test("candidate selector returns from history and sources reveal a file", async 
     .getByRole("button", { name: "Show range in diff", exact: true })
     .click();
   await page.screenshot({ path: test.info().outputPath("source-reveal.png") });
-  await expect(
-    page.getByRole("radio", { name: "Review", exact: true }),
-  ).toBeChecked();
+  await expect(page.getByRole("radio", { name: /^Changes/ })).toBeChecked();
   await expect(
     page.getByRole("textbox", { name: "Head bbbbbbbb" }),
   ).toBeVisible();
@@ -128,7 +127,10 @@ test("short mobile viewport reaches file navigation and diff", async ({
   await expect(
     page.getByRole("heading", { name: "Input trimming" }),
   ).toBeVisible();
-  await page.getByText("Review", { exact: true }).first().click();
+  await page
+    .getByRole("radio", { name: /^Changes/ })
+    .locator("..")
+    .click();
   await page.getByRole("button", { name: "Browse files", exact: true }).click();
   const file = page.getByRole("button", { name: "src/parse.ts" });
   await file.scrollIntoViewIfNeeded();
@@ -189,7 +191,10 @@ test("line comment draft survives candidate change and read-only recovery", asyn
   await expect(
     page.getByRole("heading", { name: "Input trimming" }),
   ).toBeVisible();
-  await page.getByText("Review", { exact: true }).first().click();
+  await page
+    .getByRole("radio", { name: /^Changes/ })
+    .locator("..")
+    .click();
   const head = page.getByRole("textbox", { name: "Head bbbbbbbb" });
   await expect(head).toBeVisible();
   await head.focus();
@@ -221,7 +226,10 @@ test("range comment retries the identical unknown-outcome request", async ({
   await expect(
     page.getByRole("heading", { name: "Input trimming" }),
   ).toBeVisible();
-  await page.getByText("Review", { exact: true }).first().click();
+  await page
+    .getByRole("radio", { name: /^Changes/ })
+    .locator("..")
+    .click();
   const requests: Record<string, unknown>[] = [];
   await page.exposeFunction(
     "captureSmokeComment",

@@ -2,6 +2,8 @@ import type { DiffMode } from "../Workspace/GitPanel/diff/diffEditors";
 import type { Review } from "../../services/refact/review";
 import { type CompareMode, firstAnchorOf, orderedCandidates } from "./model";
 
+export type ReviewTab = "tour" | "files" | "findings" | "discussion";
+
 /**
  * Local, per-surface view preferences. Server-owned review state never lives
  * here; this only records where the user is looking.
@@ -13,7 +15,7 @@ export type ReviewViewState = {
   diffMode: DiffMode;
   path: string | null;
   showUnchanged: boolean;
-  navTab: "files" | "tour";
+  navTab: ReviewTab;
   followTour: boolean;
   tourStepId: string | null;
   activeObjectId: string | null;
@@ -41,7 +43,7 @@ export type ReviewViewAction =
   | { type: "set_diff_mode"; diffMode: DiffMode }
   | { type: "select_file"; path: string }
   | { type: "toggle_unchanged" }
-  | { type: "set_nav_tab"; tab: "files" | "tour" }
+  | { type: "set_nav_tab"; tab: ReviewTab }
   | { type: "start_follow"; stepId: string | null; path: string | null }
   | { type: "stop_follow" }
   | { type: "tour_step"; stepId: string; path: string | null }

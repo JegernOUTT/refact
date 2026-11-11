@@ -124,7 +124,7 @@ function mount(review: typeof a | null = a) {
   const result = render(
     <>
       <textarea aria-label="Chat composer" />
-      <ReviewStackSurface chatId="chat-1" review={review} stale={false} ready />
+      <ReviewStackSurface chatId="chat-1" review={review} stale={false} />
     </>,
   );
   stores.push(result.store);
@@ -252,7 +252,7 @@ describe("ReviewStackSurface integration", () => {
       ).toEqual([]);
     },
   );
-  it("disables immutable history actions without making cumulative or refresh requests", async () => {
+  it("offers no comparison or refresh controls for a captured stack", async () => {
     const history = {
       ...stack,
       members: stack.members.map((member) => ({
@@ -262,30 +262,24 @@ describe("ReviewStackSurface integration", () => {
     };
     const { calls } = setup(history);
     const { user } = mount();
-    await screen.findByRole("combobox", { name: "Browse stack branch" });
-    await user.click(await screen.findByRole("radio", { name: "Review" }));
+    const branch = await screen.findByRole("combobox", {
+      name: "Browse stack branch",
+    });
+    await user.click(await screen.findByRole("radio", { name: /^Changes/ }));
     await screen.findByLabelText(/^Head/);
+    expect(screen.queryByRole("radio", { name: "Whole stack" })).toBeNull();
     expect(
-      screen.getByRole("radio", { name: "Recorded comparison" }),
-    ).toBeChecked();
-    const whole = screen.getByRole("radio", { name: "Whole stack" });
-    const refresh = screen.getByRole("button", { name: "Refresh stack refs" });
-    expect(whole).toBeDisabled();
-    expect(refresh).toBeDisabled();
-    expect(refresh).toHaveAttribute(
-      "title",
-      "Refresh is unavailable for immutable recorded comparison history",
-    );
-    await user.click(whole);
-    await user.click(refresh);
+      screen.queryByRole("button", { name: "Refresh stack refs" }),
+    ).toBeNull();
     await choose(user, "b");
-    await screen.findAllByTitle(/Browsing branch-b/);
+    await waitFor(() => expect(branch).toHaveTextContent("branch-b"));
     const chat = screen.getByLabelText("Chat composer");
     await user.click(chat);
     expect(chat).toHaveFocus();
-    expect(
-      screen.getAllByText(/Recorded comparison history/).at(-1),
-    ).toHaveAttribute("title", expect.stringContaining("Head: head"));
+    expect(screen.getAllByText("2 of 2").at(-1)).toHaveAttribute(
+      "title",
+      expect.stringContaining("Head: head"),
+    );
     expect(
       calls.filter((call) => /cumulative|refresh/.test(call.path)),
     ).toEqual([]);
@@ -296,7 +290,7 @@ describe("ReviewStackSurface integration", () => {
     const { user } = mount();
     await screen.findByRole("combobox", { name: "Browse stack branch" });
     await user.click(
-      await screen.findByRole("radio", { name: "Review", checked: false }),
+      await screen.findByRole("radio", { name: /^Changes/, checked: false }),
     );
     const head = await screen.findByLabelText(/^Head/);
     head.dispatchEvent(
@@ -313,9 +307,10 @@ describe("ReviewStackSurface integration", () => {
     await user.click(screen.getByRole("button", { name: "Comment" }));
     await screen.findByRole("button", { name: "Retry" });
     await choose(user, "b");
-    await screen.findAllByTitle(/Browsing branch-b/);
     expect(
-      screen.getAllByLabelText("Current execution member: branch-a")[0],
+      (
+        await screen.findAllByLabelText("Current execution member: branch-a")
+      )[0],
     ).toBeInTheDocument();
     const chat = screen.getByLabelText("Chat composer");
     await user.click(chat);
@@ -335,7 +330,7 @@ describe("ReviewStackSurface integration", () => {
     const { calls } = setup();
     const { user } = mount();
     await screen.findByRole("combobox", { name: "Browse stack branch" });
-    await user.click(await screen.findByRole("radio", { name: "Review" }));
+    await user.click(await screen.findByRole("radio", { name: /^Changes/ }));
     await screen.findByLabelText(/^Head/);
     expect(
       screen.getByRole("button", { name: "Refresh stack refs" }),
@@ -370,12 +365,11 @@ describe("ReviewStackSurface integration", () => {
   it("renders a selected stack member without an active legacy review", async () => {
     const { calls } = setup();
     const { user } = mount(null);
-    await user.click(await screen.findByRole("radio", { name: "Review" }));
+    await user.click(await screen.findByRole("radio", { name: /^Changes/ }));
     await screen.findByLabelText(/^Head/);
     expect(
       screen.getByRole("combobox", { name: "Browse stack branch" }),
     ).toHaveTextContent("branch-a");
-    expect(screen.getByTitle(/Browsing branch-a/)).toBeInTheDocument();
     expect(calls.filter((c) => /context|activate/.test(c.path))).toEqual([]);
   });
 
@@ -383,7 +377,7 @@ describe("ReviewStackSurface integration", () => {
     const state = setup();
     const { store, user } = mount();
     await screen.findByRole("combobox", { name: "Browse stack branch" });
-    await user.click(await screen.findByRole("radio", { name: "Review" }));
+    await user.click(await screen.findByRole("radio", { name: /^Changes/ }));
     await screen.findByLabelText(/^Head/);
     state.fail();
     store.dispatch(

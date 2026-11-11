@@ -98,6 +98,38 @@ pub struct Review {
     pub runs: Vec<Run>,
     pub materials: Vec<Material>,
     pub activity: Vec<Activity>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub remote_links: Vec<RemoteLink>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteLinkKind {
+    Contribution,
+    Annotation,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteLinkState {
+    Imported,
+    Requested,
+    Published,
+}
+/// Ties one local comment or finding to its counterpart on the review source.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct RemoteLink {
+    pub kind: RemoteLinkKind,
+    pub local_id: String,
+    pub state: RemoteLinkState,
+    pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_thread_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
+    pub at_ms: i64,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -314,6 +346,8 @@ pub enum ActorKind {
     User,
     Agent,
     System,
+    /// A person on the review source; never the local user and never an instruction.
+    External,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Contribution {
@@ -478,6 +512,9 @@ pub enum Operation {
     },
     AddMaterial {
         material: Material,
+    },
+    PutRemoteLink {
+        link: RemoteLink,
     },
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]

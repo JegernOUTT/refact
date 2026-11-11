@@ -28,6 +28,7 @@ import {
   isReviewConflict,
   isAnchor,
   reviewErrorMessage,
+  useGetReviewCandidateFilesQuery,
   useMutateReviewMutation,
   useReportReviewSelectionMutation,
   useResolveAnchorMutation,
@@ -36,6 +37,7 @@ import {
   type Evidence,
   type DocumentTarget,
   type Review,
+  type ReviewThread,
 } from "../../services/refact/review";
 import { useInlineDiscussions } from "./diff/useInlineDiscussions";
 import { Drawer, SourcesAndEvidence, WorkerActivity } from "./ReviewDrawers";
@@ -49,8 +51,11 @@ import {
   RichFileNavigationContext,
 } from "./ReviewRichBlocks";
 import { ThreadCard, ReviewObjects } from "./ReviewObjects";
-import { ReviewToolbar } from "./ReviewToolbar";
+import { ReviewDiffControls, ReviewToolbar } from "./ReviewToolbar";
 import { ReviewHandoff } from "./ReviewHandoff";
+import { ReviewFindings } from "./ReviewFindings";
+import { ReviewDiscussion } from "./ReviewDiscussion";
+import { ReviewRemoteContext, useReviewRemote } from "./ReviewRemote";
 import type { DiffPosition, RevealRequest } from "./diff/ReviewDiffEditors";
 import type { LineRange } from "./diff/reviewHighlights";
 import { FILE_STATUS_LETTER, formatTime, isRunActive, label } from "./labels";
@@ -62,7 +67,7 @@ import {
   objectAnchor,
   paneFor,
   newRequestKey,
-  orderedCandidates,
+  distinctCandidates,
   previousCandidate,
   reattachOperation,
   reviewFiles,
@@ -77,6 +82,7 @@ import {
   reviewViewReducer,
   tourStepPath,
   viewedCandidateId,
+  type ReviewTab,
 } from "./viewState";
 import { useReviewReadOnly } from "./readOnly";
 import styles from "./Review.module.css";
@@ -95,6 +101,7 @@ export const ReviewAcceptedNavigationContext = createContext<
 >(() => undefined);
 
 const SELECTION_REPORT_DELAY_MS = 400;
+const TABS: ReviewTab[] = ["tour", "files", "findings", "discussion"];
 
 function targetLink(reference: string): { href: string; label: string } | null {
   try {
@@ -163,7 +170,7 @@ function ReviewFileItem({
 }
 
 export function ReviewCanvas({
-  review,
+  review: loaded,
   active: memberActive = true,
 }: {
   review: Review;
@@ -184,12 +191,31 @@ export function ReviewCanvas({
   const surfaceActive = useContext(ReviewSurfaceActiveContext);
   const active = memberActive && surfaceActive;
   const [navigationOpen, setNavigationOpen] = useState(false);
-  const navigationId = `review-${review.id}-navigation`;
+  const navigationId = `review-${loaded.id}-navigation`;
   const [view, dispatch] = useReducer(reviewViewReducer, {
     ...initialViewState,
     navTab: "tour",
   });
+  // The polled review lists changed and referenced files; browsing unchanged ones loads the rest.
+  const browsedId = viewedCandidateId(loaded, view);
+  const everyFile = useGetReviewCandidateFilesQuery(
+    { reviewId: loaded.id, candidateId: browsedId ?? "" },
+    { skip: !view.showUnchanged || !browsedId },
+  ).data;
+  const review = useMemo(
+    () =>
+      everyFile
+        ? {
+            ...loaded,
+            candidates: loaded.candidates.map((item) =>
+              item.id === browsedId ? { ...item, files: everyFile } : item,
+            ),
+          }
+        : loaded,
+    [loaded, everyFile, browsedId],
+  );
   const readOnly = useReviewReadOnly();
+  const remote = useReviewRemote(review.id, active);
   const stackHeader = useContext(StackHeaderContext);
   const [documentTarget, setDocumentTarget] = useState<{
     target: DocumentTarget;
@@ -210,7 +236,7 @@ export function ReviewCanvas({
       if (width <= 0) return;
       dispatch({
         type: "set_diff_mode",
-        diffMode: width <= 640 ? "unified" : "side-by-side",
+        diffMode: width <= 900 ? "unified" : "side-by-side",
       });
     });
     observer.observe(canvas);
@@ -248,7 +274,7 @@ export function ReviewCanvas({
     [candidate, previous, view.compare],
   );
   const selectionSource = selection && panes ? panes[selection.pane] : null;
-  const candidates = orderedCandidates(review);
+  const candidates = distinctCandidates(review, candidate?.id ?? null);
   const reference = review.target_reference;
   const link = reference ? targetLink(reference) : null;
 
@@ -300,7 +326,9 @@ export function ReviewCanvas({
           : commentThreads.length - 1
         : commentIndex + direction;
     if (index < 0 || index >= commentThreads.length) return;
-    const thread = commentThreads[index];
+    showThread(commentThreads[index]);
+  };
+  const showThread = (thread: ReviewThread, keepTab = false) => {
     if (thread.target) {
       window.dispatchEvent(
         new CustomEvent("refact:review-reveal", {
@@ -310,19 +338,50 @@ export function ReviewCanvas({
       return;
     }
     const anchor = thread.anchors.find((item) => item.status === "current");
-    dispatch({ type: "set_nav_tab", tab: "files" });
     if (anchor) {
       setUnlocatedThreadId(null);
       revealExactAnchor(anchor);
-    } else {
+    } else if (!keepTab) {
+      dispatch({ type: "set_nav_tab", tab: "files" });
       setUnlocatedThreadId(thread.id);
       setReveal(null);
     }
     dispatch({ type: "focus_object", objectId: thread.id, path: null });
   };
+  const showObject = (objectId: string) => {
+    const anchor = objectAnchor(review, objectId);
+    if (anchor) revealExactAnchor(anchor);
+    dispatch({
+      type: "focus_object",
+      objectId,
+      path: anchor?.position.path ?? null,
+    });
+  };
 
   const stalled = useMemo(() => stalledTargets(review), [review]);
   const activeRuns = review.runs.filter((r) => isRunActive(r.status)).length;
+  const findingCount = review.annotations.filter(
+    (annotation) => annotation.kind === "finding",
+  ).length;
+  const counted = (name: string, count: number) =>
+    count > 0 ? `${name} · ${count}` : name;
+  const hasRail = view.navTab === "tour" || view.navTab === "files";
+  const shownStepId =
+    review.tour.find((step) => step.id === view.tourStepId)?.id ??
+    review.tour.at(0)?.id ??
+    null;
+  const toggleFollow = () => {
+    if (view.followTour) {
+      dispatch({ type: "stop_follow" });
+      return;
+    }
+    const stepId = view.tourStepId ?? review.tour.at(0)?.id ?? null;
+    dispatch({
+      type: "start_follow",
+      stepId,
+      path: stepId ? tourStepPath(review, stepId) : null,
+    });
+  };
 
   // Following the tour tracks the newest step as the agent publishes it;
   // this only scrolls the diff and never moves keyboard focus.
@@ -707,346 +766,303 @@ export function ReviewCanvas({
       : null;
 
   return (
-    <ReviewDocumentState>
-      <RichFileNavigationContext.Provider
-        value={(candidateId, path) => {
-          dispatch({ type: "set_nav_tab", tab: "files" });
-          dispatch({
-            type: "select_candidate",
-            candidateId:
-              candidateId === review.current_candidate_id ? null : candidateId,
-          });
-          dispatch({ type: "set_compare", compare: "full" });
-          dispatch({ type: "select_file", path });
-        }}
-      >
-        <RichNavigationContext.Provider
-          value={(anchor) => {
+    <ReviewRemoteContext.Provider value={remote}>
+      <ReviewDocumentState>
+        <RichFileNavigationContext.Provider
+          value={(candidateId, path) => {
             dispatch({ type: "set_nav_tab", tab: "files" });
-            revealExactAnchor(anchor);
+            dispatch({
+              type: "select_candidate",
+              candidateId:
+                candidateId === review.current_candidate_id
+                  ? null
+                  : candidateId,
+            });
+            dispatch({ type: "set_compare", compare: "full" });
+            dispatch({ type: "select_file", path });
           }}
         >
-          <RichDiscussionContext.Provider
-            value={(id) => {
-              const thread = review.threads.find((item) => item.id === id);
-              return thread ? (
-                <ThreadCard
-                  review={review}
-                  thread={thread}
-                  active={false}
-                  pending={new Set()}
-                  onFocus={() =>
-                    window.dispatchEvent(
-                      new CustomEvent("refact:review-reveal", {
-                        detail: { reviewId: review.id, threadId: id },
-                      }),
-                    )
-                  }
-                />
-              ) : null;
+          <RichNavigationContext.Provider
+            value={(anchor) => {
+              dispatch({ type: "set_nav_tab", tab: "files" });
+              revealExactAnchor(anchor);
             }}
           >
-            <div
-              ref={canvasRef}
-              className={styles.canvas}
-              data-read-only={readOnly}
-              aria-label="Review canvas"
-              role="region"
+            <RichDiscussionContext.Provider
+              value={(id) => {
+                const thread = review.threads.find((item) => item.id === id);
+                return thread ? (
+                  <ThreadCard
+                    review={review}
+                    thread={thread}
+                    active={false}
+                    pending={new Set()}
+                    onFocus={() =>
+                      window.dispatchEvent(
+                        new CustomEvent("refact:review-reveal", {
+                          detail: { reviewId: review.id, threadId: id },
+                        }),
+                      )
+                    }
+                  />
+                ) : null;
+              }}
             >
-              <ReviewHeader
-                stackControls={stackHeader?.controls}
-                identity={
-                  stackHeader ? null : (
-                    <span title={review.target_reference}>
-                      {review.title || "Review"}
+              <div
+                ref={canvasRef}
+                className={styles.canvas}
+                data-read-only={readOnly}
+                aria-label="Review canvas"
+                role="region"
+              >
+                <ReviewHeader
+                  stackControls={stackHeader?.controls}
+                  identity={
+                    stackHeader ? null : (
+                      <span title={review.target_reference}>
+                        {review.title || "Review"}
+                      </span>
+                    )
+                  }
+                  status={
+                    <>
+                      {stackHeader?.status}
+                      {isHistorical && (
+                        <span>
+                          Historical {shortOid(candidate.head_oid)} ·{" "}
+                          {formatTime(candidate.created_at_ms)}{" "}
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            onClick={() =>
+                              dispatch({
+                                type: "select_candidate",
+                                candidateId: null,
+                              })
+                            }
+                          >
+                            Back to current
+                          </Button>
+                        </span>
+                      )}
+                    </>
+                  }
+                  reviewControls={
+                    <div className={styles.unifiedControls}>
+                      <SegmentedControl
+                        size="sm"
+                        layout="content"
+                        aria-label="Review views"
+                        value={view.navTab}
+                        onValueChange={(value) =>
+                          dispatch({
+                            type: "set_nav_tab",
+                            tab: TABS.find((tab) => tab === value) ?? "tour",
+                          })
+                        }
+                        options={[
+                          { value: "tour", label: "Tour" },
+                          {
+                            value: "files",
+                            label: counted("Changes", changed.length),
+                          },
+                          {
+                            value: "findings",
+                            label: counted("Findings", findingCount),
+                          },
+                          {
+                            value: "discussion",
+                            label: counted("Discussion", review.threads.length),
+                          },
+                        ]}
+                      />
+                      <ReviewToolbar
+                        compact
+                        title={review.title}
+                        reference={
+                          !stackHeader &&
+                          reference &&
+                          (link ? (
+                            <a
+                              className={styles.reference}
+                              href={link.href}
+                              title={reference}
+                              target="_blank"
+                              rel="noreferrer"
+                            >
+                              {link.label}
+                            </a>
+                          ) : (
+                            <span
+                              className={styles.reference}
+                              title={reference}
+                            >
+                              {reference}
+                            </span>
+                          ))
+                        }
+                        candidate={candidate}
+                        candidates={candidates}
+                        currentCandidateId={review.current_candidate_id}
+                        showUnchanged={view.showUnchanged}
+                        sourcesOpen={view.sourcesOpen}
+                        workersOpen={view.activityOpen}
+                        sourcesId={`review-${review.id}-sources`}
+                        workersId={`review-${review.id}-workers`}
+                        activeWorkers={activeRuns}
+                        onCandidate={(value) => {
+                          setReveal(null);
+                          dispatch({
+                            type: "select_candidate",
+                            candidateId:
+                              value === review.current_candidate_id
+                                ? null
+                                : value,
+                          });
+                        }}
+                        onUnchanged={() => {
+                          const first = changed.at(0)?.path;
+                          if (
+                            view.showUnchanged &&
+                            first &&
+                            !changed.some((file) => file.path === path)
+                          ) {
+                            setReveal(null);
+                            selectFile(first);
+                          }
+                          dispatch({ type: "set_nav_tab", tab: "files" });
+                          dispatch({ type: "toggle_unchanged" });
+                        }}
+                        onSources={() => dispatch({ type: "toggle_sources" })}
+                        onWorkers={() => dispatch({ type: "toggle_activity" })}
+                        onSyncPr={
+                          remote.pullRequest ? remote.syncNow : undefined
+                        }
+                        handoff={
+                          <ReviewHandoff
+                            reviewId={review.id}
+                            revision={review.revision}
+                            disabled={readOnly}
+                            load={() =>
+                              loadHandoff({ reviewId: review.id }).unwrap()
+                            }
+                          />
+                        }
+                      />
+                    </div>
+                  }
+                />
+
+                {stalled.length > 0 && (
+                  <div className={styles.notice} role="status">
+                    <span className={styles.grow}>
+                      {stalled.length} item(s) lost their code location.
+                      {reattach
+                        ? ` Select lines in the diff, then reattach “${reattach.label}”.`
+                        : ""}
                     </span>
-                  )
-                }
-                status={
-                  <>
-                    {stackHeader?.status}
-                    {isHistorical && (
-                      <span>
-                        Historical {shortOid(candidate.head_oid)} ·{" "}
-                        {formatTime(candidate.created_at_ms)}{" "}
+                    {reattach ? (
+                      <>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="primary"
+                          disabled={!selection || readOnly}
+                          loading={
+                            resolveState.isLoading || mutateState.isLoading
+                          }
+                          onClick={() => void applyReattach()}
+                        >
+                          Reattach to selection
+                        </Button>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="ghost"
+                          onClick={() => setReattach(null)}
+                        >
+                          Cancel
+                        </Button>
+                      </>
+                    ) : (
+                      <Select
+                        value=""
+                        onValueChange={(value) =>
+                          setReattach(
+                            stalled.find(
+                              (t) => `${t.kind}:${t.id}:${t.index}` === value,
+                            ) ?? null,
+                          )
+                        }
+                      >
+                        <Select.Trigger
+                          aria-label="Reattach a stalled item"
+                          placeholder="Reattach…"
+                        />
+                        <Select.Content>
+                          {stalled.map((t) => (
+                            <Select.Item
+                              key={`${t.kind}:${t.id}:${t.index}`}
+                              value={`${t.kind}:${t.id}:${t.index}`}
+                            >
+                              {`${label(t.kind)}: ${t.label} — ${
+                                t.anchor.stalled_reason ??
+                                "location unavailable"
+                              }`}
+                            </Select.Item>
+                          ))}
+                        </Select.Content>
+                      </Select>
+                    )}
+                  </div>
+                )}
+
+                <div className={styles.body} data-rail={hasRail}>
+                  {hasRail && (
+                    <nav
+                      className={styles.nav}
+                      aria-label="Review navigation"
+                      data-open={navigationOpen}
+                    >
+                      <div
+                        className={styles.navigationToggle}
+                        ref={navigationToggleRef}
+                      >
                         <Button
                           size="sm"
                           variant="ghost"
-                          onClick={() =>
-                            dispatch({
-                              type: "select_candidate",
-                              candidateId: null,
-                            })
-                          }
+                          aria-expanded={navigationOpen}
+                          aria-controls={navigationId}
+                          onClick={() => setNavigationOpen((open) => !open)}
                         >
-                          Back to current
+                          {navigationOpen ? "Hide" : "Browse"}{" "}
+                          {view.navTab === "tour" ? "topics" : "files"}
                         </Button>
-                      </span>
-                    )}
-                  </>
-                }
-                reviewControls={
-                  <div className={styles.unifiedControls}>
-                    <SegmentedControl
-                      size="sm"
-                      value={view.navTab}
-                      onValueChange={(value) =>
-                        dispatch({
-                          type: "set_nav_tab",
-                          tab: value === "tour" ? "tour" : "files",
-                        })
-                      }
-                      options={[
-                        { value: "tour", label: "Tour" },
-                        { value: "files", label: "Review" },
-                      ]}
-                    />
-                    <IconButton
-                      icon={ChevronUp}
-                      aria-label="Previous comment"
-                      title="Previous comment"
-                      size="sm"
-                      variant="ghost"
-                      disabled={!commentThreads.length || commentIndex === 0}
-                      onClick={() => navigateComment(-1)}
-                    />
-                    <IconButton
-                      icon={ChevronDown}
-                      aria-label="Next comment"
-                      title="Next comment"
-                      size="sm"
-                      variant="ghost"
-                      disabled={
-                        !commentThreads.length ||
-                        commentIndex === commentThreads.length - 1
-                      }
-                      onClick={() => navigateComment(1)}
-                    />
-                    <ReviewToolbar
-                      compact
-                      title={review.title}
-                      reference={
-                        !stackHeader &&
-                        reference &&
-                        (link ? (
-                          <a
-                            className={styles.reference}
-                            href={link.href}
-                            title={reference}
-                            target="_blank"
-                            rel="noreferrer"
-                          >
-                            {link.label}
-                          </a>
-                        ) : (
-                          <span className={styles.reference} title={reference}>
-                            {reference}
-                          </span>
-                        ))
-                      }
-                      candidate={candidate}
-                      candidates={candidates}
-                      currentCandidateId={review.current_candidate_id}
-                      compare={view.compare}
-                      sinceLastAvailable={previous !== null}
-                      diffMode={view.diffMode}
-                      followTour={view.followTour}
-                      hasTour={review.tour.length > 0}
-                      showUnchanged={view.showUnchanged}
-                      sourcesOpen={view.sourcesOpen}
-                      workersOpen={view.activityOpen}
-                      sourcesId={`review-${review.id}-sources`}
-                      workersId={`review-${review.id}-workers`}
-                      activeWorkers={activeRuns}
-                      onCandidate={(value) => {
-                        setReveal(null);
-                        dispatch({
-                          type: "select_candidate",
-                          candidateId:
-                            value === review.current_candidate_id
-                              ? null
-                              : value,
-                        });
-                      }}
-                      onCompare={(compare) => {
-                        setReveal(null);
-                        dispatch({ type: "set_compare", compare });
-                      }}
-                      onDiffMode={(diffMode) => {
-                        setLayoutChosen(true);
-                        dispatch({ type: "set_diff_mode", diffMode });
-                      }}
-                      onFollow={() => {
-                        if (view.followTour) {
-                          dispatch({ type: "stop_follow" });
-                          return;
-                        }
-                        const stepId =
-                          view.tourStepId ?? review.tour.at(0)?.id ?? null;
-                        dispatch({
-                          type: "start_follow",
-                          stepId,
-                          path: stepId ? tourStepPath(review, stepId) : null,
-                        });
-                      }}
-                      onUnchanged={() => {
-                        const first = changed.at(0)?.path;
-                        if (
-                          view.showUnchanged &&
-                          first &&
-                          !changed.some((file) => file.path === path)
-                        ) {
-                          setReveal(null);
-                          selectFile(first);
-                        }
-                        dispatch({ type: "toggle_unchanged" });
-                      }}
-                      onSources={() => dispatch({ type: "toggle_sources" })}
-                      onWorkers={() => dispatch({ type: "toggle_activity" })}
-                      handoff={
-                        <ReviewHandoff
-                          reviewId={review.id}
-                          revision={review.revision}
-                          disabled={readOnly}
-                          load={() =>
-                            loadHandoff({ reviewId: review.id }).unwrap()
+                        <span
+                          className={styles.navigationSelection}
+                          title={
+                            view.navTab === "tour"
+                              ? review.tour.find(
+                                  (step) => step.id === shownStepId,
+                                )?.current.title
+                              : path ?? undefined
                           }
-                        />
-                      }
-                    />
-                  </div>
-                }
-              />
-
-              {stalled.length > 0 && (
-                <div className={styles.notice} role="status">
-                  <span className={styles.grow}>
-                    {stalled.length} item(s) lost their code location.
-                    {reattach
-                      ? ` Select lines in the diff, then reattach “${reattach.label}”.`
-                      : ""}
-                  </span>
-                  {reattach ? (
-                    <>
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="primary"
-                        disabled={!selection || readOnly}
-                        loading={
-                          resolveState.isLoading || mutateState.isLoading
-                        }
-                        onClick={() => void applyReattach()}
-                      >
-                        Reattach to selection
-                      </Button>
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="ghost"
-                        onClick={() => setReattach(null)}
-                      >
-                        Cancel
-                      </Button>
-                    </>
-                  ) : (
-                    <Select
-                      value=""
-                      onValueChange={(value) =>
-                        setReattach(
-                          stalled.find(
-                            (t) => `${t.kind}:${t.id}:${t.index}` === value,
-                          ) ?? null,
-                        )
-                      }
-                    >
-                      <Select.Trigger
-                        aria-label="Reattach a stalled item"
-                        placeholder="Reattach…"
-                      />
-                      <Select.Content>
-                        {stalled.map((t) => (
-                          <Select.Item
-                            key={`${t.kind}:${t.id}:${t.index}`}
-                            value={`${t.kind}:${t.id}:${t.index}`}
-                          >
-                            {`${label(t.kind)}: ${t.label} — ${
-                              t.anchor.stalled_reason ?? "location unavailable"
-                            }`}
-                          </Select.Item>
-                        ))}
-                      </Select.Content>
-                    </Select>
-                  )}
-                </div>
-              )}
-
-              <div className={styles.body}>
-                <nav
-                  className={styles.nav}
-                  aria-label="Review navigation"
-                  data-open={navigationOpen}
-                >
-                  <div
-                    className={styles.navigationToggle}
-                    ref={navigationToggleRef}
-                  >
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      aria-expanded={navigationOpen}
-                      aria-controls={navigationId}
-                      onClick={() => setNavigationOpen((open) => !open)}
-                    >
-                      {navigationOpen ? "Hide" : "Browse"}{" "}
-                      {view.navTab === "tour" ? "topics" : "files"}
-                    </Button>
-                    <span
-                      className={styles.navigationSelection}
-                      title={
-                        view.navTab === "tour"
-                          ? review.tour.find(
-                              (step) => step.id === view.tourStepId,
-                            )?.current.title
-                          : path ?? undefined
-                      }
-                    >
-                      {view.navTab === "tour"
-                        ? review.tour.find(
-                            (step) => step.id === view.tourStepId,
-                          )?.current.title
-                        : path}
-                    </span>
-                  </div>
-                  <div className={styles.navigationLists} id={navigationId}>
-                    {view.navTab === "files" ? (
-                      <>
-                        <ul
-                          className={styles.navList}
-                          aria-label="Changed files"
                         >
-                          {changed.map((f) => (
-                            <ReviewFileItem
-                              key={f.path}
-                              file={f}
-                              selected={f.path === path}
-                              onSelect={selectFile}
-                            />
-                          ))}
-                          {changed.length === 0 && (
-                            <li className={styles.meta}>No changed files.</li>
-                          )}
-                        </ul>
-                        {view.showUnchanged && (
+                          {view.navTab === "tour"
+                            ? review.tour.find(
+                                (step) => step.id === shownStepId,
+                              )?.current.title
+                            : path}
+                        </span>
+                      </div>
+                      <div className={styles.navigationLists} id={navigationId}>
+                        {view.navTab === "files" ? (
                           <>
-                            <h3 className={styles.sectionLabel}>
-                              Unchanged files
-                            </h3>
                             <ul
                               className={styles.navList}
-                              aria-label="Unchanged files"
+                              aria-label="Changed files"
                             >
-                              {unchanged.map((f) => (
+                              {changed.map((f) => (
                                 <ReviewFileItem
                                   key={f.path}
                                   file={f}
@@ -1054,251 +1070,360 @@ export function ReviewCanvas({
                                   onSelect={selectFile}
                                 />
                               ))}
-                              {unchanged.length === 0 && (
+                              {changed.length === 0 && (
                                 <li className={styles.meta}>
-                                  No unchanged files.
+                                  No changed files.
                                 </li>
                               )}
                             </ul>
+                            {view.showUnchanged && (
+                              <>
+                                <h3 className={styles.sectionLabel}>
+                                  Unchanged files
+                                </h3>
+                                <ul
+                                  className={styles.navList}
+                                  aria-label="Unchanged files"
+                                >
+                                  {unchanged.map((f) => (
+                                    <ReviewFileItem
+                                      key={f.path}
+                                      file={f}
+                                      selected={f.path === path}
+                                      onSelect={selectFile}
+                                    />
+                                  ))}
+                                  {unchanged.length === 0 && (
+                                    <li className={styles.meta}>
+                                      No unchanged files.
+                                    </li>
+                                  )}
+                                </ul>
+                              </>
+                            )}
+                          </>
+                        ) : (
+                          <>
+                            <ol
+                              className={styles.navList}
+                              aria-label="Tour steps"
+                            >
+                              {review.tour.map((step, index) => (
+                                <li key={step.id}>
+                                  <button
+                                    type="button"
+                                    className={styles.navItem}
+                                    aria-current={step.id === shownStepId}
+                                    title={
+                                      step.current.body || step.current.title
+                                    }
+                                    onClick={() => selectStep(step.id)}
+                                  >
+                                    <span className={styles.statusLetter}>
+                                      {index + 1}
+                                    </span>
+                                    <span className={styles.topicTitle}>
+                                      {step.current.title}
+                                    </span>
+                                    {step.current.version > 1 && (
+                                      <Badge tone="muted" size="xs">
+                                        v{step.current.version}
+                                      </Badge>
+                                    )}
+                                  </button>
+                                </li>
+                              ))}
+                              {review.tour.length === 0 && (
+                                <li className={styles.meta}>No tour yet.</li>
+                              )}
+                            </ol>
+                            {review.tour.length > 0 && (
+                              <div className={styles.navFooter}>
+                                <Button
+                                  type="button"
+                                  size="sm"
+                                  variant={view.followTour ? "soft" : "ghost"}
+                                  aria-pressed={view.followTour}
+                                  aria-label={
+                                    view.followTour
+                                      ? "Stop following"
+                                      : "Follow tour"
+                                  }
+                                  title="Open each new page as it is published"
+                                  onClick={toggleFollow}
+                                >
+                                  {view.followTour
+                                    ? "Following"
+                                    : "Follow new pages"}
+                                </Button>
+                              </div>
+                            )}
                           </>
                         )}
-                      </>
-                    ) : (
-                      <>
-                        <ol className={styles.navList} aria-label="Tour steps">
-                          {review.tour.map((step, index) => (
-                            <li key={step.id}>
-                              <button
-                                type="button"
-                                className={styles.navItem}
-                                aria-current={step.id === view.tourStepId}
-                                title={step.current.title}
-                                onClick={() => selectStep(step.id)}
-                              >
-                                <span className={styles.statusLetter}>
-                                  {index + 1}
-                                </span>
-                                <span className={styles.topicTitle}>
-                                  {step.current.title}
-                                </span>
-                                {step.current.version > 1 && (
-                                  <Badge tone="muted" size="xs">
-                                    v{step.current.version}
-                                  </Badge>
-                                )}
-                              </button>
-                            </li>
-                          ))}
-                          {review.tour.length === 0 && (
-                            <li className={styles.meta}>No tour yet.</li>
-                          )}
-                        </ol>
-                      </>
-                    )}
-                  </div>
-                </nav>
+                      </div>
+                    </nav>
+                  )}
 
-                <div className={styles.main}>
-                  <div
-                    className={styles.documentPane}
-                    hidden={view.navTab !== "tour"}
-                  >
-                    <ReviewDocument
-                      review={review}
-                      revealTarget={documentTarget}
-                      stepId={view.tourStepId}
-                      onManualScroll={() => dispatch({ type: "stop_follow" })}
-                      follow={view.followTour}
-                      active={active && view.navTab === "tour"}
-                      onRevealAnchor={revealExactAnchor}
-                    />
-                  </div>
-                  <div
-                    className={styles.reviewPane}
-                    hidden={view.navTab !== "files"}
-                  >
-                    {path && candidate ? (
-                      <>
-                        <div className={styles.fileHeader}>
-                          <span className={styles.filePath} title={path}>
-                            {path}
-                          </span>
-                          {view.diffMode === "unified" &&
-                            inlineHosts.left.length > 0 && (
+                  <div className={styles.main}>
+                    <div
+                      className={styles.documentPane}
+                      hidden={view.navTab !== "tour"}
+                    >
+                      <ReviewDocument
+                        review={review}
+                        revealTarget={documentTarget}
+                        stepId={shownStepId}
+                        onSelectStep={selectStep}
+                        onManualScroll={() => dispatch({ type: "stop_follow" })}
+                        active={active && view.navTab === "tour"}
+                        working={activeRuns > 0}
+                        onRevealAnchor={revealExactAnchor}
+                      />
+                    </div>
+                    {view.navTab === "findings" && (
+                      <ReviewFindings
+                        review={review}
+                        activeObjectId={view.activeObjectId}
+                        working={activeRuns > 0}
+                        onShow={showObject}
+                      />
+                    )}
+                    {view.navTab === "discussion" && (
+                      <ReviewDiscussion
+                        review={review}
+                        activeObjectId={view.activeObjectId}
+                        onShow={(thread) => showThread(thread, true)}
+                      />
+                    )}
+                    <div
+                      className={styles.reviewPane}
+                      hidden={view.navTab !== "files"}
+                    >
+                      {path && candidate ? (
+                        <>
+                          <div className={styles.fileHeader}>
+                            <span className={styles.filePath} title={path}>
+                              {path}
+                            </span>
+                            <IconButton
+                              icon={ChevronUp}
+                              aria-label="Previous comment"
+                              title="Previous comment"
+                              size="sm"
+                              variant="ghost"
+                              disabled={
+                                !commentThreads.length || commentIndex === 0
+                              }
+                              onClick={() => navigateComment(-1)}
+                            />
+                            <IconButton
+                              icon={ChevronDown}
+                              aria-label="Next comment"
+                              title="Next comment"
+                              size="sm"
+                              variant="ghost"
+                              disabled={
+                                !commentThreads.length ||
+                                commentIndex === commentThreads.length - 1
+                              }
+                              onClick={() => navigateComment(1)}
+                            />
+                            <ReviewDiffControls
+                              candidate={candidate}
+                              currentCandidateId={review.current_candidate_id}
+                              compare={view.compare}
+                              sinceLastAvailable={previous !== null}
+                              diffMode={view.diffMode}
+                              onCompare={(compare) => {
+                                setReveal(null);
+                                dispatch({ type: "set_compare", compare });
+                              }}
+                              onDiffMode={(diffMode) => {
+                                setLayoutChosen(true);
+                                dispatch({ type: "set_diff_mode", diffMode });
+                              }}
+                            />
+                            {view.diffMode === "unified" &&
+                              inlineHosts.left.length > 0 && (
+                                <Tooltip>
+                                  <Tooltip.Trigger asChild>
+                                    <IconButton
+                                      icon={Columns2}
+                                      aria-label={`Show ${inlineHosts.left.length} left-side discussions in Split`}
+                                      size="sm"
+                                      variant="soft"
+                                      onClick={() => {
+                                        dispatch({ type: "stop_follow" });
+                                        setLayoutChosen(true);
+                                        dispatch({
+                                          type: "set_diff_mode",
+                                          diffMode: "side-by-side",
+                                        });
+                                      }}
+                                    />
+                                  </Tooltip.Trigger>
+                                  <Tooltip.Content>
+                                    Show left-side discussions in Split
+                                  </Tooltip.Content>
+                                </Tooltip>
+                              )}
+                            {selectionLabel && !reattach && !readOnly && (
                               <Tooltip>
                                 <Tooltip.Trigger asChild>
                                   <IconButton
-                                    icon={Columns2}
-                                    aria-label={`Show ${inlineHosts.left.length} left-side discussions in Split`}
+                                    icon={MessageSquarePlus}
+                                    aria-label={`Comment on ${selectionLabel}`}
                                     size="sm"
                                     variant="soft"
-                                    onClick={() => {
-                                      dispatch({ type: "stop_follow" });
-                                      setLayoutChosen(true);
-                                      dispatch({
-                                        type: "set_diff_mode",
-                                        diffMode: "side-by-side",
-                                      });
-                                    }}
+                                    loading={resolveState.isLoading}
+                                    onClick={() => void startComment()}
                                   />
                                 </Tooltip.Trigger>
                                 <Tooltip.Content>
-                                  Show left-side discussions in Split
+                                  Comment on {selectionLabel}
                                 </Tooltip.Content>
                               </Tooltip>
                             )}
-                          {selectionLabel && !reattach && !readOnly && (
-                            <Tooltip>
-                              <Tooltip.Trigger asChild>
-                                <IconButton
-                                  icon={MessageSquarePlus}
-                                  aria-label={`Comment on ${selectionLabel}`}
-                                  size="sm"
-                                  variant="soft"
-                                  loading={resolveState.isLoading}
-                                  onClick={() => void startComment()}
-                                />
-                              </Tooltip.Trigger>
-                              <Tooltip.Content>
-                                Comment on {selectionLabel}
-                              </Tooltip.Content>
-                            </Tooltip>
-                          )}
-                        </div>
-                        {actionError && (
-                          <p role="alert" className={styles.errorText}>
-                            {actionError}
-                          </p>
-                        )}
-                        <div className={styles.diffArea}>
-                          {panes && view.navTab === "files" && (
-                            <ReviewFileDiff
-                              key={navigationIdentity}
-                              navigationKey={navigationIdentity}
-                              positions={diffPositions.current}
-                              review={review}
-                              panes={panes}
-                              diffMode={view.diffMode}
-                              preferSingleSided={!layoutChosen}
-                              path={path}
-                              activeObjectId={view.activeObjectId}
-                              reveal={
-                                reveal?.scope ===
-                                JSON.stringify([review.id, panes, path])
-                                  ? reveal
-                                  : null
-                              }
-                              inlineHosts={inlineHosts}
-                              onLineCounts={(counts) =>
-                                setLineCounts((current) =>
-                                  current?.identity === navigationIdentity &&
-                                  current.left === counts.left &&
-                                  current.right === counts.right
-                                    ? current
-                                    : {
-                                        identity: navigationIdentity,
-                                        ...counts,
-                                      },
-                                )
-                              }
-                              onCommentLine={(pane, line) => {
-                                if (readOnly) return;
-                                dispatch({ type: "stop_follow" });
-                                const selected = {
-                                  pane,
-                                  range: { startLine: line, endLine: line },
-                                };
-                                setSelection(selected);
-                                void openComment(selected);
-                              }}
-                              onSelection={(pane, range) =>
-                                setSelection(range ? { pane, range } : null)
-                              }
-                            />
-                          )}
-                        </div>
-                        {unlocatedThread && (
-                          <section
-                            className={styles.objects}
-                            aria-label="Historical comment"
-                          >
-                            <p className={styles.meta}>
-                              Code location unavailable; showing the saved
-                              discussion without guessing a line.
+                          </div>
+                          {actionError && (
+                            <p role="alert" className={styles.errorText}>
+                              {actionError}
                             </p>
-                            <ThreadCard
-                              review={review}
-                              thread={unlocatedThread}
-                              active
-                              pending={new Set()}
-                              onFocus={() => undefined}
-                            />
-                          </section>
-                        )}
-                        <ReviewObjects
-                          review={review}
-                          fallbackOnly
-                          placedIds={placedIds}
-                          candidateId={candidate.id}
-                          path={path}
-                          activeObjectId={view.activeObjectId}
-                          onFocusObject={(objectId) => {
-                            const anchor = objectAnchor(review, objectId);
-                            if (anchor) revealExactAnchor(anchor);
-                            dispatch({ type: "focus_object", objectId, path });
-                          }}
-                        />
-                      </>
-                    ) : (
-                      <p className={styles.unavailable}>
-                        {candidate
-                          ? "Select a file to review."
-                          : "Waiting for the first candidate capture."}
-                      </p>
-                    )}
+                          )}
+                          <div className={styles.diffArea}>
+                            {panes && view.navTab === "files" && (
+                              <ReviewFileDiff
+                                key={navigationIdentity}
+                                navigationKey={navigationIdentity}
+                                positions={diffPositions.current}
+                                review={review}
+                                panes={panes}
+                                diffMode={view.diffMode}
+                                preferSingleSided={!layoutChosen}
+                                path={path}
+                                activeObjectId={view.activeObjectId}
+                                reveal={
+                                  reveal?.scope ===
+                                  JSON.stringify([review.id, panes, path])
+                                    ? reveal
+                                    : null
+                                }
+                                inlineHosts={inlineHosts}
+                                onLineCounts={(counts) =>
+                                  setLineCounts((current) =>
+                                    current?.identity === navigationIdentity &&
+                                    current.left === counts.left &&
+                                    current.right === counts.right
+                                      ? current
+                                      : {
+                                          identity: navigationIdentity,
+                                          ...counts,
+                                        },
+                                  )
+                                }
+                                onCommentLine={(pane, line) => {
+                                  if (readOnly) return;
+                                  dispatch({ type: "stop_follow" });
+                                  const selected = {
+                                    pane,
+                                    range: { startLine: line, endLine: line },
+                                  };
+                                  setSelection(selected);
+                                  void openComment(selected);
+                                }}
+                                onSelection={(pane, range) =>
+                                  setSelection(range ? { pane, range } : null)
+                                }
+                              />
+                            )}
+                          </div>
+                          {unlocatedThread && (
+                            <section
+                              className={styles.objects}
+                              aria-label="Historical comment"
+                            >
+                              <p className={styles.meta}>
+                                Code location unavailable; showing the saved
+                                discussion without guessing a line.
+                              </p>
+                              <ThreadCard
+                                review={review}
+                                thread={unlocatedThread}
+                                active
+                                pending={new Set()}
+                                onFocus={() => undefined}
+                              />
+                            </section>
+                          )}
+                          <ReviewObjects
+                            review={review}
+                            fallbackOnly
+                            placedIds={placedIds}
+                            candidateId={candidate.id}
+                            path={path}
+                            activeObjectId={view.activeObjectId}
+                            onFocusObject={(objectId) => {
+                              const anchor = objectAnchor(review, objectId);
+                              if (anchor) revealExactAnchor(anchor);
+                              dispatch({
+                                type: "focus_object",
+                                objectId,
+                                path,
+                              });
+                            }}
+                          />
+                        </>
+                      ) : (
+                        <p className={styles.unavailable}>
+                          {candidate
+                            ? "Select a file to review."
+                            : "Waiting for the first candidate capture."}
+                        </p>
+                      )}
+                    </div>
                   </div>
                 </div>
-              </div>
 
-              {candidate && (
+                {candidate && (
+                  <Drawer
+                    title="Sources & Evidence"
+                    placement="inspector"
+                    chrome="external"
+                    id={`review-${review.id}-sources`}
+                    open={view.sourcesOpen}
+                    onToggle={() => dispatch({ type: "toggle_sources" })}
+                  >
+                    <SourcesAndEvidence
+                      review={review}
+                      candidateId={candidate.id}
+                      selectedAnnotationId={
+                        review.annotations.some(
+                          (a) => a.id === view.activeObjectId,
+                        )
+                          ? view.activeObjectId
+                          : null
+                      }
+                      onRevealSource={revealEvidence}
+                    />
+                  </Drawer>
+                )}
+                {portals}
                 <Drawer
-                  title="Sources & Evidence"
-                  placement="inspector"
+                  title={`Workers${
+                    activeRuns > 0 ? ` (${activeRuns} active)` : ""
+                  }`}
                   chrome="external"
-                  id={`review-${review.id}-sources`}
-                  open={view.sourcesOpen}
-                  onToggle={() => dispatch({ type: "toggle_sources" })}
+                  id={`review-${review.id}-workers`}
+                  open={view.activityOpen}
+                  onToggle={() => dispatch({ type: "toggle_activity" })}
                 >
-                  <SourcesAndEvidence
-                    review={review}
-                    candidateId={candidate.id}
-                    selectedAnnotationId={
-                      review.annotations.some(
-                        (a) => a.id === view.activeObjectId,
-                      )
-                        ? view.activeObjectId
-                        : null
-                    }
-                    onRevealSource={revealEvidence}
-                  />
+                  <WorkerActivity review={review} />
                 </Drawer>
-              )}
-              {portals}
-              <Drawer
-                title={`Workers${
-                  activeRuns > 0 ? ` (${activeRuns} active)` : ""
-                }`}
-                chrome="external"
-                id={`review-${review.id}-workers`}
-                open={view.activityOpen}
-                onToggle={() => dispatch({ type: "toggle_activity" })}
-              >
-                <WorkerActivity review={review} />
-              </Drawer>
-            </div>
-          </RichDiscussionContext.Provider>
-        </RichNavigationContext.Provider>
-      </RichFileNavigationContext.Provider>
-    </ReviewDocumentState>
+              </div>
+            </RichDiscussionContext.Provider>
+          </RichNavigationContext.Provider>
+        </RichFileNavigationContext.Provider>
+      </ReviewDocumentState>
+    </ReviewRemoteContext.Provider>
   );
 }

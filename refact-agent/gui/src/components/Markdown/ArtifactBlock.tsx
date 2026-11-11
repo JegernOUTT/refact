@@ -55,6 +55,7 @@ export interface ArtifactBlockProps {
 }
 
 const MAX_ERROR_MESSAGE_LENGTH = 500;
+const MAX_REVIEW_PAGE_HEIGHT = 60_000;
 const MAX_ERROR_REPORTS_PER_MOUNT = 3;
 const HEIGHT_CACHE_LIMIT = 50;
 const BLOB_URL_REVOKE_DELAY_MS = 60_000;
@@ -93,6 +94,9 @@ const _ArtifactBlock: React.FC<ArtifactBlockProps> = ({
   const pageRef = useRef(policy?.page);
   pageRef.current = policy?.page;
   const isPage = !!policy?.page;
+  // A tour page is the document itself: it flows at full height in one scroll.
+  const heightCapRef = useRef(MAX_IFRAME_HEIGHT);
+  heightCapRef.current = isPage ? MAX_REVIEW_PAGE_HEIGHT : MAX_IFRAME_HEIGHT;
   const revealAnchorRef = useRef(policy?.onRevealAnchor);
   revealAnchorRef.current = policy?.onRevealAnchor;
   const revealAnchorCountRef = useRef(policy?.revealAnchorCount);
@@ -111,7 +115,8 @@ const _ArtifactBlock: React.FC<ArtifactBlockProps> = ({
     live: boolean;
   } | null>(null);
   const hasFallback = !!staticFallback?.trim();
-  const offerStatic = hasFallback || reducedMotion;
+  // A tour page is the content itself; its static form is offered only for reduced motion.
+  const offerStatic = isPage ? reducedMotion : hasFallback || reducedMotion;
   const showStatic =
     offerStatic &&
     !(liveChoice?.identity === choiceIdentity
@@ -235,7 +240,7 @@ const _ArtifactBlock: React.FC<ArtifactBlockProps> = ({
             if (pending === null) return;
             const next = Math.max(
               1,
-              Math.min(Math.round(pending), MAX_IFRAME_HEIGHT),
+              Math.min(Math.round(pending), heightCapRef.current),
             );
             if (
               Math.abs(next - lastAppliedHeightRef.current) <= MIN_HEIGHT_DELTA

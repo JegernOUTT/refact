@@ -47,6 +47,7 @@ import {
 import { revealReview } from "./reviewNavigation";
 import { setHighlightsEffect, type LineRange } from "./diff/reviewHighlights";
 import { useReviewReadOnly } from "./readOnly";
+import { PublishChoice, usePublishToPr } from "./ReviewRemote";
 import { humanizeIdentifier } from "../../utils/displayNames";
 import styles from "./ReviewDocument.module.css";
 
@@ -854,6 +855,7 @@ export function SharedReviewComposer({
   focusOnOpen = false,
   onClose,
   open = true,
+  publishable = true,
 }: {
   reviewId: string;
   revision: number;
@@ -865,6 +867,8 @@ export function SharedReviewComposer({
   focusOnOpen?: boolean;
   onClose?: () => void;
   open?: boolean;
+  /** Code comments can also go to the pull request; tour questions never do. */
+  publishable?: boolean;
 }) {
   const textarea = useRef<HTMLTextAreaElement>(null);
   useEffect(() => {
@@ -897,6 +901,7 @@ export function SharedReviewComposer({
     shared ? shared.update(key, value) : setLocal(value);
   const [send, state] = useAddReviewCommentMutation();
   const readOnly = useReviewReadOnly();
+  const publish = usePublishToPr() && publishable;
   const submit = async () => {
     if (readOnly || submitting.current || state.isLoading || !draft.body.trim())
       return;
@@ -910,6 +915,7 @@ export function SharedReviewComposer({
       thread_id: threadId,
       ...(annotationId ? { annotation_id: annotationId } : {}),
       ...(annotationId ? {} : { blocks: [] }),
+      ...(publish ? { publish: true } : {}),
     };
     update({ ...draft, request });
     const result = await send(request).finally(() => {
@@ -990,6 +996,7 @@ export function SharedReviewComposer({
           Cancel
         </Button>
       )}
+      {publishable && !draft.request && <PublishChoice />}
     </form>
   );
 }

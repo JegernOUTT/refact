@@ -31,6 +31,19 @@ export const resetApi = (store: Store) => {
 // Defaults model a real disabled rollout; tests can override each exact route.
 export const server = setupServer(
   http.get("*/v1/reviews/by-chat/:chatId", () => HttpResponse.json(null)),
+  // Fixtures already list every file; the on-demand full list is absent by default.
+  http.get("*/v1/reviews/:id/candidates/:candidateId/files", () =>
+    HttpResponse.json({ detail: "candidate not found" }, { status: 404 }),
+  ),
+  // An open review canvas checks its pull request; by default there is none.
+  http.post("*/v1/reviews/:id/pr-sync", () =>
+    HttpResponse.json({
+      available: false,
+      reason: "this review is not tied to a pull request",
+      imported: 0,
+      published: 0,
+    }),
+  ),
   http.get("*/v1/buddy/operator/status", () =>
     HttpResponse.json({
       schema_version: 1,

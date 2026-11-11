@@ -122,12 +122,13 @@ function twoCandidateReview(revision = 3): Review {
 describe("ReviewChatSurface", () => {
   it("renders compact comment navigation with stable labels, titles and disabled state", async () => {
     serveReview({ review: twoCandidateReview() });
-    render(
+    const { user } = render(
       <ReviewChatSurface chatId="chat-1">
         <ChatProbe />
       </ReviewChatSurface>,
     );
     await screen.findByRole("region", { name: "Review canvas" });
+    await user.click(screen.getByRole("radio", { name: /^Changes/ }));
     for (const name of ["Previous comment", "Next comment"]) {
       const button = screen.getByRole("button", { name });
       expect(button).toHaveAttribute("title", name);
@@ -315,7 +316,7 @@ describe("ReviewChatSurface", () => {
         <ChatProbe />
       </ReviewChatSurface>,
     );
-    await user.click(await screen.findByRole("radio", { name: "Review" }));
+    await user.click(await screen.findByRole("radio", { name: /^Changes/ }));
     await screen.findByLabelText(/^Head/);
     await user.click(screen.getByRole("radio", { name: "Since last" }));
     await user.click(screen.getByRole("radio", { name: "Unified" }));
@@ -350,7 +351,7 @@ describe("ReviewChatSurface", () => {
         <ChatProbe />
       </ReviewChatSurface>,
     );
-    await user.click(await screen.findByRole("radio", { name: "Review" }));
+    await user.click(await screen.findByRole("radio", { name: /^Changes/ }));
     const head = await screen.findByLabelText(/^Head/);
     head.dispatchEvent(
       new KeyboardEvent("keydown", {
@@ -378,14 +379,8 @@ describe("ReviewChatSurface", () => {
     await screen.findByLabelText("New comment on src/a.ts");
     expect(screen.getByLabelText("New comment on src/a.ts")).not.toHaveFocus();
   });
-  it("waits for the server snapshot before requesting the review", async () => {
-    let requests = 0;
-    server.use(
-      http.get("*/v1/reviews/by-chat/chat-1", () => {
-        requests += 1;
-        return HttpResponse.json(null);
-      }),
-    );
+  it("loads the review without waiting for the chat transcript and stays read-only until it arrives", async () => {
+    serveReview({ review: twoCandidateReview() });
     const chat = createDefaultChatState();
     const runtime = chat.threads[chat.current_thread_id];
     runtime.thread.id = "chat-1";
@@ -399,12 +394,10 @@ describe("ReviewChatSurface", () => {
       </ReviewChatSurface>,
       { preloadedState: { chat } },
     );
-    expect(requests).toBe(0);
-    expect(
-      reviewApi.endpoints.getReviewByChat.select({ chatId: "chat-1" })(
-        store.getState(),
-      ).isUninitialized,
-    ).toBe(true);
+    const canvas = await screen.findByRole("region", {
+      name: "Review canvas",
+    });
+    expect(canvas).toHaveAttribute("data-read-only", "true");
     store.dispatch(
       applyChatEvent({
         chat_id: "chat-1",
@@ -434,7 +427,9 @@ describe("ReviewChatSurface", () => {
         messages: [],
       }),
     );
-    await waitFor(() => expect(requests).toBe(1));
+    await waitFor(() =>
+      expect(canvas).toHaveAttribute("data-read-only", "false"),
+    );
   });
 
   it("renders only the chat when the chat owns no review", async () => {
@@ -508,7 +503,7 @@ describe("ReviewChatSurface", () => {
     expect(screen.getByLabelText("Chat composer")).toBe(composer);
     expect(composer).toHaveFocus();
     expect(composer).toHaveValue("draft in progress");
-    await user.click(screen.getByRole("radio", { name: "Review" }));
+    await user.click(screen.getByRole("radio", { name: /^Changes/ }));
     expect(await screen.findByText("Unchecked index")).toBeVisible();
   });
 
@@ -721,7 +716,7 @@ describe("ReviewChatSurface", () => {
         <ChatProbe />
       </ReviewChatSurface>,
     );
-    await user.click(await screen.findByRole("radio", { name: "Review" }));
+    await user.click(await screen.findByRole("radio", { name: /^Changes/ }));
     const list = await screen.findByRole("list", { name: "Changed files" });
     expect(
       within(list)
@@ -831,7 +826,7 @@ describe("ReviewChatSurface", () => {
       </ReviewChatSurface>,
     );
     await screen.findByRole("region", { name: "Review canvas" });
-    await user.click(screen.getByRole("radio", { name: "Review" }));
+    await user.click(screen.getByRole("radio", { name: /^Changes/ }));
     await user.click(screen.getByRole("radio", { name: "Since last" }));
     const leftContent = await screen.findByLabelText(/^Candidate head/);
     const leftView = EditorView.findFromDOM(leftContent);
@@ -903,7 +898,7 @@ describe("ReviewChatSurface", () => {
         <ChatProbe />
       </ReviewChatSurface>,
     );
-    await user.click(await screen.findByRole("radio", { name: "Review" }));
+    await user.click(await screen.findByRole("radio", { name: /^Changes/ }));
     const firstHead = await screen.findByLabelText(/^Head/);
     expect(EditorView.findFromDOM(firstHead)?.state.doc.toString()).toBe(
       "new src/a.ts\n",
@@ -960,22 +955,18 @@ describe("ReviewChatSurface", () => {
       expect(
         screen.getByRole("button", { name: "Stop following" }),
       ).toBeInTheDocument();
+      const step = (name: RegExp) =>
+        within(screen.getByRole("list", { name: "Tour steps" })).getByRole(
+          "button",
+          { name },
+        );
       await waitFor(() =>
-        expect(screen.getByRole("button", { name: /Step 3/ })).toHaveAttribute(
-          "aria-current",
-          "true",
-        ),
+        expect(step(/Step 3/)).toHaveAttribute("aria-current", "true"),
       );
 
       const composer = screen.getByLabelText("Chat composer");
       await user.click(composer);
-      if (surface === "navigation")
-        fireEvent.click(
-          within(screen.getByRole("list", { name: "Tour steps" })).getByRole(
-            "button",
-            { name: /Step 2/ },
-          ),
-        );
+      if (surface === "navigation") fireEvent.click(step(/Step 2/));
       else {
         const doc = document.querySelector<HTMLElement>(
           "[data-review-document]",
@@ -987,9 +978,7 @@ describe("ReviewChatSurface", () => {
         screen.getByRole("button", { name: "Follow tour" }),
       ).toHaveAttribute("aria-pressed", "false");
       expect(
-        screen.getByRole("button", {
-          name: surface === "navigation" ? /Step 2/ : /Step 3/,
-        }),
+        step(surface === "navigation" ? /Step 2/ : /Step 3/),
       ).toHaveAttribute("aria-current", "true");
       expect(composer).toHaveFocus();
 
@@ -1009,20 +998,20 @@ describe("ReviewChatSurface", () => {
         ],
       };
       store.dispatch(invalidateReviewForChat("chat-1"));
-      await screen.findByRole("button", { name: /Step 4/ });
+      await waitFor(() => step(/Step 4/));
       expect(
-        screen.getByRole("button", {
-          name: surface === "navigation" ? /Step 2/ : /Step 3/,
-        }),
+        step(surface === "navigation" ? /Step 2/ : /Step 3/),
       ).toHaveAttribute("aria-current", "true");
       expect(composer).toHaveFocus();
 
       expect(
-        screen.getByRole("heading", { name: "Step 1" }),
+        screen.getByRole("heading", {
+          name: surface === "navigation" ? "Step 2" : "Step 3",
+        }),
       ).toBeInTheDocument();
       expect(
-        screen.getByRole("heading", { name: "Step 2" }),
-      ).toBeInTheDocument();
+        screen.queryByRole("heading", { name: "Step 1" }),
+      ).not.toBeInTheDocument();
       expect(
         Array.from(
           screen.getByRole("region", { name: "Review canvas" }).children,
@@ -1031,10 +1020,7 @@ describe("ReviewChatSurface", () => {
 
       fireEvent.click(screen.getByRole("button", { name: "Follow tour" }));
       await waitFor(() =>
-        expect(screen.getByRole("button", { name: /Step 4/ })).toHaveAttribute(
-          "aria-current",
-          "true",
-        ),
+        expect(step(/Step 4/)).toHaveAttribute("aria-current", "true"),
       );
       state.review = {
         ...state.review,
@@ -1053,10 +1039,7 @@ describe("ReviewChatSurface", () => {
       };
       store.dispatch(invalidateReviewForChat("chat-1"));
       await waitFor(() =>
-        expect(screen.getByRole("button", { name: /Step 5/ })).toHaveAttribute(
-          "aria-current",
-          "true",
-        ),
+        expect(step(/Step 5/)).toHaveAttribute("aria-current", "true"),
       );
       expect(
         screen.getByRole("button", { name: "Stop following" }),

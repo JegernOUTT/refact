@@ -62,6 +62,14 @@ async fn flush_with_wake(
         }) else {
             return Err("review outbox contribution missing".into());
         };
+        if contribution.actor.kind == ActorKind::External {
+            // Imported remote comments are review data; they never speak in the chat.
+            let id = item.id;
+            with_store(root.clone(), move |s| s.settle_delivery(&id))
+                .await
+                .map_err(|e| e.to_string())?;
+            continue;
+        }
         let role = if contribution.actor.kind == ActorKind::Agent {
             "assistant"
         } else {
@@ -96,7 +104,10 @@ async fn flush_with_wake(
         }
         let records = crate::privacy::records::declared_file_records(&app.gcx, paths)?;
         crate::privacy::records::merge_records(&mut message, records);
-        crate::privacy::records::merge_records(&mut message, review.privacy.clone());
+        crate::privacy::records::merge_records(
+            &mut message,
+            super::service::guarded_records(&review),
+        );
         if let Some(context) = &contribution.context {
             crate::privacy::records::merge_records(&mut message, context.privacy.clone());
         }
@@ -162,6 +173,31 @@ async fn flush_with_wake(
         }
     }
     Ok(())
+}
+
+/// Wakes the owning chat with a workspace request the user made in the canvas.
+pub async fn notify(
+    app: &AppState,
+    review: &Review,
+    key: &str,
+    source: &str,
+    text: &str,
+) -> Result<(), String> {
+    let payload = json!({"review_id":review.id});
+    let message = crate::chat::internal_roles::event(
+        crate::chat::internal_roles::EventSubkind::SystemNotice,
+        source,
+        payload,
+        text.to_string(),
+    );
+    let delivery = PendingDelivery::with_id(key, vec![message], PushMode::Append, source, true);
+    crate::chat::delivery::deliver_to_chat_with_receipt(
+        app.clone(),
+        &review.owner_chat_id,
+        delivery,
+    )
+    .await
+    .map(|_| ())
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -271,6 +307,6 @@ pub async fn context_for_chat(
         &mut message,
         crate::privacy::records::declared_file_records(&app.gcx, paths)?,
     );
-    crate::privacy::records::merge_records(&mut message, review.privacy.clone());
+    crate::privacy::records::merge_records(&mut message, super::service::guarded_records(&review));
     Ok(Some(message))
 }

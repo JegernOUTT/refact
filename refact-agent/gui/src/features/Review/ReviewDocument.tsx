@@ -1,5 +1,6 @@
 import { useLayoutEffect, useRef, useState } from "react";
-import { Button, Badge, Select } from "../../components/ui";
+import { ChevronLeft, ChevronRight } from "lucide-react";
+import { Button, Icon, Select } from "../../components/ui";
 import type {
   Anchor,
   Review,
@@ -116,54 +117,61 @@ function Topic({
   const target = candidateId
     ? { candidate_id: candidateId, step_id: step.id, version: shown.version }
     : undefined;
+  const versions = [step.current, ...step.history];
   return (
-    <article ref={root} className={styles.topic} data-step-id={step.id}>
-      <header className={styles.topicHeader}>
+    <article
+      ref={root}
+      className={styles.topic}
+      data-step-id={step.id}
+      aria-label={shown.title}
+    >
+      <header className={styles.topicHeader} data-page={!!shown.html}>
         {!shown.html && <h2>{shown.title}</h2>}
-        <Badge size="xs" tone="muted">
-          v{shown.version}
-        </Badge>
         {shown.version !== step.current.version && (
           <Button size="sm" onClick={() => apply(step.current)}>
             Apply updated topic · v{step.current.version}
           </Button>
         )}
-        <Select
-          value={String(shown.version)}
-          onValueChange={(value) => {
-            const version = [step.current, ...step.history].find(
-              (item) => item.version === Number(value),
-            );
-            if (version) apply(version);
-          }}
-        >
-          <Select.Trigger
-            aria-label={`Version of ${shown.title}`}
-            className={styles.versionSelector}
+        {versions.length > 1 && (
+          <Select
+            value={String(shown.version)}
+            onValueChange={(value) => {
+              const version = versions.find(
+                (item) => item.version === Number(value),
+              );
+              if (version) apply(version);
+            }}
+          >
+            <Select.Trigger
+              aria-label={`Version of ${shown.title}`}
+              className={styles.versionSelector}
+            />
+            <Select.Content>
+              {versions.map((version) => (
+                <Select.Item
+                  key={version.version}
+                  value={String(version.version)}
+                >
+                  v{version.version}
+                  {version.version === step.current.version
+                    ? " · latest"
+                    : " · historical"}
+                </Select.Item>
+              ))}
+            </Select.Content>
+          </Select>
+        )}
+        {versions.length > 1 && (
+          <ObjectHistory
+            compact
+            reviewId={review.id}
+            current={{ kind: "tour_step", value: step }}
           />
-          <Select.Content>
-            {[step.current, ...step.history].map((version) => (
-              <Select.Item
-                key={version.version}
-                value={String(version.version)}
-              >
-                v{version.version}
-                {version.version === step.current.version
-                  ? " · latest"
-                  : " · historical"}
-              </Select.Item>
-            ))}
-          </Select.Content>
-        </Select>
-        <ObjectHistory
-          compact
-          reviewId={review.id}
-          current={{ kind: "tour_step", value: step }}
-        />
+        )}
       </header>
       {candidateId !== review.current_candidate_id && (
         <p className={styles.historical}>
-          Historical candidate · {candidateId?.slice(0, 8)}
+          Written for an earlier version of the code.
         </p>
       )}
       {shown.html ? (
@@ -206,47 +214,36 @@ function Topic({
 export function ReviewDocument({
   review,
   stepId,
+  onSelectStep,
   onManualScroll,
-  follow,
   active,
+  working = false,
   onRevealAnchor,
   revealTarget,
 }: {
   review: Review;
   revealTarget?: { target: DocumentTarget; token: number; threadId?: string };
   stepId: string | null;
+  onSelectStep?: (stepId: string) => void;
   onManualScroll: () => void;
-  follow: boolean;
   active: boolean;
+  /** The owning chat or its workers are still writing. */
+  working?: boolean;
   onRevealAnchor: (anchor: Anchor) => void;
 }) {
   const root = useRef<HTMLDivElement>(null);
-  const lastSelection = useRef<string | null>(null);
-  const lastReveal = useRef<number | null>(null);
-  const [known, setKnown] = useState(
-    () => new Set(review.tour.map((step) => step.id)),
-  );
-  const newCount = review.tour.filter((step) => !known.has(step.id)).length;
+  const found = review.tour.findIndex((step) => step.id === stepId);
+  const index = found >= 0 ? found : 0;
+  const step = review.tour.at(index);
+  const previous = index > 0 ? review.tour.at(index - 1) : undefined;
+  const next = review.tour.at(index + 1);
+  const shownId = step?.id;
+  // A page opens at its top; a pending reveal scrolls to its own target.
+  const revealing = useRef(false);
+  revealing.current = revealTarget?.target.step_id === shownId;
   useLayoutEffect(() => {
-    if (!active || !stepId) return;
-    if (
-      revealTarget?.target.step_id === stepId &&
-      lastReveal.current !== revealTarget.token
-    ) {
-      lastReveal.current = revealTarget.token;
-      lastSelection.current = stepId;
-      return;
-    }
-    if (stepId === lastSelection.current) return;
-    const section = Array.from(
-      root.current?.querySelectorAll<HTMLElement>("[data-step-id]") ?? [],
-    ).find((item) => item.dataset.stepId === stepId);
-    if (section && root.current)
-      root.current.scrollTop +=
-        section.getBoundingClientRect().top -
-        root.current.getBoundingClientRect().top;
-    lastSelection.current = stepId;
-  }, [stepId, active, follow, revealTarget]);
+    if (root.current && !revealing.current) root.current.scrollTop = 0;
+  }, [shownId]);
   return (
     <div
       ref={root}
@@ -271,79 +268,57 @@ export function ReviewDocument({
         )
           onManualScroll();
       }}
-      aria-label="Review document"
+      aria-label="Review tour"
       tabIndex={0}
     >
-      {newCount > 0 && (
-        <Button
-          size="sm"
-          variant="ghost"
-          onClick={() => setKnown(new Set(review.tour.map((step) => step.id)))}
-        >
-          {newCount} new topic{newCount === 1 ? "" : "s"}
-        </Button>
-      )}
-      {review.tour.length === 0 ? (
+      {step ? (
+        <Topic
+          key={step.id}
+          review={review}
+          step={step}
+          revealTarget={revealTarget}
+          active={active}
+          onRevealAnchor={onRevealAnchor}
+        />
+      ) : (
         <div className={styles.empty}>
-          <h2>Your review tour</h2>
+          <h2>{working ? "The tour is being written" : "No tour yet"}</h2>
           <p>
-            No topics have been published yet. The owning chat can investigate
-            and publish explanations while independent review workers run.
-            Switch to Review to inspect captured files now.
+            {working
+              ? "Pages appear here one by one while the review runs. The changed files are already under Changes."
+              : "Ask in the chat for a walkthrough of this change. The changed files are under Changes."}
           </p>
         </div>
-      ) : (
-        review.tour.map((step) => (
-          <Topic
-            key={step.id}
-            review={review}
-            step={step}
-            revealTarget={revealTarget}
-            active={active}
-            onRevealAnchor={onRevealAnchor}
-          />
-        ))
       )}
-      <div className={styles.sourceInventory}>
-        <h3>Source inventory</h3>
-        <ReviewRichBlocks
-          review={review}
-          bindingKey={`${review.id}:inventory`}
-          body=""
-          blocks={[
-            {
-              id: "consulted-inventory",
-              revision: 1,
-              content: {
-                kind: "sources",
-                evidence_ids: review.evidence
-                  .filter((item) => item.source.kind !== "executed")
-                  .map((item) => item.id),
-                relation: "consulted",
-              },
-            },
-          ]}
-        />
-        {review.evidence.some((item) => item.source.kind === "executed") && (
-          <ReviewRichBlocks
-            review={review}
-            bindingKey={`${review.id}:executed`}
-            body=""
-            blocks={[
-              {
-                id: "executed-inventory",
-                revision: 1,
-                content: {
-                  kind: "evidence",
-                  evidence_ids: review.evidence
-                    .filter((item) => item.source.kind === "executed")
-                    .map((item) => item.id),
-                },
-              },
-            ]}
-          />
-        )}
-      </div>
+      {step && review.tour.length > 1 && (
+        <nav className={styles.pager} aria-label="Tour pages">
+          <Button
+            size="sm"
+            variant="ghost"
+            disabled={!previous}
+            onClick={() => previous && onSelectStep?.(previous.id)}
+          >
+            <Icon icon={ChevronLeft} size="sm" />
+            <span className={styles.pagerTitle}>
+              {previous ? previous.current.title : "Previous"}
+            </span>
+          </Button>
+          <span className={styles.pagerPosition}>
+            Page {index + 1} of {review.tour.length}
+          </span>
+          <Button
+            size="sm"
+            variant={next ? "primary" : "ghost"}
+            disabled={!next}
+            onClick={() => next && onSelectStep?.(next.id)}
+          >
+            <span className={styles.pagerTitle}>
+              {next ? next.current.title : "Next"}
+            </span>
+            <Icon icon={ChevronRight} size="sm" />
+          </Button>
+        </nav>
+      )}
     </div>
   );
 }

@@ -11,7 +11,14 @@
   align-items: center;
   gap: var(--rf-space-1);
   min-width: 0;
-  border-bottom: var(--rf-hairline) solid var(--rf-border);
+}
+
+/* A wide canvas keeps one row: the branch name gives way before a control wraps. */
+@container (min-width: 840px) {
+  .navigation {
+    flex: 1 1 14rem;
+    max-width: max-content;
+  }
 }
 
 .navigation > :first-child {
