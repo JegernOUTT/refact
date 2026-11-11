@@ -551,7 +551,7 @@ impl TeamRoster {
         let settings = refact_work_core::coordination_settings();
         TeamRoster::with_bounds(
             team,
-            settings.team_member_max_count,
+            usize::MAX,
             settings.team_mission_log_max_entries,
             settings.team_heartbeat_ttl_ms,
         )

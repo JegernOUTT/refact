@@ -27,7 +27,6 @@ use crate::tools::tool_task_merge_agent::ToolTaskMergeAgent;
 use crate::tools::tool_task_spawn_agent::ToolTaskSpawnAgent;
 use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
 
-const MAX_SPAWN_BATCH: usize = 10;
 const MAX_MERGE_BATCH: usize = 10;
 const MAX_CREATE_BATCH: usize = 30;
 
@@ -431,7 +430,7 @@ fn pre_dispatch_result(
 fn wave_limits() -> WaveLimits {
     let settings = refact_work_core::coordination_settings();
     WaveLimits {
-        max_wave_width: settings.max_wave_width,
+        max_wave_width: usize::MAX,
         max_pipeline_depth: settings.max_pipeline_depth,
     }
 }
@@ -930,7 +929,7 @@ impl Tool for ToolSpawnAgentsBatch {
             source: make_source(),
             experimental: false,
             allow_parallel: false,
-            description: "Spawn task agents for up to 10 ready planned cards in parallel. Pass 'schedule' to order submission into dependency waves with explicit parallel, sequential and pipeline lanes."
+            description: "Spawn task agents for ready planned cards in parallel. Pass 'schedule' to order submission into dependency waves with explicit parallel, sequential and pipeline lanes."
                 .to_string(),
             input_schema: json!({
                 "type": "object",
@@ -938,7 +937,6 @@ impl Tool for ToolSpawnAgentsBatch {
                     "task_id": { "type": "string", "description": "Task UUID (optional in planner context)" },
                     "cards": {
                         "type": "array",
-                        "maxItems": MAX_SPAWN_BATCH,
                         "items": {
                             "type": "object",
                             "properties": {
@@ -999,12 +997,6 @@ impl Tool for ToolSpawnAgentsBatch {
     ) -> Result<(bool, Vec<ContextEnum>), String> {
         let (gcx, task_id) = planner_context(&ccx, args, "spawn_agents_batch").await?;
         let raw_items = array_arg(args, "cards")?;
-        if raw_items.len() > MAX_SPAWN_BATCH {
-            return Err(format!(
-                "spawn_agents_batch accepts at most {} cards",
-                MAX_SPAWN_BATCH
-            ));
-        }
 
         let parsed: Vec<Result<SpawnBatchItem, String>> =
             raw_items.iter().map(parse_spawn_item).collect();

@@ -154,7 +154,6 @@ static COORDINATION_FIELD_BOUNDS: &[CoordinationFieldBound] = &[
     coordination_integer("lock_timeout_secs", 1, 3_600),
     coordination_integer("lock_poll_interval_ms", 1, 60_000),
     coordination_integer("approval_timeout_secs", 1, 604_800),
-    coordination_integer("max_pending_approvals", 1, 100_000),
     coordination_integer("max_pending_questions", 1, 100_000),
     coordination_integer("question_default_expiry_secs", 1, 31_536_000),
     coordination_integer("question_max_expiry_secs", 1, 31_536_000),
@@ -184,7 +183,6 @@ static COORDINATION_FIELD_BOUNDS: &[CoordinationFieldBound] = &[
     coordination_integer("board_max_reviewers", 1, 100_000),
     coordination_integer("board_claim_key_max_len", 1, 100_000),
     coordination_bool("board_allow_self_review"),
-    coordination_integer("max_wave_width", 1, 10_000),
     coordination_integer("max_pipeline_depth", 1, 10_000),
     coordination_bool("overlap_ordering_enabled"),
     coordination_integer("agent_wait_default_ms", 1, 3_600_000),
@@ -237,7 +235,6 @@ static COORDINATION_FIELD_BOUNDS: &[CoordinationFieldBound] = &[
     coordination_integer("decomposition_min_samples", 1, 100_000),
     coordination_integer("team_max_count", 1, 100_000),
     coordination_integer("team_role_max_count", 1, 100_000),
-    coordination_integer("team_member_max_count", 1, 100_000),
     coordination_integer("team_mission_log_max_entries", 1, 1_000_000),
     coordination_integer("team_heartbeat_ttl_ms", 1, 86_400_000),
     coordination_integer("outbox_retention_secs", 1, 31_536_000),
@@ -292,6 +289,9 @@ const RETIRED_COORDINATION_SETTINGS: &[&str] = &[
     "max_outstanding",
     "agent_wait_max_ms",
     "agent_wait_max_agents",
+    "max_pending_approvals",
+    "max_wave_width",
+    "team_member_max_count",
 ];
 
 pub const RETIRED_TRAJECTORY_SETTINGS: &[&str] = &["max_parallel_tools"];

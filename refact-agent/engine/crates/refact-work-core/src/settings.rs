@@ -103,6 +103,7 @@ pub struct CoordinationSettings {
     pub lock_timeout_secs: u64,
     pub lock_poll_interval_ms: u64,
     pub approval_timeout_secs: u64,
+    #[serde(skip)]
     pub max_pending_approvals: usize,
     pub max_pending_questions: usize,
     pub question_default_expiry_secs: u64,
@@ -144,6 +145,7 @@ pub struct CoordinationSettings {
     /// Cards one derived dependency wave may submit at once. Waves order
     /// submission only; admission capacity still governs execution, so the
     /// overflow is reported as undispatched rather than refused.
+    #[serde(skip)]
     pub max_wave_width: usize,
     /// Stages one pipeline lane may declare. A deeper lane is refused, because
     /// the depth is declared by the caller rather than derived from the DAG.
@@ -259,6 +261,7 @@ pub struct CoordinationSettings {
     /// Roles one team may define.
     pub team_role_max_count: usize,
     /// Seats one roster may hold at once.
+    #[serde(skip)]
     pub team_member_max_count: usize,
     /// Mission-log entries one team keeps. The log is append-only, so the bound
     /// is what stops it growing forever: the oldest entry is dropped and the

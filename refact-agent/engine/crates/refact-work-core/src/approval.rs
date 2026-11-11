@@ -100,6 +100,8 @@ impl ApprovalRegistry {
         }
     }
 
+    /// Retention bound for expired tombstones only. Live (unexpired) pending
+    /// approvals are never rejected by count in shipping registries.
     fn capacity(&self) -> usize {
         self.max_pending
             .unwrap_or_else(|| crate::coordination_settings().max_pending_approvals)
@@ -122,12 +124,17 @@ impl ApprovalRegistry {
         if pending.expires_at <= now {
             return Err(ApprovalError::Expired);
         }
-        let active = entries
-            .values()
-            .filter(|entry| entry.pending.expires_at > now)
-            .count();
-        if active >= self.capacity() {
-            return Err(ApprovalError::Capacity);
+        // Only explicitly injected finite fixtures (`ApprovalRegistry::new(n)`)
+        // keep an active-count gate; the live settings-backed registry is
+        // unlimited by count. Duplicate/expiry/authorization checks remain.
+        if let Some(max_pending) = self.max_pending {
+            let active = entries
+                .values()
+                .filter(|entry| entry.pending.expires_at > now)
+                .count();
+            if active >= max_pending {
+                return Err(ApprovalError::Capacity);
+            }
         }
         entries.insert(
             pending.id.clone(),
@@ -728,6 +735,47 @@ mod user_grant_tests {
             registry.consume_user_once("parent", "request", 3, "wrapper", 201),
             Err(ApprovalError::NotApproved)
         );
+    }
+
+    #[test]
+    fn settings_backed_registry_accepts_more_than_old_pending_count_cap() {
+        let registry = ApprovalRegistry::from_settings();
+        let total = crate::coordination_settings()
+            .max_pending_approvals
+            .max(256)
+            + 44;
+        for index in 0..total {
+            registry
+                .register(
+                    PendingApproval {
+                        id: format!("request-{index}"),
+                        child_work_id: "child".into(),
+                        parent_chat_id: "parent".into(),
+                        run_generation: 1,
+                        tool_call_id: format!("call-{index}"),
+                        tool_name: "shell".into(),
+                        args: serde_json::json!({"command":"echo ok"}),
+                        requires_human: false,
+                        digest: None,
+                        created_at: 0,
+                        expires_at: 100,
+                        execution: None,
+                    },
+                    0,
+                )
+                .unwrap();
+        }
+        assert_eq!(registry.len(), total);
+        // Duplicate and expiry protections stay in force without a count cap.
+        let mut duplicate = registry.get("parent", "request-0", 0).unwrap();
+        assert_eq!(
+            registry.register(duplicate.clone(), 0),
+            Err(ApprovalError::Duplicate)
+        );
+        duplicate.id = "late".into();
+        duplicate.tool_call_id = "late".into();
+        duplicate.expires_at = 1;
+        assert_eq!(registry.register(duplicate, 1), Err(ApprovalError::Expired));
     }
 
     #[tokio::test(start_paused = true)]

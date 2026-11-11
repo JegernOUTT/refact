@@ -36,50 +36,28 @@ fn settings_backed_approval_capacity_changes_without_discarding_accepted_request
     let mut settings = coordination_settings();
     settings.max_pending_approvals = 2;
     install_coordination_settings(settings.clone()).unwrap();
-    registry.register(request("a"), 0).unwrap();
-    registry.register(request("b"), 0).unwrap();
-    assert_eq!(
-        shared.register(request("c"), 0),
-        Err(ApprovalError::Capacity)
-    );
+    for id in ["a", "b", "c"] {
+        registry.register(request(id), 0).unwrap();
+    }
     settings.max_pending_approvals = 1;
     install_coordination_settings(settings.clone()).unwrap();
+    shared.register(request("d"), 1).unwrap();
     assert_eq!(
         registry.register(request("a"), 1),
         Err(ApprovalError::Duplicate)
     );
-    assert_eq!(registry.len(), 2);
-    assert_eq!(
-        shared.register(request("c"), 1),
-        Err(ApprovalError::Capacity)
-    );
+    assert_eq!(registry.len(), 4);
     assert_eq!(
         registry.decide("parent", 1, "a", true, 1),
         Ok(ApprovalDecision::Approved)
     );
     shared.consume("a", "a", &request("a").args, 2).unwrap();
-    assert_eq!(
-        shared.decide("parent", 1, "a", true, 3),
-        Ok(ApprovalDecision::Approved)
-    );
     shared.cancel("parent", 1, "b", 3).unwrap();
     assert_eq!(registry.wait_now("b", 3), Ok(ApprovalDecision::Cancelled));
-    settings.max_pending_approvals = 3;
-    install_coordination_settings(settings.clone()).unwrap();
-    shared.register(request("c"), 4).unwrap();
-    let rows = registry.list_for_parent("parent", 4);
-    assert_eq!(
-        rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
-        ["a", "b", "c"]
-    );
-    assert!(rows.iter().all(|row| row.expires_at == 100));
     assert_eq!(
         registry.consume("a", "a", &request("a").args, 5),
         Err(ApprovalError::Consumed)
     );
-    settings.max_pending_approvals = 0;
-    assert!(install_coordination_settings(settings).is_err());
-    assert_eq!(coordination_settings().max_pending_approvals, 3);
     registry.expire(100);
     let mut next = request("next");
     next.expires_at = 200;
