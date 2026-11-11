@@ -176,8 +176,7 @@ export function FileViewer({ path }: { path: string }) {
   const target = storedTarget ?? { path };
   const manual =
     storedTarget?.manual === true ||
-    (!storedTarget &&
-      workspaceRoots.length > 0 &&
+    (workspaceRoots.length > 0 &&
       !isPathWithinWorkspaceRoots(path, workspaceRoots));
   const { data, error, isFetching, refetch } = useReadFileQuery(
     manual

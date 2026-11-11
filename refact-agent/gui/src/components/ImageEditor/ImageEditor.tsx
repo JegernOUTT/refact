@@ -398,7 +398,22 @@ function EditorSession({ file, onApply, onCancel }: ImageEditorProps) {
       return;
     const key = event.key.toLowerCase();
     let action: (() => void) | undefined;
-    if ((event.ctrlKey || event.metaKey) && !(event.ctrlKey && event.metaKey)) {
+    if (
+      key === "enter" &&
+      !event.shiftKey &&
+      !event.ctrlKey &&
+      !event.metaKey &&
+      ready &&
+      !(
+        event.target instanceof HTMLElement &&
+        event.target.closest("button, summary")
+      )
+    ) {
+      action = () => onApply(result.file);
+    } else if (
+      (event.ctrlKey || event.metaKey) &&
+      !(event.ctrlKey && event.metaKey)
+    ) {
       if (key === "z") action = event.shiftKey ? redo : undo;
       else if (key === "y" && event.ctrlKey && !event.shiftKey) action = redo;
     } else if (!event.ctrlKey && !event.metaKey && image) {
@@ -460,6 +475,10 @@ function EditorSession({ file, onApply, onCancel }: ImageEditorProps) {
         width="min(1100px, 96vw)"
         maxHeight="94dvh"
         bodyClassName={styles.body}
+        onOpenAutoFocus={(event) => {
+          event.preventDefault();
+          if (event.target instanceof HTMLElement) event.target.focus();
+        }}
         onEscapeKeyDown={(event) => {
           event.stopPropagation();
           if (composing.current) {
@@ -747,8 +766,10 @@ function EditorSession({ file, onApply, onCancel }: ImageEditorProps) {
                     V Pan · B Brush · T Text · Shift+B Brush + Text · L Line · A
                     Arrow · E Ellipse · R Rectangle. Ctrl/Cmd+Z Undo ·
                     Ctrl/Cmd+Shift+Z or Ctrl+Y Redo. +/− Zoom · 0 Fit · 1 Actual
-                    size. Ctrl/Cmd+Enter commits inline text; Enter adds a line.
-                    Escape cancels a pending gesture, then closes the editor.
+                    size. Enter attaches the edited image without sending a
+                    message. In inline text, Enter adds a line; Ctrl/Cmd+Enter
+                    commits. Escape cancels a pending gesture, then closes the
+                    editor.
                   </p>
                 </details>
                 {annotations.length >= MAX_ANNOTATIONS && (

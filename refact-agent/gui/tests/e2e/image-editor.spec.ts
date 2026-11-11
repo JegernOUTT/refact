@@ -53,6 +53,21 @@ test("default apply preserves original bytes and focus; cancel discards", async 
   await page.getByRole("button", { name: "Cancel / Discard" }).click();
   await expect(page.getByTestId("result")).toHaveText("cancelled");
 });
+
+test("Enter expands keyboard help without attaching the image", async ({
+  page,
+}) => {
+  await open(page);
+  const help = page.locator("summary", { hasText: "Keyboard shortcuts" });
+  const disclosure = page.locator("details").filter({ has: help });
+  await expect(disclosure).not.toHaveAttribute("open");
+  await help.focus();
+  await page.keyboard.press("Enter");
+  await expect(disclosure).toHaveAttribute("open", "");
+  await expect(page.getByRole("dialog")).toBeVisible();
+  await expect(page.getByTestId("result")).toHaveText("");
+});
+
 test("shipping brush pixels survive PNG export with undo redo", async ({
   page,
 }) => {

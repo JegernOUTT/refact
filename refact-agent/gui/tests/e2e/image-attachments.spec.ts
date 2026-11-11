@@ -99,6 +99,61 @@ for (const method of ["upload", "drop", "paste"])
       ),
     ).toBe(0);
   });
+test("Enter attaches the image without sending or clearing the draft", async ({
+  page,
+}) => {
+  await page.goto("/tests/e2e/image-attachments.html");
+  const draft = page.getByTestId("chat-form-textarea");
+  await check(draft).toBeVisible();
+  await check(
+    page.getByRole("button", { name: /gpt-5.5/ }).first(),
+  ).toBeVisible();
+  await draft.fill("Keep this draft");
+  await ingress(page, "paste");
+  await check(page.getByRole("dialog")).toBeVisible();
+  await check(
+    page.getByRole("button", { name: "Apply", exact: true }),
+  ).toBeEnabled();
+  await page.keyboard.press("Enter");
+  await check(page.getByRole("dialog")).toHaveCount(0);
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const state = (
+          window as unknown as {
+            __toolbarAlignmentStore: {
+              getState: () => {
+                chat: {
+                  threads: Record<
+                    string,
+                    { attached_images: { name: string; content: string }[] }
+                  >;
+                };
+              };
+            };
+          }
+        ).__toolbarAlignmentStore.getState();
+        return state.chat.threads["showcase-chat"].attached_images.map(
+          (image) => ({
+            name: image.name,
+            png: image.content.startsWith("data:image/png;base64,"),
+          }),
+        );
+      }),
+    )
+    .toEqual([{ name: "test.png", png: true }]);
+  await check(draft).toHaveValue("Keep this draft");
+  expect(
+    await page.evaluate(() =>
+      (
+        window as unknown as { __routeShowcaseCommands: { type?: string }[] }
+      ).__routeShowcaseCommands.filter(
+        (command) => command.type === "user_message",
+      ),
+    ),
+  ).toEqual([]);
+});
+
 test("Retry mixed clipboard text/caret survives editor Cancel", async ({
   page,
 }) => {

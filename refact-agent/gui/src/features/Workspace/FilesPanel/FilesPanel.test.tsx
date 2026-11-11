@@ -1965,6 +1965,59 @@ describe("FilesPanel", () => {
     ).toBeDisabled();
   });
 
+  it.each([undefined, false])(
+    "opens linked external images through protected open with manual metadata %s",
+    async (manual) => {
+      const path = "/tmp/refact-review-overhaul/header-1600.png";
+      const reads = vi.fn(() =>
+        HttpResponse.json(
+          { detail: "Path is outside of project directories" },
+          { status: 403 },
+        ),
+      );
+      const opens = vi.fn();
+      server.use(
+        http.get("*/v1/files/read", reads),
+        http.post("*/v1/files/open", async ({ request }) => {
+          opens(await request.json());
+          return HttpResponse.json(
+            readResponse({
+              path,
+              content: "",
+              language: null,
+              binary: true,
+              can_edit: false,
+              image_mime: "image/png",
+              image_data: "iVBORw0KGgo=",
+            }),
+          );
+        }),
+      );
+      const { store } = render(<ActiveFileViewer />, {
+        preloadedState: {
+          current_project: { name: "workspace", workspaceRoots: [rootPath] },
+        },
+      });
+      act(() => {
+        store.dispatch(openFileInFilesPanel({ path, line: 1, manual }));
+      });
+
+      const image = await screen.findByRole("img", { name: "header-1600.png" });
+      expect(image).toHaveAttribute(
+        "src",
+        "data:image/png;base64,iVBORw0KGgo=",
+      );
+      expect(opens).toHaveBeenCalledExactlyOnceWith({ path });
+      expect(reads).not.toHaveBeenCalled();
+      expect(store.getState().current_project.workspaceRoots).toEqual([
+        rootPath,
+      ]);
+      expect(
+        screen.getByRole("button", { name: "Edit this file" }),
+      ).toBeDisabled();
+    },
+  );
+
   it("never treats a manual path as editable without can_edit true", async () => {
     server.use(
       http.post("*/v1/files/open", () =>
