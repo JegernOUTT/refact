@@ -635,8 +635,7 @@ must use `chat` delivery.
   and create/update validation.
 - Existing-chat agent turns and chat-delivered command jobs defer while the chat is busy, paused, missing,
   or closed. Busy defers retry after 30s; invalid targets defer after 60s for durable/recurring jobs.
-- Command jobs and isolated agent-turn jobs use the cron lane and are bounded by
-  `scheduler.max_concurrent_runs` (default 8).
+- Command jobs and isolated agent-turn jobs use the cron lane without a configurable execution-count quota. Legacy `scheduler.max_concurrent_runs` and `scheduler.max_jobs` values are ignored and omitted from saved configuration. Per-job ownership and duplicate-occurrence checks remain active.
 - Durable catch-up runs on runner start. Legacy one-shot cron jobs whose first scheduled time passed
   fire ASAP when their target can be restored; recurring jobs use `recurring_missed_grace_state()`.
 - Missed recurring grace is half the schedule period clamped by `scheduler.missed_grace_min_ms` (default

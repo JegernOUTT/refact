@@ -16,7 +16,6 @@ use crate::scheduler::{
     push_from_value,
 };
 use refact_core::chat_types::PushMode;
-use crate::tools::tool_cron_create::MAX_CRON_JOBS;
 
 use crate::scheduler::automation_api as automation;
 
@@ -378,16 +377,6 @@ async fn create_http_cron_job(
     validate_next_fire(&task, now_ms)?;
 
     let session_store = session_cron_store();
-    let durable_count = match &durable_store {
-        Some(store) => store.try_list().await?.len(),
-        None => 0,
-    };
-    let total_tasks = session_store.list().await.len() + durable_count;
-    if total_tasks >= MAX_CRON_JOBS {
-        return Err(format!(
-            "Too many scheduled jobs (max {MAX_CRON_JOBS}). Cancel one first."
-        ));
-    }
     if task.durable && durable_store.is_none() {
         return Err("No project root available for durable scheduled jobs".to_string());
     }

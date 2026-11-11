@@ -21,7 +21,6 @@ use crate::scheduler::{
 use refact_core::chat_types::PushMode;
 use crate::tools::tools_description::{ToolDesc, ToolSource, ToolSourceType};
 
-pub const MAX_CRON_JOBS: usize = 50;
 const ONE_YEAR_MS: u64 = 365 * 24 * 60 * 60 * 1000;
 
 #[derive(Clone, Debug)]
@@ -455,16 +454,6 @@ pub(crate) async fn create_cron_job(
         input.recurring.unwrap_or(true)
     };
 
-    let durable_count = match &runtime.durable_store {
-        Some(store) => store.try_list().await?.len(),
-        None => 0,
-    };
-    let total_tasks = runtime.session_store.list().await.len() + durable_count;
-    if total_tasks >= MAX_CRON_JOBS {
-        return Err(format!(
-            "Too many scheduled jobs (max {MAX_CRON_JOBS}). Cancel one first."
-        ));
-    }
     let durable = input
         .durable
         .unwrap_or_else(|| runtime.durable_store.is_some());
@@ -943,23 +932,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cap_enforced() {
+    async fn more_than_fifty_scheduled_jobs_are_accepted() {
         let session_store: Arc<dyn CronStore> = Arc::new(InMemoryCronStore::new());
-        for idx in 0..MAX_CRON_JOBS {
+        for idx in 0..60 {
             session_store
                 .add(test_task(&format!("cron_{idx}")))
                 .await
                 .unwrap();
         }
-
-        let err = create_cron_job(
+        let created = create_cron_job(
             default_input(),
-            runtime(session_store, None, Arc::new(Notify::new())),
+            runtime(session_store.clone(), None, Arc::new(Notify::new())),
         )
         .await
-        .unwrap_err();
-
-        assert_eq!(err, "Too many scheduled jobs (max 50). Cancel one first.");
+        .unwrap();
+        assert!(session_store.get(&created.task.id).await.is_some());
+        assert_eq!(session_store.list().await.len(), 61);
     }
 
     #[tokio::test]

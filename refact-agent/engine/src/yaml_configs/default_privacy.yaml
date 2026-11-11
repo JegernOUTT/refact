@@ -63,7 +63,6 @@ privacy_rules:
 scheduler:
   enabled: true
   disable_durable: false
-  max_jobs: 50
 # Lifecycle hooks run shell commands on agent events (see .refact/hooks.yaml or
 # ~/.config/refact/hooks.yaml). Global hooks always run. Project-local hooks are
 # DISABLED by default: a cloned repository could otherwise execute arbitrary shell

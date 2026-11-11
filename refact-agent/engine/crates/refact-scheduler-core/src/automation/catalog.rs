@@ -159,13 +159,34 @@ impl ProjectAutomationLease {
         let mut capacities = self.capacities.lock().unwrap_or_else(|p| p.into_inner());
         capacities
             .entry(lane.into())
-            .or_insert_with(|| Arc::new(tokio::sync::Semaphore::new(max.clamp(1, 256))))
+            .or_insert_with(|| {
+                Arc::new(tokio::sync::Semaphore::new(
+                    max.clamp(1, tokio::sync::Semaphore::MAX_PERMITS),
+                ))
+            })
             .clone()
     }
 }
 
 pub struct AutomationCatalog {
     dir: Dir,
+}
+
+#[cfg(test)]
+mod capacity_tests {
+    use super::*;
+
+    #[test]
+    fn execution_lane_can_admit_more_than_the_retired_256_ceiling() {
+        let directory = tempfile::tempdir().unwrap();
+        let lease = ProjectAutomationLease::acquire(directory.path()).unwrap();
+        let lane = lease.capacity("unlimited-regression", tokio::sync::Semaphore::MAX_PERMITS);
+        let mut permits = Vec::new();
+        for _ in 0..300 {
+            permits.push(lane.clone().try_acquire_owned().unwrap());
+        }
+        assert_eq!(permits.len(), 300);
+    }
 }
 impl AutomationCatalog {
     pub fn open(root: impl AsRef<Path>) -> Result<Self, String> {
