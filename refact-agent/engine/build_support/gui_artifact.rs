@@ -249,7 +249,17 @@ fn is_link(metadata: &fs::Metadata) -> bool {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum HardlinkPolicy {
+    SingleLink,
+    InstalledProgram,
+}
+
 fn regular(path: &Path) -> Result<File> {
+    regular_with_policy(path, HardlinkPolicy::SingleLink)
+}
+
+fn regular_with_policy(path: &Path, policy: HardlinkPolicy) -> Result<File> {
     real_directory(path.parent().ok_or("GUI file has no parent")?)?;
     let before = fs::symlink_metadata(path)?;
     if !before.is_file() || is_link(&before) {
@@ -275,15 +285,24 @@ fn regular(path: &Path) -> Result<File> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        if before.dev() != after.dev() || before.ino() != after.ino() || after.nlink() != 1 {
-            return refuse("GUI file identity changed or has hard links");
+        if before.dev() != after.dev() || before.ino() != after.ino() {
+            return refuse(&format!("GUI file identity changed: {}", path.display()));
+        }
+        if policy == HardlinkPolicy::SingleLink && after.nlink() != 1 {
+            return refuse(&format!("GUI file has hard links: {}", path.display()));
         }
     }
+    #[cfg(not(unix))]
+    let _ = policy;
     Ok(file)
 }
 
 fn read(path: &Path, limit: u64) -> Result<Vec<u8>> {
-    let file = regular(path)?;
+    read_with_policy(path, limit, HardlinkPolicy::SingleLink)
+}
+
+fn read_with_policy(path: &Path, limit: u64, policy: HardlinkPolicy) -> Result<Vec<u8>> {
+    let file = regular_with_policy(path, policy)?;
     if file.metadata()?.len() > limit {
         return refuse("GUI document exceeds size bound");
     }
@@ -498,11 +517,39 @@ pub fn resolve_program(program: &str) -> Result<PathBuf> {
         let candidate = directory.join(program);
         if candidate.is_file() {
             let canonical = fs::canonicalize(candidate)?;
-            regular(&canonical)?;
+            regular_with_policy(&canonical, HardlinkPolicy::InstalledProgram)?;
             return Ok(canonical);
         }
     }
     refuse("GUI build needs installed local Node/npm binaries; no download attempted")
+}
+
+fn installed_program_digest(path: &Path) -> Result<String> {
+    Ok(digest(&read_with_policy(
+        path,
+        MAX_FILE,
+        HardlinkPolicy::InstalledProgram,
+    )?))
+}
+
+#[cfg(all(test, unix))]
+mod installed_program_tests {
+    use super::*;
+
+    #[test]
+    fn installed_program_digest_accepts_hardlinks_and_hashes_exact_bytes() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(root.path()).unwrap();
+        let program = root.join("node");
+        let alias = root.join("nodejs");
+        let bytes = b"#!/bin/sh\nprintf 'fake installed executable\\n'\n";
+        fs::write(&program, bytes).unwrap();
+        fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::hard_link(&program, &alias).unwrap();
+        assert_eq!(installed_program_digest(&program).unwrap(), digest(bytes));
+        assert_eq!(installed_program_digest(&alias).unwrap(), digest(bytes));
+    }
 }
 
 pub fn producer_toolchain(gui: &Path, node: &Path, options: &OsString) -> Result<Toolchain> {
@@ -533,9 +580,9 @@ pub fn producer_toolchain(gui: &Path, node: &Path, options: &OsString) -> Result
     let toolchain = Toolchain {
         node: field("node")?,
         node_abi: field("node_abi")?,
-        node_sha256: digest(&read(node, MAX_FILE)?),
+        node_sha256: installed_program_digest(node)?,
         npm: npm_version,
-        npm_cli_sha256: digest(&read(&npm, MAX_FILE)?),
+        npm_cli_sha256: installed_program_digest(&npm)?,
         typescript: field("typescript")?,
         vite: field("vite")?,
         platform: platform.into(),

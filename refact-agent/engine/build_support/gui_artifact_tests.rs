@@ -288,3 +288,57 @@ fn gui_artifact_node_options_preserve_preload_guards_and_heap_policy() {
     );
     assert_eq!(merged_node_options(None), "--max-old-space-size=8192");
 }
+
+#[cfg(unix)]
+#[test]
+fn gui_artifact_installed_program_resolution_accepts_hardlinks_and_launcher_symlinks() {
+    use std::os::unix::fs::{symlink, PermissionsExt};
+    let root = tempfile::tempdir().unwrap();
+    let root = fs::canonicalize(root.path()).unwrap();
+    let program = root.join("node");
+    let alias = root.join("nodejs");
+    let launcher = root.join("npm");
+    fs::write(&program, b"#!/bin/sh\nexit 0\n").unwrap();
+    fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::hard_link(&program, &alias).unwrap();
+    symlink(&alias, &launcher).unwrap();
+    assert!(std::env::split_paths(&std::env::var_os("PATH").unwrap())
+        .next()
+        .is_some());
+    assert_eq!(resolve_program(program.to_str().unwrap()).unwrap(), program);
+    assert_eq!(resolve_program(alias.to_str().unwrap()).unwrap(), alias);
+    assert_eq!(resolve_program(launcher.to_str().unwrap()).unwrap(), alias);
+}
+
+#[cfg(unix)]
+#[test]
+fn gui_artifact_source_and_artifact_hardlinks_preserve_existing_and_external_bytes() {
+    for relative in ["src/lib/index.ts", "dist/chat/index.js"] {
+        let fixture = Fixture::new();
+        fixture.consume().unwrap();
+        let before = inventory(&fixture.destination(), false).unwrap();
+        let linked = fixture.gui.join(relative);
+        let bytes = fs::read(&linked).unwrap();
+        let outside = fixture.engine.join("outside");
+        fs::hard_link(&linked, &outside).unwrap();
+        let (inventory_root, source) = if relative.starts_with("src/") {
+            (fixture.gui.clone(), true)
+        } else {
+            (fixture.gui.join("dist/chat"), false)
+        };
+        let error = inventory(&inventory_root, source).unwrap_err().to_string();
+        assert!(error.contains("hard links"), "{error}");
+        fixture.assert_refused_preserving();
+        assert!(publish(
+            &fixture.gui,
+            &fixture.engine,
+            &fixture.manifest,
+            false,
+            || Ok(())
+        )
+        .is_err());
+        assert_eq!(inventory(&fixture.destination(), false).unwrap(), before);
+        assert_eq!(fs::read(&outside).unwrap(), bytes);
+        assert_eq!(fs::read(&linked).unwrap(), bytes);
+    }
+}

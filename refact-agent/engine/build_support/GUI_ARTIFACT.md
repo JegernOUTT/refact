@@ -17,6 +17,13 @@ claimed by this document or by static formatting.
   installer, a remote tool resolver or an automatic build/download fallback.
   Dependencies must be separately prepared by an authorized operator. This makes
   offline and normal builds use the same explicit prerequisite rule.
+- Installed Node executables and resolved npm launchers may have Unix hardlinks
+  (for example, distribution-provided `node`/`nodejs` aliases), both when resolved
+  and when hashed for toolchain identity. Resolution still canonicalizes launcher
+  symlinks; the resolved file is opened without following links and must pass the
+  same regular-file, size and device/inode identity checks. This exception does not
+  apply to source files, local TypeScript/Vite scripts, manifests, artifacts,
+  staging/prior output or the trusted controller; their link restrictions remain.
 - `REFACT_USE_PREBUILT_GUI=1` requests only a pinned prebuilt consumer. Missing,
   untrusted, mismatched, corrupt or incomplete input fails without running Node,
   npm, TypeScript or Vite. Local Git may be read to reproduce the version commit.
