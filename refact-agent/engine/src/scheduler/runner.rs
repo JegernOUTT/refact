@@ -1990,10 +1990,11 @@ fn missed_one_shot_task(task: &Job, now: u64) -> bool {
             .is_some_and(|next| next < now)
 }
 
-fn task_final_after_fire(task: &Job, now: u64) -> bool {
-    task.recurring
-        && task.auto_expire_after_ms > 0
-        && now.saturating_sub(task.created_at_ms) > task.auto_expire_after_ms
+/// Recurring schedules have no lifetime cutoff: neither the legacy implicit
+/// 30-day default nor an explicitly configured `auto_expire_after_ms` ever makes
+/// a fire final. One-shot removal is handled separately by the one-shot paths.
+fn task_final_after_fire(_task: &Job, _now: u64) -> bool {
+    false
 }
 
 fn now_ms() -> u64 {
@@ -3871,27 +3872,43 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn expired_task_removed_from_store() {
+    async fn recurring_task_with_explicit_expiry_survives_due_execution() {
         let now = now_ms();
         let store = Arc::new(InMemoryCronStore::new());
-        store
-            .add(expired_task("cron_expire_removed", now))
-            .await
-            .unwrap();
+        // Direct Rust fields bypass serde normalization: even an explicit,
+        // long-elapsed lifetime must not cut a recurring schedule off.
+        let task = expired_task("cron_expire_survives", now);
+        assert!(task.auto_expire_after_ms > 0);
+        assert!(!task_final_after_fire(&task, now));
+        store.add(task).await.unwrap();
         let (_workspace, gcx) = gcx_with_session(SessionState::Idle).await;
         let mut runner = CronRunner::new(store.clone(), gcx.clone());
 
         runner.fire_due_tasks(now).await;
 
-        assert!(store.list().await.is_empty());
+        let stored = store.get("cron_expire_survives").await.unwrap();
+        assert!(stored.recurring);
+        assert_eq!(stored.fire_count, 1);
+        assert_eq!(stored.last_status.as_deref(), Some("fired"));
         let session = session(&gcx).await;
         let session = session.lock().await;
-        let fire_event = event_message(&session, "cron_fire", "cron_expire_removed");
-        assert_eq!(fire_event.extra["event"]["payload"]["final"], json!(true));
-        let notice_event = event_message(&session, "system_notice", "cron_expire_removed");
+        let fire_event = event_message(&session, "cron_fire", "cron_expire_survives");
+        assert_eq!(fire_event.extra["event"]["payload"]["final"], json!(false));
+        assert!(!session.messages.iter().any(|message| {
+            message.role == EVENT_ROLE
+                && message.extra["event"]["subkind"].as_str() == Some("system_notice")
+                && message.extra["event"]["payload"]["reason"].as_str() == Some("auto_expired")
+        }));
+    }
+
+    #[test]
+    fn auto_expired_notice_message_shape_is_stable() {
+        let now = now_ms();
+        let task = expired_task("cron_expire_notice", now);
+        let notice_event = auto_expired_notice_message(&task);
         assert_eq!(
             notice_event.extra["event"]["payload"],
-            json!({"task_id": "cron_expire_removed", "reason": "auto_expired"})
+            json!({"task_id": "cron_expire_notice", "reason": "auto_expired"})
         );
         assert_eq!(
             notice_event.content.content_text_only(),

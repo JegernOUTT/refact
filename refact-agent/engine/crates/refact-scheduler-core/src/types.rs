@@ -11,6 +11,9 @@ pub use refact_core::scheduler_config::{
     SCHEDULER_DISABLE_ENV, SchedulerConfig, scheduler_disabled_by_env,
 };
 
+/// Legacy 30-day recurring lifetime. Recurring schedules no longer expire: this
+/// value is retained only so older callers/fixtures keep compiling. It is never
+/// applied as a default and persisted `auto_expire_after_ms` values are ignored.
 pub const DEFAULT_RECURRING_AUTO_EXPIRE_AFTER_MS: u64 = 30 * 24 * 60 * 60 * 1000;
 pub const DURABLE_DISABLED_NOTE: &str = "durable schedules disabled by config";
 pub const SCHEDULER_DISABLED_ERROR: &str = "scheduler is disabled";
@@ -67,6 +70,9 @@ pub struct Job {
     pub recent_runs: Vec<CronRunRecord>,
     pub paused_at_ms: Option<u64>,
     pub trigger_at_ms: Option<u64>,
+    /// Legacy field. Always `0` (no lifetime cutoff) for newly built and loaded
+    /// jobs; still serialized as `0` so older binaries reading the store never
+    /// fall back to their 30-day recurring default.
     pub auto_expire_after_ms: u64,
     #[serde(default)]
     pub retry_attempts: u32,
@@ -629,12 +635,10 @@ impl From<RawJob> for Job {
         let recurring = raw
             .recurring
             .unwrap_or_else(|| default_recurring_for_trigger(&trigger));
-        let auto_expire_after_ms = if non_time_trigger(&trigger) {
-            0
-        } else {
-            raw.auto_expire_after_ms
-                .unwrap_or_else(|| default_auto_expire_after_ms(recurring))
-        };
+        // Persisted expiry (implicit or explicitly configured) is intentionally
+        // ignored: recurring schedules have no lifetime cutoff.
+        let _ignored_legacy_expiry = raw.auto_expire_after_ms;
+        let auto_expire_after_ms = default_auto_expire_after_trigger(&trigger, recurring);
 
         Self {
             id: raw.id.unwrap_or_else(new_job_id),
@@ -701,12 +705,8 @@ fn default_command_target() -> AgentTarget {
     }
 }
 
-fn default_auto_expire_after_ms(recurring: bool) -> u64 {
-    if recurring {
-        DEFAULT_RECURRING_AUTO_EXPIRE_AFTER_MS
-    } else {
-        0
-    }
+fn default_auto_expire_after_ms(_recurring: bool) -> u64 {
+    0
 }
 
 fn default_auto_expire_after_trigger(trigger: &Trigger, recurring: bool) -> u64 {
@@ -765,9 +765,81 @@ mod tests {
             }],
             paused_at_ms: None,
             trigger_at_ms: Some(3_000),
-            auto_expire_after_ms: DEFAULT_RECURRING_AUTO_EXPIRE_AFTER_MS,
+            auto_expire_after_ms: 0,
             retry_attempts: 0,
         }
+    }
+
+    #[test]
+    fn new_recurring_job_has_no_expiry() {
+        let mut job = Job::new_cron_agent_chat(
+            "*/5 * * * *".to_string(),
+            "Check".to_string(),
+            "Check".to_string(),
+            true,
+            false,
+            1_000,
+        );
+        assert!(job.recurring);
+        assert_eq!(job.auto_expire_after_ms, 0);
+
+        job.set_trigger(Trigger::Interval {
+            every_ms: 60_000,
+        });
+        assert_eq!(job.auto_expire_after_ms, 0);
+    }
+
+    #[test]
+    fn legacy_recurring_cron_expiry_is_ignored_on_load() {
+        for expiry in [
+            json!(DEFAULT_RECURRING_AUTO_EXPIRE_AFTER_MS),
+            json!(172_800_000u64),
+            json!(1u64),
+        ] {
+            let value = json!({
+                "id": "cron_old_expiry",
+                "description": "Old recurring",
+                "recurring": true,
+                "durable": true,
+                "created_at_ms": 123,
+                "trigger": {"kind": "cron", "expr": "*/5 * * * *", "tz": null},
+                "action": {
+                    "kind": "agent_turn",
+                    "prompt": "hi",
+                    "target": {"kind": "existing_chat", "chat_id": "chat-1"},
+                    "mode": null,
+                    "model": null,
+                    "tools": null
+                },
+                "delivery": {"kind": "chat"},
+                "fire_count": 7,
+                "auto_expire_after_ms": expiry
+            });
+            let job: Job = serde_json::from_value(value).unwrap();
+            assert!(job.recurring);
+            assert_eq!(job.fire_count, 7);
+            assert_eq!(job.auto_expire_after_ms, 0);
+        }
+
+        // Flat legacy shape without the field also loads with no expiry.
+        let flat: Job = serde_json::from_value(json!({
+            "id": "cron_flat",
+            "cron": "*/5 * * * *",
+            "prompt": "hi",
+            "recurring": true,
+            "created_at_ms": 5
+        }))
+        .unwrap();
+        assert!(flat.recurring);
+        assert_eq!(flat.auto_expire_after_ms, 0);
+    }
+
+    #[test]
+    fn serialization_round_trips_without_expiry() {
+        let serialized = serde_json::to_value(nested_job()).unwrap();
+        assert_eq!(serialized["auto_expire_after_ms"], json!(0));
+        let back: Job = serde_json::from_value(serialized).unwrap();
+        assert_eq!(back, nested_job());
     }
 
     #[test]

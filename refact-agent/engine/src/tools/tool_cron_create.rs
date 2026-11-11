@@ -72,7 +72,7 @@ pub(crate) fn create_description(config_path: String) -> ToolDesc {
             },
             experimental: false,
             allow_parallel: false,
-            description: "Schedule a prompt to be enqueued later. Use a standard 5-field cron expression (`minute hour day-of-month month day-of-week`) evaluated in the local timezone. Set `recurring` to true for repeated prompts or false for a one-shot prompt that is removed after it fires. Omit `durable` to persist in the current project when a project store exists; set it false for a session-only in-memory schedule. Scheduler jitter is applied automatically so jobs may run shortly after the exact cron instant. Recurring jobs auto-expire after 30 days unless canceled earlier.".to_string(),
+            description: "Schedule a prompt to be enqueued later. Use a standard 5-field cron expression (`minute hour day-of-month month day-of-week`) evaluated in the local timezone. Set `recurring` to true for repeated prompts or false for a one-shot prompt that is removed after it fires. Omit `durable` to persist in the current project when a project store exists; set it false for a session-only in-memory schedule. Scheduler jitter is applied automatically so jobs may run shortly after the exact cron instant. Recurring jobs continue until paused or deleted; there is no automatic lifetime expiry.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {

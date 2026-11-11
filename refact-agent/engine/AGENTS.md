@@ -547,7 +547,7 @@ jobs are project-scoped and stored at `<project>/.refact/scheduled_tasks.json`.
 | `trigger_at_ms` | Manual run marker set by `cron_update(run_now=true)`, HTTP run, or webhook dispatch. |
 | `last_fired_at_ms`, `fire_count` | Last successful/error firing timestamp and counter. |
 | `last_status`, `last_error`, `recent_runs` | Run history. `recent_runs` is capped by `scheduler.recent_runs_cap` (default 20). |
-| `auto_expire_after_ms` | Recurring jobs default to 30 days and emit an auto-expire notice after the final fire. |
+| `auto_expire_after_ms` | Legacy field saved as zero; recurring jobs no longer expire, and old configured expiry values are ignored on load. |
 | `retry_attempts` | Transient retry counter for classifiable rate-limit/overload/network/timeout/5xx failures. |
 
 Serialized shapes:
@@ -648,8 +648,7 @@ must use `chat` delivery.
   retry was scheduled. Chat and isolated jobs are counted only after their scheduled prompt is accepted
   by the queue; command jobs are counted after the command run completes.
 - Run history status values include `fired`, `error`, `deferred`, `skipped`, and `advanced`.
-- Recurring jobs auto-expire after `auto_expire_after_ms` when set. The default for recurring jobs is
-  30 days; one-shot jobs use `0`.
+- Recurring jobs have no lifetime cutoff. Legacy `auto_expire_after_ms` values are ignored. One-shot jobs still remove their accepted occurrence after firing.
 
 ### Schedule tool
 
