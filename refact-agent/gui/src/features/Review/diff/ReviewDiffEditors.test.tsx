@@ -1,6 +1,7 @@
 import { EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { screen, waitFor } from "@testing-library/react";
+import { act } from "react-dom/test-utils";
 import { afterEach, expect, test, vi } from "vitest";
 
 import { render } from "../../../utils/test-utils";
@@ -415,4 +416,177 @@ test("split restore prefers the cached head position over a divergent base", asy
     expect(controller.views().a?.scrollDOM.scrollTop).toBe(240);
     expect(controller.views().b.scrollDOM.scrollTop).toBe(240);
   });
+});
+
+function pendingRestoration() {
+  const create = vi.spyOn(editors, "createDiffEditors");
+  const positions = new Map<
+    string,
+    import("./ReviewDiffEditors").DiffPosition
+  >();
+  const input = {
+    ...props,
+    left: "old\n" + "context\n".repeat(40) + "removed\n",
+    right: "new\n" + "context\n".repeat(40) + "added\n",
+  };
+  const rendered = render(
+    <ReviewDiffEditors {...input} positions={positions} navigationKey="a" />,
+  );
+  const first = create.mock.results[0].value as editors.DiffEditorsController;
+  positions.set("a", {
+    b: first.views().b.scrollSnapshot(),
+    topB: 240,
+    chunk: 0,
+  });
+  const frames = new Map<number, FrameRequestCallback>();
+  let id = 0;
+  vi.spyOn(window, "requestAnimationFrame").mockImplementation((callback) => {
+    frames.set(++id, callback);
+    return id;
+  });
+  vi.spyOn(window, "cancelAnimationFrame").mockImplementation((key) => {
+    frames.delete(key);
+  });
+  rendered.rerender(
+    <ReviewDiffEditors
+      key="restored"
+      {...input}
+      positions={positions}
+      navigationKey="a"
+    />,
+  );
+  const controller = create.mock.results[1]
+    .value as editors.DiffEditorsController;
+  const frame = () => {
+    const pending = [...frames.values()];
+    frames.clear();
+    act(() => pending.forEach((callback) => callback(0)));
+  };
+  return { ...rendered, controller, positions, frame, frames };
+}
+
+test("restores absolute offsets after late measured anchor movement without caching transient scroll", () => {
+  const { controller, positions, frame, frames } = pendingRestoration();
+  const { a, b } = controller.views();
+  const measure = vi.spyOn(b, "lineBlockAtHeight");
+  measure.mockImplementationOnce(() => {
+    b.scrollDOM.scrollTop = 260;
+    return { from: 0 } as ReturnType<EditorView["lineBlockAtHeight"]>;
+  });
+  frame();
+  expect(measure).toHaveBeenCalledWith(240);
+  expect(b.scrollDOM.scrollTop).toBe(240);
+  b.scrollDOM.scrollTop = 260;
+  b.scrollDOM.dispatchEvent(new Event("scroll"));
+  expect(positions.get("a")?.topB).toBe(240);
+  expect(a?.scrollDOM.scrollTop).toBe(240);
+  frame();
+  expect(b.scrollDOM.scrollTop).toBe(240);
+  for (let i = 0; i < 4; i++) frame();
+  expect(a?.scrollDOM.scrollTop).toBe(240);
+  expect(b.scrollDOM.scrollTop).toBe(240);
+  expect(positions.get("a")?.topB).toBe(240);
+  expect(frames.size).toBe(0);
+});
+
+test.each([
+  "wheel",
+  "pointerdown",
+  "touchstart",
+  "keydown",
+  "scroller-wheel",
+  "scroller-pointerdown",
+  "scroller-touchstart",
+])("%s cancels pending restoration and preserves the user's scroll", (type) => {
+  const { controller, positions, frame } = pendingRestoration();
+  const { b } = controller.views();
+  const event =
+    type === "keydown"
+      ? new KeyboardEvent(type, { key: "PageDown", bubbles: true })
+      : new Event(type.replace("scroller-", ""), { bubbles: true });
+  if (type === "touchstart")
+    Object.defineProperty(event, "targetTouches", { value: [] });
+  (type.startsWith("scroller-") ? b.scrollDOM : b.contentDOM).dispatchEvent(
+    event,
+  );
+  b.scrollDOM.scrollTop = 310;
+  b.scrollDOM.dispatchEvent(new Event("scroll"));
+  for (let i = 0; i < 5; i++) frame();
+  expect(b.scrollDOM.scrollTop).toBe(310);
+  expect(positions.get("a")?.topB).toBe(310);
+});
+
+test.each(["reveal", "hunk", "unmount", "replacement"] as const)(
+  "%s cancels pending restoration before it can overwrite newer navigation",
+  (action) => {
+    const { controller, positions, frame, rerender, unmount } =
+      pendingRestoration();
+    const { b } = controller.views();
+    const measured = vi.spyOn(b, "lineBlockAtHeight");
+    if (action === "unmount") unmount();
+    else if (action === "hunk")
+      screen.getByRole("button", { name: "Next change" }).click();
+    else
+      rerender(
+        <ReviewDiffEditors
+          key="restored"
+          {...props}
+          positions={positions}
+          navigationKey={action === "replacement" ? "b" : "a"}
+          path={action === "replacement" ? "other.txt" : props.path}
+          reveal={
+            action === "reveal" ? { pane: "right", line: 3, token: 1 } : null
+          }
+        />,
+      );
+    measured.mockClear();
+    for (let i = 0; i < 5; i++) frame();
+    expect(measured).not.toHaveBeenCalled();
+    if (action === "unmount" || action === "replacement")
+      expect(positions.get("a")?.topB).toBe(240);
+  },
+);
+
+test("bounded restoration preserves the cached offset when hidden panes clamp scrolling", () => {
+  const { controller, positions, frame, frames } = pendingRestoration();
+  for (const view of [controller.views().a, controller.views().b]) {
+    if (view)
+      Object.defineProperty(view.scrollDOM, "scrollTop", {
+        configurable: true,
+        get: () => 0,
+        set: () => undefined,
+      });
+  }
+  for (let i = 0; i < 15; i++) frame();
+  expect(frames.size).toBe(0);
+  expect(positions.get("a")?.topB).toBe(240);
+});
+
+test("queued clamped restoration scroll after timeout cannot replace the desired cache", () => {
+  const { controller, positions, frame, frames } = pendingRestoration();
+  let limit = 100;
+  for (const view of [controller.views().a, controller.views().b]) {
+    if (!view) continue;
+    let top = 0;
+    Object.defineProperty(view.scrollDOM, "scrollTop", {
+      configurable: true,
+      get: () => top,
+      set: (value: number) => {
+        top = Math.min(value, limit);
+      },
+    });
+  }
+  for (let i = 0; i < 11; i++) frame();
+  limit = 180;
+  frame();
+  for (let i = 0; i < 3; i++) frame();
+  expect(frames.size).toBe(0);
+  const { b } = controller.views();
+  expect(b.scrollDOM.scrollTop).toBe(180);
+  b.scrollDOM.dispatchEvent(new Event("scroll"));
+  expect(positions.get("a")?.topB).toBe(240);
+  b.scrollDOM.dispatchEvent(new Event("wheel"));
+  b.scrollDOM.scrollTop = 160;
+  b.scrollDOM.dispatchEvent(new Event("scroll"));
+  expect(positions.get("a")?.topB).toBe(160);
 });

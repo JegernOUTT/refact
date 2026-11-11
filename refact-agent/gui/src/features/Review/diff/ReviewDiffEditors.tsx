@@ -122,6 +122,7 @@ export function ReviewDiffEditors({
     revealToken?: number;
   }>();
   const controllerRef = useRef<DiffEditorsController | null>(null);
+  const cancelRestore = useRef<(() => void) | null>(null);
   const latest = useRef({
     navigationKey,
     positions,
@@ -143,7 +144,7 @@ export function ReviewDiffEditors({
   const savePosition = () => {
     const views = controllerRef.current?.views();
     const current = binding.current;
-    if (!views || !current) return;
+    if (!views || !current || cancelRestore.current) return;
     current.positions?.delete(current.key);
     current.positions?.set(current.key, {
       a: views.a?.scrollSnapshot(),
@@ -159,8 +160,14 @@ export function ReviewDiffEditors({
     }
   };
   const manualScroll = useRef(false);
+  const startManualScroll = () => {
+    cancelRestore.current?.();
+    mirroredScroll.current = new WeakMap();
+    manualScroll.current = true;
+  };
   const mirroredScroll = useRef(new WeakMap<EditorView, number>());
   const trackScroll = (view: EditorView, side: "a" | "b") => {
+    if (cancelRestore.current) return;
     const top = view.scrollDOM.scrollTop;
     const mirrored = mirroredScroll.current.get(view) === top;
     mirroredScroll.current.delete(view);
@@ -197,13 +204,13 @@ export function ReviewDiffEditors({
       a: [
         EditorView.domEventHandlers({
           wheel: () => {
-            manualScroll.current = true;
+            startManualScroll();
           },
           pointerdown: () => {
-            manualScroll.current = true;
+            startManualScroll();
           },
           touchstart: () => {
-            manualScroll.current = true;
+            startManualScroll();
           },
           keydown: (event) => {
             if (
@@ -217,7 +224,7 @@ export function ReviewDiffEditors({
                 " ",
               ].includes(event.key)
             )
-              manualScroll.current = true;
+              startManualScroll();
           },
           scroll: (_event, view) => trackLatest.current(view, "a"),
         }),
@@ -232,13 +239,13 @@ export function ReviewDiffEditors({
       b: [
         EditorView.domEventHandlers({
           wheel: () => {
-            manualScroll.current = true;
+            startManualScroll();
           },
           pointerdown: () => {
-            manualScroll.current = true;
+            startManualScroll();
           },
           touchstart: () => {
-            manualScroll.current = true;
+            startManualScroll();
           },
           keydown: (event) => {
             if (
@@ -252,7 +259,7 @@ export function ReviewDiffEditors({
                 " ",
               ].includes(event.key)
             )
-              manualScroll.current = true;
+              startManualScroll();
           },
           scroll: (_event, view) => trackLatest.current(view, "b"),
         }),
@@ -268,6 +275,7 @@ export function ReviewDiffEditors({
     [],
   );
   const applyReveal = useCallback((request: RevealRequest) => {
+    cancelRestore.current?.();
     manualScroll.current = false;
     const views = controllerRef.current?.views();
     if (!views) return;
@@ -293,6 +301,7 @@ export function ReviewDiffEditors({
       const previous = controllerRef.current;
       if (previous && binding.current && previous.views().b.dom.isConnected)
         saveLatest.current();
+      cancelRestore.current?.();
       controllerRef.current = controller;
       if (!controller) return;
       const key = latest.current.navigationKey ?? "";
@@ -317,13 +326,59 @@ export function ReviewDiffEditors({
       } else if (cached) {
         if (views.a && cached.a) views.a.dispatch({ effects: cached.a });
         views.b.dispatch({ effects: cached.b });
-        views.b.requestMeasure({
-          read: () => cached.topB,
-          write: (top) => {
-            if (views.a) views.a.scrollDOM.scrollTop = top;
-            views.b.scrollDOM.scrollTop = top;
-          },
-        });
+        let frame = 0;
+        let remaining = 12;
+        let stable = 0;
+        let geometry = "";
+        const panes = [views.a, views.b].filter(
+          (view): view is EditorView => !!view,
+        );
+        const interrupt = () => {
+          cancel();
+          mirroredScroll.current = new WeakMap();
+          manualScroll.current = true;
+        };
+        const cancel = () => {
+          cancelAnimationFrame(frame);
+          for (const view of panes)
+            for (const type of ["wheel", "pointerdown", "touchstart"])
+              view.scrollDOM.removeEventListener(type, interrupt, true);
+          cancelRestore.current = null;
+        };
+        for (const view of panes)
+          for (const type of ["wheel", "pointerdown", "touchstart"])
+            view.scrollDOM.addEventListener(type, interrupt, true);
+        cancelRestore.current = cancel;
+        const restore = () => {
+          if (cancelRestore.current !== cancel) return;
+          for (const view of panes) view.lineBlockAtHeight(cached.topB);
+          const measured = panes
+            .map((view) =>
+              [
+                view.contentHeight,
+                view.scrollDOM.clientHeight,
+                view.scrollDOM.clientWidth,
+              ].join(":"),
+            )
+            .join(";");
+          const aligned = panes.every(
+            (view) => view.scrollDOM.scrollTop === cached.topB,
+          );
+          stable = aligned && measured === geometry ? stable + 1 : 0;
+          geometry = measured;
+          for (const view of panes) {
+            const before = view.scrollDOM.scrollTop;
+            view.scrollDOM.scrollTop = cached.topB;
+            if (view.scrollDOM.scrollTop !== before)
+              mirroredScroll.current.set(view, view.scrollDOM.scrollTop);
+            view.requestMeasure();
+          }
+          if (stable >= 2 || --remaining === 0) {
+            cancel();
+            if (stable >= 2) saveLatest.current();
+          } else frame = requestAnimationFrame(restore);
+        };
+        frame = requestAnimationFrame(restore);
       } else if (chunks.length && autoRevealFirstChange) {
         const chunk = chunks[0];
         for (const [view, offset] of [
@@ -365,6 +420,7 @@ export function ReviewDiffEditors({
   }, [reveal, applyReveal]);
 
   const navigateChunk = (direction: number) => {
+    cancelRestore.current?.();
     manualScroll.current = false;
     const views = controllerRef.current?.views();
     if (!views) return;

@@ -30,22 +30,32 @@ const rows = Array.from({ length: 6 }, (_, index) => {
 });
 
 async function openDesk(page: Page, width: number, height: number) {
+  await page.route("**/v1/buddy/operator/pending-publications", (route) =>
+    route.fulfill({ json: { schema_version: 1, project, data: [] } }),
+  );
   await page.route("**/*", async (route) => {
     const url = new URL(route.request().url());
     if (url.pathname === "/v1/buddy/work")
       return route.fulfill({
         json: { schema_version: 1, project, data: rows, next_cursor: null },
       });
-    return route.continue();
+    return route.fallback();
   });
   await page.setViewportSize({ width, height });
   const workList = page.waitForResponse(
     (response) => new URL(response.url()).pathname === "/v1/buddy/work",
   );
+  const recovery = page.waitForResponse(
+    "**/v1/buddy/operator/pending-publications",
+  );
   await page.goto(ROUTE);
   await workList;
+  expect((await recovery).ok()).toBe(true);
   await page.getByRole("tab", { name: "Reports", exact: true }).click();
   await expect(page.locator(`${DESK} ul li button`)).toHaveCount(rows.length);
+  await expect(
+    page.getByText(/Publication recovery is unavailable/),
+  ).toHaveCount(0);
 }
 
 async function expectFirstRowBelowControlsInTopHalf(
@@ -56,6 +66,10 @@ async function expectFirstRowBelowControlsInTopHalf(
   await expect(row).toBeVisible();
   await expect(row).toBeInViewport();
   const rowBox = await row.boundingBox();
+  await test.info().attach("first-report-row", {
+    body: JSON.stringify(rowBox),
+    contentType: "application/json",
+  });
   expect(rowBox, "first work row has no layout box").not.toBeNull();
   expect(rowBox!.y, `first work row starts at y=${rowBox!.y}`).toBeLessThan(
     height / 2,
@@ -86,6 +100,25 @@ async function expectFirstRowBelowControlsInTopHalf(
 }
 
 test.describe("Reports narrow layout", () => {
+  for (const width of [240, 1280]) {
+    test(`keeps the first work row below usable controls at ${width}px`, async ({
+      page,
+    }) => {
+      await openDesk(page, width, 900);
+      await expectFirstRowBelowControlsInTopHalf(page, 900);
+      for (const control of [
+        page.getByRole("searchbox", { name: "Search reports" }),
+        page.getByLabel("Show reports"),
+      ]) {
+        await expect(control).toBeVisible();
+        const box = await control.boundingBox();
+        expect(box).not.toBeNull();
+        expect(box!.x).toBeGreaterThanOrEqual(0);
+        expect(box!.x + box!.width).toBeLessThanOrEqual(width);
+      }
+    });
+  }
+
   test("compacts the controls and first work row into the first half-screen at 360px", async ({
     page,
   }) => {

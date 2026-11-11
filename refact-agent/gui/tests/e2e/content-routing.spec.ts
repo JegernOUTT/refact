@@ -1,22 +1,33 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 const fixture = "/tests/e2e/content-routing.html";
+
+async function expectRouteReady(page: Page, hash: RegExp) {
+  await expect(page).toHaveURL(hash);
+  await expect(page.getByTestId("pending")).toHaveText("false");
+  await expect(page.getByTestId("error")).toBeEmpty();
+  await page.waitForLoadState("load");
+}
 test("Back and Forward restore content after state-driven navigation", async ({
   page,
 }) => {
   await page.goto(`${fixture}#/settings/privacy`);
   await expect(page.getByTestId("page")).toHaveText("privacy settings");
+  await expectRouteReady(page, /#\/settings\/privacy$/);
   await page.getByRole("button", { name: "Open file from workspace" }).click();
   await expect(page.getByTestId("surface")).toHaveText(
     "file:/workspace/example.ts",
   );
+  await expectRouteReady(page, /#\/file\/%2Fworkspace%2Fexample.ts$/);
   await expect(page).toHaveURL(/#\/file\/%2Fworkspace%2Fexample.ts$/);
-  await page.goBack();
+  await page.goBack({ waitUntil: "commit" });
   await expect(page.getByTestId("page")).toHaveText("privacy settings");
-  await page.goForward();
+  await expectRouteReady(page, /#\/settings\/privacy$/);
+  await page.goForward({ waitUntil: "commit" });
   await expect(page.getByTestId("page")).toHaveText("chat");
   await expect(page.getByTestId("surface")).toHaveText(
     "file:/workspace/example.ts",
   );
+  await expectRouteReady(page, /#\/file\/%2Fworkspace%2Fexample.ts$/);
 });
 
 test("direct open, reload, Back and Forward restore focused content", async ({
@@ -24,20 +35,25 @@ test("direct open, reload, Back and Forward restore focused content", async ({
 }) => {
   await page.goto(`${fixture}#/settings/privacy`);
   await expect(page.getByTestId("page")).toHaveText("privacy settings");
+  await expectRouteReady(page, /#\/settings\/privacy$/);
   await page.getByRole("link", { name: "File", exact: true }).click();
   await expect(page.getByTestId("surface")).toHaveText(
     "file:/workspace/example.ts",
   );
+  await expectRouteReady(page, /#\/file\/%2Fworkspace%2Fexample.ts$/);
   await page.reload();
   await expect(page.getByTestId("surface")).toHaveText(
     "file:/workspace/example.ts",
   );
-  await page.goBack();
+  await expectRouteReady(page, /#\/file\/%2Fworkspace%2Fexample.ts$/);
+  await page.goBack({ waitUntil: "commit" });
   await expect(page.getByTestId("page")).toHaveText("privacy settings");
-  await page.goForward();
+  await expectRouteReady(page, /#\/settings\/privacy$/);
+  await page.goForward({ waitUntil: "commit" });
   await expect(page.getByTestId("surface")).toHaveText(
     "file:/workspace/example.ts",
   );
+  await expectRouteReady(page, /#\/file\/%2Fworkspace%2Fexample.ts$/);
 });
 test("copyable legacy hrefs omit secrets and middle-click creates an independent tab", async ({
   page,
@@ -60,6 +76,7 @@ test("copyable legacy hrefs omit secrets and middle-click creates an independent
   );
   expect(child.url()).not.toContain("private");
   await expect(page.getByTestId("page")).toHaveText("privacy settings");
+  await expectRouteReady(page, /#\/settings\/privacy$/);
 });
 
 test("task-associated chat identity survives reload and subsequent planner selection", async ({

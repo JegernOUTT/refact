@@ -50,6 +50,13 @@ test("HTML pages discover dynamic pinned slots, preserve JS state and submit hos
   await expect(
     page.getByRole("dialog").locator(".cm-editor").first(),
   ).toBeVisible();
+  await expect
+    .poll(() =>
+      dialog.evaluate((element) =>
+        element.contains(element.ownerDocument.activeElement),
+      ),
+    )
+    .toBe(true);
   await page.keyboard.press("Escape");
   await expect(page.getByRole("dialog")).toHaveCount(0);
   await expect(frame.locator("#counter")).toHaveText("1");

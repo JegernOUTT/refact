@@ -150,12 +150,15 @@ test("synthetic canonical human comment, agent rich reply and reply composer", a
   await expect(
     thread.getByText("Synthetic human follow-up", { exact: true }),
   ).toBeVisible();
-  expect(
-    (await page.evaluate(() => window.__reviewFixture?.comments()))?.[0],
-  ).toMatchObject({
-    thread_id: "synthetic-rich-thread",
-    body: "Synthetic human follow-up",
-  });
+  await expect
+    .poll(
+      async () =>
+        (await page.evaluate(() => window.__reviewFixture?.comments()))?.[0],
+    )
+    .toMatchObject({
+      thread_id: "synthetic-rich-thread",
+      body: "Synthetic human follow-up",
+    });
   await page.evaluate(() => window.__reviewFixture?.syntheticReply());
   await expect(thread.getByText(/Synthetic live agent reply:/)).toBeVisible();
   await keyboardToggle(

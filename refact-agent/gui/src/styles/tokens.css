@@ -11,6 +11,7 @@
   --rf-surface-1: rgba(255, 255, 255, 0.03);
   --rf-surface-2: rgba(255, 255, 255, 0.05);
   --rf-surface-3: rgba(255, 255, 255, 0.07);
+
   /* Overlays are deliberately translucent like the chat dock glass (user
      request: selectors, worktrees, project info, dialogs all read as glass);
      keep a small opacity step above --rf-surface-glass so the elevation
@@ -126,6 +127,7 @@
   --rf-text-3: 14px;
   --rf-text-4: 15px;
   --rf-text-5: 19px;
+
   /* Paired integer line heights: odd sizes x --rf-line (1.5) produce
      half-pixel line boxes (19.5/22.5/28.5) and fractional layout. */
   --rf-line-1: 18px;
@@ -133,6 +135,7 @@
   --rf-line-3: 21px;
   --rf-line-4: 22px;
   --rf-line-5: 28px;
+
   /* Weight tokens: 12 raw literals measured app-wide (650x60, 600x54,
      one-offs 760/750/620/560/450). Four rungs; use these, not literals. */
   --rf-weight-regular: 400;
@@ -348,6 +351,7 @@
   --rf-surface-1: rgba(0, 0, 0, 0.022);
   --rf-surface-2: rgba(0, 0, 0, 0.05);
   --rf-surface-3: rgba(0, 0, 0, 0.08);
+
   /* Overlay must sit visibly above panel glass; a shared value collapsed
      the light-theme elevation ladder to one tier (audit L-05). Translucent
      per the glass doctrine, one step above glass. */
@@ -356,6 +360,7 @@
   --rf-scrim: rgba(0, 0, 0, 0.32);
   --rf-border: rgba(0, 0, 0, 0.12);
   --rf-border-strong: rgba(0, 0, 0, 0.22);
+
   /* Status colors need light-mode variants: the dark-theme pastels measure
      2.2-3.1:1 on the light bg (badge tones, SaveStatus, field errors, danger
      ghost/soft button labels). Same hue families, darkened to >=4.5:1 on

@@ -3,7 +3,7 @@ import { expect, test } from "@playwright/test";
 test("native explanation steps, pauses, replays and retains state on navigation", async ({
   page,
 }) => {
-  await page.clock.install();
+  await page.clock.install({ time: new Date("2025-01-15T00:00:00Z") });
   await page.goto("/tests/e2e/review-canvas.html?tour=rich&dynamic=evaluation");
   const visual = page.locator('[data-block-id="visual"]');
   await visual.scrollIntoViewIfNeeded();
@@ -13,7 +13,7 @@ test("native explanation steps, pauses, replays and retains state on navigation"
   await frame.getByRole("button", { name: "Next step" }).focus();
   await page.keyboard.press("Enter");
   await expect(status).toContainText("2. Parser splits");
-  await page.clock.pauseAt(new Date());
+  await page.clock.pauseAt(new Date("2025-01-15T12:00:00Z"));
   await frame.getByRole("button", { name: "Play", exact: true }).focus();
   await page.keyboard.press("Space");
   await page.clock.runFor(900);

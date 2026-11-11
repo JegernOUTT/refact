@@ -114,7 +114,32 @@ function snapshotEvent(chatId: string): string {
     ],
     background_agents: [],
   };
-  return `data: ${JSON.stringify(event)}\n\n`;
+  const messages = event.messages;
+  const bootstrap = [
+    {
+      ...event,
+      messages: [],
+      snapshot_chunked: true,
+      chunk_count: 1,
+      message_count: messages.length,
+    },
+    {
+      type: "snapshot_chunk",
+      chat_id: chatId,
+      seq: event.seq,
+      chunk_index: 0,
+      chunk_count: 1,
+      messages,
+    },
+    {
+      type: "snapshot_end",
+      chat_id: chatId,
+      seq: event.seq,
+      chunk_count: 1,
+      message_count: messages.length,
+    },
+  ];
+  return bootstrap.map((part) => `data: ${JSON.stringify(part)}\n\n`).join("");
 }
 
 type Mock = {
@@ -146,14 +171,35 @@ async function mockEngine(page: Page): Promise<Mock> {
       const json = (body: unknown, status = 200) =>
         route.fulfill({ status, json: body });
 
-      if (path === "/v1/chats/subscribe") {
-        const chatId = url.searchParams.get("chat_id") ?? "";
-        mock.subscribed.push(chatId);
-        if (!transcript[chatId]) return json({ detail: "unknown chat" }, 404);
+      if (path === "/v1/chats/subscribe-many") {
+        expect(url.searchParams.get("snapshot_chunks")).toBe("1");
+        expect(url.searchParams.get("per_chat_close")).toBe("1");
+        const chatIds: unknown = JSON.parse(
+          url.searchParams.get("chat_ids") ?? "null",
+        );
+        if (
+          !Array.isArray(chatIds) ||
+          !chatIds.every((id: unknown): id is string => typeof id === "string")
+        ) {
+          return json({ detail: "invalid chat_ids" }, 400);
+        }
+        mock.subscribed.push(...chatIds);
         return route.fulfill({
           status: 200,
           headers: { "Content-Type": "text/event-stream" },
-          body: snapshotEvent(chatId),
+          body: chatIds
+            .map((chatId: string) =>
+              transcript[chatId]
+                ? snapshotEvent(chatId)
+                : `data: ${JSON.stringify({
+                    type: "subscription_closed",
+                    chat_id: chatId,
+                    reason: "unavailable",
+                    retryable: false,
+                    message: "unknown chat",
+                  })}\n\n`,
+            )
+            .join(""),
         });
       }
       const trajectory = /^\/v1\/trajectories\/([^/]+)$/.exec(path);

@@ -151,6 +151,18 @@ test("long files restore scroll and traverse cross-file and historical comments"
   await expect
     .poll(() => rightScroll().evaluate((node) => node.scrollTop))
     .toBe(savedTop);
+  const settledTops = await host.locator(".cm-scroller").evaluateAll(
+    (nodes) =>
+      new Promise<number[]>((resolve) => {
+        let frames = 5;
+        const measure = () => {
+          if (--frames === 0) resolve(nodes.map((node) => node.scrollTop));
+          else requestAnimationFrame(measure);
+        };
+        requestAnimationFrame(measure);
+      }),
+  );
+  expect(settledTops).toEqual([savedTop, savedTop]);
   await page
     .getByRole("button", { name: "Next change", exact: true })
     .press("Enter");

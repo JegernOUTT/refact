@@ -7,3 +7,6 @@ generated
 storybook-static
 test-results
 playwright-report
+
+/vite.config.ts.timestamp-*.mjs
+/vite.node.config.ts.timestamp-*.mjs

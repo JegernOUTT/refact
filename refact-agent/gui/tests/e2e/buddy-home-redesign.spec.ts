@@ -50,6 +50,9 @@ type WorkRequest = {
 
 async function openBuddy(page: Page, width: number, height = 900) {
   const workRequests: WorkRequest[] = [];
+  await page.route("**/v1/buddy/operator/pending-publications", (route) =>
+    route.fulfill({ json: { schema_version: 1, project, data: [] } }),
+  );
   page.on("pageerror", (error) => {
     throw error;
   });
@@ -70,8 +73,15 @@ async function openBuddy(page: Page, width: number, height = 900) {
     });
   });
   await page.setViewportSize({ width, height });
+  const recovery = page.waitForResponse(
+    "**/v1/buddy/operator/pending-publications",
+  );
   await page.goto(ROUTE);
+  expect((await recovery).ok()).toBe(true);
   await page.getByTestId("buddy-home-content").waitFor();
+  await expect(
+    page.getByText(/Publication recovery is unavailable/),
+  ).toHaveCount(0);
   return workRequests;
 }
 
@@ -226,6 +236,7 @@ test.describe("Buddy Home redesign (operator enabled, 50 saved items)", () => {
   });
 
   for (const viewport of [
+    { width: 240, height: 640 },
     { width: 360, height: 640 },
     { width: 1280, height: 800 },
   ]) {
@@ -241,6 +252,10 @@ test.describe("Buddy Home redesign (operator enabled, 50 saved items)", () => {
       await expect(page.getByTestId("buddy-world")).toHaveCount(1);
       await expect(world).toBeInViewport();
       const box = await world.boundingBox();
+      await test.info().attach("play-scene", {
+        body: JSON.stringify(box),
+        contentType: "application/json",
+      });
       expect(box).not.toBeNull();
       // Scene starts in the upper part of the first viewport and is not a
       // thumbnail.

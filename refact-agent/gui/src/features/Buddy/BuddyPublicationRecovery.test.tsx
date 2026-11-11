@@ -25,6 +25,31 @@ const status: OperatorStatus = {
 };
 
 describe("publication-only recovery", () => {
+  it("keeps recovery failure and no-rerun guidance in an accessible status", async () => {
+    const store = setUpStore();
+    server.use(
+      http.post("*/v1/buddy/operator/pending-publications", () =>
+        HttpResponse.json({ error: "Storage unavailable" }, { status: 503 }),
+      ),
+    );
+    render(
+      <BuddyPublicationRecovery
+        status={status}
+        identity={buddyOperatorIdentity(store.getState())}
+      />,
+      { store },
+    );
+
+    const warning = await screen.findByRole("status");
+    expect(warning.textContent).toContain(
+      "Publication recovery is unavailable",
+    );
+    expect(warning.textContent).toContain("do not rerun side effects");
+    expect(warning.textContent).toContain("memory-only");
+    expect(warning.textContent).toContain("lost on engine restart");
+    expect(screen.queryByRole("button", { name: /Retry saving/ })).toBeNull();
+  });
+
   it("discovers metadata, warns about restart, and clears successful publication retry", async () => {
     const store = setUpStore();
     let requestBody: unknown;

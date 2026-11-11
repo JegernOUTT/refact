@@ -9,6 +9,7 @@
   grid-auto-flow: column;
   max-width: 100%;
   min-width: 0;
+
   /* Fixed height (26px items + 2px insets = 30) so grid/stretch parents
      cannot inflate the control off the ladder — the N-47 Button recipe. */
   height: calc(var(--rf-control-h-sm) + 2 * var(--rf-segment-padding));
@@ -140,14 +141,14 @@
   max-width: none;
 }
 
-.layout-content .input:checked + .label {
-  background: var(--rf-surface-glass);
-  box-shadow: inset 0 0 0 var(--rf-hairline) var(--rf-color-accent);
-}
-
 .input:disabled + .label {
   color: var(--rf-color-faint);
   cursor: not-allowed;
+}
+
+.layout-content .input:checked + .label {
+  background: var(--rf-surface-glass);
+  box-shadow: inset 0 0 0 var(--rf-hairline) var(--rf-color-accent);
 }
 
 @media (prefers-reduced-motion: no-preference) {

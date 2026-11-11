@@ -46,13 +46,18 @@ class DependencyPreparation(unittest.TestCase):
         (self.modules / "fixture.tsbuildinfo").write_text("mutable cache")
         self.environment = {"node": "v22.fixture", "node_abi": "fixture-abi", "platform": sys.platform, "arch": {"x86_64": "x64", "AMD64": "x64", "aarch64": "arm64", "arm64": "arm64"}[platform.machine()], "libc": "fixture-libc", "npm": "fixture-npm", "install_policy": "fixture-no-scripts"}
         self.receipt = self.root / "source-receipt.json"
+        for path in self.root.rglob("*"):
+            if not path.is_symlink():
+                path.chmod(0o755 if path.is_dir() or path.stat().st_mode & 0o111 else 0o644)
         record, key = deps.inputs(self.source, self.environment)
         receipt = {"schema": 1, "kind": "refact-managed-dependency-install", "producer": "temporary-fixture", "install_id": "fixture-only", "source": str(self.source), "inputs": record, "key": key, "tree_sha256": deps.digest(deps.encoded(deps.inventory(self.modules)))}
         self.receipt.write_bytes(deps.encoded(receipt))
+        self.receipt.chmod(0o644)
         self.receipt_hash = deps.digest(self.receipt.read_bytes())
         self.ownership = self.root / "ownership.json"
         _, owner = deps.destination(self.checkout, self.package)
         self.ownership.write_bytes(deps.encoded({"schema": 1, "kind": "refact-owned-checkout", "owner_id": "temporary-fixture", "owner": owner}))
+        self.ownership.chmod(0o644)
         self.ownership_hash = deps.digest(self.ownership.read_bytes())
 
     def prepare(self, **changes):
@@ -76,6 +81,18 @@ class DependencyPreparation(unittest.TestCase):
         with self.assertRaisesRegex(deps.Refusal, "preserved"):
             self.prepare()
 
+    def test_group_writable_inputs_remain_rejected(self):
+        for path in (self.modules, self.modules / "fixture-bin" / "cli.js", self.receipt):
+            with self.subTest(path=path.relative_to(self.root)):
+                original = path.stat().st_mode & 0o777
+                try:
+                    path.chmod(original | 0o020)
+                    with self.assertRaises(deps.Refusal):
+                        self.prepare()
+                    self.assertFalse((self.package / "node_modules").exists())
+                finally:
+                    path.chmod(original)
+
     def test_lockfile_and_trusted_receipt_mismatches_refuse_before_output(self):
         with self.assertRaisesRegex(deps.Refusal, "SHA256 mismatch"):
             self.prepare(receipt_sha256="0" * 64)
@@ -88,8 +105,9 @@ class DependencyPreparation(unittest.TestCase):
             self.prepare()
         lock.write_text(original)
         patches = self.package / "patches"
-        patches.mkdir()
+        patches.mkdir(mode=0o755)
         (patches / "new.patch").write_text("different patched install")
+        (patches / "new.patch").chmod(0o644)
         with self.assertRaisesRegex(deps.Refusal, "inputs differ"):
             self.prepare()
         (patches / "new.patch").unlink()
@@ -108,7 +126,7 @@ class DependencyPreparation(unittest.TestCase):
         self.assertTrue(output.is_symlink())
         output.unlink()
         outside = self.root / "outside"
-        outside.mkdir()
+        outside.mkdir(mode=0o755)
         with self.assertRaisesRegex(deps.Refusal, "escapes"):
             self.prepare(package=outside)
         (self.modules / "escape").symlink_to("../../outside")

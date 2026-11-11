@@ -10,24 +10,25 @@ async function fitsPage(page: Page) {
 }
 
 async function fitsToolbar(page: Page) {
-  const overflow = await page
-    .getByTestId("composer-toolbar")
-    .evaluate((row) => {
-      const bounds = row.getBoundingClientRect();
-      const padding = parseFloat(getComputedStyle(row).paddingRight);
-      return Array.from(row.children).some((child) => {
-        if (
-          child.getAttribute("data-hidden") === "true" ||
-          child.getAttribute("data-empty") === "true"
-        )
-          return false;
-        const rect = child.getBoundingClientRect();
-        return (
-          rect.left < bounds.left || rect.right > bounds.right - padding + 1
-        );
-      });
-    });
-  expect(overflow).toBe(false);
+  await expect
+    .poll(() =>
+      page.getByTestId("composer-toolbar").evaluate((row) => {
+        const bounds = row.getBoundingClientRect();
+        const padding = parseFloat(getComputedStyle(row).paddingRight);
+        return Array.from(row.children).some((child) => {
+          if (
+            child.getAttribute("data-hidden") === "true" ||
+            child.getAttribute("data-empty") === "true"
+          )
+            return false;
+          const rect = child.getBoundingClientRect();
+          return (
+            rect.left < bounds.left || rect.right > bounds.right - padding + 1
+          );
+        });
+      }),
+    )
+    .toBe(false);
 }
 
 async function record(page: Page, name: string) {
@@ -337,8 +338,12 @@ test("resizing an open selector preserves its trigger and keeps Stop inside the 
   const context = page.locator('[data-composer-control="context"] button');
   await context.click();
   await expect(context).toHaveAttribute("aria-expanded", "true");
+  await context.evaluate((element) => {
+    element.setAttribute("data-resize-identity", "original");
+  });
   await page.setViewportSize({ width: 240, height: 900 });
   await expect(context).toBeVisible();
+  await expect(context).toHaveAttribute("data-resize-identity", "original");
   await expect(
     page.locator('button[aria-label="Stop generation"]'),
   ).toBeInViewport();

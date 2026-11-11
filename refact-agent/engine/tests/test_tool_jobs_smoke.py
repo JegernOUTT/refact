@@ -18,6 +18,8 @@ import subprocess
 import tempfile
 import time
 import uuid
+import unittest
+from unittest.mock import patch
 
 from aiohttp import web
 import aiohttp
@@ -28,6 +30,10 @@ MODEL = "localstub/foreground-smoke"
 MARKER = "TOOL_JOB_SMOKE_NATIVE_RESULT"
 CMDLINE_NAME = "cmdline_smoke"
 SECOND_PROMPT = "Second human turn while native job is pending."
+PHASE_TIMEOUT_SECONDS = 20
+RECEIPT_TIMEOUT_SECONDS = 75
+BARRIER_TIMEOUT_SECONDS = 120
+COMMAND_TIMEOUT_SECONDS = 150
 
 
 class StubProvider:
@@ -178,7 +184,7 @@ class HTTP:
                         return event
 
 
-async def until(label, callback, seconds=20):
+async def until(label, callback, seconds=PHASE_TIMEOUT_SECONDS):
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
         result = await callback()
@@ -194,7 +200,7 @@ def write_fixture(workspace: Path, config: Path, cache: Path, provider_port: int
     (workspace / ".refact" / "integrations.d" / "cmdline_smoke.yaml").write_text(
         "command: python3 -u barrier_tool.py\ncommand_workdir: "
         + str(workspace) + "\ndescription: Run the deterministic foreground smoke barrier tool\n"
-        "parameters: []\nparameters_required: []\ntimeout: '120'\n"
+        f"parameters: []\nparameters_required: []\ntimeout: '{COMMAND_TIMEOUT_SECONDS}'\n"
         "available: {on_your_laptop: true, when_isolated: true}\n"
         "confirmation: {ask_user: [], deny: []}\n")
     (workspace / "barrier_tool.py").write_text(
@@ -202,7 +208,7 @@ def write_fixture(workspace: Path, config: Path, cache: Path, provider_port: int
         f"base = pathlib.Path({str(workspace)!r})\n"
         "(base / 'invoked').open('a').write('1\\n')\n"
         "(base / 'started').write_text('ready')\n"
-        "deadline = time.monotonic() + 90\n"
+        f"deadline = time.monotonic() + {BARRIER_TIMEOUT_SECONDS}\n"
         "while not (base / 'release').exists() and time.monotonic() < deadline: time.sleep(.025)\n"
         "if not (base / 'release').exists(): raise SystemExit('barrier timed out')\n"
         f"print({MARKER!r}, flush=True)\n")
@@ -253,7 +259,7 @@ async def run(args):
                 assert params.get("status") == "applied", params
                 await http.command(chat, "user_message", content="Use cmdline_smoke exactly once and stop.")
                 await until("native command barrier entered", lambda: asyncio.to_thread((workspace / "started").exists))
-                before = await until("accepted tool-job receipt", lambda: _receipt_snapshot(http, chat))
+                before = await wait_for_receipt(http, chat)
                 messages = before.get("messages", [])
                 receipt = next((m for m in messages if m.get("role") == "tool" and
                     m.get("tool_job")), None)
@@ -332,6 +338,11 @@ def text(message):
     return content if isinstance(content, str) else json.dumps(content)
 
 
+async def wait_for_receipt(http, chat):
+    return await until("accepted tool-job receipt", lambda: _receipt_snapshot(http, chat),
+                       seconds=RECEIPT_TIMEOUT_SECONDS)
+
+
 async def _receipt_snapshot(http, chat):
     snap = await http.snapshot(chat)
     return snap if any(m.get("role") == "tool" and
@@ -363,6 +374,42 @@ async def _second_turn(http, chat):
 async def _terminal(http, chat, job_id):
     snapshot = await http.request("GET", f"/chats/{chat}/tool-jobs/{job_id}")
     return snapshot if snapshot.get("result") is not None else None
+
+
+class FixtureDeadlineTests(unittest.IsolatedAsyncioTestCase):
+    async def test_receipt_after_inline_budget_and_finite_timeout(self):
+        now = 0.0
+
+        async def advance(seconds):
+            nonlocal now
+            now += seconds
+
+        expected = {"messages": [{"role": "tool", "tool_job": {"status": "accepted"}}]}
+
+        class ReceiptHTTP:
+            async def snapshot(self, _chat):
+                return expected if now >= 65 else {"messages": []}
+
+        async def missing():
+            return None
+
+        with patch.object(time, "monotonic", side_effect=lambda: now), \
+                patch.object(asyncio, "sleep", side_effect=advance):
+            self.assertEqual(await wait_for_receipt(ReceiptHTTP(), "fixture-chat"), expected)
+            with self.assertRaisesRegex(AssertionError, "missing: finite timeout"):
+                await until("missing", missing, seconds=RECEIPT_TIMEOUT_SECONDS)
+
+        self.assertGreater(BARRIER_TIMEOUT_SECONDS,
+                           RECEIPT_TIMEOUT_SECONDS + PHASE_TIMEOUT_SECONDS + 20)
+        self.assertGreater(COMMAND_TIMEOUT_SECONDS, BARRIER_TIMEOUT_SECONDS)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            workspace = root / "workspace"
+            write_fixture(workspace, root / "config", root / "cache", PROVIDER_PORT)
+            command = (workspace / ".refact/integrations.d/cmdline_smoke.yaml").read_text()
+            self.assertIn(f"timeout: '{COMMAND_TIMEOUT_SECONDS}'", command)
+            barrier = (workspace / "barrier_tool.py").read_text()
+            self.assertIn(f"deadline = time.monotonic() + {BARRIER_TIMEOUT_SECONDS}", barrier)
 
 
 def main():
