@@ -647,6 +647,15 @@ pub struct SubchatConfig {
 }
 
 impl SubchatConfig {
+    pub(crate) fn ordinary_background_has_unlimited_steps(&self) -> bool {
+        self.stateful
+            && self.background_agent_id.is_some()
+            && self.parent_tool_call_id.is_some()
+            && self.tool_name == "subagent"
+            && self.buddy_meta.is_none()
+            && !matches!(self.tools, ToolsPolicy::Supervised { .. })
+    }
+
     pub fn context_tokens_cap(&self) -> Option<usize> {
         (!self.implicit_context_window).then_some(self.n_ctx)
     }
@@ -2489,7 +2498,11 @@ async fn run_subchat_with_lease_scoped(
     let current_messages_result: Result<(Vec<ChatMessage>, bool), String> = async {
         let mut messages = messages;
         loop {
-            let (mut completed, aborted) = if let Some(ref wrap_up) = config.wrap_up {
+            let wrap_up = config
+                .wrap_up
+                .as_ref()
+                .filter(|_| !config.ordinary_background_has_unlimited_steps());
+            let (mut completed, aborted) = if let Some(wrap_up) = wrap_up {
                 Box::pin(run_subchat_with_wrap_up(
                     ccx.clone(),
                     &config,
@@ -3288,7 +3301,11 @@ async fn run_subchat_loop(
 ) -> Result<(Vec<ChatMessage>, bool), String> {
     let mut context_limit_compact_count = 0usize;
     let mut supervised_cost = 0.0_f64;
-    for step in 0..config.max_steps {
+    let unlimited = config.ordinary_background_has_unlimited_steps();
+    for step in 0usize.. {
+        if !unlimited && step >= config.max_steps {
+            break;
+        }
         if is_aborted(&config.abort_flag) {
             if config.soft_abort {
                 return Ok((messages, true));
@@ -3444,7 +3461,7 @@ async fn run_subchat_loop(
             messages,
             tools_policy,
             step,
-            config.max_steps,
+            if unlimited { 0 } else { config.max_steps },
             config.parent_tool_call_id.clone(),
             config.autonomous_no_confirm,
             config.auto_approve_editing_tools,
@@ -3462,7 +3479,8 @@ async fn run_subchat_loop(
         }
     }
 
-    if config.background_agent_id.is_some()
+    if !unlimited
+        && config.background_agent_id.is_some()
         && !has_final_answer(&messages)
         && !is_aborted(&config.abort_flag)
     {
@@ -3487,7 +3505,7 @@ async fn run_subchat_loop(
     }
 
     if needs_forced_final_answer(
-        config.final_step_force_answer && subchat_retries_allowed(config),
+        !unlimited && config.final_step_force_answer && subchat_retries_allowed(config),
         is_aborted(&config.abort_flag),
         has_final_answer(&messages),
     ) {
@@ -3981,13 +3999,17 @@ async fn execute_pending_tool_calls(
         let context_files = get_context_files_from_messages(&messages);
         for tc in &allowed {
             let args_truncated = truncate_args(&tc.function.arguments, 200);
-            let progress_msg = format!(
-                "{}/{}: {}({})",
-                step_idx + 1,
-                max_steps,
-                tc.function.name,
-                args_truncated
-            );
+            let progress_msg = if max_steps == 0 {
+                format!("{}: {}({})", step_idx + 1, tc.function.name, args_truncated)
+            } else {
+                format!(
+                    "{}/{}: {}({})",
+                    step_idx + 1,
+                    max_steps,
+                    tc.function.name,
+                    args_truncated
+                )
+            };
             let tool_msg = json!({
                 "tool_call_id": tx_toolid,
                 "subchat_id": progress_msg,
@@ -5531,6 +5553,27 @@ mod subchat_tests {
     }
 
     #[test]
+    fn ordinary_step_budget_does_not_apply_to_buddy_or_one_shot_helpers() {
+        let mut config = test_subchat_config();
+        assert!(!config.ordinary_background_has_unlimited_steps());
+        config.stateful = true;
+        config.background_agent_id = Some("child".into());
+        config.parent_tool_call_id = Some("launch-call".into());
+        assert!(config.ordinary_background_has_unlimited_steps());
+        config.parent_tool_call_id = None;
+        assert!(
+            !config.ordinary_background_has_unlimited_steps(),
+            "application-owned Buddy launches stay bounded"
+        );
+        config.parent_tool_call_id = Some("launch-call".into());
+        config.tools = ToolsPolicy::Supervised {
+            tools: vec![],
+            budget: Default::default(),
+        };
+        assert!(!config.ordinary_background_has_unlimited_steps());
+    }
+
+    #[test]
     fn completed_child_history_preserves_signatures_only_for_the_same_model() {
         let mut message = ChatMessage::new("assistant".into(), "completed answer".into());
         message.thinking_blocks = Some(vec![
@@ -5571,6 +5614,107 @@ mod subchat_tests {
             )
             .await,
         ))
+    }
+
+    #[tokio::test]
+    async fn ordinary_background_runner_continues_past_its_legacy_step_metadata() {
+        let ccx = abort_test_ccx().await;
+        let workspace = tempfile::tempdir().unwrap();
+        let chat_id = "ordinary-unlimited-loop";
+        let gcx = ccx.lock().await.global_context.clone();
+        *gcx.documents_state.workspace_folders.lock().unwrap() =
+            vec![workspace.path().to_path_buf()];
+        ccx.lock().await.chat_id = chat_id.into();
+        *gcx.privacy_policy_load.write().unwrap() = refact_privacy::PolicyLoad::default();
+        let mut caps = crate::caps::CodeAssistantCaps::default();
+        caps.chat_models.insert(
+            "model".into(),
+            Arc::new(crate::caps::ChatModelRecord {
+                base: crate::caps::BaseModelRecord {
+                    id: "model".into(),
+                    tokenizer: "fake".into(),
+                    n_ctx: 4096,
+                    ..Default::default()
+                },
+                supports_tools: true,
+                supports_agent: true,
+                ..Default::default()
+            }),
+        );
+        {
+            let mut state = gcx.caps_state.write().await;
+            state.caps = Some(Arc::new(caps));
+            state.last_attempted_ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+        }
+        let mut config = test_subchat_config();
+        config.stateful = true;
+        config.background_agent_id = Some("ordinary-child".into());
+        config.parent_tool_call_id = Some("launch-call".into());
+        config.chat_id = Some(chat_id.into());
+        config.title = Some("Unlimited regression".into());
+        config.max_steps = 1;
+        let app = ccx.lock().await.app.clone();
+        let mut session = crate::chat::types::ChatSession::new(chat_id.into());
+        session.thread = super::stateful_thread_from_config(chat_id, &config);
+        config.runner_lease_token = Some(
+            session
+                .claim_runner(
+                    "regression-runner".into(),
+                    Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                )
+                .unwrap(),
+        );
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert(chat_id.into(), Arc::new(tokio::sync::Mutex::new(session)));
+        let mut fixture = super::SubchatModelFixture::default();
+        for turn in 0..3 {
+            fixture.responses.push_back(super::ChoiceFinal {
+                content: if turn == 2 { "done".into() } else { String::new() },
+                tool_calls_raw: if turn == 2 { vec![] } else { vec![serde_json::json!({"id":format!("call-{turn}"),"type":"function","function":{"name":"cat","arguments":"{}"}})] },
+                finish_reason: Some("stop".into()),
+                usage: Some(crate::call_validation::ChatUsage { total_tokens: 1, completion_tokens: 1, ..Default::default() }),
+                ..Default::default()
+            });
+        }
+        super::SUBCHAT_MODEL_FIXTURES
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap()
+            .insert(chat_id.into(), fixture);
+        let mut usage = crate::call_validation::ChatUsage::default();
+        let progress = Arc::new(StdMutex::new(Vec::new()));
+        let result = super::run_subchat_loop(
+            ccx,
+            &config,
+            vec![ChatMessage::new("user".into(), "work".into())],
+            &ToolsPolicy::None,
+            &mut usage,
+            &progress,
+        )
+        .await;
+        let fixture = super::SUBCHAT_MODEL_FIXTURES
+            .get()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .remove(chat_id)
+            .unwrap();
+        let (messages, aborted) = result.unwrap();
+        assert!(!aborted);
+        assert_eq!(fixture.requests.len(), 3);
+        assert_eq!(messages.last().unwrap().content.content_text_only(), "done");
+        assert!(!messages.iter().any(|message| message
+            .extra
+            .get("event")
+            .and_then(|event| event.get("source"))
+            .and_then(serde_json::Value::as_str)
+            == Some(crate::agents::push::NOTICE_CAP_STOP)));
     }
 
     #[tokio::test]

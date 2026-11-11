@@ -1247,9 +1247,16 @@ pub(crate) async fn agent_lifecycle_execute(
         None
     };
     let recovery_available = scope_available && recovery_unavailable_reason.is_none();
+    let unlimited_steps = recovered
+        .as_ref()
+        .is_some_and(|run| run.config.ordinary_background_has_unlimited_steps());
     let steps_left = recovery_available
-        && max_steps.is_some_and(|limit| limit > record.step_count as usize)
-        && cap_stop.is_none();
+        && (unlimited_steps || max_steps.is_some_and(|limit| limit > record.step_count as usize))
+        && (cap_stop.is_none()
+            || unlimited_steps
+                && cap_stop
+                    .as_ref()
+                    .is_some_and(|cap| cap.parent_can_raise_steps()));
     Ok(tool_message(tool_call_id, json!({
             "summary": outcome.summary(),
             "action": args.get("action"),
@@ -1268,7 +1275,7 @@ pub(crate) async fn agent_lifecycle_execute(
             "can_close": !record.status.is_terminal(),
             "can_resume": steps_left && record.status.is_terminal() && record.status != BgAgentStatus::Completed,
             "can_continue": steps_left && record.status == BgAgentStatus::Completed,
-            "can_raise_and_resume": recovery_available && record.status == BgAgentStatus::Failed
+            "can_raise_and_resume": !unlimited_steps && recovery_available && record.status == BgAgentStatus::Failed
                 && cap_stop.as_ref().is_some_and(|stop| stop.parent_can_raise_steps()
                     && settings_ceiling.is_some_and(|ceiling| ceiling > stop.used.max(record.step_count as usize).max(stop.limit))),
             "max_steps": max_steps,

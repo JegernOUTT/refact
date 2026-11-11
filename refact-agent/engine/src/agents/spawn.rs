@@ -520,7 +520,8 @@ pub(crate) async fn recover_run_config(
         || !config.stateful
         || !seed.config.stateful
         || config.max_steps == 0
-        || config.max_steps > limits.subagent_max_steps
+        || (!config.ordinary_background_has_unlimited_steps()
+            && config.max_steps > limits.subagent_max_steps)
         || config.subchat_depth == 0
         || config.subchat_depth >= limits.max_subchat_depth
         || !tools_within_ceiling(&config.tools, &seed.config.tools)
@@ -729,13 +730,20 @@ pub(crate) async fn recovery_unavailable_reason(
     let used = cap.as_ref().map_or(record.step_count as usize, |cap| {
         cap.used.max(record.step_count as usize)
     });
-    remaining_goal_steps(&trajectory, used, usize::MAX).err()
+    remaining_goal_steps(
+        &trajectory,
+        used,
+        usize::MAX,
+        run.config.ordinary_background_has_unlimited_steps(),
+    )
+    .err()
 }
 
 fn remaining_goal_steps(
     trajectory: &crate::chat::trajectories::LoadedTrajectory,
     used_steps: usize,
     mut remaining: usize,
+    unlimited: bool,
 ) -> Result<usize, String> {
     let projected_goal = crate::chat::goal_snapshot_from_messages(&trajectory.messages, None);
     for goal in trajectory.goal.iter().chain(projected_goal.iter()) {
@@ -744,6 +752,9 @@ fn remaining_goal_steps(
             crate::chat::types::GoalStatus::Paused | crate::chat::types::GoalStatus::Stopped
         ) {
             return Err("child goal is explicitly paused or stopped; resume its goal through the authorized user control first".into());
+        }
+        if unlimited {
+            continue;
         }
         if refact_chat_api::goal_budget_exhaustion_status(
             &goal.budget,
@@ -1743,7 +1754,10 @@ async fn prepare_launch_for_parent_run(
         );
         messages.splice(index..index, context);
     }
-    if max_steps == 0 || max_steps > limits.subagent_max_steps {
+    let ordinary_launch = req.parent_tool_call_id.is_some()
+        && req.config_name == "subagent"
+        && req.native_supervision_guard.is_none();
+    if max_steps == 0 || (!ordinary_launch && max_steps > limits.subagent_max_steps) {
         return Err("launch step bound exceeds Settings ceiling".into());
     }
     if messages.len() > limits.launch_context_messages
@@ -2654,9 +2668,11 @@ async fn resume_agent_for_parent_run(
         cap.used.max(old.step_count as usize)
     });
     let max_steps = raised_max_steps.unwrap_or(config.max_steps);
-    if max_steps <= used_steps
-        || raised_max_steps.is_some_and(|steps| steps <= config.max_steps)
-        || max_steps > limits.subagent_max_steps
+    let unlimited = config.ordinary_background_has_unlimited_steps();
+    if !unlimited
+        && (max_steps <= used_steps
+            || raised_max_steps.is_some_and(|steps| steps <= config.max_steps)
+            || max_steps > limits.subagent_max_steps)
     {
         return Err("max_steps must exceed lifetime usage and stay within the Settings subagent step ceiling; inspect the cap before raising it".into());
     }
@@ -2686,7 +2702,16 @@ async fn resume_agent_for_parent_run(
     let trajectory_revision = resume_trajectory_revision(&trajectory)?;
     let mut messages = trajectory.messages.clone();
     reconcile_resume_tool_pairs(&mut messages, reconcile_incomplete)?;
-    let remaining = remaining_goal_steps(&trajectory, used_steps, max_steps - used_steps)?;
+    let remaining = remaining_goal_steps(
+        &trajectory,
+        used_steps,
+        if unlimited {
+            config.max_steps
+        } else {
+            max_steps - used_steps
+        },
+        unlimited,
+    )?;
     let project_root = config
         .worktree
         .as_ref()
@@ -3044,7 +3069,8 @@ async fn resume_agent_for_parent_run(
                 config.max_steps = config.max_steps.min(remaining_goal_steps(
                     &current,
                     used_steps,
-                    max_steps - used_steps,
+                    if unlimited { config.max_steps } else { max_steps - used_steps },
+                    unlimited,
                 )?);
                 if replacement.is_some() {
                     let setup = &attempt;
