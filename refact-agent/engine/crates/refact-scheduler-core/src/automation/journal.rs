@@ -1588,7 +1588,7 @@ mod transaction_fence_tests {
     use super::*;
     #[test]
     fn runtime_mutation_rolls_back_without_catalog_changes_and_reconcile_keeps_trigger() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_support::tempdir();
         let journal = AutomationJournal::open(root.path()).unwrap();
         let lease = super::super::ProjectAutomationLease::acquire(root.path()).unwrap();
         journal.activate_owner(&lease).unwrap();
@@ -1659,7 +1659,7 @@ mod transaction_fence_tests {
 
     #[test]
     fn epoch_changed_after_precheck_cannot_enter_mutation_transaction() {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_support::tempdir();
         let journal = AutomationJournal::open(root.path()).unwrap();
         let lease = super::super::ProjectAutomationLease::acquire(root.path()).unwrap();
         journal.activate_owner(&lease).unwrap();

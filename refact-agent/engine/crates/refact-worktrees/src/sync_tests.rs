@@ -157,6 +157,8 @@ async fn fixture() -> (tempfile::TempDir, WorktreeService, WorktreeMeta) {
     let source = temp.path().join("repo");
     std::fs::create_dir(&source).unwrap();
     git(&source, &["init", "-b", "main"]);
+    git(&source, &["config", "user.name", "Sync Test"]);
+    git(&source, &["config", "user.email", "sync@example.invalid"]);
     commit(&source, "file", b"base\n");
     let service =
         super::super::worktree_registry_tests::test_service(temp.path().join("cache"), source)

@@ -3198,7 +3198,7 @@ mod tests {
 
     #[tokio::test]
     async fn durable_revoke_and_internal_journal_failures_are_reported() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_support::tempdir();
         let service = AutomationService::new(temp.path()).unwrap();
         service
             .configure(
@@ -3464,7 +3464,7 @@ mod tests {
 
     #[test]
     fn automation_lease_is_shared_with_project_owner() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_support::tempdir();
         let a = ProjectAutomationLease::acquire(temp.path()).unwrap();
         let b = ProjectAutomationLease::acquire(temp.path()).unwrap();
         assert!(Arc::ptr_eq(&a, &b));

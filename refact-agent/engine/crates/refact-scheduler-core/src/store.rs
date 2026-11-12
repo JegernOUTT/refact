@@ -393,7 +393,7 @@ mod tests {
 
     #[test]
     fn durable_observation_never_creates_or_migrates_storage() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_support::tempdir();
         assert!(read_durable_jobs(temp.path()).unwrap().is_empty());
         assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 0);
         let path = scheduled_tasks_path(temp.path());
@@ -415,7 +415,7 @@ mod tests {
 
     #[tokio::test]
     async fn durable_observation_reads_committed_journal_and_reports_corruption() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_support::tempdir();
         let store = JsonFileCronStore::new(temp.path()).unwrap();
         store.add(test_job("committed")).await.unwrap();
         assert_eq!(
@@ -431,8 +431,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn durable_observation_rejects_symlink_storage() {
-        let temp = tempfile::tempdir().unwrap();
-        let external = tempfile::tempdir().unwrap();
+        let temp = crate::test_support::tempdir();
+        let external = crate::test_support::tempdir();
         std::os::unix::fs::symlink(external.path(), temp.path().join(".refact")).unwrap();
         assert!(read_durable_jobs(temp.path()).is_err());
         std::fs::remove_file(temp.path().join(".refact")).unwrap();
@@ -464,7 +464,7 @@ mod tests {
 
     #[tokio::test]
     async fn durable_handles_share_notifications_and_committed_state() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_support::tempdir();
         let runner = JsonFileCronStore::new(temp.path()).unwrap();
         let writer = JsonFileCronStore::new(temp.path().join(".")).unwrap();
         let notify = runner.change_notify();
@@ -495,7 +495,7 @@ mod tests {
 
     #[tokio::test]
     async fn independent_handles_observe_controls_and_preserve_unrelated_jobs() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_support::tempdir();
         let runner = JsonFileCronStore::new(temp.path()).unwrap();
         let controls = JsonFileCronStore::new(temp.path()).unwrap();
         assert!(runner.try_list().await.unwrap().is_empty());
@@ -511,7 +511,7 @@ mod tests {
 
     #[tokio::test]
     async fn atomic_bookkeeping_preserves_controls_and_cannot_resurrect() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_support::tempdir();
         let runner = JsonFileCronStore::new(temp.path()).unwrap();
         let controls = JsonFileCronStore::new(temp.path()).unwrap();
         runner.add(test_job("job")).await.unwrap();
@@ -565,7 +565,7 @@ mod tests {
 
     #[tokio::test]
     async fn conditional_removal_preserves_edited_jobs() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_support::tempdir();
         let runner = JsonFileCronStore::new(temp.path()).unwrap();
         let controls = JsonFileCronStore::new(temp.path()).unwrap();
         runner.add(test_job("conditional")).await.unwrap();
@@ -606,7 +606,7 @@ mod tests {
 
     #[tokio::test]
     async fn failed_mutations_leave_authoritative_data_unchanged() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_support::tempdir();
         let store = JsonFileCronStore::new(temp.path()).unwrap();
         store.add(test_job("original")).await.unwrap();
         assert!(store
@@ -630,7 +630,7 @@ mod tests {
 
     #[tokio::test]
     async fn cancelled_caller_still_notifies_after_committed_blocking_write() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_support::tempdir();
         let store = Arc::new(JsonFileCronStore::new(temp.path()).unwrap());
         let notify = store.change_notify();
         let notified = notify.notified();
@@ -663,7 +663,7 @@ mod tests {
 
     #[tokio::test]
     async fn concurrent_handles_do_not_clobber_jobs() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_support::tempdir();
         let mut handles = Vec::new();
         for n in 0..24 {
             let store = JsonFileCronStore::new(temp.path()).unwrap();
@@ -718,7 +718,7 @@ mod tests {
 
     #[test]
     fn separate_processes_do_not_clobber_jobs() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_support::tempdir();
         let executable = std::env::current_exe().unwrap();
         let mut children = Vec::new();
         for prefix in ["left", "right"] {
@@ -746,7 +746,7 @@ mod tests {
 
     #[tokio::test]
     async fn json_file_round_trip() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_support::tempdir();
         let job = test_job("cron_1");
 
         {
@@ -761,7 +761,7 @@ mod tests {
 
     #[tokio::test]
     async fn legacy_file_loads_and_rewrites_nested() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_support::tempdir();
         let path = scheduled_tasks_path(temp.path());
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(
@@ -809,7 +809,7 @@ mod tests {
 
     #[tokio::test]
     async fn replace_updates_in_place() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_support::tempdir();
         let store = JsonFileCronStore::new(temp.path()).unwrap();
         let mut job = test_job("cron_replace");
         store.add(job.clone()).await.unwrap();

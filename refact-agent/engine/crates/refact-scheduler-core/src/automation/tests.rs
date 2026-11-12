@@ -3,7 +3,7 @@ use serde_json::json;
 
 #[test]
 fn finite_delivery_failures_survive_reopen_without_ack_or_wake_or_recheckpoint() {
-    let root = tempfile::tempdir().unwrap();
+    let root = crate::test_support::tempdir();
     let j = AutomationJournal::open(root.path()).unwrap();
     let lease = ProjectAutomationLease::acquire(root.path()).unwrap();
     j.activate_owner(&lease).unwrap();
@@ -75,7 +75,7 @@ fn finite_delivery_failures_survive_reopen_without_ack_or_wake_or_recheckpoint()
 
 #[test]
 fn deadletter_retention_preserves_metadata_and_pending_payload_with_bounded_admission() {
-    let root = tempfile::tempdir().unwrap();
+    let root = crate::test_support::tempdir();
     let j = AutomationJournal::open(root.path()).unwrap();
     let lease = ProjectAutomationLease::acquire(root.path()).unwrap();
     j.activate_owner(&lease).unwrap();
@@ -133,7 +133,7 @@ fn deadletter_retention_preserves_metadata_and_pending_payload_with_bounded_admi
 
 #[test]
 fn explicit_agent_enqueue_rejection_releases_started_claim_but_not_command_or_unknown() {
-    let root = tempfile::tempdir().unwrap();
+    let root = crate::test_support::tempdir();
     let j = AutomationJournal::open(root.path()).unwrap();
     let lease = ProjectAutomationLease::acquire(root.path()).unwrap();
     j.activate_owner(&lease).unwrap();
@@ -180,7 +180,7 @@ fn explicit_agent_enqueue_rejection_releases_started_claim_but_not_command_or_un
 
 #[test]
 fn succeeded_occurrence_lookup_is_owner_and_current_authority_fenced() {
-    let root = tempfile::tempdir().unwrap();
+    let root = crate::test_support::tempdir();
     let j = AutomationJournal::open(root.path()).unwrap();
     let lease = ProjectAutomationLease::acquire(root.path()).unwrap();
     j.activate_owner(&lease).unwrap();
@@ -220,7 +220,7 @@ fn succeeded_occurrence_lookup_is_owner_and_current_authority_fenced() {
 
 #[test]
 fn legacy_outbox_schema_migrates_exhausted_attempts_to_honest_failure() {
-    let root = tempfile::tempdir().unwrap();
+    let root = crate::test_support::tempdir();
     let j = AutomationJournal::open(root.path()).unwrap();
     drop(j);
     let db = rusqlite::Connection::open(journal_path(root.path()).unwrap()).unwrap();
@@ -290,7 +290,7 @@ fn source(j: &AutomationJournal) -> IngestRequest {
 }
 #[test]
 fn sql_ingest_commits_event_latest_checkpoint_and_outbox_once() {
-    let t = tempfile::tempdir().unwrap();
+    let t = crate::test_support::tempdir();
     let j = AutomationJournal::open(t.path()).unwrap();
     let lease = ProjectAutomationLease::acquire(t.path()).unwrap();
     j.activate_owner(&lease).unwrap();
@@ -309,7 +309,7 @@ fn sql_ingest_commits_event_latest_checkpoint_and_outbox_once() {
 }
 #[test]
 fn large_ingest_and_delivery_preserve_exact_payload_dedup_and_denial() {
-    let t = tempfile::tempdir().unwrap();
+    let t = crate::test_support::tempdir();
     let j = AutomationJournal::open(t.path()).unwrap();
     let lease = ProjectAutomationLease::acquire(t.path()).unwrap();
     j.activate_owner(&lease).unwrap();
@@ -349,7 +349,7 @@ fn large_ingest_and_delivery_preserve_exact_payload_dedup_and_denial() {
 
 #[test]
 fn malformed_delivery_rolls_back_every_ingest_write() {
-    let t = tempfile::tempdir().unwrap();
+    let t = crate::test_support::tempdir();
     let j = AutomationJournal::open(t.path()).unwrap();
     let lease = ProjectAutomationLease::acquire(t.path()).unwrap();
     j.activate_owner(&lease).unwrap();
@@ -367,7 +367,7 @@ fn malformed_delivery_rolls_back_every_ingest_write() {
 }
 #[test]
 fn upstream_identity_not_local_generation_controls_deduplication() {
-    let t = tempfile::tempdir().unwrap();
+    let t = crate::test_support::tempdir();
     let j = AutomationJournal::open(t.path()).unwrap();
     let lease = ProjectAutomationLease::acquire(t.path()).unwrap();
     j.activate_owner(&lease).unwrap();
@@ -397,7 +397,7 @@ fn upstream_identity_not_local_generation_controls_deduplication() {
 }
 #[test]
 fn unkeyed_events_are_best_effort_not_accidentally_deduplicated() {
-    let t = tempfile::tempdir().unwrap();
+    let t = crate::test_support::tempdir();
     let j = AutomationJournal::open(t.path()).unwrap();
     let lease = ProjectAutomationLease::acquire(t.path()).unwrap();
     j.activate_owner(&lease).unwrap();
@@ -414,7 +414,7 @@ fn unkeyed_events_are_best_effort_not_accidentally_deduplicated() {
 }
 #[test]
 fn semantic_reconcile_preserves_grant_but_changed_spec_revokes() {
-    let t = tempfile::tempdir().unwrap();
+    let t = crate::test_support::tempdir();
     let j = AutomationJournal::open(t.path()).unwrap();
     let lease = ProjectAutomationLease::acquire(t.path()).unwrap();
     j.activate_owner(&lease).unwrap();
@@ -442,7 +442,7 @@ fn semantic_reconcile_preserves_grant_but_changed_spec_revokes() {
 }
 #[test]
 fn delivery_ack_and_retry_do_not_reexecute_or_recheckpoint() {
-    let t = tempfile::tempdir().unwrap();
+    let t = crate::test_support::tempdir();
     let j = AutomationJournal::open(t.path()).unwrap();
     let lease = ProjectAutomationLease::acquire(t.path()).unwrap();
     j.activate_owner(&lease).unwrap();
@@ -460,7 +460,7 @@ fn delivery_ack_and_retry_do_not_reexecute_or_recheckpoint() {
 }
 #[test]
 fn claims_exclude_duplicate_and_started_recovery_blocks_new_occurrences() {
-    let t = tempfile::tempdir().unwrap();
+    let t = crate::test_support::tempdir();
     let j = AutomationJournal::open(t.path()).unwrap();
     let lease = ProjectAutomationLease::acquire(t.path()).unwrap();
     j.activate_owner(&lease).unwrap();
@@ -491,7 +491,7 @@ fn claims_exclude_duplicate_and_started_recovery_blocks_new_occurrences() {
 }
 #[test]
 fn never_started_recovery_releases_claim_without_replaying_side_effect() {
-    let t = tempfile::tempdir().unwrap();
+    let t = crate::test_support::tempdir();
     let j = AutomationJournal::open(t.path()).unwrap();
     let lease = ProjectAutomationLease::acquire(t.path()).unwrap();
     j.activate_owner(&lease).unwrap();
@@ -516,7 +516,7 @@ fn never_started_recovery_releases_claim_without_replaying_side_effect() {
 }
 #[test]
 fn changed_job_revokes_old_effect_admission() {
-    let t = tempfile::tempdir().unwrap();
+    let t = crate::test_support::tempdir();
     let j = AutomationJournal::open(t.path()).unwrap();
     let lease = ProjectAutomationLease::acquire(t.path()).unwrap();
     j.activate_owner(&lease).unwrap();
@@ -537,7 +537,7 @@ fn changed_job_revokes_old_effect_admission() {
 }
 #[test]
 fn sessions_are_fenced_and_never_loaded_as_durable() {
-    let t = tempfile::tempdir().unwrap();
+    let t = crate::test_support::tempdir();
     let j = AutomationJournal::open(t.path()).unwrap();
     let lease = ProjectAutomationLease::acquire(t.path()).unwrap();
     j.activate_owner(&lease).unwrap();
@@ -596,7 +596,7 @@ fn lease_shared_in_process_but_independent_owner_denied() {
             }
         }
     }
-    let t = tempfile::tempdir().unwrap();
+    let t = crate::test_support::tempdir();
     let a = ProjectAutomationLease::acquire(t.path()).unwrap();
     let b = ProjectAutomationLease::acquire(t.path()).unwrap();
     assert!(std::sync::Arc::ptr_eq(&a, &b));
@@ -775,7 +775,7 @@ fn lease_shared_in_process_but_independent_owner_denied() {
 }
 #[test]
 fn observer_does_not_create_and_cannot_write() {
-    let t = tempfile::tempdir().unwrap();
+    let t = crate::test_support::tempdir();
     assert!(AutomationJournal::open_observer(t.path()).is_err());
     assert!(!t.path().join(".refact").exists());
     let j = AutomationJournal::open(t.path()).unwrap();
@@ -788,7 +788,7 @@ fn observer_does_not_create_and_cannot_write() {
 }
 #[test]
 fn paused_expired_unapproved_and_archived_sources_cannot_keep_daemon_awake() {
-    let t = tempfile::tempdir().unwrap();
+    let t = crate::test_support::tempdir();
     let j = AutomationJournal::open(t.path()).unwrap();
     let lease = ProjectAutomationLease::acquire(t.path()).unwrap();
     j.activate_owner(&lease).unwrap();
@@ -812,7 +812,7 @@ fn paused_expired_unapproved_and_archived_sources_cannot_keep_daemon_awake() {
 }
 #[test]
 fn migration_retires_json_preserves_fields_and_places_retry_review_hold() {
-    let t = tempfile::tempdir().unwrap();
+    let t = crate::test_support::tempdir();
     let j = AutomationJournal::open(t.path()).unwrap();
     let lease = ProjectAutomationLease::acquire(t.path()).unwrap();
     j.activate_owner(&lease).unwrap();
@@ -835,7 +835,7 @@ fn migration_retires_json_preserves_fields_and_places_retry_review_hold() {
 }
 #[test]
 fn catalog_cas_and_external_deletion_are_authoritative() {
-    let t = tempfile::tempdir().unwrap();
+    let t = crate::test_support::tempdir();
     let j = AutomationJournal::open(t.path()).unwrap();
     let lease = ProjectAutomationLease::acquire(t.path()).unwrap();
     j.activate_owner(&lease).unwrap();
@@ -853,8 +853,8 @@ fn catalog_cas_and_external_deletion_are_authoritative() {
 #[test]
 fn symlinked_storage_components_and_hardlinks_are_refused() {
     use std::os::unix::fs::symlink;
-    let t = tempfile::tempdir().unwrap();
-    let outside = tempfile::tempdir().unwrap();
+    let t = crate::test_support::tempdir();
+    let outside = crate::test_support::tempdir();
     symlink(outside.path(), t.path().join(".refact")).unwrap();
     assert!(AutomationJournal::open(t.path()).is_err());
     // Private execution ownership does not traverse project-controlled .refact.
@@ -874,7 +874,7 @@ fn symlinked_storage_components_and_hardlinks_are_refused() {
 
 #[test]
 fn session_collision_cannot_overwrite_durable_or_other_session_authority() {
-    let t = tempfile::tempdir().unwrap();
+    let t = crate::test_support::tempdir();
     let j = AutomationJournal::open(t.path()).unwrap();
     let original = job("authority");
     j.put_legacy_job(&original).unwrap();
@@ -888,7 +888,7 @@ fn session_collision_cannot_overwrite_durable_or_other_session_authority() {
 }
 #[test]
 fn observer_migration_refuses_before_retiring_legacy_authority() {
-    let t = tempfile::tempdir().unwrap();
+    let t = crate::test_support::tempdir();
     let _j = AutomationJournal::open(t.path()).unwrap();
     let lease = ProjectAutomationLease::acquire(t.path()).unwrap();
     let old = t.path().join(".refact/scheduled_tasks.json");
@@ -904,7 +904,7 @@ fn observer_migration_refuses_before_retiring_legacy_authority() {
 }
 #[test]
 fn atomic_completion_rejects_invalid_payload_without_finishing_claim() {
-    let t = tempfile::tempdir().unwrap();
+    let t = crate::test_support::tempdir();
     let j = AutomationJournal::open(t.path()).unwrap();
     let lease = ProjectAutomationLease::acquire(t.path()).unwrap();
     j.activate_owner(&lease).unwrap();
@@ -956,8 +956,8 @@ fn atomic_completion_rejects_invalid_payload_without_finishing_claim() {
 }
 #[test]
 fn activation_checks_root_identity_and_retains_the_execution_lease() {
-    let t = tempfile::tempdir().unwrap();
-    let other = tempfile::tempdir().unwrap();
+    let t = crate::test_support::tempdir();
+    let other = crate::test_support::tempdir();
     let j = AutomationJournal::open(t.path()).unwrap();
     let wrong = ProjectAutomationLease::acquire(other.path()).unwrap();
     assert!(j.activate_owner(&wrong).is_err());
@@ -996,7 +996,7 @@ fn cron_wake_summary_includes_interval_once_cron_and_explicit_manual() {
         ("manual", crate::types::Trigger::Manual, None),
     ];
     for (id, trigger, expected) in cases {
-        let t = tempfile::tempdir().unwrap();
+        let t = crate::test_support::tempdir();
         let j = AutomationJournal::open(t.path()).unwrap();
         let mut job = job(id);
         job.trigger = trigger;
@@ -1024,7 +1024,7 @@ fn cron_wake_summary_includes_interval_once_cron_and_explicit_manual() {
     for (month, local_hour_utc) in [(1, 0), (7, 1)] {
         for recurring in [false, true] {
             for zone in [None, Some("UTC")] {
-                let t = tempfile::tempdir().unwrap();
+                let t = crate::test_support::tempdir();
                 let j = AutomationJournal::open(t.path()).unwrap();
                 let lease = ProjectAutomationLease::acquire(t.path()).unwrap();
                 j.activate_owner(&lease).unwrap();
@@ -1096,7 +1096,7 @@ fn cron_wake_summary_includes_interval_once_cron_and_explicit_manual() {
 }
 #[test]
 fn project_database_leaf_is_not_authoritative_and_runtime_is_private() {
-    let t = tempfile::tempdir().unwrap();
+    let t = crate::test_support::tempdir();
     std::fs::create_dir_all(t.path().join(".refact/automation")).unwrap();
     std::fs::write(
         t.path().join(".refact/automation/runtime.sqlite"),
@@ -1119,7 +1119,7 @@ fn project_database_leaf_is_not_authoritative_and_runtime_is_private() {
 
 #[test]
 fn external_security_edit_is_desired_state_not_automatic_execution_grant() {
-    let t = tempfile::tempdir().unwrap();
+    let t = crate::test_support::tempdir();
     let j = AutomationJournal::open(t.path()).unwrap();
     let lease = ProjectAutomationLease::acquire(t.path()).unwrap();
     j.activate_owner(&lease).unwrap();
@@ -1152,7 +1152,7 @@ fn external_security_edit_is_desired_state_not_automatic_execution_grant() {
 }
 #[test]
 fn sql_trigger_failure_proves_atomic_completion_rollback() {
-    let t = tempfile::tempdir().unwrap();
+    let t = crate::test_support::tempdir();
     let j = AutomationJournal::open(t.path()).unwrap();
     let lease = ProjectAutomationLease::acquire(t.path()).unwrap();
     j.activate_owner(&lease).unwrap();
@@ -1194,7 +1194,7 @@ fn sql_trigger_failure_proves_atomic_completion_rollback() {
 }
 #[test]
 fn pending_delivery_capacity_keeps_checkpoint_and_effect_admission_unchanged() {
-    let t = tempfile::tempdir().unwrap();
+    let t = crate::test_support::tempdir();
     let j = AutomationJournal::open(t.path()).unwrap();
     let lease = ProjectAutomationLease::acquire(t.path()).unwrap();
     j.activate_owner(&lease).unwrap();
@@ -1222,7 +1222,7 @@ fn pending_delivery_capacity_keeps_checkpoint_and_effect_admission_unchanged() {
 
 #[test]
 fn project_lock_unlink_cannot_create_second_private_runtime_owner() {
-    let root = tempfile::tempdir().unwrap();
+    let root = crate::test_support::tempdir();
     let lease = ProjectAutomationLease::acquire(root.path()).unwrap();
     std::fs::create_dir_all(root.path().join(".refact/apps")).unwrap();
     let old = root.path().join(".refact/apps/.automation.lock");
@@ -1255,7 +1255,7 @@ fn generic_definition() -> Definition {
 }
 #[test]
 fn generic_approval_claim_effect_completion_and_revocation_share_run_ledger() {
-    let root = tempfile::tempdir().unwrap();
+    let root = crate::test_support::tempdir();
     let journal = AutomationJournal::open(root.path()).unwrap();
     let lease = ProjectAutomationLease::acquire(root.path()).unwrap();
     journal.activate_owner(&lease).unwrap();
@@ -1300,7 +1300,7 @@ fn generic_approval_claim_effect_completion_and_revocation_share_run_ledger() {
 }
 #[test]
 fn cron_only_completion_and_ack_retention_is_bounded_without_any_source_ingest() {
-    let root = tempfile::tempdir().unwrap();
+    let root = crate::test_support::tempdir();
     let journal = AutomationJournal::open(root.path()).unwrap();
     let lease = ProjectAutomationLease::acquire(root.path()).unwrap();
     journal.activate_owner(&lease).unwrap();
@@ -1436,7 +1436,7 @@ fn byte_policies_default_unlimited_and_preserve_positive_digest_covered_opt_ins(
 
 #[test]
 fn explicit_run_delivery_accepts_large_payload_once_and_rejects_stale_claim() {
-    let t = tempfile::tempdir().unwrap();
+    let t = crate::test_support::tempdir();
     let j = AutomationJournal::open(t.path()).unwrap();
     let lease = ProjectAutomationLease::acquire(t.path()).unwrap();
     j.activate_owner(&lease).unwrap();

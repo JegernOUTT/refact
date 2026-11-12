@@ -178,7 +178,7 @@ mod capacity_tests {
 
     #[test]
     fn execution_lane_can_admit_more_than_the_retired_256_ceiling() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_support::tempdir();
         let lease = ProjectAutomationLease::acquire(directory.path()).unwrap();
         let lane = lease.capacity("unlimited-regression", tokio::sync::Semaphore::MAX_PERMITS);
         let mut permits = Vec::new();
