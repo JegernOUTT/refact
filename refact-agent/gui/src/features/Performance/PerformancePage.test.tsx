@@ -7,7 +7,7 @@ import type {
   TrajectorySettingsResponse,
 } from "../../services/refact/performance";
 import { server } from "../../utils/mockServer";
-import { render, screen, waitFor } from "../../utils/test-utils";
+import { render, screen, waitFor, within } from "../../utils/test-utils";
 import { formatBytes, formatDurationUs } from "./performanceFormatters";
 import {
   PerformancePage,
@@ -188,7 +188,16 @@ describe("PerformancePage", () => {
     ).toBeInTheDocument();
     expect(screen.getByText("Watcher / VecDB")).toBeInTheDocument();
     expect(screen.getByText("Automatic enrichment")).toBeInTheDocument();
-    expect(screen.getByText("Trajectory writer enabled")).toBeInTheDocument();
+    await screen.findByRole("switch", { name: "Trajectory writer enabled" });
+    const rollouts = screen.getByRole("heading", {
+      name: "Rollout switches",
+    }).parentElement;
+    if (!rollouts) throw new Error("Rollout switches section is missing");
+    const writer = within(rollouts)
+      .getByText("Trajectory writer enabled")
+      .closest("li");
+    if (!writer) throw new Error("Trajectory writer rollout is missing");
+    expect(within(writer).getByText("On")).toBeInTheDocument();
   });
 
   it("enables disabled collection and refetches telemetry", async () => {

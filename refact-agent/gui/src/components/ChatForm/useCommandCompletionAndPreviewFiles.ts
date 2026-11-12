@@ -23,6 +23,9 @@ import {
 } from "../../features/Chat/Thread";
 import { formatMessagesForLsp } from "../../features/Chat/Thread/utils";
 
+const completionDebounceOptions = { leading: true, maxWait: 250 };
+const previewDebounceOptions = { leading: true };
+
 function useGetCommandCompletionQuery(
   query: string,
   cursor: number,
@@ -51,18 +54,19 @@ function useCommandCompletion() {
     cursor: number;
   } | null>(null);
 
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  const debounceSetCommand = useCallback(
-    useDebounceCallback(
-      (query: string, cursor: number) => setCommand({ query, cursor }),
-      500,
-      {
-        leading: true,
-        maxWait: 250,
-      },
-    ),
+  const updateCommand = useCallback(
+    (query: string, cursor: number) => setCommand({ query, cursor }),
     [setCommand],
   );
+  const debounceSetCommand = useDebounceCallback(
+    updateCommand,
+    500,
+    completionDebounceOptions,
+  );
+
+  useEffect(() => {
+    return () => debounceSetCommand.cancel();
+  }, [debounceSetCommand]);
 
   const commandCompletionResponse = useGetCommandCompletionQuery(
     command?.query ?? "",
@@ -145,13 +149,15 @@ function useGetPreviewFiles(query: string, checkboxes: Checkboxes) {
   );
   const [previewQuery, setPreviewQuery] = useState<string>(queryWithCheckboxes);
 
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  const debounceSetPreviewQuery = useCallback(
-    useDebounceCallback(setPreviewQuery, 500, {
-      leading: true,
-    }),
-    [setPreviewQuery],
+  const debounceSetPreviewQuery = useDebounceCallback(
+    setPreviewQuery,
+    500,
+    previewDebounceOptions,
   );
+
+  useEffect(() => {
+    return () => debounceSetPreviewQuery.cancel();
+  }, [debounceSetPreviewQuery]);
 
   useEffect(() => {
     debounceSetPreviewQuery(queryWithCheckboxes);
