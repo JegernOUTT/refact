@@ -1331,7 +1331,8 @@ mod tests {
 
     #[test]
     fn directory_inventory_rebuild_prunes_deleted_subtrees_and_keeps_empty_folders() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp =
+            tempfile::tempdir_in(dunce::canonicalize(std::env::temp_dir()).unwrap()).unwrap();
         let old = temp.path().join("old");
         std::fs::create_dir(&old).unwrap();
         std::fs::write(old.join("no_extension"), "x").unwrap();
@@ -1360,7 +1361,8 @@ mod tests {
 
     #[test]
     fn cold_build_recovers_from_modify_during_staging() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp =
+            tempfile::tempdir_in(dunce::canonicalize(std::env::temp_dir()).unwrap()).unwrap();
         let changed = temp.path().join("changed.txt");
         let untouched = temp.path().join("untouched.txt");
         std::fs::write(&changed, "old").unwrap();
@@ -1737,10 +1739,11 @@ mod tests {
 
     #[test]
     fn walk_reading_transient_facts_cannot_publish_them_after_aba() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp =
+            tempfile::tempdir_in(dunce::canonicalize(std::env::temp_dir()).unwrap()).unwrap();
         let file = temp.path().join("flapping.txt");
         std::fs::write(&file, "a").unwrap();
-        let file = std::fs::canonicalize(&file).unwrap();
+        let file = dunce::canonicalize(&file).unwrap();
         let original_mtime = std::fs::metadata(&file).unwrap().modified().unwrap();
         let index = FileIndex::default();
         let shutdown = AtomicBool::new(false);

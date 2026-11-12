@@ -505,6 +505,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     #[serial_test::serial(scheduler_env)]
     async fn hooks_fire_hook_id_runs_matching_webhook_jobs_only() {
@@ -575,6 +576,7 @@ mod tests {
         store.remove(&other_id).await.unwrap();
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     #[serial_test::serial(scheduler_env)]
     async fn hooks_fire_one_shot_failed_job_reports_not_fired() {

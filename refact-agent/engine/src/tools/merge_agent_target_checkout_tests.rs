@@ -38,6 +38,7 @@ impl Fixture {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("repo");
         std::fs::create_dir(&source).unwrap();
+        let source = dunce::canonicalize(&source).unwrap();
         git(&source, &["init"]);
         git(&source, &["config", "core.autocrlf", "false"]);
         git(&source, &["checkout", "-b", "main"]);
@@ -175,7 +176,10 @@ async fn merge_into_base_checked_out_in_planner_worktree_succeeds() {
         fixture.request(),
         Some(fixture.check_request()),
         move |_, request| async move {
-            assert_eq!(request.workspace_root, planner.canonicalize().unwrap());
+            assert_eq!(
+                request.workspace_root,
+                dunce::canonicalize(&planner).unwrap()
+            );
             assert_eq!(
                 git(&planner, &["rev-parse", "HEAD"]).trim(),
                 request.expected_merge_commit
@@ -396,7 +400,7 @@ impl PostMergeCommandRunner for RegressionRunner {
         command: PostMergeCommand,
         _: Duration,
     ) -> PostMergeCommandOutput {
-        assert_eq!(root, self.checkout.canonicalize().unwrap());
+        assert_eq!(root, dunce::canonicalize(&self.checkout).unwrap());
         let (success, output) = match command {
             PostMergeCommand::Verify {
                 ..

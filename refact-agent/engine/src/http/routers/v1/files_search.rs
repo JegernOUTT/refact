@@ -303,8 +303,10 @@ mod tests {
 
     #[tokio::test]
     async fn search_filters_current_scope_and_hidden_ancestors_without_reading_contents() {
-        let workspace = tempfile::tempdir().unwrap();
-        let outside = tempfile::tempdir().unwrap();
+        let workspace =
+            tempfile::tempdir_in(dunce::canonicalize(std::env::temp_dir()).unwrap()).unwrap();
+        let outside =
+            tempfile::tempdir_in(dunce::canonicalize(std::env::temp_dir()).unwrap()).unwrap();
         std::fs::create_dir_all(workspace.path().join("target/nested")).unwrap();
         std::fs::create_dir(workspace.path().join("empty")).unwrap();
         std::fs::write(workspace.path().join("main.rs"), "secret-content").unwrap();
@@ -416,7 +418,8 @@ mod tests {
 
     #[tokio::test]
     async fn search_orders_by_size_before_truncating_case_insensitive_relative_matches() {
-        let workspace = tempfile::tempdir().unwrap();
+        let workspace =
+            tempfile::tempdir_in(dunce::canonicalize(std::env::temp_dir()).unwrap()).unwrap();
         std::fs::create_dir(workspace.path().join("Nested")).unwrap();
         std::fs::write(workspace.path().join("Nested/z.txt"), "small").unwrap();
         std::fs::write(workspace.path().join("Nested/a.rs"), "larger bytes").unwrap();

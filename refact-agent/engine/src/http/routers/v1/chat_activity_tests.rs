@@ -81,6 +81,7 @@ fn recovery(state: RecoveryState) -> refact_core::recovery::RecoveryRecord {
     })).unwrap()
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn activity_unopened_work_and_cold_schedules_are_deduplicated() {
     let (root, app) = fixture().await;
@@ -207,6 +208,7 @@ async fn activity_cold_recovery_and_live_clearing_follow_current_state() {
     }
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn activity_excludes_other_project_hidden_chats_and_non_time_targets() {
     let (root, app) = fixture().await;

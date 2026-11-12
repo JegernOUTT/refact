@@ -1235,6 +1235,7 @@ mod tests {
         .expect("real interval source produced no output");
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn human_credential_pipeline_uses_private_store_and_fences_identity_change() {
         use refact_scheduler_core::sources::{
@@ -1408,6 +1409,7 @@ mod tests {
         gcx.apps.shutdown().await;
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn non_resuming_source_starts_this_session_but_not_on_host_rebuild() {
         let temp = tempfile::tempdir().unwrap();
@@ -1478,6 +1480,7 @@ mod tests {
         gcx.apps.shutdown().await;
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn invalid_catalog_fences_an_already_pending_http_response() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -1560,6 +1563,7 @@ mod tests {
         gcx.apps.shutdown().await;
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn invalid_catalog_blocks_source_publish_before_tick_and_recovery_requires_approval() {
         let temp = tempfile::tempdir().unwrap();
@@ -1633,6 +1637,7 @@ mod tests {
         serde_json::from_value(json!({"schema_version":1,"id":"transform_test","revision":1,"owner":{"kind":"project"},"description":"test","enabled":true,"trigger":{"kind":"channel_event","channel":"input","filter":null},"action":{"kind":"transform","input_channel":"input","output_channel":"output","select_fields":["public"],"max_output_bytes":1024},"deliveries":[{"id":"output","channel":"output","credential_ref":null}],"lifecycle":{"kind":"on_demand"},"policy":{"idempotent":true,"max_pending_events":16,"max_event_bytes":1024}})).unwrap()
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn exact_approval_and_stale_action_snapshot_are_fenced() {
         let temp = tempfile::tempdir().unwrap();
@@ -1727,6 +1732,7 @@ mod tests {
         sources.shutdown().await;
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn cancelled_finite_demand_cleanup_is_owned_and_joined() {
         let temp = tempfile::tempdir().unwrap();

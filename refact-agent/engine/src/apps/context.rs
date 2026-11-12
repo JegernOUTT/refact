@@ -369,6 +369,7 @@ mod tests {
     use super::*;
     use refact_privacy::Attribution;
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn diagnostics_provenance_includes_exact_binding_state_file() {
         let dir = tempfile::tempdir().unwrap();

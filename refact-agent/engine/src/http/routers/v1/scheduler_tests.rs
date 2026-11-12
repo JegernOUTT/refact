@@ -64,6 +64,7 @@ async fn json_request(app: Router, request: Request<Body>) -> (StatusCode, Value
     (status, serde_json::from_slice(&body).unwrap())
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn scheduler_cron_http_get_post_delete_happy_paths() {
     let (_temp, app_state, app) = test_app().await;
@@ -146,6 +147,7 @@ async fn scheduler_cron_http_get_post_delete_happy_paths() {
         .any(|task| task["id"] == json!(id)));
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn scheduler_cron_http_defaults_to_durable_when_project_store_exists() {
     let (temp, app_state, app) = test_app().await;
@@ -181,6 +183,7 @@ async fn scheduler_cron_http_defaults_to_durable_when_project_store_exists() {
     assert!(tasks.iter().any(|task| task.id == created["id"]));
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn scheduler_cron_http_explicit_false_stays_session_only() {
     let (_temp, app_state, app) = test_app().await;
@@ -260,6 +263,7 @@ async fn scheduler_create_rejects_closed_or_missing_chat() {
     assert_eq!(status_closed, StatusCode::BAD_REQUEST);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn scheduler_cron_http_post_command_creates_command_job() {
     let (_temp, app_state, app) = test_app().await;
@@ -332,6 +336,7 @@ async fn scheduler_cron_http_post_command_creates_command_job() {
     assert_eq!(listed_task["action_kind"], json!("command"));
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn scheduler_cron_http_post_webhook_delivery_round_trips() {
     let (_temp, _app_state, app) = test_app().await;
@@ -399,6 +404,7 @@ async fn scheduler_cron_http_post_webhook_delivery_round_trips() {
     assert_eq!(listed_task["delivery"].get("token"), None);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn scheduler_cron_http_post_webhook_trigger_is_dormant() {
     let (_temp, _app_state, app) = test_app().await;
@@ -466,6 +472,7 @@ async fn scheduler_cron_http_post_webhook_trigger_is_dormant() {
     assert_eq!(listed_task["delivery"]["kind"], json!("none"));
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn scheduler_cron_http_post_rejects_prompt_plus_command() {
     let (_temp, app_state, app) = test_app().await;
@@ -494,6 +501,7 @@ async fn scheduler_cron_http_post_rejects_prompt_plus_command() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn scheduler_cron_http_patch_pauses_resumes_and_changes_schedule() {
     let (_temp, app_state, app) = test_app().await;
@@ -573,6 +581,7 @@ async fn scheduler_cron_http_patch_pauses_resumes_and_changes_schedule() {
     assert_eq!(stored.description, "Updated patch frogs");
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn scheduler_http_push_defaults_and_patch_preserves_policy() {
     let (_temp, _state, app) = test_app().await;

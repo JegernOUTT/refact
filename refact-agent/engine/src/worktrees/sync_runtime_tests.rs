@@ -23,6 +23,7 @@ async fn fixture() -> Fixture {
     let git =
         |root: &std::path::Path, args: &[&str]| crate::worktrees::git::run_git(root, args).unwrap();
     git(&source, &["init"]);
+    git(&source, &["config", "core.autocrlf", "false"]);
     git(&source, &["checkout", "-b", "main"]);
     git(&source, &["config", "user.email", "test@example.invalid"]);
     git(&source, &["config", "user.name", "Test"]);

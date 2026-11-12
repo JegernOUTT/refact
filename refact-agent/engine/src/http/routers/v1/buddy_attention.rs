@@ -327,8 +327,10 @@ mod tests {
 
     #[tokio::test]
     async fn attention_includes_late_session_and_excludes_foreign_project() {
-        let root = tempfile::tempdir().unwrap();
-        let foreign = tempfile::tempdir().unwrap();
+        let root =
+            tempfile::tempdir_in(dunce::canonicalize(std::env::temp_dir()).unwrap()).unwrap();
+        let foreign =
+            tempfile::tempdir_in(dunce::canonicalize(std::env::temp_dir()).unwrap()).unwrap();
         let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
             root.path().join("cache"),
             root.path().join("config"),

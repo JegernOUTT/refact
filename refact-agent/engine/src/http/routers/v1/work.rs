@@ -352,7 +352,7 @@ mod tests {
     use tower::ServiceExt;
 
     async fn app(token: Option<&str>) -> (AppState, tempfile::TempDir) {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir_in(dunce::canonicalize(std::env::temp_dir()).unwrap()).unwrap();
         let mut gcx = crate::global_context::tests::make_test_gcx_with_dirs(
             dir.path().join("cache"),
             dir.path().join("config"),

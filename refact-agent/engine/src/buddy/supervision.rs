@@ -2453,6 +2453,47 @@ mod tests {
         fx.close().await;
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn registered_candidate_version_rejects_symlinked_changed_file() {
+        let fx = CandidateFixture::new(true).await;
+        let native = crate::worktrees::service::WorktreeService::new(
+            fx.source.cache_dir.clone(),
+            fx.source.source.clone(),
+        )
+        .unwrap();
+        let worktree_id = load_link(&fx.runtime, fx.source.mandate_id.clone())
+            .await
+            .unwrap()
+            .value
+            .engineering_proof
+            .unwrap()
+            .source
+            .worktree_id;
+        assert!(
+            super::super::resources::project_code::registered_candidate_version(
+                &native,
+                &worktree_id,
+            )
+            .await
+            .is_ok()
+        );
+        let outside = fx.source.temp.path().join("outside.rs");
+        std::fs::write(&outside, "outside bytes").unwrap();
+        let changed = fx.source.root.join("src/a.rs");
+        std::fs::remove_file(&changed).unwrap();
+        std::os::unix::fs::symlink(&outside, &changed).unwrap();
+        assert!(matches!(
+            super::super::resources::project_code::registered_candidate_version(
+                &native,
+                &worktree_id,
+            )
+            .await,
+            Err(super::super::resources::ResourceError::SymlinkNotAllowed)
+        ));
+        fx.close().await;
+    }
+
     #[tokio::test]
     async fn candidate_assessment_router_connects_all_code_families_without_execution_or_replay() {
         use refact_buddy_core::autonomous_workflows::*;

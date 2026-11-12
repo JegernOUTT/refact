@@ -759,6 +759,7 @@ mod tests {
         task
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn valid_recurring_creates() {
         let temp = tempfile::tempdir().unwrap();
@@ -950,6 +951,7 @@ mod tests {
         assert_eq!(session_store.list().await.len(), 61);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn durable_writes_to_disk() {
         let temp = tempfile::tempdir().unwrap();
@@ -993,6 +995,7 @@ mod tests {
         assert_eq!(reloaded.list().await, vec![outcome.task]);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn omitted_durable_defaults_to_project_store() {
         let temp = tempfile::tempdir().unwrap();
@@ -1020,6 +1023,7 @@ mod tests {
         assert_eq!(reloaded.list().await, vec![outcome.task]);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn explicit_session_only_overrides_project_store_default() {
         let temp = tempfile::tempdir().unwrap();

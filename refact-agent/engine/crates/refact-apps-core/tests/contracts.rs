@@ -2,6 +2,36 @@ use refact_apps_core::{AppStore, StateScope};
 use serde_json::json;
 
 #[tokio::test]
+async fn atomic_resource_replacement_leaves_only_the_committed_file() {
+    let project = tempfile::tempdir().unwrap();
+    let store = AppStore::open(project.path()).await.unwrap();
+    let app = store.create("atomic", "Atomic").await.unwrap();
+    let updated = store
+        .write_file(
+            "atomic",
+            "ui/app.js",
+            b"replacement();".to_vec(),
+            &app.revision,
+        )
+        .await
+        .unwrap();
+    assert_ne!(updated.revision, app.revision);
+    assert_eq!(
+        store.read_file("atomic", "ui/app.js").await.unwrap(),
+        b"replacement();"
+    );
+    let mut names = std::fs::read_dir(project.path().join(".refact/apps/atomic/ui"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect::<Vec<_>>();
+    names.sort();
+    assert_eq!(
+        names,
+        ["app.js", "index.html", "style.css"].map(std::ffi::OsString::from)
+    );
+}
+
+#[tokio::test]
 async fn stale_state_writer_cannot_overwrite_persisted_value() {
     let project = tempfile::tempdir().unwrap();
     let store = AppStore::open(project.path()).await.unwrap();

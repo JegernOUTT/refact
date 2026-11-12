@@ -994,6 +994,7 @@ pub(crate) mod tests {
             .contains("already exists"));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn child_app_write_needs_no_human_approval() {
         let fixture = fixture().await;

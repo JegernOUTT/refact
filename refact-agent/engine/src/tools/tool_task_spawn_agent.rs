@@ -1910,6 +1910,7 @@ mod tests {
 
     fn init_repo(root: &Path) {
         run_git(root, &["init"]);
+        run_git(root, &["config", "core.autocrlf", "false"]);
         run_git(root, &["checkout", "-b", "main"]);
         run_git(root, &["config", "user.email", "test@example.com"]);
         run_git(root, &["config", "user.name", "Test User"]);
@@ -1926,7 +1927,7 @@ mod tests {
     }
 
     async fn set_workspace(gcx: Arc<GlobalContext>, root: &Path) {
-        let root = root.canonicalize().unwrap();
+        let root = dunce::canonicalize(root).unwrap();
         *gcx.documents_state.workspace_folders.lock().unwrap() = vec![root];
     }
 
@@ -2110,11 +2111,11 @@ mod tests {
             .await
             .unwrap();
         *gcx.documents_state.workspace_folders.lock().unwrap() = vec![
-            other.canonicalize().unwrap(),
-            source.canonicalize().unwrap(),
+            dunce::canonicalize(&other).unwrap(),
+            dunce::canonicalize(&source).unwrap(),
         ];
         let before = crate::files_correction::get_project_dirs(gcx.clone()).await;
-        assert_eq!(before[0], other.canonicalize().unwrap());
+        assert_eq!(before[0], dunce::canonicalize(&other).unwrap());
         let (branch, commit) =
             resolve_spawn_base(None, None, None, accepted_source.root(), &task_meta);
         let prepared = prepare_agent_worktree_with_base_and_suffix(
@@ -2143,7 +2144,7 @@ mod tests {
         assert!(prepared.meta.root.is_dir());
         assert_eq!(
             prepared.meta.source_workspace_root,
-            source.canonicalize().unwrap()
+            dunce::canonicalize(&source).unwrap()
         );
         assert_eq!(
             prepared.meta.base_commit.as_deref(),
@@ -2158,7 +2159,8 @@ mod tests {
             "accepted project\n"
         );
         let service =
-            WorktreeService::new(gcx.cache_dir.clone(), source.canonicalize().unwrap()).unwrap();
+            WorktreeService::new(gcx.cache_dir.clone(), dunce::canonicalize(&source).unwrap())
+                .unwrap();
         assert_eq!(service.project_hash(), accepted_source.project());
         assert_eq!(
             service.get_worktree(&prepared.meta.id).await.unwrap().meta,
@@ -2208,7 +2210,7 @@ mod tests {
         assert!(!gcx.cache_dir.join("worktrees").exists());
         assert_eq!(
             crate::files_correction::get_project_dirs(gcx).await,
-            vec![other.canonicalize().unwrap()]
+            vec![dunce::canonicalize(&other).unwrap()]
         );
     }
 
@@ -2239,7 +2241,8 @@ mod tests {
         let branch = prepared.meta.branch.clone().unwrap();
         let root = prepared.meta.root.clone();
         let cache_dir = gcx.cache_dir.clone();
-        let service = WorktreeService::new(cache_dir, source.canonicalize().unwrap()).unwrap();
+        let service =
+            WorktreeService::new(cache_dir, dunce::canonicalize(&source).unwrap()).unwrap();
         assert!(service.get_worktree(&id).await.is_ok());
 
         prepared.cleanup_unlinked(gcx).await;

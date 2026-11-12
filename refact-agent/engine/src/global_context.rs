@@ -1247,6 +1247,7 @@ pub mod tests {
         {
             Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => return Ok(false),
+            Err(_) if tokio::fs::symlink_metadata(path).await.is_ok() => return Ok(false),
             Err(error) => return Err(error),
         };
         file.write_all(content.as_bytes()).await?;

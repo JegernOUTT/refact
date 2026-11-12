@@ -1092,7 +1092,18 @@ mod resource_http_tests {
         assert_eq!(unavailable.mode, "unavailable");
         let reason = unavailable.unavailable_reason.unwrap();
         assert_eq!(reason.kind, "already_owned");
-        assert!(reason.detail.contains("pid "));
+        // Windows byte-range locks prevent a competing handle from reading
+        // owner metadata. Exclusion still holds; the None-owner status must
+        // not invent a PID or turn contention into an I/O error.
+        #[cfg(windows)]
+        assert_eq!(
+            reason.detail,
+            "operator store is already owned by another writer"
+        );
+        #[cfg(not(windows))]
+        assert!(reason
+            .detail
+            .contains(&format!("pid {} ", std::process::id())));
         assert!(reason.retry_in_seconds.is_some());
 
         holder.shutdown().await;

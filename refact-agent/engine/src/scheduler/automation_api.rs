@@ -244,6 +244,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn rejected_host_policy_does_not_commit_desired_catalog() {
         let temp = tempfile::tempdir().unwrap();

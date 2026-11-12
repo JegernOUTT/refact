@@ -86,6 +86,7 @@ pub(crate) async fn catalog(app: &AppState, caller: &WorkCaller) -> Result<Vec<S
     {
         let canonical = tokio::fs::canonicalize(&directory)
             .await
+            .map(|path| dunce::simplified(&path).to_path_buf())
             .map_err(Error::storage)?;
         if !canonical.starts_with(&root) {
             return Err(Error::denied());
@@ -131,6 +132,7 @@ pub(crate) async fn catalog(app: &AppState, caller: &WorkCaller) -> Result<Vec<S
     {
         let canonical = tokio::fs::canonicalize(&tasks)
             .await
+            .map(|path| dunce::simplified(&path).to_path_buf())
             .map_err(Error::storage)?;
         if !canonical.starts_with(&root) {
             return Err(Error::denied());
@@ -199,10 +201,73 @@ pub(crate) struct SourceStamp {
     metadata: std::fs::Metadata,
 }
 
-pub(crate) fn source_stamp(source: &Source) -> Result<SourceStamp, Error> {
-    let canonical = crate::coordination::scope::canonical_candidate(&source.path)
-        .map_err(|_| Error::denied())?;
-    let metadata = std::fs::symlink_metadata(&source.path).map_err(|_| Error::denied())?;
+#[cfg(windows)]
+mod win {
+    use std::os::windows::io::AsRawHandle;
+
+    #[repr(C)]
+    struct FileTime {
+        low: u32,
+        high: u32,
+    }
+
+    #[repr(C)]
+    struct ByHandleFileInformation {
+        file_attributes: u32,
+        creation_time: FileTime,
+        last_access_time: FileTime,
+        last_write_time: FileTime,
+        volume_serial_number: u32,
+        file_size_high: u32,
+        file_size_low: u32,
+        number_of_links: u32,
+        file_index_high: u32,
+        file_index_low: u32,
+    }
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetFileInformationByHandle(
+            handle: *mut core::ffi::c_void,
+            information: *mut ByHandleFileInformation,
+        ) -> i32;
+    }
+
+    pub(super) const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    pub(super) const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+
+    pub(super) fn link_count(file: &std::fs::File) -> Option<u32> {
+        let mut information = std::mem::MaybeUninit::<ByHandleFileInformation>::zeroed();
+        let ok = unsafe {
+            GetFileInformationByHandle(file.as_raw_handle() as *mut _, information.as_mut_ptr())
+        };
+        if ok == 0 {
+            return None;
+        }
+        Some(unsafe { information.assume_init() }.number_of_links)
+    }
+}
+
+fn open_source_file(path: &Path) -> Result<std::fs::File, Error> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        options.custom_flags(win::FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    let file = options.open(path).map_err(|_| Error::denied())?;
+    handle_is_single_plain_file(&file)?;
+    Ok(file)
+}
+
+fn handle_is_single_plain_file(file: &std::fs::File) -> Result<(), Error> {
+    let metadata = file.metadata().map_err(|_| Error::denied())?;
     if !metadata.is_file() || metadata.file_type().is_symlink() {
         return Err(Error::denied());
     }
@@ -212,6 +277,30 @@ pub(crate) fn source_stamp(source: &Source) -> Result<SourceStamp, Error> {
         if metadata.nlink() != 1 {
             return Err(Error::denied());
         }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        if metadata.file_attributes() & win::FILE_ATTRIBUTE_REPARSE_POINT != 0
+            || win::link_count(file) != Some(1)
+        {
+            return Err(Error::denied());
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn source_stamp(source: &Source) -> Result<SourceStamp, Error> {
+    let canonical = crate::coordination::scope::canonical_candidate(&source.path)
+        .map_err(|_| Error::denied())?;
+    let before = std::fs::symlink_metadata(&source.path).map_err(|_| Error::denied())?;
+    if !before.is_file() || before.file_type().is_symlink() {
+        return Err(Error::denied());
+    }
+    let file = open_source_file(&source.path)?;
+    let metadata = file.metadata().map_err(|_| Error::denied())?;
+    if !stat_equal(&before, &metadata) {
+        return Err(Error::denied());
     }
     Ok(SourceStamp {
         canonical,
@@ -235,21 +324,7 @@ fn read_source(root: &Path, source: &Source) -> Result<(serde_json::Value, Strin
     if !before.is_file() || before.file_type().is_symlink() || before.len() > MAX_SOURCE_BYTES {
         return Err(Error::denied());
     }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        if before.nlink() != 1 {
-            return Err(Error::denied());
-        }
-    }
-    let mut options = std::fs::OpenOptions::new();
-    options.read(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
-    }
-    let mut file = options.open(&source.path).map_err(|_| Error::denied())?;
+    let mut file = open_source_file(&source.path)?;
     if !stat_equal(&before, &file.metadata().map_err(|_| Error::denied())?) {
         return Err(Error::denied());
     }
@@ -319,6 +394,7 @@ fn read_source(root: &Path, source: &Source) -> Result<(serde_json::Value, Strin
         (value, crate::chat::trajectory_index::source_sha256(&bytes))
     };
     let after = std::fs::symlink_metadata(&source.path).map_err(|_| Error::denied())?;
+    handle_is_single_plain_file(&file)?;
     if !stat_equal(&before, &file.metadata().map_err(|_| Error::denied())?)
         || !stat_equal(&before, &after)
         || crate::coordination::scope::canonical_candidate(&source.path)
@@ -545,11 +621,77 @@ impl<'de> serde::de::DeserializeSeed<'de> for MessagesSeed {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn catalog_canonical_directories_keep_containment_and_source_fences() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(dir.path()).unwrap();
+        let trajectories = root.join(".refact/trajectories");
+        let task = root.join(".refact/tasks/native-task");
+        std::fs::create_dir_all(&trajectories).unwrap();
+        std::fs::create_dir_all(&task).unwrap();
+        std::fs::write(
+            task.join("meta.yaml"),
+            "id: native-task\nname: Native task\n",
+        )
+        .unwrap();
+        let value = json!({"id":"native-chat","title":"Native chat","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-02T00:00:00Z","model":"trusted/model","mode":"agent","tool_use":"agent","version":1,"messages":[]});
+        std::fs::write(
+            trajectories.join("native-chat.json"),
+            serde_json::to_vec(&value).unwrap(),
+        )
+        .unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let app = AppState::from_gcx(gcx).await;
+        let caller = WorkCaller {
+            source_root: std::fs::canonicalize(&root).unwrap(),
+            checkout_root: root.clone(),
+            root_chat_id: None,
+            principal: "fixture".into(),
+            model: None,
+        };
+        let sources = catalog(&app, &caller).await.unwrap();
+        assert!(sources.iter().any(|source| source.item.id == "native-chat"));
+        let source = sources
+            .iter()
+            .find(|source| source.item.id == "native-task")
+            .unwrap();
+        assert_eq!(source.path, task.join("meta.yaml"));
+        assert!(read_source(&root, source).is_ok());
+        let foreign = tempfile::tempdir().unwrap();
+        assert!(read_source(&dunce::canonicalize(foreign.path()).unwrap(), source).is_err());
+        std::fs::write(&source.path, "id: forged-task\nname: Forged\n").unwrap();
+        assert!(read_source(&root, source).is_err());
+    }
+
     #[cfg(unix)]
     #[tokio::test]
+    async fn catalog_rejects_directories_resolving_outside_the_project() {
+        let dir = tempfile::tempdir().unwrap();
+        let foreign = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join(".refact")).unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let app = AppState::from_gcx(gcx).await;
+        let caller = WorkCaller {
+            source_root: dunce::canonicalize(dir.path()).unwrap(),
+            checkout_root: dir.path().into(),
+            root_chat_id: None,
+            principal: "fixture".into(),
+            model: None,
+        };
+        for name in ["trajectories", "tasks"] {
+            let link = dir.path().join(".refact").join(name);
+            std::os::unix::fs::symlink(foreign.path(), &link).unwrap();
+            assert!(catalog(&app, &caller).await.is_err());
+            std::fs::remove_file(link).unwrap();
+        }
+    }
+
+    #[tokio::test]
     async fn hardlinked_task_source_cannot_disclose_an_external_alias() {
-        let root = tempfile::tempdir().unwrap();
-        let private = tempfile::tempdir().unwrap();
+        let base = dunce::canonicalize(std::env::temp_dir()).unwrap();
+        let root = tempfile::tempdir_in(&base).unwrap();
+        let private = tempfile::tempdir_in(&base).unwrap();
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let external = private.path().join("meta.yaml");
         std::fs::write(&external, "id: alias-task\nname: Confidential topic\n").unwrap();
@@ -581,7 +723,7 @@ mod tests {
     }
     #[tokio::test]
     async fn streaming_large_source_carries_late_provenance_and_rejects_changed_bytes() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir_in(dunce::canonicalize(std::env::temp_dir()).unwrap()).unwrap();
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let path = dir.path().join("synthetic.json");
         let value = json!({"id":"synthetic","title":"Private fixture title","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-02T00:00:00Z","model":"trusted/model","mode":"agent","tool_use":"agent","version":1,"messages":[{"role":"user","content":"Build a fixture parser"},{"role":"assistant","content":"x".repeat(3*1024*1024)},{"role":"tool","content":"late guarded result","privacy":{"files":[{"path":"/synthetic/guarded","zone":"guarded","attribution":"declared"}]}}]});

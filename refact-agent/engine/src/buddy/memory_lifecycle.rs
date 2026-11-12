@@ -3404,7 +3404,7 @@ mod tests {
 
     #[tokio::test]
     async fn merge_owner_preserves_lineage_links_and_refreshes_retrieval() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir_in(dunce::canonicalize(std::env::temp_dir()).unwrap()).unwrap();
         let app = test_gcx_with_workspace(dir.path()).await;
         let root = dir.path().join(KNOWLEDGE_FOLDER_NAME);
         tokio::fs::create_dir_all(&root).await.unwrap();

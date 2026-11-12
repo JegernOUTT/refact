@@ -324,18 +324,7 @@ impl WindowsOwnedProfile {
         // Freeze reparse/attribute mutation during cleanup. The existing root DELETE
         // handle requires this second handle to SHARE_DELETE; the original still denies
         // third-party DELETE opens. No handle is dropped during the transition.
-        let shield = unsafe {
-            ReOpenFile(
-                file.as_raw_handle().cast(),
-                FILE_READ_ATTRIBUTES | FILE_LIST_DIRECTORY,
-                FILE_SHARE_READ | FILE_SHARE_DELETE,
-                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
-            )
-        };
-        if shield == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
-            return Err(last());
-        }
-        let shield = unsafe { File::from_raw_handle(shield.cast()) };
+        let shield = shield_root(file)?;
         directory(file)?;
         let sd = descriptor(&current_sid()?)?;
         private_acl(file, &sd)?;
@@ -408,6 +397,51 @@ fn create_root(parent: &File, name: &str, sd: &Local) -> Result<File, String> {
     };
     if status < 0 {
         return Err(nt_error(status));
+    }
+    Ok(unsafe { File::from_raw_handle(handle.cast()) })
+}
+fn shield_root(root: &File) -> Result<File, String> {
+    use windows_sys::Wdk::Foundation::OBJECT_ATTRIBUTES;
+    use windows_sys::Wdk::Storage::FileSystem::{
+        NtCreateFile, FILE_DIRECTORY_FILE, FILE_OPEN, FILE_OPEN_REPARSE_POINT,
+        FILE_SYNCHRONOUS_IO_NONALERT,
+    };
+    use windows_sys::Win32::Foundation::UNICODE_STRING;
+    // ReOpenFile rejects directories even with FILE_FLAG_BACKUP_SEMANTICS.
+    // An empty native relative name reopens the pinned object, not its path.
+    let mut empty = [0u16];
+    let mut name = UNICODE_STRING {
+        Length: 0,
+        MaximumLength: 2,
+        Buffer: empty.as_mut_ptr(),
+    };
+    let object = OBJECT_ATTRIBUTES {
+        Length: std::mem::size_of::<OBJECT_ATTRIBUTES>() as u32,
+        RootDirectory: root.as_raw_handle().cast(),
+        ObjectName: &mut name,
+        Attributes: 0x40,
+        SecurityDescriptor: std::ptr::null_mut(),
+        SecurityQualityOfService: std::ptr::null_mut(),
+    };
+    let mut ios = unsafe { std::mem::zeroed() };
+    let mut handle = std::ptr::null_mut();
+    let status = unsafe {
+        NtCreateFile(
+            &mut handle,
+            FILE_READ_ATTRIBUTES | FILE_LIST_DIRECTORY | SYNCHRONIZE,
+            &object,
+            &mut ios,
+            std::ptr::null(),
+            0,
+            FILE_SHARE_READ | FILE_SHARE_DELETE,
+            FILE_OPEN,
+            FILE_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT,
+            std::ptr::null(),
+            0,
+        )
+    };
+    if status < 0 {
+        return Err(format!("profile root shield: {}", nt_error(status)));
     }
     Ok(unsafe { File::from_raw_handle(handle.cast()) })
 }
@@ -563,6 +597,119 @@ fn remove_contents(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn windows_directory_shield_reopens_owned_object_and_cleanup_is_idempotent() {
+        let cache = tempfile::tempdir().unwrap();
+        let profile = WindowsOwnedProfile::create(cache.path()).unwrap();
+        let root = profile.root.lock().unwrap();
+        let original = info(root.as_ref().unwrap()).unwrap();
+        let shield = shield_root(root.as_ref().unwrap()).unwrap();
+        directory(&shield).unwrap();
+        let reopened = info(&shield).unwrap();
+        assert_eq!(original.dwVolumeSerialNumber, reopened.dwVolumeSerialNumber);
+        assert_eq!(original.nFileIndexHigh, reopened.nFileIndexHigh);
+        assert_eq!(original.nFileIndexLow, reopened.nFileIndexLow);
+        assert!(open(profile.path(), true).is_err());
+        drop(shield);
+        drop(root);
+        profile.cleanup(true, true).unwrap();
+        assert!(!profile.path().exists());
+        profile.cleanup(true, true).unwrap();
+    }
+    fn junction(link: &Path, target: &Path) {
+        let output = std::process::Command::new("cmd")
+            .args(["/D", "/C", "mklink", "/J"])
+            .arg(link)
+            .arg(target)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "junction setup required, not skipped: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    #[test]
+    fn windows_cleanup_proof_lock_and_neighbor_preservation() {
+        let cache = tempfile::tempdir().unwrap();
+        let profile = WindowsOwnedProfile::create(cache.path()).unwrap();
+        let neighbor = WindowsOwnedProfile::create(cache.path()).unwrap();
+        std::fs::create_dir(profile.path().join("nested")).unwrap();
+        std::fs::write(profile.path().join("nested/data"), b"delete").unwrap();
+        std::fs::write(neighbor.path().join("keep"), b"keep").unwrap();
+        assert!(profile.cleanup(false, true).is_err());
+        assert!(profile.cleanup(true, false).is_err());
+        std::fs::write(
+            profile.path().join("SingletonLock"),
+            b"unrecognized Windows lock",
+        )
+        .unwrap();
+        assert!(profile.cleanup(true, true).is_err());
+        assert!(profile.root.lock().unwrap().is_some());
+        std::fs::remove_file(profile.path().join("SingletonLock")).unwrap();
+        profile.cleanup(true, true).unwrap();
+        assert!(!profile.path().exists());
+        assert_eq!(
+            std::fs::read(neighbor.path().join("keep")).unwrap(),
+            b"keep"
+        );
+        neighbor.cleanup(true, true).unwrap();
+    }
+    #[test]
+    fn windows_root_and_ancestor_replacement_is_denied() {
+        let cache = tempfile::tempdir().unwrap();
+        let profile = WindowsOwnedProfile::create(cache.path()).unwrap();
+        assert!(std::fs::rename(profile.path(), profile.path().with_extension("moved")).is_err());
+        assert!(std::fs::remove_dir(profile.path()).is_err());
+        assert!(std::fs::rename(cache.path(), cache.path().with_extension("moved")).is_err());
+        profile.cleanup(true, true).unwrap();
+    }
+    #[test]
+    fn windows_reparse_ancestor_rejected_and_child_deleted_not_followed() {
+        let cache = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("secret"), b"keep").unwrap();
+        let alias = cache.path().join("alias");
+        junction(&alias, outside.path());
+        assert!(WindowsOwnedProfile::create(&alias).is_err());
+        assert!(WindowsOwnedProfile::create(&alias.join("subdir")).is_err());
+        let profile = WindowsOwnedProfile::create(cache.path()).unwrap();
+        junction(&profile.path().join("junction"), outside.path());
+        std::fs::hard_link(
+            outside.path().join("secret"),
+            profile.path().join("hardlink"),
+        )
+        .unwrap();
+        profile.cleanup(true, true).unwrap();
+        assert_eq!(
+            std::fs::read(outside.path().join("secret")).unwrap(),
+            b"keep"
+        );
+        std::fs::remove_dir(alias).unwrap();
+    }
+    #[test]
+    fn windows_readonly_and_budget_failures_retain_original_guard() {
+        let cache = tempfile::tempdir().unwrap();
+        let profile = WindowsOwnedProfile::create(cache.path()).unwrap();
+        let readonly = profile.path().join("readonly");
+        std::fs::write(&readonly, b"keep").unwrap();
+        let mut permissions = std::fs::metadata(&readonly).unwrap().permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(&readonly, permissions).unwrap();
+        assert!(profile.cleanup(true, true).is_err());
+        assert!(profile.root.lock().unwrap().is_some());
+        let root = profile.root.lock().unwrap();
+        let mut budget = Budget {
+            nodes: 0,
+            deadline: Instant::now() + Duration::from_secs(1),
+        };
+        assert!(remove_contents(profile.path(), root.as_ref().unwrap(), &mut budget, 0).is_err());
+        drop(root);
+        let mut permissions = std::fs::metadata(&readonly).unwrap().permissions();
+        permissions.set_readonly(false);
+        std::fs::set_permissions(&readonly, permissions).unwrap();
+        profile.cleanup(true, true).unwrap();
+    }
     #[test]
     fn windows_persistent_quota_survives_guard_drop_and_concurrency() {
         let cache = tempfile::tempdir().unwrap();

@@ -314,7 +314,10 @@ mod tests {
     #[tokio::test]
     async fn knowledge_results_and_expansion_hide_foreign_agent_namespace() {
         let dir = tempfile::tempdir().unwrap();
-        let knowledge_dir = dir.path().join(crate::file_filter::KNOWLEDGE_FOLDER_NAME);
+        // Search filters indexed paths against canonical knowledge roots. Do
+        // not seed an 8.3 temp alias which production discovery would resolve.
+        let root = dunce::canonicalize(dir.path()).unwrap();
+        let knowledge_dir = root.join(crate::file_filter::KNOWLEDGE_FOLDER_NAME);
         tokio::fs::create_dir_all(&knowledge_dir).await.unwrap();
         tokio::fs::write(
             knowledge_dir.join("private.md"),
@@ -330,7 +333,7 @@ mod tests {
         .unwrap();
 
         let gcx = crate::global_context::tests::make_test_gcx().await;
-        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![dir.path().to_path_buf()];
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![root];
         {
             let text = tokio::fs::read_to_string(knowledge_dir.join("private.md"))
                 .await
@@ -359,7 +362,10 @@ mod tests {
         }
 
         let foreign_result = run_knowledge(gcx.clone(), Some("B")).await;
-        assert!(foreign_result.contains("Shared Knowledge"));
+        assert!(
+            foreign_result.contains("Shared Knowledge"),
+            "{foreign_result}"
+        );
         assert!(!foreign_result.contains("Agent Secret"), "{foreign_result}");
         assert!(!foreign_result.contains("private.md"), "{foreign_result}");
         assert!(

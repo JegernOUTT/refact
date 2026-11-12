@@ -134,8 +134,9 @@ impl WakeStore {
             || request.canonical_root != entry.root
             || tokio::fs::canonicalize(&entry.root)
                 .await
+                .map(|path| dunce::simplified(&path).to_path_buf())
                 .map_err(|e| e.to_string())?
-                != entry.root
+                != dunce::simplified(&entry.root)
         {
             return Err("invalid finite canonical-project wake-only grant".into());
         }
@@ -284,7 +285,7 @@ mod tests {
         let entry = ProjectEntry {
             id: "p".into(),
             slug: "p".into(),
-            root: dir.path().canonicalize().unwrap(),
+            root: dunce::canonicalize(dir.path()).unwrap(),
             pinned: false,
             automation_suspended: false,
             last_active_ms: 0,

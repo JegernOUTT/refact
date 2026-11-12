@@ -154,6 +154,7 @@ fn atomic(dir: &Dir, path: &str, bytes: &[u8]) -> AppResult<()> {
         let mut file = parent.open_with(&tmp, &options).map_err(err)?;
         file.write_all(bytes).map_err(err)?;
         file.sync_all().map_err(err)?;
+        drop(file);
         parent.rename(&tmp, &parent, leaf).map_err(err)?;
         // Persist the rename before reporting success on Unix.
         #[cfg(unix)]
@@ -921,6 +922,75 @@ mod tests {
         assert_eq!(
             std::fs::read(&outside).unwrap(),
             br#"{"revision":1,"value":"outside"}"#
+        );
+    }
+
+    #[tokio::test]
+    async fn large_state_roundtrips_after_reopen_and_obeys_cas() {
+        let project = tempfile::tempdir().unwrap();
+        let store = AppStore::open(project.path()).await.unwrap();
+        store.create("large", "Large").await.unwrap();
+        let value = serde_json::json!({"data": "x".repeat(4 * 1024 * 1024 + 1)});
+        let written = store
+            .write_state("large", StateScope::Standalone, 0, value.clone())
+            .await
+            .unwrap();
+        assert_eq!(written.revision, 1);
+        drop(store);
+        let store = AppStore::open(project.path()).await.unwrap();
+        let loaded = store
+            .read_state("large", StateScope::Standalone)
+            .await
+            .unwrap();
+        assert_eq!(loaded.value, value);
+        assert_eq!(loaded.revision, 1);
+        assert!(store
+            .write_state("large", StateScope::Standalone, 0, serde_json::Value::Null)
+            .await
+            .is_err());
+        assert_eq!(
+            store
+                .read_state("large", StateScope::Standalone)
+                .await
+                .unwrap()
+                .value,
+            value
+        );
+    }
+
+    #[tokio::test]
+    async fn named_icons_publish_without_files_but_resource_icons_must_exist() {
+        let project = tempfile::tempdir().unwrap();
+        let store = AppStore::open(project.path()).await.unwrap();
+        let created = store.create("icons", "Icons").await.unwrap();
+        let mut manifest = created.manifest.clone();
+        manifest.icon = Some("lucide:timer".into());
+        let record = store
+            .write_file(
+                "icons",
+                "app.json",
+                serde_json::to_vec(&manifest).unwrap(),
+                &created.revision,
+            )
+            .await
+            .unwrap();
+        let published = store.publish("icons", &record.revision).await.unwrap();
+        assert_eq!(published.manifest.icon.as_deref(), Some("lucide:timer"));
+        assert!(!published.files.contains_key("lucide:timer"));
+        manifest.icon = Some("assets/missing.svg".into());
+        let failure = store
+            .write_file(
+                "icons",
+                "app.json",
+                serde_json::to_vec(&manifest).unwrap(),
+                &record.revision,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(failure, "missing entrypoint or icon");
+        assert_eq!(
+            store.published("icons").await.unwrap().revision,
+            published.revision
         );
     }
 

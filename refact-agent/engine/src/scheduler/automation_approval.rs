@@ -436,6 +436,7 @@ mod tests {
         (app, ccx, call, args, dir)
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn actual_preflight_never_autoauthorizes_and_human_acceptance_is_one_use() {
         let (app, ccx, call, args, _dir) = fixture().await;
@@ -493,6 +494,7 @@ mod tests {
         app.gcx.apps.shutdown().await;
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn changed_arguments_or_catalog_revision_burn_human_receipt() {
         for stale_catalog in [false, true] {
@@ -524,6 +526,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn endpoint_grant_requires_actual_human_and_binds_every_grant_argument() {
         let (app, ccx, mut call, mut args, dir) = fixture().await;

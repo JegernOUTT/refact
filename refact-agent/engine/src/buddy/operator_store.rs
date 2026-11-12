@@ -5531,7 +5531,11 @@ mod tests {
         let root = TempDir::new().unwrap();
         let identity = project(root.path());
         let first = OperatorStore::open(root.path(), &identity).unwrap();
-        fs::write(root.path().join(".refact/buddy/operator.lock"), b"not-json").unwrap();
+        let lock_path = root.path().join(".refact/buddy/operator.lock");
+        #[cfg(not(windows))]
+        fs::write(&lock_path, b"not-json").unwrap();
+        #[cfg(windows)]
+        assert!(fs::write(&lock_path, b"not-json").is_err());
         let Err(error) = OperatorStore::open(root.path(), &identity) else {
             panic!("expected contended lock");
         };

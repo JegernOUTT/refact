@@ -681,6 +681,7 @@ mod tests {
         assert!(!root.join(".refact").exists());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn observer_background_lease_requires_approval_and_expires_at_boundary() {
         use crate::daemon::idle::{idle_decision, IdleDecision, WorkerIdleSnapshot};
@@ -843,6 +844,7 @@ mod tests {
         assert!(automation_pending(&unapproved, 199).is_none());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn corrupt_journal_is_error_not_legacy_or_wake_authority() {
         let dir = tempdir().unwrap();
@@ -882,6 +884,7 @@ mod tests {
             .exists());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn corrupt_observer_retries_coarsely_without_starting_worker() {
         let dir = tempdir().unwrap();

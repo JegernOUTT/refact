@@ -9,6 +9,15 @@ pub struct ReviewStore {
 impl ReviewStore {
     pub fn open(trusted_root: &Path) -> Result<Self> {
         let root = std::fs::canonicalize(trusted_root)?;
+        #[cfg(windows)]
+        let directory = {
+            use std::os::windows::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(0x0200_0000)
+                .open(&root)?
+        };
+        #[cfg(not(windows))]
         let mut directory = std::fs::File::open(&root)?;
         #[cfg(target_os = "linux")]
         let db = {

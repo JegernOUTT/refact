@@ -5227,7 +5227,9 @@ mod resume_validation_tests {
         ])
         .await
         .unwrap();
-        let original = serde_json::to_value(&context).unwrap();
+        let mut original = serde_json::to_value(&context).unwrap();
+        original["content"][0]["file_name"] =
+            serde_json::json!(path.to_string_lossy().replace('\\', "/"));
         let mut messages =
             serde_json::from_value::<Vec<ChatMessage>>(serde_json::json!([context])).unwrap();
         reconcile_resume_tool_pairs(&mut messages, false).unwrap();

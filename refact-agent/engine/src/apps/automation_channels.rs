@@ -70,6 +70,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn collector_outbox_reaches_only_granted_app_topic_without_model() {
         let temp = tempfile::tempdir().unwrap();
@@ -164,6 +165,7 @@ mod tests {
         gcx.apps.shutdown().await;
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn pending_collector_payload_cannot_be_retargeted_by_reapproval() {
         let temp = tempfile::tempdir().unwrap();
@@ -306,6 +308,7 @@ mod tests {
         gcx.apps.shutdown().await;
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn transform_outbox_projects_fields_into_same_app_broker() {
         let temp = tempfile::tempdir().unwrap();
@@ -383,6 +386,7 @@ mod tests {
         gcx.apps.shutdown().await;
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn trusted_publication_replay_is_durable_but_equal_independent_updates_survive() {
         let temp = tempfile::tempdir().unwrap();

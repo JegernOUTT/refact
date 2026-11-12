@@ -566,7 +566,9 @@ pub fn prepare_merge_checkout(source_root: &Path, target: &str) -> Result<MergeC
         .prefix("refact-merge-target-")
         .tempdir()
         .map_err(|error| error.to_string())?;
-    let root = temporary.path().join("worktree");
+    let root = dunce::canonicalize(temporary.path())
+        .map_err(|error| error.to_string())?
+        .join("worktree");
     Ok(MergeCheckout {
         root,
         source_root: source_root.to_path_buf(),
@@ -1525,6 +1527,45 @@ mod diff_metadata_tests {
 
     fn git(root: &Path, args: &[&str]) -> String {
         run_git(root, args).unwrap()
+    }
+
+    #[test]
+    fn temporary_merge_checkout_keeps_canonical_identity_after_materialization() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = dunce::canonicalize(temp.path()).unwrap();
+        git(&source, &["init", "-b", "main"]);
+        git(&source, &["config", "core.autocrlf", "false"]);
+        git(&source, &["config", "user.email", "merge@example.test"]);
+        git(&source, &["config", "user.name", "Merge Test"]);
+        std::fs::write(source.join("file.txt"), "base\n").unwrap();
+        git(&source, &["add", "file.txt"]);
+        git(&source, &["commit", "-m", "base"]);
+        git(&source, &["branch", "target"]);
+        std::fs::write(source.join("file.txt"), "user changes\n").unwrap();
+
+        let checkout = prepare_merge_checkout(&source, "target").unwrap();
+        assert!(checkout.is_temporary());
+        assert!(!checkout.root.exists());
+        assert_eq!(
+            checkout.root,
+            dunce::canonicalize(checkout.root.parent().unwrap())
+                .unwrap()
+                .join("worktree")
+        );
+        checkout.materialize().unwrap();
+        assert_eq!(checkout.root, dunce::canonicalize(&checkout.root).unwrap());
+        let target = list_git_worktrees_checked(&source)
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.branch.as_deref() == Some("target"))
+            .unwrap();
+        assert_eq!(dunce::canonicalize(target.root).unwrap(), checkout.root);
+        checkout.cleanup().unwrap();
+        assert!(!checkout.root.exists());
+        assert_eq!(
+            std::fs::read_to_string(source.join("file.txt")).unwrap(),
+            "user changes\n"
+        );
     }
 
     #[test]

@@ -1976,7 +1976,11 @@ mod router_tests {
         }
         let limited = router.oneshot(frontend_error_request()).await.unwrap();
         assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn automation_router_keeps_origin_authorization_and_private_runtime() {
         let dir = tempfile::tempdir().unwrap();
         let mut gcx = crate::global_context::tests::make_test_gcx_with_dirs(
             dir.path().join("cache"),

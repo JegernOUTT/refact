@@ -343,12 +343,12 @@ mod tests {
         *gcx.documents_state.workspace_folders.lock().unwrap() = vec![root.path().to_path_buf()];
         let app = AppState::from_gcx(gcx).await;
         let mut session = ChatSession::new("native-chat".into());
-        let canonical_root = root.path().canonicalize().unwrap();
+        let canonical_root = dunce::canonicalize(root.path()).unwrap();
         let mut alias = canonical_root.as_os_str().to_os_string();
         alias.push(format!("{}.", std::path::MAIN_SEPARATOR));
         let alias = std::path::PathBuf::from(alias);
         assert_ne!(alias.as_os_str(), canonical_root.as_os_str());
-        assert_eq!(alias.canonicalize().unwrap(), canonical_root);
+        assert_eq!(dunce::canonicalize(&alias).unwrap(), canonical_root);
         session.work_project_root = Some(alias);
         session
             .register_pending_questions(PendingQuestionSet {

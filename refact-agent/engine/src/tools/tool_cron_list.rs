@@ -306,6 +306,7 @@ mod tests {
         assert_eq!(all[0]["id"], json!("cron_list_sess_a"));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn cron_list_scope_all_sees_session_and_durable() {
         let session_store: Arc<dyn CronStore> = Arc::new(InMemoryCronStore::new());

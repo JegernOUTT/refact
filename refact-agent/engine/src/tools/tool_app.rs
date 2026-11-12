@@ -1478,6 +1478,7 @@ pub(super) mod tests {
         app.gcx.apps.shutdown().await;
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn app_preflight_does_not_require_confirmation() {
         let (app, _ccx, _dir) = approval_fixture().await;
@@ -1517,6 +1518,7 @@ pub(super) mod tests {
         app.gcx.apps.shutdown().await;
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn attach_without_confirmation_keeps_binding_resolution_chat_local() {
         let (app, ccx, _dir) = approval_fixture().await;
@@ -1569,6 +1571,7 @@ pub(super) mod tests {
         app.gcx.apps.shutdown().await;
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn unbound_create_dispatch_needs_no_receipt_and_retains_store_validation() {
         let (app, ccx, _dir) = approval_fixture().await;

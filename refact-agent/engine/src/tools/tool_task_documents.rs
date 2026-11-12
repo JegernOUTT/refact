@@ -1521,7 +1521,9 @@ mod tests {
 
     async fn temp_documents_dir() -> (TempDir, PathBuf) {
         let temp = tempfile::tempdir().unwrap();
-        let dir = temp.path().join(".refact/tasks/task-1/documents");
+        let dir = dunce::canonicalize(temp.path())
+            .unwrap()
+            .join(".refact/tasks/task-1/documents");
         fs::create_dir_all(&dir).await.unwrap();
         (temp, dir)
     }

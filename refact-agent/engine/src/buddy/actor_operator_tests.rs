@@ -54,12 +54,21 @@ async fn reopen_succeeds_once_the_lock_is_released() {
     let mut service = service(&root);
     service.enable_operator_from_settings();
     assert!(service.outcome_runtime.is_none());
+    #[cfg(not(windows))]
     assert!(matches!(
         service
             .operator_open_failure
             .as_ref()
             .map(|failure| &failure.reason),
         Some(OperatorOpenFailureReason::AlreadyOwned(Some(_)))
+    ));
+    #[cfg(windows)]
+    assert!(matches!(
+        service
+            .operator_open_failure
+            .as_ref()
+            .map(|failure| &failure.reason),
+        Some(OperatorOpenFailureReason::AlreadyOwned(None))
     ));
     let buddy = Arc::new(tokio::sync::Mutex::new(Some(service)));
 

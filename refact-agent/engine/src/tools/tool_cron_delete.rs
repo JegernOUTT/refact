@@ -193,6 +193,7 @@ mod tests {
         assert!(session_store.list().await.is_empty());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn cron_delete_removes_durable_task() {
         let temp = tempfile::tempdir().unwrap();
@@ -216,6 +217,7 @@ mod tests {
         assert!(durable_store.list().await.is_empty());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn cron_delete_uses_same_durable_path_as_list() {
         use crate::tools::tool_cron_list::CronListRuntime;

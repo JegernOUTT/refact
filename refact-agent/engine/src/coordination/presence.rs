@@ -914,7 +914,8 @@ mod tests {
     #[tokio::test]
     async fn production_startup_publishes_presence_and_shutdown_closes_it() {
         crate::runtime_settings::reset_for_test();
-        let workspace = tempfile::tempdir().unwrap();
+        let workspace =
+            tempfile::tempdir_in(dunce::canonicalize(std::env::temp_dir()).unwrap()).unwrap();
         let config = tempfile::tempdir().unwrap();
         let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
             workspace.path().join("cache"),

@@ -1356,7 +1356,7 @@ mod tests {
         use crate::at_commands::at_commands::AtCommandsContext;
         use crate::tools::file_edit::tool_create_textdoc::tool_create_text_doc_exec;
         let temp = tempfile::tempdir().unwrap();
-        let root = temp.path().canonicalize().unwrap();
+        let root = dunce::canonicalize(temp.path()).unwrap();
         std::fs::create_dir(root.join("src")).unwrap();
         let (mut guard, _) = spawn_fixture();
         guard.engineering = true;

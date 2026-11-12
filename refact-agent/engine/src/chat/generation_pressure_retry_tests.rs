@@ -483,8 +483,9 @@ async fn native_mutation_in_flight_blocks_runner_claim_until_guard_drop() {
 #[tokio::test]
 async fn populated_recovery_snapshot_load_interrupts_and_redacts() {
     let dir = tempfile::tempdir().unwrap();
+    let root = dunce::canonicalize(dir.path()).unwrap();
     let gcx = crate::global_context::tests::make_test_gcx().await;
-    *gcx.documents_state.workspace_folders.lock().unwrap() = vec![dir.path().to_path_buf()];
+    *gcx.documents_state.workspace_folders.lock().unwrap() = vec![root.clone()];
     let mut session = ChatSession::new("recovery-reload".into());
     session.add_message(ChatMessage::new("user".into(), "continue".into()));
     session.runtime.recovery = Some(active_record());
@@ -496,7 +497,7 @@ async fn populated_recovery_snapshot_load_interrupts_and_redacts() {
         .await
         .unwrap();
     assert!(
-        path.starts_with(dir.path()),
+        path.starts_with(&root),
         "persistence must use the isolated workspace"
     );
     let mut saved: serde_json::Value =

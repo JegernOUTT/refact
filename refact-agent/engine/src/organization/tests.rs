@@ -13,7 +13,7 @@ fn organization_setting_patch_preserves_other_background_permissions() {
 #[tokio::test]
 async fn service_rejects_foreign_children_and_clears_derived_taxonomy_provenance() {
     use crate::{app_state::AppState, coordination::scope::WorkCaller, caps::BaseModelRecord};
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir_in(dunce::canonicalize(std::env::temp_dir()).unwrap()).unwrap();
     let foreign = tempfile::tempdir().unwrap();
     let gcx = crate::global_context::tests::make_test_gcx().await;
     *gcx.documents_state.workspace_folders.lock().unwrap() = vec![dir.path().into()];

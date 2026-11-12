@@ -237,7 +237,7 @@ mod tests {
         let workspace = tempfile::tempdir().unwrap();
         let gcx = crate::global_context::tests::make_test_gcx().await;
         *gcx.documents_state.workspace_folders.lock().unwrap() =
-            vec![workspace.path().canonicalize().unwrap()];
+            vec![dunce::canonicalize(workspace.path()).unwrap()];
         let (root, _) = crate::caps::project_model_defaults_state(gcx.clone()).await;
         let mut caps = crate::caps::CodeAssistantCaps::default();
         caps.chat_models.insert(
@@ -284,7 +284,10 @@ mod tests {
         drop(update);
 
         let caller = caller.await.unwrap();
-        assert_eq!(caller.source_root, workspace.path().canonicalize().unwrap());
+        assert_eq!(
+            caller.source_root,
+            dunce::canonicalize(workspace.path()).unwrap()
+        );
         assert_eq!(caller.checkout_root, workspace.path());
         assert_eq!(caller.model.unwrap().id, "test/model");
     }
@@ -310,6 +313,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("project");
         std::fs::create_dir(&root).unwrap();
+        let root = dunce::canonicalize(&root).unwrap();
         let caller = WorkCaller {
             source_root: root.clone(),
             checkout_root: root.clone(),
@@ -319,7 +323,7 @@ mod tests {
         };
         assert_eq!(
             resolve_path("new/sub/file.rs", &caller).unwrap(),
-            root.join("new/sub/file.rs")
+            root.join("new").join("sub").join("file.rs")
         );
         assert!(resolve_path("../private", &caller).is_err());
         assert!(resolve_path(

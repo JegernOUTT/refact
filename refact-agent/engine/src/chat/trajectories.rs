@@ -17425,12 +17425,18 @@ mod tests {
                 serde_json::to_value(&expected).unwrap(),
                 "direct projection, case {i}"
             );
-            let entries = app
-                .chat
-                .trajectory_index_coordinator
-                .snapshot(&index_dir, None)
-                .await
-                .unwrap();
+            let entries = if trajectory_index::trajectory_index_coordinator_rollout_enabled() {
+                app.chat
+                    .trajectory_index_coordinator
+                    .snapshot(&index_dir, None)
+                    .await
+                    .unwrap()
+            } else {
+                trajectory_index::read_trajectory_index(&index_dir)
+                    .await
+                    .unwrap()
+                    .expect("saved legacy index")
+            };
             let actual = entries
                 .entries
                 .iter()

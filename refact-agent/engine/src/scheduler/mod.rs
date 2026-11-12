@@ -105,6 +105,39 @@ pub(crate) mod tests {
         );
     }
 
+    #[cfg(not(unix))]
+    #[tokio::test]
+    async fn non_unix_durable_project_store_fails_closed_without_private_runtime() {
+        let project = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![project.path().into()];
+        let error = match active_durable_cron_store(gcx).await {
+            Ok(_) => panic!("durable store must not open without private runtime permissions"),
+            Err(error) => error,
+        };
+        assert_eq!(error, "private automation runtime permissions unsupported");
+        let journal = refact_scheduler_core::automation::AutomationJournal::open(project.path());
+        assert_eq!(
+            journal.err().as_deref(),
+            Some("private automation runtime permissions unsupported")
+        );
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn non_unix_credential_store_fails_closed() {
+        let project = tempfile::tempdir().unwrap();
+        let storage = tempfile::tempdir().unwrap();
+        for base in [None, Some(storage.path())] {
+            assert_eq!(
+                credentials::AutomationCredentialStore::open(project.path(), base)
+                    .err()
+                    .as_deref(),
+                Some("private credential storage unavailable")
+            );
+        }
+    }
+
     #[test]
     fn disable_durable_forces_session_only() {
         let config = SchedulerConfig {

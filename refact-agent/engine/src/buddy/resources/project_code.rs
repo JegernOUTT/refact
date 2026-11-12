@@ -119,10 +119,14 @@ pub async fn registered_candidate_version(
         {
             return Err(ResourceError::PathEscapesProject);
         }
-        let path = view.meta.root.join(relative);
+        let path = relative
+            .components()
+            .fold(view.meta.root.clone(), |path, part| path.join(part));
         let bytes = match tokio::fs::symlink_metadata(&path).await {
             Ok(meta) => {
-                if meta.file_type().is_symlink() || tokio::fs::canonicalize(&path).await? != path {
+                if meta.file_type().is_symlink()
+                    || dunce::simplified(&tokio::fs::canonicalize(&path).await?) != path
+                {
                     return Err(ResourceError::SymlinkNotAllowed);
                 }
                 Some(tokio::fs::read(&path).await?)

@@ -54,6 +54,7 @@ pub async fn project_caller(app: &AppState, caller: &WorkCaller) -> Result<WorkC
         for record in registry.records {
             if tokio::fs::canonicalize(&record.meta.root)
                 .await
+                .map(|path| dunce::simplified(&path).to_path_buf())
                 .ok()
                 .as_deref()
                 == Some(candidate.0.as_path())

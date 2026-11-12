@@ -2231,7 +2231,7 @@ mod tests {
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let app = AppState::from_gcx(gcx.clone()).await;
         let (workspace, _parent_session) = parent_delivery_fixture(&app, "parent").await;
-        let root = workspace.path().canonicalize().unwrap();
+        let root = dunce::canonicalize(workspace.path()).unwrap();
         let (defaults_root, _) = crate::caps::project_model_defaults_state(gcx.clone()).await;
         let mut caps = crate::caps::CodeAssistantCaps::default();
         caps.chat_models.insert(

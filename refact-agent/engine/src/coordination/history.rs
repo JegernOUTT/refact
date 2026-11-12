@@ -695,7 +695,7 @@ mod tests {
         ProjectRoots,
         TrajectoryIndexEntry,
     ) {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir_in(dunce::canonicalize(std::env::temp_dir()).unwrap()).unwrap();
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let roots = roots::load_project_roots(gcx.clone(), dir.path().into()).await;
         let value = json!({"id":"lazy", "title":"Private original", "created_at":"2026-01-01T00:00:00Z", "updated_at":"2026-01-02T00:00:00Z", "model":"trusted/model", "mode":"agent", "tool_use":"agent", "version":7, "messages":messages});
@@ -778,7 +778,7 @@ mod tests {
             .unwrap()
             .is_empty());
         let path = dir.path().join("lazy.json");
-        let canonical = std::fs::canonicalize(&path).unwrap();
+        let canonical = dunce::canonicalize(&path).unwrap();
         let original = std::fs::read(&path).unwrap();
         let changed = String::from_utf8(original.clone())
             .unwrap()
@@ -814,11 +814,14 @@ mod tests {
                 .await
                 .is_some()
         );
+        #[cfg(unix)]
         assert_eq!(
             SOURCE_READS.lock().unwrap()[&canonical],
             before,
             "unchanged verified source outside the racy window must reuse evidence without reading or hashing"
         );
+        #[cfg(not(unix))]
+        assert_eq!(SOURCE_READS.lock().unwrap()[&canonical], before + 1);
     }
 
     #[tokio::test]
@@ -894,7 +897,7 @@ mod tests {
             rows[MAX_RESOLVED_ROWS].title.as_deref(),
             Some("Index fallback 32")
         );
-        let suffix = std::fs::canonicalize(dir.path().join("ordered-32.json")).unwrap();
+        let suffix = dunce::canonicalize(dir.path().join("ordered-32.json")).unwrap();
         assert!(!SOURCE_READS.lock().unwrap().contains_key(&suffix));
         gcx.privacy_policy_load.write().unwrap().policy = Arc::new(refact_privacy::PrivacyPolicy {
             zones: vec![refact_privacy::Zone {

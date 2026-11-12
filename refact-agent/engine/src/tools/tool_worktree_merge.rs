@@ -53,6 +53,7 @@ mod tests {
         let source = dunce::canonicalize(&source).unwrap();
         let git = |args: &[&str]| crate::worktrees::git::run_git(&source, args).unwrap();
         git(&["init"]);
+        git(&["config", "core.autocrlf", "false"]);
         git(&["checkout", "-b", "main"]);
         git(&["config", "user.email", "test@example.invalid"]);
         git(&["config", "user.name", "Test"]);

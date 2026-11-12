@@ -507,6 +507,7 @@ mod tests {
     fn init_repo(root: &Path) {
         std::fs::create_dir_all(root).unwrap();
         run_git(root, &["init"]);
+        run_git(root, &["config", "core.autocrlf", "false"]);
         run_git(root, &["checkout", "-b", "main"]);
         run_git(root, &["config", "user.email", "test@example.com"]);
         run_git(root, &["config", "user.name", "Test User"]);
@@ -1080,7 +1081,7 @@ mod tests {
         assert!(outcome.response.merged);
         assert_eq!(
             checkouts.lock().unwrap().as_slice(),
-            [source.clone()],
+            [dunce::canonicalize(&source).unwrap()],
             "revalidation must execute against the merged checkout, not the branch worktree"
         );
         let post_merge = outcome

@@ -289,6 +289,7 @@ pub async fn execute(
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn declared_actions_emit_once_and_write_only_view_state_with_cas() {
         let dir = tempfile::tempdir().unwrap();

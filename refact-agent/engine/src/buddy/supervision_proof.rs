@@ -1073,7 +1073,11 @@ pub(crate) mod tests {
             observed_after_at: "1970-01-01T00:00:00Z".into(),
             source: SourceObservation {
                 worktree_id: "wt".into(),
-                worktree_root: "/x/worktree".into(),
+                worktree_root: if cfg!(windows) {
+                    r"C:\x\worktree".into()
+                } else {
+                    "/x/worktree".into()
+                },
                 source_workspace_root: "/r".into(),
                 baseline_head: "a".repeat(40),
                 current_head: "b".repeat(40),

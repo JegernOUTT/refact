@@ -1,6 +1,7 @@
 use super::*;
 use serde_json::json;
 
+#[cfg(unix)]
 #[tokio::test]
 async fn worker_http_accepts_large_state_without_weakening_view_origin_or_cas() {
     use axum::body::Body;
@@ -108,6 +109,7 @@ async fn worker_http_accepts_large_state_without_weakening_view_origin_or_cas() 
     app.gcx.apps.shutdown().await;
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn shutdown_refuses_new_runtime_admission() {
     let first = tempfile::tempdir().unwrap();
@@ -128,6 +130,7 @@ async fn shutdown_refuses_new_runtime_admission() {
     assert!(refused, "registry admitted a runtime after shutdown");
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn published_document_and_view_state_use_immutable_bundle_and_exact_credentials() {
     let dir = tempfile::tempdir().unwrap();
@@ -212,6 +215,7 @@ async fn published_document_and_view_state_use_immutable_bundle_and_exact_creden
     app.gcx.apps.shutdown().await;
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn registered_worktree_uses_project_catalog_and_binding() {
     let dir = tempfile::tempdir().unwrap();

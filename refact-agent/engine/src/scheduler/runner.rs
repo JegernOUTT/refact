@@ -2531,6 +2531,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn one_shot_removed_after_normal_fire() {
         let now = now_ms();
@@ -2555,6 +2556,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn once_trigger_fires_and_is_removed() {
         let now = now_ms();
@@ -2598,6 +2600,7 @@ mod tests {
         assert_no_fire(&gcx).await;
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn one_shot_remains_when_enqueue_is_rejected() {
         let now = now_ms();
@@ -2663,6 +2666,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn fires_without_durability_when_the_store_cannot_be_opened() {
         let now = now_ms();
@@ -2695,6 +2699,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn fired_delivery_is_persisted_when_the_store_is_available() {
         let now = now_ms();
@@ -2725,6 +2730,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn rejected_enqueue_without_durability_keeps_rejection_semantics() {
         let now = now_ms();
@@ -2772,6 +2778,7 @@ mod tests {
         assert!(session.messages.iter().all(|m| m.role != EVENT_ROLE));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn rejected_recurring_occurrence_is_retried_not_skipped() {
         let now = now_ms();
@@ -2834,6 +2841,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn interval_job_fires_on_cadence() {
         let now = now_ms();
@@ -2855,6 +2863,7 @@ mod tests {
         assert!(runner.task_is_due(&stored, now + 60_000));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn overdue_recurring_job_fast_forwards_without_burst() {
         let now = now_ms();
@@ -2877,6 +2886,7 @@ mod tests {
         assert!(runner.task_is_due(&stored, now + every_ms));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn command_job_runs_and_delivers_stdout() {
         let now = now_ms();
@@ -2915,6 +2925,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn recurring_command_advances_before_fire_without_double_counting() {
         let now = now_ms();
@@ -2946,6 +2957,7 @@ mod tests {
         assert_eq!(fire_event.extra["event"]["payload"]["fire_count"], json!(1));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn independent_manual_and_store_entrypoints_share_project_capacity() {
         let now = now_ms();
@@ -2977,6 +2989,7 @@ mod tests {
         assert!(CronRunner::fire_manual_job(gcx, second, now).await.unwrap());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn interrupted_effect_holds_even_a_new_manual_request() {
         let now = now_ms();
@@ -2995,6 +3008,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn refused_isolated_open_is_a_rejected_enqueue_not_an_interrupted_effect() {
         let now = now_ms();
@@ -3018,6 +3032,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn duplicate_job_admission_does_not_consume_remaining_capacity() {
         let now = now_ms();
@@ -3036,6 +3051,7 @@ mod tests {
         assert_eq!(owner.capacity.available_permits(), 1);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn concurrency_cap_defers_over_limit_command_runs() {
         let now = now_ms();
@@ -3071,6 +3087,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn command_job_nonzero_exit_records_error() {
         let now = now_ms();
@@ -3103,6 +3120,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn started_command_failure_is_not_automatically_replayed() {
         let now = now_ms();
@@ -3138,6 +3156,7 @@ mod tests {
     /// and the retry used to be re-attempted at the very instant it had just
     /// been deferred (the busy spin). The chain 60s -> 120s is what is
     /// load-bearing; its absolute instants shift by one defer window.
+    #[cfg(unix)]
     #[tokio::test]
     async fn saturated_cron_lane_defers_retry_without_losing_backoff() {
         let now = now_ms();
@@ -3200,6 +3219,7 @@ mod tests {
     /// earliest `scheduled_fire_at_ms`, advance a fake clock to it, fire -- and
     /// a defer window that is not honoured returns an instant already in the
     /// past, so the clock stands still while the wake-ups run away.
+    #[cfg(unix)]
     #[tokio::test]
     async fn saturated_cron_lane_does_not_busy_spin_on_a_retrying_task() {
         const WINDOW_MS: u64 = 5 * 60_000;
@@ -3291,6 +3311,7 @@ mod tests {
         assert!(runner.task_is_due(&task, now + IDLE_DEFER_MS));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn command_success_resets_retry_backoff() {
         let now = now_ms();
@@ -3310,6 +3331,7 @@ mod tests {
         assert_eq!(stored.trigger_at_ms, None);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn command_delivery_failure_records_separate_error_without_retry() {
         let router = axum::Router::new().route(
@@ -3351,6 +3373,7 @@ mod tests {
         server_task.abort();
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn timezone_cron_job_fires_at_local_time() {
         let now = utc_ms(2026, 1, 1, 3, 30);
@@ -3396,6 +3419,7 @@ mod tests {
         assert_no_fire(&gcx).await;
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn trigger_at_fires_paused_job_once_and_clears() {
         let now = now_ms();
@@ -3417,6 +3441,7 @@ mod tests {
         assert!(!runner.task_is_due(&stored, now + 60_000));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn trigger_at_overrides_existing_defer_once() {
         let now = now_ms();
@@ -3438,6 +3463,7 @@ mod tests {
         assert!(!runner.deferred_until_ms.contains_key("run_now_deferred"));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn durable_runner_refreshes_selected_controls_and_discovers_new_jobs() {
         let now = now_ms();
@@ -3489,6 +3515,7 @@ mod tests {
         assert!(controls.get("deleted").await.is_none());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn old_completion_does_not_delete_rescheduled_one_shot() {
         let now = now_ms();
@@ -3618,6 +3645,7 @@ mod tests {
         assert_eq!(store.get(&selected.id).await.unwrap().fire_count, 9);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn durable_completion_preserves_edits_and_deleted_jobs() {
         let now = now_ms();
@@ -3705,6 +3733,7 @@ mod tests {
         assert_eq!(stored.fire_count, 8);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn due_task_without_chat_id_does_not_spin() {
         let now = now_ms();
@@ -3746,6 +3775,7 @@ mod tests {
         assert!(runner.deferred_until_ms.is_empty());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn closed_chat_task_does_not_hot_loop() {
         let now = now_ms();
@@ -3772,6 +3802,7 @@ mod tests {
         assert!(session.command_queue.is_empty());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn default_push_accepts_while_generating() {
         let now = now_ms();
@@ -3794,6 +3825,7 @@ mod tests {
         assert_eq!(session.pending_deliveries[0].push, PushMode::Append);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn isolated_due_job_creates_fresh_session_and_skips_idle_gate() {
         let now = now_ms();
@@ -3822,6 +3854,7 @@ mod tests {
         assert!(existing.command_queue.is_empty());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn recurring_isolated_job_creates_distinct_session_per_fire() {
         let now = now_ms();
@@ -3850,6 +3883,7 @@ mod tests {
         assert_eq!(stored.fire_count, 2);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn webhook_trigger_with_zero_auto_expire_survives_fire() {
         let now = now_ms();
@@ -3874,6 +3908,7 @@ mod tests {
         assert_eq!(stored.auto_expire_after_ms, 0);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn recurring_task_with_explicit_expiry_survives_due_execution() {
         let now = now_ms();
@@ -3919,6 +3954,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test(start_paused = true)]
     async fn shutdown_flag_cancels_runner() {
         let now = now_ms();
@@ -4106,6 +4142,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn durable_task_with_refused_chat_open_is_deferred_as_temporarily_unavailable() {
         let now = now_ms();
@@ -4201,6 +4238,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn durable_one_shot_catch_up_fires_with_missed_when_session_available() {
         let now = now_ms();
@@ -4275,6 +4313,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn mode_and_model_land_atomically_at_each_push_boundary() {
         for push in [PushMode::Append, PushMode::WhenIdle, PushMode::Preempt] {

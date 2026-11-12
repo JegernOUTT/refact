@@ -775,15 +775,16 @@ mod tests {
         let plan = plan_patch(gcx.clone(), &args, None, None).await.unwrap();
         let armed = crate::file_activity::durable_fault::arm_for(
             crate::file_activity::durable_fault::AFTER_RENAME,
-            path.to_string_lossy().to_string(),
+            plan.file_results[0].path.to_string_lossy().to_string(),
         );
+        let planned_path = plan.file_results[0].path.clone();
         let error = super::super::patch_transaction::apply(gcx, &plan)
             .await
             .unwrap_err();
         drop(armed);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "after\n");
         assert!(
-            error.contains(&format!("Changed: [{}]", path.display())),
+            error.contains(&format!("Changed: [{}]", planned_path.display())),
             "{error}"
         );
         assert!(error.contains("Unchanged: []"), "{error}");

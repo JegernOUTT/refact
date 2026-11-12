@@ -7,6 +7,7 @@ mod tests {
     use crate::tools::tool_app::{Family, ToolApp};
     use crate::tools::tools_description::{MatchConfirmDenyResult, Tool};
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn source_grant_does_not_require_tool_confirmation() {
         let (app, context, _dir) = crate::tools::tool_app::tests::approval_fixture().await;

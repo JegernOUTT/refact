@@ -3018,6 +3018,7 @@ mod tests {
         let source = temp.path().join("repo");
         std::fs::create_dir_all(&source).unwrap();
         init_repo(&source);
+        let source = dunce::canonicalize(&source).unwrap();
         let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
             temp.path().join("cache"),
             temp.path().join("config"),
@@ -3763,7 +3764,7 @@ mod tests {
             .unwrap();
         let session_arc = Arc::new(AMutex::new(ChatSession::new("guard-toctou".into())));
         let mut session = session_arc.lock().await;
-        let mut alias = std::ffi::OsString::from(&root);
+        let mut alias = std::ffi::OsString::from(dunce::simplified(std::path::Path::new(&root)));
         alias.push(format!("{}.", std::path::MAIN_SEPARATOR));
         let alias = std::path::PathBuf::from(alias);
         assert_ne!(alias.as_os_str(), std::path::Path::new(&root).as_os_str());

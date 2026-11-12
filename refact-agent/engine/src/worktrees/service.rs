@@ -66,6 +66,7 @@ mod effect_tests {
         std::fs::create_dir_all(&source).unwrap();
         for args in [
             vec!["init"],
+            vec!["config", "core.autocrlf", "false"],
             vec!["checkout", "-b", "main"],
             vec!["config", "user.email", "test@example.com"],
             vec!["config", "user.name", "Test"],

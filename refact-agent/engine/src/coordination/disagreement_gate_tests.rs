@@ -172,6 +172,7 @@ fn init_git(root: &Path) {
         );
     };
     run(&["init", "-b", "main"]);
+    run(&["config", "core.autocrlf", "false"]);
     run(&["config", "user.email", "test@example.com"]);
     run(&["config", "user.name", "Test"]);
     std::fs::write(root.join("src.rs"), "fn main() {}\n").unwrap();
@@ -295,6 +296,7 @@ async fn verify_card_with_open_disagreement_does_not_pass() {
     let root = temp.path().join("workspace");
     let cache = temp.path().join("cache");
     std::fs::create_dir_all(&root).unwrap();
+    let root = dunce::canonicalize(&root).unwrap();
     init_git(&root);
 
     let (endpoint, hits, server) = start_review_server().await;

@@ -3149,8 +3149,10 @@ mod tests {
             let temp = tempfile::tempdir().unwrap();
             let source = temp.path().join("repo");
             std::fs::create_dir(&source).unwrap();
+            let source = dunce::canonicalize(&source).unwrap();
             let git = |args: &[&str]| crate::worktrees::git::run_git(&source, args).unwrap();
             git(&["init"]);
+            git(&["config", "core.autocrlf", "false"]);
             git(&["checkout", "-b", "main"]);
             git(&["config", "user.name", "Test User"]);
             git(&["config", "user.email", "test@example.com"]);

@@ -2624,7 +2624,7 @@ pub(crate) mod tests {
         expected.verification = Some(
             VerificationSnapshot::capture(
                 &gcx,
-                temp.path().to_path_buf(),
+                dunce::canonicalize(temp.path()).unwrap(),
                 &candidate,
                 "task-1",
                 "T-1",
@@ -2705,7 +2705,7 @@ pub(crate) mod tests {
         let board = storage::load_board(gcx.clone(), "task-1").await.unwrap();
         let snapshot = VerificationSnapshot::capture(
             &gcx,
-            temp.path().to_path_buf(),
+            dunce::canonicalize(temp.path()).unwrap(),
             &candidate,
             "task-1",
             "T-1",
@@ -2807,7 +2807,7 @@ pub(crate) mod tests {
         expected.verification = Some(
             VerificationSnapshot::capture(
                 &gcx,
-                temp.path().to_path_buf(),
+                dunce::canonicalize(temp.path()).unwrap(),
                 &candidate,
                 "task-1",
                 "T-1",
@@ -2886,7 +2886,7 @@ pub(crate) mod tests {
         expected.verification = Some(
             VerificationSnapshot::capture(
                 &gcx,
-                temp.path().to_path_buf(),
+                dunce::canonicalize(temp.path()).unwrap(),
                 &candidate,
                 "task-1",
                 "T-1",
@@ -2960,7 +2960,7 @@ pub(crate) mod tests {
         expected.verification = Some(
             VerificationSnapshot::capture(
                 &gcx,
-                temp.path().to_path_buf(),
+                dunce::canonicalize(temp.path()).unwrap(),
                 &candidate,
                 "task-1",
                 "T-1",

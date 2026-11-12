@@ -508,6 +508,7 @@ mod tests {
         assert_eq!(stored.paused_at_ms, None);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn cron_update_updates_durable_task() {
         let temp = tempfile::tempdir().unwrap();

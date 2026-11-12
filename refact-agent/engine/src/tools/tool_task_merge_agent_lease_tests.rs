@@ -33,6 +33,7 @@ fn git(cwd: &Path, args: &[&str]) -> String {
 fn init_repo(root: &Path) {
     std::fs::create_dir_all(root).unwrap();
     git(root, &["init"]);
+    git(root, &["config", "core.autocrlf", "false"]);
     git(root, &["checkout", "-b", "main"]);
     git(root, &["config", "user.email", "test@example.com"]);
     git(root, &["config", "user.name", "Test User"]);

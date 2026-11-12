@@ -1235,25 +1235,28 @@ mod tests {
     #[tokio::test]
     async fn tool_cat_related_memories_respect_agent_namespace() {
         let temp = tempfile::tempdir().unwrap();
-        let file = temp.path().join("src/x.rs");
+        // Seed the index with the same canonical spelling used by tool reads.
+        let root = dunce::canonicalize(temp.path()).unwrap();
+        let file = root.join("src/x.rs");
         write_lines(&file, 2);
-        let task_memory = temp.path().join(".refact/tasks/task-1/memories/private.md");
+        let task_memory = root.join(".refact/tasks/task-1/memories/private.md");
         std::fs::create_dir_all(task_memory.parent().unwrap()).unwrap();
         std::fs::write(
             &task_memory,
             format!(
-                "---\ntitle: Agent Secret\ntask_id: task-1\nkind: finding\nnamespace: agent:A\nrelated_files: [\"{}\"]\n---\n\nsecret body",
-                file.display()
+                "---\ntitle: Agent Secret\ntask_id: task-1\nkind: finding\nnamespace: agent:A\nrelated_files: [{}]\n---\n\nsecret body",
+                serde_json::to_string(&normalized(&file)).unwrap()
             ),
         )
         .unwrap();
 
-        let ccx_b = ccx_for_root_as_agent(temp.path(), Some("B")).await;
+        let ccx_b = ccx_for_root_as_agent(&root, Some("B")).await;
         let gcx = ccx_b.lock().await.app.gcx.clone();
         {
             let text = std::fs::read_to_string(&task_memory).unwrap();
             let (frontmatter, content_start) =
                 crate::knowledge_graph::kg_structs::KnowledgeFrontmatter::parse(&text);
+            assert!(content_start > 0, "fixture frontmatter must parse: {text}");
             let mut index = gcx.knowledge_index.lock().await;
             crate::knowledge_index::add_knowledge_frontmatter_to_index(
                 &mut index,
@@ -1267,12 +1270,13 @@ mod tests {
         assert!(!output_b.contains("Agent Secret"));
         assert!(!output_b.contains("private.md"));
 
-        let ccx_a = ccx_for_root_as_agent(temp.path(), Some("A")).await;
+        let ccx_a = ccx_for_root_as_agent(&root, Some("A")).await;
         let gcx = ccx_a.lock().await.app.gcx.clone();
         {
             let text = std::fs::read_to_string(&task_memory).unwrap();
             let (frontmatter, content_start) =
                 crate::knowledge_graph::kg_structs::KnowledgeFrontmatter::parse(&text);
+            assert!(content_start > 0, "fixture frontmatter must parse: {text}");
             let mut index = gcx.knowledge_index.lock().await;
             crate::knowledge_index::add_knowledge_frontmatter_to_index(
                 &mut index,

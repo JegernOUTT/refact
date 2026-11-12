@@ -3836,7 +3836,13 @@ mod tests {
             .await;
         let root = dir.path().join("project");
         std::fs::create_dir_all(&root).unwrap();
-        let entry = state.projects.write().await.open(root).await.unwrap();
+        let entry = state
+            .projects
+            .write()
+            .await
+            .open(dunce::canonicalize(&root).unwrap())
+            .await
+            .unwrap();
         let request = crate::daemon::buddy_wake::WakeGrantRequest {
             canonical_root: entry.root.clone(),
             trigger_kind: crate::daemon::buddy_wake::WakeTriggerKind::ObservationTick,

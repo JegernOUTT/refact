@@ -537,9 +537,7 @@ mod tests {
         .await;
         *gcx.documents_state.workspace_folders.lock().unwrap() = vec![root.path().to_path_buf()];
         let app = AppState::from_gcx(gcx).await;
-        let root = root
-            .path()
-            .canonicalize()
+        let root = dunce::canonicalize(root.path())
             .unwrap()
             .to_string_lossy()
             .into_owned();
@@ -549,7 +547,7 @@ mod tests {
         let alias = std::path::PathBuf::from(alias);
         assert_ne!(alias.as_os_str(), std::path::Path::new(&root).as_os_str());
         assert_eq!(
-            alias.canonicalize().unwrap(),
+            dunce::canonicalize(&alias).unwrap(),
             std::path::PathBuf::from(&root)
         );
         paused.work_project_root = Some(alias.clone());
