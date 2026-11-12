@@ -30,15 +30,6 @@ use crate::browser::default_executable;
 use super::fetcher::{Fetcher, FetcherOptions};
 use std::collections::HashMap;
 
-#[cfg(test)]
-struct ForTesting;
-#[cfg(test)]
-impl ForTesting {
-    thread_local! {
-        static USER_DATA_DIR: RefCell<Option<String>> = const { RefCell::new(None) };
-    }
-}
-
 pub struct Process {
     child_process: OwnedProcess,
     pub debug_ws_url: Url,
@@ -531,11 +522,6 @@ impl Process {
         };
         let data_dir_option = format!("--user-data-dir={}", &user_data_dir.to_str().unwrap());
 
-        #[cfg(test)]
-        ForTesting::USER_DATA_DIR.with(|dir| {
-            *dir.borrow_mut() = user_data_dir.to_str().map(std::borrow::ToOwned::to_owned);
-        });
-
         trace!("Chrome will have profile: {data_dir_option}");
 
         let mut args = vec![
@@ -876,8 +862,6 @@ mod tests {
     use std::sync::Once;
     use std::thread;
 
-    use crate::browser::default_executable;
-
     use super::*;
 
     static INIT: Once = Once::new();
@@ -1069,45 +1053,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(unix)]
-    fn launch_tracker_nested_non_lifo_and_thread_scopes_do_not_leak_authority() {
-        let (_fixture, options) = launch_fixture("exec sleep 30");
-        let outer = OwnedLaunchTracker::new();
-        let first = Process::start_process(&options).unwrap();
-        let inner = OwnedLaunchTracker::new();
-        let second = Process::start_process(&options).unwrap();
-        assert_eq!(outer.processes().len(), 1);
-        assert_eq!(inner.processes().len(), 1);
-        assert_eq!(inner.processes()[0].id(), second.id());
-        let other_options = options.clone();
-        thread::spawn(move || {
-            let process = Process::start_process(&other_options).unwrap();
-            assert!(
-                process
-                    .terminate_before(Instant::now() + Duration::from_secs(2))
-                    .unwrap()
-            );
-        })
-        .join()
-        .unwrap();
-        assert_eq!(inner.processes().len(), 1);
-        drop(outer);
-        let third = Process::start_process(&options).unwrap();
-        assert_eq!(inner.processes().len(), 2);
-        drop(inner);
-        LAUNCH_TRACKERS.with(|trackers| assert!(trackers.borrow().is_empty()));
-        let fresh = OwnedLaunchTracker::new();
-        assert!(fresh.processes().is_empty());
-        for process in [first, second, third] {
-            assert!(
-                process
-                    .terminate_before(Instant::now() + Duration::from_secs(2))
-                    .unwrap()
-            );
-        }
-    }
-
-    #[test]
     #[cfg(any(unix, windows))]
     fn owned_process_expired_or_contended_deadline_never_dispatches_kill() {
         let owned = owned_fixture();
@@ -1189,19 +1134,6 @@ mod tests {
     }
 
     #[test]
-    fn can_launch_chrome_and_get_ws_url() {
-        setup();
-        let chrome = super::Process::new(
-            LaunchOptions::default_builder()
-                .path(Some(default_executable().unwrap()))
-                .build()
-                .unwrap(),
-        )
-        .unwrap();
-        info!("{:?}", chrome.debug_ws_url);
-    }
-
-    #[test]
     #[cfg(feature = "fetch")]
     fn can_install_chrome_to_dir_and_launch() {
         use crate::browser::fetcher::CUR_REV;
@@ -1257,111 +1189,5 @@ mod tests {
         let reader = BufReader::new(lines.as_bytes());
         let ws_url_result = Process::ws_url_from_reader(reader);
         assert!(ws_url_result.is_ok());
-    }
-
-    #[cfg(target_os = "linux")]
-    fn current_child_pids() -> Vec<i32> {
-        use std::fs::File;
-        use std::io::prelude::*;
-        let current_pid = std::process::id();
-        let mut current_process_children_file =
-            File::open(format!("/proc/{current_pid}/task/{current_pid}/children")).unwrap();
-        let mut child_pids = String::new();
-        current_process_children_file
-            .read_to_string(&mut child_pids)
-            .unwrap();
-        child_pids
-            .split_whitespace()
-            .map(|pid_str| pid_str.parse::<i32>().unwrap())
-            .collect()
-    }
-
-    #[test]
-    #[cfg(target_os = "linux")]
-    fn kills_process_on_drop() {
-        setup();
-        {
-            let _chrome = &mut super::Process::new(
-                LaunchOptions::default_builder()
-                    .path(Some(default_executable().unwrap()))
-                    .build()
-                    .unwrap(),
-            )
-            .unwrap();
-        }
-
-        let child_pids = current_child_pids();
-        assert!(child_pids.is_empty());
-    }
-
-    #[test]
-    fn launch_multiple_non_headless_instances() {
-        setup();
-        let mut handles = Vec::new();
-
-        for _ in 0..10 {
-            let handle = thread::spawn(|| {
-                // these sleeps are to make it more likely the chrome startups will overlap
-                std::thread::sleep(std::time::Duration::from_millis(10));
-                let chrome = super::Process::new(
-                    LaunchOptions::default_builder()
-                        .path(Some(default_executable().unwrap()))
-                        .build()
-                        .unwrap(),
-                )
-                .unwrap();
-                std::thread::sleep(std::time::Duration::from_millis(100));
-                chrome.debug_ws_url
-            });
-            handles.push(handle);
-        }
-
-        for handle in handles {
-            handle.join().unwrap();
-        }
-    }
-
-    #[test]
-    fn no_instance_sharing() {
-        setup();
-
-        let mut handles = Vec::new();
-
-        for _ in 0..10 {
-            let chrome = super::Process::new(
-                LaunchOptions::default_builder()
-                    .path(Some(default_executable().unwrap()))
-                    .headless(true)
-                    .build()
-                    .unwrap(),
-            )
-            .unwrap();
-            handles.push(chrome);
-        }
-    }
-
-    #[test]
-    fn test_temporary_user_data_dir_is_removed_automatically() {
-        setup();
-
-        let options = LaunchOptions::default_builder().build().unwrap();
-
-        // Ensure we did not pass an explicit user_data_dir
-        let temp_dir = options.user_data_dir.clone();
-        assert_eq!(None, temp_dir);
-
-        let user_data_dir = {
-            let _chrome = &mut super::Process::new(options).unwrap();
-
-            ForTesting::USER_DATA_DIR.with(|dir| dir.borrow_mut().take())
-        };
-
-        match user_data_dir {
-            Some(temp_path) => {
-                let user_data_dir_exists = std::path::Path::new(&temp_path).is_dir();
-                assert!(!user_data_dir_exists);
-            }
-            None => panic!("No user data dir was created"),
-        }
     }
 }

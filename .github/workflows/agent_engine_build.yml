@@ -58,7 +58,7 @@ jobs:
           # x86_64-apple-darwin (macOS Intel) is disabled — GitHub-hosted macos-15-large runners
           # incur significant costs and Intel Mac support is being phased out. Re-enable only if
           # explicitly needed and billing is confirmed.
-          - os: macos-14
+          - os: macos-15
             target: aarch64-apple-darwin
             code-target: darwin-arm64 
 
