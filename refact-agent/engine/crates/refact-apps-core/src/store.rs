@@ -820,6 +820,7 @@ fn install(root: &Dir, slug: &str, files: &BTreeMap<String, Vec<u8>>) -> AppResu
         for (path, bytes) in files {
             atomic(&dir, path, bytes)?;
         }
+        drop(dir);
         root.rename(&staging, root, slug).map_err(err)
     })();
     if result.is_err() {
