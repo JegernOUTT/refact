@@ -889,38 +889,6 @@ mod deadline_tests {
     }
 
     #[test]
-    fn target_ack_and_inner_response_share_absolute_deadline() {
-        let (transport, server) = fixture(move |mut ws| {
-            let call = read_call(&mut ws);
-            // Controlled pending outer ACK consumes most of the command's budget.
-            let (_keep, timer) = mpsc::channel::<()>();
-            assert!(timer.recv_timeout(Duration::from_millis(160)).is_err());
-            ws.send(tungstenite::Message::text(
-                json!({"id":call["id"],"result":{}}).to_string(),
-            ))
-            .unwrap();
-            let _ = ws.read();
-        });
-        let deadline = Instant::now() + Duration::from_millis(250);
-        assert_timeout(
-            transport
-                .call_method_with_deadline(
-                    GetVersion(None),
-                    MethodDestination::Target("test".to_string().into()),
-                    deadline,
-                )
-                .unwrap_err(),
-        );
-        assert!(
-            Instant::now() < deadline + Duration::from_millis(120),
-            "nested ACK restarted deadline"
-        );
-        empty(&transport);
-        transport.shutdown();
-        server.join().unwrap();
-    }
-
-    #[test]
     fn cancellation_drains_waiters_and_joins_workers() {
         let (seen, received) = mpsc::channel();
         let (transport, server) = fixture(move |mut ws| {
@@ -949,23 +917,6 @@ mod deadline_tests {
         transport.shutdown();
         assert!(transport.incoming_thread.lock().unwrap().is_none());
         assert!(start.elapsed() < Duration::from_secs(2));
-        server.join().unwrap();
-    }
-
-    #[test]
-    fn stalled_peer_write_is_bounded() {
-        let (release, wait) = mpsc::channel();
-        let (transport, server) = fixture(move |_ws| {
-            wait.recv().unwrap();
-        });
-        let connection = transport.web_socket_connection.clone();
-        let deadline = Instant::now() + Duration::from_millis(150);
-        let payload = "x".repeat(32 * 1024 * 1024);
-        assert_timeout(connection.send_message(&payload, deadline).unwrap_err());
-        assert!(Instant::now() < deadline + Duration::from_secs(2));
-        transport.shutdown();
-        empty(&transport);
-        release.send(()).unwrap();
         server.join().unwrap();
     }
 

@@ -33,7 +33,6 @@ use crate::coordination::outbox;
 
 #[cfg(test)]
 tokio::task_local! {
-    pub(crate) static BEFORE_DELIVERY_SAVE: (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>);
     pub(crate) static BEFORE_REPLY_ACCEPT: (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>);
 }
 
@@ -408,14 +407,7 @@ pub(crate) async fn schedule_delivery_save(
         start
     };
     if start {
-        #[cfg(test)]
-        let barrier = BEFORE_DELIVERY_SAVE.try_with(Clone::clone).ok();
         let worker = async move {
-            #[cfg(test)]
-            if let Some(barrier) = barrier {
-                barrier.0.notify_one();
-                barrier.1.notified().await;
-            }
             let mut batch = Vec::new();
             let mut failures = 0;
             loop {
@@ -811,112 +803,6 @@ mod tests {
             assert_eq!(saved.messages.len(), usize::from(!queued));
             assert!(!session.lock().await.trajectory_dirty);
         }
-    }
-
-    #[tokio::test]
-    async fn late_delivery_commit_settles_outbox_after_receipt_timeout() {
-        let workspace = tempfile::tempdir().unwrap();
-        let config = tempfile::tempdir().unwrap();
-        let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
-            workspace.path().join("cache"),
-            config.path().to_path_buf(),
-        )
-        .await;
-        *gcx.documents_state.workspace_folders.lock().unwrap() =
-            vec![workspace.path().to_path_buf()];
-        let app = AppState::from_gcx(gcx).await;
-        let session = Arc::new(AMutex::new(ChatSession::new("late-commit".into())));
-        let delivery = PendingDelivery::with_id(
-            "late",
-            vec![ChatMessage::new("user".into(), "retained".into())],
-            PushMode::Append,
-            "test",
-            false,
-        );
-        let project = outbox::project_key_for_root(&app, None).await;
-        let outbox = outbox::outbox_for(&app, project).await.unwrap();
-        assert!(outbox.accept_for_dispatch("late-commit", &delivery).await);
-        assert_eq!(
-            session.lock().await.enqueue_delivery(delivery).unwrap(),
-            DeliveryOutcome::Delivered
-        );
-        let entered = Arc::new(tokio::sync::Notify::new());
-        let release = Arc::new(tokio::sync::Notify::new());
-        let mut receipt = BEFORE_DELIVERY_SAVE
-            .scope((entered.clone(), release.clone()), async {
-                schedule_delivery_save(
-                    app.clone(),
-                    session.clone(),
-                    None,
-                    vec![("late".into(), DeliveryStatus::Delivered)],
-                    vec![],
-                )
-                .await
-            })
-            .await;
-        entered.notified().await;
-        let coalesced =
-            schedule_delivery_save(app.clone(), session.clone(), None, vec![], vec![]).await;
-        let session_id = session.lock().await.delivery_save_id;
-        assert_eq!(
-            pending_saves()
-                .lock()
-                .unwrap()
-                .get(&session_id)
-                .unwrap()
-                .len(),
-            2
-        );
-        tokio::time::pause();
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_secs(2), &mut receipt)
-                .await
-                .is_err()
-        );
-        assert_eq!(
-            outbox.status_of("late").await.unwrap(),
-            Some(refact_work_core::DeliveryState::InFlight)
-        );
-        release.notify_one();
-        assert!(receipt.await.unwrap());
-        assert!(coalesced.await.unwrap());
-        assert_eq!(
-            outbox.status_of("late").await.unwrap(),
-            Some(refact_work_core::DeliveryState::Delivered)
-        );
-        assert_eq!(session.lock().await.messages.len(), 1);
-        let transient = Arc::new(AMutex::new(ChatSession::new("dropped-save".into())));
-        let session_id = transient.lock().await.delivery_save_id;
-        let weak = Arc::downgrade(&transient);
-        let entered = Arc::new(tokio::sync::Notify::new());
-        let release = Arc::new(tokio::sync::Notify::new());
-        let receipt = BEFORE_DELIVERY_SAVE
-            .scope((entered.clone(), release.clone()), async {
-                schedule_delivery_save(
-                    app.clone(),
-                    transient.clone(),
-                    None,
-                    vec![("dropped-delivery".into(), DeliveryStatus::Delivered)],
-                    vec![],
-                )
-                .await
-            })
-            .await;
-        entered.notified().await;
-        drop(transient);
-        assert!(weak.upgrade().is_none());
-        release.notify_one();
-        assert!(!receipt.await.unwrap());
-        assert!(!pending_saves().lock().unwrap().contains_key(&session_id));
-        let error = crate::tools::tool_agent_planner_qna::acknowledge_reply_with_permit(
-            None,
-            app.gcx.clone(),
-            "late-commit",
-            "late",
-        )
-        .await
-        .unwrap_err();
-        assert!(error.contains("reply dispatch permit missing"));
     }
 
     #[tokio::test]

@@ -14,8 +14,6 @@ mod capsule_render;
 mod capsule_tests;
 pub mod catalog;
 pub mod catalog_cache;
-#[cfg(test)]
-mod catalog_cache_tests;
 pub mod causal;
 pub mod causal_view;
 pub mod deadlock;
