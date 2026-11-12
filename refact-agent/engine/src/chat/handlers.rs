@@ -1932,6 +1932,60 @@ mod tests {
         assert_eq!(chats, vec!["mux-a".to_string(), "mux-b".to_string()]);
     }
 
+    async fn next_mux_item_after_heartbeats(
+        body: &mut Body,
+    ) -> Option<Result<hyper::body::Bytes, hyper::Error>> {
+        use hyper::body::HttpBody;
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                match body.data().await {
+                    Some(Ok(bytes)) => {
+                        let heartbeat = std::str::from_utf8(&bytes)
+                            .ok()
+                            .and_then(|text| text.strip_prefix(": hb "))
+                            .and_then(|text| text.strip_suffix("\n\n"))
+                            .and_then(|timestamp| timestamp.parse::<i64>().ok());
+                        assert!(
+                            heartbeat.is_some(),
+                            "unexpected multiplexed chunk: {bytes:?}"
+                        );
+                    }
+                    item => return item,
+                }
+            }
+        })
+        .await
+        .expect("ended chat must surface")
+    }
+
+    #[tokio::test]
+    async fn multiplex_legacy_abort_after_ready_sibling_heartbeat() {
+        let (release, ended) = tokio::sync::oneshot::channel::<()>();
+        let ending = Body::wrap_stream(futures::stream::unfold(ended, |ended| async move {
+            ended.await.unwrap();
+            None::<(Result<&'static str, std::convert::Infallible>, _)>
+        }));
+        let sibling = Body::wrap_stream(async_stream::stream! {
+            yield Ok::<_, std::convert::Infallible>(": hb 123\n\n");
+            release.send(()).unwrap();
+            std::future::pending::<()>().await;
+        });
+        let bodies = std::sync::Mutex::new(HashMap::from([
+            ("ending".to_string(), ending),
+            ("sibling".to_string(), sibling),
+        ]));
+        let mut body =
+            multiplex_chat_subscriptions(vec!["ending".into(), "sibling".into()], false, |id| {
+                let body = bodies.lock().unwrap().remove(&id).unwrap();
+                async move { Ok(Response::new(body)) }
+            });
+        let item = next_mux_item_after_heartbeats(&mut body).await;
+        assert!(
+            matches!(item, Some(Err(_))),
+            "legacy clients see an aborted body, not a close frame"
+        );
+    }
+
     #[tokio::test]
     async fn multiplex_without_per_chat_close_aborts_on_ended_or_unavailable_chat() {
         use hyper::body::HttpBody;
@@ -1955,9 +2009,7 @@ mod tests {
             snapshots += 1;
         }
         ending.lock().await.close_event_channel();
-        let item = tokio::time::timeout(std::time::Duration::from_secs(10), body.data())
-            .await
-            .expect("ended chat must surface");
+        let item = next_mux_item_after_heartbeats(&mut body).await;
         assert!(
             matches!(item, Some(Err(_))),
             "legacy clients see an aborted body, not a close frame"
