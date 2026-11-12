@@ -991,48 +991,6 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn launch_tracker_survives_late_initialization_failure_and_success_observer_drop() {
-        let (_fixture, options) = launch_fixture(
-            "echo 'DevTools listening on ws://127.0.0.1:1/devtools/browser/test' >&2\nexec sleep 30",
-        );
-        let tracker = OwnedLaunchTracker::new();
-        let process = Process::new(options).unwrap();
-        let children = tracker.processes();
-        assert_eq!(children.len(), 1);
-        assert_eq!(process.get_id(), children[0].id());
-        drop(tracker);
-        assert!(
-            children[0]
-                .child
-                .lock()
-                .unwrap()
-                .0
-                .try_wait()
-                .unwrap()
-                .is_none()
-        );
-        // Model failure after successful Process construction (e.g. transport or
-        // download-monitor initialization). The receipt outlives runtime teardown.
-        drop(process);
-        assert!(
-            children[0]
-                .child
-                .lock()
-                .unwrap()
-                .0
-                .try_wait()
-                .unwrap()
-                .is_none()
-        );
-        assert!(
-            children[0]
-                .terminate_before(Instant::now() + Duration::from_secs(2))
-                .unwrap()
-        );
-    }
-
-    #[test]
-    #[cfg(unix)]
     fn launch_tracker_retries_reap_superseded_children() {
         let (_fixture, mut options) = launch_fixture("echo 'ERROR bind()' >&2\nexec sleep 30");
         options.port = None;

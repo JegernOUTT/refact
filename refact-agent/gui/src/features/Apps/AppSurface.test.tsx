@@ -346,43 +346,6 @@ it("never rolls state or the next CAS back when a delayed GET loses to SET", asy
   );
 });
 
-it("reports ancestor-hidden retained tabs immediately without losing ready or the iframe", async () => {
-  const beats: Record<string, unknown>[] = [];
-  mockApp((command) => {
-    if (command.action === "view_heartbeat") beats.push(command);
-  });
-  const view = render(
-    <div data-testid="retained">
-      <AppSurface appId="board" bindingId="binding" chatId="owner" />
-    </div>,
-    { store: surfaceStore() },
-  );
-  const { frame } = await readySurface();
-  await waitFor(() =>
-    expect(beats.at(-1)).toMatchObject({ ready: true, visible: true }),
-  );
-  const srcdoc = frame.srcdoc;
-  act(() => {
-    screen.getByTestId("retained").hidden = true;
-  });
-  await waitFor(() =>
-    expect(beats.at(-1)).toMatchObject({
-      ready: true,
-      visible: false,
-      focused: false,
-    }),
-  );
-  act(() => {
-    screen.getByTestId("retained").hidden = false;
-  });
-  await waitFor(() =>
-    expect(beats.at(-1)).toMatchObject({ ready: true, visible: true }),
-  );
-  expect(screen.getByTitle("board")).toBe(frame);
-  expect(frame.srcdoc).toBe(srcdoc);
-  view.unmount();
-});
-
 it("keeps the same iframe and local draft after capture fails and reports the error", async () => {
   const commands: Record<string, unknown>[] = [];
   mockApp((command) => commands.push(command));

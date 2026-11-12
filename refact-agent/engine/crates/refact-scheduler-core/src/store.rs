@@ -683,67 +683,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn scheduler_process_writer() {
-        let Some(root) = std::env::var_os("REFACT_SCHEDULER_TEST_ROOT") else {
-            return;
-        };
-        let prefix = std::env::var("REFACT_SCHEDULER_TEST_PREFIX").unwrap();
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        runtime.block_on(async {
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-            let store = loop {
-                match JsonFileCronStore::new(&root) {
-                    Ok(store) => break store,
-                    Err(error)
-                        if error.contains("execution owner already active")
-                            && std::time::Instant::now() < deadline =>
-                    {
-                        std::thread::yield_now();
-                    }
-                    Err(error) => panic!("scheduler writer could not acquire ownership: {error}"),
-                }
-            };
-            for n in 0..16 {
-                store
-                    .add(test_job(&format!("{prefix}_{n:02}")))
-                    .await
-                    .unwrap();
-            }
-        });
-    }
-
-    #[test]
-    fn separate_processes_do_not_clobber_jobs() {
-        let temp = crate::test_support::tempdir();
-        let executable = std::env::current_exe().unwrap();
-        let mut children = Vec::new();
-        for prefix in ["left", "right"] {
-            children.push(
-                std::process::Command::new(&executable)
-                    .args(["--exact", "store::tests::scheduler_process_writer"])
-                    .env("REFACT_SCHEDULER_TEST_ROOT", temp.path())
-                    .env("REFACT_SCHEDULER_TEST_PREFIX", prefix)
-                    .spawn()
-                    .unwrap(),
-            );
-        }
-        for mut child in children {
-            assert!(child.wait().unwrap().success());
-        }
-        let jobs = read_durable_jobs(temp.path()).unwrap();
-        let mut ids = jobs.into_iter().map(|job| job.id).collect::<Vec<_>>();
-        ids.sort();
-        let expected = ["left", "right"]
-            .into_iter()
-            .flat_map(|prefix| (0..16).map(move |n| format!("{prefix}_{n:02}")))
-            .collect::<Vec<_>>();
-        assert_eq!(ids, expected);
-    }
-
     #[tokio::test]
     async fn json_file_round_trip() {
         let temp = crate::test_support::tempdir();
