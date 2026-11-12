@@ -387,6 +387,7 @@ pub fn read_durable_jobs(project_root: impl AsRef<Path>) -> Result<Vec<Job>, Str
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use serde_json::json;
 
     use super::*;
@@ -413,6 +414,7 @@ mod tests {
             .contains("Failed to parse scheduled tasks"));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn durable_observation_reads_committed_journal_and_reports_corruption() {
         let temp = crate::test_support::tempdir();
@@ -426,6 +428,29 @@ mod tests {
         let path = crate::automation::journal_path(temp.path()).unwrap();
         std::fs::write(path, b"not sqlite").unwrap();
         assert!(read_durable_jobs(temp.path()).is_err());
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn durable_store_refuses_unsupported_private_runtime_without_migration() {
+        let temp = crate::test_support::tempdir();
+        let path = scheduled_tasks_path(temp.path());
+        std::fs::create_dir(path.parent().unwrap()).unwrap();
+        let jobs = vec![test_job("legacy")];
+        let bytes = serde_json::to_vec(&jobs).unwrap();
+        std::fs::write(&path, &bytes).unwrap();
+        for _ in 0..2 {
+            assert_eq!(
+                JsonFileCronStore::new(temp.path()).err().as_deref(),
+                Some("private automation runtime permissions unsupported")
+            );
+        }
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        assert_eq!(
+            std::fs::read_dir(path.parent().unwrap()).unwrap().count(),
+            1
+        );
+        assert_eq!(read_durable_jobs(temp.path()).unwrap(), jobs);
     }
 
     #[cfg(unix)]
@@ -462,6 +487,7 @@ mod tests {
         job
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn durable_handles_share_notifications_and_committed_state() {
         let temp = crate::test_support::tempdir();
@@ -493,6 +519,7 @@ mod tests {
         assert_eq!(fired.fire_count, 1);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn independent_handles_observe_controls_and_preserve_unrelated_jobs() {
         let temp = crate::test_support::tempdir();
@@ -509,6 +536,7 @@ mod tests {
         assert_eq!(controls.list().await, vec![test_job("second")]);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn atomic_bookkeeping_preserves_controls_and_cannot_resurrect() {
         let temp = crate::test_support::tempdir();
@@ -563,6 +591,7 @@ mod tests {
             .is_empty());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn conditional_removal_preserves_edited_jobs() {
         let temp = crate::test_support::tempdir();
@@ -604,6 +633,7 @@ mod tests {
         assert!(runner.try_get("conditional").await.is_err());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn failed_mutations_leave_authoritative_data_unchanged() {
         let temp = crate::test_support::tempdir();
@@ -628,6 +658,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn cancelled_caller_still_notifies_after_committed_blocking_write() {
         let temp = crate::test_support::tempdir();
@@ -661,6 +692,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn concurrent_handles_do_not_clobber_jobs() {
         let temp = crate::test_support::tempdir();
@@ -683,6 +715,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn json_file_round_trip() {
         let temp = crate::test_support::tempdir();
@@ -698,6 +731,7 @@ mod tests {
         assert_eq!(store.list().await, vec![job]);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn legacy_file_loads_and_rewrites_nested() {
         let temp = crate::test_support::tempdir();
@@ -746,6 +780,7 @@ mod tests {
         assert!(rewritten[0].get("prompt").is_none());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn replace_updates_in_place() {
         let temp = crate::test_support::tempdir();

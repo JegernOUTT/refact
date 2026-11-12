@@ -1,6 +1,7 @@
 use super::*;
 use serde_json::json;
 
+#[cfg(unix)]
 #[test]
 fn finite_delivery_failures_survive_reopen_without_ack_or_wake_or_recheckpoint() {
     let root = crate::test_support::tempdir();
@@ -73,6 +74,7 @@ fn finite_delivery_failures_survive_reopen_without_ack_or_wake_or_recheckpoint()
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn deadletter_retention_preserves_metadata_and_pending_payload_with_bounded_admission() {
     let root = crate::test_support::tempdir();
@@ -131,6 +133,7 @@ fn deadletter_retention_preserves_metadata_and_pending_payload_with_bounded_admi
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn explicit_agent_enqueue_rejection_releases_started_claim_but_not_command_or_unknown() {
     let root = crate::test_support::tempdir();
@@ -178,6 +181,7 @@ fn explicit_agent_enqueue_rejection_releases_started_claim_but_not_command_or_un
     assert!(!j.release_rejected_agent_enqueue(&claim).unwrap());
 }
 
+#[cfg(unix)]
 #[test]
 fn succeeded_occurrence_lookup_is_owner_and_current_authority_fenced() {
     let root = crate::test_support::tempdir();
@@ -218,6 +222,7 @@ fn succeeded_occurrence_lookup_is_owner_and_current_authority_fenced() {
         .unwrap());
 }
 
+#[cfg(unix)]
 #[test]
 fn legacy_outbox_schema_migrates_exhausted_attempts_to_honest_failure() {
     let root = crate::test_support::tempdir();
@@ -237,6 +242,7 @@ fn legacy_outbox_schema_migrates_exhausted_attempts_to_honest_failure() {
     );
 }
 
+#[cfg(unix)]
 fn job(id: &str) -> crate::types::Job {
     let mut j = crate::types::Job::new_cron_agent_chat(
         "* * * * *".into(),
@@ -249,6 +255,7 @@ fn job(id: &str) -> crate::types::Job {
     j.id = id.into();
     j
 }
+#[cfg(unix)]
 fn source(j: &AutomationJournal) -> IngestRequest {
     j.reconcile_app_source("app", "source", "digest", &json!({"driver":"manual"}))
         .unwrap();
@@ -288,6 +295,7 @@ fn source(j: &AutomationJournal) -> IngestRequest {
         at_ms: 100,
     }
 }
+#[cfg(unix)]
 #[test]
 fn sql_ingest_commits_event_latest_checkpoint_and_outbox_once() {
     let t = crate::test_support::tempdir();
@@ -307,6 +315,7 @@ fn sql_ingest_commits_event_latest_checkpoint_and_outbox_once() {
     );
     assert_eq!(j.pending_deliveries(10, 100).unwrap().len(), 1);
 }
+#[cfg(unix)]
 #[test]
 fn large_ingest_and_delivery_preserve_exact_payload_dedup_and_denial() {
     let t = crate::test_support::tempdir();
@@ -347,6 +356,7 @@ fn large_ingest_and_delivery_preserve_exact_payload_dedup_and_denial() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn malformed_delivery_rolls_back_every_ingest_write() {
     let t = crate::test_support::tempdir();
@@ -365,6 +375,7 @@ fn malformed_delivery_rolls_back_every_ingest_write() {
         IngestOutcome::Inserted { .. }
     ));
 }
+#[cfg(unix)]
 #[test]
 fn upstream_identity_not_local_generation_controls_deduplication() {
     let t = crate::test_support::tempdir();
@@ -395,6 +406,7 @@ fn upstream_identity_not_local_generation_controls_deduplication() {
         IngestOutcome::Inserted { .. }
     ));
 }
+#[cfg(unix)]
 #[test]
 fn unkeyed_events_are_best_effort_not_accidentally_deduplicated() {
     let t = crate::test_support::tempdir();
@@ -412,6 +424,7 @@ fn unkeyed_events_are_best_effort_not_accidentally_deduplicated() {
         IngestOutcome::Inserted { .. }
     ));
 }
+#[cfg(unix)]
 #[test]
 fn semantic_reconcile_preserves_grant_but_changed_spec_revokes() {
     let t = crate::test_support::tempdir();
@@ -440,6 +453,7 @@ fn semantic_reconcile_preserves_grant_but_changed_spec_revokes() {
     assert!(!j.source_state("app", "source").unwrap().unwrap().approved);
     assert!(j.ingest(&r).is_err());
 }
+#[cfg(unix)]
 #[test]
 fn delivery_ack_and_retry_do_not_reexecute_or_recheckpoint() {
     let t = crate::test_support::tempdir();
@@ -458,6 +472,7 @@ fn delivery_ack_and_retry_do_not_reexecute_or_recheckpoint() {
     assert!(!j.acknowledge_delivery(d.event_seq, &d.target).unwrap());
     assert_eq!(j.checkpoint("app", "source").unwrap(), r.cursor);
 }
+#[cfg(unix)]
 #[test]
 fn claims_exclude_duplicate_and_started_recovery_blocks_new_occurrences() {
     let t = crate::test_support::tempdir();
@@ -489,6 +504,7 @@ fn claims_exclude_duplicate_and_started_recovery_blocks_new_occurrences() {
         .is_none());
     assert_eq!(j.wake_summary().unwrap().recovery, 1);
 }
+#[cfg(unix)]
 #[test]
 fn never_started_recovery_releases_claim_without_replaying_side_effect() {
     let t = crate::test_support::tempdir();
@@ -514,6 +530,7 @@ fn never_started_recovery_releases_claim_without_replaying_side_effect() {
         .unwrap()
         .is_some());
 }
+#[cfg(unix)]
 #[test]
 fn changed_job_revokes_old_effect_admission() {
     let t = crate::test_support::tempdir();
@@ -535,6 +552,7 @@ fn changed_job_revokes_old_effect_admission() {
         .unwrap()
         .is_none());
 }
+#[cfg(unix)]
 #[test]
 fn sessions_are_fenced_and_never_loaded_as_durable() {
     let t = crate::test_support::tempdir();
@@ -557,6 +575,7 @@ fn sessions_are_fenced_and_never_loaded_as_durable() {
         .claim_run("session", "two", &digest, "stale-owner", false)
         .is_err());
 }
+#[cfg(unix)]
 #[test]
 fn lease_shared_in_process_but_independent_owner_denied() {
     #[cfg(unix)]
@@ -774,10 +793,33 @@ fn lease_shared_in_process_but_independent_owner_denied() {
     }
 }
 #[test]
-fn observer_does_not_create_and_cannot_write() {
+fn missing_observer_does_not_create_project_storage() {
     let t = crate::test_support::tempdir();
     assert!(AutomationJournal::open_observer(t.path()).is_err());
     assert!(!t.path().join(".refact").exists());
+}
+
+#[cfg(not(unix))]
+#[test]
+fn execution_lease_refuses_unsupported_private_runtime_without_creating_owner_lock() {
+    let root = crate::test_support::tempdir();
+    let path = journal_path(root.path()).unwrap();
+    let lock = path.parent().unwrap().join("owner.lock");
+    assert!(!path.exists());
+    assert!(!lock.exists());
+    assert_eq!(
+        ProjectAutomationLease::acquire(root.path()).err().unwrap(),
+        "private automation runtime permissions unsupported"
+    );
+    assert!(!lock.exists());
+    assert!(!path.exists());
+    assert!(!root.path().join(".refact").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn observer_does_not_create_and_cannot_write() {
+    let t = crate::test_support::tempdir();
     let j = AutomationJournal::open(t.path()).unwrap();
     let lease = ProjectAutomationLease::acquire(t.path()).unwrap();
     j.activate_owner(&lease).unwrap();
@@ -786,6 +828,7 @@ fn observer_does_not_create_and_cannot_write() {
     assert!(o.put_session_job(&job("no"), "epoch").is_err());
     assert!(j.load_legacy_jobs().unwrap().is_empty());
 }
+#[cfg(unix)]
 #[test]
 fn paused_expired_unapproved_and_archived_sources_cannot_keep_daemon_awake() {
     let t = crate::test_support::tempdir();
@@ -810,6 +853,7 @@ fn paused_expired_unapproved_and_archived_sources_cannot_keep_daemon_awake() {
     assert!(j.list_sources().unwrap().is_empty());
     assert!(!j.wake_summary_at(100).unwrap().background_active);
 }
+#[cfg(unix)]
 #[test]
 fn migration_retires_json_preserves_fields_and_places_retry_review_hold() {
     let t = crate::test_support::tempdir();
@@ -833,6 +877,7 @@ fn migration_retires_json_preserves_fields_and_places_retry_review_hold() {
     assert_eq!(j.wake_summary().unwrap().recovery, 1);
     assert_eq!(j.migrate_legacy_jobs(t.path(), &lease).unwrap(), 0);
 }
+#[cfg(unix)]
 #[test]
 fn catalog_cas_and_external_deletion_are_authoritative() {
     let t = crate::test_support::tempdir();
@@ -872,6 +917,7 @@ fn symlinked_storage_components_and_hardlinks_are_refused() {
     assert!(AutomationJournal::open(t.path()).is_err());
 }
 
+#[cfg(unix)]
 #[test]
 fn session_collision_cannot_overwrite_durable_or_other_session_authority() {
     let t = crate::test_support::tempdir();
@@ -886,6 +932,7 @@ fn session_collision_cannot_overwrite_durable_or_other_session_authority() {
     j.put_session_job(&attacker, "first").unwrap();
     assert!(j.put_session_job(&attacker, "second").is_err());
 }
+#[cfg(unix)]
 #[test]
 fn observer_migration_refuses_before_retiring_legacy_authority() {
     let t = crate::test_support::tempdir();
@@ -902,6 +949,7 @@ fn observer_migration_refuses_before_retiring_legacy_authority() {
         .exists());
     assert!(observer.load_legacy_jobs().unwrap().is_empty());
 }
+#[cfg(unix)]
 #[test]
 fn atomic_completion_rejects_invalid_payload_without_finishing_claim() {
     let t = crate::test_support::tempdir();
@@ -954,6 +1002,7 @@ fn atomic_completion_rejects_invalid_payload_without_finishing_claim() {
         .complete_run_and_enqueue_delivery(&claim, RunStatus::Succeeded, None, None, None)
         .unwrap());
 }
+#[cfg(unix)]
 #[test]
 fn activation_checks_root_identity_and_retains_the_execution_lease() {
     let t = crate::test_support::tempdir();
@@ -968,6 +1017,7 @@ fn activation_checks_root_identity_and_retains_the_execution_lease() {
     drop(j);
     assert!(ProjectAutomationLease::acquire_exclusive(t.path()).is_ok());
 }
+#[cfg(unix)]
 #[test]
 fn cron_wake_summary_includes_interval_once_cron_and_explicit_manual() {
     let cases = [
@@ -1094,6 +1144,7 @@ fn cron_wake_summary_includes_interval_once_cron_and_explicit_manual() {
         "timezone wake mismatches: {mismatches:?}"
     );
 }
+#[cfg(unix)]
 #[test]
 fn project_database_leaf_is_not_authoritative_and_runtime_is_private() {
     let t = crate::test_support::tempdir();
@@ -1117,6 +1168,7 @@ fn project_database_leaf_is_not_authoritative_and_runtime_is_private() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn external_security_edit_is_desired_state_not_automatic_execution_grant() {
     let t = crate::test_support::tempdir();
@@ -1150,6 +1202,7 @@ fn external_security_edit_is_desired_state_not_automatic_execution_grant() {
         .is_none());
     assert_eq!(j.wake_summary().unwrap().recovery, 1);
 }
+#[cfg(unix)]
 #[test]
 fn sql_trigger_failure_proves_atomic_completion_rollback() {
     let t = crate::test_support::tempdir();
@@ -1192,6 +1245,7 @@ fn sql_trigger_failure_proves_atomic_completion_rollback() {
         )
         .unwrap());
 }
+#[cfg(unix)]
 #[test]
 fn pending_delivery_capacity_keeps_checkpoint_and_effect_admission_unchanged() {
     let t = crate::test_support::tempdir();
@@ -1220,6 +1274,7 @@ fn pending_delivery_capacity_keeps_checkpoint_and_effect_admission_unchanged() {
     assert_eq!(j.wake_summary().unwrap().pending_delivery, 4096);
 }
 
+#[cfg(unix)]
 #[test]
 fn project_lock_unlink_cannot_create_second_private_runtime_owner() {
     let root = crate::test_support::tempdir();
@@ -1253,6 +1308,7 @@ fn generic_definition() -> Definition {
         policy: ExecutionPolicy::default(),
     }
 }
+#[cfg(unix)]
 #[test]
 fn generic_approval_claim_effect_completion_and_revocation_share_run_ledger() {
     let root = crate::test_support::tempdir();
@@ -1298,6 +1354,7 @@ fn generic_approval_claim_effect_completion_and_revocation_share_run_ledger() {
         .unwrap()
         .is_none());
 }
+#[cfg(unix)]
 #[test]
 fn cron_only_completion_and_ack_retention_is_bounded_without_any_source_ingest() {
     let root = crate::test_support::tempdir();
@@ -1434,6 +1491,7 @@ fn byte_policies_default_unlimited_and_preserve_positive_digest_covered_opt_ins(
     ));
 }
 
+#[cfg(unix)]
 #[test]
 fn explicit_run_delivery_accepts_large_payload_once_and_rejects_stale_claim() {
     let t = crate::test_support::tempdir();

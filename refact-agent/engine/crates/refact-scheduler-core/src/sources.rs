@@ -2146,7 +2146,9 @@ fn public_address(ip: std::net::IpAddr) -> bool {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     struct FixtureResolver;
+    #[cfg(unix)]
     impl SourceCredentialResolver for FixtureResolver {
         fn resolve(
             &self,
@@ -2164,6 +2166,7 @@ mod tests {
             ))
         }
     }
+    #[cfg(unix)]
     fn auth_policy() -> SourcePolicy {
         SourcePolicy {
             credential_bindings: vec![CredentialBinding {
@@ -2175,6 +2178,7 @@ mod tests {
             ..Default::default()
         }
     }
+    #[cfg(unix)]
     #[tokio::test]
     async fn revoked_credential_cannot_forward_already_received_stream_data() {
         struct Revocable(std::sync::atomic::AtomicBool);
@@ -2254,6 +2258,7 @@ mod tests {
         owner.shutdown().await;
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn authenticated_http_never_journals_headers_and_replacement_revokes() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -2342,6 +2347,7 @@ mod tests {
         owner.shutdown().await;
         server.await.unwrap();
     }
+    #[cfg(unix)]
     #[tokio::test]
     async fn websocket_auth_subprotocol_subscription_and_reconnect() {
         use futures_util::SinkExt;
@@ -2446,6 +2452,7 @@ mod tests {
         server.await.unwrap();
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn in_flight_file_read_releases_state_and_revoke_fences_stale_batch() {
         let temp = tempfile::tempdir().unwrap();
@@ -2532,6 +2539,7 @@ mod tests {
         assert_eq!(owner.journal.checkpoint("app", "tail").unwrap(), None);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn file_grant_and_committed_cursor_survive_service_restart() {
         let temp = tempfile::tempdir().unwrap();
@@ -2611,6 +2619,7 @@ mod tests {
         owner.shutdown().await;
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn unconfigure_tombstone_does_not_restore_or_reuse_old_approval() {
         let temp = tempfile::tempdir().unwrap();
@@ -2650,6 +2659,7 @@ mod tests {
         restored.shutdown().await;
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn sse_stall_emits_stale_and_unknown_gap_without_inventing_checkpoint() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -2734,6 +2744,7 @@ mod tests {
         server.await.unwrap();
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn sse_idle_reconnect_uses_only_committed_capability_cursor_and_revocation_fences() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -2885,6 +2896,7 @@ mod tests {
         revoked.shutdown().await;
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn ui_revision_preserves_approval_generation_and_source_specific_change_revokes() {
         let temp = tempfile::tempdir().unwrap();
@@ -2941,6 +2953,7 @@ mod tests {
         service.shutdown().await;
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn restart_restores_background_and_latest_but_not_view_demand_or_revoked_authority() {
         let temp = tempfile::tempdir().unwrap();
@@ -3051,6 +3064,7 @@ mod tests {
         server.await.unwrap();
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn refresh_requires_live_grants_and_coalesces_real_reads_without_cached_success() {
         let temp = tempfile::tempdir().unwrap();
@@ -3125,6 +3139,7 @@ mod tests {
         service.shutdown().await;
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn stale_process_read_cannot_publish_into_reconfigured_generation() {
         let temp = tempfile::tempdir().unwrap();
@@ -3196,6 +3211,7 @@ mod tests {
         service.shutdown().await;
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn durable_revoke_and_internal_journal_failures_are_reported() {
         let temp = crate::test_support::tempdir();
@@ -3257,6 +3273,7 @@ mod tests {
         service.shutdown().await;
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn lifecycle_lease_is_explicit_digest_bound_expiring_and_suspended() {
         let temp = tempfile::tempdir().unwrap();
@@ -3326,6 +3343,7 @@ mod tests {
         service.shutdown().await;
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn internal_transform_failure_is_observable_and_not_success() {
         let temp = tempfile::tempdir().unwrap();
@@ -3372,6 +3390,7 @@ mod tests {
         service.shutdown().await;
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn sse_inherited_cursor_never_deduplicates_distinct_idless_dispatches() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -3462,6 +3481,37 @@ mod tests {
         }
     }
 
+    #[cfg(not(unix))]
+    #[test]
+    fn service_constructors_refuse_unsupported_private_runtime_without_execution() {
+        const UNSUPPORTED: &str = "private automation runtime permissions unsupported";
+        let temp = crate::test_support::tempdir();
+        assert_eq!(
+            ProjectAutomationLease::acquire(temp.path())
+                .err()
+                .as_deref(),
+            Some(UNSUPPORTED)
+        );
+        assert_eq!(
+            AutomationService::new(temp.path()).err().as_deref(),
+            Some(UNSUPPORTED)
+        );
+        assert_eq!(
+            AutomationService::new_suspended(temp.path())
+                .err()
+                .as_deref(),
+            Some(UNSUPPORTED)
+        );
+        assert_eq!(
+            AutomationService::new(temp.path().join("."))
+                .err()
+                .as_deref(),
+            Some(UNSUPPORTED)
+        );
+        assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 0);
+    }
+
+    #[cfg(unix)]
     #[test]
     fn automation_lease_is_shared_with_project_owner() {
         let temp = crate::test_support::tempdir();
@@ -3470,6 +3520,7 @@ mod tests {
         assert!(Arc::ptr_eq(&a, &b));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn large_http_payload_reaches_supervisor_snapshot_and_survives_restart() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -3615,6 +3666,7 @@ mod tests {
         server.await.unwrap();
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn declarations_do_not_grant_and_last_consumer_cancels_shared_interval() {
         let temp = tempfile::tempdir().unwrap();

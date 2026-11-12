@@ -176,6 +176,7 @@ pub struct AutomationCatalog {
 mod capacity_tests {
     use super::*;
 
+    #[cfg(unix)]
     #[test]
     fn execution_lane_can_admit_more_than_the_retired_256_ceiling() {
         let directory = crate::test_support::tempdir();

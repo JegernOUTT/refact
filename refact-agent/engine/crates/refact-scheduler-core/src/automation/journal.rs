@@ -1586,6 +1586,7 @@ CREATE INDEX IF NOT EXISTS outbox_pending ON outbox(acked,event_seq);";
 #[cfg(test)]
 mod transaction_fence_tests {
     use super::*;
+    #[cfg(unix)]
     #[test]
     fn runtime_mutation_rolls_back_without_catalog_changes_and_reconcile_keeps_trigger() {
         let root = crate::test_support::tempdir();
@@ -1657,6 +1658,7 @@ mod transaction_fence_tests {
         assert_eq!(observer.load_legacy_jobs().unwrap(), vec![stored]);
     }
 
+    #[cfg(unix)]
     #[test]
     fn epoch_changed_after_precheck_cannot_enter_mutation_transaction() {
         let root = crate::test_support::tempdir();
