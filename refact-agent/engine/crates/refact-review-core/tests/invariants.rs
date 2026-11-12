@@ -1398,3 +1398,34 @@ fn legacy_rich_fields_are_omitted_and_retry_fingerprint_survives_reload() {
     assert_eq!(store.mutate(&r.id, request).unwrap(), first);
     assert_eq!(store.load(&r.id).unwrap(), first);
 }
+#[test]
+fn captured_repository_identity_is_the_non_verbatim_canonical_root() {
+    let root = tempfile::tempdir().unwrap();
+    let checkout = tempfile::tempdir().unwrap();
+    let repo = git2::Repository::init(checkout.path()).unwrap();
+    let oid = commit(&repo, "one\n");
+    let store = ReviewStore::open(root.path()).unwrap();
+    let expected = dunce::canonicalize(checkout.path())
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    assert!(!expected.starts_with(r"\\?\"));
+    let committed = capture(&store, &repo, &oid);
+    assert_eq!(committed.repository, expected);
+    let overlay = store
+        .capture(
+            checkout.path(),
+            CaptureRequest {
+                base_oid: oid.clone(),
+                head_oid: oid,
+                policy: CapturePolicy {
+                    working: true,
+                    staged: false,
+                    untracked: false,
+                },
+                origin: Origin::Local,
+            },
+        )
+        .unwrap();
+    assert_eq!(overlay.repository, expected);
+}

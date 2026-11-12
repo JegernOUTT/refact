@@ -571,8 +571,9 @@ impl DaemonState {
                     if self.is_shutting_down()
                         || tokio::fs::canonicalize(&entry.root)
                             .await
+                            .map(|path| dunce::simplified(&path).to_path_buf())
                             .map_err(|e| e.to_string())?
-                            != entry.root
+                            != dunce::simplified(&entry.root)
                     {
                         return Ok(false);
                     }

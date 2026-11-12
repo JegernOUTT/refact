@@ -1,6 +1,20 @@
 use super::*;
 use serde_json::json;
 
+#[cfg(not(unix))]
+#[tokio::test]
+async fn runtime_refuses_process_sources_without_private_automation_permissions() {
+    let project = tempfile::tempdir().unwrap();
+    let gcx = crate::global_context::tests::make_test_gcx().await;
+    let runtimes = AppRuntimes::default();
+    let error = match runtimes.get(project.path().to_path_buf(), gcx).await {
+        Ok(_) => panic!("app runtime must not start without private automation permissions"),
+        Err(error) => error,
+    };
+    assert_eq!(error, "private automation runtime permissions unsupported");
+    assert!(runtimes.projects.lock().await.is_empty());
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn worker_http_accepts_large_state_without_weakening_view_origin_or_cas() {

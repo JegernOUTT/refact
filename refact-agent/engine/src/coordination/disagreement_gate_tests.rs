@@ -113,13 +113,14 @@ async fn policy_on_unavailable_ledger_fails_closed() {
 }
 
 fn card(worktree: &Path, base_branch: &str) -> BoardCard {
+    let verify_command = "git --version";
     BoardCard {
         id: CARD_ID.to_string(),
         title: "Disagreement gated card".to_string(),
         column: "done".to_string(),
         priority: "P1".to_string(),
         depends_on: Vec::new(),
-        instructions: "## Acceptance Criteria\n- Verify: `true`".to_string(),
+        instructions: format!("## Acceptance Criteria\n- Verify: `{verify_command}`"),
         assignee: None,
         agent_chat_id: Some("agent-disagreement".to_string()),
         status_updates: Vec::new(),
@@ -128,7 +129,7 @@ fn card(worktree: &Path, base_branch: &str) -> BoardCard {
         final_report_structured: Some(FinalReport {
             success: true,
             verification: vec![VerificationResult {
-                command: "true".to_string(),
+                command: verify_command.to_string(),
                 exit_code: Some(0),
                 passed: true,
                 outcome: VerificationOutcome::Passed,

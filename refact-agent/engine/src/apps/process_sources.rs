@@ -678,6 +678,7 @@ fn bounded_text(text: &str) -> (&str, bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     #[tokio::test]
     async fn cold_adapter_retains_completed_provenance_without_source_declaration() {
         let temp = tempfile::tempdir().unwrap();
@@ -725,6 +726,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn adapter_rejects_forged_owner_and_joins_shutdown() {
         let temp = tempfile::tempdir().unwrap();

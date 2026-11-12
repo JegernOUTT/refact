@@ -958,14 +958,21 @@ mod tests {
             .await
             .unwrap()
             .expect("startup heartbeat records this engine");
-        assert!(classify(
+        let state = classify(
             &stored,
             &HostIdentity::local(),
             probe_process_start(stored.pid),
             now_ms(),
             settings.presence_stale_after_ms as i64,
-        )
-        .is_alive());
+        );
+        if cfg!(target_os = "linux") {
+            assert!(state.is_alive());
+        } else {
+            assert_eq!(probe_process_start(stored.pid), StartIdentity::Unknown);
+            assert_eq!(stored.process_started_at_ms, START_IDENTITY_UNOBTAINABLE);
+            assert_eq!(state, PresenceState::Unknown);
+            assert!(!state.is_alive());
+        }
 
         service.shutdown().await.unwrap();
         let closed = store
@@ -974,6 +981,16 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(closed.presence_mark, PresenceMark::Closed);
+        assert_eq!(
+            classify(
+                &closed,
+                &HostIdentity::local(),
+                probe_process_start(closed.pid),
+                now_ms(),
+                settings.presence_stale_after_ms as i64,
+            ),
+            PresenceState::Dead
+        );
         assert_eq!(project_liveness(&project), None);
         crate::runtime_settings::reset_for_test();
     }

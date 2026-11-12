@@ -3934,7 +3934,7 @@ mod tests {
         assert!(attempt.ccx.lock().await.approved_executions["saved-child"].consumed);
         let id = process_id(&only_message(messages));
         let completed = tokio::time::timeout(
-            Duration::from_secs(10),
+            Duration::from_millis(wait_completion_timeout_ms().max(10_000)),
             fixture.app.runtime.exec_registry.wait(&id),
         )
         .await

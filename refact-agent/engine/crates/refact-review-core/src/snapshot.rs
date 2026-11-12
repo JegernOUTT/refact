@@ -3,7 +3,7 @@ use std::{collections::BTreeMap, path::Path, io::Read};
 type Files = BTreeMap<String, (Vec<u8>, u32)>;
 impl ReviewStore {
     pub fn capture(&self, repository: &Path, request: CaptureRequest) -> Result<Candidate> {
-        let root = std::fs::canonicalize(repository)?;
+        let root = dunce::canonicalize(repository)?;
         let repo = git2::Repository::open(&root)?;
         let base = repo.find_commit(git2::Oid::from_str(&request.base_oid)?)?;
         let head = repo.find_commit(git2::Oid::from_str(&request.head_oid)?)?;
@@ -12,10 +12,8 @@ impl ReviewStore {
         tree_files(&repo, &base.tree()?, "", &mut base_files)?;
         tree_files(&repo, &head.tree()?, "", &mut head_files)?;
         if request.policy.staged || request.policy.working || request.policy.untracked {
-            let checkout = repo
-                .workdir()
-                .ok_or_else(|| invalid("workdir required"))?
-                .canonicalize()?;
+            let checkout =
+                dunce::canonicalize(repo.workdir().ok_or_else(|| invalid("workdir required"))?)?;
             if checkout != root {
                 return Err(invalid("capture requires repository workdir root"));
             }

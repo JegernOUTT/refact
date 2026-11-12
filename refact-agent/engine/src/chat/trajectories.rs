@@ -1427,7 +1427,12 @@ pub(crate) async fn index_dir_for_trajectory_file(
 ) -> Option<PathBuf> {
     let parent = file_path.parent()?;
     let normal_dirs = get_all_trajectories_dirs(gcx.clone()).await;
-    if normal_dirs.iter().any(|dir| dir == parent) {
+    let normal_keys: Vec<_> = normal_dirs
+        .iter()
+        .map(|dir| crate::files_correction::canonicalize_normalized_path(dir.clone()))
+        .collect();
+    let parent_key = crate::files_correction::canonicalize_normalized_path(parent.to_path_buf());
+    if normal_keys.contains(&parent_key) {
         return Some(parent.to_path_buf());
     }
     let task_roots = get_all_task_roots(gcx).await;
@@ -1435,7 +1440,9 @@ pub(crate) async fn index_dir_for_trajectory_file(
         return Some(parent.to_path_buf());
     }
     if let Some(grandparent) = parent.parent() {
-        if normal_dirs.iter().any(|dir| dir == grandparent)
+        let grandparent_key =
+            crate::files_correction::canonicalize_normalized_path(grandparent.to_path_buf());
+        if normal_keys.contains(&grandparent_key)
             || is_task_trajectory_index_dir(grandparent, &task_roots).await
         {
             return Some(grandparent.to_path_buf());
@@ -17397,6 +17404,13 @@ mod tests {
             let index_dir = index_dir_for_trajectory_file(gcx.clone(), &path)
                 .await
                 .unwrap();
+            if i != 3 && i != 4 {
+                assert_eq!(
+                    normalized_test_path(&index_dir),
+                    normalized_test_path(&dir.path().join(".refact/trajectories")),
+                    "normal nested saves must use the root index, case {i}"
+                );
+            }
             let bytes = tokio::fs::read(&path).await.unwrap();
             let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
             let hash: [u8; 32] = trajectory_index::source_sha256(&bytes);

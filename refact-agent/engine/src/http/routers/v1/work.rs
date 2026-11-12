@@ -688,8 +688,9 @@ mod tests {
         assert_ne!(second["seq"], first["seq"]);
         assert!(denied_bytes.contains("visible peer retitled"));
         for secret in ["denied peer title", "sse-denied", guarded_path.as_str()] {
+            let wire_secret = serde_json::to_string(secret).unwrap();
             assert!(
-                !denied_bytes.contains(secret),
+                !denied_bytes.contains(secret) && !denied_bytes.contains(&wire_secret),
                 "'{secret}' reached the stream: {denied_bytes}"
             );
         }
@@ -709,7 +710,7 @@ mod tests {
         assert_eq!(third["rows"].as_array().unwrap().len(), 3);
         assert_ne!(third["snapshot_id"], first["snapshot_id"]);
         assert!(disclosed_bytes.contains("denied peer title"));
-        assert!(disclosed_bytes.contains(guarded_path.as_str()));
+        assert!(disclosed_bytes.contains(&serde_json::to_string(&guarded_path).unwrap()));
         tokio::time::resume();
     }
 

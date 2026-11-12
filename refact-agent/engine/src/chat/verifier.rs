@@ -1823,7 +1823,9 @@ async fn run_verification_argv_scoped(
     }
     let effective_cwd = if runner.is_some() {
         match tokio::fs::canonicalize(&effective_cwd).await {
-            Ok(cwd) if cwd.starts_with(worktree) => dunce::simplified(&cwd).to_path_buf(),
+            Ok(cwd) if dunce::simplified(&cwd).starts_with(worktree) => {
+                dunce::simplified(&cwd).to_path_buf()
+            }
             _ => {
                 return unrun_verification(
                     command,

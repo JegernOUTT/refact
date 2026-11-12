@@ -568,6 +568,7 @@ mod tests {
             .0;
         assert_eq!(snapshot.coverage, "loaded_native_sessions");
         assert_eq!(snapshot.sessions[0].tools.len(), 1);
+        let root = snapshot.project_root.clone();
         for (project_root, tool_call_id, version) in [
             (
                 "/wrong".to_string(),
