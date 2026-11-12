@@ -963,6 +963,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("repo");
         std::fs::create_dir(&source).unwrap();
+        let source = dunce::canonicalize(source).unwrap();
         let repo = git2::Repository::init(&source).unwrap();
         let blob = repo.blob(b"original\n").unwrap();
         let mut tree = repo.treebuilder(None).unwrap();
@@ -1291,6 +1292,38 @@ mod tests {
         )
         .unwrap();
         let before_refresh = store.load_stack("context-stack").unwrap();
+        let mut refresh_manifest = before_refresh.clone();
+        refresh_manifest.members[0].head_oid = Some(refreshed_oid.to_string());
+        let mut refresh_candidate = store
+            .capture(
+                &source,
+                CaptureRequest {
+                    base_oid: oid.to_string(),
+                    head_oid: refreshed_oid.to_string(),
+                    policy: CapturePolicy::default(),
+                    origin: Origin::Imported,
+                },
+            )
+            .unwrap();
+        assert_eq!(refresh_candidate.repository, refresh_manifest.repository);
+        refresh_candidate.repository = source.join("different-repository").to_str().unwrap().into();
+        let reviews_before_rejection = store.list_for_chat("review-context-root").unwrap();
+        let rejected = store
+            .publish_stack_refresh(
+                refresh_manifest,
+                before_refresh.revision,
+                "reject-wrong-repository",
+                vec![(member_id.clone(), refresh_candidate)],
+            )
+            .unwrap_err();
+        assert!(rejected
+            .to_string()
+            .contains("refresh candidate binding mismatch"));
+        assert_eq!(store.load_stack("context-stack").unwrap(), before_refresh);
+        assert_eq!(
+            store.list_for_chat("review-context-root").unwrap(),
+            reviews_before_rejection
+        );
         let refreshed = super::super::stacks::refresh(
             &app,
             "review-context-root",
