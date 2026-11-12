@@ -1,7 +1,10 @@
 use refact_review_core::*;
 
 fn fixture() -> (tempfile::TempDir, ReviewStore, StackManifest) {
-    let root = tempfile::tempdir().unwrap();
+    let base = std::env::temp_dir();
+    #[cfg(unix)]
+    let base = base.canonicalize().unwrap();
+    let root = tempfile::tempdir_in(base).unwrap();
     let repo = git2::Repository::init(root.path()).unwrap();
     let tree = repo
         .find_tree(repo.treebuilder(None).unwrap().write().unwrap())
