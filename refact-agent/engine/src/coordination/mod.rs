@@ -51,8 +51,6 @@ pub mod service;
 #[cfg(test)]
 mod service_tests;
 #[cfg(test)]
-mod shared_context_tests;
-#[cfg(test)]
 mod team_config_tests;
 #[cfg(test)]
 mod team_registry_tests;

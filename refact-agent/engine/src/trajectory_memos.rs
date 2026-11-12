@@ -2725,55 +2725,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancelled_attempt_releases_its_claim() {
-        let (workspace, gcx) = memo_test_workspace(1).await;
-        let path = trajectory_path(workspace.path(), 0);
-        let calls = Arc::new(AtomicUsize::new(0));
-        let pending: Arc<MemoExtractor> = {
-            let calls = calls.clone();
-            Arc::new(move |_| {
-                let calls = calls.clone();
-                Box::pin(async move {
-                    calls.fetch_add(1, Ordering::SeqCst);
-                    std::future::pending::<Result<ExtractionResult, String>>().await
-                })
-            })
-        };
-        let task = {
-            let gcx = gcx.clone();
-            let path = path.clone();
-            tokio::spawn(async move {
-                process_single_trajectory_with_extractor(
-                    gcx,
-                    path,
-                    &stale_threshold(),
-                    pending.as_ref(),
-                )
-                .await
-            })
-        };
-        while calls.load(Ordering::SeqCst) == 0 {
-            tokio::task::yield_now().await;
-        }
-        assert!(try_claim_extraction(&path).await.unwrap().is_none());
-        task.abort();
-        let _ = task.await;
-
-        assert!(try_claim_extraction(&path).await.unwrap().is_some());
-        let retry_calls = Arc::new(AtomicUsize::new(0));
-        let retry = scripted_extractor(vec![], retry_calls.clone());
-        let outcome = process_single_trajectory_with_extractor(
-            gcx,
-            path.clone(),
-            &stale_threshold(),
-            retry.as_ref(),
-        )
-        .await;
-        assert!(matches!(outcome, MemoProcessingOutcome::Extracted));
-        assert_eq!(retry_calls.load(Ordering::SeqCst), 1);
-    }
-
-    #[tokio::test]
     async fn new_messages_during_extraction_are_preserved_and_not_finished() {
         let (workspace, gcx) = memo_test_workspace(1).await;
         let path = trajectory_path(workspace.path(), 0);

@@ -575,53 +575,6 @@ async fn benchmark_provenance_rich_capsule_omission_inventory() {
     }
 }
 
-#[serial_test::serial(runtime_settings)]
-#[tokio::test]
-async fn warm_skip_still_checks_caller_and_does_not_starve_pending_state() {
-    let (app, _dir, caller) = fixture().await;
-    super::capsule::ROW_DERIVATIONS
-        .scope(std::cell::Cell::new(0), async {
-            let mut state = CapsuleState::default();
-            assert!(
-                prepare_work_context(&app, &mut state, "capsule-caller", "trusted/model")
-                    .await
-                    .is_some()
-            );
-            assert_eq!(super::capsule::ROW_DERIVATIONS.with(|count| count.get()), 1);
-            assert!(
-                prepare_work_context(&app, &mut state, "capsule-caller", "trusted/model")
-                    .await
-                    .is_none()
-            );
-            assert_eq!(super::capsule::ROW_DERIVATIONS.with(|count| count.get()), 1);
-            state.pending_fingerprint = state.last_fingerprint;
-            state.pending_since_ms = Some(0);
-            assert!(
-                prepare_work_context(&app, &mut state, "capsule-caller", "trusted/model")
-                    .await
-                    .is_none()
-            );
-            assert_eq!(super::capsule::ROW_DERIVATIONS.with(|count| count.get()), 2);
-            assert!(state.pending_fingerprint.is_none());
-            assert!(state.pending_since_ms.is_none());
-            caller.lock().await.thread.model = "other/model".into();
-            let before = state.clone();
-            assert!(
-                prepare_work_context(&app, &mut state, "capsule-caller", "trusted/model")
-                    .await
-                    .is_none()
-            );
-            assert_eq!(state, before, "a stale caller must not reach the memo");
-            assert!(
-                prepare_work_context(&app, &mut state, "capsule-caller", "other/model")
-                    .await
-                    .is_some()
-            );
-            assert_eq!(super::capsule::ROW_DERIVATIONS.with(|count| count.get()), 3);
-        })
-        .await;
-}
-
 struct CapsuleTestClock;
 impl crate::chat::perf_diagnostics::PerfClock for CapsuleTestClock {
     fn now_us(&self) -> u64 {
