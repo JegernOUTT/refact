@@ -349,18 +349,21 @@ async fn drive_maintenance(
     shutdown: Arc<std::sync::atomic::AtomicBool>,
     maintenance: impl std::future::Future<Output = ()>,
 ) {
-    tokio::pin!(maintenance);
-    let mut native_tick =
-        tokio::time::interval(std::time::Duration::from_secs(PET_DECAY_INTERVAL_SECS));
-    loop {
-        tokio::select! {
-            _ = wait_for_shutdown(shutdown.clone()) => break,
-            _ = &mut maintenance => break,
-            _ = native_tick.tick() => {
-                let mut guard = buddy.lock().await;
-                if let Some(svc) = guard.as_mut() { svc.apply_pet_tick(PET_DECAY_INTERVAL_SECS); }
+    let native_ticks = async {
+        let mut native_tick =
+            tokio::time::interval(std::time::Duration::from_secs(PET_DECAY_INTERVAL_SECS));
+        loop {
+            native_tick.tick().await;
+            let mut guard = buddy.lock().await;
+            if let Some(svc) = guard.as_mut() {
+                svc.apply_pet_tick(PET_DECAY_INTERVAL_SECS);
             }
         }
+    };
+    tokio::select! {
+        _ = wait_for_shutdown(shutdown) => {},
+        _ = maintenance => {},
+        _ = native_ticks => {},
     }
 }
 

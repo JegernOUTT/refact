@@ -597,6 +597,80 @@ async fn cancelled_admission_and_failed_memory_commit_preserve_input() {
         .is_ok());
 }
 
+#[tokio::test(start_paused = true)]
+async fn production_maintenance_driver_polls_queued_lock_and_native_ticks_until_shutdown() {
+    let root = tempfile::tempdir().unwrap();
+    let svc = service(root.path());
+    let mut events = svc.events_tx.subscribe();
+    let buddy = Arc::new(tokio::sync::Mutex::new(Some(svc)));
+    let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let external_guard = buddy.lock().await;
+    let (progress_tx, mut progress_rx) = tokio::sync::oneshot::channel();
+    let (finish_tx, finish_rx) = tokio::sync::oneshot::channel::<()>();
+    {
+        let mut maintenance = Box::pin(async {
+            let guard = buddy.lock().await;
+            progress_tx.send(()).unwrap();
+            drop(guard);
+            let _ = finish_rx.await;
+        });
+        assert!(futures::poll!(&mut maintenance).is_pending());
+        let driver = drive_maintenance(&buddy, shutdown.clone(), maintenance);
+        tokio::pin!(driver);
+        assert!(futures::poll!(&mut driver).is_pending());
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert!(futures::poll!(&mut driver).is_pending());
+        assert!(matches!(
+            progress_rx.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+        assert!(events.try_recv().is_err());
+
+        drop(external_guard);
+        assert!(futures::poll!(&mut driver).is_pending());
+        assert_eq!(
+            progress_rx.try_recv(),
+            Ok(()),
+            "queued maintenance must be polled while the native tick waits for Buddy"
+        );
+        assert!(futures::poll!(&mut driver).is_pending());
+        let native_event = events
+            .try_recv()
+            .expect("immediate native tick is not lost");
+        let BuddyEvent::StateUpdated {
+            state,
+        } = native_event
+        else {
+            panic!("expected native pet tick, got {native_event:?}");
+        };
+        assert_eq!(state.pet.evolution.open_seconds, PET_DECAY_INTERVAL_SECS);
+        let guard = buddy.try_lock().expect("both driver futures release Buddy");
+        assert_eq!(
+            serde_json::to_value(&state).unwrap(),
+            serde_json::to_value(guard.as_ref().unwrap().presentation_state()).unwrap()
+        );
+        assert!(events.try_recv().is_err());
+        tokio::time::advance(Duration::from_secs(PET_DECAY_INTERVAL_SECS)).await;
+        assert!(futures::poll!(&mut driver).is_pending());
+        shutdown.store(true, Ordering::SeqCst);
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert!(
+            futures::poll!(&mut driver).is_ready(),
+            "shutdown must not wait for the native tick's Buddy lock"
+        );
+        drop(guard);
+    }
+    assert!(finish_tx.is_closed(), "shutdown drops owned maintenance");
+    let guard = buddy
+        .try_lock()
+        .expect("shutdown cancels the native lock waiter");
+    assert_eq!(
+        guard.as_ref().unwrap().state.pet.evolution.open_seconds,
+        PET_DECAY_INTERVAL_SECS
+    );
+    assert!(events.try_recv().is_err());
+}
+
 #[tokio::test]
 async fn production_maintenance_driver_stops_while_repository_is_blocked() {
     let root = tempfile::tempdir().unwrap();
