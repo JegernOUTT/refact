@@ -7,7 +7,10 @@ fn discovery(repository: &str) -> StackManifest {
         owner_chat_id: "owner".into(),
         revision: 0,
         title: "Recorded merged PRs".into(),
-        repository: repository.into(),
+        repository: dunce::canonicalize(repository)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned(),
         source: StackSource {
             kind: "provided_manifest".into(),
             reference: Some("Explicit recorded comparison evidence".into()),

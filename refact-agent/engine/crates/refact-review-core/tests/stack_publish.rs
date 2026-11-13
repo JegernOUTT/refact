@@ -24,7 +24,10 @@ fn fixture() -> (tempfile::TempDir, ReviewStore, StackManifest) {
         owner_chat_id: "owner".into(),
         revision: 0,
         title: "Stack".into(),
-        repository: root.path().to_str().unwrap().into(),
+        repository: dunce::canonicalize(root.path())
+            .unwrap()
+            .to_string_lossy()
+            .into_owned(),
         source: StackSource {
             kind: "provided_manifest".into(),
             reference: Some("fixture".into()),
