@@ -1,0 +1,2 @@
+/src/defaults/**/*.yaml text eol=lf
+/src/defaults/**/*.yml text eol=lf
