@@ -475,6 +475,7 @@ async fn policy_rescue_router_saturation_exact_consent_atomic_receipt_and_reopen
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("project");
     std::fs::create_dir_all(&root).unwrap();
+    let root = dunce::canonicalize(&root).unwrap();
     let mut config = DaemonConfig::default();
     config.auth.enabled = true;
     config.auth.username = Some("policy-user".into());
@@ -492,6 +493,24 @@ async fn policy_rescue_router_saturation_exact_consent_atomic_receipt_and_reopen
         project_id: entry.id.clone(),
         canonical_root: entry.root.to_string_lossy().into_owned(),
     };
+    drop(OperatorStore::open(&entry.root, &project).unwrap());
+    let mut wrong_project = project.clone();
+    wrong_project.project_id.push_str("-other");
+    assert!(matches!(
+        OperatorStore::open(&entry.root, &wrong_project),
+        Err(refact_lsp::buddy::operator_store::OperatorStoreError::ProjectMismatch)
+    ));
+    let other_root = temp.path().join("other-project");
+    std::fs::create_dir(&other_root).unwrap();
+    wrong_project = project.clone();
+    wrong_project.canonical_root = dunce::canonicalize(other_root)
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    assert!(matches!(
+        OperatorStore::open(&entry.root, &wrong_project),
+        Err(refact_lsp::buddy::operator_store::OperatorStoreError::ProjectMismatch)
+    ));
     drop(OperatorStore::open(&entry.root, &project).unwrap());
     let router = refact_lsp::daemon::server::make_router(state.clone(), 0);
     let preview_uri = format!("/daemon/v1/projects/{}/operator/policy/preview", entry.id);
