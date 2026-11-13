@@ -541,10 +541,13 @@ async fn open_project_returns_bad_gateway_when_crash_loop_exhausts() {
     assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
     let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
     let value: Value = serde_json::from_slice(&bytes).unwrap();
-    assert!(value["error"]
-        .as_str()
-        .unwrap_or_default()
-        .contains("worker exited"));
+    assert!(
+        value["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("worker exited"),
+        "unexpected crash-loop response: {value}"
+    );
     let entries = state.projects.read().await.list();
     assert_eq!(entries.len(), 1);
     let info = state.supervisor.worker_info(&entries[0].id).await.unwrap();

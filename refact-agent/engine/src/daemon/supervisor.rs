@@ -387,7 +387,8 @@ impl Supervisor {
                 return Ok(info);
             }
         }
-        self.spawn_worker(slot.clone(), spec, "ensure", fence).await
+        self.spawn_worker(slot.clone(), spec, "ensure", fence, None)
+            .await
     }
 
     /// Background callers cannot clear operator intent, even with a stale registry snapshot.
@@ -552,7 +553,7 @@ impl Supervisor {
             record.crash_history.clear();
             record.restart_not_before_ms = 0;
         }
-        self.spawn_worker(slot.clone(), spec, "manual_restart", fence)
+        self.spawn_worker(slot.clone(), spec, "manual_restart", fence, None)
             .await
     }
 
@@ -583,7 +584,7 @@ impl Supervisor {
             self.stop_slot_locked(&slot, &spec.project_id, false)
                 .await?;
         }
-        self.spawn_worker(slot.clone(), spec, "proxy_restart", fence)
+        self.spawn_worker(slot.clone(), spec, "proxy_restart", fence, None)
             .await
     }
 
@@ -1034,30 +1035,21 @@ impl Supervisor {
         spec: WorkerLaunchSpec,
         reason: &str,
         fence: u64,
+        resumed_generation: Option<u64>,
     ) -> Result<WorkerInfo, String> {
         let _installation = self.installation_fence.read().await;
-        if self.wake_shutdown.load(std::sync::atomic::Ordering::SeqCst) {
+        if resumed_generation.is_none()
+            && self.wake_shutdown.load(std::sync::atomic::Ordering::SeqCst)
+        {
             return Err("worker start rejected during daemon shutdown".into());
         }
-        if let Some(conflict) = self.probe_foreign_workspace_lease(&spec.root).await {
-            let _guard = slot.op_lock.lock().await;
-            if let Some(info) = self.reusable_info(&slot).await {
-                return Ok(info);
-            }
-            return Ok(self.mark_workspace_busy(&slot, &spec, &conflict).await);
-        }
-        self.clear_workspace_busy(&spec.project_id);
-        let mut port_retry_generation = None;
+        let conflict = self.probe_foreign_workspace_lease(&spec.root).await;
+        let mut retry_generation = resumed_generation;
         for attempt in 1..=MAX_PORT_BUSY_RETRIES {
-            let reservation = self.reserve_port_pair()?;
-            let ports = reservation.ports();
-            let nonce = uuid::Uuid::new_v4().to_string();
-            let (pid, generation) = {
+            let (pid, generation, reservation, nonce) = {
                 let _guard = slot.op_lock.lock().await;
-                if let Some(expected_generation) = port_retry_generation.take() {
-                    if self.wake_shutdown.load(std::sync::atomic::Ordering::SeqCst) {
-                        return Err("worker start rejected during daemon shutdown".into());
-                    }
+                let resuming = retry_generation.take();
+                if let Some(expected_generation) = resuming {
                     let record = slot.record.lock().await;
                     if record.generation != expected_generation
                         || record.info.state != WorkerState::Starting
@@ -1069,6 +1061,39 @@ impl Supervisor {
                 } else if let Some(info) = self.reusable_info(&slot).await {
                     return Ok(info);
                 }
+                if self.wake_shutdown.load(std::sync::atomic::Ordering::SeqCst) {
+                    let error = "worker start rejected during daemon shutdown".to_string();
+                    if resuming.is_some() {
+                        self.mark_failed(&slot, &spec.project_id, error.clone())
+                            .await;
+                    }
+                    return Err(error);
+                }
+                if resuming.is_some()
+                    && (self.buddy_wake_fence(&spec.project_id) != fence
+                        || self.automation_suspended.lock().contains(&spec.project_id))
+                {
+                    let error = "wake cancelled before spawn; budget consumed".to_string();
+                    self.mark_failed(&slot, &spec.project_id, error.clone())
+                        .await;
+                    return Err(error);
+                }
+                if let Some(conflict) = &conflict {
+                    return Ok(self.mark_workspace_busy(&slot, &spec, conflict).await);
+                }
+                self.clear_workspace_busy(&spec.project_id);
+                let reservation = match self.reserve_port_pair() {
+                    Ok(reservation) => reservation,
+                    Err(error) => {
+                        if resuming.is_some() {
+                            self.mark_failed(&slot, &spec.project_id, error.clone())
+                                .await;
+                        }
+                        return Err(error);
+                    }
+                };
+                let ports = reservation.ports();
+                let nonce = uuid::Uuid::new_v4().to_string();
                 let child = match self
                     .spawn_child_fenced(&spec, ports, &nonce, Some((fence, u64::MAX)))
                     .await
@@ -1095,8 +1120,9 @@ impl Supervisor {
                     state: WorkerState::Starting,
                     last_error: None,
                 };
-                (pid, record.generation)
+                (pid, record.generation, reservation, nonce)
             };
+            let ports = reservation.ports();
             let _ = self
                 .events
                 .emit(
@@ -1203,7 +1229,7 @@ impl Supervisor {
                         )
                         .await;
                     if retrying_ports {
-                        port_retry_generation = Some(generation);
+                        retry_generation = Some(generation);
                         continue;
                     }
                     let info = self
@@ -1537,14 +1563,20 @@ impl Supervisor {
             if record.generation != generation
                 || !matches!(record.info.state.clone(), WorkerState::Starting)
                 || record.child.is_some()
+                || record.info.pid.is_some()
             {
                 return;
             }
             record.monitor_task = None;
-            record.info.state = WorkerState::Stopped;
         }
         let _ = self
-            .spawn_worker(slot.clone(), spec.clone(), "auto_restart", fence)
+            .spawn_worker(
+                slot.clone(),
+                spec.clone(),
+                "auto_restart",
+                fence,
+                Some(generation),
+            )
             .await;
     }
 
@@ -2480,6 +2512,174 @@ mod tests {
             automation_suspended: false,
             last_active_ms: now_ms(),
             settings: ProjectSettings::default(),
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(daemon)]
+    async fn auto_restart_keeps_readiness_pending_while_installation_is_fenced() {
+        let _env = EnvGuard::fake_worker().expect("python is required for the restart regression");
+        let dir = tempfile::tempdir().unwrap();
+        let supervisor = Supervisor::new(
+            EventBus::new(dir.path().join("events.jsonl")),
+            dir.path().join("daemon"),
+            0,
+        );
+        let entry = test_entry(dir.path().to_path_buf());
+        let slot = supervisor.slot_for(&entry.id).await;
+        supervisor
+            .set_project_liveness(&entry.id, true, now_ms())
+            .await;
+        let (info, delay) = supervisor
+            .record_unexpected_exit(&slot, &entry.id, 0, Some(1), "worker exited".into())
+            .await;
+        assert_eq!(info.state, WorkerState::Starting);
+        assert!(delay.is_some());
+        slot.record.lock().await.restart_not_before_ms = 0;
+        let gate = supervisor.installation_fence.write().await;
+        let mut before = Box::pin(supervisor.wait_for_ready_state(&entry.id));
+        assert!(futures::poll!(&mut before).is_pending());
+        let mut restart = Box::pin(supervisor.clone().restart_after_delay(
+            slot.clone(),
+            WorkerLaunchSpec::from(&entry),
+            0,
+        ));
+        assert!(futures::poll!(&mut restart).is_pending());
+        let mut during = Box::pin(supervisor.wait_for_ready_state(&entry.id));
+        assert!(
+            futures::poll!(&mut during).is_pending(),
+            "readiness must remain pending while automatic restart waits for installation"
+        );
+        assert_eq!(slot.record.lock().await.generation, 0);
+        drop(gate);
+        let result = tokio::time::timeout(Duration::from_secs(15), async {
+            tokio::join!(restart, before, during)
+        })
+        .await;
+        supervisor.stop_all().await;
+        let (_, before, during) = result.expect("automatic restart must finish");
+        let before = before.unwrap();
+        assert_eq!(before.state, WorkerState::Ready);
+        assert!(before.pid.is_some());
+        assert_eq!(during.unwrap(), before);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(daemon)]
+    async fn auto_restart_preserves_terminal_and_superseding_authority() {
+        let _locks = EngineLocksDirGuard::set();
+        for case in [
+            "stop", "newer", "lease", "shutdown", "ports", "command", "suspend", "pid",
+        ] {
+            let _env = EnvGuard::fake_worker().expect("python is required for restart coverage");
+            let dir = tempfile::tempdir().unwrap();
+            let events = EventBus::new(dir.path().join("events.jsonl"));
+            let supervisor = Supervisor::new(events.clone(), dir.path().join("daemon"), 0);
+            let entry = test_entry(dir.path().to_path_buf());
+            let slot = supervisor.slot_for(&entry.id).await;
+            slot.record.lock().await.info.state = WorkerState::Starting;
+            let gate = supervisor.installation_fence.write().await;
+            let mut restart = Box::pin(supervisor.clone().restart_after_delay(
+                slot.clone(),
+                WorkerLaunchSpec::from(&entry),
+                0,
+            ));
+            assert!(futures::poll!(&mut restart).is_pending(), "{case}");
+            let mut lease = None;
+            match case {
+                "stop" => {
+                    supervisor.stop_worker(&entry.id).await.unwrap();
+                }
+                "newer" => {
+                    supervisor
+                        .set_test_worker_info(&entry.id, 42, WorkerState::Ready, "newer")
+                        .await;
+                }
+                "lease" => {
+                    lease = Some(hold_lease_as(&workspace_lease_root(&entry.root), 424_242));
+                }
+                "shutdown" => supervisor.request_shutdown("test".into()),
+                "ports" => {
+                    let ports = PortPair {
+                        http_port: 1,
+                        lsp_port: 2,
+                    };
+                    supervisor.reserved_ports.lock().extend([1, 2]);
+                    supervisor
+                        .test_port_pairs
+                        .lock()
+                        .extend(std::iter::repeat_n(ports, 32));
+                }
+                "command" => std::env::set_var("REFACT_DAEMON_WORKER_CMD", "'"),
+                "suspend" => {
+                    supervisor.set_automation_suspended(&entry.id, true);
+                    lease = Some(hold_lease_as(&workspace_lease_root(&entry.root), 424_242));
+                }
+                "pid" => slot.record.lock().await.info.pid = Some(42),
+                _ => unreachable!(),
+            }
+            let prior = slot.record.lock().await.info.clone();
+            drop(gate);
+            let result = tokio::time::timeout(Duration::from_secs(5), restart).await;
+            let (info, generation, has_child, crash_history) = {
+                let record = slot.record.lock().await;
+                (
+                    record.info.clone(),
+                    record.generation,
+                    record.child.is_some(),
+                    record.crash_history.clone(),
+                )
+            };
+            let busy = supervisor.workspace_busy(&entry.id);
+            let emitted = events.snapshot().await;
+            drop(lease);
+            supervisor.stop_all().await;
+            result.expect(case);
+            assert!(!has_child, "{case}");
+            assert!(crash_history.is_empty(), "{case}");
+            match case {
+                "stop" | "newer" | "pid" => assert_eq!(info, prior, "{case}"),
+                _ => {
+                    let expected = match case {
+                        "lease" => {
+                            format!("{WORKSPACE_BUSY_MARKER}: {}", busy.as_ref().unwrap().holder)
+                        }
+                        "shutdown" => "worker start rejected during daemon shutdown".into(),
+                        "ports" => "failed to allocate unreserved worker ports".into(),
+                        "command" => {
+                            "failed to parse REFACT_DAEMON_WORKER_CMD: missing closing quote".into()
+                        }
+                        "suspend" => "wake cancelled before spawn; budget consumed".into(),
+                        _ => unreachable!(),
+                    };
+                    assert_eq!(
+                        info.state,
+                        WorkerState::Failed {
+                            reason: expected.clone()
+                        },
+                        "{case}"
+                    );
+                    assert_eq!(info.last_error, Some(expected), "{case}");
+                    assert_eq!(info.pid, None, "{case}");
+                }
+            }
+            assert_eq!(
+                generation,
+                if matches!(case, "stop" | "newer") {
+                    1
+                } else {
+                    0
+                },
+                "{case}"
+            );
+            assert!(
+                !emitted.iter().any(|event| matches!(
+                    event.kind.as_str(),
+                    "worker_starting" | "worker_crashed"
+                )),
+                "{case}"
+            );
+            assert_eq!(busy.is_some(), case == "lease", "{case}");
         }
     }
 
