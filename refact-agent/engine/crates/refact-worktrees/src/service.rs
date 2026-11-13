@@ -6248,10 +6248,11 @@ mod worktree_registry_tests {
             if current != owner {
                 return Err("Fixture persisted preflight owner changed".into());
             }
-            for entry in git::list_git_worktrees(&check_source) {
+            for mut entry in git::list_git_worktrees(&check_source) {
                 if entry.branch.is_some() || !entry.root.ends_with("worktree") {
                     continue;
                 }
+                entry.root = dunce::canonicalize(&entry.root).unwrap();
                 assert!(entry.root.join(".git").is_file());
                 {
                     let mut observed = observed_path.lock().unwrap();
@@ -6377,7 +6378,7 @@ mod worktree_registry_tests {
         assert!(run_git(&created.worktree.meta.root, &["status", "--porcelain"]).is_empty());
         assert!(git::list_git_worktrees(&source)
             .iter()
-            .any(|entry| entry.root == retained_path));
+            .any(|entry| dunce::canonicalize(&entry.root).unwrap() == retained_path));
         run_git(
             &source,
             &[
@@ -7028,7 +7029,7 @@ mod worktree_registry_tests {
         let source = temp.path().join("repo");
         std::fs::create_dir_all(&source).unwrap();
         init_repo(&source);
-        let source = source.canonicalize().unwrap();
+        let source = canonicalize_existing_dir(&source).unwrap();
         let service = test_service(temp.path().join("cache"), source.clone()).unwrap();
         let root = temp.path().join("legacy-checkout");
         let branch = "refact/task/task-1/card/T-1/legacy";
@@ -7046,7 +7047,7 @@ mod worktree_registry_tests {
         let meta = WorktreeMeta {
             id: branch.into(),
             kind: "task_agent".into(),
-            root: root.canonicalize().unwrap(),
+            root: canonicalize_existing_dir(&root).unwrap(),
             source_workspace_root: source.clone(),
             repo_root: source.clone(),
             branch: Some(branch.into()),
@@ -7057,7 +7058,7 @@ mod worktree_registry_tests {
             agent_id: None,
             enforce: true,
         };
-        assert!(service.validate_legacy_merge_identity(&meta).is_ok());
+        service.validate_legacy_merge_identity(&meta).unwrap();
         assert!(service
             .validate_legacy_task_agent_worktree_meta(&meta)
             .await
@@ -7071,7 +7072,7 @@ mod worktree_registry_tests {
         std::fs::create_dir_all(&foreign).unwrap();
         init_repo(&foreign);
         let mut impostor = meta.clone();
-        impostor.root = foreign.canonicalize().unwrap();
+        impostor.root = canonicalize_existing_dir(&foreign).unwrap();
         assert!(service.validate_legacy_merge_identity(&impostor).is_err());
         let fenced = service
             .fence_legacy_merge_worktree(&meta, "main")

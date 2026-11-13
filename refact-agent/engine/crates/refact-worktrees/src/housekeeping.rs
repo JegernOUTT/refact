@@ -348,6 +348,7 @@ mod tests {
             &source,
             &["config", "user.email", "scratch@example.invalid"],
         );
+        git(&source, &["config", "core.autocrlf", "false"]);
         std::fs::write(source.join("file"), "retained\n").unwrap();
         git(&source, &["add", "file"]);
         git(&source, &["commit", "-m", "scratch", "--no-gpg-sign"]);
@@ -464,6 +465,7 @@ mod quarantine_tests {
         git_cmd(&root, &["init", "-b", "main"]);
         git_cmd(&root, &["config", "user.name", "Scratch"]);
         git_cmd(&root, &["config", "user.email", "scratch@example.invalid"]);
+        git_cmd(&root, &["config", "core.autocrlf", "false"]);
         std::fs::write(root.join("tracked"), "retained\n").unwrap();
         git_cmd(&root, &["add", "tracked"]);
         git_cmd(&root, &["commit", "-m", "initial"]);

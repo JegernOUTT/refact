@@ -159,6 +159,7 @@ async fn fixture() -> (tempfile::TempDir, WorktreeService, WorktreeMeta) {
     git(&source, &["init", "-b", "main"]);
     git(&source, &["config", "user.name", "Sync Test"]);
     git(&source, &["config", "user.email", "sync@example.invalid"]);
+    git(&source, &["config", "core.autocrlf", "false"]);
     commit(&source, "file", b"base\n");
     let service =
         super::super::worktree_registry_tests::test_service(temp.path().join("cache"), source)
