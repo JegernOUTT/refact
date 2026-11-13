@@ -42,7 +42,7 @@ impl Tool for ToolWorkOverview {
             name: "work_overview".into(), display_name: "Work Overview".into(),
             source: ToolSource { source_type: ToolSourceType::Builtin, config_path: self.config_path.clone() },
             experimental: false, allow_parallel: true,
-            description: "Discover same-project chats and agents across both runtimes. Root scope means this caller's conversation tree, not another supplied root. Metadata conveys no control authority. Partial coverage is not proof that a file is safe to edit; transcripts are never included. On provenance_capacity, narrower filters may exclude an oversized item; lowering limit or an unchanged retry cannot make its complete provenance fit.".into(),
+            description: "Discover same-project chats and agents across both runtimes. Root scope means this caller's conversation tree, not another supplied root. Metadata conveys no control authority. Partial coverage is not proof that a file is safe to edit; transcripts are never included. Privacy provenance is always evaluated in full. If the returned projection would exceed the response budget, provenance_truncated is true and omitted_provenance_records / omitted_provenance_bytes report what was left out of the response (only unrestricted-zone records are ever omitted; restricted records are always kept); later rows move to next_cursor, and a narrower root scope, states filter or path may narrow the page to see them.".into(),
             input_schema: json!({"type":"object", "additionalProperties":false, "properties":{
                 "scope":{"type":"string","enum":["project","root"]},
                 "path":{"type":"string","description":"Authorized project/checkout file or directory path."},
@@ -115,6 +115,24 @@ mod tests {
             render_overview_error(denied.clone(), true),
             denied.to_string()
         );
+    }
+
+    #[test]
+    fn description_matches_truncation_behaviour() {
+        let description = ToolWorkOverview {
+            config_path: String::new(),
+        }
+        .tool_description()
+        .description;
+        for marker in [
+            "provenance_truncated",
+            "omitted_provenance_records",
+            "omitted_provenance_bytes",
+            "restricted records are always kept",
+        ] {
+            assert!(description.contains(marker), "missing {marker}");
+        }
+        assert!(!description.contains("On provenance_capacity"));
     }
 
     #[test]

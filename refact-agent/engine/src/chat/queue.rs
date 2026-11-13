@@ -1140,6 +1140,61 @@ fn goal_exists_including_pending(session: &ChatSession) -> bool {
             .any(|message| message.role == internal_roles::GOAL_ROLE)
 }
 
+fn goal_queued_for_install(session: &ChatSession) -> bool {
+    session
+        .post_tool_side_effects
+        .iter()
+        .chain(
+            session
+                .pending_deliveries
+                .iter()
+                .flat_map(|delivery| delivery.messages.iter()),
+        )
+        .any(|message| message.role == internal_roles::GOAL_ROLE)
+}
+
+pub(crate) fn ensure_set_goal_allowed(session: &ChatSession) -> Result<(), String> {
+    if !goal_exists_including_pending(session) {
+        return Ok(());
+    }
+    let replaceable = !goal_queued_for_install(session)
+        && session.goal.as_ref().is_some_and(|goal| {
+            !goal.active && !matches!(goal.owner, Some(refact_chat_api::GoalOwner::Task { .. }))
+        });
+    if replaceable {
+        Ok(())
+    } else {
+        Err("goal already exists; use update_goal".to_string())
+    }
+}
+
+pub(crate) fn foreign_goal_owner_hint(session: &ChatSession) -> Option<String> {
+    let goal = session.goal.as_ref()?;
+    goal.transferred_to
+        .clone()
+        .or_else(|| match &goal.owner {
+            Some(refact_chat_api::GoalOwner::Chat {
+                id,
+            }) if *id != session.chat_id => Some(id.clone()),
+            _ => None,
+        })
+        .or_else(|| {
+            (session.thread.link_type.as_deref() == Some("branch"))
+                .then(|| session.thread.parent_id.clone())
+                .flatten()
+        })
+        .filter(|id| !id.is_empty() && *id != session.chat_id)
+}
+
+pub(crate) fn unowned_goal_error(session: &ChatSession, action: &str) -> String {
+    let owner = foreign_goal_owner_hint(session)
+        .map(|id| format!(" (owned by chat `{id}`; {action} it there)"))
+        .unwrap_or_default();
+    format!(
+        "this chat does not own the goal{owner}; call set_goal to start a new goal in this chat"
+    )
+}
+
 fn goal_delta_count_including_pending(session: &ChatSession) -> usize {
     crate::chat::goal_role::effective_goal_delta_count(&session.accepted_control_projection())
 }
@@ -1169,9 +1224,7 @@ fn handle_set_goal_command(
     if content.trim().is_empty() {
         return Err("argument `content` must be non-empty".to_string());
     }
-    if goal_exists_including_pending(session) {
-        return Err("goal already exists; use update_goal".to_string());
-    }
+    ensure_set_goal_allowed(session)?;
     let current_mode =
         crate::yaml_configs::customization_registry::map_legacy_mode_to_id(&session.thread.mode)
             .to_string();
@@ -1353,11 +1406,12 @@ fn handle_update_goal_command(
 }
 
 pub(super) fn validate_goal_control(session: &ChatSession, action: &str) -> Result<(), String> {
-    if session.goal.is_none() {
+    let Some(goal) = session.goal.as_ref() else {
         return Err("no goal to control; call set_goal first".into());
-    }
+    };
     match action.trim().to_ascii_lowercase().as_str() {
         "pause" | "stop" => Ok(()),
+        "resume" if !goal.active => Err(unowned_goal_error(session, "resume")),
         "resume"
             if matches!(
                 session.goal_status,
@@ -6108,6 +6162,85 @@ mod tests {
 
         assert_eq!(error, "goal already exists; use update_goal");
         assert_eq!(session.goal.as_ref().unwrap().content, "First");
+    }
+
+    fn branched_session_with_copied_goal() -> ChatSession {
+        let mut source = ChatSession::new("source-chat".to_string());
+        handle_set_goal_command(&mut source, "Source goal".to_string(), None, None, None).unwrap();
+        let mut copied = source.messages.clone();
+        crate::chat::trajectory_ops::demote_goal_ownership_for_branch(&mut copied);
+        let mut branch = ChatSession::new("branch-chat".to_string());
+        branch.thread.parent_id = Some("source-chat".to_string());
+        branch.thread.link_type = Some("branch".to_string());
+        for message in copied {
+            branch.add_message(message);
+        }
+        let goal = branch.goal.as_ref().unwrap();
+        assert!(!goal.active);
+        assert_eq!(goal.status, GoalStatus::Paused);
+        branch
+    }
+
+    #[test]
+    fn goal_control_resume_refuses_copied_goal_and_names_owner() {
+        let mut session = branched_session_with_copied_goal();
+        let ledger_len = session.goal_ledger.len();
+
+        let error = handle_goal_control_command(&mut session, "resume".to_string()).unwrap_err();
+
+        assert!(error.contains("does not own the goal"), "{error}");
+        assert!(error.contains("source-chat"), "{error}");
+        assert!(error.contains("set_goal"), "{error}");
+        assert_eq!(
+            validate_goal_control(&session, "resume").unwrap_err(),
+            error
+        );
+        let goal = session.goal.as_ref().unwrap();
+        assert!(!goal.active);
+        assert_eq!(goal.status, GoalStatus::Paused);
+        assert_eq!(session.goal_ledger.len(), ledger_len);
+    }
+
+    #[test]
+    fn set_goal_replaces_copied_goal_with_fresh_owned_goal() {
+        let mut session = branched_session_with_copied_goal();
+        let copied_id = session
+            .messages
+            .iter()
+            .find(|message| message.role == internal_roles::GOAL_ROLE)
+            .unwrap()
+            .message_id
+            .clone();
+
+        let result =
+            handle_set_goal_command(&mut session, "Branch goal".to_string(), None, None, None)
+                .unwrap();
+
+        assert_eq!(result, json!({"version": 2, "supersedes": copied_id}));
+        let goal = session.goal.as_ref().unwrap();
+        assert_eq!(goal.content, "Branch goal");
+        assert_eq!(goal.version, 2);
+        assert!(goal.active);
+        assert_eq!(goal.status, GoalStatus::Active);
+        assert_eq!(
+            session
+                .messages
+                .iter()
+                .filter(|message| message.role == internal_roles::GOAL_ROLE)
+                .count(),
+            2
+        );
+        assert!(session.goal_ledger.iter().any(|entry| matches!(
+            &entry.op,
+            refact_chat_api::GoalLedgerOp::Installed {
+                version: 2,
+                active: true,
+                ..
+            }
+        )));
+        let error = handle_set_goal_command(&mut session, "Again".to_string(), None, None, None)
+            .unwrap_err();
+        assert_eq!(error, "goal already exists; use update_goal");
     }
 
     #[test]

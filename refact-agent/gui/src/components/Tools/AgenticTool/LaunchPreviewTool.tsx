@@ -32,7 +32,7 @@ type Preview = {
   estimated_tokens: number;
   serialized_bytes: number;
   skipped_count: number;
-  effective_model: string;
+  effective_model?: string;
   effective_tools?: string[];
   deliverable?: {
     required_sections: string[];
@@ -168,8 +168,13 @@ function parse(value: unknown): Preview | null {
     !natural(row.estimated_tokens) ||
     !natural(row.serialized_bytes) ||
     !natural(row.skipped_count) ||
-    typeof row.effective_model !== "string" ||
-    !row.effective_model ||
+    !(
+      (typeof row.effective_model === "string" &&
+        row.effective_model.length > 0) ||
+      (row.effective_model === undefined &&
+        typeof row.launch_blocked === "string" &&
+        row.launch_blocked.trim().length > 0)
+    ) ||
     (row.effective_tools !== undefined &&
       (!Array.isArray(row.effective_tools) ||
         !row.effective_tools.every(
@@ -180,7 +185,9 @@ function parse(value: unknown): Preview | null {
     !row.context_sources.every(source) ||
     !effectiveLaunch(row.effective_launch) ||
     !(
-      row.launch_blocked === undefined || typeof row.launch_blocked === "string"
+      row.launch_blocked === undefined ||
+      (typeof row.launch_blocked === "string" &&
+        row.launch_blocked.trim().length > 0)
     )
   )
     return null;
@@ -427,7 +434,10 @@ export function LaunchPreviewTool({
       summary={
         available
           ? [
-              { label: "Model", value: bounded(preview.effective_model) },
+              ...(preview.effective_model &&
+              preview.launch_blocked === undefined
+                ? [{ label: "Model", value: bounded(preview.effective_model) }]
+                : []),
               {
                 label: "Context",
                 value: `${preview.estimated_tokens} tokens · ${preview.serialized_bytes} bytes`,

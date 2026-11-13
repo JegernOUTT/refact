@@ -300,6 +300,10 @@ impl GuardedMerge {
     }
 }
 
+pub(crate) fn source_kept(response: &MergeWorktreeResponse) -> bool {
+    response.source_kept
+}
+
 fn source_cleanup_allowed(post_merge: Option<&MergeVerification>) -> bool {
     post_merge.map_or(true, |verification| {
         verification.passed || verification.auto_reverted
@@ -370,17 +374,42 @@ where
                 },
             )
             .await;
-        let response = match response {
+        let mut response = match response {
             Ok(response) => response,
             Err(error) => {
                 return Err(MergeGateError::Merge(error));
             }
         };
-        service
-            .checkpoint_merge_phase()
-            .await
-            .map_err(MergeGateError::Merge)?;
-        let post_merge = match response.merged {
+        let applied = response.merged;
+        let late = |response: &mut MergeWorktreeResponse,
+                    result: Result<(), String>,
+                    context: &str|
+         -> Result<(), MergeGateError> {
+            match result {
+                Ok(()) => Ok(()),
+                Err(error) if applied => {
+                    response
+                        .warnings
+                        .push(format!("The merge was applied, but {context}: {error}"));
+                    Ok(())
+                }
+                Err(error) => Err(MergeGateError::Merge(error)),
+            }
+        };
+        #[cfg(test)]
+        let after_merge = match post_apply_fault::take(service.merge_checkout_root()) {
+            true => Err("injected lease loss after the merge was applied".to_string()),
+            false => service.checkpoint_merge_phase().await,
+        };
+        #[cfg(not(test))]
+        let after_merge = service.checkpoint_merge_phase().await;
+        let mut authority_ok = after_merge.is_ok();
+        late(
+            &mut response,
+            after_merge,
+            "merge authority was lost afterwards",
+        )?;
+        let post_merge = match response.merged && !source_kept(&response) {
             true => {
                 MERGE_PHASE_SCOPE
                     .scope(
@@ -394,12 +423,17 @@ where
             }
             false => None,
         };
-        service
-            .checkpoint_merge_phase()
-            .await
-            .map_err(MergeGateError::Merge)?;
-        let cleanup = match delete_requested
+        let after_verify = service.checkpoint_merge_phase().await;
+        authority_ok &= after_verify.is_ok();
+        late(
+            &mut response,
+            after_verify,
+            "merge authority was lost after verification",
+        )?;
+        let cleanup = match authority_ok
+            && delete_requested
             && source_cleanup_allowed(post_merge.as_ref())
+            && !source_kept(&response)
             && (response.merged || response.status == "nothing_to_merge")
         {
             true => match service.delete_worktree(worktree_id, true, true).await {
@@ -414,14 +448,16 @@ where
             },
             false => None,
         };
-        service
-            .checkpoint_merge_phase()
-            .await
-            .map_err(MergeGateError::Merge)?;
-        service
-            .cleanup_merge_target()
-            .await
-            .map_err(MergeGateError::Merge)?;
+        let before_target_cleanup = service.checkpoint_merge_phase().await;
+        let target_cleanup = match before_target_cleanup {
+            Ok(()) => service.cleanup_merge_target().await,
+            Err(error) => Err(error),
+        };
+        late(
+            &mut response,
+            target_cleanup,
+            "cleaning up the merge target failed",
+        )?;
         Ok(GuardedMerge {
             checkout: checkout.as_str().to_string(),
             waited_for_lease_ms,
@@ -434,6 +470,34 @@ where
     .await;
     shutdown_renewal(renewal).await;
     operation
+}
+
+#[cfg(test)]
+pub(crate) mod post_apply_fault {
+    use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
+
+    static ROOTS: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
+    fn key(root: &Path) -> PathBuf {
+        dunce::canonicalize(root).unwrap_or_else(|_| root.to_path_buf())
+    }
+
+    pub(crate) fn install(root: &Path) {
+        ROOTS.lock().unwrap().push(key(root));
+    }
+
+    pub(super) fn take(root: &Path) -> bool {
+        let root = key(root);
+        let mut roots = ROOTS.lock().unwrap();
+        match roots.iter().position(|path| *path == root) {
+            Some(index) => {
+                roots.remove(index);
+                true
+            }
+            None => false,
+        }
+    }
 }
 
 tokio::task_local! {
@@ -773,6 +837,55 @@ mod tests {
             "untracked work\n",
             "acknowledged dirt is restored, never discarded"
         );
+    }
+
+    #[tokio::test]
+    async fn lease_lost_after_an_applied_merge_is_a_warning_not_an_error() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("repo");
+        init_repo(&source);
+        let service = crate::worktrees::service::fenced_service(
+            WorktreeService::new(temp.path().join("cache"), source.clone()).unwrap(),
+            Arc::new(crate::tool_jobs::scope::ScopeCoordinator::default()),
+        );
+        let (gate, _leases) = shared_gate(&Uuid::new_v4().to_string()).await;
+        let (id, root) =
+            worktree_with_commit(&service, "refact/chat/late-loss", "merged.txt", "merged\n").await;
+        std::fs::write(source.join("scratch.txt"), "untracked work\n").unwrap();
+        post_apply_fault::install(&source);
+
+        let outcome = merge_under_lease(
+            &gate,
+            &service,
+            &id,
+            MergeWorktreeRequest {
+                acknowledge_dirty_baseline: true,
+                delete_after_merge: true,
+                ..merge_request()
+            },
+            None,
+            nothing_verified,
+        )
+        .await
+        .expect("an applied merge is never reported as an error");
+
+        assert!(outcome.response.merged, "{}", outcome.response.status);
+        assert!(
+            outcome
+                .response
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("injected lease loss")),
+            "{:?}",
+            outcome.response.warnings
+        );
+        assert!(source.join("merged.txt").exists());
+        assert_eq!(
+            std::fs::read_to_string(source.join("scratch.txt")).unwrap(),
+            "untracked work\n"
+        );
+        assert!(outcome.cleanup.is_none(), "source cleanup needs authority");
+        assert!(root.exists());
     }
 
     #[tokio::test]

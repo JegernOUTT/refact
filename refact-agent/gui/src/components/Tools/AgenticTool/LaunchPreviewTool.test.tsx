@@ -6,7 +6,11 @@ import {
   screen,
 } from "../../../utils/test-utils";
 import { LaunchPreviewTool } from "./LaunchPreviewTool";
-import { launchPreviewCall, launchPreviewReceipt } from "./launchFixtures";
+import {
+  blockedLaunchPreviewReceipt,
+  launchPreviewCall,
+  launchPreviewReceipt,
+} from "./launchFixtures";
 
 const resolved = { ...launchPreviewReceipt().extra, skipped_count: 0 };
 
@@ -61,6 +65,22 @@ describe("LaunchPreviewTool", () => {
     );
     expect(screen.getByTestId("launch-blocked")).toHaveTextContent(
       "1 unresolved context entry",
+    );
+  });
+
+  test("renders the engine blocked envelope without claiming applied settings", () => {
+    const receipt = blockedLaunchPreviewReceipt();
+    renderOpen(receipt.extra);
+    expect(screen.getByTestId("transcript-status-pill")).toHaveTextContent(
+      "Blocked",
+    );
+    expect(screen.getByTestId("launch-blocked")).toHaveTextContent(
+      "Launch blocked: launch denied",
+    );
+    expect(screen.queryByLabelText("Effective launch settings")).toBeNull();
+    expect(screen.queryByText("Model")).toBeNull();
+    expect(screen.queryByRole("alert")).not.toHaveTextContent(
+      "Preview unavailable",
     );
   });
 
@@ -130,6 +150,9 @@ describe("LaunchPreviewTool", () => {
     null,
     {},
     { ...resolved, preview: false },
+    { ...blockedLaunchPreviewReceipt().extra, launch_blocked: "" },
+    { ...blockedLaunchPreviewReceipt().extra, effective_model: 42 },
+    { ...blockedLaunchPreviewReceipt().extra, estimated_tokens: -1 },
     { ...resolved, estimated_tokens: -1 },
     { ...resolved, effective_tools: [42] },
     { ...resolved, effective_launch: { revision: "one" } },

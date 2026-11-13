@@ -530,6 +530,10 @@ fn mark_finished_card(
     }
 }
 
+fn should_schedule_finish_verifier(success: bool, finished_ab_variant: Option<&str>) -> bool {
+    success && finished_ab_variant.is_none()
+}
+
 fn mark_ab_variant_finished(
     card: &mut BoardCard,
     variant_key: &str,
@@ -915,8 +919,8 @@ impl Tool for ToolTaskAgentFinish {
                     gcx.clone(), &task_id, &card_id, owner, &finish_chat_id, worktree,
                 ).await {
                     Ok(fence) => Some(fence),
-                    Err(_) => {
-                        tracing::warn!("finish verification fence unavailable; completion remains unverified");
+                    Err(error) => {
+                        tracing::warn!(%error, "finish verification fence unavailable; completion requires human review");
                         None
                     }
                 }
@@ -1066,6 +1070,14 @@ impl Tool for ToolTaskAgentFinish {
             report.markdown.chars().take(100).collect::<String>()
         );
 
+        if should_schedule_finish_verifier(success, finished_ab_variant.as_deref()) {
+            if let Some(expected) = verifier_expected_state.clone() {
+                schedule_card_verifier_after_finish(
+                    gcx.clone(), task_id.clone(), card_id.clone(), expected,
+                ).await;
+            }
+        }
+
         let notify_error = crate::chat::task_agent_monitor::notify_planner_agents_finished(
             crate::app_state::AppState::from_gcx(gcx.clone()).await,
             &task_id,
@@ -1083,17 +1095,7 @@ impl Tool for ToolTaskAgentFinish {
             );
         }
 
-        if success {
-            if let Some(verifier_expected_state) = verifier_expected_state {
-                schedule_card_verifier_after_finish(
-                    gcx.clone(),
-                    task_id.clone(),
-                    card_id.clone(),
-                    verifier_expected_state,
-                )
-                .await;
-            }
-        } else if let Some(expected_state) = verifier_expected_state {
+        if let Some(expected_state) = verifier_expected_state.filter(|_| !success && finished_ab_variant.is_none()) {
             let card_id_clear = card_id.clone();
             let _ = storage::update_board_atomic(gcx.clone(), &task_id, move |board| {
                 let board_rev = board.rev;
@@ -1407,6 +1409,14 @@ mod tests {
         assert_eq!(error, "stale finish cleanup");
         assert_eq!(card.assignee.as_deref(), Some("agent-2"));
         assert_eq!(card.agent_chat_id.as_deref(), Some("agent-chat-2"));
+    }
+
+    #[test]
+    fn ab_variant_finishes_never_schedule_verifier() {
+        assert!(!should_schedule_finish_verifier(true, Some("a")));
+        assert!(!should_schedule_finish_verifier(true, Some("b")));
+        assert!(!should_schedule_finish_verifier(false, Some("a")));
+        assert!(should_schedule_finish_verifier(true, None));
     }
 
     #[test]

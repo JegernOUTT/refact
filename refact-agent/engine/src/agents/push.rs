@@ -387,6 +387,7 @@ fn build_completion_event(record: &BackgroundAgent) -> refact_core::chat_types::
             "worktree_id": record.worktree_id,
             "worktree_branch": record.worktree_branch,
             "merge_status": record.merge_status,
+            "result_truncated": record.result_summary.as_deref().is_some_and(|text| text.starts_with("[Result truncated: output-token limit reached]")),
             "tokens_used": record.tokens_used,
             "cost_usd": record.cost_usd,
             "deliverable_status": record.deliverable_status,
@@ -654,6 +655,19 @@ mod tests {
             )
             .await
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn completion_payload_and_summary_flag_output_token_truncation() {
+        let mut record = completed_record(BgAgentKind::Subagent).await;
+        record.result_summary =
+            Some("[Result truncated: output-token limit reached]\npartial report".into());
+        let event = build_completion_event(&record);
+        assert_eq!(event.extra["event"]["payload"]["result_truncated"], true);
+        assert!(event
+            .content
+            .content_text_only()
+            .contains("[Result truncated: output-token limit reached]"));
     }
 
     #[tokio::test]

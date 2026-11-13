@@ -388,12 +388,28 @@ fn run_git_observed(
     args: &[&str],
     succeeded: impl FnOnce() -> Result<(), String>,
 ) -> Result<String, String> {
+    run_git_observed_with_env(path, args, &[], succeeded)
+}
+
+fn run_git_observed_with_env(
+    path: &Path,
+    args: &[&str],
+    envs: &[(&str, &str)],
+    succeeded: impl FnOnce() -> Result<(), String>,
+) -> Result<String, String> {
     crate::locking::checkpoint_git_phase()?;
+    #[cfg(test)]
+    commit_window_fault::before(path, args)?;
     let output = Command::new("git")
         .args(args)
+        .envs(envs.iter().copied())
         .current_dir(path)
         .output()
         .map_err(|e| format!("Failed to run git {:?}: {}", args, e))?;
+    #[cfg(test)]
+    if output.status.success() {
+        commit_window_fault::hit(path, args)?;
+    }
     if output.status.success() {
         succeeded()?;
     }
@@ -409,6 +425,210 @@ fn run_git_observed(
             Err(stderr.into_owned())
         }
     }
+}
+
+#[cfg(test)]
+pub(crate) mod commit_window_fault {
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    enum Fault {
+        After,
+        Before,
+        Trigger(Arc<AtomicBool>),
+    }
+
+    static FAULTS: Mutex<Vec<(PathBuf, &'static str, Fault)>> = Mutex::new(Vec::new());
+
+    fn key(root: &Path) -> PathBuf {
+        dunce::canonicalize(root).unwrap_or_else(|_| root.to_path_buf())
+    }
+
+    pub(crate) fn install(root: &Path, token: &'static str) {
+        FAULTS
+            .lock()
+            .unwrap()
+            .push((key(root), token, Fault::After));
+    }
+
+    pub(crate) fn install_before(root: &Path, token: &'static str) {
+        FAULTS
+            .lock()
+            .unwrap()
+            .push((key(root), token, Fault::Before));
+    }
+
+    pub(crate) fn install_trigger(root: &Path, token: &'static str, flag: Arc<AtomicBool>) {
+        FAULTS
+            .lock()
+            .unwrap()
+            .push((key(root), token, Fault::Trigger(flag)));
+    }
+
+    fn take(root: &Path, args: &[&str], after: bool) -> Option<Fault> {
+        let root = key(root);
+        let mut faults = FAULTS.lock().unwrap();
+        let index = faults.iter().position(|(path, token, fault)| {
+            *path == root && args.contains(token) && matches!(fault, Fault::After) == after
+        })?;
+        Some(faults.remove(index).2)
+    }
+
+    pub(super) fn before(root: &Path, args: &[&str]) -> Result<(), String> {
+        match take(root, args, false) {
+            None => Ok(()),
+            Some(Fault::Trigger(flag)) => {
+                flag.store(true, Ordering::SeqCst);
+                Ok(())
+            }
+            Some(_) => Err(format!("injected failure before git {args:?}")),
+        }
+    }
+
+    pub(super) fn hit(root: &Path, args: &[&str]) -> Result<(), String> {
+        match take(root, args, true) {
+            None => Ok(()),
+            Some(_) => Err("injected authority loss after git exited successfully".into()),
+        }
+    }
+}
+
+pub const MERGE_COMMITTER_NAME: &str = "Refact Agent";
+pub const MERGE_COMMITTER_EMAIL: &str = "agent@refact.ai";
+
+#[derive(Clone, Copy)]
+pub enum Landing<'a> {
+    Merge { source: &'a str },
+    Squash { tree: &'a str },
+}
+
+fn landing_matches(root: &Path, commit: &str, pre_merge_head: &str, landing: Landing<'_>) -> bool {
+    if commit == pre_merge_head {
+        return false;
+    }
+    let rev = |spec: String| {
+        run_git(root, &["rev-parse", "--verify", "-q", &spec])
+            .ok()
+            .map(|out| out.trim().to_string())
+    };
+    if rev(format!("{commit}^1")).as_deref() != Some(pre_merge_head) {
+        return false;
+    }
+    match landing {
+        Landing::Merge {
+            source,
+        } => rev(format!("{commit}^2")).as_deref() == Some(source),
+        Landing::Squash {
+            tree,
+        } => {
+            if rev(format!("{commit}^2")).is_some() {
+                return false;
+            }
+            (!tree.is_empty() && rev(format!("{commit}^{{tree}}")).as_deref() == Some(tree))
+                || run_git(root, &["log", "-1", "--format=%ce", commit])
+                    .is_ok_and(|email| email.trim() == MERGE_COMMITTER_EMAIL)
+        }
+    }
+}
+
+pub fn landed_commit(root: &Path, pre_merge_head: &str, landing: Landing<'_>) -> Option<String> {
+    crate::locking::with_git_phase(None, || {
+        let head = head_rev(root).ok()?;
+        landing_matches(root, &head, pre_merge_head, landing).then_some(head)
+    })
+}
+
+pub fn landed_commit_below_head(
+    root: &Path,
+    pre_merge_head: &str,
+    landing: Landing<'_>,
+) -> Option<String> {
+    crate::locking::with_git_phase(None, || {
+        let commits = run_git(
+            root,
+            &[
+                "rev-list",
+                "--first-parent",
+                "--reverse",
+                &format!("{pre_merge_head}..HEAD"),
+            ],
+        )
+        .ok()?;
+        let first = commits.lines().next()?.trim().to_string();
+        landing_matches(root, &first, pre_merge_head, landing).then_some(first)
+    })
+}
+
+pub fn find_landed_commit(
+    root: &Path,
+    pre_merge_head: &str,
+    landing: Landing<'_>,
+) -> Option<String> {
+    landed_commit(root, pre_merge_head, landing)
+        .or_else(|| landed_commit_below_head(root, pre_merge_head, landing))
+}
+
+pub fn reapply_failure_summary(
+    error: &str,
+    rolled_back: bool,
+    stash_restored: bool,
+    foreign_head: Option<&str>,
+    stash_location: &str,
+) -> String {
+    let restore = if stash_restored {
+        "your edits were restored".to_string()
+    } else {
+        format!(
+            "restoring your uncommitted edits failed; they are saved in {}",
+            stash_location
+        )
+    };
+    match (foreign_head, rolled_back, stash_restored) {
+        (Some(head), _, _) => format!(
+            "The target HEAD moved to {} during the merge; nothing was rolled back; {}: {}",
+            head, restore, error
+        ),
+        (None, true, true) => format!(
+            "Nothing was merged: your uncommitted target edits could not be re-applied on top of the incoming changes, so the merge was rolled back and your edits were restored in place: {}",
+            error
+        ),
+        (None, false, true) => format!(
+            "Nothing was merged: the merge was rolled back with warnings; your edits were restored: {}",
+            error
+        ),
+        (None, _, false) => format!(
+            "Nothing was merged: the merge was rolled back, but restoring your uncommitted edits failed; they are saved in {}: {}",
+            stash_location, error
+        ),
+    }
+}
+
+pub fn kept_after_reapply_failure(
+    error: &str,
+    stash_restored: bool,
+    foreign_head: Option<&str>,
+    stash_location: &str,
+) -> String {
+    format!(
+        "The merge commit landed and was kept because {}; re-applying your uncommitted target edits failed: {}; {}",
+        match foreign_head {
+            Some(head) => format!("the target HEAD moved to {} afterwards", head),
+            None => "rolling it back failed".to_string(),
+        },
+        error,
+        if stash_restored {
+            "they were restored afterwards".to_string()
+        } else {
+            format!("they are saved in {}", stash_location)
+        }
+    )
+}
+
+pub fn commit_retained(root: &Path, commit: &str) -> bool {
+    crate::locking::with_git_phase(None, || {
+        git_probe(root, &["merge-base", "--is-ancestor", commit, "HEAD"]).unwrap_or(true)
+    })
 }
 
 pub fn run_git_with_refact_author(path: &Path, args: &[&str]) -> Result<String, String> {
@@ -427,7 +647,15 @@ pub(crate) fn run_git_with_refact_author_observed(
         "user.email=agent@refact.ai",
     ];
     full_args.extend_from_slice(args);
-    run_git_observed(path, &full_args, succeeded)
+    run_git_observed_with_env(
+        path,
+        &full_args,
+        &[
+            ("GIT_COMMITTER_NAME", MERGE_COMMITTER_NAME),
+            ("GIT_COMMITTER_EMAIL", MERGE_COMMITTER_EMAIL),
+        ],
+        succeeded,
+    )
 }
 
 pub fn run_git_lossy(path: &Path, args: &[&str]) -> String {
@@ -1058,6 +1286,22 @@ pub struct DirtyWorktreeStash {
 pub struct RestoreStashedChangesResult {
     pub critical_ok: bool,
     pub warnings: Vec<String>,
+    pub rolled_back: bool,
+    pub stash_restored: bool,
+    pub foreign_head: Option<String>,
+}
+
+impl DirtyWorktreeStash {
+    pub fn stash_oid(&self) -> &str {
+        &self.stash_oid
+    }
+
+    pub fn describe(&self) -> String {
+        format!(
+            "git stash {} (\"{}\"); recover with `git stash apply --index {}`",
+            self.stash_oid, self.stash_marker, self.stash_oid
+        )
+    }
 }
 
 pub fn stash_dirty_worktree(
@@ -1065,53 +1309,449 @@ pub fn stash_dirty_worktree(
     label: &str,
     expected_branch: Option<&str>,
 ) -> Result<Option<DirtyWorktreeStash>, String> {
-    ensure_no_merge_in_progress(root, label)?;
-    let status = run_git(root, &["status", "--porcelain"])?;
-    if status.trim().is_empty() {
-        return Ok(None);
+    match stash_dirty_worktree_retaining(root, label, expected_branch) {
+        Ok(stash) => Ok(stash),
+        Err((error, None)) => Err(error),
+        Err((error, Some(stash))) => {
+            let restore = rollback_merge_and_restore_stash(root, None, Some(&stash));
+            Err(format!("{}; {}", error, restore_details(&stash, &restore)))
+        }
     }
+}
 
-    let mut repo = discover_repo(root)?;
-    let original_branch = current_branch(&repo);
-    let original_head = head_rev(root)?;
-    if let Some(expected_branch) = expected_branch {
-        ensure_checkout_on_branch(root, label, expected_branch)?;
-    }
+pub fn stash_dirty_worktree_retaining(
+    root: &Path,
+    label: &str,
+    expected_branch: Option<&str>,
+) -> Result<Option<DirtyWorktreeStash>, (String, Option<DirtyWorktreeStash>)> {
+    let before = || -> Result<Option<(Repository, Option<String>, String)>, String> {
+        ensure_no_merge_in_progress(root, label)?;
+        let status = run_git(root, &["status", "--porcelain"])?;
+        if status.trim().is_empty() {
+            return Ok(None);
+        }
+        let repo = discover_repo(root)?;
+        let original_branch = current_branch(&repo);
+        let original_head = head_rev(root)?;
+        if let Some(expected_branch) = expected_branch {
+            ensure_checkout_on_branch(root, label, expected_branch)?;
+        }
+        crate::locking::checkpoint_git_phase()?;
+        Ok(Some((repo, original_branch, original_head)))
+    };
+    let Some((mut repo, original_branch, original_head)) = before().map_err(|e| (e, None))? else {
+        return Ok(None);
+    };
     let stash_marker = format!("Refact worktree merge target workspace {}", Uuid::new_v4());
     let stasher = Signature::now("Refact Agent", "agent@refact.ai")
-        .map_err(|e| format!("Failed to create stash author: {}", e))?;
-    crate::locking::checkpoint_git_phase()?;
+        .map_err(|e| (format!("Failed to create stash author: {}", e), None))?;
     let stash_oid = repo
         .stash_save(&stasher, &stash_marker, Some(StashFlags::INCLUDE_UNTRACKED))
-        .map_err(|e| format!("Failed to stash target workspace changes: {}", e))?
+        .map_err(|e| {
+            (
+                format!("Failed to stash target workspace changes: {}", e),
+                None,
+            )
+        })?
         .to_string();
-    crate::locking::checkpoint_git_phase()?;
     let stash = DirtyWorktreeStash {
         original_branch,
         original_head,
         stash_marker,
         stash_oid,
     };
+    if let Err(e) = crate::locking::checkpoint_git_phase() {
+        return Err((e, Some(stash)));
+    }
     if let Err(e) = ensure_clean_worktree(root, label) {
-        let restore_result = restore_stashed_changes(root, &stash);
-        let restore_details = if restore_result.critical_ok && restore_result.warnings.is_empty() {
-            "target workspace changes were restored".to_string()
-        } else if restore_result.critical_ok {
-            format!(
-                "target workspace changes were restored with warnings: {}",
-                restore_result.warnings.join("; ")
-            )
+        return Err((e, Some(stash)));
+    }
+    Ok(Some(stash))
+}
+
+pub fn restore_details(stash: &DirtyWorktreeStash, result: &RestoreStashedChangesResult) -> String {
+    if result.critical_ok && result.warnings.is_empty() {
+        "target workspace changes were restored".to_string()
+    } else if result.critical_ok {
+        format!(
+            "target workspace changes were restored with warnings: {}",
+            result.warnings.join("; ")
+        )
+    } else if result.stash_restored {
+        format!(
+            "target workspace changes were restored, but the rollback finished with warnings: {}",
+            result.warnings.join("; ")
+        )
+    } else {
+        format!(
+            "failed to restore target workspace changes; the edits are preserved in {}: {}",
+            stash.describe(),
+            result.warnings.join("; ")
+        )
+    }
+}
+
+pub fn rollback_merge_and_restore_stash(
+    root: &Path,
+    pre_merge_head: Option<&str>,
+    stash: Option<&DirtyWorktreeStash>,
+) -> RestoreStashedChangesResult {
+    rollback_merge_owned(root, pre_merge_head, None, stash)
+}
+
+pub fn rollback_merge_owned(
+    root: &Path,
+    pre_merge_head: Option<&str>,
+    own_commit: Option<&str>,
+    stash: Option<&DirtyWorktreeStash>,
+) -> RestoreStashedChangesResult {
+    crate::locking::with_git_phase(None, || {
+        if let (Some(pre), Ok(head)) = (pre_merge_head, head_rev(root)) {
+            if head != pre && Some(head.as_str()) != own_commit {
+                return restore_over_foreign_head(root, head, stash);
+            }
+        }
+        let mut warnings = cleanup_failed_merge(root);
+        let mut rolled_back = warnings.is_empty();
+        if let Some(head) = pre_merge_head {
+            let reset = reset_keeping_local_changes(root, head);
+            rolled_back &= reset.is_empty();
+            warnings.extend(reset);
+        }
+        let mut critical_ok = rolled_back;
+        let mut stash_restored = true;
+        if let Some(stash) = stash {
+            let restored = restore_stashed_changes(root, stash);
+            critical_ok &= restored.critical_ok;
+            rolled_back &= restored.rolled_back;
+            stash_restored = restored.stash_restored;
+            warnings.extend(restored.warnings);
+        }
+        critical_ok &= conflict_files_for_path(root).is_empty() && !has_merge_in_progress(root);
+        for name in ["MERGE_MSG", "SQUASH_MSG"] {
+            if let Ok(path) = run_git(root, &["rev-parse", "--git-path", name]) {
+                let path = PathBuf::from(path.trim());
+                let path = if path.is_absolute() {
+                    path
+                } else {
+                    root.join(path)
+                };
+                if path.exists() {
+                    if let Err(e) = std::fs::remove_file(&path) {
+                        critical_ok = false;
+                        warnings.push(format!("Failed to remove {}: {}", name, e));
+                    }
+                }
+            }
+        }
+        RestoreStashedChangesResult {
+            critical_ok,
+            warnings,
+            rolled_back,
+            stash_restored,
+            foreign_head: None,
+        }
+    })
+}
+
+fn restore_over_foreign_head(
+    root: &Path,
+    head: String,
+    stash: Option<&DirtyWorktreeStash>,
+) -> RestoreStashedChangesResult {
+    let mut leftovers = Vec::new();
+    if has_merge_in_progress(root) {
+        leftovers.push("MERGE_HEAD".to_string());
+    }
+    if let Ok(path) = run_git(root, &["rev-parse", "--git-path", "SQUASH_MSG"]) {
+        let path = PathBuf::from(path.trim());
+        let path = if path.is_absolute() {
+            path
+        } else {
+            root.join(path)
+        };
+        if path.exists() {
+            leftovers.push("SQUASH_MSG".to_string());
+        }
+    }
+    let unmerged = conflict_files_for_path(root);
+    if !unmerged.is_empty() {
+        leftovers.push(format!("unmerged index entries ({})", unmerged.join(", ")));
+    }
+    let mut warnings = vec![format!(
+        "The target HEAD moved to {} during the merge; nothing was rolled back{}",
+        head,
+        if leftovers.is_empty() {
+            String::new()
         } else {
             format!(
-                "failed to restore target workspace changes; they remain saved in git stash {}: {}",
-                stash.stash_oid,
-                restore_result.warnings.join("; ")
+                "; leftover merge state was left untouched for inspection: {}",
+                leftovers.join(", ")
             )
+        }
+    )];
+    if !unmerged.is_empty()
+        || leftovers
+            .iter()
+            .any(|item| item == "MERGE_HEAD" || item == "SQUASH_MSG")
+    {
+        if let Some(stash) = stash {
+            warnings.push(format!(
+                "Your uncommitted target edits were not re-applied over the leftover merge state; they are saved in {}",
+                stash.describe()
+            ));
+        }
+        return RestoreStashedChangesResult {
+            critical_ok: false,
+            warnings,
+            rolled_back: false,
+            stash_restored: stash.is_none(),
+            foreign_head: Some(head),
         };
-        return Err(format!("{}; {}", e, restore_details));
+    }
+    let stash_restored = match stash {
+        None => true,
+        Some(stash) => match apply_and_drop_stash(root, stash) {
+            Ok(drop_warnings) => {
+                warnings.extend(drop_warnings);
+                true
+            }
+            Err(e) => {
+                warnings.push(format!(
+                    "Restoring your uncommitted target edits failed; they are saved in {}: {}",
+                    stash.describe(),
+                    e
+                ));
+                false
+            }
+        },
+    };
+    RestoreStashedChangesResult {
+        critical_ok: false,
+        warnings,
+        rolled_back: false,
+        stash_restored,
+        foreign_head: Some(head),
+    }
+}
+
+pub struct TargetStashGuard {
+    root: PathBuf,
+    pre_merge_head: Option<String>,
+    own_commit: Option<String>,
+    stash: Option<DirtyWorktreeStash>,
+}
+
+impl TargetStashGuard {
+    pub fn new(root: &Path) -> Self {
+        Self {
+            root: root.to_path_buf(),
+            pre_merge_head: None,
+            own_commit: None,
+            stash: None,
+        }
     }
 
-    Ok(Some(stash))
+    pub fn set_own_commit(&mut self, commit: Option<String>) {
+        self.own_commit = commit;
+    }
+
+    pub fn hold(&mut self, stash: Option<DirtyWorktreeStash>) {
+        self.stash = stash;
+    }
+
+    pub fn set_pre_merge_head(&mut self, head: String) {
+        self.pre_merge_head = Some(head);
+    }
+
+    pub fn holds_stash(&self) -> bool {
+        self.stash.is_some()
+    }
+
+    pub fn release(&mut self) -> Option<DirtyWorktreeStash> {
+        self.stash.take()
+    }
+
+    pub fn recover(&mut self) -> Option<(DirtyWorktreeStash, RestoreStashedChangesResult)> {
+        let stash = self.stash.take()?;
+        let result = rollback_merge_owned(
+            &self.root,
+            self.pre_merge_head.as_deref(),
+            self.own_commit.as_deref(),
+            Some(&stash),
+        );
+        Some((stash, result))
+    }
+
+    pub fn fail(&mut self, error: String) -> String {
+        match self.recover() {
+            None => error,
+            Some((_, result)) if result.foreign_head.is_some() => {
+                format!("{}; {}", error, result.warnings.join("; "))
+            }
+            Some((stash, result)) if result.rolled_back => format!(
+                "{}; the target was rolled back to its pre-merge HEAD and {}",
+                error,
+                restore_details(&stash, &result)
+            ),
+            Some((stash, result)) => format!(
+                "{}; rolling the target back to its pre-merge HEAD did not finish cleanly and {}",
+                error,
+                restore_details(&stash, &result)
+            ),
+        }
+    }
+}
+
+impl Drop for TargetStashGuard {
+    fn drop(&mut self) {
+        let _ = self.recover();
+    }
+}
+
+fn tree_paths(root: &Path, rev: &str) -> Result<std::collections::BTreeSet<String>, String> {
+    Ok(run_git(root, &["ls-tree", "-r", "-z", "--name-only", rev])?
+        .split('\0')
+        .filter(|path| !path.is_empty())
+        .map(str::to_string)
+        .collect())
+}
+
+fn git_probe(root: &Path, args: &[&str]) -> Result<bool, String> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(root)
+        .output()
+        .map_err(|e| format!("Failed to run git {:?}: {}", args, e))?;
+    match output.status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => Err(format!(
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr).trim()
+        )),
+    }
+}
+
+fn untracked_and_ignored(root: &Path, path: &str) -> Result<bool, String> {
+    Ok(!git_probe(
+        root,
+        &[
+            "--literal-pathspecs",
+            "ls-files",
+            "--error-unmatch",
+            "--",
+            path,
+        ],
+    )? && git_probe(
+        root,
+        &[
+            "check-ignore",
+            "-q",
+            "--no-index",
+            "--",
+            &format!("./{path}"),
+        ],
+    )?)
+}
+
+fn ignored_untracked_under(root: &Path, path: &str) -> Result<Vec<String>, String> {
+    Ok(run_git(
+        root,
+        &[
+            "--literal-pathspecs",
+            "ls-files",
+            "-z",
+            "-o",
+            "-i",
+            "--exclude-standard",
+            "--",
+            path,
+        ],
+    )?
+    .split('\0')
+    .filter(|path| !path.is_empty())
+    .map(str::to_string)
+    .collect())
+}
+
+pub fn ignored_paths_colliding_with_incoming(
+    root: &Path,
+    source: &str,
+) -> Result<Vec<String>, String> {
+    let base = run_git(root, &["merge-base", "HEAD", source])?
+        .trim()
+        .to_string();
+    let changed = run_git(
+        root,
+        &[
+            "diff",
+            "--name-only",
+            "-z",
+            "--no-renames",
+            "--diff-filter=AMT",
+            &base,
+            source,
+        ],
+    )?;
+    let head = tree_paths(root, "HEAD")?;
+    let mut head_dirs = std::collections::BTreeSet::new();
+    for path in &head {
+        let mut prefix = PathBuf::new();
+        let components: Vec<_> = Path::new(path).components().collect();
+        for component in &components[..components.len().saturating_sub(1)] {
+            prefix.push(component);
+            head_dirs.insert(prefix.to_string_lossy().to_string());
+        }
+    }
+    let tracked_in_head = |path: &str| head.contains(path) || head_dirs.contains(path);
+    let mut collisions = std::collections::BTreeSet::new();
+    for path in changed.split('\0').filter(|path| !path.is_empty()) {
+        if head_dirs.contains(path) {
+            collisions.extend(ignored_untracked_under(root, path)?);
+            continue;
+        }
+        if tracked_in_head(path) {
+            continue;
+        }
+        let mut prefix = PathBuf::new();
+        let components: Vec<_> = Path::new(path).components().collect();
+        let mut blocked_by_parent = false;
+        for component in &components[..components.len().saturating_sub(1)] {
+            prefix.push(component);
+            let parent = prefix.to_string_lossy().to_string();
+            if tracked_in_head(&parent) {
+                continue;
+            }
+            match root.join(&prefix).symlink_metadata() {
+                Ok(meta) if meta.is_dir() => {}
+                Ok(_) => {
+                    if untracked_and_ignored(root, &parent)? {
+                        collisions.insert(parent);
+                    }
+                    blocked_by_parent = true;
+                    break;
+                }
+                Err(_) => {
+                    blocked_by_parent = true;
+                    break;
+                }
+            }
+        }
+        if blocked_by_parent {
+            continue;
+        }
+        let Ok(meta) = root.join(path).symlink_metadata() else {
+            continue;
+        };
+        if meta.is_dir() {
+            collisions.extend(ignored_untracked_under(root, path)?);
+        } else if untracked_and_ignored(root, path)? {
+            collisions.insert(path.to_string());
+        }
+    }
+    Ok(collisions.into_iter().collect())
 }
 
 fn stash_entry_for_marker(root: &Path, marker: &str) -> Result<Option<(String, String)>, String> {
@@ -1135,12 +1775,26 @@ pub fn apply_and_drop_stash(
     root: &Path,
     stash: &DirtyWorktreeStash,
 ) -> Result<Vec<String>, String> {
-    run_git(root, &["stash", "apply", "--index", &stash.stash_oid]).map_err(|e| {
-        format!(
-            "Failed to reapply target workspace changes after merge: {}; changes remain saved in git stash {}",
-            e, stash.stash_oid
-        )
-    })?;
+    let untracked_before = stash_untracked_paths(root, stash)
+        .into_iter()
+        .filter(|path| root.join(path).symlink_metadata().is_err())
+        .collect::<Vec<_>>();
+    if let Err(e) = run_git(root, &["stash", "apply", "--index", &stash.stash_oid]) {
+        let removed = remove_untracked_created_by_failed_apply(root, stash, &untracked_before);
+        return Err(format!(
+            "Failed to reapply target workspace changes after merge: {}; changes remain saved in git stash {}{}",
+            e,
+            stash.stash_oid,
+            if removed.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "; removed {} untracked file(s) the failed apply had restored so a retry can succeed",
+                    removed.len()
+                )
+            }
+        ));
+    }
 
     let mut warnings = Vec::new();
     match stash_entry_for_marker(root, &stash.stash_marker) {
@@ -1163,6 +1817,98 @@ pub fn apply_and_drop_stash(
         )),
     }
     Ok(warnings)
+}
+
+fn stash_untracked_paths(root: &Path, stash: &DirtyWorktreeStash) -> Vec<String> {
+    let untracked = format!("{}^3", stash.stash_oid);
+    if run_git(
+        root,
+        &[
+            "rev-parse",
+            "-q",
+            "--verify",
+            &format!("{untracked}^{{tree}}"),
+        ],
+    )
+    .is_err()
+    {
+        return Vec::new();
+    }
+    tree_paths(root, &untracked)
+        .map(|paths| paths.into_iter().collect())
+        .unwrap_or_default()
+}
+
+fn symlink_target_bytes(path: &Path) -> Option<Vec<u8>> {
+    let target = std::fs::read_link(path).ok()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        Some(target.as_os_str().as_bytes().to_vec())
+    }
+    #[cfg(not(unix))]
+    {
+        Some(target.to_string_lossy().replace('\\', "/").into_bytes())
+    }
+}
+
+fn remove_untracked_created_by_failed_apply(
+    root: &Path,
+    stash: &DirtyWorktreeStash,
+    absent_before: &[String],
+) -> Vec<String> {
+    let mut removed = Vec::new();
+    for path in absent_before {
+        let on_disk = root.join(path);
+        let Ok(meta) = on_disk.symlink_metadata() else {
+            continue;
+        };
+        let is_symlink = meta.file_type().is_symlink();
+        if !meta.is_file() && !is_symlink {
+            continue;
+        }
+        let Ok(tracked) = run_git(root, &["ls-files", "--", path]) else {
+            continue;
+        };
+        if !tracked.trim().is_empty() {
+            continue;
+        }
+        let Ok(entry) = run_git(
+            root,
+            &["ls-tree", &format!("{}^3", stash.stash_oid), "--", path],
+        ) else {
+            continue;
+        };
+        let stash_symlink = entry.starts_with("120000 ");
+        if entry.trim().is_empty() || stash_symlink != is_symlink {
+            continue;
+        }
+        let Ok(expected) = std::process::Command::new("git")
+            .args([
+                "cat-file",
+                "blob",
+                &format!("{}^3:{}", stash.stash_oid, path),
+            ])
+            .current_dir(root)
+            .output()
+        else {
+            continue;
+        };
+        if !expected.status.success() {
+            continue;
+        }
+        let actual = if is_symlink {
+            symlink_target_bytes(&on_disk)
+        } else {
+            std::fs::read(&on_disk).ok()
+        };
+        if actual.as_deref() == Some(expected.stdout.as_slice())
+            && std::fs::remove_file(&on_disk).is_ok()
+        {
+            removed.push(path.clone());
+        }
+    }
+    removed
 }
 
 pub fn reset_keeping_local_changes(root: &Path, rev: &str) -> Vec<String> {
@@ -1195,6 +1941,7 @@ pub fn restore_stashed_changes(
     if !reset_warnings.is_empty() {
         critical_ok = false;
     }
+    let mut rolled_back = critical_ok;
     warnings.extend(reset_warnings);
     let checkout_result = match stash.original_branch.as_deref() {
         Some(branch) => checkout_branch(root, branch),
@@ -1208,26 +1955,37 @@ pub fn restore_stashed_changes(
         return RestoreStashedChangesResult {
             critical_ok: false,
             warnings,
+            rolled_back: false,
+            stash_restored: false,
+            foreign_head: None,
         };
     }
     let reset_warnings = reset_keeping_local_changes(root, &stash.original_head);
     if !reset_warnings.is_empty() {
         critical_ok = false;
+        rolled_back = false;
     }
     warnings.extend(reset_warnings);
-    match apply_and_drop_stash(root, stash) {
-        Ok(drop_warnings) => warnings.extend(drop_warnings),
+    let stash_restored = match apply_and_drop_stash(root, stash) {
+        Ok(drop_warnings) => {
+            warnings.extend(drop_warnings);
+            true
+        }
         Err(e) => {
             critical_ok = false;
             warnings.push(format!(
                 "Failed to restore target workspace changes after rolling back merge: {}",
                 e
             ));
+            false
         }
-    }
+    };
     RestoreStashedChangesResult {
         critical_ok,
         warnings,
+        rolled_back,
+        stash_restored,
+        foreign_head: None,
     }
 }
 
@@ -1703,5 +2461,649 @@ mod rollback_tests {
         assert_eq!(git(root, &["rev-parse", "HEAD"]).trim(), merged);
         assert_eq!(read(root, "clean.txt"), "another chat\n");
         assert_eq!(read(root, "other.txt"), "another chat\n");
+    }
+
+    fn dirty_user_edits(root: &Path) {
+        std::fs::write(root.join("merged.txt"), "staged user\n").unwrap();
+        git(root, &["add", "merged.txt"]);
+        std::fs::write(root.join("merged.txt"), "unstaged user\n").unwrap();
+        std::fs::write(root.join("notes.txt"), "untracked user\n").unwrap();
+    }
+
+    fn assert_user_edits(root: &Path, head: &str) {
+        assert_eq!(git(root, &["rev-parse", "HEAD"]).trim(), head);
+        assert_eq!(git(root, &["show", ":merged.txt"]), "staged user\n");
+        assert_eq!(read(root, "merged.txt"), "unstaged user\n");
+        assert_eq!(read(root, "notes.txt"), "untracked user\n");
+        assert!(git(root, &["stash", "list"]).trim().is_empty());
+        assert!(!has_merge_in_progress(root));
+    }
+
+    #[test]
+    fn stash_post_validation_failure_returns_the_stash_handle() {
+        let temp = repo_with_conflicting_branch();
+        let root = temp.path();
+        dirty_user_edits(root);
+        let head = git(root, &["rev-parse", "HEAD"]).trim().to_string();
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let calls = std::sync::Arc::new(AtomicUsize::new(0));
+        let lose_after = std::sync::Arc::new(AtomicUsize::new(usize::MAX));
+        let (seen, limit) = (calls.clone(), lose_after.clone());
+        let authority = crate::locking::MergeAuthority(std::sync::Arc::new(move || {
+            if seen.fetch_add(1, Ordering::SeqCst) >= limit.load(Ordering::SeqCst) {
+                Err("lease revoked".into())
+            } else {
+                Ok(())
+            }
+        }));
+        let probe = crate::locking::with_git_phase(Some(authority.clone()), || {
+            stash_dirty_worktree_retaining(root, "Target", Some("main"))
+        })
+        .unwrap()
+        .unwrap();
+        let total = calls.swap(0, Ordering::SeqCst);
+        assert!(rollback_merge_and_restore_stash(root, None, Some(&probe)).critical_ok);
+        assert_user_edits(root, &head);
+
+        lose_after.store(total - 1, Ordering::SeqCst);
+        let (error, stash) = crate::locking::with_git_phase(Some(authority), || {
+            stash_dirty_worktree_retaining(root, "Target", Some("main"))
+        })
+        .unwrap_err();
+        assert!(error.contains("lease revoked"), "{error}");
+        let stash = stash.expect("a created stash must be returned with the error");
+        assert!(!git(root, &["stash", "list"]).trim().is_empty());
+
+        let revoked = crate::locking::MergeAuthority(std::sync::Arc::new(|| Err("revoked".into())));
+        let restored = crate::locking::with_git_phase(Some(revoked), || {
+            rollback_merge_and_restore_stash(root, Some(&head), Some(&stash))
+        });
+        assert!(restored.critical_ok, "{:?}", restored.warnings);
+        assert_user_edits(root, &head);
+    }
+
+    #[test]
+    fn rollback_clears_squash_and_merge_state_then_restores_edits() {
+        for strategy in [
+            &["merge", "--squash", "feature"][..],
+            &["merge", "--no-ff", "--no-commit", "feature"][..],
+        ] {
+            let temp = repo_with_conflicting_branch();
+            let root = temp.path();
+            git(root, &["checkout", "-b", "clean-base", "HEAD~1"]);
+            dirty_user_edits(root);
+            let head = git(root, &["rev-parse", "HEAD"]).trim().to_string();
+            let stash = stash_dirty_worktree(root, "Target", None).unwrap().unwrap();
+            git(root, strategy);
+            assert_eq!(read(root, "clean.txt"), "feature\n");
+
+            let restored = rollback_merge_and_restore_stash(root, Some(&head), Some(&stash));
+
+            assert!(
+                restored.critical_ok,
+                "{strategy:?}: {:?}",
+                restored.warnings
+            );
+            assert_user_edits(root, &head);
+            assert_eq!(read(root, "clean.txt"), "base\n");
+            for name in ["MERGE_HEAD", "MERGE_MSG", "SQUASH_MSG"] {
+                let path = git(root, &["rev-parse", "--git-path", name]);
+                assert!(!root.join(path.trim()).exists(), "{strategy:?}: {name}");
+            }
+        }
+    }
+
+    #[test]
+    fn failed_apply_removes_only_untracked_files_it_restored_so_retry_succeeds() {
+        let temp = repo_with_conflicting_branch();
+        let root = temp.path();
+        let pre = git(root, &["rev-parse", "HEAD"]).trim().to_string();
+        std::fs::write(root.join("merged.txt"), "user\n").unwrap();
+        std::fs::write(root.join("notes.txt"), "untracked user\n").unwrap();
+        let stash = stash_dirty_worktree(root, "Target", Some("main"))
+            .unwrap()
+            .unwrap();
+        std::fs::write(root.join("merged.txt"), "incoming\n").unwrap();
+        git(root, &["commit", "-am", "incoming overlap"]);
+
+        let error = apply_and_drop_stash(root, &stash).unwrap_err();
+
+        assert!(error.contains("removed 1 untracked file"), "{error}");
+        assert!(!root.join("notes.txt").exists());
+        let warnings = reset_keeping_local_changes(root, &pre);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        apply_and_drop_stash(root, &stash).unwrap();
+        assert_eq!(read(root, "merged.txt"), "user\n");
+        assert_eq!(read(root, "notes.txt"), "untracked user\n");
+        assert!(git(root, &["stash", "list"]).trim().is_empty());
+    }
+
+    #[test]
+    fn failed_apply_keeps_untracked_files_that_existed_or_differ() {
+        let temp = repo_with_conflicting_branch();
+        let root = temp.path();
+        std::fs::write(root.join("merged.txt"), "user\n").unwrap();
+        std::fs::write(root.join("notes.txt"), "untracked user\n").unwrap();
+        let stash = stash_dirty_worktree(root, "Target", Some("main"))
+            .unwrap()
+            .unwrap();
+        std::fs::write(root.join("merged.txt"), "incoming\n").unwrap();
+        git(root, &["commit", "-am", "incoming overlap"]);
+        std::fs::write(root.join("notes.txt"), "someone else\n").unwrap();
+
+        assert!(apply_and_drop_stash(root, &stash).is_err());
+
+        assert_eq!(read(root, "notes.txt"), "someone else\n");
+        assert!(!git(root, &["stash", "list"]).trim().is_empty());
+    }
+
+    #[test]
+    fn ignored_collision_probe_names_files_and_blocking_parents() {
+        let temp = repo_with_conflicting_branch();
+        let root = temp.path();
+        std::fs::write(root.join(".git/info/exclude"), "*.log\nout\n").unwrap();
+        git(root, &["checkout", "feature"]);
+        std::fs::create_dir(root.join("out")).unwrap();
+        std::fs::write(root.join("build.log"), "tracked\n").unwrap();
+        std::fs::write(root.join("out/result.txt"), "tracked\n").unwrap();
+        git(root, &["add", "-f", "build.log", "out/result.txt"]);
+        git(root, &["commit", "-m", "tracked outputs"]);
+        git(root, &["checkout", "main"]);
+        assert!(!root.join("out").exists());
+        assert!(ignored_paths_colliding_with_incoming(root, "feature")
+            .unwrap()
+            .is_empty());
+        std::fs::write(root.join("build.log"), "precious\n").unwrap();
+        std::fs::write(root.join("out"), "precious file\n").unwrap();
+
+        assert_eq!(
+            ignored_paths_colliding_with_incoming(root, "feature").unwrap(),
+            vec!["build.log".to_string(), "out".to_string()]
+        );
+    }
+
+    fn simple_repo() -> tempfile::TempDir {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        git(root, &["init"]);
+        git(root, &["checkout", "-b", "main"]);
+        git(root, &["config", "core.autocrlf", "false"]);
+        git(root, &["config", "user.email", "probe@example.test"]);
+        git(root, &["config", "user.name", "Probe Test"]);
+        temp
+    }
+
+    fn commit_all_files(root: &Path, message: &str) {
+        git(root, &["add", "-A"]);
+        git(root, &["commit", "-m", message]);
+    }
+
+    #[test]
+    fn ignored_collision_probe_ignores_tracked_dir_replaced_by_file() {
+        let temp = simple_repo();
+        let root = temp.path();
+        std::fs::create_dir(root.join("docs")).unwrap();
+        std::fs::write(root.join("docs/x.md"), "x\n").unwrap();
+        commit_all_files(root, "base");
+        git(root, &["checkout", "-b", "feature"]);
+        git(root, &["rm", "-r", "-q", "docs"]);
+        std::fs::write(root.join("docs"), "now a file\n").unwrap();
+        commit_all_files(root, "dir to file");
+        git(root, &["checkout", "main"]);
+
+        assert!(ignored_paths_colliding_with_incoming(root, "feature")
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn ignored_collision_probe_flags_ignored_contents_of_tracked_dir_replaced_by_file() {
+        let temp = simple_repo();
+        let root = temp.path();
+        std::fs::create_dir(root.join("docs")).unwrap();
+        std::fs::write(root.join("docs/x.md"), "x\n").unwrap();
+        std::fs::write(root.join(".gitignore"), "*.tmp\n").unwrap();
+        commit_all_files(root, "base");
+        git(root, &["checkout", "-b", "feature"]);
+        git(root, &["rm", "-r", "-q", "docs"]);
+        std::fs::write(root.join("docs"), "now a file\n").unwrap();
+        commit_all_files(root, "dir to file");
+        git(root, &["checkout", "main"]);
+        std::fs::write(root.join("docs/cache.tmp"), "precious\n").unwrap();
+
+        assert_eq!(
+            ignored_paths_colliding_with_incoming(root, "feature").unwrap(),
+            vec!["docs/cache.tmp".to_string()]
+        );
+    }
+
+    #[test]
+    fn ignored_collision_probe_treats_glob_characters_literally() {
+        let temp = simple_repo();
+        let root = temp.path();
+        std::fs::create_dir(root.join("pages")).unwrap();
+        std::fs::write(root.join("pages/i.tsx"), "tracked\n").unwrap();
+        std::fs::write(root.join(".gitignore"), "pages/\\[id\\].tsx\n").unwrap();
+        commit_all_files(root, "base");
+        git(root, &["checkout", "-b", "feature"]);
+        std::fs::write(root.join("pages/[id].tsx"), "incoming\n").unwrap();
+        git(root, &["add", "-f", "pages/[id].tsx"]);
+        git(root, &["commit", "-m", "incoming"]);
+        git(root, &["checkout", "main"]);
+        std::fs::write(root.join("pages/[id].tsx"), "precious\n").unwrap();
+
+        assert_eq!(
+            ignored_paths_colliding_with_incoming(root, "feature").unwrap(),
+            vec!["pages/[id].tsx".to_string()]
+        );
+    }
+
+    #[test]
+    fn ignored_collision_probe_fails_closed_when_git_fails() {
+        let temp = simple_repo();
+        let root = temp.path();
+        assert!(untracked_and_ignored(&root.join("missing"), "x").is_err());
+    }
+
+    #[test]
+    fn landed_commit_recognises_only_this_merges_commit() {
+        let temp = repo_with_conflicting_branch();
+        let root = temp.path();
+        git(root, &["checkout", "-q", "-b", "clean-base", "HEAD~1"]);
+        let before = head_rev(root).unwrap();
+        let source = git(root, &["rev-parse", "feature"]).trim().to_string();
+        assert_eq!(
+            landed_commit(
+                root,
+                &before,
+                Landing::Merge {
+                    source: &source
+                }
+            ),
+            None
+        );
+
+        std::fs::write(root.join("extra.txt"), "x\n").unwrap();
+        git(root, &["add", "extra.txt"]);
+        git(root, &["commit", "-m", "unrelated child"]);
+        let tree = git(root, &["rev-parse", "HEAD^{tree}"]).trim().to_string();
+        assert_eq!(
+            landed_commit(
+                root,
+                &before,
+                Landing::Merge {
+                    source: &source
+                }
+            ),
+            None
+        );
+        git(root, &["reset", "-q", "--hard", &before]);
+        git(root, &["merge", "-q", "--squash", "feature"]);
+        let squash_tree = git(root, &["write-tree"]).trim().to_string();
+        assert_ne!(tree, squash_tree);
+        git(root, &["reset", "-q", "--hard", &before]);
+        std::fs::write(root.join("extra.txt"), "x\n").unwrap();
+        git(root, &["add", "extra.txt"]);
+        git(root, &["commit", "-m", "unrelated child"]);
+        assert_eq!(
+            landed_commit(
+                root,
+                &before,
+                Landing::Squash {
+                    tree: &squash_tree
+                }
+            ),
+            None
+        );
+
+        git(root, &["reset", "-q", "--hard", &before]);
+        git(root, &["merge", "-q", "--squash", "feature"]);
+        git(root, &["commit", "-q", "-m", "squash"]);
+        let squashed = head_rev(root).unwrap();
+        assert_eq!(
+            landed_commit(
+                root,
+                &before,
+                Landing::Squash {
+                    tree: &squash_tree
+                }
+            ),
+            Some(squashed)
+        );
+
+        git(root, &["reset", "-q", "--hard", &before]);
+        git(root, &["merge", "-q", "--no-ff", "--no-edit", "feature"]);
+        let merged = head_rev(root).unwrap();
+        assert_eq!(
+            landed_commit(
+                root,
+                &before,
+                Landing::Merge {
+                    source: &source
+                }
+            ),
+            Some(merged)
+        );
+        assert_eq!(
+            landed_commit(
+                root,
+                &before,
+                Landing::Merge {
+                    source: &before
+                }
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn squash_identity_accepts_a_restaged_tree_only_from_the_merge_committer() {
+        let temp = repo_with_conflicting_branch();
+        let root = temp.path();
+        git(root, &["checkout", "-q", "-b", "clean-base", "HEAD~1"]);
+        let before = head_rev(root).unwrap();
+        git(root, &["merge", "-q", "--squash", "feature"]);
+        let tree = git(root, &["write-tree"]).trim().to_string();
+        std::fs::write(root.join("other.txt"), "formatted\n").unwrap();
+        git(root, &["add", "other.txt"]);
+        git(root, &["commit", "-q", "-m", "user squash"]);
+        let landing = Landing::Squash {
+            tree: &tree,
+        };
+        assert_eq!(landed_commit(root, &before, landing), None);
+
+        git(root, &["reset", "-q", "--hard", &before]);
+        git(root, &["merge", "-q", "--squash", "feature"]);
+        std::fs::write(root.join("other.txt"), "formatted\n").unwrap();
+        git(root, &["add", "other.txt"]);
+        run_git_with_refact_author(root, &["commit", "-q", "-m", "agent squash"]).unwrap();
+        let own = head_rev(root).unwrap();
+        assert_eq!(landed_commit(root, &before, landing), Some(own.clone()));
+
+        git(root, &["commit", "-q", "--allow-empty", "-m", "hook"]);
+        assert_eq!(landed_commit(root, &before, landing), None);
+        assert_eq!(landed_commit_below_head(root, &before, landing), Some(own));
+    }
+
+    #[test]
+    fn rollback_over_a_foreign_head_leaves_merge_state_alone_and_names_it() {
+        let temp = repo_with_conflicting_branch();
+        let root = temp.path();
+        let pre = head_rev(root).unwrap();
+        dirty_user_edits(root);
+        let stash = stash_dirty_worktree(root, "Target", Some("main"))
+            .unwrap()
+            .unwrap();
+        std::fs::write(root.join("foreign.txt"), "other writer\n").unwrap();
+        git(root, &["add", "foreign.txt"]);
+        git(root, &["commit", "-m", "foreign"]);
+        let foreign = head_rev(root).unwrap();
+        assert!(run_git(root, &["merge", "--no-ff", "feature"]).is_err());
+        assert!(has_merge_in_progress(root));
+
+        let restored = rollback_merge_owned(root, Some(&pre), None, Some(&stash));
+
+        assert_eq!(head_rev(root).unwrap(), foreign);
+        assert!(has_merge_in_progress(root));
+        assert_eq!(
+            conflict_files_for_path(root),
+            vec!["merged.txt".to_string()]
+        );
+        assert!(!restored.stash_restored);
+        assert!(!restored.critical_ok);
+        let first = &restored.warnings[0];
+        assert!(first.contains("leftover merge state"), "{first}");
+        assert!(first.contains("MERGE_HEAD"), "{first}");
+        assert!(
+            first.contains("unmerged index entries (merged.txt)"),
+            "{first}"
+        );
+        assert!(
+            restored
+                .warnings
+                .iter()
+                .any(|warning| warning.contains(stash.stash_oid())),
+            "{:?}",
+            restored.warnings
+        );
+        assert!(!git(root, &["stash", "list"]).trim().is_empty());
+    }
+
+    #[test]
+    fn refact_author_commits_force_the_merge_committer_over_config_overrides() {
+        let temp = repo_with_conflicting_branch();
+        let root = temp.path();
+        git(root, &["config", "committer.email", "dev@example.test"]);
+        git(root, &["config", "committer.name", "Dev Override"]);
+
+        run_git_with_refact_author(root, &["commit", "--allow-empty", "-q", "-m", "identity"])
+            .unwrap();
+
+        assert_eq!(
+            git(root, &["log", "-1", "--format=%ce"]).trim(),
+            MERGE_COMMITTER_EMAIL
+        );
+        assert_eq!(
+            git(root, &["log", "-1", "--format=%cn"]).trim(),
+            MERGE_COMMITTER_NAME
+        );
+    }
+
+    #[test]
+    fn rollback_over_a_foreign_head_keeps_a_staged_squash_and_names_the_stash() {
+        let temp = repo_with_conflicting_branch();
+        let root = temp.path();
+        git(root, &["checkout", "-b", "side"]);
+        std::fs::write(root.join("side.txt"), "side\n").unwrap();
+        git(root, &["add", "side.txt"]);
+        git(root, &["commit", "-m", "side"]);
+        git(root, &["checkout", "main"]);
+        let pre = head_rev(root).unwrap();
+        dirty_user_edits(root);
+        let stash = stash_dirty_worktree(root, "Target", Some("main"))
+            .unwrap()
+            .unwrap();
+        run_git(root, &["merge", "--squash", "side"]).unwrap();
+        let tree = git(root, &["rev-parse", "HEAD^{tree}"]);
+        let foreign = git(
+            root,
+            &["commit-tree", tree.trim(), "-p", &pre, "-m", "foreign"],
+        )
+        .trim()
+        .to_string();
+        git(root, &["update-ref", "HEAD", &foreign]);
+
+        let restored = rollback_merge_owned(root, Some(&pre), None, Some(&stash));
+
+        assert_eq!(head_rev(root).unwrap(), foreign);
+        assert!(!restored.stash_restored);
+        assert!(
+            restored.warnings[0].contains("SQUASH_MSG"),
+            "{:?}",
+            restored.warnings
+        );
+        assert!(
+            restored
+                .warnings
+                .iter()
+                .any(|warning| warning.contains(stash.stash_oid())),
+            "{:?}",
+            restored.warnings
+        );
+        assert!(git(root, &["diff", "--cached", "--name-only"]).contains("side.txt"));
+        assert!(!git(root, &["stash", "list"]).trim().is_empty());
+    }
+
+    #[test]
+    fn rollback_never_moves_head_away_from_a_foreign_commit() {
+        let temp = repo_with_conflicting_branch();
+        let root = temp.path();
+        let pre = head_rev(root).unwrap();
+        dirty_user_edits(root);
+        let stash = stash_dirty_worktree(root, "Target", Some("main"))
+            .unwrap()
+            .unwrap();
+        std::fs::write(root.join("foreign.txt"), "other writer\n").unwrap();
+        git(root, &["add", "foreign.txt"]);
+        git(root, &["commit", "-m", "foreign"]);
+        let foreign = head_rev(root).unwrap();
+
+        let restored = rollback_merge_owned(root, Some(&pre), Some(&pre), Some(&stash));
+
+        assert_eq!(head_rev(root).unwrap(), foreign);
+        assert_eq!(restored.foreign_head.as_deref(), Some(foreign.as_str()));
+        assert!(!restored.rolled_back);
+        assert!(restored.stash_restored, "{:?}", restored.warnings);
+        assert!(restored
+            .warnings
+            .iter()
+            .any(|warning| warning.contains(&format!("moved to {foreign}"))
+                && warning.contains("nothing was rolled back")));
+        assert_eq!(read(root, "foreign.txt"), "other writer\n");
+        assert_eq!(git(root, &["show", ":merged.txt"]), "staged user\n");
+        assert_eq!(read(root, "merged.txt"), "unstaged user\n");
+        assert_eq!(read(root, "notes.txt"), "untracked user\n");
+        assert!(git(root, &["stash", "list"]).trim().is_empty());
+    }
+
+    #[test]
+    fn ignored_collision_probe_handles_paths_starting_with_a_colon() {
+        let temp = simple_repo();
+        let root = temp.path();
+        std::fs::write(root.join("file.txt"), "base\n").unwrap();
+        std::fs::write(root.join(".gitignore"), ":precious.dat\n*.log\n").unwrap();
+        commit_all_files(root, "base");
+        git(root, &["checkout", "-b", "feature"]);
+        for path in [":precious.dat", ":(x).log"] {
+            std::fs::write(root.join(path), "incoming\n").unwrap();
+            git(root, &["add", "-f", "--", &format!("./{path}")]);
+        }
+        git(root, &["commit", "-m", "incoming"]);
+        git(root, &["checkout", "main"]);
+        for path in [":precious.dat", ":(x).log"] {
+            std::fs::write(root.join(path), "precious\n").unwrap();
+        }
+
+        assert_eq!(
+            ignored_paths_colliding_with_incoming(root, "feature").unwrap(),
+            vec![":(x).log".to_string(), ":precious.dat".to_string()]
+        );
+    }
+
+    #[test]
+    fn ignored_collision_probe_ignores_tracked_file_replaced_by_dir() {
+        let temp = simple_repo();
+        let root = temp.path();
+        std::fs::write(root.join("docs"), "a file\n").unwrap();
+        commit_all_files(root, "base");
+        git(root, &["checkout", "-b", "feature"]);
+        git(root, &["rm", "-q", "docs"]);
+        std::fs::create_dir(root.join("docs")).unwrap();
+        std::fs::write(root.join("docs/a.md"), "a\n").unwrap();
+        commit_all_files(root, "file to dir");
+        git(root, &["checkout", "main"]);
+
+        assert!(ignored_paths_colliding_with_incoming(root, "feature")
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn ignored_collision_probe_ignores_untouched_path_the_target_stopped_tracking() {
+        let temp = simple_repo();
+        let root = temp.path();
+        std::fs::write(root.join("config.local"), "base config\n").unwrap();
+        std::fs::write(root.join("file.txt"), "base\n").unwrap();
+        commit_all_files(root, "base");
+        git(root, &["branch", "feature"]);
+        git(root, &["rm", "-q", "--cached", "config.local"]);
+        std::fs::write(root.join(".gitignore"), "config.local\n").unwrap();
+        commit_all_files(root, "stop tracking config.local");
+        std::fs::write(root.join("config.local"), "user local config\n").unwrap();
+        git(root, &["checkout", "-q", "feature"]);
+        std::fs::write(root.join("file.txt"), "feature\n").unwrap();
+        git(root, &["commit", "-qam", "feature change"]);
+        git(root, &["checkout", "-q", "main"]);
+        std::fs::write(root.join("config.local"), "user local config\n").unwrap();
+
+        assert!(ignored_paths_colliding_with_incoming(root, "feature")
+            .unwrap()
+            .is_empty());
+        git(root, &["merge", "--no-ff", "--no-edit", "feature"]);
+        assert_eq!(read(root, "config.local"), "user local config\n");
+    }
+
+    #[test]
+    fn ignored_collision_probe_skips_unignored_occupants_and_flags_ignored_dir_contents() {
+        let temp = simple_repo();
+        let root = temp.path();
+        std::fs::write(root.join("file.txt"), "base\n").unwrap();
+        std::fs::write(root.join(".gitignore"), "cache/\n").unwrap();
+        commit_all_files(root, "base");
+        git(root, &["checkout", "-b", "feature"]);
+        std::fs::write(root.join("plain.txt"), "incoming\n").unwrap();
+        std::fs::write(root.join("cache"), "incoming file at an ignored dir\n").unwrap();
+        git(root, &["add", "-f", "plain.txt", "cache"]);
+        git(root, &["commit", "-m", "incoming"]);
+        git(root, &["checkout", "main"]);
+        std::fs::write(root.join("plain.txt"), "untracked, not ignored\n").unwrap();
+        std::fs::create_dir(root.join("cache")).unwrap();
+        std::fs::write(root.join("cache/blob.bin"), "precious\n").unwrap();
+
+        assert_eq!(
+            ignored_paths_colliding_with_incoming(root, "feature").unwrap(),
+            vec!["cache/blob.bin".to_string()]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_apply_removes_restored_untracked_symlink_so_retry_succeeds() {
+        let temp = repo_with_conflicting_branch();
+        let root = temp.path();
+        let pre = git(root, &["rev-parse", "HEAD"]).trim().to_string();
+        std::fs::write(root.join("merged.txt"), "user\n").unwrap();
+        std::os::unix::fs::symlink("merged.txt", root.join("link")).unwrap();
+        let stash = stash_dirty_worktree(root, "Target", Some("main"))
+            .unwrap()
+            .unwrap();
+        assert!(root.join("link").symlink_metadata().is_err());
+        std::fs::write(root.join("merged.txt"), "incoming\n").unwrap();
+        git(root, &["commit", "-am", "incoming overlap"]);
+
+        let error = apply_and_drop_stash(root, &stash).unwrap_err();
+
+        assert!(error.contains("removed 1 untracked file"), "{error}");
+        assert!(root.join("link").symlink_metadata().is_err());
+        assert!(reset_keeping_local_changes(root, &pre).is_empty());
+        apply_and_drop_stash(root, &stash).unwrap();
+        assert_eq!(
+            std::fs::read_link(root.join("link")).unwrap(),
+            PathBuf::from("merged.txt")
+        );
+        assert!(git(root, &["stash", "list"]).trim().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_apply_keeps_symlink_with_different_target() {
+        let temp = repo_with_conflicting_branch();
+        let root = temp.path();
+        std::fs::write(root.join("merged.txt"), "user\n").unwrap();
+        std::os::unix::fs::symlink("merged.txt", root.join("link")).unwrap();
+        let stash = stash_dirty_worktree(root, "Target", Some("main"))
+            .unwrap()
+            .unwrap();
+        std::fs::write(root.join("merged.txt"), "incoming\n").unwrap();
+        git(root, &["commit", "-am", "incoming overlap"]);
+        let before: Vec<String> = Vec::new();
+        std::os::unix::fs::symlink("other.txt", root.join("link")).unwrap();
+        let removed = remove_untracked_created_by_failed_apply(root, &stash, &["link".to_string()]);
+        assert!(removed.is_empty());
+        assert_eq!(
+            std::fs::read_link(root.join("link")).unwrap(),
+            PathBuf::from("other.txt")
+        );
+        let _ = before;
     }
 }

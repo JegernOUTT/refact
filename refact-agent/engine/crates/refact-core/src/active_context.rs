@@ -167,6 +167,31 @@ fn validate_ids(messages: &[ChatMessage], require_ids: bool) -> Result<(), Activ
     Ok(())
 }
 
+pub fn repair_identical_message_duplicates(
+    stored: &[ChatMessage],
+) -> Result<Vec<ChatMessage>, ActiveContextError> {
+    let mut seen = HashMap::new();
+    let mut repaired = Vec::with_capacity(stored.len());
+    for message in stored {
+        if !message.message_id.is_empty() {
+            let bytes = serde_json::to_vec(message).map_err(|_| {
+                ActiveContextError::InvalidPayload("message serialization failed".into())
+            })?;
+            if let Some(previous) = seen.get(&message.message_id) {
+                if previous == &bytes {
+                    continue;
+                }
+                return Err(ActiveContextError::InvalidPayload(
+                    "duplicate active message ID".into(),
+                ));
+            }
+            seen.insert(message.message_id.clone(), bytes);
+        }
+        repaired.push(message.clone());
+    }
+    Ok(repaired)
+}
+
 pub fn validate_reconstruction_payload(messages: &[ChatMessage]) -> Result<(), ActiveContextError> {
     if messages.is_empty() {
         return Err(ActiveContextError::InvalidPayload("empty payload".into()));
@@ -657,6 +682,30 @@ mod tests {
             }),
         );
         result
+    }
+
+    #[test]
+    fn duplicate_repair_requires_complete_byte_identity() {
+        let original = message("same", "system", "guarded instruction");
+        let duplicate = vec![original.clone(), original.clone()];
+        assert!(active_context(&duplicate).is_err());
+        let repaired = repair_identical_message_duplicates(&duplicate).unwrap();
+        assert_eq!(repaired.len(), 1);
+        assert!(active_context(&repaired).is_ok());
+        let mut conflict = original.clone();
+        conflict
+            .extra
+            .insert("privacy".into(), json!({"zone": "secret"}));
+        assert!(repair_identical_message_duplicates(&[original, conflict]).is_err());
+        assert_eq!(
+            repair_identical_message_duplicates(&[
+                message("", "user", "same"),
+                message("", "user", "same")
+            ])
+            .unwrap()
+            .len(),
+            2
+        );
     }
 
     #[test]

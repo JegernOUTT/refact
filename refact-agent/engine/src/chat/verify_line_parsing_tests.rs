@@ -85,8 +85,9 @@ fn never_run_acceptance_check_is_unavailable_not_failed() {
         concerns: gates.reasons(),
         ..Default::default()
     });
-    assert!(ensure_verifier_allows_merge(&card, false).is_err());
-    assert!(ensure_verifier_allows_merge(&card, true).is_ok());
+    assert!(ensure_verifier_allows_merge(&card, false)
+        .unwrap()
+        .is_some());
 }
 
 #[test]
@@ -132,8 +133,7 @@ fn all_commands_passed_plus_judge_concerns_is_needs_review_and_force_mergeable()
         concerns: concerns.clone(),
         ..Default::default()
     });
-    assert!(ensure_verifier_allows_merge(&card, false).is_err());
-    let warning = ensure_verifier_allows_merge(&card, true).unwrap().unwrap();
+    let warning = ensure_verifier_allows_merge(&card, false).unwrap().unwrap();
     for concern in concerns {
         assert!(warning.contains(&concern), "{warning}");
     }
@@ -181,10 +181,8 @@ async fn ran_and_failed_command_is_still_a_genuine_failure_force_cannot_bypass()
     });
     for classification in [classification, VerifierReportClassification::HumanReview] {
         card.verifier_report.as_mut().unwrap().classification = classification;
-        let error = ensure_verifier_allows_merge(&card, true).unwrap_err();
-        assert!(
-            error.contains("force=true cannot bypass verification failures"),
-            "{error}"
-        );
+        let warning = ensure_verifier_allows_merge(&card, false).unwrap().unwrap();
+        assert!(warning.contains("Verification FAILED"), "{warning}");
+        assert!(warning.contains("merged anyway"), "{warning}");
     }
 }

@@ -32,12 +32,13 @@ fn tool_message(tool_call_id: &str, content: String) -> Result<(bool, Vec<Contex
     ))
 }
 
-fn require_pursuable_goal(session: &ChatSession) -> Result<(), String> {
+fn require_pursuable_goal(session: &ChatSession, resume: bool) -> Result<(), String> {
     let Some(goal) = session.goal.as_ref() else {
         return Err("no goal installed; call set_goal first".to_string());
     };
     if !goal.active {
-        return Err("this chat does not own the goal".to_string());
+        let action = if resume { "resume" } else { "pause" };
+        return Err(crate::chat::queue::unowned_goal_error(session, action));
     }
     if goal.status != GoalStatus::Active {
         return Err(format!(
@@ -89,7 +90,7 @@ pub(crate) async fn control_goal(
     let session_arc = session_for_chat(ccx).await?;
     crate::tasks::goal::hydrate_session_task_goal_for_mutation(gcx.clone(), &session_arc).await?;
     let mut session = session_arc.lock().await;
-    require_pursuable_goal(&session)?;
+    require_pursuable_goal(&session, resume)?;
     if resume
         && !session
             .goal
@@ -183,6 +184,32 @@ mod tests {
         assert!(wake);
         assert!(!session.delivery_wake_sources.contains("goal"));
         assert!(session.delivery_wake_sources.contains("external"));
+    }
+
+    #[test]
+    fn unowned_goal_controls_point_to_set_goal() {
+        let mut session = session_with_goal();
+        session.thread.parent_id = Some("source-chat".to_string());
+        session.thread.link_type = Some("branch".to_string());
+        session.goal.as_mut().unwrap().active = false;
+
+        for (resume, action) in [(false, "pause"), (true, "resume")] {
+            let error = require_pursuable_goal(&session, resume).unwrap_err();
+            assert!(
+                error.starts_with("this chat does not own the goal"),
+                "{error}"
+            );
+            assert!(error.contains("source-chat"), "{error}");
+            assert!(error.contains(&format!("{action} it there")), "{error}");
+            assert!(error.contains("call set_goal"), "{error}");
+        }
+
+        session.thread.link_type = None;
+        let error = require_pursuable_goal(&session, false).unwrap_err();
+        assert_eq!(
+            error,
+            "this chat does not own the goal; call set_goal to start a new goal in this chat"
+        );
     }
 
     fn met_reply() -> crate::chat::goal_verifier::GoalVerifierReply {

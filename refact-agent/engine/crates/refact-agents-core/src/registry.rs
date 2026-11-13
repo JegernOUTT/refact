@@ -1327,6 +1327,7 @@ impl BackgroundAgentRegistry {
             let payload = serde_json::json!({
                 "agent_id": agent_id,
                 "result_summary": result_summary.clone(),
+                "result_truncated": result_summary.starts_with("[Result truncated: output-token limit reached]"),
                 "edited_files": edited_files.clone(),
                 "diff_summary": diff_summary.clone(),
                 "conflict_summary": conflict_summary.clone(),

@@ -96,7 +96,7 @@ async fn fixture() -> (AppState, tempfile::TempDir) {
 #[serial_test::serial(runtime_settings)]
 #[tokio::test]
 #[ignore = "opt-in realistic provenance scale validation benchmark"]
-async fn realistic_provenance_scale_and_first_row_capacity_failure() {
+async fn realistic_provenance_scale_and_first_row_truncation() {
     let (app, dir) = fixture().await;
     let policy = refact_privacy::PrivacyPolicy {
         zones: (0..20)
@@ -202,7 +202,7 @@ async fn realistic_provenance_scale_and_first_row_capacity_failure() {
     let mut source = ChatMessage::new("tool".into(), "oversized provenance".into());
     crate::privacy::records::merge_records(
         &mut source,
-        (0..257).map(|n| {
+        (0..super::service::PROVENANCE_RECORD_CAP + 8).map(|n| {
             let path = dir.path().join(format!("overflow-{n}.rs"));
             std::fs::write(&path, "synthetic overflow source\n").unwrap();
             refact_privacy::FileRecord {
@@ -232,10 +232,17 @@ async fn realistic_provenance_scale_and_first_row_capacity_failure() {
     )
     .await;
     let elapsed = start.elapsed();
-    let error = result.expect_err("first row exceeding provenance record cap must fail closed");
+    let page = result.expect("first row exceeding the provenance record cap is truncated");
+    assert!(page.provenance_truncated);
+    assert!(page.omitted_provenance_records >= 8);
+    assert!(page.omitted_provenance_bytes > 0);
     assert_eq!(
-        error.cause,
-        Some(super::error::WorkFailureCause::ProvenanceCapacity)
+        page.source_records.len(),
+        super::service::PROVENANCE_RECORD_CAP
     );
-    eprintln!("realistic_load rows=1 records_per_row=257 setup_ms=0 overview_ms={} result=error category=provenance_capacity", elapsed.as_millis());
+    assert!(
+        !page.rows.is_empty(),
+        "the oversized first row is still returned"
+    );
+    eprintln!("realistic_load rows=1 records_per_row={} setup_ms=0 overview_ms={} result=truncated omitted_records={}", super::service::PROVENANCE_RECORD_CAP + 8, elapsed.as_millis(), page.omitted_provenance_records);
 }

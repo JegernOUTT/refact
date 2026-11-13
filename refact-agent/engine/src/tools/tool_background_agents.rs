@@ -523,6 +523,51 @@ fn not_found_error(agent_id: &str) -> String {
     format!("Background agent '{agent_id}' not found in this chat.")
 }
 
+async fn foreign_agent_refusal(
+    app: &crate::app_state::AppState,
+    caller_chat_id: &str,
+    caller_root_id: &str,
+    agent_id: &str,
+) -> String {
+    match app.agents.get_any(agent_id).await {
+        Ok(record)
+            if record.parent_chat_id != caller_chat_id
+                && record
+                    .parent_root_chat_id
+                    .as_deref()
+                    .unwrap_or(record.parent_chat_id.as_str())
+                    == caller_root_id =>
+        {
+            format!(
+                "Background agent '{agent_id}' belongs to chat '{}', not this chat; only that chat can control it.",
+                record.parent_chat_id
+            )
+        }
+        _ => not_found_error(agent_id),
+    }
+}
+
+async fn get_owned_agent(
+    ccx: &Arc<AMutex<AtCommandsContext>>,
+    agent_id: &str,
+) -> Result<(crate::app_state::AppState, String, BackgroundAgent), String> {
+    let (app, chat_id, root_id) = {
+        let ccx_lock = ccx.lock().await;
+        (
+            ccx_lock.app.clone(),
+            get_parent_chat_id(&ccx_lock),
+            ccx_lock.root_chat_id.clone(),
+        )
+    };
+    match app.agents.get(&chat_id, agent_id).await {
+        Ok(record) => Ok((app, chat_id, record)),
+        Err(error) if error == "agent not found" => {
+            Err(foreign_agent_refusal(&app, &chat_id, &root_id, agent_id).await)
+        }
+        Err(error) => Err(error),
+    }
+}
+
 fn map_registry_error(agent_id: &str, error: String) -> String {
     if error == "agent not found" {
         not_found_error(agent_id)
@@ -1103,15 +1148,7 @@ pub(crate) async fn agent_lifecycle_execute(
     args: &HashMap<String, Value>,
 ) -> Result<(bool, Vec<ContextEnum>), String> {
     let (agent_id, action) = parse_agent_lifecycle_args(args)?;
-    let (app, chat_id) = background_agent_context(&ccx).await;
-    let mut record = app
-        .agents
-        .get_any(&agent_id)
-        .await
-        .map_err(|error| map_registry_error(&agent_id, error))?;
-    if record.parent_chat_id != chat_id {
-        return Err(not_found_error(&agent_id));
-    }
+    let (app, chat_id, mut record) = get_owned_agent(&ccx, &agent_id).await?;
     let outcome = match action {
         AgentLifecycleAction::Inspect => LifecycleOutcome::Inspected,
         AgentLifecycleAction::Close {
@@ -1324,12 +1361,7 @@ impl Tool for ToolAgentStatus {
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
         let agent_id = parse_required_string(args, "agent_id")?;
-        let (app, parent_chat_id) = background_agent_context(&ccx).await;
-        let record = app
-            .agents
-            .get(&parent_chat_id, &agent_id)
-            .await
-            .map_err(|error| map_registry_error(&agent_id, error))?;
+        let (_, _, record) = get_owned_agent(&ccx, &agent_id).await?;
         Ok(tool_message(
             tool_call_id,
             format_agent_status_block(&record),
@@ -1524,12 +1556,7 @@ impl Tool for ToolAgentResult {
     ) -> Result<(bool, Vec<ContextEnum>), String> {
         let agent_id = parse_required_string(args, "agent_id")?;
         let include_details = parse_optional_bool(args, "include_details", false)?;
-        let (app, parent_chat_id) = background_agent_context(&ccx).await;
-        let record = app
-            .agents
-            .get(&parent_chat_id, &agent_id)
-            .await
-            .map_err(|error| map_registry_error(&agent_id, error))?;
+        let (app, _, record) = get_owned_agent(&ccx, &agent_id).await?;
         let content = format_agent_result(&record, include_details).await?;
         let mut result = tool_message(tool_call_id, content);
         let model = ccx.lock().await.current_model.clone();
@@ -2004,6 +2031,53 @@ mod tests {
         .await
         .unwrap();
         assert!(abort.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn same_root_foreign_agent_refusal_names_owner_without_granting_access() {
+        let (_temp, app, ccx) = test_context("branch-chat").await;
+        ccx.lock().await.root_chat_id = "source-chat".to_string();
+        let sibling = create_agent(&app, "source-chat", BgAgentKind::Delegate, "Sibling").await;
+        let mut foreign_request = create_request("other-root-chat", BgAgentKind::Delegate, "Far");
+        foreign_request.parent_root_chat_id = Some("other-root".to_string());
+        let (foreign, _, _) = app.agents.create(foreign_request).await.unwrap();
+        let named = format!(
+            "Background agent '{}' belongs to chat 'source-chat', not this chat; only that chat can control it.",
+            sibling.agent_id
+        );
+
+        for (agent_id, expected) in [
+            (sibling.agent_id.clone(), named),
+            (foreign.agent_id.clone(), not_found_error(&foreign.agent_id)),
+            (
+                "missing-agent".to_string(),
+                not_found_error("missing-agent"),
+            ),
+        ] {
+            let request = args(&[("agent_id", json!(agent_id))]);
+            let status_err = ToolAgentStatus {
+                config_path: String::new(),
+            }
+            .tool_execute(ccx.clone(), &"call".to_string(), &request)
+            .await
+            .unwrap_err();
+            assert_eq!(status_err, expected);
+            let result_err = ToolAgentResult {
+                config_path: String::new(),
+            }
+            .tool_execute(ccx.clone(), &"call".to_string(), &request)
+            .await
+            .unwrap_err();
+            assert_eq!(result_err, expected);
+            let lifecycle_err = agent_lifecycle_execute(
+                ccx.clone(),
+                &"call".to_string(),
+                &args(&[("agent_id", json!(agent_id)), ("action", json!("inspect"))]),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(lifecycle_err, expected);
+        }
     }
 
     #[tokio::test]

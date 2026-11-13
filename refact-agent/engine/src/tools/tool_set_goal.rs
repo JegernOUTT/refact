@@ -103,9 +103,8 @@ impl Tool for ToolSetGoal {
             .await?;
         let report = {
             let mut session = session_arc.lock().await;
-            if current_goal_including_queued(&session)?.is_some() {
-                return Err("goal already exists; use update_goal".to_string());
-            }
+            let previous = current_goal_including_queued(&session)?;
+            crate::chat::queue::ensure_set_goal_allowed(&session)?;
             let current_mode = map_legacy_mode_to_id(&session.thread.mode).to_string();
             let report = queue_goal_side_effect(
                 &mut session,
@@ -115,6 +114,7 @@ impl Tool for ToolSetGoal {
                 push,
                 tool_call_id,
                 plan_meta,
+                previous.as_ref(),
             )?;
             report
         };
@@ -155,8 +155,20 @@ fn queue_goal_side_effect(
     push: PushMode,
     tool_call_id: &str,
     plan: Option<Value>,
+    previous: Option<&ChatMessage>,
 ) -> Result<GoalInstallReport, String> {
-    let mut message = internal_roles::goal(mode, 1, body, None, true, GoalBudget::default());
+    let version = previous
+        .and_then(goal_role::goal_version)
+        .map_or(1, |version| version + 1);
+    let supersedes = previous.map(|message| message.message_id.clone());
+    let mut message = internal_roles::goal(
+        mode,
+        version,
+        body,
+        supersedes.clone(),
+        true,
+        GoalBudget::default(),
+    );
     if mode == "plan"
         || session
             .thread
@@ -186,8 +198,8 @@ fn queue_goal_side_effect(
             internal_roles::event(
                 EventSubkind::SystemNotice,
                 "tool.set_goal",
-                json!({"version": 1}),
-                "Goal updated to v1",
+                json!({"version": version}),
+                format!("Goal updated to v{version}"),
             ),
         ],
         push,
@@ -197,8 +209,8 @@ fn queue_goal_side_effect(
     delivery.after_tool_call_id = Some(tool_call_id.to_string());
     session.enqueue_delivery(delivery)?;
     Ok(GoalInstallReport {
-        version: 1,
-        supersedes: None,
+        version,
+        supersedes,
     })
 }
 
@@ -358,6 +370,60 @@ mod tests {
             prior.get("tool_calls").is_some(),
             "prior message: {prior:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn set_goal_supersedes_copied_goal_but_not_owned_goal() {
+        let (gcx, ccx) = ccx_for_session("agent").await;
+        let session_arc = gcx
+            .chat_sessions
+            .read()
+            .await
+            .get(CHAT_ID)
+            .cloned()
+            .unwrap();
+        let copied_id = {
+            let mut session = session_arc.lock().await;
+            let mut source = ChatSession::new("source-chat".to_string());
+            source.install_goal("agent", "source goal", true, GoalBudget::default());
+            let mut copied = source.messages.clone();
+            crate::chat::trajectory_ops::demote_goal_ownership_for_branch(&mut copied);
+            let copied_id = copied[0].message_id.clone();
+            for message in copied {
+                session.add_message(message);
+            }
+            assert!(!session.goal.as_ref().unwrap().active);
+            copied_id
+        };
+
+        let mut tool = ToolSetGoal {
+            config_path: String::new(),
+        };
+        let args = HashMap::from([("content".to_string(), json!("branch goal"))]);
+        let (_, results) = tool
+            .tool_execute(ccx.clone(), &"call-goal".to_string(), &args)
+            .await
+            .unwrap();
+        assert_eq!(
+            tool_result_json(&results),
+            json!({"version": 2, "supersedes": copied_id})
+        );
+        {
+            let mut session = session_arc.lock().await;
+            session.drain_post_tool_side_effects();
+            session.drain_pending_deliveries();
+            let goal = session.goal.as_ref().unwrap();
+            assert_eq!(goal.version, 2);
+            assert!(goal.active);
+            assert_eq!(goal.status, refact_chat_api::GoalStatus::Active);
+            assert_eq!(goal.content, "branch goal");
+        }
+
+        let error = tool
+            .tool_execute(ccx, &"call-again".to_string(), &args)
+            .await
+            .unwrap_err();
+        assert_eq!(error, "goal already exists; use update_goal");
     }
 
     #[tokio::test]

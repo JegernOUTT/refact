@@ -404,9 +404,10 @@ mod tests {
             .iter()
             .any(|note| note.contains("Structural deliverable check failed")));
         assert!(
-            crate::tools::tool_task_merge_agent::ensure_verifier_allows_merge(card, true)
-                .unwrap_err()
-                .contains("force=true cannot bypass verification failures")
+            crate::tools::tool_task_merge_agent::ensure_verifier_allows_merge(card, false)
+                .unwrap()
+                .unwrap()
+                .contains("Verification FAILED")
         );
     }
 

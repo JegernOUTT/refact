@@ -58,7 +58,6 @@ struct SubagentArgs {
     launch_spec: Option<LaunchSpec>,
     profile: Option<ProfileReference>,
     preview_only: bool,
-    sandbox: Option<crate::exec::types::ExecSandboxMode>,
 }
 
 #[derive(Clone)]
@@ -125,15 +124,14 @@ impl Tool for ToolSubagent {
             },
             experimental: false,
             allow_parallel: true,
-            description: "Spawn a background-only, stateful child trajectory for research or implementation. The child inherits all parent-chat tools by default; task wording such as 'read-only' does not restrict capabilities. Use tools and sandbox explicitly for capability boundaries. The child can select a configured model or named model, and may receive a goal and optional goal.plan, target files, and an isolated worktree that auto-merges by default. A trajectory link is returned immediately and completion is auto-pushed. Preview reports requested sandbox enforcement support without dispatch; a tools allowlist is not an OS sandbox. Use `agents_overview` and `agent_message` to coordinate with peers.".to_string(),
+            description: "Spawn a background-only, stateful child trajectory for research or implementation. The child inherits all parent-chat tools by default; task wording such as 'read-only' does not restrict capabilities. Use tools explicitly to restrict callable tools; the child runs under the default execution policy. The child can select a configured model or named model, and may receive a goal and optional goal.plan, target files, and an isolated worktree that auto-merges by default. A trajectory link is returned immediately and completion is auto-pushed. Preview resolves launch settings without dispatch; a tools allowlist is not an OS sandbox. Use `agents_overview` and `agent_message` to coordinate with peers.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "task": {"type": "string", "description": "Focused instructions for the background subagent."},
                     "expected_result": {"type": "string", "description": "Concrete outcome the subagent should deliver."},
                     "target_files": {"type": "array", "items": {"type": "string"}, "description": "Optional declared edit targets, used as collision hints. This is declared intent, not an enforced sandbox: it only restricts built-in mutations when the run's scope guard is strict."},
-                    "sandbox": {"type": "string", "enum": ["read_only", "workspace_write", "full_access"], "description": "Optional confinement this run requires for shell execution, not a filter on other tools or a grant of authority. For read-only research, combine an explicit read-tool allowlist with read_only confinement where supported; task wording alone enforces neither. If this engine and terminal security mode cannot enforce it, the launch fails before dispatch instead of running unsandboxed. Omit to accept the engine default."},
-                    "tools": {"type": "string", "description": "Optional comma-separated tool allowlist that narrows inherited authority. Omit or leave empty to inherit all parent-chat tools. Task wording such as 'read-only' does not restrict tools. For read-only research, explicitly list only required read tools (e.g. cat, tree, glob, search_pattern) and request supported sandbox=read_only for shell confinement. Exclude subagent and review when nested delegation is not intended. Coordination tools may still be added within parent authority."},
+                    "tools": {"type": "string", "description": "Optional comma-separated tool allowlist that narrows inherited authority. Omit or leave empty to inherit all parent-chat tools. Task wording such as 'read-only' does not restrict tools. For read-only research, explicitly list only required read tools (e.g. cat, tree, glob, search_pattern); omit shell and process tools when command execution is not intended. Exclude subagent and review when nested delegation is not intended. Coordination tools may still be added within parent authority."},
                     "model_type": {"type": "string", "enum": MODEL_TYPES, "description": "Configured model slot. Ignored when model_name is supplied."},
                     "model_name": {"type": "string", "description": "Concrete chat model id. Takes precedence over model_type."},
                     "context_tokens_cap": {"type": "integer", "minimum": 1, "description": "Optional child context limit in tokens, at most the selected model's window. Omit to use the full model window; the parent's own limit is never inherited."},
@@ -141,7 +139,7 @@ impl Tool for ToolSubagent {
                     "worktree": {"type": "string", "enum": ["inherit", "isolated"], "default": "inherit", "description": "Use the parent worktree or create an isolated worktree."},
                     "push": PushMode::schema(),
                     "auto_merge": {"type": "boolean", "default": true, "description": "Only for worktree=isolated. Squash-merge completion automatically."},
-                    "action": {"type": "string", "enum": ["run", "preview"], "default": "run", "description": "Use `preview` to resolve launch settings and requested sandbox support without spawning a child. Unsupported sandbox returns supported=false/reason, not execution."},
+                    "action": {"type": "string", "enum": ["run", "preview"], "default": "run", "description": "Use `preview` to resolve launch settings without spawning a child."},
                     "profile": {
                         "description": "Optional reusable agent profile: a name string, or {name, revision} to pin an exact revision. The profile supplies defaults (model, tools, role, skills, effort, hooks, path scope, approval, budget); this run may only narrow them. A profile never widens authority.",
                         "oneOf": [
@@ -242,30 +240,11 @@ impl Tool for ToolSubagent {
             }
             None => crate::file_activity::settings(),
         };
+        let ignored_sandbox = args.contains_key("sandbox");
         let args = parse_subagent_args_with_limits(args, &limits)?;
         if let Some(goal) = &args.goal {
             let policy = crate::chat::verify_cmd::VerifyCommandPolicy::load(gcx.clone()).await;
             crate::chat::evidence::validate_goal_verify_commands(&goal.criteria, &policy)?;
-        }
-        let sandbox_support = crate::agents::sandbox_contract::preflight(
-            args.sandbox.clone(),
-            crate::exec::command_policy::baseline_sandbox_mode(Some("agent")),
-            gcx.terminal_security_config.mode,
-            refact_sandbox::sandbox_status(),
-        );
-        if let Err(reason) = &sandbox_support {
-            if !args.preview_only {
-                return Err(reason.clone());
-            }
-            let mut preview = build_launch_preview_tool_result(
-                &args,
-                None,
-                None,
-                Err(reason.as_str()),
-                tool_call_id,
-            );
-            append_sandbox_preview(&mut preview, &args, &sandbox_support);
-            return Ok((false, vec![preview]));
         }
         let profile = match args.profile.as_ref() {
             Some(reference) => Some(
@@ -606,7 +585,7 @@ impl Tool for ToolSubagent {
                     }),
                 );
             }
-            append_sandbox_preview(&mut preview, &args, &sandbox_support);
+            append_ignored_sandbox_notice(&mut preview, ignored_sandbox);
             return Ok((false, vec![preview]));
         }
 
@@ -649,18 +628,17 @@ impl Tool for ToolSubagent {
         }
         crate::review::runs::prepare_launch(&app, &mut req).await?;
         let handle = spawn_background_agent(app.clone(), req).await?;
-        Ok((
-            false,
-            vec![build_background_start_tool_result(
-                &handle,
-                &args.task,
-                &parent_chat_id,
-                &model,
-                model_type.as_deref(),
-                &peer_snapshot,
-                tool_call_id,
-            )],
-        ))
+        let mut result = build_background_start_tool_result(
+            &handle,
+            &args.task,
+            &parent_chat_id,
+            &model,
+            model_type.as_deref(),
+            &peer_snapshot,
+            tool_call_id,
+        );
+        append_ignored_sandbox_notice(&mut result, ignored_sandbox);
+        Ok((false, vec![result]))
     }
 
     fn tool_depends_on(&self) -> Vec<String> {
@@ -756,10 +734,6 @@ fn parse_subagent_args_with_limits(
     };
     let launch_spec = launch_spec::parse_launch_spec_with_limits(args, limits)?;
     let profile = parse_profile_reference(args)?;
-    let sandbox = match args.get("sandbox") {
-        Some(value) => crate::agents::sandbox_contract::parse_requested(value)?,
-        None => None,
-    };
     Ok(SubagentArgs {
         task,
         expected_result,
@@ -775,7 +749,6 @@ fn parse_subagent_args_with_limits(
         launch_spec,
         profile,
         preview_only,
-        sandbox,
     })
 }
 
@@ -1405,41 +1378,21 @@ fn build_launch_preview_tool_result(
             json!(resolved.map(|r| r.excluded.clone()).unwrap_or_default()),
         ),
     ]);
+    if let Err(reason) = effective {
+        extra.insert("launch_blocked".into(), json!(reason));
+    }
     if let Some(profile) = profile {
         extra.insert("profile".into(), json!(profile));
     }
     tool_message(lines.join("\n"), tool_call_id, extra)
 }
 
-fn append_sandbox_preview(
-    preview: &mut ContextEnum,
-    args: &SubagentArgs,
-    support: &Result<(), String>,
-) {
-    if let ContextEnum::ChatMessage(message) = preview {
-        let requested = args
-            .sandbox
-            .as_ref()
-            .map(crate::agents::sandbox_contract::mode_name);
-        message.extra.insert(
-            "sandbox_preflight".into(),
-            json!({
-                "requested": requested,
-                "supported": support.is_ok(),
-                "reason": support.as_ref().err(),
-                "executed": false,
-            }),
-        );
-        if let ChatContent::SimpleText(text) = &mut message.content {
-            text.push_str(&format!(
-                "\n\n## Sandbox Enforcement Preflight (advisory; no execution)\n- requested: {}\n- supported: {}\n",
-                requested.unwrap_or("not specified (engine default; no confinement requested)"),
-                support.is_ok(),
-            ));
-            if let Err(reason) = support {
-                text.push_str(&format!("- reason: {}\n", preview_value(reason)));
+fn append_ignored_sandbox_notice(result: &mut ContextEnum, supplied: bool) {
+    if supplied {
+        if let ContextEnum::ChatMessage(message) = result {
+            if let ChatContent::SimpleText(text) = &mut message.content {
+                text.push_str("\n\nNotice: `sandbox` is no longer supported and was ignored. The child runs under the default policy; `tools` restricts callable tools, not OS execution.");
             }
-            text.push_str("A tools allowlist restricts callable tools, not OS execution. This preview grants no authority, starts no child and never downgrades requested confinement; run checks support again before dispatch.");
         }
     }
 }
@@ -1591,67 +1544,71 @@ mod tests {
 
     #[serial(test_runner)]
     #[tokio::test]
-    async fn an_unenforceable_sandbox_request_refuses_the_launch_before_dispatch() {
-        let (ccx, _workspace) = test_context("parent").await;
+    async fn obsolete_sandbox_is_ignored_with_notice_in_preview_and_launch() {
+        let (ccx, workspace) = test_context("parent").await;
         let app = ccx.lock().await.app.clone();
+        let mut parent = crate::chat::types::ChatSession::new("parent".into());
+        parent.thread.model = "test/default".into();
+        parent.work_project_root = Some(dunce::canonicalize(workspace.path()).unwrap());
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert("parent".into(), Arc::new(AMutex::new(parent)));
         let _runner =
             crate::agents::spawn::install_test_runner(Arc::new(|_gcx, _messages, _cfg| {
-                panic!("a child was dispatched despite an unenforceable sandbox request")
+                Box::pin(async {
+                    Ok(SubchatResult {
+                        messages: vec![],
+                        metering: Map::new(),
+                        chat_id: None,
+                        aborted: false,
+                    })
+                })
             }));
-        let mut args = args();
-        args.insert("sandbox".to_string(), json!("workspace_write"));
-
-        let mut preview_args = args.clone();
-        preview_args.insert("action".into(), json!("preview"));
-        let (_, contexts) = ToolSubagent {
-            config_path: String::new(),
+        for action in ["preview", "run"] {
+            let mut request = args();
+            request.insert("sandbox".into(), json!({"obsolete": true}));
+            request.insert("action".into(), json!(action));
+            let (_, contexts) = ToolSubagent {
+                config_path: String::new(),
+            }
+            .tool_execute(ccx.clone(), &action.into(), &request)
+            .await
+            .unwrap();
+            let result = message(contexts);
+            let text = result.content.content_text_only();
+            assert!(text.contains("`sandbox` is no longer supported and was ignored"));
+            assert!(text.contains("default policy"));
+            assert!(text.contains("`tools` restricts callable tools"));
+            assert!(result.extra.get("sandbox_preflight").is_none());
+            if action == "preview" {
+                assert!(result.extra.get("effective_launch").is_some());
+                assert!(app.agents.list_all().await.is_empty());
+            } else {
+                assert_eq!(app.agents.list_all().await.len(), 1);
+                let agent = result.extra["background_agent_id"].as_str().unwrap();
+                app.agents
+                    .wait("parent", agent, Duration::from_secs(5))
+                    .await
+                    .unwrap();
+            }
         }
-        .tool_execute(ccx.clone(), &"preview".into(), &preview_args)
-        .await
-        .unwrap();
-        let preview = message(contexts);
-        assert_eq!(preview.extra["preview"], true);
-        assert_eq!(preview.extra["sandbox_preflight"]["supported"], false);
-        assert_eq!(preview.extra["sandbox_preflight"]["executed"], false);
-        assert_eq!(
-            preview.extra["sandbox_preflight"]["requested"],
-            "workspace_write"
-        );
-        assert!(preview.extra["sandbox_preflight"]["reason"]
-            .as_str()
-            .unwrap()
-            .contains("cannot be enforced"));
-        assert_ne!(preview.tool_failed, Some(true));
-        assert!(preview.extra.get("effective_launch").is_none());
-        assert!(app.agents.list_all().await.is_empty());
-        assert_eq!(app.work_scheduler.snapshot().outstanding, 0);
+    }
 
-        let error = ToolSubagent {
-            config_path: String::new(),
-        }
-        .tool_execute(ccx.clone(), &"call".to_string(), &args)
-        .await
-        .unwrap_err();
-
-        assert!(error.contains("launch refused before dispatch"), "{error}");
-        assert!(error.contains("workspace_write"), "{error}");
-        assert!(
-            error.contains("would otherwise have run unsandboxed"),
-            "{error}"
-        );
-        assert!(
-            app.agents.list_all().await.is_empty(),
-            "an agent record was created for a refused launch"
-        );
-
-        let mut accepted = args.clone();
-        accepted.remove("sandbox");
-        assert!(!ToolSubagent {
-            config_path: String::new(),
-        }
-        .tool_execute(ccx, &"call".to_string(), &accepted)
-        .await
-        .is_err_and(|error| error.contains("launch refused before dispatch")));
+    #[test]
+    fn refused_preview_records_reason_without_applied_settings() {
+        let args = parse_subagent_args(&args()).unwrap();
+        let result = message(vec![build_launch_preview_tool_result(
+            &args,
+            None,
+            None,
+            Err("launch denied"),
+            "preview",
+        )]);
+        assert_eq!(result.extra["launch_blocked"], "launch denied");
+        assert!(result.extra.get("effective_launch").is_none());
+        assert!(result.extra.get("effective_model").is_none());
     }
 
     fn message(contexts: Vec<ContextEnum>) -> ChatMessage {
@@ -1754,10 +1711,6 @@ mod tests {
                 <= effective["accepted_byte_limit"].as_u64().unwrap()
         );
         assert_eq!(message.extra["skipped"], json!([]));
-        assert_eq!(message.extra["sandbox_preflight"]["supported"], true);
-        assert_eq!(message.extra["sandbox_preflight"]["executed"], false);
-        assert!(message.extra["sandbox_preflight"]["requested"].is_null());
-        assert!(message.extra["sandbox_preflight"]["reason"].is_null());
         assert_eq!(message.extra["exclusions"], json!([]));
         assert!(app.agents.list_all().await.is_empty());
         let saved_depth = ccx.lock().await.subchat_depth;
@@ -2196,7 +2149,7 @@ mod tests {
             assert!(schema.get(union).is_none());
         }
         let properties = schema["properties"].as_object().unwrap();
-        for absent in ["wait", "max_steps", "notify_parent", "plan"] {
+        for absent in ["wait", "max_steps", "notify_parent", "plan", "sandbox"] {
             assert!(
                 !properties.contains_key(absent),
                 "{absent} must not be exposed"

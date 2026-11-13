@@ -527,8 +527,18 @@ pub struct WorkOverview {
     /// Non-fatal problems (locked sessions, unresolvable roots).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub degraded: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub provenance_truncated: bool,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub omitted_provenance_records: usize,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub omitted_provenance_bytes: usize,
     #[serde(skip)]
     pub(crate) source_records: Vec<refact_privacy::FileRecord>,
+}
+
+fn is_zero(value: &usize) -> bool {
+    *value == 0
 }
 
 /// Tagged selector for `work_inspect`.

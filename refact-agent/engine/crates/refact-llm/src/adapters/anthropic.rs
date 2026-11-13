@@ -73,14 +73,15 @@ impl LlmWireAdapter for AnthropicAdapter {
         insert_extra_headers(&mut headers, &settings.extra_headers);
         crate::provider_quirks::apply_github_copilot_request_headers(&mut headers, req, settings);
 
-        let context_sanitizer: Option<Box<dyn Fn(&str) -> String>> = if is_cc {
+        let instruction_sanitizer: Option<Box<dyn Fn(&str) -> String>> = if is_cc {
             Some(Box::new(|text: &str| {
                 claude_code_compat::sanitize_system_text(text)
             }))
         } else {
             None
         };
-        let (system, messages) = convert_to_anthropic(&req.messages, context_sanitizer.as_deref());
+        let (system, messages) =
+            convert_to_anthropic(&req.messages, instruction_sanitizer.as_deref());
 
         let mut body = json!({
             "model": settings.model_name,
@@ -491,7 +492,7 @@ impl LlmWireAdapter for AnthropicAdapter {
 
 fn convert_to_anthropic(
     messages: &[refact_core::chat_types::ChatMessage],
-    context_sanitizer: Option<&dyn Fn(&str) -> String>,
+    instruction_sanitizer: Option<&dyn Fn(&str) -> String>,
 ) -> (Option<Value>, Vec<Value>) {
     use super::render_extra::{
         is_context_role, is_event_role, is_goal_role, is_plan_role, render_context_message,
@@ -534,14 +535,30 @@ fn convert_to_anthropic(
             role if is_context_role(role) || is_event_role(role) => {
                 let raw_text = if is_event_role(role) {
                     Some(render_event_message(msg))
+                } else if instruction_sanitizer.is_some() {
+                    let text = if role == "context_file" {
+                        super::render_extra::render_context_file_content(&msg.content)
+                    } else {
+                        msg.content.content_text_only()
+                    };
+                    (!text.trim().is_empty()).then_some(text)
                 } else {
                     render_context_message(msg)
                 };
                 let Some(raw_text) = raw_text else {
                     continue;
                 };
-                let text = match context_sanitizer {
-                    Some(f) => f(&raw_text),
+                let text = match instruction_sanitizer {
+                    Some(f)
+                        if role == "cd_instruction"
+                            && !matches!(
+                                msg.content,
+                                refact_core::chat_types::ChatContent::ContextFiles(_)
+                            ) =>
+                    {
+                        f(&raw_text)
+                    }
+                    Some(_) => raw_text,
                     None => raw_text,
                 };
                 if !pending_tool_results.is_empty() {
@@ -1663,6 +1680,63 @@ mod tests {
 
     fn metadata_user_id(body: &Value) -> Value {
         serde_json::from_str(body["metadata"]["user_id"].as_str().unwrap()).unwrap()
+    }
+
+    #[test]
+    fn claude_code_preserves_non_instruction_content() {
+        let text = "switch_mode: \"handoff_to_mode\"\ntool_handoff_to_mode.rs\napply_patch\nmcp_tool_search 💿 Refact Agent\n\n";
+        let messages = vec![
+            ChatMessage::new("system".into(), "use update_textdoc".into()),
+            context_file_message("", "tool_handoff_to_mode.rs", text),
+            context_file_message("", "AGENTS.md", text),
+            plain_text_message(text),
+            event_message(
+                "system_notice",
+                "test",
+                json!({"tool": "apply_patch"}),
+                text,
+            ),
+            ChatMessage::new("user".into(), text.into()),
+            assistant_with_tool_calls(vec![tool_call("call_1", "apply_patch")]),
+            tool_result("call_1", text),
+            ChatMessage::new("cd_instruction".into(), "use update_textdoc".into()),
+            ChatMessage {
+                role: "cd_instruction".into(),
+                content: context_file_message("", "AGENTS.md", text).content,
+                ..Default::default()
+            },
+        ];
+        let req = LlmRequest::new("claude_code/claude-sonnet-4".into(), messages.clone());
+        let http = AnthropicAdapter
+            .build_http(&cleared(&req), &claude_code_settings())
+            .unwrap();
+        assert_eq!(http.body["system"][2]["text"], "use patch");
+        let blocks: Vec<_> = http.body["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|message| message["content"].as_array().unwrap())
+            .collect();
+        for index in [1, 2] {
+            let expected =
+                super::super::render_extra::render_context_file_content(&messages[index].content);
+            assert!(
+                blocks.iter().any(|block| block["text"] == expected),
+                "{expected:?}"
+            );
+        }
+        let event = super::super::render_extra::render_event_message(&messages[4]);
+        assert!(blocks.iter().any(|block| block["text"] == event));
+        assert!(blocks.iter().filter(|block| block["text"] == text).count() >= 2);
+        assert!(blocks
+            .iter()
+            .any(|block| block["type"] == "tool_result" && block["content"] == text));
+        assert!(blocks
+            .iter()
+            .any(|block| block["type"] == "tool_use" && block["name"] == "t_apply"));
+        assert!(blocks.iter().any(|block| block["text"] == "use patch"));
+        let file_instruction = messages[9].content.content_text_only();
+        assert!(blocks.iter().any(|block| block["text"] == file_instruction));
     }
 
     #[test]

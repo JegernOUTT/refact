@@ -219,7 +219,7 @@ async fn unrelated_unmerged_done_card_does_not_block_spawn() {
 }
 
 #[tokio::test]
-async fn dependent_card_is_blocked() {
+async fn dependent_card_warns_and_still_spawns() {
     let mut fixture = Fixture::new().await;
     for dependency in ["DONE", "MIDDLE"] {
         fixture.board.get_card_mut("NEXT").unwrap().depends_on = vec![dependency.into()];
@@ -227,18 +227,18 @@ async fn dependent_card_is_blocked() {
         let result = ToolTaskSpawnAgent::new()
             .tool_execute(ccx, &"spawn".into(), &args())
             .await;
-        assert_eq!(app.work_scheduler.snapshot().outstanding, 1);
         crate::tasks::admission::shutdown(&app).await;
         permit.release();
-        let error = result.unwrap_err();
-        assert!(error.contains("DONE (`agent-done`)"), "{error}");
-        assert!(error.contains("dependency"), "{error}");
-        assert!(error.contains("merge_agent(card_id=...)"), "{error}");
-        assert!(!error.contains("git branch -D"), "{error}");
-        let board = storage::load_board(fixture.gcx.clone(), "task-1")
-            .await
-            .unwrap();
-        assert_eq!(board.get_card("NEXT").unwrap().column, "planned");
+        let (_, output) = result.expect("a retained dependency must not block spawning");
+        let output = response(&output);
+        assert_eq!(output["execution_state"], "queued");
+        let warning = output["warning"].as_str().expect("dependency warning");
+        assert!(warning.contains("WARNING"), "{warning}");
+        assert!(warning.contains("DONE (`agent-done`)"), "{warning}");
+        assert!(warning.contains("dependency"), "{warning}");
+        assert!(warning.contains("does not contain its code"), "{warning}");
+        assert!(warning.contains("merge_agent(card_id=...)"), "{warning}");
+        assert!(!warning.contains("git branch -D"), "{warning}");
     }
     let main = git(&fixture.source, &["rev-parse", "main"]);
     let included = git(&fixture.worktree, &["rev-parse", "HEAD"]);
@@ -294,20 +294,33 @@ async fn dependent_card_is_blocked() {
     assert_eq!(git(&fixture.worktree, &["rev-parse", "HEAD"]), included);
 
     std::fs::write(fixture.worktree.join("actual.txt"), "uncommitted work\n").unwrap();
-    let error = fixture.gate_at(Some(included.trim())).await.unwrap_err();
-    assert!(error.contains("dependency"), "{error}");
-    assert!(error.contains("file overlap: actual.txt"), "{error}");
+    let warning = fixture
+        .gate_at(Some(included.trim()))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(warning.contains("dependency"), "{warning}");
+    assert!(warning.contains("file overlap: actual.txt"), "{warning}");
     git(&fixture.worktree, &["add", "actual.txt"]);
-    assert!(fixture.gate_at(Some(included.trim())).await.is_err());
+    let warning = fixture
+        .gate_at(Some(included.trim()))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(warning.contains("dependency"), "{warning}");
     git(&fixture.worktree, &["commit", "-m", "new predecessor work"]);
     assert_ne!(git(&fixture.worktree, &["rev-parse", "HEAD"]), included);
     assert!(git(&fixture.worktree, &["status", "--porcelain"]).is_empty());
-    let error = fixture.gate_at(Some(included.trim())).await.unwrap_err();
-    assert!(error.contains("dependency"), "{error}");
+    let warning = fixture
+        .gate_at(Some(included.trim()))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(warning.contains("dependency"), "{warning}");
 }
 
 #[tokio::test]
-async fn overlapping_target_files_are_blocked() {
+async fn overlapping_target_files_warn_and_still_spawn() {
     let mut fixture = Fixture::new().await;
     for path in [
         "actual.txt",
@@ -316,25 +329,37 @@ async fn overlapping_target_files_are_blocked() {
         "renamed-to.txt",
     ] {
         fixture.board.get_card_mut("NEXT").unwrap().target_files = vec![path.into()];
-        let error = fixture.gate().await.unwrap_err();
-        assert!(error.contains("DONE (`agent-done`)"), "{error}");
-        assert!(error.contains(&format!("file overlap: {path}")), "{error}");
+        let warning = fixture.gate().await.unwrap().unwrap();
+        assert!(warning.contains("DONE (`agent-done`)"), "{warning}");
+        assert!(
+            warning.contains(&format!("file overlap: {path}")),
+            "{warning}"
+        );
     }
     fixture.board.get_card_mut("NEXT").unwrap().target_files = vec!["actual.txt".into()];
     let (app, ccx, permit) = fixture.context().await;
     let result = ToolTaskSpawnAgent::new()
         .tool_execute(ccx, &"spawn".into(), &args())
         .await;
-    assert_eq!(app.work_scheduler.snapshot().outstanding, 1);
     crate::tasks::admission::shutdown(&app).await;
     permit.release();
-    assert!(result.unwrap_err().contains("file overlap: actual.txt"));
+    let (_, output) = result.expect("file overlap must not block spawning");
+    let output = response(&output);
+    assert_eq!(output["execution_state"], "queued");
+    assert!(output["warning"]
+        .as_str()
+        .unwrap()
+        .contains("file overlap: actual.txt"));
 
     let included = git(&fixture.worktree, &["rev-parse", "HEAD"]);
     std::fs::write(fixture.worktree.join("new-wip.txt"), "untracked work\n").unwrap();
     fixture.board.get_card_mut("NEXT").unwrap().target_files = vec!["new-wip.txt".into()];
-    let error = fixture.gate_at(Some(included.trim())).await.unwrap_err();
-    assert!(error.contains("file overlap: new-wip.txt"), "{error}");
+    let warning = fixture
+        .gate_at(Some(included.trim()))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(warning.contains("file overlap: new-wip.txt"), "{warning}");
     assert!(fixture.worktree.join("new-wip.txt").is_file());
 }
 
@@ -426,36 +451,27 @@ async fn spawn_ab_uses_the_same_scoping() {
         let result = ToolSpawnAb::new()
             .tool_execute(ccx, &"spawn-ab".into(), &args())
             .await;
-        if matches!(scope, "dependency" | "overlap") {
-            assert_eq!(app.work_scheduler.snapshot().outstanding, 1);
-        }
         crate::tasks::admission::shutdown(&app).await;
         permit.release();
+        let (_, output) = result.unwrap();
+        let result = response(&output);
+        assert_eq!(result["execution_state"], "queued");
         match scope {
             "dependency" | "overlap" => {
-                let error = result.unwrap_err();
-                assert!(error.contains("Cannot spawn A/B agents"), "{error}");
-                assert!(error.contains("DONE (`agent-done`)"), "{error}");
+                let warning = result["warning"].as_str().unwrap();
+                assert!(warning.contains("DONE (`agent-done`)"), "{warning}");
                 let reason = if scope == "overlap" {
                     "file overlap"
                 } else {
                     "dependency"
                 };
-                assert!(error.contains(reason), "{error}");
+                assert!(warning.contains(reason), "{warning}");
             }
-            _ => {
-                let (_, output) = result.unwrap();
-                let result = response(&output);
-                assert_eq!(result["execution_state"], "queued");
-                if scope == "unrelated" {
-                    assert!(result["warning"]
-                        .as_str()
-                        .unwrap()
-                        .contains("DONE (`agent-done`)"));
-                } else {
-                    assert!(result.get("warning").is_none());
-                }
-            }
+            "unrelated" => assert!(result["warning"]
+                .as_str()
+                .unwrap()
+                .contains("DONE (`agent-done`)")),
+            _ => assert!(result.get("warning").is_none()),
         }
         assert!(fixture.worktree.is_dir());
     }
@@ -468,12 +484,18 @@ async fn incomplete_squash_is_not_recognised_as_merged() {
     git(&fixture.source, &["add", "actual.txt"]);
     git(&fixture.source, &["commit", "-m", "partial squash"]);
     fixture.board.get_card_mut("NEXT").unwrap().depends_on = vec!["DONE".into()];
-    assert!(fixture.gate().await.unwrap_err().contains("dependency"));
+    assert!(fixture
+        .gate()
+        .await
+        .unwrap()
+        .unwrap()
+        .contains("dependency"));
     let partial = git(&fixture.source, &["rev-parse", "HEAD"]);
     assert!(fixture
         .gate_at(Some(partial.trim()))
         .await
-        .unwrap_err()
+        .unwrap()
+        .unwrap()
         .contains("dependency"));
 }
 
@@ -491,7 +513,8 @@ async fn git_errors_use_declared_targets_without_blocking_unrelated_cards() {
     assert!(fixture
         .gate()
         .await
-        .unwrap_err()
+        .unwrap()
+        .unwrap()
         .contains("file overlap: declared-only.txt"));
 
     fixture.board.get_card_mut("DONE").unwrap().agent_branch = Some("agent-done".into());
@@ -502,7 +525,8 @@ async fn git_errors_use_declared_targets_without_blocking_unrelated_cards() {
     assert!(fixture
         .gate_at(Some(included.trim()))
         .await
-        .unwrap_err()
+        .unwrap()
+        .unwrap()
         .contains("dependency"));
     git(&fixture.worktree, &["checkout", "agent-done"]);
     let foreign = fixture._temp.path().join("foreign");
@@ -535,7 +559,8 @@ async fn git_errors_use_declared_targets_without_blocking_unrelated_cards() {
     assert!(fixture
         .gate_at(Some(included.trim()))
         .await
-        .unwrap_err()
+        .unwrap()
+        .unwrap()
         .contains("dependency"));
     assert!(fixture.worktree.is_dir());
 }
@@ -590,7 +615,7 @@ async fn missing_base_branch_uses_pinned_commit_and_explains_it() {
     assert!(warning.contains("pinned base commit"), "{warning}");
     assert_eq!(warning.lines().count(), 1);
     fixture.board.get_card_mut("NEXT").unwrap().depends_on = vec!["DONE".into()];
-    let error = scoped_worktree_gate(
+    let warning = scoped_worktree_gate(
         &fixture.board,
         "NEXT",
         &fixture.source,
@@ -599,9 +624,10 @@ async fn missing_base_branch_uses_pinned_commit_and_explains_it() {
         "spawn a new task agent",
     )
     .await
-    .unwrap_err();
-    assert!(error.contains("dependency"), "{error}");
-    assert!(error.contains("pinned base commit"), "{error}");
+    .unwrap()
+    .unwrap();
+    assert!(warning.contains("dependency"), "{warning}");
+    assert!(warning.contains("pinned base commit"), "{warning}");
     let error = fixture.gate_at(Some("missing-commit")).await.unwrap_err();
     assert!(
         error.contains("requested launch base is unavailable"),

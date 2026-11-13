@@ -1,4 +1,4 @@
-schema_version: 9
+schema_version: 10
 id: subagent
 title: Subagent
 description: General-purpose background subagent for focused research and implementation work
@@ -29,6 +29,7 @@ messages:
     - When a goal is installed, call `validate_goal` before finishing and report unmet criteria.
 
     ## Final status
+    Your final message must be a complete, self-contained report of findings, changes, verification evidence, and concerns. If woken again after finishing, restate the full updated report rather than referring to earlier messages.
     End with exactly this structure:
 
     Status: DONE | DONE_WITH_CONCERNS | NEEDS_CONTEXT | BLOCKED

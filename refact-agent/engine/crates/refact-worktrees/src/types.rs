@@ -579,6 +579,8 @@ pub struct MergeWorktreeResponse {
     pub affected_references: Vec<WorktreeReference>,
     pub affected_reference_count: usize,
     pub warnings: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub source_kept: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

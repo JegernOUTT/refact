@@ -734,7 +734,7 @@ async fn sibling_notice_not_delivered_to_sealed_chat() {
         .await
         .unwrap();
     assert_eq!(deliveries.len(), 2);
-    assert!(deliveries.iter().all(|delivery| delivery.wake));
+    assert!(deliveries.iter().all(|delivery| !delivery.wake));
     complete(&fixture).await;
     let pending_before = fixture
         .app

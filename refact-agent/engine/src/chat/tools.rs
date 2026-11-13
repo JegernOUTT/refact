@@ -99,6 +99,42 @@ fn tool_timestamp_ms() -> Option<u64> {
         .filter(|timestamp| *timestamp > 0)
 }
 
+pub(crate) fn workspace_scope_keys(
+    roots: &[std::path::PathBuf],
+) -> Result<Vec<crate::tool_jobs::ScopeKey>, String> {
+    let mut keys = Vec::new();
+    let mut skipped = Vec::new();
+    for root in roots {
+        match std::fs::canonicalize(root) {
+            Ok(canonical) if canonical.is_dir() => {
+                let canonical = dunce::simplified(&canonical).to_path_buf();
+                keys.push(crate::tool_jobs::ScopeKey::Worktree {
+                    project: canonical.clone(),
+                    root: canonical,
+                });
+            }
+            Ok(_) => {
+                tracing::warn!(
+                    "skipping workspace folder {}: not a directory",
+                    root.display()
+                );
+                skipped.push(root.display().to_string());
+            }
+            Err(error) => {
+                tracing::warn!("skipping workspace folder {}: {error}", root.display());
+                skipped.push(root.display().to_string());
+            }
+        }
+    }
+    if keys.is_empty() && !skipped.is_empty() {
+        return Err(format!(
+            "workspace identity unavailable: no workspace folder exists as a directory ({})",
+            skipped.join(", ")
+        ));
+    }
+    Ok(keys)
+}
+
 pub(crate) const SHELL_PRIVACY_APPROVAL_RULE: &str =
     "Privacy approval required: command read guarded files";
 
@@ -4335,23 +4371,9 @@ async fn execute_admitted_tool(
                 .lock()
                 .unwrap()
                 .clone();
-            for root in roots {
-                match std::fs::canonicalize(&root) {
-                    Ok(root) => {
-                        let root = dunce::simplified(&root).to_path_buf();
-                        keys.push(crate::tool_jobs::ScopeKey::Worktree {
-                            project: root.clone(),
-                            root,
-                        });
-                    }
-                    Err(_) => {
-                        return runner_capacity_error(
-                            idx,
-                            &tool_call,
-                            "primary workspace scope identity unavailable",
-                        )
-                    }
-                }
+            match workspace_scope_keys(&roots) {
+                Ok(workspace_keys) => keys.extend(workspace_keys),
+                Err(error) => return runner_capacity_error(idx, &tool_call, &error),
             }
         }
         let turn_id = context

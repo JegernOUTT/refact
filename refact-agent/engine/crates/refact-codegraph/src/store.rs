@@ -8,7 +8,6 @@ use std::time::Instant;
 
 use refact_codegraph_parsers::{RawRef, Resolver};
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
-use same_file::Handle;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracing::{debug, info, warn};
@@ -380,35 +379,57 @@ pub fn try_acquire_exclusive_lease(db_path: &Path) -> Result<Option<DatabaseLeas
     acquire_lease(db_path, true)
 }
 
-/// Identity of the sqlite file this connection was opened on. A retained descriptor lets us
-/// compare the inode we are still writing to against whatever now lives at the path.
+#[cfg(unix)]
+type FileId = (u64, u64);
+
+#[cfg(unix)]
+fn file_id(path: &Path) -> std::io::Result<FileId> {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = fs::metadata(path)?;
+    Ok((metadata.dev(), metadata.ino()))
+}
+
+#[cfg(not(unix))]
+type FileId = same_file::Handle;
+
+#[cfg(not(unix))]
+fn file_id(path: &Path) -> std::io::Result<FileId> {
+    same_file::Handle::from_path(path)
+}
+
+/// Identity of the sqlite file this connection was opened on, compared against whatever now
+/// lives at the path.
 ///
-/// `same_file::Handle` keeps its file open for as long as the identity lives, which is what makes
-/// the comparison sound: Windows file index numbers are only stable while a handle is held, and
-/// the platform-specific identity syscalls behind it are stable API on every target.
+/// On unix this only `stat`s the path and never opens the database file: POSIX advisory locks
+/// belong to the process, so closing any extra descriptor on the file silently drops the
+/// byte-range locks SQLite holds through its own descriptors. Another engine could then take
+/// those locks, and its last close would checkpoint and delete the WAL and shm files under a
+/// live writer. The live connection keeps the inode allocated, so the dev/ino pair of a replaced
+/// file cannot be reused while it is compared. Elsewhere `same_file::Handle` retains a handle,
+/// which Windows file index numbers require and which does not interact with SQLite's locks.
 ///
 /// It is immutable after `capture` and shared behind an `Arc`, so callers can check for a
 /// replacement without taking the connection mutex the indexer holds for whole batches.
 #[derive(Debug, Default)]
 pub struct StoreIdentity {
     path: Option<PathBuf>,
-    handle: Option<Handle>,
+    id: Option<FileId>,
 }
 
 impl StoreIdentity {
     fn capture(path: &Path) -> Self {
         Self {
             path: Some(path.to_path_buf()),
-            handle: Handle::from_path(path).ok(),
+            id: file_id(path).ok(),
         }
     }
 
     pub fn replaced(&self) -> bool {
-        let (Some(path), Some(handle)) = (self.path.as_ref(), self.handle.as_ref()) else {
+        let (Some(path), Some(id)) = (self.path.as_ref(), self.id.as_ref()) else {
             return false;
         };
-        match Handle::from_path(path) {
-            Ok(current) => current != *handle,
+        match file_id(path) {
+            Ok(current) => current != *id,
             Err(err) if err.kind() == ErrorKind::NotFound => true,
             Err(err) => {
                 warn!("codegraph identity check for {path:?} failed: {err}");
@@ -2780,6 +2801,68 @@ mod tests {
             !store.database_replaced(),
             "WAL activity must never look like a replacement"
         );
+    }
+
+    const WAL_PROBE_DB_ENV: &str = "REFACT_CODEGRAPH_WAL_PROBE_DB";
+    const WAL_PROBE_MARKER_ENV: &str = "REFACT_CODEGRAPH_WAL_PROBE_MARKER";
+
+    #[test]
+    fn wal_probe_child_opens_and_closes_the_database() {
+        let Some(path) = std::env::var_os(WAL_PROBE_DB_ENV) else {
+            return;
+        };
+        let conn = Connection::open(path).unwrap();
+        let _: i64 = conn
+            .query_row("SELECT COUNT(*) FROM sqlite_master", [], |row| row.get(0))
+            .unwrap();
+        conn.close().map_err(|(_, error)| error).unwrap();
+        if let Some(marker) = std::env::var_os(WAL_PROBE_MARKER_ENV) {
+            fs::write(marker, "closed").unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn replacement_check_keeps_wal_alive_when_another_process_closes_the_database() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("codegraph.sqlite");
+        let store = Store::open(&db_path).unwrap();
+        store.index_file("src/a.rs", "fn a() {}\n", "rust").unwrap();
+        assert!(!store.database_replaced());
+
+        let marker = dir.path().join("probe-ran");
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "store::tests::wal_probe_child_opens_and_closes_the_database",
+                "--test-threads=1",
+            ])
+            .env(WAL_PROBE_DB_ENV, &db_path)
+            .env(WAL_PROBE_MARKER_ENV, &marker)
+            .output()
+            .unwrap();
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success(),
+            "probe child failed: {stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            stdout.contains("test result: ok. 1 passed;"),
+            "the probe filter must select exactly one test, got: {stdout}"
+        );
+        assert_eq!(
+            fs::read_to_string(&marker).ok().as_deref(),
+            Some("closed"),
+            "the probe child must actually open and close the database"
+        );
+        assert!(
+            dir.path().join("codegraph.sqlite-wal").exists(),
+            "a foreign process closing the database must not delete the WAL of a live writer"
+        );
+        assert!(!store.database_replaced());
+        store.index_file("src/b.rs", "fn b() {}\n", "rust").unwrap();
     }
 
     // SQLite opens its database without FILE_SHARE_DELETE, so on Windows the file cannot be

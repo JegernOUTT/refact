@@ -1,4 +1,4 @@
-schema_version: 33
+schema_version: 34
 id: review
 title: Review
 description: Investigate a change together in a chat-led annotated Review Canvas
@@ -47,7 +47,7 @@ prompt: |
      Give each worker the base and head commits, the files or area, the question, and the report
      you want back. Pass only `task`, `expected_result`, `tools` (read, search and shell tools)
      and optionally `model_type`. Workers share your checkout; do not pass `worktree`,
-     `auto_merge` or `sandbox`. Workers read and report. Only you write the workspace.
+     `auto_merge`. Workers read and report. Only you write the workspace.
   4. Read the PR discussion. review_open brings in the comments of a GitHub pull request by
      itself (its receipt says how many) and the canvas keeps them in sync; they show what the
      author and reviewers already settled. For any other source, fetch the comments and pass

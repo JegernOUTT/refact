@@ -323,6 +323,10 @@ impl RuntimeVerifierActor {
         &self.expected
     }
 
+    async fn resolve_checkout(&self, app: &AppState) -> Result<ValidatedCommandCheckout, String> {
+        command_checkout::resolve_finished_verifier(app, self).await
+    }
+
     async fn after_finish(app: &AppState, request: &VerifyCardRequest) -> Result<Self, String> {
         let expected = request
             .expected_state
@@ -408,7 +412,7 @@ impl RuntimeVerifierActor {
         finishing: bool,
     ) -> Result<(), String> {
         let stale = || stale_verifier_error(&self.task_id, &self.card_id);
-        if app.runtime.shutdown_flag.load(Ordering::Relaxed) {
+        if verifiers_shutting_down(&app.gcx) {
             return Err(stale());
         }
         let live = app
@@ -418,16 +422,16 @@ impl RuntimeVerifierActor {
             .await
             .get(&self.chat_id)
             .cloned()
-            .ok_or_else(stale)?;
+            .ok_or_else(|| format!("{}; session removed or replaced", stale()))?;
         if !Arc::ptr_eq(&live, &self.session) {
-            return Err(stale());
+            return Err(format!("{}; session replaced", stale()));
         }
         if let Some(run) = app.agent_executions.get(&self.chat_id) {
             if Some(run.admission_generation()) != self.admission_generation || run.is_cancelled() {
                 return Err(stale());
             }
         }
-        {
+        let queued = {
             let session = live.lock().await;
             let task = session.thread.task_meta.as_ref().ok_or_else(stale)?;
             let state_ok = session.runtime.state == refact_runtime_api::SessionState::Completed
@@ -442,12 +446,17 @@ impl RuntimeVerifierActor {
                         .is_some_and(|calls| {
                             calls.len() == 1 && calls[0].function.name == "agent_finish"
                         }));
+            if session.runtime.paused || !session.runtime.pause_reasons.is_empty() {
+                return Err(format!("{}; session paused", stale()));
+            }
+            if session.user_interrupt_flag.load(Ordering::Relaxed) {
+                return Err(format!("{}; session interrupted", stale()));
+            }
             if !state_ok
                 || session.closed
                 || session.runtime.paused
                 || !session.runtime.pause_reasons.is_empty()
                 || session.user_interrupt_flag.load(Ordering::Relaxed)
-                || !session.command_queue.is_empty()
                 || !Arc::ptr_eq(&self.abort, &session.abort_flag)
                 || self
                     .terminal_version
@@ -466,7 +475,8 @@ impl RuntimeVerifierActor {
             {
                 return Err(stale());
             }
-        }
+            session.command_queue.len()
+        };
         let (board, _) = command_checkout::read_board(&self.source, &self.task_id).await?;
         board.require_owner(&self.owner).map_err(|_| stale())?;
         let card = board.get_card(&self.card_id).ok_or_else(stale)?;
@@ -492,6 +502,9 @@ impl RuntimeVerifierActor {
                 current_head.as_deref().unwrap_or("unavailable")
             ));
         }
+        if queued > 0 {
+            return Err(format!("{}; agent chat has {queued} queued command(s); verification unavailable at current agent-chat boundary", stale()));
+        }
         Ok(())
     }
 
@@ -515,7 +528,7 @@ impl RuntimeVerifierActor {
                         }
                     }
                     _ = shutdown_check.tick() => {
-                        if app.runtime.shutdown_flag.load(Ordering::Relaxed) {
+                        if verifiers_shutting_down(&app.gcx) {
                             return Err("verifier shutdown".to_string());
                         }
                     }
@@ -525,7 +538,9 @@ impl RuntimeVerifierActor {
         };
         tokio::time::timeout(DRAIN_TIMEOUT, wait)
             .await
-            .map_err(|_| "finish boundary unavailable before verifier deadline".to_string())?
+            .map_err(|_| {
+                "drain timeout: finish boundary unavailable before verifier deadline".to_string()
+            })?
     }
 }
 
@@ -586,9 +601,7 @@ impl CardEvidenceRunner {
                 )
                 .await?
             }
-            VerifierActor::Finished(actor) => {
-                command_checkout::resolve_finished_verifier(&app, actor).await?
-            }
+            VerifierActor::Finished(actor) => actor.resolve_checkout(&app).await?,
         };
         let board = storage::load_board(self.gcx.clone(), &self.request.task_id).await?;
         let card = board
@@ -1020,6 +1033,9 @@ pub async fn store_verifier_report(
         {
             continue;
         }
+        if matches!(result, Ok(true)) {
+            notify_stored_report(gcx.clone(), task_id, card_id, &report).await;
+        }
         return result;
     }
     Err("verification configuration remained unavailable".into())
@@ -1083,8 +1099,39 @@ async fn store_verifier_report_with_configuration(
     }
 }
 
+static NEXT_VERIFIER_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+fn track_verifier(gcx: &Arc<GlobalContext>, request: VerifyCardRequest) -> u64 {
+    let id = NEXT_VERIFIER_ID.fetch_add(1, Ordering::Relaxed);
+    gcx.card_verifier_requests
+        .lock()
+        .unwrap()
+        .insert(id, request);
+    id
+}
+
+fn untrack_verifier(gcx: &Arc<GlobalContext>, id: u64) {
+    gcx.card_verifier_requests.lock().unwrap().remove(&id);
+}
+
+fn verifiers_shutting_down(gcx: &GlobalContext) -> bool {
+    gcx.card_verifiers_shutting_down.load(Ordering::SeqCst)
+        || gcx.shutdown_flag.load(Ordering::SeqCst)
+}
+
 async fn schedule_card_verifier(gcx: Arc<GlobalContext>, request: VerifyCardRequest) {
-    if gcx.shutdown_flag.load(Ordering::SeqCst) {
+    if verifiers_shutting_down(&gcx) {
+        if let Err(error) = settle_verifier_failure(
+            gcx,
+            &request,
+            request.expected_state.as_ref(),
+            Vec::new(),
+            "verifier shutdown before scheduling".into(),
+        )
+        .await
+        {
+            tracing::warn!(%error, "Shutdown verifier report not committed");
+        }
         return;
     }
     let app = AppState::from_gcx(gcx.clone()).await;
@@ -1095,49 +1142,113 @@ async fn schedule_card_verifier(gcx: Arc<GlobalContext>, request: VerifyCardRequ
             tracing::warn!("card verifier task failed: {error}");
         }
     }
-    if gcx.shutdown_flag.load(Ordering::SeqCst) {
+    if verifiers_shutting_down(&gcx) {
+        drop(tasks);
+        if let Err(error) = settle_verifier_failure(
+            gcx,
+            &request,
+            request.expected_state.as_ref(),
+            Vec::new(),
+            "verifier shutdown before dispatch".into(),
+        )
+        .await
+        {
+            tracing::warn!(%error, "Shutdown verifier report not committed");
+        }
         return;
     }
+    let tracking_id = track_verifier(&gcx, request.clone());
     tasks.spawn(async move {
-        let result = match RuntimeVerifierActor::after_finish(&app, &request).await {
-            Ok(mut actor) => match actor.wait_completed(&app).await {
-                Ok(()) => Ok(actor),
-                Err(error) => Err(actor
-                    .ensure_current(&app, true)
-                    .await
-                    .err()
-                    .unwrap_or(error)),
-            },
-            Err(error) => Err(error),
-        };
-        let result = match result {
-            Ok(actor) => verify_card(task_gcx, request, VerifierActor::Finished(actor)).await,
-            Err(error) => {
-                settle_verifier_failure(
+        let cleanup_gcx = task_gcx.clone();
+        let run = async move {
+            if request
+                .expected_state
+                .as_ref()
+                .is_some_and(|state| state.verification.is_none())
+            {
+                if let Err(error) = settle_verifier_failure(
                     task_gcx,
                     &request,
                     request.expected_state.as_ref(),
                     Vec::new(),
-                    error,
+                    "no finish fence captured".into(),
                 )
                 .await
+                {
+                    tracing::warn!(%error, "Missing-fence verifier report not committed");
+                }
+                return;
+            }
+            let result = match RuntimeVerifierActor::after_finish(&app, &request).await {
+                Ok(mut actor) => match actor.wait_completed(&app).await {
+                    Ok(()) => Ok(actor),
+                    Err(error) => Err(actor
+                        .ensure_current(&app, true)
+                        .await
+                        .err()
+                        .unwrap_or(error)),
+                },
+                Err(error) => Err(error),
+            };
+            let result = match result {
+                Ok(actor) => verify_card(task_gcx, request, VerifierActor::Finished(actor)).await,
+                Err(error) => {
+                    settle_verifier_failure(
+                        task_gcx,
+                        &request,
+                        request.expected_state.as_ref(),
+                        Vec::new(),
+                        error,
+                    )
+                    .await
+                }
+            };
+            if let Err(error) = result {
+                tracing::warn!("card verification not committed: {error}");
             }
         };
-        if let Err(error) = result {
-            tracing::warn!("card verification not committed: {error}");
-        }
+        run.await;
+        untrack_verifier(&cleanup_gcx, tracking_id);
     });
 }
 
 pub async fn shutdown_card_verifiers(gcx: Arc<GlobalContext>) {
-    let mut tasks = gcx.card_verifier_tasks.lock().await;
-    tasks.abort_all();
-    while let Some(result) = tasks.join_next().await {
-        if let Err(error) = result {
-            if !error.is_cancelled() {
-                tracing::warn!("card verifier task failed during shutdown: {error}");
+    gcx.card_verifiers_shutting_down
+        .store(true, Ordering::SeqCst);
+    let shutdown = async {
+        {
+            let mut tasks = gcx.card_verifier_tasks.lock().await;
+            tasks.abort_all();
+            while let Some(result) = tasks.join_next().await {
+                if let Err(error) = result {
+                    if !error.is_cancelled() {
+                        tracing::warn!("card verifier task failed during shutdown: {error}");
+                    }
+                }
             }
         }
+        let requests = std::mem::take(&mut *gcx.card_verifier_requests.lock().unwrap());
+        let mut settlements = tokio::task::JoinSet::new();
+        for request in requests.into_values() {
+            let gcx = gcx.clone();
+            settlements.spawn(async move {
+                if let Err(error) = settle_verifier_failure(
+                    gcx,
+                    &request,
+                    request.expected_state.as_ref(),
+                    Vec::new(),
+                    "verifier aborted by engine shutdown before completion".into(),
+                )
+                .await
+                {
+                    tracing::warn!(%error, "Shutdown verifier report not committed");
+                }
+            });
+        }
+        while settlements.join_next().await.is_some() {}
+    };
+    if tokio::time::timeout(DRAIN_TIMEOUT, shutdown).await.is_err() {
+        tracing::warn!("Verifier shutdown settlement exceeded deadline");
     }
 }
 
@@ -1173,53 +1284,44 @@ async fn verify_card(
 ) -> Result<VerifierReport, String> {
     let mut expected = request.expected_state.clone();
     let mut attempted = Vec::new();
-    let mut settled = None;
     match verify_card_inner(
         gcx.clone(),
         &request,
         actor.clone(),
         &mut expected,
         &mut attempted,
-        &mut settled,
     )
     .await
     {
         Ok(report) => Ok(report),
         Err(error) => {
-            if is_stale_verifier_error(&error) {
-                return Err(error);
-            }
-            if let VerifierActor::Finished(actor) = &actor {
-                actor
-                    .ensure_current(&AppState::from_gcx(gcx.clone()).await, false)
-                    .await?;
-            }
-            if let Some(report) = settled.filter(|report: &VerifierReport| {
-                report.classification == VerifierReportClassification::VerificationFailed
-            }) {
-                if let Some(expected) = expected
-                    .as_ref()
-                    .filter(|state| state.verification.is_some())
-                {
-                    if store_verifier_report(
-                        gcx.clone(),
-                        &request.task_id,
-                        &request.card_id,
-                        Some(expected),
-                        report.clone(),
-                        Vec::new(),
-                    )
-                    .await?
-                    {
-                        return Ok(report);
-                    }
-                    return Err(stale_verifier_error(&request.task_id, &request.card_id));
-                }
-                return Err(error);
-            }
             settle_verifier_failure(gcx, &request, expected.as_ref(), attempted, error).await
         }
     }
+}
+
+fn merge_supersession<'a>(
+    card: &'a BoardCard,
+    expected: &ExpectedCardState,
+) -> Option<&'a StatusUpdate> {
+    if card.column != "done" {
+        return None;
+    }
+    let original = &expected.card_fingerprint;
+    let start = ["started_at", "completed_at", "created_at"]
+        .iter()
+        .find_map(|key| {
+            original[*key]
+                .as_str()
+                .and_then(|time| chrono::DateTime::parse_from_rfc3339(time).ok())
+        })?;
+    card.status_updates.iter().rev().find(|update| {
+        update
+            .message
+            .starts_with(crate::tools::tool_task_merge_agent::MERGE_AGENT_STATUS_PREFIX)
+            && chrono::DateTime::parse_from_rfc3339(&update.timestamp)
+                .is_ok_and(|time| time >= start)
+    })
 }
 
 async fn settle_verifier_failure(
@@ -1229,44 +1331,89 @@ async fn settle_verifier_failure(
     command_results: Vec<VerificationResult>,
     error: String,
 ) -> Result<VerifierReport, String> {
-    if is_stale_verifier_error(&error) {
-        return Err(error);
-    }
+    settle_verifier_report(gcx, request, expected, command_results, error, None).await
+}
+
+async fn settle_verifier_report(
+    gcx: Arc<GlobalContext>,
+    request: &VerifyCardRequest,
+    expected: Option<&ExpectedCardState>,
+    command_results: Vec<VerificationResult>,
+    error: String,
+    computed: Option<VerifierReport>,
+) -> Result<VerifierReport, String> {
     let expected = expected
-        .filter(|expected| expected.verification.is_some())
-        .ok_or_else(|| {
-            format!("verification unavailable without original finish fence: {error}")
-        })?;
-    let failed = command_results
-        .iter()
-        .any(|result| result.outcome == VerificationOutcome::CommandFailed);
-    let report = VerifierReport {
-        passed: false,
-        notes: Vec::new(),
-        command_results,
-        concerns: vec![format!(
-            "Verification infrastructure unavailable; human review required: {error}"
-        )],
-        recommendation: if failed { "fix-needed" } else { "human-review" }.into(),
-        classification: if failed {
-            VerifierReportClassification::VerificationFailed
+        .ok_or("verification unavailable: no card lineage snapshot")?
+        .clone();
+    let card_id = request.card_id.clone();
+    let task_id = request.task_id.clone();
+    let (_, report) = storage::update_board_atomic(gcx.clone(), &request.task_id, move |board| {
+        let card = board.get_card_mut(&card_id)
+            .ok_or_else(|| stale_verifier_error(&task_id, &card_id))?;
+        let original = &expected.card_fingerprint;
+        let current = verifier_card_fingerprint(card);
+        let merge = merge_supersession(card, &expected);
+        let same_assignment = ["assignee", "agent_chat_id", "started_at", "ab_variants", "team_members"]
+            .iter().all(|key| current[*key] == original[*key]);
+        let cleared_by_merge = merge.is_some() && card.assignee.is_none()
+            && card.agent_chat_id.is_none() && current["started_at"] == original["started_at"]
+            && ["completed_at", "final_report", "ab_variants", "team_members"]
+                .iter().all(|key| current[*key] == original[*key]);
+        if current["created_at"] != original["created_at"]
+            || (!same_assignment && !cleared_by_merge)
+            || current["verifier_report"] != original["verifier_report"]
+        {
+            tracing::warn!(%task_id, %card_id,
+                "Unavailable verifier report skipped: different assignment/lineage or newer report");
+            return Err(stale_verifier_error(&task_id, &card_id));
+        }
+        let superseded = merge.is_some() && !expected.matches_card(card);
+        let reason = if superseded {
+            format!("superseded by merge at {}: {error}", merge.unwrap().timestamp)
+        } else if !expected.matches_card(card) {
+            format!("stale because card changed: {error}")
         } else {
-            VerifierReportClassification::Unavailable
-        },
-    };
-    if !store_verifier_report(
-        gcx,
-        &request.task_id,
-        &request.card_id,
-        Some(expected),
-        report.clone(),
-        Vec::new(),
-    )
-    .await?
-    {
-        return Err(stale_verifier_error(&request.task_id, &request.card_id));
-    }
+            error
+        };
+        let merge_only = superseded && current.as_object().unwrap().iter().all(|(key, value)| {
+            original[key] == *value || (value.is_null() && matches!(key.as_str(), "assignee" | "agent_chat_id" | "agent_branch" | "agent_worktree" | "agent_worktree_name"))
+        });
+        let report = if let Some(mut report) = computed.filter(|_| merge_only) {
+            report.notes.push(reason);
+            report
+        } else { VerifierReport {
+            passed: false, notes: Vec::new(), command_results,
+            concerns: vec![format!("Verification infrastructure unavailable; human review required: {reason}")],
+            recommendation: "human-review".into(),
+            classification: VerifierReportClassification::Unavailable,
+        }};
+        card.verifier_report = Some(report.clone());
+        append_verifier_status(card, &report);
+        Ok(report)
+    }).await?;
+    notify_stored_report(gcx, &request.task_id, &request.card_id, &report).await;
     Ok(report)
+}
+
+async fn notify_stored_report(
+    gcx: Arc<GlobalContext>,
+    task_id: &str,
+    card_id: &str,
+    report: &VerifierReport,
+) {
+    if verifiers_shutting_down(&gcx) {
+        return;
+    }
+    if let Err(error) = super::task_agent_monitor::notify_planner_verification_result(
+        AppState::from_gcx(gcx).await,
+        task_id,
+        card_id,
+        report,
+    )
+    .await
+    {
+        tracing::warn!(%task_id, %card_id, %error, "Verifier report stored but planner notification failed");
+    }
 }
 
 async fn verify_card_inner(
@@ -1275,7 +1422,6 @@ async fn verify_card_inner(
     actor: VerifierActor,
     attempt_expected: &mut Option<ExpectedCardState>,
     attempted: &mut Vec<VerificationResult>,
-    settled: &mut Option<VerifierReport>,
 ) -> Result<VerifierReport, String> {
     let board = storage::load_board(gcx.clone(), &request.task_id).await?;
     let card = board
@@ -1293,9 +1439,7 @@ async fn verify_card_inner(
             command_checkout::resolve_planner_verifier(ccx, &request.task_id, &request.card_id)
                 .await?
         }
-        VerifierActor::Finished(actor) => {
-            command_checkout::resolve_finished_verifier(&app, actor).await?
-        }
+        VerifierActor::Finished(actor) => actor.resolve_checkout(&app).await?,
     };
     let worktree = candidate.root().to_path_buf();
     let source = candidate.metadata().source_workspace_root.clone();
@@ -1547,10 +1691,19 @@ async fn verify_card_inner(
         recommendation,
         classification,
     };
-    *settled = Some(report.clone());
-    runner.revalidate().await?;
+    if let Err(error) = runner.revalidate().await {
+        return settle_verifier_report(
+            gcx,
+            request,
+            Some(&runner.expected),
+            report.command_results.clone(),
+            error,
+            Some(report),
+        )
+        .await;
+    }
     let stored = store_verifier_report(
-        gcx,
+        gcx.clone(),
         &request.task_id,
         &request.card_id,
         Some(&runner.expected),
@@ -1559,7 +1712,15 @@ async fn verify_card_inner(
     )
     .await?;
     if !stored {
-        return Err(stale_verifier_error(&request.task_id, &request.card_id));
+        return settle_verifier_report(
+            gcx,
+            request,
+            Some(&runner.expected),
+            report.command_results.clone(),
+            stale_verifier_error(&request.task_id, &request.card_id),
+            Some(report),
+        )
+        .await;
     }
     Ok(report)
 }
@@ -2505,6 +2666,119 @@ pub(crate) mod tests {
         .unwrap();
     }
 
+    #[tokio::test]
+    async fn missing_finish_fence_persists_unavailable_and_notifies_planner() {
+        let (_temp, app, task_id, _chat, _agent, planner) =
+            crate::chat::task_agent_monitor::tests::setup_monitor_case(
+                "done",
+                crate::chat::types::SessionState::Completed,
+                Duration::from_secs(1),
+                vec![],
+            )
+            .await;
+        let expected = load_expected_card_state(app.gcx.clone(), &task_id, "T-1")
+            .await
+            .unwrap();
+        let request = VerifyCardRequest {
+            task_id: task_id.clone(),
+            card_id: "T-1".into(),
+            expected_state: Some(expected.clone()),
+        };
+        let report = settle_verifier_failure(
+            app.gcx.clone(),
+            &request,
+            Some(&expected),
+            vec![],
+            "no finish fence captured".into(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            report.classification,
+            VerifierReportClassification::Unavailable
+        );
+        assert_eq!(report.recommendation, "human-review");
+        assert!(report.concerns[0].contains("no finish fence"));
+        let board = storage::load_board(app.gcx.clone(), &task_id)
+            .await
+            .unwrap();
+        assert!(board.get_card("T-1").unwrap().verifier_report.is_some());
+        let planner = planner.lock().await;
+        let notice = &planner.pending_deliveries.back().unwrap().messages[0];
+        assert_eq!(
+            notice.extra["event"]["payload"]["kind"],
+            "verification_result"
+        );
+        assert!(notice.content.content_text_only().contains("T-1"));
+        assert!(notice
+            .content
+            .content_text_only()
+            .contains("no finish fence"));
+    }
+
+    #[tokio::test]
+    async fn unavailable_settlement_preserves_newer_report_and_assignment() {
+        let temp = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        write_task(temp.path(), gcx.clone(), card("")).await;
+        let expected = load_expected_card_state(gcx.clone(), "task-1", "T-verify")
+            .await
+            .unwrap();
+        let request = VerifyCardRequest {
+            task_id: "task-1".into(),
+            card_id: "T-verify".into(),
+            expected_state: Some(expected.clone()),
+        };
+        storage::update_board_atomic(gcx.clone(), "task-1", |board| {
+            board.get_card_mut("T-verify").unwrap().verifier_report = Some(verifier_report(true));
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert!(settle_verifier_failure(
+            gcx.clone(),
+            &request,
+            Some(&expected),
+            vec![],
+            "session replaced".into()
+        )
+        .await
+        .is_err());
+        let board = storage::load_board(gcx.clone(), "task-1").await.unwrap();
+        assert!(
+            board
+                .get_card("T-verify")
+                .unwrap()
+                .verifier_report
+                .as_ref()
+                .unwrap()
+                .passed
+        );
+        storage::update_board_atomic(gcx.clone(), "task-1", |board| {
+            let card = board.get_card_mut("T-verify").unwrap();
+            card.verifier_report = None;
+            card.assignee = Some("replacement".into());
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert!(settle_verifier_failure(
+            gcx.clone(),
+            &request,
+            Some(&expected),
+            vec![],
+            "session replaced".into()
+        )
+        .await
+        .is_err());
+        let board = storage::load_board(gcx, "task-1").await.unwrap();
+        assert!(board
+            .get_card("T-verify")
+            .unwrap()
+            .verifier_report
+            .is_none());
+    }
+
     #[test]
     fn verifier_commands_include_acceptance_verify_lines() {
         let card = card(
@@ -2866,80 +3140,390 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn store_verifier_report_noops_when_card_cleaned_up_after_merge() {
+    async fn stale_after_merge_persists_superseded_unavailable() {
         let temp = tempfile::tempdir().unwrap();
-        init_repo(temp.path());
         let gcx = crate::global_context::tests::make_test_gcx().await;
-        let mut card = card("## Acceptance Criteria\n- Verify: `cargo test verifier`");
-        card.id = "T-1".to_string();
-        card.agent_branch = Some("refact/task/task-1/card/T-1/agent".to_string());
-        card.agent_worktree = Some(temp.path().join("agent").to_string_lossy().to_string());
-        card.agent_worktree_name = Some("wt-1".to_string());
+        let mut card = card("");
+        card.agent_worktree = Some("old-checkout".into());
+        card.assignee = Some("agent-old".into());
+        card.agent_chat_id = Some("chat-old".into());
+        card.started_at = Some("2025-12-31T00:00:00Z".into());
         write_task(temp.path(), gcx.clone(), card).await;
-        let ccx = register_candidate(gcx.clone(), "task-1", "T-1", "model").await;
-        let candidate = command_checkout::resolve_planner_verifier(&ccx, "task-1", "T-1")
+        let expected = load_expected_card_state(gcx.clone(), "task-1", "T-verify")
             .await
             .unwrap();
-        let mut expected = load_expected_card_state(gcx.clone(), "task-1", "T-1")
-            .await
-            .unwrap();
-
-        let board = storage::load_board(gcx.clone(), "task-1").await.unwrap();
-        expected.verification = Some(
-            VerificationSnapshot::capture(
-                &gcx,
-                dunce::canonicalize(temp.path()).unwrap(),
-                &candidate,
-                "task-1",
-                "T-1",
-                &board,
-            )
-            .await
-            .unwrap(),
-        );
         storage::update_board_atomic(gcx.clone(), "task-1", |board| {
-            let card = board.get_card_mut("T-1").unwrap();
-            card.agent_branch = None;
+            let card = board.get_card_mut("T-verify").unwrap();
             card.agent_worktree = None;
-            card.agent_worktree_name = None;
+            card.assignee = None;
+            card.agent_chat_id = None;
+            card.status_updates.push(StatusUpdate {
+                timestamp: "2026-01-01T00:00:00Z".into(),
+                message: "Merged by planner".into(),
+            });
             Ok(())
         })
         .await
         .unwrap();
-
-        let stored = store_verifier_report(
+        let request = VerifyCardRequest {
+            task_id: "task-1".into(),
+            card_id: "T-verify".into(),
+            expected_state: Some(expected.clone()),
+        };
+        let report = settle_verifier_failure(
             gcx.clone(),
-            "task-1",
-            "T-1",
+            &request,
             Some(&expected),
-            verifier_report(false),
-            Vec::new(),
+            vec![],
+            stale_verifier_error("task-1", "T-verify"),
         )
         .await
         .unwrap();
+        assert_eq!(
+            report.classification,
+            VerifierReportClassification::Unavailable
+        );
+        assert!(report.concerns[0].contains("superseded by merge at 2026-01-01"));
+        let board = storage::load_board(gcx, "task-1").await.unwrap();
+        assert!(board
+            .get_card("T-verify")
+            .unwrap()
+            .verifier_report
+            .is_some());
+    }
 
-        assert!(!stored);
+    #[tokio::test]
+    async fn completed_actor_explains_queued_command_refusal() {
+        let temp = tempfile::tempdir().unwrap();
+        init_repo(temp.path());
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let mut card = card("");
+        card.id = "T-1".into();
+        write_task(temp.path(), gcx.clone(), card).await;
+        register_candidate(gcx.clone(), "task-1", "T-1", "model").await;
+        let app = AppState::from_gcx(gcx.clone()).await;
+        let child = app
+            .chat
+            .sessions
+            .read()
+            .await
+            .get("worker-chat")
+            .cloned()
+            .unwrap();
+        child.lock().await.command_queue.push_back(
+            serde_json::from_value(json!({
+                "client_request_id": "notification", "type": "update_pending_delivery",
+                "delivery_id": "notification", "cancel": true
+            }))
+            .unwrap(),
+        );
+        let expected = load_expected_card_state(gcx.clone(), "task-1", "T-1")
+            .await
+            .unwrap();
         let request = VerifyCardRequest {
             task_id: "task-1".into(),
             card_id: "T-1".into(),
-            expected_state: Some(expected.clone()),
+            expected_state: Some(expected),
         };
-        assert!(is_stale_verifier_error(
-            &settle_verifier_failure(
+        let queued = child.lock().await.command_queue.pop_front().unwrap();
+        let actor = RuntimeVerifierActor::after_finish(&app, &request)
+            .await
+            .unwrap();
+        child.lock().await.command_queue.push_back(queued);
+        let error = RuntimeVerifierActor::after_finish(&app, &request)
+            .await
+            .err()
+            .unwrap();
+        assert!(error.contains("agent chat has 1 queued command(s)"));
+        assert!(
+            !error.contains("verification not started"),
+            "the same refusal can occur after commands ran"
+        );
+        let error = actor.resolve_checkout(&app).await.err().unwrap();
+        assert!(error.contains("agent chat has 1 queued command(s)"));
+        assert!(!error.contains("verification not started"));
+        let report = settle_verifier_failure(
+            gcx.clone(),
+            &request,
+            request.expected_state.as_ref(),
+            verifier_report(true).command_results,
+            error,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            report.classification,
+            VerifierReportClassification::Unavailable
+        );
+        assert!(report.concerns[0].contains("agent chat has 1 queued command(s)"));
+        assert_eq!(report.command_results.len(), 1);
+        assert!(!report.concerns[0].contains("verification not started"));
+
+        let original_abort = child.lock().await.abort_flag.clone();
+        child.lock().await.abort_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let error = actor.resolve_checkout(&app).await.err().unwrap();
+        assert!(is_stale_verifier_error(&error));
+        assert!(!error.contains("queued command(s)"));
+        child.lock().await.abort_flag = original_abort;
+        let replacement = Arc::new(tokio::sync::Mutex::new(
+            crate::chat::types::ChatSession::new("worker-chat".into()),
+        ));
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert("worker-chat".into(), replacement);
+        let error = actor.resolve_checkout(&app).await.err().unwrap();
+        assert!(is_stale_verifier_error(&error));
+        assert!(error.contains("session replaced"));
+        assert!(!error.contains("queued command(s)"));
+    }
+
+    #[tokio::test]
+    async fn merge_race_preserves_computed_verdicts() {
+        for passed in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let gcx = crate::global_context::tests::make_test_gcx().await;
+            let mut card = card("");
+            card.started_at = Some("2025-12-31T00:00:00Z".into());
+            card.assignee = Some("old-agent".into());
+            card.agent_chat_id = Some("old-chat".into());
+            write_task(temp.path(), gcx.clone(), card).await;
+            let expected = load_expected_card_state(gcx.clone(), "task-1", "T-verify")
+                .await
+                .unwrap();
+            storage::update_board_atomic(gcx.clone(), "task-1", |board| {
+                let card = board.get_card_mut("T-verify").unwrap();
+                card.assignee = None;
+                card.agent_chat_id = None;
+                card.status_updates.push(StatusUpdate {
+                    timestamp: "2026-01-01T00:00:00Z".into(),
+                    message: "Merged by planner".into(),
+                });
+                Ok(())
+            })
+            .await
+            .unwrap();
+            let request = VerifyCardRequest {
+                task_id: "task-1".into(),
+                card_id: "T-verify".into(),
+                expected_state: Some(expected.clone()),
+            };
+            let computed = verifier_report(passed);
+            let report = settle_verifier_report(
                 gcx.clone(),
                 &request,
                 Some(&expected),
-                Vec::new(),
-                "finish boundary unavailable".into(),
+                computed.command_results.clone(),
+                "store race".into(),
+                Some(computed.clone()),
             )
             .await
-            .unwrap_err()
-        ));
-        let board = storage::load_board(gcx, "task-1").await.unwrap();
-        let card = board.get_card("T-1").unwrap();
-        assert!(card.verifier_report.is_none());
-        assert!(card.agent_worktree.is_none());
-        assert!(card.agent_worktree_name.is_none());
+            .unwrap();
+            assert_eq!(report.classification, computed.classification);
+            assert_eq!(report.concerns, computed.concerns);
+            assert_eq!(report.command_results, computed.command_results);
+            assert!(report
+                .notes
+                .iter()
+                .any(|note| note.contains("superseded by merge at")));
+        }
+    }
+
+    #[tokio::test]
+    async fn inflight_requests_are_owned_by_each_global_context() {
+        let first = crate::global_context::tests::make_test_gcx().await;
+        let second = crate::global_context::tests::make_test_gcx().await;
+        let request = VerifyCardRequest {
+            task_id: "task".into(),
+            card_id: "card".into(),
+            expected_state: None,
+        };
+        let id = track_verifier(&first, request);
+        assert_eq!(first.card_verifier_requests.lock().unwrap().len(), 1);
+        assert!(second.card_verifier_requests.lock().unwrap().is_empty());
+        shutdown_card_verifiers(second).await;
+        assert!(first
+            .card_verifier_requests
+            .lock()
+            .unwrap()
+            .contains_key(&id));
+        untrack_verifier(&first, id);
+        assert!(first.card_verifier_requests.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn shutdown_settles_inflight_without_reopening_sessions() {
+        let temp = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        write_task(temp.path(), gcx.clone(), card("")).await;
+        let expected = load_expected_card_state(gcx.clone(), "task-1", "T-verify")
+            .await
+            .unwrap();
+        let request = VerifyCardRequest {
+            task_id: "task-1".into(),
+            card_id: "T-verify".into(),
+            expected_state: Some(expected),
+        };
+        let id = track_verifier(&gcx, request);
+        let task_gcx = gcx.clone();
+        gcx.card_verifier_tasks.lock().await.spawn(async move {
+            std::future::pending::<()>().await;
+            untrack_verifier(&task_gcx, id);
+        });
+        assert!(!gcx.shutdown_flag.load(Ordering::SeqCst));
+        tokio::time::timeout(Duration::from_secs(2), shutdown_card_verifiers(gcx.clone()))
+            .await
+            .unwrap();
+        assert!(
+            !gcx.shutdown_flag.load(Ordering::SeqCst),
+            "verifier shutdown must not change global shutdown semantics"
+        );
+        let board = storage::load_board(gcx.clone(), "task-1").await.unwrap();
+        let report = board
+            .get_card("T-verify")
+            .unwrap()
+            .verifier_report
+            .as_ref()
+            .unwrap();
+        assert_eq!(
+            report.classification,
+            VerifierReportClassification::Unavailable
+        );
+        assert!(
+            report.concerns[0].contains("verifier aborted by engine shutdown before completion")
+        );
+        storage::update_board_atomic(gcx.clone(), "task-1", |board| {
+            board.get_card_mut("T-verify").unwrap().verifier_report = None;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let expected = load_expected_card_state(gcx.clone(), "task-1", "T-verify")
+            .await
+            .unwrap();
+        schedule_card_verifier_after_finish(
+            gcx.clone(),
+            "task-1".into(),
+            "T-verify".into(),
+            expected,
+        )
+        .await;
+        assert!(gcx.card_verifier_tasks.lock().await.is_empty());
+        let board = storage::load_board(gcx.clone(), "task-1").await.unwrap();
+        assert!(board
+            .get_card("T-verify")
+            .unwrap()
+            .verifier_report
+            .as_ref()
+            .unwrap()
+            .concerns[0]
+            .contains("shutdown before scheduling"));
+        assert!(!gcx.shutdown_flag.load(Ordering::SeqCst));
+        assert!(AppState::from_gcx(gcx)
+            .await
+            .chat
+            .sessions
+            .read()
+            .await
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn local_shutdown_suppresses_planner_notification_with_global_flag_unset() {
+        let (_temp, app, task_id, _chat, _agent, planner) =
+            crate::chat::task_agent_monitor::tests::setup_monitor_case(
+                "done",
+                crate::chat::types::SessionState::Completed,
+                Duration::from_secs(1),
+                vec![],
+            )
+            .await;
+        let pending_before = planner.lock().await.pending_deliveries.len();
+        shutdown_card_verifiers(app.gcx.clone()).await;
+        assert!(!app.gcx.shutdown_flag.load(Ordering::SeqCst));
+        let expected = load_expected_card_state(app.gcx.clone(), &task_id, "T-1")
+            .await
+            .unwrap();
+        schedule_card_verifier_after_finish(
+            app.gcx.clone(),
+            task_id.clone(),
+            "T-1".into(),
+            expected,
+        )
+        .await;
+        assert!(app.gcx.card_verifier_tasks.lock().await.is_empty());
+        let board = storage::load_board(app.gcx.clone(), &task_id)
+            .await
+            .unwrap();
+        assert!(board
+            .get_card("T-1")
+            .unwrap()
+            .verifier_report
+            .as_ref()
+            .unwrap()
+            .concerns[0]
+            .contains("shutdown before scheduling"));
+        assert_eq!(
+            planner.lock().await.pending_deliveries.len(),
+            pending_before
+        );
+        assert!(!app.gcx.shutdown_flag.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn merge_marker_must_be_prefix_and_current_lineage() {
+        for (timestamp, message) in [
+            ("2025-01-01T00:00:00Z", "Merged by planner"),
+            ("2026-01-01T00:00:00Z", "still unmerged"),
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let gcx = crate::global_context::tests::make_test_gcx().await;
+            let mut card = card("");
+            card.started_at = Some("2025-12-31T00:00:00Z".into());
+            card.assignee = Some("old-agent".into());
+            card.agent_chat_id = Some("old-chat".into());
+            write_task(temp.path(), gcx.clone(), card).await;
+            let expected = load_expected_card_state(gcx.clone(), "task-1", "T-verify")
+                .await
+                .unwrap();
+            storage::update_board_atomic(gcx.clone(), "task-1", |board| {
+                let card = board.get_card_mut("T-verify").unwrap();
+                card.assignee = None;
+                card.agent_chat_id = None;
+                card.status_updates.push(StatusUpdate {
+                    timestamp: timestamp.into(),
+                    message: message.into(),
+                });
+                Ok(())
+            })
+            .await
+            .unwrap();
+            let request = VerifyCardRequest {
+                task_id: "task-1".into(),
+                card_id: "T-verify".into(),
+                expected_state: Some(expected.clone()),
+            };
+            assert!(
+                settle_verifier_failure(
+                    gcx.clone(),
+                    &request,
+                    Some(&expected),
+                    vec![],
+                    "stale".into()
+                )
+                .await
+                .is_err(),
+                "false merge marker: {message} at {timestamp}"
+            );
+            assert!(storage::load_board(gcx, "task-1")
+                .await
+                .unwrap()
+                .get_card("T-verify")
+                .unwrap()
+                .verifier_report
+                .is_none());
+        }
     }
 
     #[tokio::test]

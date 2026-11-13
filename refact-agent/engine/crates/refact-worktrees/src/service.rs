@@ -768,6 +768,23 @@ impl WorktreeService {
         .map_err(|e| e.to_string())?
     }
 
+    pub fn spawn_merge_git_section<T: Send + 'static>(
+        &self,
+        section: impl FnOnce(&dyn Fn() -> Result<(), String>) -> T + Send + 'static,
+    ) -> tokio::task::JoinHandle<Result<T, String>> {
+        let service = self.clone();
+        tokio::task::spawn_blocking(move || {
+            service.require_source_effect_token()?;
+            service.validate_merge_phase()?;
+            service.validate_effect_token_blocking()?;
+            let checkpoint = || service.validate_merge_phase();
+            Ok(crate::locking::with_git_phase(
+                service.merge_authority.clone(),
+                || section(&checkpoint),
+            ))
+        })
+    }
+
     /// Remove only the legacy source sealed before drain. The Git worker owns
     /// the guard across removal and branch deletion even if its awaiter aborts.
     pub async fn cleanup_legacy_merge_source(&self) -> Result<(bool, bool), String> {
@@ -1860,16 +1877,38 @@ impl WorktreeService {
             })
             .await;
             service.invalidate_registry_cache();
-            let (response, updated_registry) =
+            let (mut response, updated_registry) =
                 merged.map_err(|e| format!("Worktree merge blocking task failed: {}", e))??;
-            service.checkpoint_merge_phase().await?;
+            let applied = response.merged;
+            let mut late = |result: Result<(), String>, context: &str| -> Result<(), String> {
+                match result {
+                    Ok(()) => Ok(()),
+                    Err(error) if applied => {
+                        response
+                            .warnings
+                            .push(format!("The merge was applied, but {}: {}", context, error));
+                        Ok(())
+                    }
+                    Err(error) => Err(error),
+                }
+            };
+            late(
+                service.checkpoint_merge_phase().await,
+                "merge authority was lost afterwards",
+            )?;
             if let Some(registry) = updated_registry {
-                service
-                    .save_registry_unlocked(&registry, &_registry_guard)
-                    .await?;
+                late(
+                    service
+                        .save_registry_unlocked(&registry, &_registry_guard)
+                        .await,
+                    "saving the worktree registry failed",
+                )?;
             }
             if cleanup_target {
-                service.cleanup_merge_target().await?;
+                late(
+                    service.cleanup_merge_target().await,
+                    "cleaning up the temporary merge checkout failed",
+                )?;
             }
             Ok(response)
         }
@@ -2064,6 +2103,7 @@ impl WorktreeService {
                     dirty_baseline: Some(baseline),
                     affected_references,
                     affected_reference_count,
+                    source_kept: false,
                 });
             }
         }
@@ -2118,6 +2158,7 @@ impl WorktreeService {
                 affected_references,
                 affected_reference_count,
                 warnings: Vec::new(),
+                source_kept: false,
             });
         }
         let preflight = git::preflight_merge_conflicts(
@@ -2144,67 +2185,155 @@ impl WorktreeService {
                 affected_references,
                 affected_reference_count,
                 warnings: preflight_warnings,
+                source_kept: false,
             });
         }
         self.validate_merge_phase()?;
-        let target_stash = if let Some((source, parent)) = &self.nested_merge_identity {
+        let mut guard = git::TargetStashGuard::new(target_root);
+        macro_rules! try_restoring {
+            ($expr:expr) => {
+                match $expr {
+                    Ok(value) => value,
+                    Err(error) => return Err(guard.fail(error)),
+                }
+            };
+        }
+        if let Some((source, parent)) = &self.nested_merge_identity {
             validate_worktree_meta_checkout(source)?;
             validate_worktree_meta_checkout(parent)?;
             git::ensure_clean_worktree(target_root, "Nested merge target")?;
-            None
         } else {
-            git::stash_dirty_worktree(target_root, "Target workspace", Some(&target_branch))?
-        };
-        self.validate_merge_phase()?;
+            match git::stash_dirty_worktree_retaining(
+                target_root,
+                "Target workspace",
+                Some(&target_branch),
+            ) {
+                Ok(stash) => guard.hold(stash),
+                Err((error, stash)) => {
+                    guard.hold(stash);
+                    return Err(guard.fail(error));
+                }
+            }
+        }
+        #[cfg(test)]
+        try_restoring!(registered_fault::hit(target_root));
+        try_restoring!(self.validate_merge_phase());
         let checkout_result = if self.nested_merge_identity.is_some() {
             Ok(())
         } else {
             git::checkout_branch(target_root, &target_branch)
         };
         if let Err(e) = checkout_result {
-            self.validate_merge_phase()?;
-            let mut cleanup_warnings = Vec::new();
-            if let Some(stash) = target_stash.as_ref() {
-                restore_target_stash(target_root, stash, &mut cleanup_warnings);
-            }
-            return Err(format_merge_failure(
-                &format!("Failed to checkout target branch '{}'", target_branch),
-                &e,
-                cleanup_warnings,
-            ));
+            return Err(guard.fail(format!(
+                "Failed to checkout target branch '{}': {}",
+                target_branch, e
+            )));
         }
-        self.validate_merge_phase()?;
-        let target_pre_merge_head = match git::head_rev(target_root) {
-            Ok(head) => head,
+        try_restoring!(self.validate_merge_phase());
+        let pre_merge_head = match git::head_rev(target_root) {
+            Ok(head) => {
+                guard.set_pre_merge_head(head.clone());
+                head
+            }
             Err(e) => {
-                let mut cleanup_warnings = Vec::new();
-                if let Some(stash) = target_stash.as_ref() {
-                    restore_target_stash(target_root, stash, &mut cleanup_warnings);
-                }
-                return Err(format_merge_failure(
-                    "Failed to read target workspace HEAD after checkout",
-                    &e,
-                    cleanup_warnings,
-                ));
+                return Err(guard.fail(format!(
+                    "Failed to read target workspace HEAD after checkout: {}",
+                    e
+                )));
             }
         };
-        self.validate_merge_phase()?;
-        let merge_result = if request.strategy.as_str() == "squash" {
-            git::run_git(target_root, &["merge", "--squash", &source_branch])
-        } else {
-            git::run_git_with_refact_author(
+        let ignored_collisions = try_restoring!(git::ignored_paths_colliding_with_incoming(
+            target_root,
+            &source_branch
+        ));
+        if !ignored_collisions.is_empty() {
+            let mut warnings = vec![format!(
+                "Merge refused: the source branch adds tracked files at paths occupied by ignored files in the target checkout, and merging would overwrite them: {}. Move or delete them, then retry.",
+                ignored_collisions.join(", ")
+            )];
+            if let Some((stash, restored)) = guard.recover() {
+                if !(restored.critical_ok && restored.warnings.is_empty()) {
+                    warnings.push(git::restore_details(&stash, &restored));
+                }
+            }
+            return Ok(MergeWorktreeResponse {
+                id: id.to_string(),
+                status: "ignored_file_collision".to_string(),
+                merged: false,
+                strategy: request.strategy.as_str().to_string(),
+                source_branch,
+                target_branch,
+                committed_uncommitted,
+                merge_commit: None,
+                cleanup: None,
+                conflict: None,
+                dirty_baseline: None,
+                affected_references,
+                affected_reference_count,
+                warnings: warnings.into_iter().chain(preflight_warnings).collect(),
+                source_kept: false,
+            });
+        }
+        try_restoring!(self.validate_merge_phase());
+        let squash = request.strategy.as_str() == "squash";
+        let mut post_commit_warnings = Vec::new();
+        let source_oid = try_restoring!(git::run_git(
+            target_root,
+            &[
+                "rev-parse",
+                "--verify",
+                &format!("{source_branch}^{{commit}}")
+            ]
+        ))
+        .trim()
+        .to_string();
+        let merge_result = if squash {
+            git::run_git(
                 target_root,
-                &[
-                    "merge",
-                    "--no-ff",
-                    "--no-gpg-sign",
-                    &source_branch,
-                    "-m",
-                    &commit_message,
-                ],
+                &["merge", "--squash", "--no-overwrite-ignore", &source_branch],
             )
+        } else {
+            let merged = crate::locking::with_git_phase(None, || {
+                git::run_git_with_refact_author(
+                    target_root,
+                    &[
+                        "merge",
+                        "--no-ff",
+                        "--no-overwrite-ignore",
+                        "--no-gpg-sign",
+                        &source_branch,
+                        "-m",
+                        &commit_message,
+                    ],
+                )
+            });
+            match merged {
+                Err(error)
+                    if git::find_landed_commit(
+                        target_root,
+                        &pre_merge_head,
+                        git::Landing::Merge {
+                            source: &source_oid,
+                        },
+                    )
+                    .is_some() =>
+                {
+                    post_commit_warnings.push(post_commit_authority_warning(&error));
+                    Ok(String::new())
+                }
+                merged => merged,
+            }
         };
-        self.validate_merge_phase()?;
+        let squash_tree = if squash && merge_result.is_ok() {
+            try_restoring!(git::run_git(target_root, &["write-tree"]))
+                .trim()
+                .to_string()
+        } else {
+            String::new()
+        };
+        if squash {
+            try_restoring!(self.validate_merge_phase());
+        }
         if let Err(e) = merge_result {
             let conflict_files = git::conflict_files_for_path(target_root);
             let merge_abort_warnings = if self.nested_merge_identity.is_some() {
@@ -2217,10 +2346,16 @@ impl WorktreeService {
             };
             let merge_abort_ok = merge_abort_warnings.is_empty();
             let mut cleanup_warnings = merge_abort_warnings;
-            let stash_restored = if let Some(stash) = target_stash.as_ref() {
-                restore_target_stash(target_root, stash, &mut cleanup_warnings)
-            } else {
-                true
+            let stash_restored = match guard.recover() {
+                Some((stash, restored)) => {
+                    let ok = restored.critical_ok;
+                    cleanup_warnings.extend(restored.warnings.clone());
+                    if !ok {
+                        cleanup_warnings.push(git::restore_details(&stash, &restored));
+                    }
+                    ok
+                }
+                None => true,
             };
             if !conflict_files.is_empty() {
                 let cleanup_ok = merge_abort_ok && stash_restored;
@@ -2240,12 +2375,22 @@ impl WorktreeService {
                     affected_references,
                     affected_reference_count,
                     warnings: cleanup_warnings,
+                    source_kept: false,
                 });
             }
             return Err(format_merge_failure("Merge failed", &e, cleanup_warnings));
         }
-        if request.strategy.as_str() == "squash" {
-            self.validate_merge_phase()?;
+        if squash {
+            #[cfg(test)]
+            try_restoring!(registered_fault::hit_after_merge(target_root));
+        } else {
+            #[cfg(test)]
+            if let Err(error) = registered_fault::hit_after_merge(target_root) {
+                post_commit_warnings.push(post_commit_authority_warning(&error));
+            }
+        }
+        if squash {
+            try_restoring!(self.validate_merge_phase());
             let observed = observer.is_some();
             let observed_repository = if let Some((exact, _)) = &observer {
                 let repo = git2::Repository::open(target_root).map_err(|e| e.to_string())?;
@@ -2264,57 +2409,77 @@ impl WorktreeService {
             } else {
                 None
             };
-            if let Err(e) = git::run_git_with_refact_author_observed(
-                target_root,
-                &["commit", "-m", &commit_message, "--no-gpg-sign"],
-                || {
-                    if let Some((exact, observer)) = observer {
-                        let repo =
-                            git2::Repository::open(target_root).map_err(|e| e.to_string())?;
-                        let head = repo.head().map_err(|e| e.to_string())?;
-                        let landed = head.peel_to_commit().map_err(|e| e.to_string())?;
-                        let source = repo
-                            .find_commit(
-                                git2::Oid::from_str(&exact.source_head)
-                                    .map_err(|e| e.to_string())?,
-                            )
-                            .map_err(|e| e.to_string())?;
-                        if Some(git::canonical_common_dir(&repo)?) != observed_repository
-                            || dunce::canonicalize(target_root)
-                                .map_err(|e| e.to_string())?
-                                .as_path()
-                                != target_root
-                            || head.shorthand() != Some(exact.target_branch.as_str())
-                            || landed.parent_count() != 1
-                            || landed.parent_id(0).map_err(|e| e.to_string())?.to_string()
-                                != exact.target_head
-                            || landed.tree_id() != source.tree_id()
-                            || landed.id().to_string() == exact.target_head
-                        {
-                            return Err("Successful commit identity unavailable; retain state and inspect, never replay".into());
-                        }
-                        observer(KnownLandingCommit {
-                            commit: landed.id().to_string(),
-                            exact,
-                        })?;
+            let commit_args = ["commit", "-m", &commit_message, "--no-gpg-sign"];
+            let committed = if let Some((exact, observer)) = observer {
+                git::run_git_with_refact_author_observed(target_root, &commit_args, || {
+                    let repo = git2::Repository::open(target_root).map_err(|e| e.to_string())?;
+                    let head = repo.head().map_err(|e| e.to_string())?;
+                    let landed = head.peel_to_commit().map_err(|e| e.to_string())?;
+                    let source = repo
+                        .find_commit(
+                            git2::Oid::from_str(&exact.source_head).map_err(|e| e.to_string())?,
+                        )
+                        .map_err(|e| e.to_string())?;
+                    if Some(git::canonical_common_dir(&repo)?) != observed_repository
+                        || dunce::canonicalize(target_root)
+                            .map_err(|e| e.to_string())?
+                            .as_path()
+                            != target_root
+                        || head.shorthand() != Some(exact.target_branch.as_str())
+                        || landed.parent_count() != 1
+                        || landed.parent_id(0).map_err(|e| e.to_string())?.to_string()
+                            != exact.target_head
+                        || landed.tree_id() != source.tree_id()
+                        || landed.id().to_string() == exact.target_head
+                    {
+                        return Err("Successful commit identity unavailable; retain state and inspect, never replay".into());
                     }
-                    Ok(())
-                },
-            ) {
-                if observed {
-                    return Err(format!("Observed landing stopped; retain source and target, inspect without replay: {e}"));
+                    observer(KnownLandingCommit {
+                        commit: landed.id().to_string(),
+                        exact,
+                    })
+                })
+            } else {
+                match crate::locking::with_git_phase(None, || {
+                    git::run_git_with_refact_author(target_root, &commit_args)
+                }) {
+                    Err(error)
+                        if git::find_landed_commit(
+                            target_root,
+                            &pre_merge_head,
+                            git::Landing::Squash {
+                                tree: &squash_tree,
+                            },
+                        )
+                        .is_some() =>
+                    {
+                        post_commit_warnings.push(post_commit_authority_warning(&error));
+                        Ok(String::new())
+                    }
+                    committed => committed,
                 }
-                self.validate_merge_phase()?;
+            };
+            if let Err(e) = committed {
+                if observed {
+                    guard.set_own_commit(git::landed_commit(
+                        target_root,
+                        &pre_merge_head,
+                        git::Landing::Squash {
+                            tree: &squash_tree,
+                        },
+                    ));
+                    return Err(guard.fail(format!("Observed landing stopped; retain source and target, inspect without replay: {e}")));
+                }
                 if self.nested_merge_identity.is_some() {
                     return Err(format!(
                     "Failed to commit squash merge: {}; integration state retained at '{}' with source worktree '{}' intact; inspect the target index and worktree before retrying",
                     e, target_root.display(), record.meta.root.display()
                 ));
                 }
-                let mut cleanup_warnings = git::cleanup_failed_merge(target_root);
-                if let Some(stash) = target_stash.as_ref() {
-                    restore_target_stash(target_root, stash, &mut cleanup_warnings);
+                if guard.holds_stash() {
+                    return Err(guard.fail(format!("Failed to commit squash merge: {}", e)));
                 }
+                let cleanup_warnings = git::cleanup_failed_merge(target_root);
                 return Err(format_merge_failure(
                     "Failed to commit squash merge",
                     &e,
@@ -2322,77 +2487,147 @@ impl WorktreeService {
                 ));
             }
         }
-        self.validate_merge_phase()?;
+        #[cfg(test)]
+        if let Err(error) = registered_fault::hit_after_commit(target_root) {
+            post_commit_warnings.push(post_commit_authority_warning(&error));
+        }
+        if let Err(error) = self.validate_merge_phase() {
+            post_commit_warnings.push(post_commit_authority_warning(&error));
+        }
         let mut warnings = preflight_warnings;
-        let merge_commit = match git::head_rev(target_root) {
-            Ok(head) => Some(head),
-            Err(e) => {
-                warnings.push(format!("Failed to read merge commit: {}", e));
-                None
+        let landing = if squash {
+            git::Landing::Squash {
+                tree: &squash_tree,
+            }
+        } else {
+            git::Landing::Merge {
+                source: &source_oid,
             }
         };
-        if let Some(stash) = target_stash.as_ref() {
-            self.validate_merge_phase()?;
-            match git::apply_and_drop_stash(target_root, stash) {
+        let verified_head = git::landed_commit(target_root, &pre_merge_head, landing);
+        guard.set_own_commit(verified_head.clone());
+        let merge_commit = verified_head
+            .or_else(|| git::landed_commit_below_head(target_root, &pre_merge_head, landing));
+        if merge_commit.is_none() {
+            let head = crate::locking::with_git_phase(None, || git::head_rev(target_root))
+                .unwrap_or_else(|e| format!("<unreadable: {e}>"));
+            warnings.push(format!(
+                "The target HEAD is {} and this merge's own commit could not be identified on it; inspect the target history before relying on this merge",
+                head
+            ));
+        }
+        let mut source_kept = false;
+        if guard.holds_stash() {
+            let stash = guard.release().expect("stash held");
+            let applied = crate::locking::with_git_phase(None, || {
+                git::apply_and_drop_stash(target_root, &stash)
+            });
+            match applied {
                 Ok(stash_warnings) => warnings.extend(stash_warnings),
                 Err(e) => {
-                    self.validate_merge_phase()?;
                     let conflict_files = git::conflict_files_for_path(target_root);
-                    let mut cleanup_warnings =
-                        git::reset_keeping_local_changes(target_root, &target_pre_merge_head);
-                    let reset_ok = cleanup_warnings.is_empty();
-                    let stash_restored =
-                        restore_target_stash(target_root, stash, &mut cleanup_warnings);
-                    let restored_conflicts = git::conflict_files_for_path(target_root);
-                    cleanup_warnings.insert(
-                    0,
-                    format!(
-                        "Failed to reapply target workspace changes after merge; merge was rolled back: {}",
-                        e
-                    ),
-                );
-                    let cleanup_ok = reset_ok && stash_restored;
-                    let conflict = post_cleanup_conflict_state(
-                        target_root,
-                        if conflict_files.is_empty() {
-                            restored_conflicts
-                        } else {
-                            conflict_files
-                        },
-                        cleanup_ok,
-                    );
-                    return Ok(MergeWorktreeResponse {
-                        id: id.to_string(),
-                        status: "conflict".to_string(),
-                        merged: false,
-                        strategy: request.strategy.as_str().to_string(),
-                        source_branch,
-                        target_branch,
-                        committed_uncommitted,
-                        merge_commit: None,
-                        cleanup: None,
-                        conflict: Some(conflict),
-                        dirty_baseline: None,
-                        affected_references,
-                        affected_reference_count,
-                        warnings: cleanup_warnings,
-                    });
+                    let stash_location = stash.describe();
+                    guard.hold(Some(stash));
+                    let (rolled_back, stash_restored, foreign_head, mut cleanup_warnings) =
+                        match guard.recover() {
+                            Some((_, restored)) => (
+                                restored.rolled_back && restored.foreign_head.is_none(),
+                                restored.stash_restored,
+                                restored.foreign_head,
+                                restored.warnings,
+                            ),
+                            None => (true, true, None, Vec::new()),
+                        };
+                    let kept = match merge_commit.as_deref() {
+                        Some(commit) => git::commit_retained(target_root, commit),
+                        None => !rolled_back,
+                    };
+                    if kept {
+                        warnings.push(git::kept_after_reapply_failure(
+                            &e,
+                            stash_restored,
+                            foreign_head.as_deref(),
+                            &stash_location,
+                        ));
+                        warnings.extend(cleanup_warnings);
+                        warnings.push(SOURCE_KEPT_WARNING.to_string());
+                        source_kept = true;
+                    } else {
+                        let restored_conflicts = git::conflict_files_for_path(target_root);
+                        let cleanup_ok = rolled_back && stash_restored;
+                        cleanup_warnings.insert(
+                            0,
+                            git::reapply_failure_summary(
+                                &e,
+                                rolled_back,
+                                stash_restored,
+                                foreign_head.as_deref(),
+                                &stash_location,
+                            ),
+                        );
+                        let conflict = post_cleanup_conflict_state(
+                            target_root,
+                            if conflict_files.is_empty() {
+                                restored_conflicts
+                            } else {
+                                conflict_files
+                            },
+                            cleanup_ok,
+                        );
+                        return Ok(MergeWorktreeResponse {
+                            id: id.to_string(),
+                            status: "conflict".to_string(),
+                            merged: false,
+                            strategy: request.strategy.as_str().to_string(),
+                            source_branch,
+                            target_branch,
+                            committed_uncommitted,
+                            merge_commit: None,
+                            cleanup: None,
+                            conflict: Some(conflict),
+                            dirty_baseline: None,
+                            affected_references,
+                            affected_reference_count,
+                            warnings: cleanup_warnings,
+                            source_kept: false,
+                        });
+                    }
                 }
             }
         }
-        self.validate_merge_phase()?;
-        let cleanup = if request.delete_after_merge && source_branch != target_branch {
-            let removal =
-                self.cleanup_registered_worktree_blocking(registry, index, &record, true)?;
-            *registry_changed = true;
-            Some(removal)
-        } else {
-            registry.records[index].last_known_status =
-                Some(git::status_for_path(&record.meta.root));
-            registry.records[index].updated_at = Utc::now().to_rfc3339();
-            *registry_changed = true;
-            None
-        };
+        if post_commit_warnings.is_empty() {
+            if let Err(error) = self.validate_merge_phase() {
+                post_commit_warnings.push(post_commit_authority_warning(&error));
+            }
+        }
+        let authority_lost = !post_commit_warnings.is_empty();
+        warnings.extend(post_commit_warnings);
+        let mut cleanup = None;
+        let cleanup_requested = request.delete_after_merge && source_branch != target_branch;
+        if cleanup_requested && !authority_lost && !source_kept {
+            match self.cleanup_registered_worktree_blocking(registry, index, &record, true) {
+                Ok(removal) => {
+                    *registry_changed = true;
+                    cleanup = Some(removal);
+                }
+                Err(error) => warnings.push(format!(
+                    "The merge was applied, but the source worktree could not be cleaned up and was kept: {}",
+                    error
+                )),
+            }
+        } else if cleanup_requested && authority_lost {
+            warnings.push(
+                "The merge was applied, but the source worktree was kept because merge authority was lost before cleanup."
+                    .to_string(),
+            );
+        }
+        if cleanup.is_none() {
+            if let Some(entry) = registry.records.get_mut(index) {
+                entry.last_known_status = Some(git::status_for_path(&record.meta.root));
+                entry.updated_at = Utc::now().to_rfc3339();
+                *registry_changed = true;
+            }
+        }
         Ok(MergeWorktreeResponse {
             id: id.to_string(),
             status: "merged".to_string(),
@@ -2408,6 +2643,7 @@ impl WorktreeService {
             affected_references,
             affected_reference_count,
             warnings,
+            source_kept,
         })
     }
 
@@ -3675,17 +3911,90 @@ fn fallback_merge_message(record: &WorktreeRegistryRecord, branch: &str) -> Stri
     }
 }
 
-fn restore_target_stash(
-    source_root: &Path,
-    stash: &git::DirtyWorktreeStash,
-    warnings: &mut Vec<String>,
-) -> bool {
-    let restore_result = git::restore_stashed_changes(source_root, stash);
-    let restored = restore_result.critical_ok
-        && git::conflict_files_for_path(source_root).is_empty()
-        && !git::has_merge_in_progress(source_root);
-    warnings.extend(restore_result.warnings);
-    restored
+pub const SOURCE_KEPT_WARNING: &str =
+    "The source worktree was kept because the merge could not be finished cleanly.";
+
+fn post_commit_authority_warning(error: &str) -> String {
+    format!(
+        "The merge commit already landed, so it was kept; merge authority was lost afterwards: {}",
+        error
+    )
+}
+
+#[cfg(test)]
+pub(crate) mod registered_fault {
+    use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
+
+    pub(crate) enum Action {
+        FailAfterStash,
+        FailAfterMerge,
+        FailAfterCommit,
+        BlockAfterStash {
+            entered: std::sync::mpsc::Sender<()>,
+            release: std::sync::mpsc::Receiver<()>,
+        },
+    }
+
+    static FAULTS: Mutex<Vec<(PathBuf, Action)>> = Mutex::new(Vec::new());
+
+    fn key(root: &Path) -> PathBuf {
+        dunce::canonicalize(root).unwrap_or_else(|_| root.to_path_buf())
+    }
+
+    pub(crate) fn install(root: &Path, action: Action) {
+        FAULTS.lock().unwrap().push((key(root), action));
+    }
+
+    #[derive(PartialEq)]
+    enum Point {
+        Stash,
+        Merge,
+        Commit,
+    }
+
+    fn take(root: &Path, point: Point) -> Option<Action> {
+        let root = key(root);
+        let mut faults = FAULTS.lock().unwrap();
+        let index = faults.iter().position(|(path, action)| {
+            *path == root
+                && match action {
+                    Action::FailAfterMerge => point == Point::Merge,
+                    Action::FailAfterCommit => point == Point::Commit,
+                    _ => point == Point::Stash,
+                }
+        })?;
+        Some(faults.remove(index).1)
+    }
+
+    pub(crate) fn hit_after_commit(root: &Path) -> Result<(), String> {
+        match take(root, Point::Commit) {
+            None => Ok(()),
+            Some(_) => Err("injected merge authority loss after commit".into()),
+        }
+    }
+
+    pub(crate) fn hit(root: &Path) -> Result<(), String> {
+        match take(root, Point::Stash) {
+            None => Ok(()),
+            Some(Action::BlockAfterStash {
+                entered,
+                release,
+            }) => {
+                let _ = entered.send(());
+                let _ = release.recv();
+                Ok(())
+            }
+            Some(_) => Err("injected merge authority loss after stash".into()),
+        }
+    }
+
+    pub(crate) fn hit_after_merge(root: &Path) -> Result<(), String> {
+        match take(root, Point::Merge) {
+            None => Ok(()),
+            Some(_) => Err("injected merge authority loss after merge".into()),
+        }
+    }
 }
 
 fn post_cleanup_conflict_state(
@@ -7149,5 +7458,773 @@ mod worktree_registry_tests {
         assert!(err.contains("different branch"), "{err}");
         assert!(err.contains("legacy-wrong-branch"), "{err}");
         assert!(err.contains(expected_branch), "{err}");
+    }
+
+    struct DirtyTargetFixture {
+        _temp: tempfile::TempDir,
+        service: WorktreeService,
+        source: PathBuf,
+        id: String,
+        head: String,
+        index: String,
+        status: String,
+    }
+
+    async fn dirty_target_fixture(branch: &str) -> DirtyTargetFixture {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("repo");
+        std::fs::create_dir_all(&source).unwrap();
+        init_repo(&source);
+        let source = dunce::canonicalize(&source).unwrap();
+        std::fs::write(source.join("other.txt"), "base\n").unwrap();
+        run_git(&source, &["add", "other.txt"]);
+        run_git(&source, &["commit", "-m", "other"]);
+        let service = test_service(temp.path().join("cache"), source.clone()).unwrap();
+        let created = service
+            .create_worktree(CreateWorktreeRequest {
+                branch: Some(branch.to_string()),
+                kind: Some("chat".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        commit_file(
+            &created.worktree.meta.root,
+            "file.txt",
+            "agent change\n",
+            "agent change",
+        );
+        std::fs::write(source.join("other.txt"), "staged user\n").unwrap();
+        run_git(&source, &["add", "other.txt"]);
+        std::fs::write(source.join("other.txt"), "unstaged user\n").unwrap();
+        std::fs::write(source.join("notes.txt"), "untracked user\n").unwrap();
+        DirtyTargetFixture {
+            head: run_git(&source, &["rev-parse", "HEAD"]),
+            index: run_git(&source, &["ls-files", "--stage"]),
+            status: run_git(&source, &["status", "--porcelain"]),
+            _temp: temp,
+            service,
+            source,
+            id: created.worktree.meta.id,
+        }
+    }
+
+    fn dirty_merge_request(strategy: WorktreeMergeStrategy) -> MergeWorktreeRequest {
+        MergeWorktreeRequest {
+            strategy,
+            delete_after_merge: false,
+            target_branch: Some("main".to_string()),
+            commit_message: Some("dirty target merge".to_string()),
+            acknowledge_dirty_baseline: true,
+            ..Default::default()
+        }
+    }
+
+    fn git_state_exists(root: &Path, name: &str) -> bool {
+        root.join(run_git(root, &["rev-parse", "--git-path", name]).trim())
+            .exists()
+    }
+
+    fn assert_target_edits_restored(fixture: &DirtyTargetFixture, context: &str) {
+        let root = &fixture.source;
+        assert_eq!(
+            run_git(root, &["rev-parse", "HEAD"]),
+            fixture.head,
+            "{context}"
+        );
+        assert_eq!(
+            run_git(root, &["ls-files", "--stage"]),
+            fixture.index,
+            "{context}"
+        );
+        assert_eq!(
+            run_git(root, &["status", "--porcelain"]),
+            fixture.status,
+            "{context}"
+        );
+        assert_eq!(
+            run_git(root, &["show", ":other.txt"]),
+            "staged user\n",
+            "{context}"
+        );
+        assert_eq!(
+            std::fs::read(root.join("other.txt")).unwrap(),
+            b"unstaged user\n",
+            "{context}"
+        );
+        assert_eq!(
+            std::fs::read(root.join("notes.txt")).unwrap(),
+            b"untracked user\n",
+            "{context}"
+        );
+        assert_eq!(std::fs::read(root.join("file.txt")).unwrap(), b"hello\n");
+        assert!(
+            run_git(root, &["stash", "list"]).trim().is_empty(),
+            "{context}"
+        );
+        for name in ["MERGE_HEAD", "MERGE_MSG", "SQUASH_MSG"] {
+            assert!(!git_state_exists(root, name), "{context}: {name}");
+        }
+    }
+
+    #[tokio::test]
+    async fn registered_merge_authority_loss_after_stash_restores_target_edits() {
+        for (after_merge, strategy) in [
+            (false, WorktreeMergeStrategy::Squash),
+            (false, WorktreeMergeStrategy::Merge),
+            (true, WorktreeMergeStrategy::Squash),
+        ] {
+            {
+                let context = format!("after_merge={after_merge} {strategy:?}");
+                let fixture = dirty_target_fixture("refact/chat/authority-loss").await;
+                registered_fault::install(
+                    &fixture.source,
+                    if after_merge {
+                        registered_fault::Action::FailAfterMerge
+                    } else {
+                        registered_fault::Action::FailAfterStash
+                    },
+                );
+
+                let error = fixture
+                    .service
+                    .merge_worktree(&fixture.id, dirty_merge_request(strategy.clone()))
+                    .await
+                    .unwrap_err();
+
+                assert!(
+                    error.contains("injected merge authority loss"),
+                    "{context}: {error}"
+                );
+                assert!(
+                    error.contains("target workspace changes were restored"),
+                    "{context}: {error}"
+                );
+                assert_target_edits_restored(&fixture, &context);
+                assert!(fixture.service.get_worktree(&fixture.id).await.is_ok());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn registered_merge_authority_loss_after_commit_keeps_merge_with_warning() {
+        for (action, strategy) in [
+            (
+                registered_fault::Action::FailAfterMerge,
+                WorktreeMergeStrategy::Merge,
+            ),
+            (
+                registered_fault::Action::FailAfterCommit,
+                WorktreeMergeStrategy::Squash,
+            ),
+            (
+                registered_fault::Action::FailAfterCommit,
+                WorktreeMergeStrategy::Merge,
+            ),
+        ] {
+            let context = format!("{strategy:?}");
+            let fixture = dirty_target_fixture("refact/chat/late-authority-loss").await;
+            registered_fault::install(&fixture.source, action);
+
+            let response = fixture
+                .service
+                .merge_worktree(
+                    &fixture.id,
+                    MergeWorktreeRequest {
+                        delete_after_merge: true,
+                        ..dirty_merge_request(strategy.clone())
+                    },
+                )
+                .await
+                .expect("an applied merge is never reported as an error");
+
+            assert!(response.merged, "{context}: {response:?}");
+            assert!(
+                response
+                    .warnings
+                    .iter()
+                    .any(|warning| warning.contains("commit already landed")),
+                "{context}: {:?}",
+                response.warnings
+            );
+            let root = &fixture.source;
+            assert_ne!(run_git(root, &["rev-parse", "HEAD"]), fixture.head);
+            assert_eq!(
+                std::fs::read(root.join("file.txt")).unwrap(),
+                b"agent change\n"
+            );
+            assert_eq!(run_git(root, &["show", ":other.txt"]), "staged user\n");
+            assert_eq!(
+                std::fs::read(root.join("other.txt")).unwrap(),
+                b"unstaged user\n"
+            );
+            assert_eq!(
+                std::fs::read(root.join("notes.txt")).unwrap(),
+                b"untracked user\n"
+            );
+            assert!(run_git(root, &["stash", "list"]).trim().is_empty());
+            for name in ["MERGE_HEAD", "SQUASH_MSG"] {
+                assert!(!git_state_exists(root, name), "{context}: {name}");
+            }
+            assert!(response.cleanup.is_none(), "{context}");
+            assert!(fixture.service.get_worktree(&fixture.id).await.is_ok());
+        }
+    }
+
+    #[tokio::test]
+    async fn registered_authority_loss_inside_the_commit_window_keeps_the_landed_commit() {
+        for (token, strategy) in [
+            ("--no-ff", WorktreeMergeStrategy::Merge),
+            ("commit", WorktreeMergeStrategy::Squash),
+        ] {
+            for dirty in [true, false] {
+                let context = format!("{strategy:?} dirty={dirty}");
+                let fixture = dirty_target_fixture("refact/chat/commit-window").await;
+                let root = &fixture.source;
+                if !dirty {
+                    run_git(root, &["reset", "-q", "--hard"]);
+                    std::fs::remove_file(root.join("notes.txt")).unwrap();
+                }
+                git::commit_window_fault::install(root, token);
+
+                let response = fixture
+                    .service
+                    .merge_worktree(&fixture.id, dirty_merge_request(strategy.clone()))
+                    .await
+                    .unwrap_or_else(|error| panic!("{context}: {error}"));
+
+                assert!(response.merged, "{context}: {response:?}");
+                assert!(
+                    response
+                        .warnings
+                        .iter()
+                        .any(|warning| warning.contains("commit already landed")
+                            && warning.contains("injected authority loss")),
+                    "{context}: {:?}",
+                    response.warnings
+                );
+                let head = run_git(root, &["rev-parse", "HEAD"]);
+                assert_eq!(response.merge_commit.as_deref(), Some(head.trim()));
+                assert_eq!(
+                    run_git(root, &["rev-parse", "HEAD^1"]),
+                    fixture.head,
+                    "{context}"
+                );
+                assert_eq!(
+                    std::fs::read(root.join("file.txt")).unwrap(),
+                    b"agent change\n",
+                    "{context}"
+                );
+                if dirty {
+                    assert_eq!(run_git(root, &["show", ":other.txt"]), "staged user\n");
+                    assert_eq!(
+                        std::fs::read(root.join("other.txt")).unwrap(),
+                        b"unstaged user\n"
+                    );
+                    assert_eq!(
+                        std::fs::read(root.join("notes.txt")).unwrap(),
+                        b"untracked user\n"
+                    );
+                } else {
+                    assert!(run_git(root, &["status", "--porcelain"]).is_empty());
+                }
+                assert!(run_git(root, &["stash", "list"]).trim().is_empty());
+                for name in ["MERGE_HEAD", "SQUASH_MSG"] {
+                    assert!(!git_state_exists(root, name), "{context}: {name}");
+                }
+            }
+        }
+    }
+
+    fn install_colliding_hook(root: &Path, file: &str) {
+        let hooks = root.parent().unwrap().join("hooks");
+        std::fs::create_dir_all(&hooks).unwrap();
+        for name in ["post-commit", "post-merge"] {
+            let path = hooks.join(name);
+            std::fs::write(&path, format!("#!/bin/sh\necho hook > {file}\n")).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+        }
+        run_git(root, &["config", "core.hooksPath", hooks.to_str().unwrap()]);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn registered_reapply_failure_reports_restore_outcome_truthfully() {
+        for strategy in [WorktreeMergeStrategy::Squash, WorktreeMergeStrategy::Merge] {
+            for restore_fails in [false, true] {
+                let context = format!("{strategy:?} restore_fails={restore_fails}");
+                let fixture = dirty_target_fixture("refact/chat/reapply").await;
+                let root = &fixture.source;
+                run_git(root, &["reset", "-q", "--hard"]);
+                if restore_fails {
+                    install_colliding_hook(root, "notes.txt");
+                } else {
+                    git::commit_window_fault::install_before(root, "apply");
+                }
+
+                let response = fixture
+                    .service
+                    .merge_worktree(&fixture.id, dirty_merge_request(strategy.clone()))
+                    .await
+                    .unwrap_or_else(|error| panic!("{context}: {error}"));
+
+                assert!(!response.merged, "{context}: {response:?}");
+                assert_eq!(response.status, "conflict", "{context}");
+                assert_eq!(run_git(root, &["rev-parse", "HEAD"]), fixture.head);
+                let conflict = response.conflict.as_ref().unwrap();
+                let first = &response.warnings[0];
+                if restore_fails {
+                    assert!(
+                        first.contains("Nothing was merged: the merge was rolled back, but restoring your uncommitted edits failed; they are saved in git stash"),
+                        "{context}: {first}"
+                    );
+                    assert!(first.contains("git stash apply --index"), "{context}");
+                    assert!(!first.contains("restored in place"), "{context}");
+                    assert!(!conflict.aborted, "{context}");
+                    assert!(!run_git(root, &["stash", "list"]).trim().is_empty());
+                } else {
+                    assert!(
+                        first.contains("could not be re-applied on top of the incoming changes")
+                            && first.contains("restored in place"),
+                        "{context}: {first}"
+                    );
+                    assert!(conflict.aborted, "{context}");
+                    assert!(run_git(root, &["stash", "list"]).trim().is_empty());
+                    assert_eq!(
+                        std::fs::read(root.join("notes.txt")).unwrap(),
+                        b"untracked user\n"
+                    );
+                }
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn registered_failed_rollback_keeps_the_landed_commit_and_names_the_stash() {
+        for strategy in [WorktreeMergeStrategy::Squash, WorktreeMergeStrategy::Merge] {
+            let context = format!("{strategy:?}");
+            let fixture = dirty_target_fixture("refact/chat/rollback-fails").await;
+            let root = &fixture.source;
+            install_colliding_hook(root, "notes.txt");
+
+            let response = fixture
+                .service
+                .merge_worktree(
+                    &fixture.id,
+                    MergeWorktreeRequest {
+                        delete_after_merge: true,
+                        ..dirty_merge_request(strategy.clone())
+                    },
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{context}: {error}"));
+
+            assert!(response.merged, "{context}: {response:?}");
+            let head = run_git(root, &["rev-parse", "HEAD"]);
+            assert_eq!(response.merge_commit.as_deref(), Some(head.trim()));
+            assert_eq!(run_git(root, &["rev-parse", "HEAD^1"]), fixture.head);
+            let stash = run_git(root, &["stash", "list", "--format=%H"]);
+            let stash = stash.trim();
+            assert!(!stash.is_empty(), "{context}");
+            assert!(
+                response
+                    .warnings
+                    .iter()
+                    .any(|warning| warning.contains("landed and was kept")
+                        && warning.contains(&format!("git stash apply --index {stash}"))),
+                "{context}: {:?}",
+                response.warnings
+            );
+            assert!(response
+                .warnings
+                .iter()
+                .any(|warning| warning == SOURCE_KEPT_WARNING));
+            assert!(response.cleanup.is_none(), "{context}");
+            assert!(fixture.service.get_worktree(&fixture.id).await.is_ok());
+        }
+    }
+
+    #[cfg(unix)]
+    fn install_hook(root: &Path, name: &str, body: &str) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let hooks = root.parent().unwrap().join("hooks");
+        std::fs::create_dir_all(&hooks).unwrap();
+        let path = hooks.join(name);
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        run_git(root, &["config", "core.hooksPath", hooks.to_str().unwrap()]);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn registered_hook_commit_on_top_is_never_reset_away_by_a_failed_reapply() {
+        for (hook, strategy) in [
+            ("post-commit", WorktreeMergeStrategy::Squash),
+            ("post-merge", WorktreeMergeStrategy::Merge),
+        ] {
+            let context = format!("{strategy:?}");
+            let fixture = dirty_target_fixture("refact/chat/hook-commit").await;
+            let root = &fixture.source;
+            install_hook(
+                root,
+                hook,
+                "git -c core.hooksPath=/dev/null commit -q --no-verify --allow-empty -m hook-commit",
+            );
+            git::commit_window_fault::install_before(root, "apply");
+
+            let response = fixture
+                .service
+                .merge_worktree(&fixture.id, dirty_merge_request(strategy.clone()))
+                .await
+                .unwrap_or_else(|error| panic!("{context}: {error}"));
+
+            let head = run_git(root, &["rev-parse", "HEAD"]);
+            assert_eq!(
+                run_git(root, &["log", "-1", "--format=%s", "HEAD"]).trim(),
+                "hook-commit",
+                "{context}: {response:?}"
+            );
+            let own = run_git(root, &["rev-parse", "HEAD^1"]);
+            assert_eq!(run_git(root, &["rev-parse", "HEAD^1^1"]), fixture.head);
+            assert!(response.merged, "{context}: {response:?}");
+            assert_eq!(
+                response.merge_commit.as_deref(),
+                Some(own.trim()),
+                "{context}"
+            );
+            assert_ne!(response.merge_commit.as_deref(), Some(head.trim()));
+            assert!(response.source_kept, "{context}");
+            assert!(
+                response
+                    .warnings
+                    .iter()
+                    .any(|warning| warning.contains(&format!("moved to {}", head.trim()))),
+                "{context}: {:?}",
+                response.warnings
+            );
+            assert!(
+                !response
+                    .warnings
+                    .iter()
+                    .any(|warning| warning.contains("merge authority was lost")),
+                "{context}: {:?}",
+                response.warnings
+            );
+            assert_eq!(run_git(root, &["show", ":other.txt"]), "staged user\n");
+            assert_eq!(
+                std::fs::read(root.join("other.txt")).unwrap(),
+                b"unstaged user\n"
+            );
+            assert_eq!(
+                std::fs::read(root.join("notes.txt")).unwrap(),
+                b"untracked user\n"
+            );
+            assert!(run_git(root, &["stash", "list"]).trim().is_empty());
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn registered_squash_restaged_by_pre_commit_hook_is_recognised_after_commit_error() {
+        let fixture = dirty_target_fixture("refact/chat/restage").await;
+        let root = &fixture.source;
+        install_hook(
+            root,
+            "pre-commit",
+            "printf 'formatted\\n' > file.txt\ngit add file.txt",
+        );
+        git::commit_window_fault::install(root, "commit");
+
+        let response = fixture
+            .service
+            .merge_worktree(
+                &fixture.id,
+                dirty_merge_request(WorktreeMergeStrategy::Squash),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{error}"));
+
+        assert!(response.merged, "{response:?}");
+        let head = run_git(root, &["rev-parse", "HEAD"]);
+        assert_eq!(response.merge_commit.as_deref(), Some(head.trim()));
+        assert_eq!(run_git(root, &["rev-parse", "HEAD^1"]), fixture.head);
+        assert_eq!(run_git(root, &["show", "HEAD:file.txt"]), "formatted\n");
+        assert!(response
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("commit already landed")));
+        assert_eq!(run_git(root, &["show", ":other.txt"]), "staged user\n");
+        assert_eq!(
+            std::fs::read(root.join("notes.txt")).unwrap(),
+            b"untracked user\n"
+        );
+        assert!(run_git(root, &["stash", "list"]).trim().is_empty());
+    }
+
+    #[tokio::test]
+    async fn registered_authority_lost_as_the_commit_starts_has_no_post_command_check() {
+        for (token, strategy) in [
+            ("--no-ff", WorktreeMergeStrategy::Merge),
+            ("commit", WorktreeMergeStrategy::Squash),
+        ] {
+            let context = format!("{strategy:?}");
+            let fixture = dirty_target_fixture("refact/chat/flip").await;
+            let root = &fixture.source;
+            let lost = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            git::commit_window_fault::install_trigger(root, token, lost.clone());
+            let flag = lost.clone();
+            let service = fixture.service.with_merge_authority(Arc::new(move || {
+                if flag.load(std::sync::atomic::Ordering::SeqCst) {
+                    Err("lease flipped".into())
+                } else {
+                    Ok(())
+                }
+            }));
+
+            let response = service
+                .merge_worktree(&fixture.id, dirty_merge_request(strategy.clone()))
+                .await
+                .unwrap_or_else(|error| panic!("{context}: {error}"));
+
+            assert!(lost.load(std::sync::atomic::Ordering::SeqCst), "{context}");
+            assert!(response.merged, "{context}: {response:?}");
+            assert_eq!(
+                response
+                    .warnings
+                    .iter()
+                    .filter(|warning| warning.contains("commit already landed"))
+                    .count(),
+                1,
+                "{context}: {:?}",
+                response.warnings
+            );
+            assert_eq!(run_git(root, &["rev-parse", "HEAD^1"]), fixture.head);
+            assert_eq!(
+                std::fs::read(root.join("notes.txt")).unwrap(),
+                b"untracked user\n"
+            );
+            assert!(run_git(root, &["stash", "list"]).trim().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn registered_merge_lost_lease_after_stash_restores_without_authority() {
+        let fixture = dirty_target_fixture("refact/chat/lease-loss").await;
+        let stashed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let observed = stashed.clone();
+        let root = fixture.source.clone();
+        let service = fixture.service.with_merge_authority(Arc::new(move || {
+            if observed.load(std::sync::atomic::Ordering::SeqCst)
+                || git::run_git(&root, &["stash", "list"]).is_ok_and(|list| !list.trim().is_empty())
+            {
+                observed.store(true, std::sync::atomic::Ordering::SeqCst);
+                return Err("lease revoked".into());
+            }
+            Ok(())
+        }));
+
+        let error = service
+            .merge_worktree(
+                &fixture.id,
+                dirty_merge_request(WorktreeMergeStrategy::Squash),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(stashed.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(error.contains("lease revoked"), "{error}");
+        assert!(
+            error.contains("target workspace changes were restored"),
+            "{error}"
+        );
+        assert_target_edits_restored(&fixture, "lease revoked");
+    }
+
+    #[tokio::test]
+    async fn registered_merge_ignored_collision_is_honest_and_not_clobbered() {
+        for strategy in [WorktreeMergeStrategy::Squash, WorktreeMergeStrategy::Merge] {
+            let fixture = dirty_target_fixture("refact/chat/ignored-collision").await;
+            let view = fixture.service.get_worktree(&fixture.id).await.unwrap();
+            let agent = view.meta.root.clone();
+            std::fs::write(fixture.source.join(".git/info/exclude"), "*.log\n").unwrap();
+            std::fs::write(agent.join("build.log"), "incoming tracked\n").unwrap();
+            run_git(&agent, &["add", "-f", "build.log"]);
+            run_git(&agent, &["commit", "-m", "track log"]);
+            std::fs::write(fixture.source.join("build.log"), "precious ignored\n").unwrap();
+
+            let response = fixture
+                .service
+                .merge_worktree(&fixture.id, dirty_merge_request(strategy.clone()))
+                .await
+                .unwrap();
+
+            assert!(!response.merged, "{strategy:?}");
+            assert_eq!(response.status, "ignored_file_collision");
+            assert!(
+                response.warnings.iter().any(|w| w.contains("build.log")),
+                "{:?}",
+                response.warnings
+            );
+            assert_eq!(
+                std::fs::read(fixture.source.join("build.log")).unwrap(),
+                b"precious ignored\n"
+            );
+            assert_target_edits_restored(&fixture, &format!("{strategy:?}"));
+            assert!(agent.exists());
+            assert!(fixture.service.get_worktree(&fixture.id).await.is_ok());
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn registered_merge_cancelled_after_stash_still_restores_target_edits() {
+        let fixture = Arc::new(dirty_target_fixture("refact/chat/cancelled").await);
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        registered_fault::install(
+            &fixture.source,
+            registered_fault::Action::BlockAfterStash {
+                entered: entered_tx,
+                release: release_rx,
+            },
+        );
+        let running = fixture.clone();
+        let merge = tokio::spawn(async move {
+            running
+                .service
+                .merge_worktree(
+                    &running.id,
+                    dirty_merge_request(WorktreeMergeStrategy::Squash),
+                )
+                .await
+        });
+        tokio::task::spawn_blocking(move || {
+            entered_rx
+                .recv_timeout(Duration::from_secs(60))
+                .expect("merge must reach the stash")
+        })
+        .await
+        .unwrap();
+        assert!(!run_git(&fixture.source, &["stash", "list"])
+            .trim()
+            .is_empty());
+        merge.abort();
+        assert!(merge.await.unwrap_err().is_cancelled());
+        release_tx.send(()).unwrap();
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        while !git::run_git(&fixture.source, &["stash", "list"])
+            .is_ok_and(|list| list.trim().is_empty())
+        {
+            assert!(std::time::Instant::now() < deadline, "stash abandoned");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        for name in ["MERGE_HEAD", "SQUASH_MSG"] {
+            assert!(!git_state_exists(&fixture.source, name), "{name}");
+        }
+        assert_eq!(
+            std::fs::read(fixture.source.join("other.txt")).unwrap(),
+            b"unstaged user\n"
+        );
+        assert_eq!(
+            run_git(&fixture.source, &["show", ":other.txt"]),
+            "staged user\n"
+        );
+        assert_eq!(
+            std::fs::read(fixture.source.join("notes.txt")).unwrap(),
+            b"untracked user\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn registered_merge_dirty_target_round_trip_still_merges() {
+        for strategy in [WorktreeMergeStrategy::Squash, WorktreeMergeStrategy::Merge] {
+            let fixture = dirty_target_fixture("refact/chat/round-trip").await;
+            let response = fixture
+                .service
+                .merge_worktree(&fixture.id, dirty_merge_request(strategy.clone()))
+                .await
+                .unwrap();
+            assert!(response.merged, "{strategy:?}: {response:?}");
+            assert_eq!(
+                std::fs::read(fixture.source.join("file.txt")).unwrap(),
+                b"agent change\n"
+            );
+            assert_eq!(
+                std::fs::read(fixture.source.join("other.txt")).unwrap(),
+                b"unstaged user\n"
+            );
+            assert_eq!(
+                run_git(&fixture.source, &["show", ":other.txt"]),
+                "staged user\n"
+            );
+            assert_eq!(
+                std::fs::read(fixture.source.join("notes.txt")).unwrap(),
+                b"untracked user\n"
+            );
+            assert!(run_git(&fixture.source, &["stash", "list"])
+                .trim()
+                .is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn registered_merge_does_not_flag_untouched_path_the_target_stopped_tracking() {
+        for strategy in [WorktreeMergeStrategy::Squash, WorktreeMergeStrategy::Merge] {
+            let temp = tempfile::tempdir().unwrap();
+            let source = temp.path().join("repo");
+            std::fs::create_dir_all(&source).unwrap();
+            init_repo(&source);
+            let source = dunce::canonicalize(&source).unwrap();
+            std::fs::write(source.join("config.local"), "base config\n").unwrap();
+            std::fs::create_dir(source.join("docs")).unwrap();
+            std::fs::write(source.join("docs/x.md"), "x\n").unwrap();
+            run_git(&source, &["add", "-A"]);
+            run_git(&source, &["commit", "-m", "base"]);
+            let service = test_service(temp.path().join("cache"), source.clone()).unwrap();
+            let created = service
+                .create_worktree(CreateWorktreeRequest {
+                    branch: Some("refact/chat/stopped-tracking".to_string()),
+                    kind: Some("chat".to_string()),
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+            let agent = created.worktree.meta.root.clone();
+            run_git(&agent, &["rm", "-r", "-q", "docs"]);
+            std::fs::write(agent.join("docs"), "now a file\n").unwrap();
+            commit_file(&agent, "file.txt", "agent change\n", "agent change");
+            run_git(&agent, &["add", "-A"]);
+            run_git(&agent, &["commit", "-m", "docs dir to file"]);
+            run_git(&source, &["rm", "-q", "--cached", "config.local"]);
+            std::fs::write(source.join(".gitignore"), "config.local\n").unwrap();
+            run_git(&source, &["add", ".gitignore"]);
+            run_git(&source, &["commit", "-m", "stop tracking config.local"]);
+            std::fs::write(source.join("config.local"), "user local config\n").unwrap();
+
+            let response = service
+                .merge_worktree(
+                    &created.worktree.meta.id,
+                    dirty_merge_request(strategy.clone()),
+                )
+                .await
+                .unwrap();
+
+            assert!(response.merged, "{strategy:?}: {response:?}");
+            assert_eq!(
+                std::fs::read(source.join("config.local")).unwrap(),
+                b"user local config\n"
+            );
+            assert_eq!(std::fs::read(source.join("docs")).unwrap(), b"now a file\n");
+            assert_eq!(
+                std::fs::read(source.join("file.txt")).unwrap(),
+                b"agent change\n"
+            );
+        }
     }
 }

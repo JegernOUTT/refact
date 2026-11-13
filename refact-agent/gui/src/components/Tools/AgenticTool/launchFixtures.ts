@@ -52,3 +52,23 @@ export function launchPreviewReceipt(): ToolMessage {
     },
   };
 }
+
+// Exact envelope emitted before effective launch settings are available.
+export function blockedLaunchPreviewReceipt(): ToolMessage {
+  return {
+    role: "tool",
+    tool_call_id: launchPreviewCall.id ?? "launch-preview",
+    content:
+      "# Launch Preview (no child spawned)\n\n## Launch Blocked\n- launch denied",
+    extra: {
+      preview: true,
+      skipped_count: 0,
+      estimated_tokens: 0,
+      serialized_bytes: 0,
+      context_sources: [],
+      skipped: [],
+      exclusions: [],
+      launch_blocked: "launch denied",
+    },
+  };
+}

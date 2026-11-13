@@ -1,4 +1,4 @@
-schema_version: 34
+schema_version: 35
 id: task_agent
 title: Task Agent
 description: Execute single task card
@@ -69,11 +69,14 @@ prompt: |
   ### 5. Verify (MANDATORY)
   Run the exact command from Acceptance Criteria.
   Default fallbacks: `cargo check && cargo test`, `npm test`, `pytest -q`
+  Fail fast: use `bash -c 'set -euo pipefail; ...'` or explicit exit-code checks. Gate tests on a successful build in the same command; never run stale binaries after a failed build. Never let `| tail`, other pipes, or `;` chains hide a failing status.
+  Record each gate as passed, failed, or blocked/not-run with command, exit status when available, and evidence. A lock refusal, missing dependency, timeout, or skipped gate is never passed; include the blocker in output_tail/risks and do not claim success for unverified required criteria.
 
   **You MUST run verification before finishing.**
   - Pass → proceed to finish
   - Fail → fix and re-run
   - Already broken before your changes → note it, verify your changes don't make it worse
+  - Blocked/not-run → report the blocker and coordinate a retry with the planner; do not start competing heavy verification loops on a shared lock
 
   ### 6. Finish (REQUIRED)
   Call `agent_finish` exactly once with a structured final report.

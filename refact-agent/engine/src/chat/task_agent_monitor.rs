@@ -1373,6 +1373,54 @@ async fn mark_agent_as_failed(
     Ok(())
 }
 
+pub(crate) async fn notify_planner_verification_result(
+    app: AppState,
+    task_id: &str,
+    card_id: &str,
+    report: &crate::tasks::types::VerifierReport,
+) -> Result<(), String> {
+    let planner_chat_id = current_owner(&app, task_id).await?;
+    let planner_session =
+        get_or_create_session_with_trajectory(app.clone(), &app.chat.sessions, &planner_chat_id)
+            .await
+            .map_err(|error| error.to_string())?;
+    ensure_planner_task_meta(
+        app.clone(),
+        &planner_session,
+        task_id,
+        &planner_chat_id,
+        Some(card_id),
+        "verification_result",
+    )
+    .await?;
+    let verdict = serde_json::to_value(&report.classification).unwrap_or_default();
+    let concern = report
+        .concerns
+        .first()
+        .map(String::as_str)
+        .unwrap_or("no concerns");
+    let notice = task_agent_monitor_notice(
+        json!({"kind": "verification_result", "task_id": task_id,
+            "card_id": card_id, "verdict": verdict, "top_concern": concern}),
+        format!(
+            "Card {card_id} verification: {verdict} — {}",
+            concern.chars().take(300).collect::<String>()
+        ),
+    );
+    deliver_to_chat(
+        app,
+        &planner_chat_id,
+        PendingDelivery::new(
+            vec![notice],
+            PushMode::Append,
+            TASK_AGENT_MONITOR_SOURCE,
+            true,
+        ),
+    )
+    .await?;
+    Ok(())
+}
+
 /// Notify planner about newly finished agents without waiting for the full batch to end.
 pub(crate) async fn notify_planner_agents_finished(
     app: AppState,

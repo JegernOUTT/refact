@@ -71,6 +71,9 @@ export type WorkPage = {
   next_cursor?: string;
   generated_at_ms: number;
   withheld_rows?: number;
+  provenance_truncated?: boolean;
+  omitted_provenance_records?: number;
+  omitted_provenance_bytes?: number;
 };
 
 const object = (value: unknown): value is Record<string, unknown> =>
@@ -142,7 +145,13 @@ export function parseWorkPage(value: unknown): WorkPage | null {
     !integer(value.generated_at_ms) ||
     typeof value.truncated !== "boolean" ||
     !optionalText(value.next_cursor) ||
-    (value.withheld_rows !== undefined && !integer(value.withheld_rows))
+    (value.withheld_rows !== undefined && !integer(value.withheld_rows)) ||
+    (value.provenance_truncated !== undefined &&
+      typeof value.provenance_truncated !== "boolean") ||
+    (value.omitted_provenance_records !== undefined &&
+      !integer(value.omitted_provenance_records)) ||
+    (value.omitted_provenance_bytes !== undefined &&
+      !integer(value.omitted_provenance_bytes))
   )
     return null;
   const count =

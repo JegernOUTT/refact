@@ -490,7 +490,7 @@ impl WorkViews {
         let end = selected.expect("selection follows successful validation")?;
         if end > requested_end || end < offset || (end == offset && offset < total) {
             return Err(WorkError::projection_failure(
-                WorkFailureCause::ProvenanceCapacity,
+                WorkFailureCause::ProjectionUnavailable,
             ));
         }
         let snapshot = snapshot.ok_or_else(WorkError::cursor_expired)?;

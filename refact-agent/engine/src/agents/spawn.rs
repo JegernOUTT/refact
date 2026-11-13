@@ -2298,10 +2298,12 @@ mod accepted_launch_tests {
         assert!(plain.config.auto_approve_dangerous_commands);
         assert!(plain.config.reasoning_effort.is_none());
         assert!(plain.profile.is_none());
-        assert!(!plain.messages.iter().any(|message| message
-            .content
-            .content_text_only()
-            .contains("Agent Profile")));
+        assert!(!plain.messages.iter().any(|message| {
+            message
+                .content
+                .content_text_only()
+                .contains("Agent Profile")
+        }));
 
         let mut accepted_req = req.clone();
         accepted_req.profile = Some(resolved_profile(7, 3));
@@ -2317,10 +2319,12 @@ mod accepted_launch_tests {
             prepared.config.reasoning_effort,
             Some(refact_core::chat_types::ReasoningEffort::High)
         );
-        assert!(prepared.messages.iter().any(|message| message
-            .content
-            .content_text_only()
-            .contains("Careful reviewer")));
+        assert!(prepared.messages.iter().any(|message| {
+            message
+                .content
+                .content_text_only()
+                .contains("Careful reviewer")
+        }));
         let accepted_value: Value = serde_json::from_slice(accepted.as_bytes()).unwrap();
         assert_eq!(accepted_value["profile"]["revision"], 7);
         assert_eq!(accepted_value["profile"]["name"], "reviewer");
@@ -2704,7 +2708,9 @@ async fn resume_agent_for_parent_run(
     config.auto_approve_editing_tools &= trajectory.thread.auto_approve_editing_tools;
     config.auto_approve_dangerous_commands &= trajectory.thread.auto_approve_dangerous_commands;
     let trajectory_revision = resume_trajectory_revision(&trajectory)?;
-    let mut messages = trajectory.messages.clone();
+    let mut messages =
+        refact_core::active_context::repair_identical_message_duplicates(&trajectory.messages)
+            .map_err(|error| error.to_string())?;
     reconcile_resume_tool_pairs(&mut messages, reconcile_incomplete)?;
     let remaining = remaining_goal_steps(
         &trajectory,
@@ -2868,7 +2874,9 @@ async fn resume_agent_for_parent_run(
         if !matches!(rollback, Ok(true)) {
             finish_resume_error(&app, agent_id, generation, &abort, error.clone(), false).await;
         }
-        return Err(format!("{error}; resume not accepted; inspect before retrying (metadata rollback: {rollback:?})"));
+        return Err(format!(
+            "{error}; resume not accepted; inspect before retrying (metadata rollback: {rollback:?})"
+        ));
     }
     let attempt = match app
         .agents
@@ -4653,7 +4661,7 @@ pub(crate) async fn push_sibling_notice(
                 )],
                 PushMode::Append,
                 crate::agents::push::NOTICE_SIBLING.to_string(),
-                true,
+                false,
             ),
         )
         .await
@@ -4975,14 +4983,84 @@ fn fallback_failed_record(agent_id: String, req: SpawnRequest, error: String) ->
     }
 }
 
+const TRUNCATED_RESULT_MARKER: &str = "[Result truncated: output-token limit reached]";
+
 fn final_assistant_text(messages: &[ChatMessage]) -> String {
-    messages
+    let generation_start = messages
         .iter()
-        .rev()
-        .find(|message| message.role == "assistant")
-        .map(|message| message.content.content_text_only())
-        .filter(|text| !text.trim().is_empty())
-        .unwrap_or_else(|| NO_TEXT_RESULT_SUMMARY.to_string())
+        .rposition(|message| {
+            let Some(event) = message.extra.get("event") else {
+                return false;
+            };
+            message.role == "event"
+                && event["subkind"] == "system_notice"
+                && matches!(
+                    event["source"].as_str(),
+                    Some(crate::agents::push::NOTICE_CONTINUED_TURN)
+                        | Some(crate::agents::push::NOTICE_RESUME)
+                )
+                && event["payload"]["run_generation"].as_u64().is_some()
+        })
+        .map_or(0, |index| index + 1);
+    let messages = &messages[generation_start..];
+    let included_text = |message: &ChatMessage| {
+        message.role == "assistant"
+            && message.tool_calls.as_ref().is_none_or(Vec::is_empty)
+            && !message.content.content_text_only().trim().is_empty()
+    };
+    let Some(last) = messages.iter().rposition(included_text) else {
+        return NO_TEXT_RESULT_SUMMARY.to_string();
+    };
+    let final_text = messages[last].content.content_text_only();
+    let mut report = None;
+    let mut max_followup_length = 0;
+    for index in (0..=last).rev() {
+        let message = &messages[index];
+        if message.role != "assistant"
+            || message
+                .tool_calls
+                .as_ref()
+                .is_some_and(|calls| !calls.is_empty())
+        {
+            continue;
+        }
+        let text = message.content.content_text_only();
+        if text.trim().is_empty() {
+            continue;
+        }
+        let size = text.trim().chars().count();
+        if size >= 512 && max_followup_length <= size / 4 {
+            report = Some(index);
+            break;
+        }
+        let length = text.chars().count();
+        if length > 256 {
+            break;
+        }
+        max_followup_length = max_followup_length.max(length);
+    }
+    let start = report.unwrap_or(last);
+    let mut text = if report.is_some() {
+        messages[start..=last]
+            .iter()
+            .filter(|message| included_text(message))
+            .map(|message| message.content.content_text_only())
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    } else {
+        final_text
+    };
+    if messages[start..=last].iter().any(|message| {
+        included_text(message)
+            && message
+                .finish_reason
+                .as_deref()
+                .and_then(crate::chat::normalize_stop_reason)
+                == Some(crate::chat::NormalizedStopReason::ProviderLengthStop)
+    }) {
+        text = format!("{TRUNCATED_RESULT_MARKER}\n{text}");
+    }
+    text
 }
 
 fn correction_policy() -> refact_chat_api::CorrectionPolicy {
@@ -5098,6 +5176,165 @@ async fn handoff_report_for(
 #[cfg(test)]
 mod resume_validation_tests {
     use super::*;
+
+    #[test]
+    fn final_report_retains_only_short_followups_and_flags_length_stops() {
+        let report = "verified report\n".repeat(60);
+        let mut tool_call = ChatMessage::new("assistant".into(), String::new());
+        tool_call.tool_calls = Some(vec![serde_json::from_value(serde_json::json!({
+            "id": "call", "type": "function",
+            "function": {"name": "progress_report", "arguments": "{}"}
+        }))
+        .unwrap()]);
+        let messages = vec![
+            ChatMessage::new("assistant".into(), report.clone()),
+            ChatMessage::new("event".into(), "sibling finished".into()),
+            tool_call,
+            ChatMessage::new("tool".into(), "Progress updated".into()),
+            ChatMessage::new("assistant".into(), "See the full report above.".into()),
+        ];
+        assert_eq!(
+            final_assistant_text(&messages),
+            format!("{report}\n\nSee the full report above.")
+        );
+    }
+
+    #[test]
+    fn final_report_ignores_whitespace_only_tool_call_text() {
+        let report = "verified report\n".repeat(60);
+        for text in [" ".repeat(512), "n".repeat(600)] {
+            let mut tool_call = ChatMessage::new("assistant".into(), text);
+            tool_call.finish_reason = Some("length".into());
+            tool_call.tool_calls = Some(vec![serde_json::from_value(serde_json::json!({
+                "id": "call", "type": "function",
+                "function": {"name": "progress_report", "arguments": "{}"}
+            }))
+            .unwrap()]);
+            let messages = vec![
+                ChatMessage::new("assistant".into(), report.clone()),
+                tool_call,
+                ChatMessage::new("tool".into(), "Progress updated".into()),
+                ChatMessage::new("assistant".into(), "Done.".into()),
+            ];
+            assert_eq!(
+                final_assistant_text(&messages),
+                format!("{report}\n\nDone.")
+            );
+        }
+    }
+
+    #[test]
+    fn final_report_ignores_whitespace_only_final_reply() {
+        let report = "verified report\n".repeat(60);
+        for whitespace in [" \n\t".to_string(), " ".repeat(512)] {
+            let messages = vec![
+                ChatMessage::new("assistant".into(), report.clone()),
+                ChatMessage::new("assistant".into(), whitespace),
+            ];
+            assert_eq!(final_assistant_text(&messages), report);
+        }
+    }
+
+    #[test]
+    fn final_report_does_not_use_tool_call_preamble_as_report() {
+        let mut preamble = ChatMessage::new("assistant".into(), "p".repeat(600));
+        preamble.tool_calls = Some(vec![serde_json::from_value(serde_json::json!({
+            "id": "call", "type": "function",
+            "function": {"name": "progress_report", "arguments": "{}"}
+        }))
+        .unwrap()]);
+        let messages = vec![
+            preamble,
+            ChatMessage::new("tool".into(), "Progress updated".into()),
+            ChatMessage::new("assistant".into(), "Done.".into()),
+        ];
+        assert_eq!(final_assistant_text(&messages), "Done.");
+    }
+
+    #[test]
+    fn final_report_measures_substantiveness_without_surrounding_whitespace() {
+        let messages = vec![
+            ChatMessage::new("assistant".into(), format!(" {} ", "r".repeat(511))),
+            ChatMessage::new("assistant".into(), "Done.".into()),
+        ];
+        assert_eq!(final_assistant_text(&messages), "Done.");
+    }
+
+    #[test]
+    fn final_report_uses_latest_substantive_report() {
+        let older = "old report\n".repeat(70);
+        let newer = "new report\n".repeat(70);
+        let messages = vec![
+            ChatMessage::new("assistant".into(), older.clone()),
+            ChatMessage::new("assistant".into(), newer.clone()),
+            ChatMessage::new("assistant".into(), "Done.".into()),
+        ];
+        assert_eq!(final_assistant_text(&messages), format!("{newer}\n\nDone."));
+        assert!(!final_assistant_text(&messages).contains(&older));
+    }
+
+    #[test]
+    fn final_report_does_not_cross_run_generation_boundary() {
+        use crate::agents::types::BgAgentStatus;
+        for previous in [
+            BgAgentStatus::Completed,
+            BgAgentStatus::Closed,
+            BgAgentStatus::Failed,
+        ] {
+            let (source, notice) = continuation_notice(previous);
+            let messages = vec![
+                ChatMessage::new("assistant".into(), "previous report\n".repeat(60)),
+                event(
+                    EventSubkind::SystemNotice,
+                    source,
+                    serde_json::json!({"agent_id": "child", "run_generation": 2}),
+                    notice,
+                ),
+                ChatMessage::new("user".into(), "Please answer this follow-up.".into()),
+                ChatMessage::new("assistant".into(), "New answer.".into()),
+            ];
+            assert_eq!(final_assistant_text(&messages), "New answer.");
+            assert_eq!(final_assistant_text(&messages[..3]), NO_TEXT_RESULT_SUMMARY);
+        }
+    }
+
+    #[test]
+    fn final_report_flags_length_stop_on_retained_report_or_followup() {
+        for stop_index in [0, 1, 2] {
+            for reason in ["length", "max_tokens"] {
+                let report = "verified report\n".repeat(60);
+                let mut messages = vec![
+                    ChatMessage::new("assistant".into(), report.clone()),
+                    ChatMessage::new("assistant".into(), "First follow-up.".into()),
+                    ChatMessage::new("assistant".into(), "Done.".into()),
+                ];
+                messages[stop_index].finish_reason = Some(reason.into());
+                assert_eq!(
+                    final_assistant_text(&messages),
+                    format!("{TRUNCATED_RESULT_MARKER}\n{report}\n\nFirst follow-up.\n\nDone.")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn final_report_preserves_short_final_and_nonshort_replacement_behavior() {
+        assert_eq!(final_assistant_text(&[]), NO_TEXT_RESULT_SUMMARY);
+        let mut messages = vec![ChatMessage::new("assistant".into(), "Short final.".into())];
+        assert_eq!(final_assistant_text(&messages), "Short final.");
+        messages[0].finish_reason = Some("length".into());
+        assert_eq!(
+            final_assistant_text(&messages),
+            format!("{TRUNCATED_RESULT_MARKER}\nShort final.")
+        );
+        messages[0].content = ChatContent::SimpleText("report".repeat(100));
+        let replacement = "x".repeat(300);
+        messages.push(ChatMessage::new("assistant".into(), replacement.clone()));
+        assert_eq!(final_assistant_text(&messages), replacement);
+        messages[0].content = ChatContent::SimpleText("r".repeat(512));
+        messages[1].content = ChatContent::SimpleText("x".repeat(129));
+        assert_eq!(final_assistant_text(&messages), "x".repeat(129));
+    }
 
     #[test]
     fn recovery_thread_revision_ignores_only_incomplete_prefix_clock() {

@@ -912,6 +912,8 @@ fn prepare_subchat_messages(
     messages: Vec<ChatMessage>,
     model_id: &str,
 ) -> Result<Vec<ChatMessage>, String> {
+    let messages = refact_core::active_context::repair_identical_message_duplicates(&messages)
+        .map_err(|e| e.to_string())?;
     let messages = refact_core::active_context::active_context(&messages)
         .map_err(|e| e.to_string())?
         .messages;
@@ -923,6 +925,12 @@ fn prepare_subchat_messages(
         return Ok(messages);
     }
 
+    if messages.iter().any(|message| {
+        message.role == "system"
+            && message.content.content_text_only() == GUARDED_REPORT_INSTRUCTION
+    }) {
+        return Ok(messages);
+    }
     let mut prepared = Vec::with_capacity(messages.len() + 1);
     prepared.push(ChatMessage::new(
         "system".to_string(),
@@ -6493,6 +6501,51 @@ mod subchat_tests {
             prepared[0].content.content_text_only(),
             GUARDED_REPORT_INSTRUCTION
         );
+    }
+
+    #[tokio::test]
+    async fn guarded_followup_then_two_continuations_is_idempotent() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        install_privacy_policy(&gcx, "trusted", true);
+        let input = vec![message_with_privacy(
+            "user",
+            "guarded context",
+            vec![privacy_record(".env", "secrets")],
+        )];
+        let mut messages = prepare_subchat_messages(&gcx, input, "trusted/model").unwrap();
+        messages[0].message_id = "legacy:system:ec51f16f7e94419faa2c170f1f717230".into();
+        messages.push(ChatMessage::new("assistant".into(), "complete".into()));
+        let followup = refact_chat_api::PendingDelivery::new(
+            vec![ChatMessage::new("user".into(), "saved follow-up".into())],
+            refact_chat_api::PushMode::Append,
+            "agents.message",
+            true,
+        );
+        for generation in 2..=3 {
+            super::append_runner_deliveries(&mut messages, vec![followup.clone()]);
+            messages.push(ChatMessage::new(
+                "user".into(),
+                format!("continue {generation}"),
+            ));
+            messages = prepare_subchat_messages(&gcx, messages, "trusted/model").unwrap();
+            assert!(refact_core::active_context::active_context(&messages).is_ok());
+            assert_eq!(
+                messages
+                    .iter()
+                    .filter(
+                        |message| message.content.content_text_only() == GUARDED_REPORT_INSTRUCTION
+                    )
+                    .count(),
+                1
+            );
+            assert_eq!(
+                messages
+                    .iter()
+                    .filter(|message| message.content.content_text_only() == "saved follow-up")
+                    .count(),
+                1
+            );
+        }
     }
 
     #[test]

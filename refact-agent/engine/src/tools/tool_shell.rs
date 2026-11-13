@@ -452,22 +452,17 @@ impl Tool for ToolShell {
                     root: meta.root.clone(),
                 });
             } else {
-                for root in context
+                let roots = context
                     .global_context
                     .documents_state
                     .workspace_folders
                     .lock()
                     .unwrap()
-                    .iter()
-                {
-                    let root = std::fs::canonicalize(root)
-                        .map_err(|_| "shell workspace identity unavailable")?;
-                    let root = dunce::simplified(&root).to_path_buf();
-                    keys.push(crate::tool_jobs::ScopeKey::Worktree {
-                        project: root.clone(),
-                        root,
-                    });
-                }
+                    .clone();
+                keys.extend(
+                    crate::chat::tools::workspace_scope_keys(&roots)
+                        .map_err(|error| format!("shell {error}"))?,
+                );
             }
             (jobs, keys)
         };
@@ -1569,6 +1564,56 @@ mod tests {
         let (gcx, ccx) = ccx_with_gcx_and_abort(None).await;
         *gcx.documents_state.workspace_folders.lock().unwrap() = vec![workspace.to_path_buf()];
         (gcx, ccx)
+    }
+
+    #[tokio::test]
+    async fn shell_runs_when_a_workspace_folder_was_removed() {
+        let existing = tempfile::tempdir().unwrap();
+        let removed = tempfile::tempdir().unwrap();
+        let removed_path = removed.path().to_path_buf();
+        drop(removed);
+        let (gcx, ccx) = ccx_with_gcx_and_abort(None).await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() =
+            vec![existing.path().to_path_buf(), removed_path];
+        let (_, messages) = ToolShell::default()
+            .tool_execute(
+                ccx,
+                &"shell".into(),
+                &args(vec![
+                    ("command", json!(success_command())),
+                    ("description", json!("Run with a stale workspace folder")),
+                ]),
+            )
+            .await
+            .unwrap();
+        let message = only_chat_message(messages);
+        assert!(text(&message).contains("hello"));
+        assert_eq!(message.tool_failed, Some(false));
+    }
+
+    #[tokio::test]
+    async fn shell_names_stale_folders_when_no_workspace_root_remains() {
+        let removed = tempfile::tempdir().unwrap();
+        let removed_path = removed.path().to_path_buf();
+        drop(removed);
+        let (gcx, ccx) = ccx_with_gcx_and_abort(None).await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![removed_path.clone()];
+        let error = ToolShell::default()
+            .tool_execute(
+                ccx,
+                &"shell".into(),
+                &args(vec![
+                    ("command", json!(success_command())),
+                    ("description", json!("Run with only a stale folder")),
+                ]),
+            )
+            .await
+            .unwrap_err();
+        assert!(error.contains("workspace identity unavailable"), "{error}");
+        assert!(
+            error.contains(&removed_path.display().to_string()),
+            "{error}"
+        );
     }
 
     async fn ccx_with_abort(abort_flag: Option<Arc<AtomicBool>>) -> Arc<AMutex<AtCommandsContext>> {

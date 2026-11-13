@@ -613,6 +613,35 @@ fn audited_mode_semantic_workflows_and_confirmation_boundaries() {
     for tool in ["set_goal", "board_create", "schedule"] {
         assert!(!has(design, tool));
     }
+    let planner = &modes["task_planner"];
+    for tool in [
+        "apply_patch",
+        "update_textdoc",
+        "update_textdoc_by_lines",
+        "update_textdoc_anchored",
+        "update_textdoc_regex",
+        "create_textdoc",
+        "undo_textdoc",
+    ] {
+        assert!(has(planner, tool), "planner missing {tool}");
+        assert!(exact_rule(planner, tool, "auto"));
+    }
+    assert!(planner.prompt.contains("small, low-risk direct fixes"));
+    assert!(!planner.prompt.contains("Never modify files yourself!"));
+    for id in ["task_agent", "task_planner"] {
+        let prompt = &modes[id].prompt;
+        assert!(prompt.contains("set -euo pipefail"));
+        assert!(prompt.contains("blocked/not-run"));
+        assert!(prompt.contains("successful build in the same command"));
+        assert!(!prompt.contains("sandbox="));
+    }
+    assert!(planner
+        .prompt
+        .contains("never blocks on verifier or card state"));
+    assert!(planner.prompt.contains("\"Merge Not Performed\""));
+    assert!(planner
+        .prompt
+        .contains("report may arrive after the finish notification"));
     assert!(has(&modes["task_planner"], "restart_agent"));
     assert!(exact_rule(&modes["task_planner"], "restart_agent", "ask"));
     assert!(!has(&modes["task_planner"], "worktree_create"));

@@ -13,7 +13,7 @@ async fn provenance_budget_paginates_complete_rows_without_skipping_or_splicing(
     let (app, dir, caller) = fixture().await;
     app.chat.sessions.write().await.remove("c");
     for id in ["a", "b"] {
-        let records = (0..150).map(|n| refact_privacy::FileRecord {
+        let records = (0..700).map(|n| refact_privacy::FileRecord {
             path: dir
                 .path()
                 .join(format!("{id}-{n}.rs"))
@@ -106,12 +106,13 @@ async fn fixture() -> (AppState, tempfile::TempDir, WorkCaller) {
 
 #[serial(coordination_work_overview)]
 #[tokio::test]
-async fn provenance_budget_single_detail_capacity_is_typed_not_encoding() {
+async fn provenance_budget_single_detail_overflow_is_truncated_with_counts() {
     let (app, dir, caller) = fixture().await;
     let mut message = crate::call_validation::ChatMessage::default();
+    let total = PROVENANCE_RECORD_CAP + 100;
     crate::privacy::records::merge_records(
         &mut message,
-        (0..257).map(|n| refact_privacy::FileRecord {
+        (0..total).map(|n| refact_privacy::FileRecord {
             path: dir
                 .path()
                 .join(format!("detail-{n}.rs"))
@@ -130,7 +131,7 @@ async fn provenance_budget_single_detail_capacity_is_typed_not_encoding() {
         .lock()
         .await
         .add_message(message);
-    let error = inspect(
+    let inspection = inspect(
         &app,
         &caller,
         InspectRequest {
@@ -142,20 +143,40 @@ async fn provenance_budget_single_detail_capacity_is_typed_not_encoding() {
         },
     )
     .await
-    .unwrap_err();
+    .unwrap();
+    let page = &inspection.page;
+    assert!(page.provenance_truncated);
+    assert!(page.omitted_provenance_records >= 100);
+    assert!(page.omitted_provenance_bytes > 0);
+    assert_eq!(page.source_records.len(), PROVENANCE_RECORD_CAP);
+    let rendered = serde_json::to_value(&inspection).unwrap();
+    assert_eq!(rendered["provenance_truncated"], true);
     assert_eq!(
-        serde_json::to_value(error.cause).unwrap(),
-        "provenance_capacity"
+        rendered["omitted_provenance_records"],
+        page.omitted_provenance_records
     );
-    assert!(!error.retryable);
-    assert!(error
-        .message
-        .contains("provenance was not truncated or omitted"));
-    assert!(error
-        .message
-        .contains("repeating an unchanged request does not resolve"));
-    assert!(uuid::Uuid::parse_str(&error.request_id).is_ok());
-    assert!(!error.to_string().contains(dir.path().to_str().unwrap()));
+    assert!(rendered["omitted_provenance_bytes"].as_u64().unwrap() > 0);
+    let mut attached = crate::call_validation::ChatMessage::default();
+    attach_provenance(&app, &mut attached, page, inspection.row.as_ref()).unwrap();
+    assert_eq!(
+        attached.extra["privacy"]["files"].as_array().unwrap().len(),
+        PROVENANCE_RECORD_CAP
+    );
+}
+
+#[serial(coordination_work_overview)]
+#[tokio::test]
+async fn provenance_budget_within_caps_reports_no_truncation() {
+    let (app, _dir, caller) = fixture().await;
+    let page = overview(&app, &caller, WorkOverviewRequest::default())
+        .await
+        .unwrap();
+    assert!(!page.provenance_truncated);
+    assert_eq!(page.omitted_provenance_records, 0);
+    assert_eq!(page.omitted_provenance_bytes, 0);
+    let rendered = serde_json::to_value(&page).unwrap();
+    assert!(rendered.get("provenance_truncated").is_none());
+    assert!(rendered.get("omitted_provenance_records").is_none());
 }
 
 #[serial(coordination_work_overview)]
@@ -172,22 +193,34 @@ async fn provenance_budget_attachment_exact_count_bytes_and_duplicate_boundaries
         zone: "normal".into(),
         attribution: refact_privacy::Attribution::Declared,
     };
-    page.source_records = (0..256).map(|n| record(format!("file-{n}.rs"))).collect();
-    let mut message = crate::call_validation::ChatMessage::default();
-    attach_provenance(&app, &mut message, &page, None).unwrap();
-    assert_eq!(
-        message.extra["privacy"]["files"].as_array().unwrap().len(),
-        256
-    );
+    let attached = |page: &WorkOverview| {
+        let mut message = crate::call_validation::ChatMessage::default();
+        attach_provenance(&app, &mut message, page, None).unwrap();
+        message
+            .extra
+            .get("privacy")
+            .map_or(0, |privacy| privacy["files"].as_array().unwrap().len())
+    };
+    page.source_records = (0..PROVENANCE_RECORD_CAP)
+        .map(|n| record(format!("file-{n}.rs")))
+        .collect();
+    assert_eq!(attached(&page), PROVENANCE_RECORD_CAP);
     page.source_records.extend(page.source_records.clone());
-    attach_provenance(&app, &mut message, &page, None).unwrap();
+    assert_eq!(attached(&page), PROVENANCE_RECORD_CAP);
     page.source_records.push(record("one-too-many.rs".into()));
-    let error = attach_provenance(&app, &mut message, &page, None).unwrap_err();
+    assert_eq!(attached(&page), PROVENANCE_RECORD_CAP);
+    let guarded = refact_privacy::FileRecord {
+        path: "guarded.rs".into(),
+        zone: "secret".into(),
+        attribution: refact_privacy::Attribution::Declared,
+    };
+    page.source_records.push(guarded);
     assert_eq!(
-        serde_json::to_value(error.cause).unwrap(),
-        "provenance_capacity"
+        attached(&page),
+        PROVENANCE_RECORD_CAP + 1,
+        "restricted-zone records are never dropped"
     );
-    let cap = 64 * 1024 - 64;
+    let cap = PROVENANCE_BYTE_CAP;
     let overhead = serde_json::to_vec(&vec![record(String::new())])
         .unwrap()
         .len();
@@ -199,20 +232,7 @@ async fn provenance_budget_attachment_exact_count_bytes_and_duplicate_boundaries
             serde_json::to_vec(&page.source_records).unwrap().len(),
             cap.checked_add_signed(delta).unwrap()
         );
-        let result = attach_provenance(
-            &app,
-            &mut crate::call_validation::ChatMessage::default(),
-            &page,
-            None,
-        );
-        if delta <= 0 {
-            result.unwrap();
-        } else {
-            assert_eq!(
-                serde_json::to_value(result.unwrap_err().cause).unwrap(),
-                "provenance_capacity"
-            );
-        }
+        assert_eq!(attached(&page), usize::from(delta <= 0));
     }
 }
 
@@ -225,11 +245,11 @@ async fn provenance_budget_inventory_roots_and_fixed_guards_are_complete() {
         .unwrap();
     let mut first = seed.roots[0].clone();
     first.id = "inventory-a".into();
-    first.path = Some(format!("/{}", "a".repeat(34_000)));
+    first.path = Some(format!("/{}", "a".repeat(140_000)));
     first.source_path = Some("/source-a".into());
     let mut second = first.clone();
     second.id = "inventory-b".into();
-    second.path = Some(format!("/{}", "b".repeat(34_000)));
+    second.path = Some(format!("/{}", "b".repeat(140_000)));
     second.source_path = Some("/source-b".into());
     let snapshot = WorkSnapshot {
         roots: vec![first.clone(), second.clone()],
@@ -252,7 +272,7 @@ async fn provenance_budget_inventory_roots_and_fixed_guards_are_complete() {
             &settings,
             1,
             |_| Ok(()),
-            |saved, start, end| budget_page(&app, saved, start, end).map(|result| result.0),
+            |saved, start, end| budget_page(&app, saved, start, end).map(|result| result.end),
         )
         .unwrap();
     assert_eq!(page.snapshot.roots, vec![first]);
@@ -266,13 +286,13 @@ async fn provenance_budget_inventory_roots_and_fixed_guards_are_complete() {
             &settings,
             2,
             |_| Ok(()),
-            |saved, start, end| budget_page(&app, saved, start, end).map(|result| result.0),
+            |saved, start, end| budget_page(&app, saved, start, end).map(|result| result.end),
         )
         .unwrap();
     assert_eq!(next.snapshot.roots, vec![second]);
     assert!(next.window.next_cursor.is_none());
     let mut oversized = seed.rows[0].clone();
-    oversized.source_records = (0..257)
+    oversized.source_records = (0..PROVENANCE_RECORD_CAP + 8)
         .map(|n| refact_privacy::FileRecord {
             path: format!("guard-{n}"),
             zone: "normal".into(),
@@ -283,10 +303,10 @@ async fn provenance_budget_inventory_roots_and_fixed_guards_are_complete() {
         guard_rows: vec![oversized],
         ..Default::default()
     };
-    assert_eq!(
-        budget_page(&app, &guarded, 0, 0).unwrap_err().cause,
-        Some(super::error::WorkFailureCause::ProvenanceCapacity)
-    );
+    let selected = budget_page(&app, &guarded, 0, 0).unwrap();
+    assert_eq!(selected.records.len(), PROVENANCE_RECORD_CAP);
+    assert!(selected.omitted_records >= 8);
+    assert!(selected.omitted_bytes > 0);
 }
 
 /// Register one worktree against the fixture project exactly as the worktree
@@ -1174,7 +1194,7 @@ async fn direct_inventory_cursor_uses_frozen_order_budget_and_revalidates_record
         message.message_id = "source".into();
         crate::privacy::records::merge_records(
             &mut message,
-            (0..150).map(|n| refact_privacy::FileRecord {
+            (0..700).map(|n| refact_privacy::FileRecord {
                 path: dir
                     .path()
                     .join(format!("{id}-{n}.rs"))

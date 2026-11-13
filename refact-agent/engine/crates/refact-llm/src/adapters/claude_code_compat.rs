@@ -142,11 +142,9 @@ pub fn build_oauth_url(endpoint: &str) -> String {
 // ─── System Prompt Helpers ───────────────────────────────────────────────────
 
 /// Maps original Refact tool base-names to CC-mode generic names.
-/// Applied in FOUR places to stay consistent:
-///   1. System prompt text     — sanitize_system_text()
-///   2. Context file messages  — sanitize_system_text() (via context_sanitizer in convert_to_anthropic)
-///   3. Outbound tools array   — apply_cc_tool_names()
-///   4. Message history        — apply_cc_tool_use_in_messages()
+/// Applied to system and Refact-authored instruction text at identifier boundaries,
+/// outbound tool definitions, and tool_use names. File contents and other message text
+/// must not pass through instruction sanitization.
 /// Reversed in dispatch fallback via cc_resolve_tool_name().
 ///
 /// ORDER: more specific names before shorter prefixes that would match them first.
@@ -310,10 +308,46 @@ const CC_SYSTEM_REPLACEMENTS: &[(&str, &str)] = &[
 pub fn sanitize_system_text(text: &str) -> String {
     let mut out = text.to_string();
     for (find, replace) in CC_SYSTEM_REPLACEMENTS {
-        out = out.replace(find, replace);
+        if *find != "mcp_" && !CC_TOOL_RENAMES.iter().any(|(name, _)| name == find) {
+            out = out.replace(find, replace);
+        }
     }
-    for (find, replace) in CC_TOOL_RENAMES {
-        out = out.replace(find, replace);
+    rename_instruction_tool_identifiers(&out)
+}
+
+fn rename_instruction_tool_identifiers(text: &str) -> String {
+    fn identifier_char(ch: char) -> bool {
+        ch.is_alphanumeric() || ch == '_'
+    }
+
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.char_indices().peekable();
+    while let Some((start, ch)) = chars.next() {
+        if !identifier_char(ch) {
+            out.push(ch);
+            continue;
+        }
+        let mut end = start + ch.len_utf8();
+        while let Some(&(index, next)) = chars.peek() {
+            if !identifier_char(next) {
+                break;
+            }
+            chars.next();
+            end = index + next.len_utf8();
+        }
+        let token = &text[start..end];
+        let before = text[..start].chars().next_back();
+        let after = text[end..].chars().next();
+        let in_path = matches!(before, Some('/' | '\\' | '.'))
+            || matches!(after, Some('/' | '\\'))
+            || (after == Some('.') && text[end + 1..].chars().next().is_some_and(identifier_char));
+        if in_path {
+            out.push_str(token);
+        } else if let Some(base) = token.strip_prefix("mcp_") {
+            out.push_str(base);
+        } else {
+            out.push_str(cc_rename_base_tool(token));
+        }
     }
     out
 }
@@ -583,6 +617,24 @@ pub fn inject_metadata(body: &mut Value, identity: Option<&ClaudeCodeIdentity>) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn instruction_tool_names_respect_identifier_and_path_boundaries() {
+        assert_eq!(
+            sanitize_system_text("use update_textdoc, `apply_patch` and handoff_to_mode."),
+            "use patch, `apply` and switch_mode."
+        );
+        let unchanged = "tool_handoff_to_mode.rs my_apply_patch_helper update_textdoc_extra \
+            /tools/apply_patch tools\\apply_patch apply_patch.rs apply_patch/helper \
+            préapply_patch apply_patché";
+        assert_eq!(sanitize_system_text(unchanged), unchanged);
+        for (original, alias) in CC_TOOL_RENAMES {
+            assert_eq!(
+                sanitize_system_text(&format!("use {original}")),
+                format!("use {alias}")
+            );
+        }
+    }
 
     #[test]
     fn test_build_oauth_url_with_existing_params() {

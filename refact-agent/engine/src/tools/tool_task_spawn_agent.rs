@@ -541,7 +541,6 @@ fn find_abandoned_worktrees(
     root: &Path,
     base: &str,
     launch_base: &str,
-    action: &str,
 ) -> Result<Option<String>, String> {
     let card = board
         .get_card(card_id)
@@ -561,7 +560,7 @@ fn find_abandoned_worktrees(
         .filter(|path| !path.trim().is_empty())
         .map(|path| spawn_gate_path(root, card.agent_worktree.as_deref(), Path::new(path)))
         .collect();
-    let mut blockers = Vec::new();
+    let mut conflicts = Vec::new();
     let mut unmerged = Vec::new();
     let mut included = Vec::new();
     for other in retained_worktree_cards(board) {
@@ -599,20 +598,26 @@ fn find_abandoned_worktrees(
         });
         let mut reasons = Vec::new();
         if dependencies.contains(&other.id) {
-            reasons.push("dependency (direct or transitive)".to_string());
+            reasons.push(format!(
+                "dependency (direct or transitive); launch base `{launch_base}` does not contain its code"
+            ));
         }
         if let Some(path) = overlap {
             reasons.push(format!("file overlap: {}", path.display()));
         }
-        if !reasons.is_empty() {
-            blockers.push(format!("- {label}: {}", reasons.join("; ")));
+        if reasons.is_empty() {
+            unmerged.push(label);
+        } else {
+            conflicts.push(format!("- {label}: {}", reasons.join("; ")));
         }
-        unmerged.push(label);
-    }
-    if !blockers.is_empty() {
-        return Err(abandoned_worktrees_error(action, &blockers));
     }
     let mut warnings = Vec::new();
+    if !conflicts.is_empty() {
+        warnings.push(format!(
+            "⚠️ WARNING: unmerged task work from other cards overlaps this card or is one of its dependencies. The agent was spawned anyway, but its checkout may lack that work or conflict with it. Merge the cards with `merge_agent(card_id=...)` or discard unwanted ones with `cancel_agent(card_id=..., discard_worktree=true)`:\n{}",
+            conflicts.join("\n")
+        ));
+    }
     if !unmerged.is_empty() {
         warnings.push(format!(
             "Warning: unmerged task work remains: {}. Merge these cards when verification is complete.",
@@ -664,7 +669,7 @@ pub(crate) async fn scoped_worktree_gate(
                 base_branch.as_deref().unwrap_or("not recorded")
             )
         });
-        match find_abandoned_worktrees(&board, &card_id, &root, base, &launch_base, &action) {
+        match find_abandoned_worktrees(&board, &card_id, &root, base, &launch_base) {
             Ok(Some(warning)) => Ok(Some(match note {
                 Some(note) => format!("{warning} {note}"),
                 None => warning,
@@ -678,13 +683,6 @@ pub(crate) async fn scoped_worktree_gate(
     })
     .await
     .map_err(|error| format!("Task worktree spawn check failed: {error}"))?
-}
-
-fn abandoned_worktrees_error(action: &str, blockers: &[String]) -> String {
-    format!(
-        "Cannot {action}: unmerged task work blocks this card. Merge the blocking cards with `merge_agent(card_id=...)` or discard unwanted done/failed worktrees with `cancel_agent(card_id=..., discard_worktree=true)`, then retry:\n{}",
-        blockers.join("\n")
-    )
 }
 
 pub(crate) async fn prepare_agent_worktree(

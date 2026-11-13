@@ -109,7 +109,7 @@ async fn force_merge_of_doing_card_stops_live_agent_before_touching_worktree() {
         merge_agent_with_git_probe(
             ccx,
             "force-merge",
-            &args(&[("card_id", json!("T-1")), ("force", json!(true))]),
+            &args(&[("card_id", json!("T-1"))]),
             move |root| async move {
                 for session in [executing, generating] {
                     let session = session.lock().await;
@@ -169,7 +169,7 @@ async fn force_merge_refuses_when_stop_unconfirmed() {
         let error = merge_agent_with_git_probe(
             ccx,
             "refused-merge",
-            &args(&[("card_id", json!("T-1")), ("force", json!(true))]),
+            &args(&[("card_id", json!("T-1"))]),
             |_| async {
                 panic!("unconfirmed stop must not reach the first git/worktree operation")
             },
@@ -231,4 +231,112 @@ async fn assert_merged(fixture: &Fixture) {
     assert!(card.agent_chat_id.is_none());
     assert!(card.agent_worktree.is_none());
     assert!(card.agent_branch.is_none());
+}
+
+fn merge_markers(card: &crate::tasks::types::BoardCard) -> Vec<String> {
+    card.status_updates
+        .iter()
+        .filter(|update| {
+            update
+                .message
+                .starts_with(super::tool_task_merge_agent::MERGE_AGENT_STATUS_PREFIX)
+        })
+        .map(|update| update.message.clone())
+        .collect()
+}
+
+#[tokio::test]
+#[serial_test::serial(runtime_settings, coordination_metrics)]
+async fn every_applied_merge_records_exactly_one_merge_marker() {
+    for legacy in [false, true] {
+        for doing in [false, true] {
+            let fixture = if doing {
+                doing_fixture(legacy).await
+            } else {
+                let fixture = Fixture::new(true).await;
+                fixture.write_board(legacy);
+                fixture
+            };
+            let started = chrono::Utc::now();
+            let facade = Arc::new(EngineChatSessionFacade::new(fixture.gcx.clone()));
+            let ccx = planner_ccx(fixture.gcx.clone(), facade, "planner").await;
+            merge_agent_with_git_probe(
+                ccx,
+                "marker-merge",
+                &args(&[("card_id", json!("T-1"))]),
+                |_| async { true },
+            )
+            .await
+            .unwrap();
+            assert_merged(&fixture).await;
+            let board = storage::load_board(fixture.gcx.clone(), "task-1")
+                .await
+                .unwrap();
+            let card = board.get_card("T-1").unwrap();
+            let markers = merge_markers(card);
+            assert_eq!(
+                markers.len(),
+                1,
+                "legacy={legacy} doing={doing}: {markers:?}"
+            );
+            let marker = card
+                .status_updates
+                .iter()
+                .find(|update| update.message == markers[0])
+                .unwrap();
+            assert!(
+                chrono::DateTime::parse_from_rfc3339(&marker.timestamp).unwrap() >= started,
+                "marker must carry a fresh timestamp"
+            );
+            assert!(markers[0].contains(TARGET), "{markers:?}");
+            if doing {
+                assert!(card.status_updates.iter().any(|update| update
+                    .message
+                    .contains("marked done for manual review")
+                    || update
+                        .message
+                        .contains("Marked done by planner for manual review")));
+            }
+        }
+    }
+}
+
+#[tokio::test]
+#[serial_test::serial(runtime_settings, coordination_metrics)]
+async fn registered_lease_loss_after_applied_merge_is_merged_with_warning_and_one_marker() {
+    let fixture = Fixture::new(true).await;
+    fixture.write_board(false);
+    std::fs::write(fixture.planner.join("notes.txt"), "user notes\n").unwrap();
+    crate::coordination::merge_gate::post_apply_fault::install(&fixture.planner);
+    let facade = Arc::new(EngineChatSessionFacade::new(fixture.gcx.clone()));
+    let ccx = planner_ccx(fixture.gcx.clone(), facade, "planner").await;
+
+    let result = merge_agent_with_git_probe(
+        ccx,
+        "late-loss",
+        &args(&[("card_id", json!("T-1"))]),
+        |_| async { true },
+    )
+    .await
+    .expect("an applied merge is never reported as an error");
+
+    let crate::call_validation::ContextEnum::ChatMessage(message) = &result.1[0] else {
+        panic!("expected chat message")
+    };
+    let text = message.content.content_text_only();
+    assert!(text.contains("Agent Work Merged"), "{text}");
+    assert!(text.contains("injected lease loss"), "{text}");
+    assert_eq!(
+        std::fs::read_to_string(fixture.planner.join("file.txt")).unwrap(),
+        "merged\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(fixture.planner.join("notes.txt")).unwrap(),
+        "user notes\n"
+    );
+    assert!(git(&fixture.planner, &["stash", "list"]).trim().is_empty());
+    let board = storage::load_board(fixture.gcx.clone(), "task-1")
+        .await
+        .unwrap();
+    assert_eq!(merge_markers(board.get_card("T-1").unwrap()).len(), 1);
 }

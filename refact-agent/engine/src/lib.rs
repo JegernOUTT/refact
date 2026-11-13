@@ -368,12 +368,12 @@ pub async fn run_with_cmdline(cmdline: global_context::CommandLine) {
     gcx.tool_jobs.scopes.begin_shutdown();
     gcx.review_readiness.shutdown().await;
     gcx.tool_jobs.shutdown().await;
+    chat::verifier::shutdown_card_verifiers(gcx.clone()).await;
     if let Err(error) =
         chat::close_all_chat_sessions(crate::app_state::AppState::from_gcx(gcx.clone()).await).await
     {
         tracing::error!("chat shutdown could not establish tool effect quiescence: {error}");
     }
-    chat::verifier::shutdown_card_verifiers(gcx.clone()).await;
     if let Err(error) = gcx.trajectory_index_coordinator.flush_all().await {
         tracing::warn!("trajectory index coordinator shutdown flush failed: {error}");
     }

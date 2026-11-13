@@ -407,6 +407,7 @@ fn pump_output(
 }
 
 fn drain_reader_into_registry(
+    runtime: tokio::runtime::Handle,
     registry: ExecRegistry,
     process_id: crate::types::ExecProcessId,
     stream: ExecOutputStream,
@@ -415,22 +416,37 @@ fn drain_reader_into_registry(
 ) {
     let mut buffer = [0; PIPE_READ_BYTES];
     let mut decoder = Utf8ChunkDecoder::default();
-    let append_raw = |raw_text: String| {
+    let mut append_failed = false;
+    let mut append_raw = |raw_text: String| {
         if raw_text.is_empty() {
             return;
         }
         let text = output_to_text(raw_text.as_bytes());
-        if let Ok(chunk) = futures::executor::block_on(registry.append_output_with_raw(
-            &process_id,
-            stream.clone(),
-            text,
-            &raw_text,
-        )) {
-            if !chunk.text.is_empty() {
-                if let Some(progress_tx) = progress_tx.as_ref() {
-                    let _ = progress_tx.send(chunk);
+        let appended = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            runtime.block_on(registry.append_output_with_raw(
+                &process_id,
+                stream.clone(),
+                text,
+                &raw_text,
+            ))
+        }));
+        let error = match appended {
+            Ok(Ok(chunk)) => {
+                if !chunk.text.is_empty() {
+                    if let Some(progress_tx) = progress_tx.as_ref() {
+                        let _ = progress_tx.send(chunk);
+                    }
                 }
+                return;
             }
+            Ok(Err(error)) => error,
+            Err(_) => "output append panicked".to_string(),
+        };
+        if !append_failed {
+            append_failed = true;
+            tracing::warn!(
+                "pty output append failed for {process_id}: {error}; discarding output and continuing to drain"
+            );
         }
     };
     loop {
@@ -463,12 +479,13 @@ fn pump_pty_output(
     reader: Box<dyn Read + Send>,
     progress_tx: Option<mpsc::UnboundedSender<crate::types::ExecOutputChunk>>,
 ) -> AbortOnDropTask {
+    let runtime = tokio::runtime::Handle::current();
     let (finished_tx, finished_rx) = tokio::sync::oneshot::channel::<()>();
     let pump_process_id = process_id.clone();
     let spawned = std::thread::Builder::new()
         .name("refact-pty-pump".to_string())
         .spawn(move || {
-            drain_reader_into_registry(registry, process_id, stream, reader, progress_tx);
+            drain_reader_into_registry(runtime, registry, process_id, stream, reader, progress_tx);
             let _ = finished_tx.send(());
         });
     match spawned {
@@ -2278,6 +2295,74 @@ mod tests {
             .wait(&result.snapshot.meta.process_id)
             .await
             .unwrap();
+    }
+
+    #[cfg(unix)]
+    async fn assert_output_beyond_spill_threshold_is_drained_and_spilled(tty: bool) {
+        const OUTPUT_BYTES: usize = 1024 * 1024;
+        let registry = ExecRegistry::new();
+        let result = registry
+            .spawn(
+                ExecSpawnRequest::background(format!(
+                    "sleep 0.5; yes 0123456789abcdef | head -c {OUTPUT_BYTES}"
+                ))
+                .with_tty(tty)
+                .with_owner(crate::types::ExecOwnerMeta {
+                    chat_id: Some("chat-large-output".to_string()),
+                    ..crate::types::ExecOwnerMeta::default()
+                }),
+            )
+            .await
+            .unwrap();
+        let process_id = result.snapshot.meta.process_id;
+        let temp = tempfile::tempdir().unwrap();
+        let target = crate::spill::SpillTarget::with_root(
+            temp.path().to_path_buf(),
+            "chat-large-output",
+            &process_id,
+        );
+        registry
+            .set_spill_target_for_test(&process_id, target.clone())
+            .await
+            .unwrap();
+
+        let snapshot = tokio::time::timeout(Duration::from_secs(20), registry.wait(&process_id))
+            .await
+            .unwrap_or_else(|_| panic!("process with large output must exit (tty={tty})"))
+            .unwrap();
+
+        assert_eq!(
+            snapshot.status,
+            ExecStatus::Exited {
+                exit_code: Some(0)
+            },
+            "tty={tty}"
+        );
+        let read = registry.read(&process_id, 0, None).await;
+        assert!(
+            read.total_bytes_appended >= OUTPUT_BYTES,
+            "tty={tty}: appended {} bytes",
+            read.total_bytes_appended
+        );
+        assert_eq!(
+            read.disk_log_path.as_ref(),
+            Some(&target.path()),
+            "tty={tty}"
+        );
+        let spilled = std::fs::metadata(target.path()).unwrap().len() as usize;
+        assert_eq!(spilled, read.total_bytes_appended, "tty={tty}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pty_output_beyond_spill_threshold_is_drained_and_spilled() {
+        assert_output_beyond_spill_threshold_is_drained_and_spilled(true).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pipe_output_beyond_spill_threshold_is_drained_and_spilled() {
+        assert_output_beyond_spill_threshold_is_drained_and_spilled(false).await;
     }
 
     #[tokio::test]
