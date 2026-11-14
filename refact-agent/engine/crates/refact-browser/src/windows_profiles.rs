@@ -737,7 +737,11 @@ mod tests {
     fn windows_protected_acl_is_exact_and_tampering_retains_profile() {
         let cache = tempfile::tempdir().unwrap();
         let profile = WindowsOwnedProfile::create(cache.path()).unwrap();
-        let output = std::process::Command::new("powershell")
+        let powershell =
+            PathBuf::from(std::env::var_os("SystemRoot").expect("SystemRoot required"))
+                .join(r"System32\WindowsPowerShell\v1.0\powershell.exe");
+        let output = std::process::Command::new(powershell)
+            .env_remove("PSModulePath")
             .args(["-NoProfile", "-NonInteractive", "-Command", "$ErrorActionPreference='Stop'; $a=Get-Acl -LiteralPath $env:PROFILE; if (!$a.AreAccessRulesProtected) {throw 'unprotected'}; $sid=[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value; $r=@($a.GetAccessRules($true,$true,[System.Security.Principal.SecurityIdentifier])); if ($r.Count -ne 2) {throw 'unexpected ACE count'}; foreach ($x in $r) {if (($x.IdentityReference.Value -ne $sid -and $x.IdentityReference.Value -ne 'S-1-5-18') -or $x.AccessControlType -ne 'Allow' -or $x.FileSystemRights -ne 'FullControl') {throw 'unexpected ACE'}}; $a.SetAccessRuleProtection($false,$true); Set-Acl -LiteralPath $env:PROFILE -AclObject $a"])
             .env("PROFILE", profile.path()).output().unwrap();
         assert!(

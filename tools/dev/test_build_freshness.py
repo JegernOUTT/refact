@@ -39,6 +39,80 @@ def toml_value(value):
     return json.dumps(value)
 
 
+def current_build_out_dir(stdout, manifest):
+    """Bind this invocation's fixture binary to its exact build-script output."""
+    messages = []
+    for line in stdout.splitlines():
+        try:
+            item = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(item, dict):
+            messages.append(item)
+    artifacts = [item for item in messages
+                 if item.get("reason") == "compiler-artifact"
+                 and item.get("manifest_path") == str(manifest)
+                 and item.get("target", {}).get("name") == NAME
+                 and "bin" in item.get("target", {}).get("kind", [])]
+    if len(artifacts) != 1 or not artifacts[0].get("package_id"):
+        raise ValueError(f"expected one current {NAME} binary artifact: {artifacts!r}")
+    scripts = [item for item in messages
+               if item.get("reason") == "build-script-executed"
+               and item.get("package_id") == artifacts[0]["package_id"]]
+    if len(scripts) != 1 or not scripts[0].get("out_dir"):
+        raise ValueError(f"expected one current {NAME} build-script output: {scripts!r}")
+    return Path(scripts[0]["out_dir"])
+
+
+class BuildOutputSelectionTests(unittest.TestCase):
+    """Cargo-free regressions; run this class without BuildFreshness setup."""
+
+    def setUp(self):
+        self.manifest = Path("/fixture/current/engine/Cargo.toml")
+        self.package = "path+file:///fixture/current/engine#freshness_probe@0.1.0"
+        self.artifact = {"reason": "compiler-artifact", "manifest_path": str(self.manifest),
+                         "package_id": self.package, "target": {"name": NAME, "kind": ["bin"]}}
+
+    def select(self, messages):
+        return current_build_out_dir("cargo diagnostic\n" + "\n".join(map(json.dumps, messages)), self.manifest)
+
+    def script(self, out_dir, package=None):
+        return {"reason": "build-script-executed", "package_id": package or self.package,
+                "out_dir": str(out_dir)}
+
+    def test_selects_current_output_despite_other_profiles_and_same_name_packages(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            target = Path(temporary)
+            outputs = [target / profile / "build" / name / "out"
+                       for profile, name in [("release", "freshness_probe-old"),
+                                             ("ci-test", "freshness_probe-old"),
+                                             ("debug", "freshness_probe-old"),
+                                             ("debug", "freshness_probe-current")]]
+            for output in outputs:
+                output.mkdir(parents=True)
+                (output / "runtime-build-info.bin").write_bytes(b"fixture")
+            foreign = "path+file:///fixture/other/engine#freshness_probe@0.1.0"
+            foreign_artifact = {**self.artifact, "manifest_path": "/fixture/other/engine/Cargo.toml",
+                                "package_id": foreign}
+            for fresh in [False, True]:
+                with self.subTest(fresh=fresh):
+                    selected = self.select([self.script(outputs[0], foreign), foreign_artifact,
+                                            {**self.artifact, "fresh": fresh}, self.script(outputs[-1])])
+                    self.assertEqual(selected, outputs[-1])
+                    self.assertTrue((selected / "runtime-build-info.bin").is_file())
+
+    def test_rejects_missing_ambiguous_or_foreign_current_output(self):
+        script = self.script("/target/debug/build/freshness_probe-current/out")
+        for messages in [[], [script], [self.artifact],
+                         [self.artifact, self.artifact, script],
+                         [self.artifact, script, script],
+                         [self.artifact, self.script("/foreign/out", "foreign-package")],
+                         [{**self.artifact, "manifest_path": "/foreign/Cargo.toml"}, script],
+                         [self.artifact, {**script, "out_dir": ""}]]:
+            with self.subTest(messages=messages), self.assertRaises(ValueError):
+                self.select(messages)
+
+
 @unittest.skipUnless(sys.platform.startswith("linux"), "executable fixtures require Linux")
 class BuildFreshness(unittest.TestCase):
     @classmethod
@@ -276,10 +350,10 @@ else:
                  "commit", "--allow-empty", "-qm", "advance packed ref")
         current = self.git("rev-parse", "HEAD")
         self.assertNotEqual(previous, current)
-        self.assertFalse(self.cargo()[0], "a new loose ref must invalidate packed-ref identity")
-        frames = list(self.target.rglob("runtime-build-info.bin"))
-        self.assertEqual(len(frames), 1, frames)
-        frame = frames[0].read_bytes()
+        fresh, result = self.cargo()
+        self.assertFalse(fresh, "a new loose ref must invalidate packed-ref identity")
+        out_dir = current_build_out_dir(result.stdout, self.engine / "Cargo.toml")
+        frame = (out_dir / "runtime-build-info.bin").read_bytes()
         prefix, suffix = b"\0REFACT_BUILD_INFO_V1\0", b"\0END_REFACT_BUILD_INFO\0"
         self.assertTrue(frame.startswith(prefix) and frame.endswith(suffix))
         self.assertEqual(json.loads(frame[len(prefix):-len(suffix)])["source_sha"], current)
