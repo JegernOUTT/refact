@@ -399,6 +399,19 @@ class InventoryTests(unittest.TestCase):
         self.assertEqual(steps[install]['working-directory'], 'refact-agent/gui')
         self.assertNotIn('continue-on-error', steps[install])
 
+    def test_performance_uses_the_engine_test_stack_without_skipping_fixtures(self):
+        import yaml
+        workflow = yaml.safe_load((ci.ROOT / '.github/workflows/engine_perf.yml').read_text())
+        self.assertEqual(str(workflow['env']['RUST_MIN_STACK']), '16777216')
+        steps = workflow['jobs']['engine-perf']['steps']
+        performance = next(step for step in steps if step.get('name') == 'Run engine performance benchmarks')
+        coordination = next(step for step in steps if step.get('name') == 'Run all ignored coordination benchmarks')
+        self.assertIn('chat::perf_harness --include-ignored --test-threads=1 --nocapture', performance['run'])
+        self.assertIn('coordination:: --ignored --test-threads=1 --nocapture', coordination['run'])
+        for step in [performance, coordination]:
+            self.assertNotIn('continue-on-error', step)
+            self.assertNotIn('if', step)
+
 
 if __name__ == '__main__':
     unittest.main()
