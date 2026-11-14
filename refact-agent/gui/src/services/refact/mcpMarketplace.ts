@@ -1,6 +1,7 @@
 import { createApi, fetchBaseQuery } from "@reduxjs/toolkit/query/react";
 import { RootState } from "../../app/store";
 import { buildApiUrlFromState } from "./apiUrl";
+import { invalidatePrivacyPolicyAfter } from "./privacy";
 
 export type MCPServer = {
   id: string;
@@ -161,6 +162,9 @@ export const mcpMarketplaceApi = createApi({
       Record<string, unknown>
     >({
       invalidatesTags: ["MarketplaceServers", "InstalledServers"],
+      async onQueryStarted(_arg, { dispatch, queryFulfilled }) {
+        await invalidatePrivacyPolicyAfter(queryFulfilled, dispatch);
+      },
       async queryFn(body, api, _extraOptions, baseQuery) {
         const state = api.getState() as RootState;
         const result = await baseQuery({
@@ -199,6 +203,9 @@ export const mcpMarketplaceApi = createApi({
         return { data: result.data as InstallResponse };
       },
       invalidatesTags: ["InstalledServers"],
+      async onQueryStarted(_arg, { dispatch, queryFulfilled }) {
+        await invalidatePrivacyPolicyAfter(queryFulfilled, dispatch);
+      },
     }),
 
     updateServer: builder.mutation<
@@ -216,6 +223,9 @@ export const mcpMarketplaceApi = createApi({
         return { data: result.data as UpdateServerResponse };
       },
       invalidatesTags: ["InstalledServers"],
+      async onQueryStarted(_arg, { dispatch, queryFulfilled }) {
+        await invalidatePrivacyPolicyAfter(queryFulfilled, dispatch);
+      },
     }),
 
     uninstallServer: builder.mutation<
@@ -233,6 +243,9 @@ export const mcpMarketplaceApi = createApi({
         return { data: result.data as UninstallServerResponse };
       },
       invalidatesTags: ["InstalledServers"],
+      async onQueryStarted(_arg, { dispatch, queryFulfilled }) {
+        await invalidatePrivacyPolicyAfter(queryFulfilled, dispatch);
+      },
     }),
 
     wizardProbe: builder.mutation<WizardProbeResponse, { input: string }>({

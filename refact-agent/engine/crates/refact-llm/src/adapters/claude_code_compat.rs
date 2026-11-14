@@ -200,9 +200,10 @@ pub fn cc_rename_base_tool(base_name: &str) -> &str {
 }
 
 fn is_cc_known_refact_tool_name(name: &str) -> bool {
-    CC_TOOL_RENAMES
-        .iter()
-        .any(|(original, renamed)| *original == name || *renamed == name)
+    name == "manage_mcp"
+        || CC_TOOL_RENAMES
+            .iter()
+            .any(|(original, renamed)| *original == name || *renamed == name)
 }
 
 pub fn cc_resolve_tool_name(name: &str) -> String {
@@ -713,6 +714,17 @@ mod tests {
         // Bare builtin names (no t_ prefix, no mcp_ prefix) → re-add mcp_ as fallback
         // (dispatch will try original name first anyway, so this is a safety net)
         assert_eq!(cc_resolve_tool_name("cat"), "mcp_cat");
+    }
+
+    #[test]
+    fn claude_code_manage_mcp_definition_and_history_roundtrip() {
+        let mut tools = json!([{"name":"manage_mcp","input_schema":{"type":"object"}}]);
+        apply_cc_tool_names(&mut tools);
+        assert_eq!(tools[0]["name"], "t_manage_mcp");
+        let mut messages = json!([{"role":"assistant","content":[{"type":"tool_use","id":"x","name":"manage_mcp","input":{"action":"list"}}]}]);
+        apply_cc_tool_use_in_messages(&mut messages);
+        assert_eq!(messages[0]["content"][0]["name"], "t_manage_mcp");
+        assert_eq!(cc_resolve_tool_name("t_manage_mcp"), "manage_mcp");
     }
 
     #[test]

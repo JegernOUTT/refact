@@ -396,6 +396,7 @@ impl ToolGroup {
 
 pub(crate) fn builtin_system_tools(config_path: String) -> Vec<Box<dyn Tool + Send>> {
     vec![
+        Box::new(crate::tools::tool_manage_mcp::ToolManageMcp),
         Box::new(crate::tools::tool_shell::ToolShell {
             cfg: crate::tools::tool_shell::SettingsShell {
                 output_filter: crate::postprocessing::pp_command_output::OutputFilter::default(),
@@ -1685,6 +1686,7 @@ mod tests {
             .map(|tool| tool.tool_description().name)
             .collect::<HashSet<_>>();
         for name in [
+            "manage_mcp",
             "set_trajectory_label",
             "wait",
             "schedule",

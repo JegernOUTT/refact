@@ -104,6 +104,63 @@ fn row_paths(row: &WorkRow, overlapping: &OverlappingWork, caller: &WorkCaller) 
     paths.into_iter().map(|(_, path)| path).collect()
 }
 
+fn provenance_path_key(path: &Path, row: &WorkRow, caller: &WorkCaller) -> String {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        Path::new(row.root.path.as_deref().unwrap_or_default()).join(path)
+    };
+    let canonical = std::fs::canonicalize(&absolute).unwrap_or(absolute);
+    for root in [
+        row.root.path.as_deref().map(Path::new),
+        Some(caller.source_root.as_path()),
+        Some(caller.checkout_root.as_path()),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+        if let Ok(relative) = canonical.strip_prefix(root) {
+            return format!("project:{}", relative.to_string_lossy());
+        }
+    }
+    let (key, alias) = crate::file_activity::resolve_key(&canonical);
+    alias.unwrap_or(key)
+}
+
+fn rendered_physical_paths(
+    row: &WorkRow,
+    value: &serde_json::Value,
+    caller: &WorkCaller,
+) -> HashSet<String> {
+    let shown: HashSet<String> = value["paths"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .map(str::to_string)
+        .collect();
+    let physical = physical_paths(row).into_iter().filter(|path| {
+        [
+            row.root.path.as_deref().map(Path::new),
+            Some(caller.source_root.as_path()),
+            Some(caller.checkout_root.as_path()),
+        ]
+        .into_iter()
+        .flatten()
+        .find_map(|root| path.strip_prefix(root).ok())
+        .is_some_and(|relative| shown.contains(relative.to_string_lossy().as_ref()))
+    });
+    physical
+        .map(|path| provenance_path_key(&path, row, caller))
+        .chain(
+            shown
+                .iter()
+                .map(|path| provenance_path_key(Path::new(path), row, caller)),
+        )
+        .collect()
+}
+
 pub(super) fn render(
     project: &str,
     rows: &[WorkRow],
@@ -152,10 +209,16 @@ pub(super) fn render(
                 break;
             }
         }
+        let rendered = rendered_physical_paths(row, &value, caller);
+        let mut row_seen = HashSet::new();
         let additions: Vec<_> = row
             .source_records
             .iter()
-            .filter(|record| !seen.contains(*record))
+            .filter(|record| {
+                rendered.contains(&provenance_path_key(Path::new(&record.path), row, caller))
+                    && !seen.contains(*record)
+                    && row_seen.insert((*record).clone())
+            })
             .collect();
         let bytes = additions.iter().try_fold(0usize, |bytes, record| {
             serde_json::to_vec(record)
@@ -174,8 +237,9 @@ pub(super) fn render(
         }
         record_bytes = record_bytes.saturating_add(bytes);
         for record in additions {
-            seen.insert(record.clone());
-            records.push(record.clone());
+            if seen.insert(record.clone()) {
+                records.push(record.clone());
+            }
         }
         body.push_str(&line);
         shown += 1;
@@ -281,15 +345,21 @@ mod tests {
         .unwrap();
         assert_eq!(rendered_rows(&compact), vec![expected]);
         assert_eq!(compact.omitted, 0);
-        assert_eq!(compact.records, row.source_records);
+        assert_eq!(
+            full.records,
+            row.source_records[..CAPSULE_MAX_PATHS_PER_ROW]
+        );
+        assert!(compact.records.is_empty());
         assert!(compact.body.len() <= settings.capsule_token_budget);
         for settings in [
             CoordinationSettings {
-                max_work_provenance_records: 19,
+                max_work_provenance_records: 5,
+                capsule_token_budget: 20_000,
                 ..settings.clone()
             },
             CoordinationSettings {
                 max_work_provenance_bytes: 1,
+                capsule_token_budget: 20_000,
                 ..settings
             },
         ] {
@@ -330,7 +400,106 @@ mod tests {
         )
         .unwrap();
         assert!(bounded.records.is_empty());
-        assert!(bounded.body.contains("1 rows hidden"));
+        assert_eq!(bounded.omitted, 0);
+    }
+
+    #[test]
+    fn capsule_provenance_matches_source_and_checkout_aliases_and_deduplicates() {
+        let (mut row, mut caller) = fixture();
+        row.root.path = Some("/worktree".into());
+        caller.checkout_root = "/worktree".into();
+        row.declared_files = vec!["src/shown.rs".into()];
+        let record = FileRecord {
+            path: "/source/src/shown.rs".into(),
+            zone: "secrets".into(),
+            attribution: refact_privacy::Attribution::Observed,
+        };
+        row.source_records = vec![record.clone(); 100];
+        row.source_records.extend((0..100).map(|i| FileRecord {
+            path: format!("/source/unrendered/{i}"),
+            ..record.clone()
+        }));
+        let rendered = render(
+            "project",
+            &[row],
+            &Default::default(),
+            &caller,
+            &CoordinationSettings {
+                max_work_provenance_records: 1,
+                ..Default::default()
+            },
+            42,
+            &str::len,
+        )
+        .unwrap();
+        assert_eq!(rendered.omitted, 0);
+        assert_eq!(rendered.records, vec![record]);
+    }
+
+    #[test]
+    fn capsule_provenance_matches_canonical_root_spelling() {
+        let (mut row, mut caller) = fixture();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("source");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/shown.rs"), "fixture").unwrap();
+        row.root.path = Some(
+            root.join("..")
+                .join("source")
+                .to_string_lossy()
+                .into_owned(),
+        );
+        caller.source_root = root.clone();
+        caller.checkout_root = root.clone();
+        row.declared_files = vec!["src/shown.rs".into()];
+        let record = FileRecord {
+            path: std::fs::canonicalize(root.join("src/shown.rs"))
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+            zone: "secrets".into(),
+            attribution: refact_privacy::Attribution::Observed,
+        };
+        row.source_records = vec![record.clone()];
+        let rendered = render(
+            "project",
+            &[row],
+            &Default::default(),
+            &caller,
+            &CoordinationSettings::default(),
+            42,
+            &str::len,
+        )
+        .unwrap();
+        assert_eq!(rendered.records, vec![record]);
+    }
+
+    #[test]
+    fn capsule_records_cover_only_rendered_paths() {
+        let (mut row, caller) = fixture();
+        row.declared_files = vec!["src/shown.rs".into()];
+        let record = |path: &str| FileRecord {
+            path: path.into(),
+            zone: "secrets".into(),
+            attribution: refact_privacy::Attribution::Observed,
+        };
+        row.source_records = vec![
+            record("/source/src/shown.rs"),
+            record("/home/user/.ssh/id_rsa"),
+        ];
+        let rendered = render(
+            "project",
+            std::slice::from_ref(&row),
+            &Default::default(),
+            &caller,
+            &CoordinationSettings::default(),
+            42,
+            &str::len,
+        )
+        .unwrap();
+        assert_eq!(rendered.omitted, 0);
+        assert!(!rendered.body.contains("id_rsa"));
+        assert_eq!(rendered.records, vec![record("/source/src/shown.rs")]);
     }
 
     #[test]

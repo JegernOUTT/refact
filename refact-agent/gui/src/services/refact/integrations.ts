@@ -10,6 +10,7 @@ import {
 } from "./consts";
 import { isDetailMessage } from "./commands";
 import { buildApiUrlFromState } from "./apiUrl";
+import { invalidatePrivacyPolicyAfter } from "./privacy";
 
 // TODO: Cache invalidation logic.
 export const integrationsApi = createApi({
@@ -143,6 +144,9 @@ export const integrationsApi = createApi({
       invalidatesTags: (_result, _error, args) => [
         { type: "INTEGRATION", id: args.filePath },
       ],
+      async onQueryStarted(_arg, { dispatch, queryFulfilled }) {
+        await invalidatePrivacyPolicyAfter(queryFulfilled, dispatch);
+      },
       async queryFn(arg, api, extraOptions, baseQuery) {
         const state = api.getState() as RootState;
         const url = buildApiUrlFromState(state, INTEGRATION_SAVE_URL);
@@ -163,6 +167,9 @@ export const integrationsApi = createApi({
       providesTags: (_result, _error, arg) => [
         { type: "INTEGRATION", id: arg },
       ],
+      async onQueryStarted(_arg, { dispatch, queryFulfilled }) {
+        await invalidatePrivacyPolicyAfter(queryFulfilled, dispatch);
+      },
       async queryFn(arg, api, extraOptions, baseQuery) {
         const state = api.getState() as RootState;
         const url = buildApiUrlFromState(state, INTEGRATION_DELETE_URL, {

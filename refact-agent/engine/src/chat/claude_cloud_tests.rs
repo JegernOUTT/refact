@@ -117,7 +117,7 @@ async fn cloud_retry_rechecks_sealed_privacy_before_preparation() {
         .await
         .err()
         .unwrap();
-    assert!(error.starts_with("Output withheld by user privacy policy"));
+    assert!(error.starts_with("Request not sent: user privacy policy"));
 }
 
 fn crc(bytes: &[u8]) -> u32 {

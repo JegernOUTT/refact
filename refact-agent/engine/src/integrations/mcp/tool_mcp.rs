@@ -22,9 +22,33 @@ use crate::call_validation::{ChatMessage, ChatContent, ContextEnum};
 use crate::integrations::integr_abstract::{IntegrationCommon, IntegrationConfirmation};
 use crate::privacy::destinations::clear_for_mcp;
 use super::session_mcp::{
-    McpRunningService, MCPConnectionStatus, add_log_entry, mcp_session_wait_startup,
+    McpRunningService, MCPConnectionStatus, add_log_entry, mcp_session_wait_startup_bounded,
     redact_sensitive_json,
 };
+
+const STARTUP_WAIT_MARGIN_SECS: u64 = 5;
+
+fn not_connected_reason(config_path: &str, status: &MCPConnectionStatus) -> Option<String> {
+    let server = super::mcp_interactions::server_name_from_config_path(config_path);
+    let reason = match status {
+        MCPConnectionStatus::Connected => return None,
+        MCPConnectionStatus::Reconnecting {
+            ..
+        } => match super::integr_mcp_common::mcp_next_retry_in_secs(config_path) {
+            Some(next) => format!("reconnecting, next try in {next}s"),
+            None => "reconnecting".to_string(),
+        },
+        MCPConnectionStatus::Connecting => "still connecting".to_string(),
+        MCPConnectionStatus::Failed {
+            message,
+        } => format!("connection failed: {message}"),
+        MCPConnectionStatus::Disconnected => "disconnected".to_string(),
+        MCPConnectionStatus::NeedsAuth => "authentication required".to_string(),
+    };
+    Some(format!(
+        "MCP server '{server}' is not connected ({reason}). Try again later or check the MCP integration status."
+    ))
+}
 
 struct McpCallAudit {
     records: Result<Vec<(usize, FileRecord)>, PrivacyAuditError>,
@@ -223,6 +247,7 @@ pub struct ToolMCP {
     pub mcp_client: Arc<AMutex<Option<McpRunningService>>>,
     pub mcp_tool: McpTool,
     pub request_timeout: u64,
+    pub init_timeout: u64,
     pub auto_approve: bool,
 }
 
@@ -273,7 +298,17 @@ impl Tool for ToolMCP {
         let model_supports_multimodality = caps_maybe.is_some_and(|caps| {
             resolve_chat_model(caps, &current_model).is_ok_and(|m| m.supports_multimodality)
         });
-        mcp_session_wait_startup(session.clone()).await;
+        let still_connecting = {
+            let mut session_locked = session.lock().await;
+            session_locked
+                .as_any_mut()
+                .downcast_mut::<super::session_mcp::SessionMCP>()
+                .is_some_and(|s| s.connection_status == MCPConnectionStatus::Connecting)
+        };
+        if still_connecting {
+            let startup_wait = Duration::from_secs(self.init_timeout + STARTUP_WAIT_MARGIN_SECS);
+            mcp_session_wait_startup_bounded(session.clone(), startup_wait).await;
+        }
 
         {
             let mut session_locked = session.lock().await;
@@ -286,42 +321,27 @@ impl Tool for ToolMCP {
                         self.mcp_tool.name
                     )
                 })?;
-            match &session_downcasted.connection_status {
-                MCPConnectionStatus::Reconnecting {
-                    ..
-                } => {
-                    let msg = format!(
-                        "MCP server '{}' is reconnecting, please try again shortly",
-                        self.mcp_tool.name
-                    );
-                    crate::buddy::actor::report_error_persisted(
-                        crate::app_state::AppState::from_gcx(gcx.clone()).await,
-                        "mcp_reconnecting",
-                        &msg,
-                        Some("mcp/tool_mcp.rs"),
-                        None,
-                    )
-                    .await;
-                    return Err(msg);
-                }
-                MCPConnectionStatus::Failed {
-                    message,
-                } => {
-                    let msg = format!(
-                        "MCP server '{}' connection failed: {}",
-                        self.mcp_tool.name, message
-                    );
-                    crate::buddy::actor::report_error_persisted(
-                        crate::app_state::AppState::from_gcx(gcx.clone()).await,
-                        "mcp_connection_failed",
-                        &msg,
-                        Some("mcp/tool_mcp.rs"),
-                        None,
-                    )
-                    .await;
-                    return Err(msg);
-                }
-                _ => {}
+            let status = session_downcasted.connection_status.clone();
+            drop(session_locked);
+            if let Some(msg) = not_connected_reason(&self.config_path, &status) {
+                let kind = match status {
+                    MCPConnectionStatus::Reconnecting {
+                        ..
+                    } => "mcp_reconnecting",
+                    MCPConnectionStatus::Failed {
+                        ..
+                    } => "mcp_connection_failed",
+                    _ => "mcp_not_connected",
+                };
+                crate::buddy::actor::report_error_persisted(
+                    crate::app_state::AppState::from_gcx(gcx.clone()).await,
+                    kind,
+                    &msg,
+                    Some("mcp/tool_mcp.rs"),
+                    None,
+                )
+                .await;
+                return Err(msg);
             }
         }
 
@@ -739,6 +759,7 @@ mod tests {
             mcp_client: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
             mcp_tool,
             request_timeout: 30,
+            init_timeout: 1,
             auto_approve: false,
         }
     }
@@ -1025,8 +1046,10 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(error.starts_with("Output withheld by user privacy policy"));
-        assert!(error.contains("zone \""));
+        assert_eq!(error, format!(
+            "Request not sent: user privacy policy does not allow \"untrusted\" to receive data from these guarded files present in this chat's context:\n  - {} (zone \"secrets\", declared)\nRetrying the same request will be refused again. Ask the user to allow \"untrusted\" for zone(s) \"secrets\" in Privacy settings, or to clear this chat's privacy record for these files.",
+            secret.to_string_lossy()
+        ));
         assert_eq!(dispatched.load(Ordering::Relaxed), 0);
     }
 
@@ -1076,9 +1099,154 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(error.starts_with("Output withheld by user privacy policy"));
+        assert!(error.starts_with("Request not sent: user privacy policy"));
         assert!(error.contains("zone \""));
         assert_eq!(dispatched.load(Ordering::Relaxed), 0);
+    }
+
+    #[derive(Clone)]
+    struct OfflineTransport;
+
+    #[async_trait::async_trait]
+    impl super::super::integr_mcp_common::MCPTransportInitializer for OfflineTransport {
+        async fn init_mcp_transport(
+            &self,
+            _logs: Arc<AMutex<Vec<String>>>,
+            _name: String,
+            _init_timeout: u64,
+            _request_timeout: u64,
+            _session: Arc<AMutex<Box<dyn crate::integrations::sessions::IntegrationSession>>>,
+            _handler: super::super::session_mcp::McpClientHandler,
+        ) -> Option<McpRunningService> {
+            None
+        }
+    }
+
+    async fn fixture_ccx(
+        gcx: &Arc<crate::global_context::GlobalContext>,
+    ) -> Arc<AMutex<AtCommandsContext>> {
+        Arc::new(AMutex::new(
+            AtCommandsContext::new_with_abort(
+                crate::app_state::AppState::from_gcx(gcx.clone()).await,
+                4096,
+                20,
+                false,
+                Vec::new(),
+                "mcp-offline-fixture".into(),
+                None,
+                "model".into(),
+                None,
+                None,
+                None,
+            )
+            .await,
+        ))
+    }
+
+    #[tokio::test]
+    async fn offline_server_with_cached_catalog_fails_tool_call_promptly() {
+        use super::super::integr_mcp_common::{
+            mcp_integr_tools, mcp_session_setup, remove_mcp_session_for_config,
+            tool_catalog_cache_store, CommonMCPSettings,
+        };
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        set_policy(&gcx, Vec::new());
+        let path = "/tmp/mcp_http_offline_cached_fixture.yaml";
+        let cached: McpTool =
+            serde_json::from_value(json!({"name": "read", "inputSchema": {"type": "object"}}))
+                .unwrap();
+        tool_catalog_cache_store(path, &[cached]);
+        mcp_session_setup(
+            gcx.clone(),
+            path.into(),
+            json!({}),
+            OfflineTransport,
+            1,
+            1,
+            30,
+            3,
+            true,
+        )
+        .await;
+        let mcp_common = CommonMCPSettings {
+            init_timeout: 1,
+            request_timeout: 1,
+            ..Default::default()
+        };
+        let mut tools = Vec::new();
+        timeout(Duration::from_secs(5), async {
+            loop {
+                tools = mcp_integr_tools(
+                    Some(Arc::downgrade(&gcx)),
+                    path,
+                    &IntegrationCommon::default(),
+                    &mcp_common,
+                )
+                .await;
+                if !tools.is_empty()
+                    && super::super::integr_mcp_common::mcp_next_retry_in_secs(path).is_some()
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("cached catalog must be served while reconnecting");
+        let started = std::time::Instant::now();
+        let error = match timeout(
+            Duration::from_secs(5),
+            tools[0].tool_execute(fixture_ccx(&gcx).await, &"call".into(), &HashMap::new()),
+        )
+        .await
+        .expect("tool call must not wait for the reconnect supervisor")
+        {
+            Err(error) => error,
+            Ok(_) => panic!("offline MCP call must fail"),
+        };
+        assert!(started.elapsed() < Duration::from_secs(3));
+        assert!(
+            error.contains("MCP server 'offline_cached_fixture' is not connected (reconnecting"),
+            "{error}"
+        );
+        remove_mcp_session_for_config(gcx, path).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn startup_wait_in_tool_call_is_bounded() {
+        use super::super::session_mcp::SessionMCP;
+        use crate::integrations::sessions::IntegrationSession;
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        set_policy(&gcx, Vec::new());
+        let mut tool = make_tool_mcp(json!({"type": "object"}));
+        tool.config_path = "/tmp/mcp_stdio_hung_startup_fixture.yaml".into();
+        let startup = tokio::spawn(std::future::pending::<()>());
+        let abort = startup.abort_handle();
+        let mut session = SessionMCP::detached(&tool.config_path);
+        session.connection_status = MCPConnectionStatus::Connecting;
+        session.startup_task_handles = Some((Arc::new(AMutex::new(Some(startup))), abort.clone()));
+        let session: Arc<AMutex<Box<dyn IntegrationSession>>> =
+            Arc::new(AMutex::new(Box::new(session)));
+        gcx.integration_sessions
+            .lock()
+            .await
+            .insert(tool.config_path.clone(), session);
+        let started = tokio::time::Instant::now();
+        let result = tool
+            .tool_execute(fixture_ccx(&gcx).await, &"call".into(), &HashMap::new())
+            .await;
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("unconnected MCP call must fail"),
+        };
+        let waited = started.elapsed();
+        assert!(waited >= Duration::from_secs(tool.init_timeout + STARTUP_WAIT_MARGIN_SECS));
+        assert!(waited < Duration::from_secs(tool.init_timeout + STARTUP_WAIT_MARGIN_SECS + 2));
+        assert!(
+            error.contains("is not connected (still connecting)"),
+            "{error}"
+        );
+        abort.abort();
     }
 
     #[tokio::test]

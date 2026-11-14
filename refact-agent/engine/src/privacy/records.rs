@@ -597,6 +597,13 @@ pub async fn apply_shell_observation(
         INHERITED_ZONE_NOTE
     };
     let target = destination.id.0.as_str();
+    let zones = offending
+        .iter()
+        .map(|(record, _)| format!("\"{}\"", record.zone))
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>()
+        .join(", ");
     match behavior {
         Some(ShellBehavior::Deny) => Err(format!(
             "Denied by user privacy policy — the command read guarded files, so its output was discarded:\n{guarded}\nThe command already ran; re-running it unchanged will be denied again. Scope it so it does not read those paths, or ask the user to relax the zone.{inherited_note}"
@@ -605,7 +612,7 @@ pub async fn apply_shell_observation(
             retain_local_shell_output(
                 message,
                 &format!(
-                    "Output withheld by user privacy policy — the command ran, but its output cannot be sent to \"{target}\" because it read guarded files:\n{guarded}\nAny side effects already happened, so do not re-run it just to retry. To see output, re-run it scoped so it does not read those paths, or ask the user to allow these zones for \"{target}\".{inherited_note}"
+                    "Output withheld by user privacy policy — the command ran, but its output cannot be sent to \"{target}\" because it read guarded files:\n{guarded}\nRetrying the same request will be refused again. Any side effects already happened, so do not re-run it just to retry. Ask the user to allow \"{target}\" for zone(s) {zones} in Privacy settings, or to clear this chat's privacy record for these files.{inherited_note}"
                 ),
                 false,
             );
@@ -1266,6 +1273,43 @@ mod tests {
     use super::*;
     use refact_exec::ObservedAccess;
     use refact_privacy::{PrivacyPolicy, SubagentPolicy, Zone};
+
+    #[tokio::test]
+    async fn observed_reads_keep_paths_replaced_by_directories_and_missing_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let folder = temp.path().join("guarded");
+        std::fs::write(&folder, "secret read before command replaced it").unwrap();
+        std::fs::remove_file(&folder).unwrap();
+        std::fs::create_dir(&folder).unwrap();
+        let file = folder.join("file.txt");
+        let missing = folder.join("deleted.txt");
+        std::fs::write(&file, "fixture").unwrap();
+        let gcx = gcx_with_zones(
+            temp.path(),
+            vec![Zone {
+                name: "private".into(),
+                patterns: vec![folder.to_string_lossy().into_owned()],
+                ..Default::default()
+            }],
+        )
+        .await;
+        let records =
+            observed_file_records(&gcx, [folder.clone(), file.clone(), missing.clone()]).unwrap();
+        assert_eq!(
+            records,
+            [folder.clone(), file, missing].map(|path| FileRecord {
+                path: path.to_string_lossy().into_owned(),
+                zone: "private".into(),
+                attribution: Attribution::Observed,
+            })
+        );
+        #[cfg(unix)]
+        {
+            let alias = temp.path().join("alias");
+            std::os::unix::fs::symlink(&folder, &alias).unwrap();
+            assert_eq!(observed_file_records(&gcx, [alias]).unwrap().len(), 1);
+        }
+    }
 
     #[tokio::test]
     async fn removed_session_label_still_requires_observation_and_withholds() {

@@ -9,7 +9,7 @@ use axum::extract::Query;
 use rust_embed::RustEmbed;
 use crate::app_state::AppState;
 use crate::custom_error::ScratchError;
-use crate::integrations::setting_up_integrations::split_path_into_project_and_integration;
+use crate::integrations::mcp::management::delete_integration_config;
 use crate::integrations::mcp::session_mcp::SessionMCP;
 
 pub async fn handle_v1_integrations(
@@ -215,32 +215,80 @@ pub struct HTTPIntegrationDeleteQueryParams {
     integration_path: PathBuf,
 }
 
+#[cfg(test)]
+mod delete_tests {
+    use super::*;
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
+
+    #[tokio::test]
+    async fn v1_integrations_delete_removes_live_session_and_cached_tools() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let app = AppState::from_gcx(gcx.clone()).await;
+        let dir = tempfile::tempdir().unwrap();
+        gcx.documents_state
+            .workspace_folders
+            .lock()
+            .unwrap()
+            .push(dir.path().to_path_buf());
+        let config_dir = dir.path().join(".refact/integrations.d");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let path = config_dir.join("mcp_http_delete.yaml");
+        std::fs::write(&path, "mcp_url: http://localhost:1\n").unwrap();
+        let key = path.to_string_lossy().into_owned();
+        let session = SessionMCP::detached(&key);
+        gcx.integration_sessions
+            .lock()
+            .await
+            .insert(key.clone(), Arc::new(Mutex::new(Box::new(session))));
+        let tool = serde_json::from_value(
+            serde_json::json!({"name":"read", "inputSchema":{"type":"object"}}),
+        )
+        .unwrap();
+        crate::integrations::mcp::integr_mcp_common::tool_catalog_cache_store(&key, &[tool]);
+        assert!(gcx.integration_sessions.lock().await.contains_key(&key));
+        let before =
+            crate::http::routers::v1::privacy::handle_v1_privacy_policy_get(State(app.clone()))
+                .await
+                .unwrap()
+                .0;
+        let server = crate::integrations::mcp::mcp_interactions::server_name_from_config_path(&key);
+        assert!(before
+            .destinations
+            .iter()
+            .any(|destination| destination.id.0 == server));
+        let response = handle_v1_integration_delete(
+            State(app.clone()),
+            Query(HTTPIntegrationDeleteQueryParams {
+                integration_path: path.clone(),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(!path.exists());
+        assert!(!gcx.integration_sessions.lock().await.contains_key(&key));
+        assert!(
+            crate::integrations::mcp::integr_mcp_common::tool_catalog_cache_get(&key).is_none()
+        );
+        let after = crate::http::routers::v1::privacy::handle_v1_privacy_policy_get(State(app))
+            .await
+            .unwrap()
+            .0;
+        assert!(!after
+            .destinations
+            .iter()
+            .any(|destination| destination.id.0 == server));
+    }
+}
+
 pub async fn handle_v1_integration_delete(
+    State(app): State<AppState>,
     Query(params): Query<HTTPIntegrationDeleteQueryParams>,
 ) -> axum::response::Result<Response<Body>, ScratchError> {
     let integration_path = params.integration_path;
     log::info!("Deleting integration path: {:?}", integration_path);
-
-    split_path_into_project_and_integration(&integration_path).map_err(|_| {
-        ScratchError::new(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "integration_path is invalid".to_string(),
-        )
-    })?;
-
-    if !integration_path.exists() {
-        return Err(ScratchError::new(
-            StatusCode::NOT_FOUND,
-            "integration_path not found".to_string(),
-        ));
-    }
-
-    std::fs::remove_file(&integration_path).map_err(|e| {
-        ScratchError::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("failed to delete integration config: {}", e),
-        )
-    })?;
+    delete_integration_config(app.gcx, &integration_path).await?;
 
     Ok(Response::builder()
         .status(StatusCode::OK)

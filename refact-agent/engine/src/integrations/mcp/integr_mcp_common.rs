@@ -147,6 +147,43 @@ const TOOL_CATALOG_CACHE_TTL_SECS: u64 = 1800;
 const TOOL_CATALOG_CACHE_MAX_ENTRIES: usize = 64;
 const MCP_CONNECT_TIMEOUT_SECS: u64 = 15;
 
+static MCP_RETRY_DEADLINES: std::sync::Mutex<Option<HashMap<String, Instant>>> =
+    std::sync::Mutex::new(None);
+
+pub fn mcp_next_retry_in_secs(config_path: &str) -> Option<u64> {
+    MCP_RETRY_DEADLINES
+        .lock()
+        .ok()?
+        .as_ref()?
+        .get(config_path)
+        .map(|deadline| deadline.saturating_duration_since(Instant::now()).as_secs())
+}
+
+fn set_retry_deadline(config_path: &str, delay: Option<u64>) {
+    if let Ok(mut deadlines) = MCP_RETRY_DEADLINES.lock() {
+        let deadlines = deadlines.get_or_insert_with(HashMap::new);
+        if let Some(delay) = delay {
+            if deadlines.len() >= TOOL_CATALOG_CACHE_MAX_ENTRIES
+                && !deadlines.contains_key(config_path)
+            {
+                if let Some(key) = deadlines
+                    .iter()
+                    .min_by_key(|(_, at)| *at)
+                    .map(|(key, _)| key.clone())
+                {
+                    deadlines.remove(&key);
+                }
+            }
+            deadlines.insert(
+                config_path.into(),
+                Instant::now() + Duration::from_secs(delay),
+            );
+        } else {
+            deadlines.remove(config_path);
+        }
+    }
+}
+
 pub fn tool_catalog_cache_store(config_path: &str, tools: &[rmcp::model::Tool]) {
     let mut guard = match MCP_TOOL_CATALOG_CACHE.lock() {
         Ok(guard) => guard,
@@ -200,6 +237,146 @@ pub fn tool_catalog_cache_remove(config_path: &str) {
     }
 }
 
+type SessionArc = Arc<AMutex<Box<dyn crate::integrations::sessions::IntegrationSession>>>;
+
+static MCP_LIFECYCLE_LOCKS: std::sync::Mutex<Option<HashMap<String, Weak<AMutex<()>>>>> =
+    std::sync::Mutex::new(None);
+
+/// Serializes setup and removal of one MCP config. Never hold it across
+/// `load_integrations` (setup and reconcile take it themselves).
+pub async fn mcp_lifecycle_lock(config_path: &str) -> tokio::sync::OwnedMutexGuard<()> {
+    let lock = {
+        let mut locks = match MCP_LIFECYCLE_LOCKS.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let locks = locks.get_or_insert_with(HashMap::new);
+        // Entries without a live Arc have no holder or waiter, so pruning them is safe.
+        locks.retain(|_, lock| lock.strong_count() > 0);
+        match locks.get(config_path).and_then(Weak::upgrade) {
+            Some(lock) => lock,
+            None => {
+                let lock = Arc::new(AMutex::new(()));
+                locks.insert(config_path.to_string(), Arc::downgrade(&lock));
+                lock
+            }
+        }
+    };
+    lock.lock_owned().await
+}
+
+#[cfg(test)]
+fn lifecycle_lock_registered(config_path: &str) -> bool {
+    let locks = match MCP_LIFECYCLE_LOCKS.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    locks
+        .as_ref()
+        .and_then(|locks| locks.get(config_path))
+        .is_some_and(|lock| lock.strong_count() > 0)
+}
+
+/// Aborts a spawned child when its owner is dropped (e.g. the startup task is aborted),
+/// instead of detaching it.
+pub(crate) struct AbortOnDrop(pub(crate) tokio::task::AbortHandle);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+pub async fn remove_mcp_session_for_config(gcx: Arc<GlobalContext>, config_path: &str) {
+    let _lifecycle = mcp_lifecycle_lock(config_path).await;
+    remove_mcp_session_locked(gcx, config_path).await;
+}
+
+/// Reconcile variant: rechecks under the lifecycle lock that the config is still missing,
+/// so a session recreated by a racing save is left intact.
+pub(crate) async fn remove_mcp_session_if_config_missing(
+    gcx: Arc<GlobalContext>,
+    config_path: &str,
+) -> bool {
+    let _lifecycle = mcp_lifecycle_lock(config_path).await;
+    if !matches!(tokio::fs::metadata(config_path).await,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound)
+    {
+        return false;
+    }
+    remove_mcp_session_locked(gcx, config_path).await;
+    true
+}
+
+async fn native_mcp_config_missing(config_path: &str) -> bool {
+    let native = std::path::Path::new(config_path)
+        .parent()
+        .and_then(|dir| dir.file_name())
+        .is_some_and(|name| name == "integrations.d");
+    native
+        && matches!(tokio::fs::metadata(config_path).await,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound)
+}
+
+async fn remove_mcp_session_locked(gcx: Arc<GlobalContext>, config_path: &str) {
+    set_retry_deadline(config_path, None);
+    let session = gcx
+        .integration_sessions
+        .lock()
+        .await
+        .get(config_path)
+        .cloned();
+    if let Some(session) = session {
+        if session
+            .lock()
+            .await
+            .as_any_mut()
+            .downcast_mut::<SessionMCP>()
+            .is_none()
+        {
+            return;
+        }
+        {
+            let mut sessions = gcx.integration_sessions.lock().await;
+            if sessions
+                .get(config_path)
+                .is_some_and(|current| Arc::ptr_eq(current, &session))
+            {
+                sessions.remove(config_path);
+            }
+        }
+        let (stop, startup) = {
+            let mut locked = session.lock().await;
+            let startup = locked
+                .as_any_mut()
+                .downcast_mut::<SessionMCP>()
+                .and_then(|mcp| mcp.startup_task_handles.clone());
+            (locked.try_stop(session.clone()), startup)
+        };
+        Box::into_pin(stop).await;
+        if let Some((join, _)) = startup {
+            if let Some(task) = join.lock().await.take() {
+                let _ = timeout(Duration::from_secs(5), task).await;
+            }
+        }
+        {
+            let mut locked = session.lock().await;
+            if let Some(mcp) = locked.as_any_mut().downcast_mut::<SessionMCP>() {
+                mcp.mcp_client = None;
+                mcp.mcp_tools.clear();
+                mcp.mcp_resources.clear();
+                mcp.mcp_prompts.clear();
+                mcp.server_info = None;
+            }
+        }
+        set_retry_deadline(config_path, None);
+    }
+    tool_catalog_cache_remove(config_path);
+    gcx.tool_catalog_generations.advance_integrations();
+    advance_mcp_catalog_generation(&gcx);
+    super::mcp_resources::remove_indexed_resources(Arc::downgrade(&gcx), config_path.into()).await;
+}
+
 fn build_mcp_tool_boxes(
     tools: &[rmcp::model::Tool],
     config_path: &str,
@@ -249,6 +426,7 @@ fn build_mcp_tool_boxes(
                 mcp_client: mcp_client.clone(),
                 mcp_tool: tool.clone(),
                 request_timeout,
+                init_timeout: mcp_common.init_timeout,
                 auto_approve,
             }) as Box<dyn crate::tools::tools_description::Tool + Send>
         })
@@ -764,10 +942,10 @@ pub(crate) async fn serve_legacy_sse_transport(
     // inside this (already async-trait-boxed) fn with a spurious
     // "implementation of `Send` is not general enough" error. Spawning the
     // serve future checks Send at a monomorphic boundary and sidesteps that;
-    // the task is awaited (or aborted on timeout) right here, so it never
+    // the guard aborts it on timeout or when this future is dropped, so it never
     // outlives this call.
     let serve_handle = tokio::spawn(rmcp::serve_client(handler, transport));
-    let abort_handle = serve_handle.abort_handle();
+    let _abort_guard = AbortOnDrop(serve_handle.abort_handle());
     match timeout(Duration::from_secs(init_timeout), serve_handle).await {
         Ok(Ok(Ok(client))) => Some(client),
         Ok(Ok(Err(e))) => {
@@ -783,7 +961,6 @@ pub(crate) async fn serve_legacy_sse_transport(
             None
         }
         Err(_) => {
-            abort_handle.abort();
             let msg = format!("Request timed out after {} seconds", init_timeout);
             tracing::error!("{msg} for {debug_name}");
             add_log_entry(logs, msg).await;
@@ -909,6 +1086,15 @@ pub async fn mcp_session_setup<T: MCPTransportInitializer + Clone + Send + Sync 
         return;
     }
 
+    let _lifecycle = mcp_lifecycle_lock(&config_path).await;
+    if native_mcp_config_missing(&config_path).await {
+        tracing::debug!(
+            "MCP setup skipped: config {:?} no longer exists",
+            config_path
+        );
+        remove_mcp_session_locked(gcx, &config_path).await;
+        return;
+    }
     let session_key = format!("{}", config_path);
 
     let session_arc = {
@@ -929,6 +1115,8 @@ pub async fn mcp_session_setup<T: MCPTransportInitializer + Clone + Send + Sync 
                 server_info: None,
                 startup_task_handles: None,
                 health_task_handle: None,
+                recovery_task: None,
+                lifecycle_epoch: 0,
                 logs: Arc::new(AMutex::new(Vec::new())),
                 stderr_file_path: None,
                 stderr_cursor: Arc::new(AMutex::new(0)),
@@ -981,11 +1169,17 @@ pub async fn mcp_session_setup<T: MCPTransportInitializer + Clone + Send + Sync 
         if let Some(health_task) = session_downcasted.health_task_handle.take() {
             health_task.abort();
         }
+        if let Some(recovery_task) = session_downcasted.recovery_task.take() {
+            recovery_task.abort();
+        }
         if let Some(index_task) = session_downcasted.resource_index_task.take() {
             index_task.abort();
         }
 
         prepare_mcp_session_for_start(session_downcasted, new_cfg_value.clone(), config_changed);
+        session_downcasted.lifecycle_epoch = session_downcasted.lifecycle_epoch.wrapping_add(1);
+        let epoch = session_downcasted.lifecycle_epoch;
+        set_retry_deadline(&config_path, None);
 
         let peer_arc: Arc<AMutex<Option<Peer<RoleClient>>>> = Arc::new(AMutex::new(None));
         let peer_arc_clone = peer_arc.clone();
@@ -994,11 +1188,8 @@ pub async fn mcp_session_setup<T: MCPTransportInitializer + Clone + Send + Sync 
             let (mcp_client, logs, debug_name, stderr_file) = {
                 let mut session_locked = session_arc_clone.lock().await;
                 let mcp_session = match session_locked.as_any_mut().downcast_mut::<SessionMCP>() {
-                    Some(s) => s,
-                    None => {
-                        tracing::error!("Session is not a SessionMCP, cannot start MCP client");
-                        return;
-                    }
+                    Some(s) if s.lifecycle_epoch == epoch => s,
+                    _ => return,
                 };
                 mcp_session.stderr_cursor = Arc::new(AMutex::new(0));
                 (
@@ -1028,10 +1219,11 @@ pub async fn mcp_session_setup<T: MCPTransportInitializer + Clone + Send + Sync 
                 if let Some(gcx) = gcx_weak.upgrade() {
                     advance_mcp_catalog_generation(&gcx);
                 }
-                tokio::spawn(super::mcp_resources::remove_indexed_resources(
+                super::mcp_resources::remove_indexed_resources(
                     gcx_weak.clone(),
                     config_path.clone(),
-                ));
+                )
+                .await;
             }
             if let Some(stderr_file) = &stderr_file {
                 if let Err(e) = tokio::fs::remove_file(stderr_file).await {
@@ -1118,8 +1310,8 @@ pub async fn mcp_session_setup<T: MCPTransportInitializer + Clone + Send + Sync 
                     let mut session_locked = session_arc_clone.lock().await;
                     let mcp_session = match session_locked.as_any_mut().downcast_mut::<SessionMCP>()
                     {
-                        Some(s) => s,
-                        None => return,
+                        Some(s) if s.lifecycle_epoch == epoch => s,
+                        _ => return,
                     };
                     if !matches!(
                         mcp_session.connection_status,
@@ -1144,6 +1336,22 @@ pub async fn mcp_session_setup<T: MCPTransportInitializer + Clone + Send + Sync 
                             }
                         }
                     }
+                    drop(session_locked);
+                    if reconnect_enabled && reconnect_max_attempts > 0 && !restricted {
+                        spawn_initial_recovery(
+                            session_arc_clone.clone(),
+                            transport_initializer.clone(),
+                            logs.clone(),
+                            debug_name.clone(),
+                            init_timeout,
+                            request_timeout,
+                            health_check_interval,
+                            reconnect_max_attempts,
+                            gcx_weak.clone(),
+                            epoch,
+                        )
+                        .await;
+                    }
                     return;
                 }
             };
@@ -1166,12 +1374,34 @@ pub async fn mcp_session_setup<T: MCPTransportInitializer + Clone + Send + Sync 
                     let mut session_locked = session_arc_clone.lock().await;
                     let mcp_session = match session_locked.as_any_mut().downcast_mut::<SessionMCP>()
                     {
-                        Some(s) => s,
-                        None => return,
+                        Some(s) if s.lifecycle_epoch == epoch => s,
+                        _ => return,
                     };
                     mcp_session.connection_status = MCPConnectionStatus::Failed {
                         message: format!("Failed to list tools: {:?}", tools_error),
                     };
+                    drop(session_locked);
+                    cancel_mcp_client(
+                        &debug_name,
+                        Arc::new(AMutex::new(Some(client))),
+                        logs.clone(),
+                    )
+                    .await;
+                    if reconnect_enabled && reconnect_max_attempts > 0 && !restricted {
+                        spawn_initial_recovery(
+                            session_arc_clone.clone(),
+                            transport_initializer.clone(),
+                            logs.clone(),
+                            debug_name.clone(),
+                            init_timeout,
+                            request_timeout,
+                            health_check_interval,
+                            reconnect_max_attempts,
+                            gcx_weak.clone(),
+                            epoch,
+                        )
+                        .await;
+                    }
                     return;
                 }
                 Err(_) => {
@@ -1183,12 +1413,34 @@ pub async fn mcp_session_setup<T: MCPTransportInitializer + Clone + Send + Sync 
                     let mut session_locked = session_arc_clone.lock().await;
                     let mcp_session = match session_locked.as_any_mut().downcast_mut::<SessionMCP>()
                     {
-                        Some(s) => s,
-                        None => return,
+                        Some(s) if s.lifecycle_epoch == epoch => s,
+                        _ => return,
                     };
                     mcp_session.connection_status = MCPConnectionStatus::Failed {
                         message: "List tools timed out".to_string(),
                     };
+                    drop(session_locked);
+                    cancel_mcp_client(
+                        &debug_name,
+                        Arc::new(AMutex::new(Some(client))),
+                        logs.clone(),
+                    )
+                    .await;
+                    if reconnect_enabled && reconnect_max_attempts > 0 && !restricted {
+                        spawn_initial_recovery(
+                            session_arc_clone.clone(),
+                            transport_initializer.clone(),
+                            logs.clone(),
+                            debug_name.clone(),
+                            init_timeout,
+                            request_timeout,
+                            health_check_interval,
+                            reconnect_max_attempts,
+                            gcx_weak.clone(),
+                            epoch,
+                        )
+                        .await;
+                    }
                     return;
                 }
             };
@@ -1202,109 +1454,23 @@ pub async fn mcp_session_setup<T: MCPTransportInitializer + Clone + Send + Sync 
                 .collect();
             let tools_len = tools.len();
 
-            let peer = client.peer().clone();
-            let server_info = client.peer_info().as_deref().cloned();
-            *peer_arc.lock().await = Some(peer.clone());
-
-            let capabilities = server_info
-                .as_ref()
-                .map(|s| s.capabilities.clone())
-                .unwrap_or_default();
-
-            let resources = if !restricted && capabilities.resources.is_some() {
-                match timeout(
-                    Duration::from_secs(request_timeout),
-                    client.list_all_resources(),
-                )
-                .await
-                {
-                    Ok(Ok(r)) => r,
-                    Ok(Err(e)) => {
-                        add_log_entry(logs.clone(), format!("Failed to list resources: {:?}", e))
-                            .await;
-                        vec![]
-                    }
-                    Err(_) => {
-                        add_log_entry(logs.clone(), "List resources timed out".to_string()).await;
-                        vec![]
-                    }
-                }
-            } else {
-                vec![]
-            };
-
-            let prompts = if !restricted && capabilities.prompts.is_some() {
-                match timeout(
-                    Duration::from_secs(request_timeout),
-                    client.list_all_prompts(),
-                )
-                .await
-                {
-                    Ok(Ok(p)) => p,
-                    Ok(Err(e)) => {
-                        add_log_entry(logs.clone(), format!("Failed to list prompts: {:?}", e))
-                            .await;
-                        vec![]
-                    }
-                    Err(_) => {
-                        add_log_entry(logs.clone(), "List prompts timed out".to_string()).await;
-                        vec![]
-                    }
-                }
-            } else {
-                vec![]
-            };
-
-            let client_arc = {
-                let mut session_locked = session_arc_clone.lock().await;
-                let session_downcasted =
-                    match session_locked.as_any_mut().downcast_mut::<SessionMCP>() {
-                        Some(s) => s,
-                        None => {
-                            tracing::error!(
-                                "Session is not a SessionMCP, cannot store connected MCP client"
-                            );
-                            return;
-                        }
-                    };
-
-                let arc = Arc::new(AMutex::new(Some(client)));
-                session_downcasted.mcp_client = Some(arc.clone());
-                tool_catalog_cache_store(&config_path, &tools);
-                if let Some(gcx) = gcx_weak.upgrade() {
-                    advance_mcp_catalog_generation(&gcx);
-                }
-                session_downcasted.mcp_tools = tools;
-                session_downcasted.mcp_resources = resources.clone();
-                session_downcasted.mcp_prompts = prompts;
-                session_downcasted.server_info = server_info;
-                session_downcasted.connection_status = MCPConnectionStatus::Connected;
-                session_downcasted.last_logged_status = None;
-                session_downcasted.last_successful_connection = Some(Instant::now());
-                if let Ok(mut m) = session_downcasted.metrics.try_lock() {
-                    m.record_connected();
-                }
-                arc
-            };
-
-            if !resources.is_empty() {
-                let index_task = tokio::spawn(super::mcp_resources::index_mcp_resources(
-                    gcx_weak.clone(),
-                    config_path.clone(),
-                    peer,
-                    resources,
-                    logs.clone(),
-                ));
-                let mut session_locked = session_arc_clone.lock().await;
-                if let Some(mcp_session) = session_locked.as_any_mut().downcast_mut::<SessionMCP>()
-                {
-                    if let Some(previous) = mcp_session
-                        .resource_index_task
-                        .replace(index_task.abort_handle())
-                    {
-                        previous.abort();
-                    }
-                }
+            let client_arc = Arc::new(AMutex::new(None));
+            if !publish_connected_client(
+                &session_arc_clone,
+                &client_arc,
+                client,
+                &peer_arc,
+                tools,
+                restricted,
+                &logs,
+                &debug_name,
+                request_timeout,
+                &gcx_weak,
+                epoch,
+            )
+            .await
+            {
+                return;
             }
 
             log(
@@ -1313,8 +1479,8 @@ pub async fn mcp_session_setup<T: MCPTransportInitializer + Clone + Send + Sync 
             )
             .await;
 
-            if reconnect_enabled && !restricted {
-                let health_task = tokio::spawn(mcp_health_monitor(
+            if reconnect_enabled && reconnect_max_attempts > 0 && !restricted {
+                install_health_monitor(
                     session_arc_clone.clone(),
                     transport_initializer.clone(),
                     client_arc,
@@ -1325,36 +1491,9 @@ pub async fn mcp_session_setup<T: MCPTransportInitializer + Clone + Send + Sync 
                     health_check_interval,
                     reconnect_max_attempts,
                     gcx_weak.clone(),
-                ));
-                let health_abort = health_task.abort_handle();
-                let mut session_locked = session_arc_clone.lock().await;
-                let mcp_session = match session_locked.as_any_mut().downcast_mut::<SessionMCP>() {
-                    Some(s) => s,
-                    None => return,
-                };
-                if let Some(old) = mcp_session.health_task_handle.replace(health_abort) {
-                    old.abort();
-                }
-            }
-
-            {
-                let mut session_locked = session_arc_clone.lock().await;
-                let mcp_session = match session_locked.as_any_mut().downcast_mut::<SessionMCP>() {
-                    Some(s) => s,
-                    None => return,
-                };
-                if mcp_session.auth_manager.is_some() {
-                    let refresh_task = tokio::spawn(mcp_oauth_refresh_task(
-                        session_arc_clone.clone(),
-                        config_path.clone(),
-                    ));
-                    if let Some(old) = mcp_session
-                        .oauth_refresh_task_handle
-                        .replace(refresh_task.abort_handle())
-                    {
-                        old.abort();
-                    }
-                }
+                    epoch,
+                )
+                .await;
             }
         });
 
@@ -1364,6 +1503,258 @@ pub async fn mcp_session_setup<T: MCPTransportInitializer + Clone + Send + Sync 
             startup_task_abort_handle,
         ));
     }
+}
+
+async fn recover_initial_connection<T: MCPTransportInitializer + Clone + Send + Sync + 'static>(
+    session: SessionArc,
+    initializer: T,
+    logs: Arc<AMutex<Vec<String>>>,
+    name: String,
+    init_timeout: u64,
+    request_timeout: u64,
+    health_interval: u64,
+    attempts: u64,
+    gcx: Weak<GlobalContext>,
+    epoch: u64,
+) {
+    let client = Arc::new(AMutex::new(None));
+    {
+        let mut locked = session.lock().await;
+        let Some(session) = locked.as_any_mut().downcast_mut::<SessionMCP>() else {
+            return;
+        };
+        if session.lifecycle_epoch != epoch
+            || matches!(session.connection_status, MCPConnectionStatus::NeedsAuth)
+            || session
+                .oauth_probe
+                .as_ref()
+                .is_some_and(|probe| probe.needs_auth)
+        {
+            return;
+        }
+        session.mcp_client = Some(client.clone());
+    }
+    if reconnect_with_backoff(
+        session.clone(),
+        &initializer,
+        client.clone(),
+        logs.clone(),
+        &name,
+        init_timeout,
+        request_timeout,
+        attempts,
+        &[1, 2, 4, 8, 16, 30, 60],
+        gcx.clone(),
+        epoch,
+    )
+    .await
+    {
+        install_health_monitor(
+            session,
+            initializer,
+            client,
+            logs,
+            name,
+            init_timeout,
+            request_timeout,
+            health_interval,
+            attempts,
+            gcx,
+            epoch,
+        )
+        .await;
+    }
+}
+
+async fn spawn_initial_recovery<T: MCPTransportInitializer + Clone + Send + Sync + 'static>(
+    session: SessionArc,
+    initializer: T,
+    logs: Arc<AMutex<Vec<String>>>,
+    name: String,
+    init_timeout: u64,
+    request_timeout: u64,
+    health_interval: u64,
+    attempts: u64,
+    gcx: Weak<GlobalContext>,
+    epoch: u64,
+) {
+    let mut locked = session.lock().await;
+    let Some(mcp) = locked.as_any_mut().downcast_mut::<SessionMCP>() else {
+        return;
+    };
+    if mcp.lifecycle_epoch != epoch {
+        return;
+    }
+    let task = tokio::spawn(recover_initial_connection(
+        session.clone(),
+        initializer,
+        logs,
+        name,
+        init_timeout,
+        request_timeout,
+        health_interval,
+        attempts,
+        gcx,
+        epoch,
+    ));
+    if let Some(old) = mcp.recovery_task.replace(task) {
+        old.abort();
+    }
+}
+
+async fn install_health_monitor<T: MCPTransportInitializer + Clone + Send + Sync + 'static>(
+    session: SessionArc,
+    initializer: T,
+    client: Arc<AMutex<Option<McpRunningService>>>,
+    logs: Arc<AMutex<Vec<String>>>,
+    name: String,
+    init_timeout: u64,
+    request_timeout: u64,
+    health_interval: u64,
+    attempts: u64,
+    gcx: Weak<GlobalContext>,
+    epoch: u64,
+) {
+    let mut locked = session.lock().await;
+    let Some(mcp) = locked.as_any_mut().downcast_mut::<SessionMCP>() else {
+        return;
+    };
+    if mcp.lifecycle_epoch != epoch {
+        return;
+    }
+    let health = tokio::spawn(mcp_health_monitor(
+        session.clone(),
+        initializer,
+        client,
+        logs,
+        name,
+        init_timeout,
+        request_timeout,
+        health_interval,
+        attempts,
+        gcx,
+        epoch,
+    ));
+    if let Some(old) = mcp.health_task_handle.replace(health) {
+        old.abort();
+    }
+}
+
+/// Shared tail for every successful connect (initial, initial recovery, health reconnect):
+/// loads server info, resources and prompts, publishes the catalog and starts the owned
+/// resource-index and OAuth refresh tasks. Returns false when the session moved on.
+async fn publish_connected_client(
+    session: &SessionArc,
+    client_arc: &Arc<AMutex<Option<McpRunningService>>>,
+    client: McpRunningService,
+    peer_arc: &Arc<AMutex<Option<Peer<RoleClient>>>>,
+    tools: Vec<rmcp::model::Tool>,
+    restricted: bool,
+    logs: &Arc<AMutex<Vec<String>>>,
+    debug_name: &str,
+    request_timeout: u64,
+    gcx_weak: &Weak<GlobalContext>,
+    epoch: u64,
+) -> bool {
+    let peer = client.peer().clone();
+    let server_info = client.peer_info().as_deref().cloned();
+    *peer_arc.lock().await = Some(peer.clone());
+    let capabilities = server_info
+        .as_ref()
+        .map(|s| s.capabilities.clone())
+        .unwrap_or_default();
+    let resources = if !restricted && capabilities.resources.is_some() {
+        match timeout(
+            Duration::from_secs(request_timeout),
+            client.list_all_resources(),
+        )
+        .await
+        {
+            Ok(Ok(r)) => r,
+            Ok(Err(e)) => {
+                add_log_entry(logs.clone(), format!("Failed to list resources: {:?}", e)).await;
+                vec![]
+            }
+            Err(_) => {
+                add_log_entry(logs.clone(), "List resources timed out".to_string()).await;
+                vec![]
+            }
+        }
+    } else {
+        vec![]
+    };
+    let prompts = if !restricted && capabilities.prompts.is_some() {
+        match timeout(
+            Duration::from_secs(request_timeout),
+            client.list_all_prompts(),
+        )
+        .await
+        {
+            Ok(Ok(p)) => p,
+            Ok(Err(e)) => {
+                add_log_entry(logs.clone(), format!("Failed to list prompts: {:?}", e)).await;
+                vec![]
+            }
+            Err(_) => {
+                add_log_entry(logs.clone(), "List prompts timed out".to_string()).await;
+                vec![]
+            }
+        }
+    } else {
+        vec![]
+    };
+
+    *client_arc.lock().await = Some(client);
+    let metrics = {
+        let mut locked = session.lock().await;
+        let mcp = match locked.as_any_mut().downcast_mut::<SessionMCP>() {
+            Some(mcp) if mcp.lifecycle_epoch == epoch => mcp,
+            _ => {
+                drop(locked);
+                cancel_mcp_client(debug_name, client_arc.clone(), logs.clone()).await;
+                return false;
+            }
+        };
+        let config_path = mcp.config_path.clone();
+        mcp.mcp_client = Some(client_arc.clone());
+        tool_catalog_cache_store(&config_path, &tools);
+        if let Some(gcx) = gcx_weak.upgrade() {
+            advance_mcp_catalog_generation(&gcx);
+        }
+        mcp.mcp_tools = tools;
+        mcp.mcp_resources = resources.clone();
+        mcp.mcp_prompts = prompts;
+        mcp.server_info = server_info;
+        set_retry_deadline(&config_path, None);
+        mcp.connection_status = MCPConnectionStatus::Connected;
+        mcp.last_logged_status = None;
+        mcp.last_successful_connection = Some(Instant::now());
+        if let Some(previous) = mcp.resource_index_task.take() {
+            previous.abort();
+        }
+        if !resources.is_empty() {
+            let index_task = tokio::spawn(super::mcp_resources::index_mcp_resources(
+                gcx_weak.clone(),
+                config_path.clone(),
+                peer,
+                resources,
+                logs.clone(),
+            ));
+            mcp.resource_index_task = Some(index_task.abort_handle());
+        }
+        if mcp.auth_manager.is_some() {
+            let refresh_task = tokio::spawn(mcp_oauth_refresh_task(session.clone(), config_path));
+            if let Some(old) = mcp
+                .oauth_refresh_task_handle
+                .replace(refresh_task.abort_handle())
+            {
+                old.abort();
+            }
+        }
+        mcp.metrics.clone()
+    };
+    metrics.lock().await.record_connected();
+    true
 }
 
 async fn mcp_health_monitor<T: MCPTransportInitializer + Clone>(
@@ -1377,6 +1768,7 @@ async fn mcp_health_monitor<T: MCPTransportInitializer + Clone>(
     health_check_interval: u64,
     reconnect_max_attempts: u64,
     gcx_weak: std::sync::Weak<GlobalContext>,
+    epoch: u64,
 ) {
     let backoff_delays: Vec<u64> = vec![1, 2, 4, 8, 16, 30, 60];
 
@@ -1438,31 +1830,24 @@ async fn mcp_health_monitor<T: MCPTransportInitializer + Clone>(
                 reconnect_max_attempts,
                 &backoff_delays,
                 gcx_weak.clone(),
+                epoch,
             )
             .await;
 
             if !reconnected {
-                let give_up_msg = {
-                    let mut session_locked = session_arc.lock().await;
-                    let mcp_session = match session_locked.as_any_mut().downcast_mut::<SessionMCP>()
-                    {
-                        Some(s) => s,
-                        None => return,
-                    };
+                let mut locked = session_arc.lock().await;
+                if let Some(session) = locked.as_any_mut().downcast_mut::<SessionMCP>() {
+                    if session.lifecycle_epoch != epoch {
+                        return;
+                    }
                     if matches!(
-                        mcp_session.auth_status,
+                        session.auth_status,
                         MCPAuthStatus::NeedsReauth | MCPAuthStatus::NeedsLogin
                     ) {
-                        mcp_session.connection_status = MCPConnectionStatus::NeedsAuth;
-                        "Health monitor: re-authentication required, giving up".to_string()
-                    } else {
-                        mcp_session.connection_status = MCPConnectionStatus::Failed {
-                            message: "Max reconnect attempts reached".to_string(),
-                        };
-                        "Health monitor: max reconnect attempts reached, giving up".to_string()
+                        session.connection_status = MCPConnectionStatus::NeedsAuth;
                     }
-                };
-                add_log_entry(logs.clone(), give_up_msg).await;
+                    set_retry_deadline(&session.config_path, None);
+                }
                 return;
             }
         }
@@ -1480,13 +1865,17 @@ async fn reconnect_with_backoff<T: MCPTransportInitializer>(
     reconnect_max_attempts: u64,
     backoff_delays: &[u64],
     gcx_weak: std::sync::Weak<GlobalContext>,
+    epoch: u64,
 ) -> bool {
-    let max_attempts = reconnect_max_attempts.min(backoff_delays.len() as u64) as usize;
-
-    for attempt in 0..max_attempts {
+    if reconnect_max_attempts == 0 || backoff_delays.is_empty() {
+        return false;
+    }
+    let max_attempts = reconnect_max_attempts;
+    let mut attempt = 0u64;
+    loop {
         let shutdown_flag = match gcx_weak.upgrade() {
             Some(gcx) => gcx.shutdown_flag.clone(),
-            None => Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            None => return false,
         };
         if shutdown_flag.load(std::sync::atomic::Ordering::SeqCst) {
             tracing::info!(
@@ -1499,12 +1888,15 @@ async fn reconnect_with_backoff<T: MCPTransportInitializer>(
         let reauthentication_required = {
             let mut session_locked = session_arc.lock().await;
             let mcp_session = match session_locked.as_any_mut().downcast_mut::<SessionMCP>() {
-                Some(s) => s,
-                None => continue,
+                Some(s) if s.lifecycle_epoch == epoch => s,
+                _ => return false,
             };
             matches!(
                 mcp_session.auth_status,
                 MCPAuthStatus::NeedsReauth | MCPAuthStatus::NeedsLogin
+            ) || matches!(
+                mcp_session.connection_status,
+                MCPConnectionStatus::NeedsAuth
             )
         };
         if reauthentication_required {
@@ -1517,24 +1909,32 @@ async fn reconnect_with_backoff<T: MCPTransportInitializer>(
             return false;
         }
 
-        let delay = backoff_delays[attempt];
+        let slow = attempt >= max_attempts;
+        let delay = if slow {
+            *backoff_delays.last().unwrap()
+        } else {
+            backoff_delays[(attempt as usize).min(backoff_delays.len() - 1)]
+        };
+        attempt = attempt.saturating_add(1);
 
         {
             let mut session_locked = session_arc.lock().await;
             let mcp_session = match session_locked.as_any_mut().downcast_mut::<SessionMCP>() {
-                Some(s) => s,
-                None => continue,
+                Some(s) if s.lifecycle_epoch == epoch => s,
+                _ => return false,
             };
+            set_retry_deadline(&mcp_session.config_path, Some(delay));
             mcp_session.connection_status = MCPConnectionStatus::Reconnecting {
-                attempt: attempt as u32,
+                attempt: attempt.min(u32::MAX as u64) as u32,
             };
         }
 
         let msg = format!(
-            "Reconnecting to {} (attempt {}/{}), waiting {}s",
+            "Reconnecting to {} (attempt {}/{}{}), waiting {}s",
             debug_name,
-            attempt + 1,
+            attempt,
             max_attempts,
+            if slow { ", slow retry" } else { "" },
             delay
         );
         tracing::info!("{}", msg);
@@ -1566,6 +1966,7 @@ async fn reconnect_with_backoff<T: MCPTransportInitializer>(
             prompt_refresh_handle: Arc::new(AMutex::new(None)),
         };
 
+        cancel_mcp_client(debug_name, client_arc.clone(), logs.clone()).await;
         let new_client = transport_initializer
             .init_mcp_transport(
                 logs.clone(),
@@ -1580,11 +1981,7 @@ async fn reconnect_with_backoff<T: MCPTransportInitializer>(
         let new_client = match new_client {
             Some(c) => c,
             None => {
-                tracing::warn!(
-                    "Reconnect attempt {} failed for {}",
-                    attempt + 1,
-                    debug_name
-                );
+                tracing::warn!("Reconnect attempt {} failed for {}", attempt, debug_name);
                 continue;
             }
         };
@@ -1602,41 +1999,53 @@ async fn reconnect_with_backoff<T: MCPTransportInitializer>(
                     format!("Reconnect: failed to list tools: {:?}", e),
                 )
                 .await;
+                cancel_mcp_client(
+                    debug_name,
+                    Arc::new(AMutex::new(Some(new_client))),
+                    logs.clone(),
+                )
+                .await;
                 continue;
             }
             Err(_) => {
                 add_log_entry(logs.clone(), "Reconnect: list tools timed out".to_string()).await;
+                cancel_mcp_client(
+                    debug_name,
+                    Arc::new(AMutex::new(Some(new_client))),
+                    logs.clone(),
+                )
+                .await;
                 continue;
             }
         };
 
         let tools_len = tools.len();
-        let peer = new_client.peer().clone();
-        *peer_arc.lock().await = Some(peer);
+        if !publish_connected_client(
+            &session_arc,
+            &client_arc,
+            new_client,
+            &peer_arc,
+            tools,
+            false,
+            &logs,
+            debug_name,
+            request_timeout,
+            &gcx_weak,
+            epoch,
+        )
+        .await
         {
-            let mut client_locked = client_arc.lock().await;
-            *client_locked = Some(new_client);
+            return false;
         }
         let metrics_arc = {
             let mut session_locked = session_arc.lock().await;
-            let mcp_session = match session_locked.as_any_mut().downcast_mut::<SessionMCP>() {
-                Some(s) => s,
-                None => return false,
-            };
-            tool_catalog_cache_store(&mcp_session.config_path, &tools);
-            if let Some(gcx) = gcx_weak.upgrade() {
-                advance_mcp_catalog_generation(&gcx);
-            }
-            mcp_session.mcp_tools = tools;
-            mcp_session.connection_status = MCPConnectionStatus::Connected;
-            mcp_session.last_logged_status = None;
-            mcp_session.last_successful_connection = Some(Instant::now());
-            mcp_session.metrics.clone()
+            session_locked
+                .as_any_mut()
+                .downcast_mut::<SessionMCP>()
+                .map(|s| s.metrics.clone())
         };
-        {
-            let mut m = metrics_arc.lock().await;
-            m.record_reconnect();
-            m.record_connected();
+        if let Some(metrics_arc) = metrics_arc {
+            metrics_arc.lock().await.record_reconnect();
         }
 
         let msg = format!(
@@ -1647,8 +2056,6 @@ async fn reconnect_with_backoff<T: MCPTransportInitializer>(
         add_log_entry(logs.clone(), msg).await;
         return true;
     }
-
-    false
 }
 
 #[cfg(test)]
@@ -1670,6 +2077,8 @@ mod tests {
                 server_info: None,
                 startup_task_handles: None,
                 health_task_handle: None,
+                recovery_task: None,
+                lifecycle_epoch: 0,
                 logs: Arc::new(AMutex::new(Vec::new())),
                 stderr_file_path: None,
                 stderr_cursor: Arc::new(AMutex::new(0)),
@@ -1928,17 +2337,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_reconnect_state_transitions() {
-        let session_arc = make_session_arc(MCPConnectionStatus::Connected);
-        let logs = Arc::new(AMutex::new(Vec::new()));
-        let attempt_count = Arc::new(AtomicU32::new(0));
-
-        struct AlwaysFailInitializer {
-            attempts: Arc<AtomicU32>,
-        }
-
+    async fn stale_snapshot_setup_does_not_resurrect_deleted_native_config() {
+        #[derive(Clone)]
+        struct CountInitializer(Arc<AtomicU32>);
         #[async_trait::async_trait]
-        impl MCPTransportInitializer for AlwaysFailInitializer {
+        impl MCPTransportInitializer for CountInitializer {
             async fn init_mcp_transport(
                 &self,
                 _logs: Arc<AMutex<Vec<String>>>,
@@ -1948,105 +2351,621 @@ mod tests {
                 _session: Arc<AMutex<Box<dyn IntegrationSession>>>,
                 _handler: McpClientHandler,
             ) -> Option<McpRunningService> {
-                self.attempts.fetch_add(1, Ordering::SeqCst);
+                self.0.fetch_add(1, Ordering::SeqCst);
                 None
             }
         }
-
-        let initializer = AlwaysFailInitializer {
-            attempts: attempt_count.clone(),
-        };
-        let client_arc: Arc<AMutex<Option<McpRunningService>>> = Arc::new(AMutex::new(None));
-        let backoff_delays = vec![0u64, 0, 0];
-
-        let result = reconnect_with_backoff(
-            session_arc.clone(),
-            &initializer,
-            client_arc,
-            logs,
-            "test_server",
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir
+            .path()
+            .join("integrations.d")
+            .join("mcp_stdio_gone.yaml");
+        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+        std::fs::write(&config, "command: never\n").unwrap();
+        let config_path = config.to_string_lossy().into_owned();
+        let snapshot = serde_json::json!({"command": "never"});
+        std::fs::remove_file(&config).unwrap();
+        remove_mcp_session_for_config(gcx.clone(), &config_path).await;
+        let attempts = Arc::new(AtomicU32::new(0));
+        mcp_session_setup(
+            gcx.clone(),
+            config_path.clone(),
+            snapshot.clone(),
+            CountInitializer(attempts.clone()),
             1,
             1,
-            3,
-            &backoff_delays,
-            std::sync::Weak::new(),
+            1,
+            1,
+            false,
         )
         .await;
+        assert!(gcx.integration_sessions.lock().await.is_empty());
+        assert_eq!(attempts.load(Ordering::SeqCst), 0);
 
-        assert!(!result, "Should return false when all attempts fail");
-        assert_eq!(
-            attempt_count.load(Ordering::SeqCst),
-            3,
-            "Should attempt exactly max_attempts times"
+        gcx.integration_sessions.lock().await.insert(
+            config_path.clone(),
+            make_session_arc(MCPConnectionStatus::Connected),
         );
+        mcp_session_setup(
+            gcx.clone(),
+            config_path.clone(),
+            snapshot,
+            CountInitializer(attempts.clone()),
+            1,
+            1,
+            1,
+            1,
+            false,
+        )
+        .await;
+        assert!(gcx.integration_sessions.lock().await.is_empty());
+        assert_eq!(attempts.load(Ordering::SeqCst), 0);
+    }
 
-        let mut session_locked = session_arc.lock().await;
-        let mcp_session = session_locked
-            .as_any_mut()
-            .downcast_mut::<super::super::session_mcp::SessionMCP>()
-            .unwrap();
-        assert!(
-            matches!(
-                mcp_session.connection_status,
-                MCPConnectionStatus::Reconnecting {
-                    attempt: 2
+    #[derive(Clone)]
+    struct OfflineInitializer {
+        attempts: Arc<AtomicU32>,
+        shutdown: Arc<std::sync::atomic::AtomicBool>,
+        stop_after: u32,
+    }
+
+    #[derive(Clone)]
+    struct RecoveringInitializer {
+        attempts: Arc<AtomicU32>,
+        offline_attempts: u32,
+        fixtures: Arc<AMutex<Vec<tokio::task::JoinHandle<()>>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl MCPTransportInitializer for RecoveringInitializer {
+        async fn init_mcp_transport(
+            &self,
+            _logs: Arc<AMutex<Vec<String>>>,
+            _name: String,
+            _init_timeout: u64,
+            _request_timeout: u64,
+            _session: Arc<AMutex<Box<dyn IntegrationSession>>>,
+            handler: McpClientHandler,
+        ) -> Option<McpRunningService> {
+            use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+            if self.attempts.fetch_add(1, Ordering::SeqCst) < self.offline_attempts {
+                return None;
+            }
+            let (client, server) = tokio::io::duplex(8192);
+            self.fixtures.lock().await.push(tokio::spawn(async move {
+                let (read, mut write) = tokio::io::split(server);
+                let mut lines = BufReader::new(read).lines();
+                while let Some(line) = lines.next_line().await.unwrap() {
+                    let request: Value = serde_json::from_str(&line).unwrap();
+                    let result = match request["method"].as_str() {
+                        Some("initialize") => serde_json::json!({
+                            "protocolVersion": "2024-11-05",
+                            "capabilities": {"tools":{}, "resources":{}, "prompts":{}},
+                            "serverInfo": {"name":"fixture", "version":"1"}
+                        }),
+                        Some("tools/list") => serde_json::json!({"tools":[{
+                            "name":"read", "inputSchema":{"type":"object"}
+                        }]}),
+                        Some("resources/list") => serde_json::json!({"resources":[{
+                            "uri":"file:///fixture.txt", "name":"fixture.txt"
+                        }]}),
+                        Some("prompts/list") => serde_json::json!({"prompts":[{
+                            "name":"summarize"
+                        }]}),
+                        _ => continue,
+                    };
+                    let response =
+                        serde_json::json!({"jsonrpc":"2.0", "id":request["id"], "result":result});
+                    if write
+                        .write_all(format!("{response}\n").as_bytes())
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
                 }
+            }));
+            timeout(Duration::from_secs(2), rmcp::serve_client(handler, client))
+                .await
+                .ok()?
+                .ok()
+        }
+    }
+
+    #[tokio::test]
+    async fn initial_offline_recovery_runs_connected_tail_and_removal_stops_supervisor() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let path = "/tmp/mcp_initial_offline_fixture.yaml";
+        let initializer = RecoveringInitializer {
+            attempts: Arc::new(AtomicU32::new(0)),
+            offline_attempts: 1,
+            fixtures: Arc::new(AMutex::new(Vec::new())),
+        };
+        mcp_session_setup(
+            gcx.clone(),
+            path.into(),
+            serde_json::json!({}),
+            initializer.clone(),
+            1,
+            1,
+            30,
+            1,
+            true,
+        )
+        .await;
+        timeout(Duration::from_secs(5), async {
+            loop {
+                let session = gcx
+                    .integration_sessions
+                    .lock()
+                    .await
+                    .get(path)
+                    .cloned()
+                    .unwrap();
+                let mut locked = session.lock().await;
+                let session = locked.as_any_mut().downcast_mut::<SessionMCP>().unwrap();
+                if session.connection_status == MCPConnectionStatus::Connected {
+                    assert_eq!(session.mcp_tools[0].name, "read");
+                    assert_eq!(
+                        session.server_info.as_ref().unwrap().server_info.name,
+                        "fixture"
+                    );
+                    assert_eq!(session.mcp_resources[0].uri, "file:///fixture.txt");
+                    assert_eq!(session.mcp_prompts[0].name, "summarize");
+                    assert!(session.recovery_task.is_some());
+                    assert!(session
+                        .startup_task_handles
+                        .as_ref()
+                        .unwrap()
+                        .1
+                        .is_finished());
+                    break;
+                }
+                drop(locked);
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(initializer.attempts.load(Ordering::SeqCst), 2);
+        remove_mcp_session_for_config(gcx, path).await;
+        for fixture in initializer.fixtures.lock().await.drain(..) {
+            timeout(Duration::from_secs(2), fixture)
+                .await
+                .unwrap()
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn slow_retry_connects_after_exhausted_burst() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let session = make_session_arc(MCPConnectionStatus::Disconnected);
+        let client = Arc::new(AMutex::new(None));
+        let logs = Arc::new(AMutex::new(Vec::new()));
+        let initializer = RecoveringInitializer {
+            attempts: Arc::new(AtomicU32::new(0)),
+            offline_attempts: 3,
+            fixtures: Arc::new(AMutex::new(Vec::new())),
+        };
+        assert!(
+            reconnect_with_backoff(
+                session.clone(),
+                &initializer,
+                client.clone(),
+                logs.clone(),
+                "slow-fixture",
+                1,
+                1,
+                2,
+                &[0],
+                Arc::downgrade(&gcx),
+                0,
+            )
+            .await
+        );
+        assert_eq!(initializer.attempts.load(Ordering::SeqCst), 4);
+        assert_eq!(
+            session
+                .lock()
+                .await
+                .as_any_mut()
+                .downcast_mut::<SessionMCP>()
+                .unwrap()
+                .connection_status,
+            MCPConnectionStatus::Connected
+        );
+        cancel_mcp_client("slow-fixture", client, logs).await;
+        for fixture in initializer.fixtures.lock().await.drain(..) {
+            timeout(Duration::from_secs(2), fixture)
+                .await
+                .unwrap()
+                .unwrap();
+        }
+        tool_catalog_cache_remove("/tmp/test.yaml");
+    }
+
+    #[tokio::test]
+    async fn removal_serializes_with_changed_settings_setup() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let path = "/tmp/mcp_remove_vs_setup_fixture.yaml";
+        let initializer = RecoveringInitializer {
+            attempts: Arc::new(AtomicU32::new(0)),
+            offline_attempts: 0,
+            fixtures: Arc::new(AMutex::new(Vec::new())),
+        };
+        let setup = |version: u32| {
+            mcp_session_setup(
+                gcx.clone(),
+                path.into(),
+                serde_json::json!({ "version": version }),
+                initializer.clone(),
+                2,
+                2,
+                30,
+                1,
+                true,
+            )
+        };
+        setup(1).await;
+        let old = gcx
+            .integration_sessions
+            .lock()
+            .await
+            .get(path)
+            .cloned()
+            .unwrap();
+        let old_join = old
+            .lock()
+            .await
+            .as_any_mut()
+            .downcast_mut::<SessionMCP>()
+            .unwrap()
+            .startup_task_handles
+            .clone()
+            .unwrap()
+            .0;
+        timeout(
+            Duration::from_secs(5),
+            super::super::session_mcp::mcp_session_wait_startup_bounded(
+                old.clone(),
+                Duration::from_secs(5),
             ),
-            "Final status should be Reconnecting with last attempt index"
+        )
+        .await
+        .unwrap();
+        let barrier = old_join.lock().await;
+        let remover = tokio::spawn(remove_mcp_session_for_config(gcx.clone(), path));
+        timeout(Duration::from_secs(5), async {
+            while gcx.integration_sessions.lock().await.contains_key(path)
+                || old
+                    .lock()
+                    .await
+                    .as_any_mut()
+                    .downcast_mut::<SessionMCP>()
+                    .unwrap()
+                    .connection_status
+                    != MCPConnectionStatus::Disconnected
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let racing_setup = tokio::spawn({
+            let gcx = gcx.clone();
+            let initializer = initializer.clone();
+            async move {
+                mcp_session_setup(
+                    gcx,
+                    path.into(),
+                    serde_json::json!({"version": 2}),
+                    initializer,
+                    2,
+                    2,
+                    30,
+                    1,
+                    true,
+                )
+                .await
+            }
+        });
+        for _ in 0..50 {
+            tokio::task::yield_now().await;
+        }
+        assert!(!racing_setup.is_finished());
+        assert!(!gcx.integration_sessions.lock().await.contains_key(path));
+        drop(barrier);
+        timeout(Duration::from_secs(5), remover)
+            .await
+            .unwrap()
+            .unwrap();
+        timeout(Duration::from_secs(5), racing_setup)
+            .await
+            .unwrap()
+            .unwrap();
+        {
+            let mut locked = old.lock().await;
+            let old = locked.as_any_mut().downcast_mut::<SessionMCP>().unwrap();
+            assert!(old.mcp_client.is_none());
+            assert!(old.health_task_handle.is_none());
+            assert!(old.recovery_task.is_none());
+            assert!(old.mcp_tools.is_empty());
+        }
+        let new = gcx
+            .integration_sessions
+            .lock()
+            .await
+            .get(path)
+            .cloned()
+            .unwrap();
+        assert!(!Arc::ptr_eq(&old, &new));
+        timeout(Duration::from_secs(5), async {
+            loop {
+                {
+                    let mut locked = new.lock().await;
+                    let new = locked.as_any_mut().downcast_mut::<SessionMCP>().unwrap();
+                    if new.connection_status == MCPConnectionStatus::Connected {
+                        assert_eq!(new.launched_cfg, serde_json::json!({"version": 2}));
+                        assert_eq!(new.mcp_tools[0].name, "read");
+                        break;
+                    }
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(tool_catalog_cache_get(path).unwrap()[0].name, "read");
+        assert_eq!(initializer.attempts.load(Ordering::SeqCst), 2);
+        remove_mcp_session_for_config(gcx.clone(), path).await;
+        assert!(!gcx.integration_sessions.lock().await.contains_key(path));
+        for fixture in initializer.fixtures.lock().await.drain(..) {
+            timeout(Duration::from_secs(2), fixture)
+                .await
+                .unwrap()
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn settings_change_and_removal_abort_initial_retry() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let path = "/tmp/mcp_cancel_retry_fixture.yaml";
+        let initializer = OfflineInitializer {
+            attempts: Arc::new(AtomicU32::new(0)),
+            shutdown: gcx.shutdown_flag.clone(),
+            stop_after: u32::MAX,
+        };
+        mcp_session_setup(
+            gcx.clone(),
+            path.into(),
+            serde_json::json!({"version":1}),
+            initializer.clone(),
+            1,
+            1,
+            30,
+            1,
+            true,
+        )
+        .await;
+        let session = gcx
+            .integration_sessions
+            .lock()
+            .await
+            .get(path)
+            .cloned()
+            .unwrap();
+        timeout(Duration::from_secs(2), async {
+            loop {
+                if mcp_next_retry_in_secs(path).is_some() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let old_abort = session
+            .lock()
+            .await
+            .as_any_mut()
+            .downcast_mut::<SessionMCP>()
+            .unwrap()
+            .recovery_task
+            .as_ref()
+            .unwrap()
+            .abort_handle();
+        mcp_session_setup(
+            gcx.clone(),
+            path.into(),
+            serde_json::json!({"version":2}),
+            initializer.clone(),
+            1,
+            1,
+            30,
+            1,
+            true,
+        )
+        .await;
+        timeout(Duration::from_secs(2), async {
+            while !old_abort.is_finished() {
+                tokio::task::yield_now().await;
+            }
+            while mcp_next_retry_in_secs(path).is_none() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        let new_abort = session
+            .lock()
+            .await
+            .as_any_mut()
+            .downcast_mut::<SessionMCP>()
+            .unwrap()
+            .recovery_task
+            .as_ref()
+            .unwrap()
+            .abort_handle();
+        assert!(!new_abort.is_finished());
+        assert_eq!(initializer.attempts.load(Ordering::SeqCst), 2);
+        remove_mcp_session_for_config(gcx.clone(), path).await;
+        timeout(Duration::from_secs(2), async {
+            while !new_abort.is_finished() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(!gcx.integration_sessions.lock().await.contains_key(path));
+        assert!(mcp_next_retry_in_secs(path).is_none());
+        assert_eq!(initializer.attempts.load(Ordering::SeqCst), 2);
+    }
+
+    #[async_trait::async_trait]
+    impl MCPTransportInitializer for OfflineInitializer {
+        async fn init_mcp_transport(
+            &self,
+            _logs: Arc<AMutex<Vec<String>>>,
+            _name: String,
+            _init_timeout: u64,
+            _request_timeout: u64,
+            _session: Arc<AMutex<Box<dyn IntegrationSession>>>,
+            _handler: McpClientHandler,
+        ) -> Option<McpRunningService> {
+            if self.attempts.fetch_add(1, Ordering::SeqCst) + 1 == self.stop_after {
+                self.shutdown.store(true, Ordering::SeqCst);
+            }
+            None
+        }
+    }
+
+    #[tokio::test]
+    async fn reconnect_continues_beyond_burst_and_delay_table() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let session = make_session_arc(MCPConnectionStatus::Disconnected);
+        let attempts = Arc::new(AtomicU32::new(0));
+        let initializer = OfflineInitializer {
+            attempts: attempts.clone(),
+            shutdown: gcx.shutdown_flag.clone(),
+            stop_after: 11,
+        };
+        assert!(
+            !reconnect_with_backoff(
+                session.clone(),
+                &initializer,
+                Arc::new(AMutex::new(None)),
+                Arc::new(AMutex::new(Vec::new())),
+                "fixture",
+                1,
+                1,
+                9,
+                &[0],
+                Arc::downgrade(&gcx),
+                0,
+            )
+            .await
+        );
+        assert_eq!(attempts.load(Ordering::SeqCst), 11);
+        assert_eq!(
+            session
+                .lock()
+                .await
+                .as_any_mut()
+                .downcast_mut::<SessionMCP>()
+                .unwrap()
+                .connection_status,
+            MCPConnectionStatus::Reconnecting {
+                attempt: 11
+            }
         );
     }
 
     #[tokio::test]
-    async fn test_reconnect_max_attempts_capped_by_backoff_delays() {
-        let session_arc = make_session_arc(MCPConnectionStatus::Connected);
-        let logs = Arc::new(AMutex::new(Vec::new()));
-        let attempt_count = Arc::new(AtomicU32::new(0));
-
-        struct CountingInitializer {
-            attempts: Arc<AtomicU32>,
-        }
-
-        #[async_trait::async_trait]
-        impl MCPTransportInitializer for CountingInitializer {
-            async fn init_mcp_transport(
-                &self,
-                _logs: Arc<AMutex<Vec<String>>>,
-                _debug_name: String,
-                _init_timeout: u64,
-                _request_timeout: u64,
-                _session: Arc<AMutex<Box<dyn IntegrationSession>>>,
-                _handler: McpClientHandler,
-            ) -> Option<McpRunningService> {
-                self.attempts.fetch_add(1, Ordering::SeqCst);
-                None
+    async fn disabled_or_zero_attempt_reconnect_stops_after_initial_failure() {
+        for (enabled, max_attempts) in [(false, 9), (true, 0)] {
+            let gcx = crate::global_context::tests::make_test_gcx().await;
+            let path = format!("/tmp/mcp_no_retry_{enabled}_{max_attempts}.yaml");
+            let initializer = OfflineInitializer {
+                attempts: Arc::new(AtomicU32::new(0)),
+                shutdown: gcx.shutdown_flag.clone(),
+                stop_after: u32::MAX,
+            };
+            mcp_session_setup(
+                gcx.clone(),
+                path.clone(),
+                serde_json::json!({}),
+                initializer.clone(),
+                1,
+                1,
+                1,
+                max_attempts,
+                enabled,
+            )
+            .await;
+            let session = gcx
+                .integration_sessions
+                .lock()
+                .await
+                .get(&path)
+                .cloned()
+                .unwrap();
+            timeout(
+                Duration::from_secs(2),
+                super::super::session_mcp::mcp_session_wait_startup(session.clone()),
+            )
+            .await
+            .unwrap();
+            assert_eq!(initializer.attempts.load(Ordering::SeqCst), 1);
+            {
+                let mut locked = session.lock().await;
+                let mcp = locked.as_any_mut().downcast_mut::<SessionMCP>().unwrap();
+                assert_eq!(
+                    mcp.connection_status,
+                    MCPConnectionStatus::Failed {
+                        message: "Transport initialization failed".into(),
+                    }
+                );
+                assert!(mcp.health_task_handle.is_none());
+                assert!(mcp.mcp_client.is_none());
             }
+            assert!(mcp_next_retry_in_secs(&path).is_none());
+            remove_mcp_session_for_config(gcx, &path).await;
         }
+    }
 
-        let initializer = CountingInitializer {
-            attempts: attempt_count.clone(),
-        };
-        let client_arc: Arc<AMutex<Option<McpRunningService>>> = Arc::new(AMutex::new(None));
-        let backoff_delays = vec![0u64, 0];
-
-        reconnect_with_backoff(
-            session_arc.clone(),
-            &initializer,
-            client_arc,
-            logs,
-            "test_server",
-            1,
-            1,
-            100,
-            &backoff_delays,
-            std::sync::Weak::new(),
-        )
-        .await;
-
-        assert_eq!(
-            attempt_count.load(Ordering::SeqCst),
-            2,
-            "Should be capped by backoff_delays length, not reconnect_max_attempts"
-        );
+    #[tokio::test]
+    async fn removing_session_cancels_startup_and_clears_catalog() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let path = "/tmp/mcp_remove_fixture.yaml";
+        let session = make_session_arc(MCPConnectionStatus::Connecting);
+        let (ready, wait) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            ready.send(()).unwrap();
+            std::future::pending::<()>().await;
+        });
+        let abort = task.abort_handle();
+        {
+            let mut locked = session.lock().await;
+            let session = locked.as_any_mut().downcast_mut::<SessionMCP>().unwrap();
+            session.config_path = path.into();
+            session.startup_task_handles = Some((Arc::new(AMutex::new(Some(task))), abort.clone()));
+        }
+        wait.await.unwrap();
+        gcx.integration_sessions
+            .lock()
+            .await
+            .insert(path.into(), session.clone());
+        tool_catalog_cache_store(path, &[]);
+        assert!(tool_catalog_cache_get(path).is_some());
+        remove_mcp_session_for_config(gcx.clone(), path).await;
+        assert!(!gcx.integration_sessions.lock().await.contains_key(path));
+        assert!(tool_catalog_cache_get(path).is_none());
+        tokio::task::yield_now().await;
+        assert!(abort.is_finished());
     }
 
     #[tokio::test]
@@ -2071,6 +2990,8 @@ mod tests {
                 server_info: None,
                 startup_task_handles: None,
                 health_task_handle: None,
+                recovery_task: None,
+                lifecycle_epoch: 0,
                 logs: logs.clone(),
                 stderr_file_path: None,
                 stderr_cursor: Arc::new(AMutex::new(0)),
@@ -2120,5 +3041,58 @@ mod tests {
             "Auth status should be NeedsLogin when no tokens, got {:?}",
             mcp_session.auth_status
         );
+    }
+
+    #[tokio::test]
+    async fn lifecycle_lock_entry_is_pruned_after_last_guard_drops() {
+        let key = "/tmp/lifecycle_lock_prune_fixture/integrations.d/mcp_http_x.yaml";
+        let guard = mcp_lifecycle_lock(key).await;
+        assert!(lifecycle_lock_registered(key));
+        let waiter = tokio::spawn(async move {
+            let _second = mcp_lifecycle_lock(key).await;
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!waiter.is_finished(), "a live lock must keep serializing");
+        drop(guard);
+        tokio::time::timeout(Duration::from_secs(5), waiter)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!lifecycle_lock_registered(key));
+        drop(mcp_lifecycle_lock("/tmp/lifecycle_lock_prune_fixture/other.yaml").await);
+        let locks = MCP_LIFECYCLE_LOCKS.lock().unwrap();
+        assert!(!locks.as_ref().unwrap().contains_key(key));
+    }
+
+    #[tokio::test]
+    async fn aborted_owner_aborts_spawned_serve_child() {
+        struct DropFlag(Arc<std::sync::atomic::AtomicBool>);
+        impl Drop for DropFlag {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+        let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let owner = tokio::spawn({
+            let dropped = dropped.clone();
+            async move {
+                let child = tokio::spawn(async move {
+                    let _flag = DropFlag(dropped);
+                    std::future::pending::<()>().await;
+                });
+                let _guard = AbortOnDrop(child.abort_handle());
+                let _ = timeout(Duration::from_secs(60), child).await;
+            }
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        owner.abort();
+        let _ = owner.await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !dropped.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("child serve task must be aborted with its owner");
     }
 }

@@ -1,4 +1,4 @@
-schema_version: 25
+schema_version: 26
 id: setup_mcp
 title: Setup MCP
 description: Discover and configure suitable MCP servers for the project
@@ -145,7 +145,7 @@ prompt: |
   Never overwrite existing integration configs without explicit user confirmation.
 
   ### 6. Write — create integration config files
-  Write to `.refact/integrations.d/<name>.yaml`.
+  Prefer `manage_mcp(action="save", name="short-name", transport="http|sse|stdio", settings={...})` over hand-editing YAML. Use list/status/logs/reconnect to inspect and validate. Save/remove require approval; never bypass that guidance.
   Use `$VARIABLE` for all credential placeholders — never hardcode secrets.
   Include a comment in each file explaining what the integration does and how to test it.
 
@@ -173,6 +173,7 @@ prompt: |
   %HANDOFF_INSTRUCTIONS%
 
 tools:
+  - manage_mcp
   - set_trajectory_label
   - codegraph_overview
   - code_health

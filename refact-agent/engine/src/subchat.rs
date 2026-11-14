@@ -894,16 +894,13 @@ fn gate_subchat_boundary(
     model_id: &str,
 ) -> Result<(), String> {
     let records = unique_privacy_records(messages).map_err(|error| error.to_string())?;
-    let policy = gcx.privacy_policy_load.read().unwrap().policy.clone();
-    let compiled = policy.compile().map_err(|error| error.to_string())?;
-    match refact_privacy::clear(
+    match crate::privacy::destinations::clear_current(
+        gcx,
         AuditedSubchatReport(records),
         &subagent_destination(model_id),
-        &compiled,
     ) {
         Ok(_) => Ok(()),
-        Err(refusal) if refusal.offending.is_empty() => Err(refusal.message),
-        Err(refusal) => Err(refusal.model_facing().to_string()),
+        Err(refusal) => Err(refusal.model_facing()),
     }
 }
 
@@ -6383,6 +6380,42 @@ mod subchat_tests {
     }
 
     #[tokio::test]
+    async fn subchat_boundary_redacts_internal_policy_failure() {
+        let gcx = make_test_gcx().await;
+        gcx.privacy_policy_load.write().unwrap().error =
+            Some("internal policy failure: /private/config".into());
+        let error = gate_subchat_boundary(&gcx, &[], "trusted/model").unwrap_err();
+        assert_eq!(error, "Request not sent: user privacy policy — privacy metadata or policy could not be verified. Resolve the privacy verification problem before trying again.");
+    }
+
+    #[tokio::test]
+    async fn subchat_boundary_reclassifies_removed_zones_with_workspace_roots() {
+        let gcx = make_test_gcx().await;
+        let workspace = tempfile::tempdir().unwrap();
+        *gcx.documents_state.workspace_folders.lock().unwrap() =
+            vec![workspace.path().to_path_buf()];
+        install_privacy_policy(&gcx, "trusted", true);
+        gcx.privacy_policy_load.write().unwrap().policy = Arc::new(refact_privacy::PrivacyPolicy {
+            zones: vec![refact_privacy::Zone {
+                name: "current".into(),
+                patterns: vec!["private/**".into()],
+                send_to: vec!["trusted".into()],
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        let path = workspace.path().join("private/payload");
+        let messages = vec![message_with_privacy(
+            "user",
+            "secret context",
+            vec![privacy_record(&path.to_string_lossy(), "removed")],
+        )];
+        assert!(gate_subchat_boundary(&gcx, &messages, "trusted/model").is_ok());
+        let error = gate_subchat_boundary(&gcx, &messages, "untrusted/model").unwrap_err();
+        assert!(error.starts_with("Request not sent: user privacy policy"));
+    }
+
+    #[tokio::test]
     async fn subchat_privacy_in_gate_checks_subagent_model_destination() {
         let gcx = make_test_gcx().await;
         install_privacy_policy(&gcx, "trusted", true);
@@ -6394,7 +6427,7 @@ mod subchat_tests {
 
         let error = gate_subchat_boundary(&gcx, &messages, "untrusted/model").unwrap_err();
 
-        assert!(error.starts_with("Output withheld by user privacy policy"));
+        assert!(error.starts_with("Request not sent: user privacy policy"));
         assert!(error.contains("zone \""));
     }
 
@@ -6411,7 +6444,7 @@ mod subchat_tests {
         let sanitized = sanitize_messages_for_new_thread(&messages);
         let error = prepare_subchat_messages(&gcx, sanitized, "untrusted/model").unwrap_err();
 
-        assert!(error.starts_with("Output withheld by user privacy policy"));
+        assert!(error.starts_with("Request not sent: user privacy policy"));
         assert!(error.contains("zone \""));
     }
 
@@ -6438,7 +6471,7 @@ mod subchat_tests {
 
         let error = gate_subchat_boundary(&gcx, &messages[1..], "parent/model").unwrap_err();
 
-        assert!(error.starts_with("Output withheld by user privacy policy"));
+        assert!(error.starts_with("Request not sent: user privacy policy"));
     }
 
     #[test]

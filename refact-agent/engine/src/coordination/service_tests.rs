@@ -1334,14 +1334,14 @@ async fn direct_inventory_cursor_rechecks_absolute_and_relative_carried_paths() 
             .add_message(message);
         let privacy = crate::privacy::classification_cache::privacy_key(&app.gcx).unwrap();
         let (catalog, disclosure) = visible_projection(&app, &caller).await.unwrap();
-        assert!(
-            catalog.find("b").is_some(),
-            "carried zone alone permits the row"
-        );
-        let error = inventory_cursor_from_projection(&app, &caller, catalog, &disclosure, &privacy)
-            .await
-            .unwrap_err();
-        assert_eq!(error.code, "cursor_expired", "relative={relative}");
+        assert_eq!(catalog.find("b").is_some(), relative);
+        let result =
+            inventory_cursor_from_projection(&app, &caller, catalog, &disclosure, &privacy).await;
+        if relative {
+            assert_eq!(result.unwrap_err().code, "cursor_expired");
+        } else {
+            result.unwrap();
+        }
         assert_eq!(app.work_views.page_selections(), 0);
     }
 }

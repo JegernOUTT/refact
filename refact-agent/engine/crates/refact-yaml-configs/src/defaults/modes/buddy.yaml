@@ -1,4 +1,4 @@
-schema_version: 22
+schema_version: 23
 id: buddy
 title: Buddy
 description: Persistent project companion for setup, diagnostics, and knowledge management
@@ -68,6 +68,7 @@ allow_mcp: true
 allow_subagents: false
 
 tools:
+  - manage_mcp
   - set_trajectory_label
   - codegraph_overview
   - code_health

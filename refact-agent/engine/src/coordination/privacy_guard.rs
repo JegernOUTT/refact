@@ -79,7 +79,7 @@ fn clear_rows_with_batch(
             let audit = WorkAudit {
                 records: records.iter().cloned().enumerate().collect(),
             };
-            refact_privacy::clear(audit, &destination, &batch.compiled).ok()?;
+            crate::privacy::destinations::clear_current(gcx, audit, &destination).ok()?;
             // Carry all disclosed path records into future tool/capsule
             // messages, so a later model switch cannot re-send old metadata.
             row.source_records = records;
@@ -127,12 +127,12 @@ fn clear_roots_with_batch(
                 .chain(root.source_path.iter())
                 .map(PathBuf::from);
             let records = batch.classify_declared_paths(gcx, paths);
-            refact_privacy::clear(
+            crate::privacy::destinations::clear_current(
+                gcx,
                 WorkAudit {
                     records: records.into_iter().enumerate().collect(),
                 },
                 &destination,
-                &batch.compiled,
             )
             .is_ok()
         })
@@ -283,6 +283,48 @@ mod tests {
                 .code,
             "policy_unavailable"
         );
+    }
+
+    #[tokio::test]
+    async fn removed_source_zone_is_reclassified_with_workspace_roots() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let workspace = tempfile::tempdir().unwrap();
+        *gcx.documents_state.workspace_folders.lock().unwrap() =
+            vec![workspace.path().to_path_buf()];
+        gcx.privacy_policy_load.write().unwrap().policy = Arc::new(PrivacyPolicy {
+            zones: vec![Zone {
+                name: "current".into(),
+                patterns: vec!["private/**".into()],
+                send_to: vec!["trusted".into()],
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        let mut source = row();
+        source.source_records.push(FileRecord {
+            path: workspace
+                .path()
+                .join("private/payload")
+                .to_string_lossy()
+                .into_owned(),
+            zone: "removed".into(),
+            attribution: Attribution::Declared,
+        });
+        let model = BaseModelRecord {
+            id: "trusted/model".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            clear_rows(&gcx, vec![source.clone()], &model)
+                .unwrap()
+                .len(),
+            1
+        );
+        let model = BaseModelRecord {
+            id: "other/model".into(),
+            ..Default::default()
+        };
+        assert!(clear_rows(&gcx, vec![source], &model).unwrap().is_empty());
     }
 
     #[tokio::test]

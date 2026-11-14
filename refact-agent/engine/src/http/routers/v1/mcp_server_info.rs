@@ -9,7 +9,7 @@ use crate::custom_error::ScratchError;
 use crate::integrations::mcp::mcp_naming;
 use crate::integrations::mcp::session_mcp::{SessionMCP, MCPConnectionStatus};
 use crate::integrations::mcp::mcp_metrics::MCPServerMetrics;
-use crate::integrations::running_integrations::load_integrations;
+use crate::integrations::mcp::management::reconnect_mcp_server;
 
 #[derive(Deserialize)]
 pub struct McpServerInfoQuery {
@@ -129,7 +129,14 @@ pub async fn handle_v1_mcp_server_info(
         )
     };
 
-    let status = serde_json::to_value(&connection_status).unwrap_or(serde_json::Value::Null);
+    let mut status = serde_json::to_value(&connection_status).unwrap_or(serde_json::Value::Null);
+    if matches!(connection_status, MCPConnectionStatus::Reconnecting { .. }) {
+        if let Some(next) =
+            crate::integrations::mcp::integr_mcp_common::mcp_next_retry_in_secs(&config_path_clone)
+        {
+            status["next_retry_in_secs"] = serde_json::json!(next);
+        }
+    }
     let auth_status_json = serde_json::to_value(&auth_status).unwrap_or(serde_json::Value::Null);
 
     let (server_name, server_version, protocol_version, capabilities_json) =
@@ -269,79 +276,7 @@ pub async fn handle_v1_mcp_server_reconnect(
         )
     })?;
 
-    let session_key = post.config_path.clone();
-
-    let session = {
-        let integration_sessions = gcx.integration_sessions.clone();
-        let integration_sessions = integration_sessions.lock().await;
-        integration_sessions.get(&session_key).cloned()
-    }
-    .ok_or(ScratchError::new(
-        StatusCode::NOT_FOUND,
-        format!("no session for {}", session_key),
-    ))?;
-
-    let (client, logs) = {
-        let mut session_locked = session.lock().await;
-        let mcp_session = session_locked
-            .as_any_mut()
-            .downcast_mut::<SessionMCP>()
-            .ok_or(ScratchError::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "session is not an MCP session".to_string(),
-            ))?;
-
-        let busy = match &mcp_session.connection_status {
-            MCPConnectionStatus::Reconnecting {
-                ..
-            } => true,
-            MCPConnectionStatus::Connecting => {
-                crate::integrations::mcp::integr_mcp_common::startup_task_in_flight(mcp_session)
-            }
-            _ => false,
-        };
-        if busy {
-            return Err(ScratchError::new(
-                StatusCode::CONFLICT,
-                "MCP server is already connecting or reconnecting".to_string(),
-            ));
-        }
-
-        mcp_session.connection_status = MCPConnectionStatus::Disconnected;
-        mcp_session.launched_cfg = serde_json::Value::Null;
-        (mcp_session.mcp_client.clone(), mcp_session.logs.clone())
-    };
-
-    if let Some(client_arc) = client {
-        crate::integrations::mcp::session_mcp::cancel_mcp_client(&session_key, client_arc, logs)
-            .await;
-    }
-
-    {
-        let mut session_locked = session.lock().await;
-        let mcp_session = session_locked
-            .as_any_mut()
-            .downcast_mut::<SessionMCP>()
-            .ok_or(ScratchError::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "session is not an MCP session".to_string(),
-            ))?;
-        mcp_session.mcp_tools = vec![];
-        mcp_session.mcp_resources = vec![];
-        mcp_session.mcp_prompts = vec![];
-        mcp_session.server_info = None;
-        mcp_session.connection_status = MCPConnectionStatus::Connecting;
-    }
-
-    let config_filename = std::path::Path::new(&session_key)
-        .file_name()
-        .map(|f| f.to_string_lossy().to_string())
-        .unwrap_or_default();
-    let _ = load_integrations(
-        gcx.clone(),
-        &[format!("**/integrations.d/{}", config_filename)],
-    )
-    .await;
+    reconnect_mcp_server(gcx, &post.config_path).await?;
 
     Ok(Response::builder()
         .status(StatusCode::OK)

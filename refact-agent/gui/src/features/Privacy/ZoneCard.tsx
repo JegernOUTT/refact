@@ -97,6 +97,9 @@ export function ZoneCard({
         patterns={zone.patterns}
         onChange={(patterns) => onChange({ patterns })}
       />
+      <p className={styles.noteLine}>
+        A folder path also covers everything inside it.
+      </p>
 
       <div className={styles.zoneShellRow}>
         <span className={styles.zoneShellLabel}>

@@ -140,6 +140,7 @@ pub(crate) const SHELL_PRIVACY_APPROVAL_RULE: &str =
 
 pub(crate) fn requires_actual_human_approval(reason: &str) -> bool {
     reason == crate::scheduler::automation_approval::HUMAN_AUTOMATION_APPROVAL
+        || reason == PROTECTED_CONFIG_APPROVAL
 }
 
 pub(crate) fn is_shell_privacy_approval(reason: &PauseReason) -> bool {
@@ -442,6 +443,9 @@ fn is_tool_result_truncation_exempt(tool_name: &str) -> bool {
 }
 
 fn should_auto_approve_confirmation(thread: &ThreadParams, tool_name: &str) -> bool {
+    if tool_name == "manage_mcp" {
+        return false;
+    }
     if thread.auto_approve_dangerous_commands {
         return true;
     }
@@ -455,6 +459,79 @@ fn should_auto_approve_confirmation(thread: &ThreadParams, tool_name: &str) -> b
         return true;
     }
     thread.auto_approve_editing_tools && is_editing_tool(tool_name)
+}
+
+const PROTECTED_CONFIG_APPROVAL: &str = "Protected configuration changes require confirmation";
+
+#[cfg(test)]
+fn protected_config_path(path: &str) -> bool {
+    let normalized = path.trim().replace('\\', "/");
+    let protected = |path: &std::path::Path| {
+        path.file_name()
+            .is_some_and(|name| name.to_string_lossy().eq_ignore_ascii_case("privacy.yaml"))
+            || path.components().any(|part| {
+                part.as_os_str()
+                    .to_string_lossy()
+                    .eq_ignore_ascii_case("integrations.d")
+            })
+    };
+    let path = std::path::Path::new(&normalized);
+    protected(path)
+        || path.ancestors().any(|ancestor| {
+            std::fs::canonicalize(ancestor)
+                .ok()
+                .is_some_and(|canonical| protected(&canonical))
+        })
+}
+
+#[cfg(test)]
+fn protected_config_edit(tool_name: &str, args: &serde_json::Value) -> bool {
+    protected_config_edit_with(tool_name, args, protected_config_path)
+}
+
+fn protected_config_edit_with(
+    tool_name: &str,
+    args: &serde_json::Value,
+    protected: impl Fn(&str) -> bool,
+) -> bool {
+    if !is_editing_tool(tool_name) && tool_name != "rm" {
+        return false;
+    }
+    if tool_name == "apply_patch" {
+        return args["patch"].as_str().is_some_and(|patch| {
+            use refact_file_edit_core::openai_apply_patch::{parse_patch, FileOperation};
+            if let Ok(parsed) = parse_patch(patch) {
+                return parsed.operations.iter().any(|op| match op {
+                    FileOperation::Add {
+                        path, ..
+                    }
+                    | FileOperation::Delete {
+                        path,
+                    } => protected(path),
+                    FileOperation::Update {
+                        path,
+                        move_to,
+                        ..
+                    } => protected(path) || move_to.as_deref().is_some_and(&protected),
+                });
+            }
+            patch.lines().any(|line| {
+                [
+                    "*** Add File:",
+                    "*** Update File:",
+                    "*** Delete File:",
+                    "*** Move to:",
+                ]
+                .iter()
+                .filter_map(|prefix| line.trim().strip_prefix(prefix))
+                .any(|path| protected(path.trim()))
+            })
+        });
+    }
+    ["path", "source", "destination", "file_name", "filename"]
+        .iter()
+        .filter_map(|key| args[key].as_str())
+        .any(protected)
 }
 
 async fn record_tool_activity(
@@ -2485,6 +2562,210 @@ mod tests {
     }
 
     #[test]
+    fn confirmation_protected_config_edits_and_autonomous_mcp() {
+        for header in ["Add File", "Update File", "Delete File", "Move to"] {
+            for gap in ["", " ", "\t"] {
+                assert!(protected_config_edit(
+                    "apply_patch",
+                    &serde_json::json!({"patch": format!("*** Begin Patch\n  *** {header}:{gap}.refact/PRIVACY.YAML  \n*** End Patch")})
+                ));
+            }
+        }
+        assert!(protected_config_edit(
+            "apply_patch",
+            &serde_json::json!({"patch": "*** Begin Patch\n*** Update File:ordinary.txt\n*** Move to:.refact/privacy.yaml\n@@\n-old\n+new\n*** End Patch"})
+        ));
+        assert!(protected_config_edit(
+            "rm",
+            &serde_json::json!({"path": "  .refact/INTEGRATIONS.D/x.yaml \n"})
+        ));
+        assert!(requires_actual_human_approval(PROTECTED_CONFIG_APPROVAL));
+        let thread = ThreadParams {
+            autonomous_no_confirm: true,
+            auto_approve_editing_tools: true,
+            auto_approve_dangerous_commands: true,
+            ..Default::default()
+        };
+        assert!(!should_auto_approve_confirmation(&thread, "manage_mcp"));
+        assert_eq!(
+            compute_final_action(
+                &MatchConfirmDenyResult::CONFIRMATION,
+                Some("auto"),
+                true,
+                "manage_mcp"
+            ),
+            "ask"
+        );
+        assert_eq!(
+            compute_final_action(
+                &MatchConfirmDenyResult::PASS,
+                Some("auto"),
+                false,
+                "manage_mcp"
+            ),
+            "auto"
+        );
+        for name in [
+            "create_textdoc",
+            "update_textdoc",
+            "update_textdoc_regex",
+            "update_textdoc_by_lines",
+            "update_textdoc_anchored",
+            "undo_textdoc",
+            "rm",
+        ] {
+            for path in [
+                ".refact/integrations.d/mcp_stdio_x.yaml",
+                "/home/user/.config/refact/privacy.yaml",
+                ".refact/privacy.yaml",
+            ] {
+                assert!(
+                    protected_config_edit(name, &serde_json::json!({"path": path})),
+                    "{name}: {path}"
+                );
+            }
+            assert!(!protected_config_edit(
+                name,
+                &serde_json::json!({"path": "src/main.rs"})
+            ));
+        }
+        assert!(protected_config_edit(
+            "mv",
+            &serde_json::json!({"source": "a", "destination": ".refact/privacy.yaml"})
+        ));
+        assert!(protected_config_edit(
+            "mv",
+            &serde_json::json!({"source": ".refact/integrations.d", "destination": "a"})
+        ));
+        for operation in ["Add File", "Update File", "Delete File", "Move to"] {
+            assert!(protected_config_edit(
+                "apply_patch",
+                &serde_json::json!({"patch": format!("*** Begin Patch\n*** {operation}: .refact/privacy.yaml\n*** End Patch")})
+            ));
+        }
+        assert!(should_auto_approve_confirmation(&thread, "create_textdoc"));
+    }
+
+    #[tokio::test]
+    async fn confirmation_protected_config_overrides_agent_auto_policy() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let app = AppState::from_gcx(gcx).await;
+        let thread = ThreadParams {
+            id: "protected-edit".into(),
+            auto_approve_editing_tools: true,
+            autonomous_no_confirm: true,
+            ..Default::default()
+        };
+        for (path, expected) in [(".refact/privacy.yaml", 1), ("src/ordinary.rs", 0)] {
+            let call: ChatToolCall = serde_json::from_value(serde_json::json!({
+                "id": "edit", "type": "function", "function": {
+                    "name": "create_textdoc", "arguments": serde_json::json!({
+                        "path": path, "content": "fixture"
+                    }).to_string()
+                }
+            }))
+            .unwrap();
+            let (confirmations, denials) = check_tools_confirmation(
+                app.clone(),
+                &[call],
+                &[],
+                &thread,
+                None,
+                "agent",
+                None,
+                &[],
+                "",
+            )
+            .await;
+            assert!(denials.is_empty(), "{denials:?}");
+            assert_eq!(confirmations.len(), expected, "{path}");
+            if expected > 0 {
+                assert_eq!(confirmations[0].rule, PROTECTED_CONFIG_APPROVAL);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn confirmation_protects_directories_enclosing_config() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("ws");
+        std::fs::create_dir_all(root.join(".refact")).unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![root.clone()];
+        let config_parent = gcx
+            .config_dir
+            .parent()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let app = AppState::from_gcx(gcx).await;
+        let thread = ThreadParams {
+            id: "protected-dir".into(),
+            auto_approve_editing_tools: true,
+            autonomous_no_confirm: true,
+            ..Default::default()
+        };
+        let root_str = root.to_string_lossy().into_owned();
+        for (name, args, expected) in [
+            (
+                "rm",
+                serde_json::json!({"path": ".refact", "recursive": true}),
+                1,
+            ),
+            (
+                "rm",
+                serde_json::json!({"path": root_str, "recursive": true}),
+                1,
+            ),
+            (
+                "rm",
+                serde_json::json!({"path": config_parent, "recursive": true}),
+                1,
+            ),
+            (
+                "mv",
+                serde_json::json!({"source": ".refact", "destination": "moved"}),
+                1,
+            ),
+            (
+                "mv",
+                serde_json::json!({"source": "src", "destination": "moved"}),
+                0,
+            ),
+            (
+                "rm",
+                serde_json::json!({"path": "src", "recursive": true}),
+                0,
+            ),
+        ] {
+            let call: ChatToolCall = serde_json::from_value(serde_json::json!({
+                "id": "dir", "type": "function", "function": {
+                    "name": name, "arguments": args.to_string()
+                }
+            }))
+            .unwrap();
+            let (confirmations, denials) = check_tools_confirmation(
+                app.clone(),
+                &[call],
+                &[],
+                &thread,
+                None,
+                "agent",
+                None,
+                &[],
+                "",
+            )
+            .await;
+            assert!(denials.is_empty(), "{denials:?}");
+            assert_eq!(confirmations.len(), expected, "{name} {args}");
+            if expected > 0 {
+                assert_eq!(confirmations[0].rule, PROTECTED_CONFIG_APPROVAL);
+            }
+        }
+    }
+
+    #[test]
     fn test_auto_approve_editing_tools_stays_limited_to_editing_tools() {
         let thread = ThreadParams {
             auto_approve_editing_tools: true,
@@ -3025,6 +3306,7 @@ pub async fn process_tool_calls_once(
         let (auto_approved, remaining): (Vec<_>, Vec<_>) =
             confirmations.into_iter().partition(|confirmation| {
                 !requires_actual_human_approval(&confirmation.rule)
+                    && confirmation.rule != PROTECTED_CONFIG_APPROVAL
                     && should_auto_approve_confirmation(&current_thread, &confirmation.tool_name)
             });
 
@@ -3530,6 +3812,9 @@ fn compute_final_action(
     {
         return "ask";
     }
+    if tool_name == "manage_mcp" && *tool_result == MatchConfirmDenyResult::CONFIRMATION {
+        return "ask";
+    }
     if tool_name == "handoff_to_mode" {
         return "auto";
     }
@@ -3808,6 +4093,37 @@ async fn check_tools_confirmation_with_pool(
                     is_auto_approved,
                     &resolved_tool_name,
                 );
+                let context = ccx.lock().await;
+                let root = crate::tools::file_edit::auxiliary::protected_config_root(
+                    &context.app.gcx,
+                    context.execution_scope.as_ref(),
+                );
+                let workspace_roots = context
+                    .app
+                    .gcx
+                    .documents_state
+                    .workspace_folders
+                    .lock()
+                    .unwrap()
+                    .clone();
+                let protected_edit = protected_config_edit_with(
+                    &resolved_tool_name,
+                    &serde_json::from_str(&tool_call.function.arguments).unwrap_or_default(),
+                    |path| {
+                        let protected_at = |root: &std::path::Path| {
+                            crate::tools::file_edit::auxiliary::is_protected_config_path(
+                                &context.app.gcx,
+                                root,
+                                std::path::Path::new(path.trim()),
+                            )
+                        };
+                        protected_at(&root) || workspace_roots.iter().any(|root| protected_at(root))
+                    },
+                );
+                drop(context);
+                if protected_edit && final_action != "deny" {
+                    final_action = "ask";
+                }
                 if crate::tools::tool_app::family_for_tool(&resolved_tool_name).is_some()
                     && final_action == "ask"
                 {
@@ -3828,7 +4144,9 @@ async fn check_tools_confirmation_with_pool(
                     final_action = "ask";
                 }
 
-                let rule_text = if forced_automation_confirmation {
+                let rule_text = if protected_edit {
+                    PROTECTED_CONFIG_APPROVAL.into()
+                } else if forced_automation_confirmation {
                     crate::scheduler::automation_approval::HUMAN_AUTOMATION_APPROVAL.into()
                 } else {
                     match mode_action.as_deref() {

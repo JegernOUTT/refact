@@ -870,7 +870,11 @@ pub struct SessionMCP {
     pub mcp_prompts: Vec<McpPrompt>,
     pub server_info: Option<ServerInfo>,
     pub startup_task_handles: Option<(Arc<AMutex<Option<JoinHandle<()>>>>, AbortHandle)>,
-    pub health_task_handle: Option<AbortHandle>,
+    pub health_task_handle: Option<JoinHandle<()>>,
+    /// Supervised retry after a failed initial connect; owned so stop/reconfigure abort it.
+    pub recovery_task: Option<JoinHandle<()>>,
+    /// Bumped on every (re)start and stop; background tasks publish only while it matches.
+    pub lifecycle_epoch: u64,
     pub logs: Arc<AMutex<Vec<String>>>,
     pub stderr_file_path: Option<PathBuf>,
     pub stderr_cursor: Arc<AMutex<u64>>,
@@ -914,6 +918,7 @@ impl IntegrationSession for SessionMCP {
                 health_task_handle,
                 oauth_refresh_task_handle,
                 resource_index_task,
+                recovery_task,
                 stderr_file,
             ) = {
                 let mut session_locked = self_arc.lock().await;
@@ -922,15 +927,18 @@ impl IntegrationSession for SessionMCP {
                     .downcast_mut::<SessionMCP>()
                     .unwrap();
                 session_downcasted.connection_status = MCPConnectionStatus::Disconnected;
+                session_downcasted.lifecycle_epoch =
+                    session_downcasted.lifecycle_epoch.wrapping_add(1);
                 (
                     session_downcasted.debug_name.clone(),
                     session_downcasted.config_path.clone(),
                     session_downcasted.mcp_client.clone(),
                     session_downcasted.logs.clone(),
                     session_downcasted.startup_task_handles.clone(),
-                    session_downcasted.health_task_handle.clone(),
+                    session_downcasted.health_task_handle.take(),
                     session_downcasted.oauth_refresh_task_handle.clone(),
                     session_downcasted.resource_index_task.take(),
+                    session_downcasted.recovery_task.take(),
                     session_downcasted.stderr_file_path.clone(),
                 )
             };
@@ -942,10 +950,6 @@ impl IntegrationSession for SessionMCP {
                 abort_handle.abort();
             }
 
-            if let Some(abort_handle) = health_task_handle {
-                abort_handle.abort();
-            }
-
             if let Some(abort_handle) = oauth_refresh_task_handle {
                 abort_handle.abort();
             }
@@ -953,6 +957,9 @@ impl IntegrationSession for SessionMCP {
             if let Some(abort_handle) = resource_index_task {
                 abort_handle.abort();
             }
+
+            abort_and_join(health_task_handle).await;
+            abort_and_join(recovery_task).await;
 
             if let Some(client) = client {
                 cancel_mcp_client(&debug_name, client, logs).await;
@@ -965,6 +972,13 @@ impl IntegrationSession for SessionMCP {
 
             "".to_string()
         })
+    }
+}
+
+pub(crate) async fn abort_and_join(task: Option<JoinHandle<()>>) {
+    if let Some(task) = task {
+        task.abort();
+        let _ = timeout(Duration::from_secs(3), task).await;
     }
 }
 
@@ -1215,6 +1229,32 @@ pub async fn mcp_session_wait_startup(session_arc: Arc<AMutex<Box<dyn Integratio
     }
 }
 
+/// Waits for the startup attempt without taking its JoinHandle, so teardown can still join it.
+/// Returns false when `limit` elapsed first.
+pub async fn mcp_session_wait_startup_bounded(
+    session_arc: Arc<AMutex<Box<dyn IntegrationSession>>>,
+    limit: Duration,
+) -> bool {
+    let abort = {
+        let mut session_locked = session_arc.lock().await;
+        session_locked
+            .as_any_mut()
+            .downcast_mut::<SessionMCP>()
+            .and_then(|s| s.startup_task_handles.as_ref().map(|h| h.1.clone()))
+    };
+    let Some(abort) = abort else {
+        return true;
+    };
+    let deadline = tokio::time::Instant::now() + limit;
+    while !abort.is_finished() {
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        sleep(Duration::from_millis(50)).await;
+    }
+    true
+}
+
 impl SessionMCP {
     pub(crate) fn detached(config_path: &str) -> Self {
         let debug_name = config_path;
@@ -1229,6 +1269,8 @@ impl SessionMCP {
             server_info: None,
             startup_task_handles: None,
             health_task_handle: None,
+            recovery_task: None,
+            lifecycle_epoch: 0,
             logs: Arc::new(AMutex::new(Vec::new())),
             stderr_file_path: None,
             stderr_cursor: Arc::new(AMutex::new(0)),

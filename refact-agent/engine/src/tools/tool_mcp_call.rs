@@ -183,12 +183,16 @@ impl Tool for ToolMcpCall {
             crate::tools::tools_list::get_integration_mcp_tool_by_name(gcx.clone(), &tool_name)
                 .await;
 
-        let mut tool = found_tool.ok_or_else(|| {
-            format!(
-                "MCP tool '{}' not found. Use mcp_tool_search to discover available tools.",
-                tool_name
-            )
-        })?;
+        let mut tool = match found_tool {
+            Some(tool) => tool,
+            None => {
+                return Err(format!(
+                    "MCP tool '{}' not found. Use mcp_tool_search to discover available tools.{}",
+                    tool_name,
+                    super::tool_mcp_search::unavailable_mcp_status_summary(&ccx).await,
+                ))
+            }
+        };
 
         crate::agents::tool_authority::ensure_context_tool(&ccx, &tool.tool_description().name)
             .await?;

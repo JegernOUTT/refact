@@ -4,6 +4,7 @@ import { Plus } from "lucide-react";
 import {
   Badge,
   Button,
+  Dialog,
   ErrorState,
   LoadingState,
   SaveStatus,
@@ -106,11 +107,24 @@ function policiesEqual(left: PrivacyPolicy, right: PrivacyPolicy) {
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
+interface PendingRemoval {
+  name: string;
+  origin: string | null;
+}
+
+const DISCOVERY_RETRY_MS = 3000;
+const DISCOVERY_MAX_RETRIES = 10;
+
 export function PrivacySettingsSection() {
-  const policyQuery = useGetPrivacyPolicyQuery(undefined);
+  const policyQuery = useGetPrivacyPolicyQuery(undefined, {
+    refetchOnMountOrArgChange: true,
+  });
   const statusQuery = useGetPrivacyStatusQuery(undefined);
   const [updatePolicy, updateState] = useUpdatePrivacyPolicyMutation();
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [pendingRemoval, setPendingRemoval] = useState<PendingRemoval | null>(
+    null,
+  );
   const [serverPolicy, setServerPolicy] = useState<PrivacyPolicy | null>(null);
   const [draftZones, setDraftZones] = useState<PrivacyZone[] | null>(null);
   const draftZonesRef = useRef<PrivacyZone[] | null>(null);
@@ -123,6 +137,9 @@ export function PrivacySettingsSection() {
   const [matrixOpen, setMatrixOpen] = useState(false);
   const matrixRef = useRef<HTMLDivElement>(null);
   const matrixWasOpenRef = useRef(false);
+  const discoveryRetriesRef = useRef(0);
+  const discoveryOwnRefetchRef = useRef(false);
+  const draftOriginsRef = useRef<(string | null)[]>([]);
   const reducedMotion = useReducedMotion();
 
   useEffect(() => {
@@ -136,17 +153,59 @@ export function PrivacySettingsSection() {
   }, [matrixOpen, reducedMotion]);
 
   const data = policyQuery.data;
+  const discoveryDeferred = data?.discovery_deferred === true;
+  const policyFetching = policyQuery.isFetching;
+  const policyStartedAt = policyQuery.startedTimeStamp;
+  const policyFulfilledAt = policyQuery.fulfilledTimeStamp;
+  const refetchPolicy = policyQuery.refetch;
 
-  const setZoneDraft = useCallback((zones: PrivacyZone[]) => {
-    draftZonesRef.current = zones;
-    setDraftZones(zones);
-  }, []);
+  useEffect(() => {
+    if (policyStartedAt === undefined) return;
+    if (discoveryOwnRefetchRef.current) {
+      discoveryOwnRefetchRef.current = false;
+      return;
+    }
+    discoveryRetriesRef.current = 0;
+  }, [policyStartedAt]);
+
+  useEffect(() => {
+    if (!discoveryDeferred) {
+      discoveryRetriesRef.current = 0;
+      return;
+    }
+    if (policyFetching) return;
+    if (discoveryRetriesRef.current >= DISCOVERY_MAX_RETRIES) return;
+    const timer = setTimeout(() => {
+      discoveryRetriesRef.current += 1;
+      discoveryOwnRefetchRef.current = true;
+      void refetchPolicy();
+    }, DISCOVERY_RETRY_MS);
+    return () => clearTimeout(timer);
+  }, [
+    discoveryDeferred,
+    policyFetching,
+    policyStartedAt,
+    policyFulfilledAt,
+    refetchPolicy,
+  ]);
+
+  const setZoneDraft = useCallback(
+    (zones: PrivacyZone[], origins: (string | null)[]) => {
+      draftZonesRef.current = zones;
+      draftOriginsRef.current = origins;
+      setDraftZones(zones);
+    },
+    [],
+  );
 
   const setZoneBaseline = useCallback(
     (zones: PrivacyZone[]) => {
       baselineZonesRef.current = zones;
       setBaselineZones(zones);
-      setZoneDraft(zones);
+      setZoneDraft(
+        zones,
+        zones.map((zone) => zone.name),
+      );
     },
     [setZoneDraft],
   );
@@ -210,6 +269,14 @@ export function PrivacySettingsSection() {
     [setZoneBaseline, updatePolicy],
   );
 
+  const currentOrigins = useCallback(
+    () =>
+      draftOriginsRef.current.length === currentZones.length
+        ? draftOriginsRef.current
+        : currentZones.map((zone) => zone.name),
+    [currentZones],
+  );
+
   const handleZoneToggle = useCallback(
     (zoneName: string, destinationId: string) => {
       if (!data || !policyWithDraft) return;
@@ -220,9 +287,10 @@ export function PrivacySettingsSection() {
           destinationId,
           data.destinations.map((destination) => destination.id),
         ).zones,
+        currentOrigins(),
       );
     },
-    [data, policyWithDraft, setZoneDraft],
+    [currentOrigins, data, policyWithDraft, setZoneDraft],
   );
 
   const handleMcpToggle = useCallback(
@@ -239,17 +307,78 @@ export function PrivacySettingsSection() {
         currentZones.map((zone) =>
           zone.name === zoneName ? { ...zone, ...patch } : zone,
         ),
+        currentOrigins(),
       );
     },
-    [currentZones, setZoneDraft],
+    [currentOrigins, currentZones, setZoneDraft],
+  );
+
+  const requestRemoval = useCallback(
+    (zoneName: string) => {
+      const index = currentZones.findIndex((zone) => zone.name === zoneName);
+      const origin = index < 0 ? null : currentOrigins()[index] ?? null;
+      const savedOrigin =
+        origin !== null &&
+        currentPolicy?.zones.some((zone) => zone.name === origin) === true
+          ? origin
+          : null;
+      setPendingRemoval({ name: zoneName, origin: savedOrigin });
+    },
+    [currentOrigins, currentPolicy, currentZones],
   );
 
   const removeZone = useCallback(
-    (zoneName: string) => {
-      setZoneDraft(currentZones.filter((zone) => zone.name !== zoneName));
+    async (removal: PendingRemoval) => {
+      const base = currentPolicy;
+      const draft = draftZonesRef.current ?? currentZones;
+      const origins =
+        draftOriginsRef.current.length === draft.length
+          ? draftOriginsRef.current
+          : draft.map((zone) => zone.name);
+      const draftIndex = draft.findIndex((zone) => zone.name === removal.name);
+      const remainingDraft = draft.filter((_, index) => index !== draftIndex);
+      const remainingOrigins = origins.filter(
+        (_, index) => index !== draftIndex,
+      );
+      if (removal.origin === null || !base) {
+        if (draftIndex >= 0) setZoneDraft(remainingDraft, remainingOrigins);
+        return;
+      }
+      setSaveError(null);
+      try {
+        const response = await updatePolicy({
+          ...base,
+          zones: base.zones.filter((zone) => zone.name !== removal.origin),
+        }).unwrap();
+        pendingSavedPolicyRef.current = response.policy;
+        setServerPolicy(response.policy);
+        baselineZonesRef.current = response.policy.zones;
+        setBaselineZones(response.policy.zones);
+        const latest = draftZonesRef.current ?? draft;
+        const latestIndex = latest.findIndex(
+          (zone) => zone.name === removal.name,
+        );
+        const latestOrigins =
+          draftOriginsRef.current.length === latest.length
+            ? draftOriginsRef.current
+            : latest.map((zone) => zone.name);
+        setZoneDraft(
+          latest.filter((_, index) => index !== latestIndex),
+          latestOrigins.filter((_, index) => index !== latestIndex),
+        );
+      } catch (error) {
+        setSaveError(errorText(error));
+      }
     },
-    [currentZones, setZoneDraft],
+    [currentPolicy, currentZones, setZoneDraft, updatePolicy],
   );
+
+  const confirmRemoval = useCallback(() => {
+    if (pendingRemoval === null) return;
+    const removal = pendingRemoval;
+    setPendingRemoval(null);
+    void removeZone(removal);
+  }, [pendingRemoval, removeZone]);
 
   const addZone = useCallback(() => {
     const zone: PrivacyZone = {
@@ -258,8 +387,8 @@ export function PrivacySettingsSection() {
       send_to: [],
       on_shell_read: "withhold",
     };
-    setZoneDraft([zone, ...currentZones]);
-  }, [currentZones, setZoneDraft]);
+    setZoneDraft([zone, ...currentZones], [null, ...currentOrigins()]);
+  }, [currentOrigins, currentZones, setZoneDraft]);
 
   if (policyQuery.isLoading) {
     return (
@@ -416,7 +545,7 @@ export function PrivacySettingsSection() {
                     .filter((other) => other !== zone.name)}
                   zone={zone}
                   onChange={(patch) => updateZone(zone.name, patch)}
-                  onRemove={() => removeZone(zone.name)}
+                  onRemove={() => requestRemoval(zone.name)}
                 />
               ))}
             </div>
@@ -528,6 +657,36 @@ export function PrivacySettingsSection() {
           ) : null}
         </div>
       </SettingsGroup>
+
+      <Dialog
+        open={pendingRemoval !== null}
+        onOpenChange={(open) => {
+          if (!open) setPendingRemoval(null);
+        }}
+      >
+        <Dialog.Content maxWidth="420px">
+          <Dialog.Title>
+            {pendingRemoval?.origin === null
+              ? `Remove unsaved zone "${pendingRemoval.name}"?`
+              : `Remove zone "${pendingRemoval?.name ?? ""}"?`}
+          </Dialog.Title>
+          <Dialog.Description>
+            {pendingRemoval?.origin === null
+              ? "This zone has not been saved yet. It is only discarded from your draft."
+              : "This takes effect immediately."}
+          </Dialog.Description>
+          <Dialog.Footer>
+            <Dialog.Close asChild>
+              <Button size="sm" variant="ghost">
+                Cancel
+              </Button>
+            </Dialog.Close>
+            <Button size="sm" variant="danger" onClick={confirmRemoval}>
+              Remove zone
+            </Button>
+          </Dialog.Footer>
+        </Dialog.Content>
+      </Dialog>
     </SettingsSection>
   );
 }

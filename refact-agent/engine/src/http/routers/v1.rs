@@ -535,6 +535,10 @@ fn privacy_routes() -> Router<AppState> {
             "/privacy/derived/clear",
             post(privacy::handle_v1_privacy_derived_clear),
         )
+        .route(
+            "/privacy/records/clear",
+            post(privacy::handle_v1_privacy_records_clear),
+        )
 }
 
 fn worktrees_routes() -> Router<AppState> {

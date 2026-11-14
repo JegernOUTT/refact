@@ -65,22 +65,30 @@ impl Refusal {
         let target = self.destination.id.0.as_str();
         if self.offending.is_empty() {
             return if self.message == PRIVACY_CONTEXT_CHANGED {
-                "Output withheld by user privacy policy — privacy context kept changing, so verification could not complete. Try again once the privacy context is stable.".to_string()
+                "Request not sent: user privacy policy — privacy context kept changing, so verification could not complete. Try again once the privacy context is stable.".to_string()
             } else {
-                "Output withheld by user privacy policy — privacy metadata or policy could not be verified. Resolve the privacy verification problem before trying again.".to_string()
+                "Request not sent: user privacy policy — privacy metadata or policy could not be verified. Resolve the privacy verification problem before trying again.".to_string()
             };
         }
-        let mut listed: Vec<String> = Vec::new();
-        let mut seen: Vec<(&str, &str)> = Vec::new();
+        let mut listed = Vec::new();
+        let mut seen = std::collections::BTreeSet::new();
+        let mut zones = std::collections::BTreeSet::new();
         let mut hidden = 0usize;
         for (_, record) in &self.offending {
-            let key = (record.path.as_str(), record.zone.as_str());
-            if seen.contains(&key) {
+            zones.insert(format!("\"{}\"", record.zone));
+            if !seen.insert((&record.path, &record.zone)) {
                 continue;
             }
-            seen.push(key);
             if listed.len() < 5 {
-                listed.push(format!("  - {} (zone \"{}\")", record.path, record.zone));
+                let attribution = match record.attribution {
+                    crate::record::Attribution::Declared => "declared",
+                    crate::record::Attribution::Observed => "observed",
+                    crate::record::Attribution::Heuristic => "heuristic",
+                };
+                listed.push(format!(
+                    "  - {} (zone \"{}\", {attribution})",
+                    record.path, record.zone
+                ));
             } else {
                 hidden += 1;
             }
@@ -88,8 +96,9 @@ impl Refusal {
         if hidden > 0 {
             listed.push(format!("  - ...and {hidden} more"));
         }
+        let zones = zones.into_iter().collect::<Vec<_>>().join(", ");
         format!(
-            "Output withheld by user privacy policy — \"{target}\" cannot receive these guarded files:\n{}\nRetrying the same request will be refused again. Continue without those files, or ask the user to allow these zones for \"{target}\".",
+            "Request not sent: user privacy policy does not allow \"{target}\" to receive data from these guarded files present in this chat's context:\n{}\nRetrying the same request will be refused again. Ask the user to allow \"{target}\" for zone(s) {zones} in Privacy settings, or to clear this chat's privacy record for these files.",
             listed.join("\n")
         )
     }
@@ -191,21 +200,27 @@ fn record_is_allowed(
     destination: &Destination,
     policy: &CompiledPolicy,
 ) -> bool {
-    if record.zone == "blocked" {
+    if record.path.is_empty() || record.path.contains('\0') || record.zone == "blocked" {
         return false;
     }
     if let Some(zone) = policy.zone_named(&record.zone) {
         return destination.matches_send_to(&zone.send_to);
     }
+    let current = policy.zone_for_path(std::path::Path::new(&record.path));
+    if !destination.matches_send_to(&current.send_to) {
+        return false;
+    }
     if let Some(zone_names) = record.zone.strip_prefix("effective:") {
         return !zone_names.is_empty()
             && zone_names.split('+').all(|zone_name| {
-                policy
-                    .zone_named(zone_name)
-                    .is_some_and(|zone| destination.matches_send_to(&zone.send_to))
+                !zone_name.is_empty()
+                    && zone_name != "blocked"
+                    && policy
+                        .zone_named(zone_name)
+                        .is_none_or(|zone| destination.matches_send_to(&zone.send_to))
             });
     }
-    false
+    true
 }
 
 #[cfg(test)]
@@ -488,8 +503,8 @@ mod tests {
             message: "malformed metadata at /private/internal/path: secret contents".into(),
             ..transient.clone()
         };
-        assert_eq!(transient.model_facing(), "Output withheld by user privacy policy — privacy context kept changing, so verification could not complete. Try again once the privacy context is stable.");
-        assert_eq!(generic.model_facing(), "Output withheld by user privacy policy — privacy metadata or policy could not be verified. Resolve the privacy verification problem before trying again.");
+        assert_eq!(transient.model_facing(), "Request not sent: user privacy policy — privacy context kept changing, so verification could not complete. Try again once the privacy context is stable.");
+        assert_eq!(generic.model_facing(), "Request not sent: user privacy policy — privacy metadata or policy could not be verified. Resolve the privacy verification problem before trying again.");
         let refusal = clear(
             AuditedRecords {
                 value: "payload".into(),
@@ -500,7 +515,7 @@ mod tests {
         )
         .err()
         .unwrap();
-        assert_eq!(refusal.model_facing(), "Output withheld by user privacy policy — \"untrusted\" cannot receive these guarded files:\n  - .env (zone \"secrets\")\nRetrying the same request will be refused again. Continue without those files, or ask the user to allow these zones for \"untrusted\".");
+        assert_eq!(refusal.model_facing(), "Request not sent: user privacy policy does not allow \"untrusted\" to receive data from these guarded files present in this chat's context:\n  - .env (zone \"secrets\", declared)\nRetrying the same request will be refused again. Ask the user to allow \"untrusted\" for zone(s) \"secrets\" in Privacy settings, or to clear this chat's privacy record for these files.");
     }
 
     #[test]
@@ -527,15 +542,35 @@ mod tests {
     }
 
     #[test]
-    fn unknown_and_blocked_zones_fail_closed() {
-        for zone in ["unknown", "blocked"] {
+    fn removed_zones_reclassify_paths_and_preserve_remaining_obligations() {
+        for (path, zone, target, allowed) in [
+            ("guarded", "removed", "untrusted", true),
+            (".env", "removed", "untrusted", false),
+            (".env", "removed", "trusted", true),
+            ("guarded", "effective:removed+secrets", "untrusted", false),
+            (
+                "guarded",
+                "effective:removed+also-removed",
+                "untrusted",
+                true,
+            ),
+            ("guarded", "blocked", "trusted", false),
+            ("guarded", "effective:removed+blocked", "trusted", false),
+            ("", "removed", "trusted", false),
+            ("bad\0path", "removed", "trusted", false),
+            ("guarded", "effective:", "trusted", false),
+        ] {
             let audited = AuditedRecords {
                 value: "payload".to_string(),
-                records: vec![record("guarded", zone)],
+                records: vec![record(path, zone)],
             };
 
             let policy = compiled(&policy());
-            assert!(clear(audited, &destination("trusted"), &policy).is_err());
+            assert_eq!(
+                clear(audited, &destination(target), &policy).is_ok(),
+                allowed,
+                "path={path:?}, zone={zone}, target={target}"
+            );
         }
     }
 }

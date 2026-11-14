@@ -867,7 +867,8 @@ fn read_open(_process_id: libc::pid_t) -> Result<PendingOpen, String> {
 }
 
 fn flags_indicate_read(flags: u64) -> bool {
-    (flags as libc::c_int & libc::O_ACCMODE) != libc::O_WRONLY
+    let flags = flags as libc::c_int;
+    flags & libc::O_DIRECTORY == 0 && (flags & libc::O_ACCMODE) != libc::O_WRONLY
 }
 
 fn flags_indicate_write(flags: u64) -> bool {
@@ -975,6 +976,83 @@ fn is_missing_process_error(reason: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn directory_opens_are_not_content_reads() {
+        assert!(!flags_indicate_read(
+            (libc::O_RDONLY | libc::O_DIRECTORY) as u64
+        ));
+        assert!(!flags_indicate_read(
+            (libc::O_RDWR | libc::O_DIRECTORY) as u64
+        ));
+        assert!(flags_indicate_read(libc::O_RDONLY as u64));
+        assert!(flags_indicate_read(libc::O_RDWR as u64));
+        assert!(!flags_indicate_read(libc::O_WRONLY as u64));
+    }
+
+    #[test]
+    fn synthetic_open_flags_publish_only_content_reads() {
+        let shared = Arc::new(Shared::new());
+        let mut supervisor = Supervisor::new(0, false, shared.clone());
+        let directory = PathBuf::from("/synthetic/directory");
+        let file = directory.join("file");
+        for (path, flags, expected) in [
+            (directory, libc::O_RDONLY | libc::O_DIRECTORY, false),
+            (file.clone(), libc::O_RDONLY, true),
+        ] {
+            let open = PendingOpen {
+                reads: flags_indicate_read(flags as u64),
+                writes: flags_indicate_write(flags as u64),
+            };
+            assert_eq!(supervisor.publish_access(path, open), expected);
+        }
+        assert_eq!(shared_access(&shared).reads, vec![file]);
+        assert!(shared_access(&shared).writes.is_empty());
+        assert_eq!(shared_access(&shared), supervisor.observed_access());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Linux ptrace; run with REFACT_TEST_PTRACE=1"]
+    async fn observe_ls_excludes_directory_but_cat_includes_file() {
+        if std::env::var("REFACT_TEST_PTRACE").as_deref() != Ok("1") {
+            eprintln!("skipping live observation: set REFACT_TEST_PTRACE=1");
+            return;
+        }
+        let workspace = tempfile::tempdir().unwrap();
+        let guarded = workspace.path().join("guarded");
+        std::fs::create_dir(&guarded).unwrap();
+        let file = guarded.join("payload");
+        std::fs::write(&file, "secret").unwrap();
+        for (command, expected_read) in [("ls guarded", false), ("cat guarded/payload", true)] {
+            let result = crate::ExecRegistry::new()
+                .spawn(
+                    crate::ExecSpawnRequest::foreground(command)
+                        .with_cwd(workspace.path().to_path_buf())
+                        .with_observe(true),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                result.snapshot.status,
+                crate::ExecStatus::Exited {
+                    exit_code: Some(0)
+                }
+            );
+            if let ObservationStatus::Unavailable(reason) = &result.observation {
+                eprintln!("skipping live observation: {reason}");
+                return;
+            }
+            let ObservationStatus::Observed(access) = result.observation else {
+                panic!("observer unavailable: {:?}", result.observation);
+            };
+            assert!(!access.reads.contains(&guarded), "{command}: {access:?}");
+            assert_eq!(
+                access.reads.contains(&file),
+                expected_read,
+                "{command}: {access:?}"
+            );
+        }
+    }
 
     #[tokio::test]
     async fn supervisor_failure_is_immediately_unavailable() {

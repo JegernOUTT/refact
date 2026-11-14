@@ -284,6 +284,8 @@ OpenAI conversion lives in `src/llm/adapters/openai_chat.rs` (`convert_messages_
 
 Tool trait: `tool_execute(&mut self, ccx, tool_call_id, args) -> Result<(bool, Vec<ContextEnum>)>`.
 
+`manage_mcp` lists, inspects, tails redacted logs, reconnects, saves and removes MCP servers from chat. Save/remove require confirmation; provider MCP access policy applies to every action. Settings merge preserves omitted keys and `***` secrets.
+
 `AtCommandsContext` provides: global_context, chat_id, n_ctx, abort_flag, messages, current_model, task_meta, subchat depth/channels, postprocess params.
 
 ### Background subagents and coordination

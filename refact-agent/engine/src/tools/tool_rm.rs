@@ -217,6 +217,12 @@ impl Tool for ToolRm {
                 (true_path, corrected_path, Vec::new(), corrections)
             };
 
+        crate::tools::file_edit::auxiliary::refuse_protected_path_repair(
+            &gcx,
+            execution_scope.as_ref(),
+            &path_str,
+            &true_path,
+        )?;
         check_scope_guard(&ccx, &true_path).await?;
 
         // Check if path exists.

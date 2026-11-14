@@ -38,7 +38,7 @@ pub(crate) fn clear_for_model<T: PrivacyAudited>(
     clear_current(gcx, value, &destination)
 }
 
-fn clear_current<T: PrivacyAudited>(
+pub(crate) fn clear_current<T: PrivacyAudited>(
     gcx: &SharedGlobalContext,
     value: T,
     destination: &Destination,
@@ -217,7 +217,7 @@ mod tests {
                 refusal.message,
                 refact_privacy::gate::PRIVACY_CONTEXT_CHANGED
             );
-            assert_eq!(refusal.model_facing(), "Output withheld by user privacy policy — privacy context kept changing, so verification could not complete. Try again once the privacy context is stable.");
+            assert_eq!(refusal.model_facing(), "Request not sent: user privacy policy — privacy context kept changing, so verification could not complete. Try again once the privacy context is stable.");
         }
     }
 
@@ -332,7 +332,7 @@ mod tests {
                 events.load(Ordering::SeqCst),
                 if failure == "finish-policy" { 2 } else { 0 }
             );
-            assert_eq!(refusal.model_facing(), "Output withheld by user privacy policy — privacy metadata or policy could not be verified. Resolve the privacy verification problem before trying again.");
+            assert_eq!(refusal.model_facing(), "Request not sent: user privacy policy — privacy metadata or policy could not be verified. Resolve the privacy verification problem before trying again.");
         }
     }
 
@@ -365,7 +365,7 @@ mod tests {
             refusal.message,
             "final audit failed at /private/internal/path"
         );
-        assert_eq!(refusal.model_facing(), "Output withheld by user privacy policy — privacy metadata or policy could not be verified. Resolve the privacy verification problem before trying again.");
+        assert_eq!(refusal.model_facing(), "Request not sent: user privacy policy — privacy metadata or policy could not be verified. Resolve the privacy verification problem before trying again.");
     }
 
     struct Records(Vec<refact_privacy::FileRecord>);
@@ -407,7 +407,11 @@ mod tests {
         assert!(clear_for_model(&gcx, Records(vec![record.clone()]), &other).is_err());
         let mut carried = record.clone();
         carried.zone = "effective:secrets+removed".into();
-        assert!(clear_for_model(&gcx, Records(vec![carried]), &trusted).is_err());
+        assert!(clear_for_model(&gcx, Records(vec![carried.clone()]), &trusted).is_ok());
+        assert!(clear_for_model(&gcx, Records(vec![carried.clone()]), &other).is_err());
+        gcx.privacy_policy_load.write().unwrap().policy =
+            Arc::new(refact_privacy::PrivacyPolicy::default());
+        assert!(clear_for_model(&gcx, Records(vec![carried]), &other).is_ok());
         let mut malformed = record.clone();
         malformed.path.clear();
         assert!(clear_for_model(&gcx, Records(vec![malformed]), &trusted).is_err());

@@ -12,49 +12,8 @@ use crate::custom_error::ScratchError;
 use crate::integrations::mcp::mcp_naming;
 
 const EXPORT_VERSION: u32 = 1;
-const REDACTED: &str = "<REDACTED>";
+use crate::integrations::mcp::redaction::{is_secret_field, redact_secrets, REDACTED};
 static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-fn is_secret_field(key: &str) -> bool {
-    let key_lower = key.to_lowercase();
-    [
-        "token",
-        "secret",
-        "password",
-        "passwd",
-        "api_key",
-        "apikey",
-        "access_token",
-        "refresh_token",
-        "client_secret",
-        "authorization",
-        "bearer",
-        "cookie",
-        "credential",
-    ]
-    .iter()
-    .any(|needle| key_lower.contains(needle))
-}
-
-fn redact_secrets(value: &mut Value) {
-    match value {
-        Value::Object(map) => {
-            for (key, child) in map {
-                if is_secret_field(key) && !child.is_object() && !child.is_array() {
-                    *child = Value::String(REDACTED.to_string());
-                } else {
-                    redact_secrets(child);
-                }
-            }
-        }
-        Value::Array(items) => {
-            for item in items {
-                redact_secrets(item);
-            }
-        }
-        _ => {}
-    }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExportedServer {
@@ -122,6 +81,17 @@ async fn collect_mcp_yaml_files(
     result
 }
 
+/// Per-key export redaction: `headers`/`env` stay maps so import can restore each value.
+fn redact_exported_config(config: &mut HashMap<String, Value>) {
+    for (key, value) in config.iter_mut() {
+        if is_secret_field(key) && !value.is_object() && !value.is_array() {
+            *value = Value::String(REDACTED.to_string());
+        } else {
+            redact_secrets(value);
+        }
+    }
+}
+
 #[derive(Deserialize)]
 pub struct ExportRequest {
     #[serde(default)]
@@ -162,13 +132,7 @@ pub async fn handle_v1_mcp_export(
         let transport = mcp_naming::detect_transport(config_name);
 
         if !req.include_secrets {
-            for (key, value) in &mut parsed {
-                if is_secret_field(key) {
-                    *value = Value::String(REDACTED.to_string());
-                } else {
-                    redact_secrets(value);
-                }
-            }
+            redact_exported_config(&mut parsed);
         }
 
         let tools_config: HashMap<String, Value> = parsed
@@ -858,6 +822,45 @@ mod tests {
         assert_eq!(value["oauth_tokens"]["safe"], "visible");
         assert_eq!(value["headers"]["Authorization"], REDACTED);
         assert_eq!(value["headers"]["Accept"], "application/json");
+    }
+
+    #[test]
+    fn test_export_keeps_headers_and_env_maps_with_per_key_redaction() {
+        let mut config: HashMap<String, Value> = HashMap::from([
+            (
+                "env".to_string(),
+                serde_json::json!({ "GITHUB_TOKEN": "ghp", "PATH": "/bin" }),
+            ),
+            (
+                "headers".to_string(),
+                serde_json::json!({ "Authorization": "Bearer x", "Accept": "json" }),
+            ),
+            ("api_key".to_string(), Value::String("k".to_string())),
+        ]);
+        redact_exported_config(&mut config);
+        assert_eq!(
+            config["env"],
+            serde_json::json!({ "GITHUB_TOKEN": REDACTED, "PATH": "/bin" })
+        );
+        assert_eq!(
+            config["headers"],
+            serde_json::json!({ "Authorization": REDACTED, "Accept": "json" })
+        );
+        assert_eq!(config["api_key"], REDACTED);
+        let secrets = vec![
+            ImportSecret {
+                path: vec!["env".to_string(), "GITHUB_TOKEN".to_string()],
+                value: "ghp".to_string(),
+            },
+            ImportSecret {
+                path: vec!["headers".to_string(), "Authorization".to_string()],
+                value: "Bearer x".to_string(),
+            },
+        ];
+        apply_secrets_to_config(&mut config, &secrets);
+        assert_eq!(config["env"]["GITHUB_TOKEN"], "ghp");
+        assert_eq!(config["headers"]["Authorization"], "Bearer x");
+        assert_eq!(config["headers"]["Accept"], "json");
     }
 
     #[test]

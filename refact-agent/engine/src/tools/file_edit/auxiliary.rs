@@ -37,6 +37,235 @@ pub fn active_execution_scope(scope: Option<&ExecutionScope>) -> Option<&Executi
     scope.filter(|scope| scope.is_enforced())
 }
 
+pub fn protected_config_root(gcx: &GlobalContext, scope: Option<&ExecutionScope>) -> PathBuf {
+    scope
+        .map(|scope| scope.effective_root().to_path_buf())
+        .or_else(|| {
+            gcx.documents_state
+                .workspace_folders
+                .lock()
+                .unwrap()
+                .first()
+                .cloned()
+        })
+        .unwrap_or_else(|| gcx.config_dir.clone())
+}
+
+fn normalized_config_path(path: PathBuf) -> PathBuf {
+    let absolute = canonicalize_normalized_path(path);
+    for ancestor in absolute.ancestors() {
+        if let Ok(canonical) = std::fs::canonicalize(ancestor) {
+            if let Ok(suffix) = absolute.strip_prefix(ancestor) {
+                return canonicalize_normalized_path(canonical.join(suffix));
+            }
+        }
+    }
+    absolute
+}
+
+fn protected_config_locations(gcx: &GlobalContext, root: &Path) -> Vec<PathBuf> {
+    let mut roots = vec![root.to_path_buf()];
+    roots.extend(
+        gcx.documents_state
+            .workspace_folders
+            .lock()
+            .unwrap()
+            .iter()
+            .cloned(),
+    );
+    let mut locations: Vec<PathBuf> = roots
+        .iter()
+        .flat_map(|r| {
+            [
+                r.join(".refact").join("privacy.yaml"),
+                r.join(".refact").join("integrations.d"),
+            ]
+        })
+        .collect();
+    locations.push(gcx.config_dir.join("privacy.yaml"));
+    locations.push(gcx.config_dir.join("integrations.d"));
+    for custom in [&gcx.cmdline.privacy_yaml, &gcx.cmdline.integrations_yaml] {
+        if !custom.is_empty() {
+            locations.push(PathBuf::from(custom));
+        }
+    }
+    locations.into_iter().map(normalized_config_path).collect()
+}
+
+pub fn is_protected_config_path(gcx: &GlobalContext, root: &Path, path: &Path) -> bool {
+    let named = |p: &Path| {
+        p.file_name()
+            .is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case("privacy.yaml"))
+            || p.components().any(|c| {
+                c.as_os_str()
+                    .to_string_lossy()
+                    .eq_ignore_ascii_case("integrations.d")
+            })
+    };
+    let path = PathBuf::from(preprocess_path_for_normalization(
+        path.to_string_lossy().trim().replace('\\', "/"),
+    ));
+    let absolute = if path.is_absolute() {
+        path
+    } else {
+        root.join(path)
+    };
+    let canonical = normalized_config_path(absolute.clone());
+    let global = if gcx.cmdline.privacy_yaml.is_empty() {
+        gcx.config_dir.join("privacy.yaml")
+    } else {
+        PathBuf::from(&gcx.cmdline.privacy_yaml)
+    };
+    named(&absolute)
+        || named(&canonical)
+        || absolute
+            .ancestors()
+            .any(|p| std::fs::canonicalize(p).ok().is_some_and(|p| named(&p)))
+        || [
+            Some(global),
+            (!gcx.cmdline.integrations_yaml.is_empty())
+                .then(|| PathBuf::from(&gcx.cmdline.integrations_yaml)),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|p| canonical == normalized_config_path(p))
+        || protected_config_locations(gcx, root)
+            .iter()
+            .any(|location| location.starts_with(&canonical))
+}
+
+pub fn refuse_protected_path_repair(
+    gcx: &GlobalContext,
+    scope: Option<&ExecutionScope>,
+    raw: &str,
+    resolved: &Path,
+) -> Result<(), String> {
+    let root = protected_config_root(gcx, scope);
+    if is_protected_config_path(gcx, &root, resolved) {
+        let raw = PathBuf::from(preprocess_path_for_normalization(raw.trim().to_string()));
+        let exact = if raw.is_absolute() {
+            raw
+        } else {
+            root.join(raw)
+        };
+        if normalized_config_path(exact) != normalized_config_path(resolved.to_path_buf()) {
+            return Err(format!("Protected configuration path repair refused; provide the exact path '{}' so it can be confirmed", resolved.display()));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod protected_config_tests {
+    use super::*;
+    #[tokio::test]
+    async fn custom_config_paths_and_aliases_are_protected() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let mut gcx = Arc::try_unwrap(gcx).ok().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let privacy = temp.path().join("custom-policy.yml");
+        let integrations = temp.path().join("custom-tools.yml");
+        std::fs::write(&privacy, "").unwrap();
+        std::fs::write(&integrations, "").unwrap();
+        gcx.cmdline.privacy_yaml = privacy.to_string_lossy().into_owned();
+        gcx.cmdline.integrations_yaml = integrations.to_string_lossy().into_owned();
+        for path in [&privacy, &integrations] {
+            assert!(is_protected_config_path(&gcx, temp.path(), path));
+            assert!(refuse_protected_path_repair(&gcx, None, "wrong.yml", path).is_err());
+        }
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&privacy, temp.path().join("alias.yml")).unwrap();
+            assert!(is_protected_config_path(
+                &gcx,
+                temp.path(),
+                Path::new("alias.yml")
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn enclosing_directories_of_protected_config_are_protected() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("ws");
+        std::fs::create_dir_all(root.join(".refact/integrations.d")).unwrap();
+        std::fs::create_dir_all(root.join("src/nested")).unwrap();
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![root.clone()];
+        for path in [
+            root.join(".refact"),
+            PathBuf::from(".refact"),
+            PathBuf::from("./.refact/"),
+            root.clone(),
+            temp.path().to_path_buf(),
+            gcx.config_dir.clone(),
+            gcx.config_dir.parent().unwrap().to_path_buf(),
+        ] {
+            assert!(is_protected_config_path(&gcx, &root, &path), "{path:?}");
+        }
+        for path in [
+            root.join("src"),
+            root.join("src/nested"),
+            PathBuf::from("src"),
+        ] {
+            assert!(!is_protected_config_path(&gcx, &root, &path), "{path:?}");
+        }
+        assert!(
+            refuse_protected_path_repair(&gcx, None, ".refac", &root.join(".refact"))
+                .unwrap_err()
+                .contains("exact path")
+        );
+        assert!(refuse_protected_path_repair(&gcx, None, ".refact", &root.join(".refact")).is_ok());
+        assert!(refuse_protected_path_repair(&gcx, None, "sr", &root.join("src")).is_ok());
+    }
+
+    #[tokio::test]
+    async fn protected_repair_requires_exact_workspace_path() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![root.to_path_buf()];
+        let protected = root.join(".refact/integrations.d/mcp_stdio_x.yaml");
+        std::fs::create_dir_all(protected.parent().unwrap()).unwrap();
+        std::fs::write(&protected, "config").unwrap();
+        assert!(
+            refuse_protected_path_repair(&gcx, None, "mcp_stdio_x.yaml", &protected)
+                .unwrap_err()
+                .contains("exact path")
+        );
+        assert!(refuse_protected_path_repair(
+            &gcx,
+            None,
+            " .refact/integrations.d/./mcp_stdio_x.yaml ",
+            &protected
+        )
+        .is_ok());
+        assert!(
+            refuse_protected_path_repair(&gcx, None, "main.rs", &root.join("src/main.rs")).is_ok()
+        );
+        assert!(is_protected_config_path(
+            &gcx,
+            root,
+            &gcx.config_dir.join("privacy.yaml")
+        ));
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(root.join(".refact/integrations.d"), root.join("alias"))
+                .unwrap();
+            assert!(is_protected_config_path(
+                &gcx,
+                root,
+                Path::new("alias/mcp_stdio_x.yaml")
+            ));
+            assert!(is_protected_config_path(
+                &gcx,
+                root,
+                Path::new("alias/new.yaml")
+            ));
+        }
+    }
+}
+
 pub fn resolve_path_with_scope(
     raw_path: &Path,
     privacy_settings: Arc<PrivacySettings>,
@@ -172,7 +401,9 @@ pub async fn parse_path_for_update(
         execution_scope,
         true,
     ) {
-        return resolved;
+        let resolved = resolved?;
+        refuse_protected_path_repair(&gcx, execution_scope, &s, &resolved.path)?;
+        return Ok(resolved);
     }
 
     let candidates = file_repair_candidates(gcx.clone(), &raw_path, 3, false).await;
@@ -186,6 +417,7 @@ pub async fn parse_path_for_update(
     .await
     .map(|f| canonicalize_normalized_path(PathBuf::from(f)))?;
 
+    refuse_protected_path_repair(&gcx, execution_scope, &s, &path)?;
     if check_file_privacy(
         privacy_settings,
         &path,
@@ -230,7 +462,9 @@ pub async fn parse_path_for_create(
     if let Some(resolved) =
         resolve_path_with_scope(&raw_path, privacy_settings.clone(), execution_scope, false)
     {
-        return resolved;
+        let resolved = resolved?;
+        refuse_protected_path_repair(&gcx, execution_scope, &s, &resolved.path)?;
+        return Ok(resolved);
     }
 
     let filename = raw_path
@@ -269,6 +503,7 @@ pub async fn parse_path_for_create(
         path
     };
 
+    refuse_protected_path_repair(&gcx, execution_scope, &s, &path)?;
     if check_file_privacy(
         privacy_settings,
         &path,

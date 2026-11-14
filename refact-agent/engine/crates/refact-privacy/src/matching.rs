@@ -149,20 +149,55 @@ impl std::ops::Deref for ClassificationBatch {
 pub fn compile_patterns(patterns: &[String]) -> Result<Vec<Pattern>, PolicyError> {
     let mut compiled = Vec::with_capacity(patterns.len());
     for pattern in patterns {
+        if pattern.trim().is_empty() {
+            continue;
+        }
         let normalized = normalize(pattern);
-        compiled.push(
-            Pattern::new(&normalized).map_err(|error| PolicyError::InvalidGlob {
-                pattern: pattern.clone(),
-                message: error.to_string(),
-            })?,
-        );
-        for alias in canonical_pattern_aliases(&normalized) {
-            if let Ok(alias) = Pattern::new(&alias) {
-                compiled.push(alias);
+        let expanded = if normalized.contains(['*', '?', '[']) {
+            vec![normalized]
+        } else {
+            let literal = normalized.trim_end_matches('/');
+            if literal.is_empty()
+                || (literal.len() == 2
+                    && literal.as_bytes()[0].is_ascii_alphabetic()
+                    && literal.ends_with(':'))
+            {
+                vec![normalized]
+            } else {
+                vec![literal.to_string(), format!("{literal}/**")]
+            }
+        };
+        for normalized in expanded {
+            compiled.push(
+                Pattern::new(&normalized).map_err(|error| PolicyError::InvalidGlob {
+                    pattern: pattern.clone(),
+                    message: error.to_string(),
+                })?,
+            );
+            for alias in canonical_pattern_aliases(&normalized) {
+                if let Ok(alias) = Pattern::new(&alias) {
+                    compiled.push(alias);
+                }
             }
         }
     }
     Ok(compiled)
+}
+
+#[cfg(test)]
+#[test]
+fn drive_root_literals_load_without_descendant_expansion() {
+    for pattern in ["C:", "C:\\", "c:/"] {
+        let compiled = compile_patterns(&[pattern.to_string()]).unwrap();
+        assert!(
+            !compiled.iter().any(|p| p.matches("c:/secret.txt")),
+            "{pattern}"
+        );
+    }
+    assert!(compile_patterns(&["**".into()])
+        .unwrap()
+        .iter()
+        .any(|p| p.matches("c:/secret.txt")));
 }
 
 #[cfg(windows)]
@@ -829,9 +864,9 @@ mod tests {
     fn owner_memo_recovers_on_call_after_admission_failure() {
         let temp = tempfile::tempdir().unwrap();
         let compiled = policy(vec![
-            zone("first", &["never-first"], &[]),
-            zone("second", &["never-second"], &[]),
-            zone("normal", &["never-normal"], &["*"]),
+            zone("first", &["never-first*"], &[]),
+            zone("second", &["never-second*"], &[]),
+            zone("normal", &["never-normal*"], &["*"]),
         ])
         .compile()
         .unwrap();
@@ -1517,6 +1552,86 @@ mod tests {
 
     fn zone(name: &str, patterns: &[&str], send_to: &[&str]) -> Zone {
         zone_with_shell_behavior(name, patterns, send_to, ShellBehavior::Withhold)
+    }
+
+    #[test]
+    fn degenerate_literals_do_not_shadow_absolute_paths() {
+        for pattern in ["", " ", "\t\n", "/", "//"] {
+            let compiled = policy(vec![
+                zone("permissive", &[pattern], &["*"]),
+                zone("private", &["**"], &[]),
+            ])
+            .compile()
+            .unwrap();
+            assert_eq!(
+                compiled.zone_for_path(Path::new("/workspace/secret")).name,
+                "private",
+                "pattern={pattern:?}"
+            );
+        }
+        let root = compile_patterns(&["/".into()]).unwrap();
+        assert!(root.iter().any(|pattern| pattern.matches("/")));
+        assert!(!root.iter().any(|pattern| pattern.matches("/secret")));
+        let env = policy(vec![zone("private", &[".env"], &[])])
+            .compile()
+            .unwrap();
+        assert_eq!(
+            env.zone_for_path(Path::new("/workspace/.env")).name,
+            "private"
+        );
+        assert_eq!(
+            env.zone_for_path(Path::new("/workspace/.env.bak")).name,
+            "normal"
+        );
+    }
+
+    #[test]
+    fn literal_patterns_cover_contents_without_matching_neighbor_prefixes() {
+        let temp = tempfile::tempdir().unwrap();
+        let folder = temp.path().join("polez");
+        for trailing in ["", "/"] {
+            let pattern = format!("{}{trailing}", folder.display());
+            let compiled = policy(vec![zone("private", &[&pattern], &[])])
+                .compile()
+                .unwrap();
+            for suffix in ["polez", "polez/f", "polez/a/b"] {
+                assert_eq!(
+                    compiled.zone_for_path(&temp.path().join(suffix)).name,
+                    "private"
+                );
+            }
+            for suffix in ["polez-pr/f", "polezx"] {
+                assert_eq!(
+                    compiled.zone_for_path(&temp.path().join(suffix)).name,
+                    "normal"
+                );
+            }
+            let blocked = PrivacyPolicy {
+                blocked: vec![pattern],
+                ..Default::default()
+            }
+            .compile()
+            .unwrap();
+            assert_eq!(blocked.zone_for_path(&folder.join("a/b")).name, "blocked");
+        }
+        let relative = policy(vec![zone("private", &["secrets"], &[])])
+            .compile()
+            .unwrap();
+        assert_eq!(
+            relative
+                .zone_for_path_with_roots(&temp.path().join("secrets/x"), [temp.path()])
+                .name,
+            "private"
+        );
+    }
+
+    #[test]
+    fn wildcard_patterns_are_not_expanded() {
+        for source in ["dir/*", "dir/?", "dir/[ab]", "dir/**"] {
+            let patterns = compile_patterns(&[source.into()]).unwrap();
+            assert_eq!(patterns.len(), 1);
+            assert_eq!(patterns[0].as_str(), source);
+        }
     }
 
     fn policy(zones: Vec<Zone>) -> PrivacyPolicy {

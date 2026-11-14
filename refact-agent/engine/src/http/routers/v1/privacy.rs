@@ -123,6 +123,25 @@ pub async fn handle_v1_privacy_policy_post(
     State(app): State<AppState>,
     Json(policy): Json<PrivacyPolicy>,
 ) -> Result<Json<PrivacyPolicyResponse>, ScratchError> {
+    if policy
+        .blocked
+        .iter()
+        .chain(policy.zones.iter().flat_map(|zone| zone.patterns.iter()))
+        .any(|pattern| {
+            let normalized = pattern.replace('\\', "/");
+            let literal = normalized.trim_matches(|c: char| c == '/' || c.is_whitespace());
+            literal.is_empty()
+                || literal == "."
+                || (literal.len() == 2
+                    && literal.as_bytes()[0].is_ascii_alphabetic()
+                    && literal.ends_with(':'))
+        })
+    {
+        return Err(ScratchError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "Privacy patterns must not be empty, dot, or drive-root literals; use ** to mean everything".to_string(),
+        ));
+    }
     policy.compile().map_err(|error| {
         ScratchError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -179,19 +198,12 @@ pub async fn handle_v1_privacy_inspect(
         .as_ref()
         .map(|records| records.iter().map(|(_, record)| record.clone()).collect())
         .unwrap_or_default();
-    let policy = app.gcx.privacy_policy_load.read().unwrap().policy.clone();
-    let compiled = policy.compile().map_err(|error| {
-        ScratchError::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to compile privacy policy: {error}"),
-        )
-    })?;
-    let clearance = refact_privacy::clear(
+    let clearance = crate::privacy::destinations::clear_current(
+        &app.gcx,
         AuditedMessages {
             records: indexed_records,
         },
         &request.destination,
-        &compiled,
     );
     let (sendable, blocked, refusal) = match clearance {
         Ok(_) => (true, Vec::new(), None),
@@ -273,6 +285,203 @@ pub async fn handle_v1_privacy_derived_clear(
         cleared: before.saturating_sub(remaining),
         remaining,
     }))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PrivacyRecordsClearRequest {
+    pub chat_id: String,
+    pub paths: Vec<String>,
+}
+
+#[derive(Debug, Default, Serialize, PartialEq, Eq)]
+pub struct PrivacyRecordsClearResponse {
+    pub cleared: usize,
+    pub remaining: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub persisted: Option<bool>,
+}
+
+pub async fn handle_v1_privacy_records_clear(
+    State(app): State<AppState>,
+    headers: axum::http::HeaderMap,
+    body_bytes: hyper::body::Bytes,
+) -> Result<Json<PrivacyRecordsClearResponse>, ScratchError> {
+    if app
+        .gcx
+        .cmdline
+        .daemon_auth_token
+        .as_deref()
+        .is_some_and(|token| !token.is_empty())
+    {
+        crate::buddy::operator_runtime::authenticated_operator_request(&app, &headers)
+            .map_err(|error| ScratchError::new(StatusCode::FORBIDDEN, error))?;
+    }
+    let request: PrivacyRecordsClearRequest = serde_json::from_slice(&body_bytes)
+        .map_err(|_| ScratchError::new(StatusCode::BAD_REQUEST, "Invalid JSON request".into()))?;
+    if request.paths.is_empty() {
+        return Err(ScratchError::new(
+            StatusCode::BAD_REQUEST,
+            "paths must not be empty".to_string(),
+        ));
+    }
+    let session_arc = {
+        let sessions = app.gcx.chat_sessions.read().await;
+        sessions.get(&request.chat_id).cloned()
+    }
+    .ok_or_else(|| {
+        ScratchError::new(StatusCode::NOT_FOUND, "Chat session not found".to_string())
+    })?;
+    let paths = request
+        .paths
+        .iter()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
+    crate::privacy::load_privacy_if_needed(app.gcx.clone()).await;
+    let mut response = {
+        let mut session = session_arc.lock().await;
+        if session.has_runner_lease()
+            || session.turn_depth > 0
+            || !crate::chat::context_rebuild::explicit_context_ready(&session)
+            || crate::chat::context_rebuild::compression_attempt_active(&session)
+            || session
+                .native_commands_in_flight
+                .load(std::sync::atomic::Ordering::SeqCst)
+                != 0
+            || matches!(
+                session.runtime.state,
+                crate::chat::types::SessionState::Generating
+                    | crate::chat::types::SessionState::ExecutingTools
+            )
+        {
+            return Err(ScratchError::new(
+                StatusCode::CONFLICT,
+                "chat is busy; try again when it is idle".into(),
+            ));
+        }
+        let classification = crate::privacy::classification_cache::snapshot(&app.gcx)
+            .map_err(|error| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, error))?;
+        let protected = |record: &FileRecord| {
+            blocked_zone(&record.zone)
+                || blocked_zone(
+                    &classification
+                        .classify(&app.gcx, std::path::Path::new(&record.path))
+                        .zone
+                        .name,
+                )
+        };
+        let mut response = PrivacyRecordsClearResponse::default();
+        let mut messages = session.messages.clone();
+        for message in messages.iter_mut() {
+            clear_message_records(&mut message.extra, &paths, &protected, &mut response);
+        }
+        let removable_derived = {
+            let derived = session
+                .derived_privacy_zones
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            paths
+                .iter()
+                .filter(|path| {
+                    !derived
+                        .get(std::path::Path::new(path))
+                        .is_some_and(|entry| blocked_zone(&entry.zone))
+                        && !blocked_zone(
+                            &classification
+                                .classify(&app.gcx, std::path::Path::new(path))
+                                .zone
+                                .name,
+                        )
+                })
+                .map(|path| std::path::PathBuf::from(*path))
+                .collect::<Vec<_>>()
+        };
+        classification
+            .finish(&app.gcx)
+            .map_err(|error| ScratchError::new(StatusCode::CONFLICT, error))?;
+        {
+            let mut derived = session
+                .derived_privacy_zones
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            for path in removable_derived {
+                derived.remove(&path);
+            }
+        }
+        session.messages = messages;
+        if response.cleared > 0 {
+            session.increment_version();
+            let event = session.snapshot();
+            session.emit(event);
+        }
+        response
+    };
+    if response.cleared > 0 {
+        if let Err(error) = crate::chat::trajectories::try_save_trajectory_with_intent(
+            app.clone(),
+            session_arc,
+            crate::chat::types::TrajectoryCommitIntent::Required,
+        )
+        .await
+        {
+            tracing::warn!("privacy records cleared in memory but not persisted: {error}");
+            response.persisted = Some(false);
+        }
+    }
+    tracing::info!(
+        "privacy records cleared: chat_id={} cleared={}",
+        request.chat_id,
+        response.cleared
+    );
+    Ok(Json(response))
+}
+
+fn blocked_zone(zone: &str) -> bool {
+    zone == "blocked"
+        || zone
+            .strip_prefix("effective:")
+            .is_some_and(|zones| zones.split('+').any(|zone| zone == "blocked"))
+}
+
+fn clear_message_records(
+    message: &mut serde_json::Map<String, serde_json::Value>,
+    paths: &HashSet<&str>,
+    protected: &dyn Fn(&FileRecord) -> bool,
+    response: &mut PrivacyRecordsClearResponse,
+) {
+    if let Some(nested) = message
+        .get_mut(refact_core::active_context::COMPRESSION_REPORT_KEY)
+        .and_then(|report| report.get_mut("payload"))
+        .and_then(|payload| payload.get_mut("messages"))
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        for nested in nested
+            .iter_mut()
+            .filter_map(serde_json::Value::as_object_mut)
+        {
+            clear_message_records(nested, paths, protected, response);
+        }
+    }
+    let Some(value) = message.get("privacy") else {
+        return;
+    };
+    let Ok(mut privacy) = serde_json::from_value::<refact_privacy::PrivacyRecord>(value.clone())
+    else {
+        return;
+    };
+    let before = privacy.files.len();
+    privacy
+        .files
+        .retain(|record| !paths.contains(record.path.as_str()) || protected(record));
+    response.cleared += before - privacy.files.len();
+    response.remaining += privacy.files.len();
+    if privacy.files.len() == before {
+        return;
+    }
+    if privacy.files.is_empty() {
+        message.remove("privacy");
+    } else if let Ok(value) = serde_json::to_value(privacy) {
+        message.insert("privacy".to_string(), value);
+    }
 }
 
 async fn session_derived_zones(
@@ -627,6 +836,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn privacy_policy_post_rejects_empty_patterns() {
+        let (_cache, _config, app) = test_app().await;
+        let router = crate::http::routers::make_refact_http_server(app);
+        for pattern in ["", " ", "\t\n", "/", " / ", ".", "./", "C:\\", "c:"] {
+            for blocked in [false, true] {
+                let mut body = policy(".env");
+                if blocked {
+                    body["blocked"] = json!([pattern]);
+                } else {
+                    body["zones"][0]["patterns"] = json!([pattern]);
+                }
+                let response = router
+                    .clone()
+                    .oneshot(post_json("/v1/privacy/policy", body))
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+                let body = to_bytes(response.into_body()).await.unwrap();
+                assert!(String::from_utf8_lossy(&body).contains("use ** to mean everything"));
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn privacy_policy_post_defers_discovery_and_get_returns_complete_response() {
         let (_cache, config, app) = test_app().await;
         let secret = config.path().join("secret.env");
@@ -752,6 +985,356 @@ mod tests {
         assert!(response["observation"]["last_error"].is_null());
     }
 
+    fn guarded(path: &str, zone: &str) -> FileRecord {
+        FileRecord {
+            path: path.to_string(),
+            zone: zone.to_string(),
+            attribution: refact_privacy::Attribution::Observed,
+        }
+    }
+
+    fn message_with(id: &str, records: Vec<FileRecord>) -> ChatMessage {
+        let mut message = ChatMessage::new("user".to_string(), id.to_string());
+        message.message_id = id.to_string();
+        crate::privacy::records::merge_records(&mut message, records);
+        message
+    }
+
+    async fn insert_session(app: &AppState, chat_id: &str, messages: Vec<ChatMessage>) {
+        let mut session = ChatSession::new(chat_id.to_string());
+        session.messages = messages;
+        app.gcx
+            .chat_sessions
+            .write()
+            .await
+            .insert(chat_id.to_string(), Arc::new(AMutex::new(session)));
+    }
+
+    #[tokio::test]
+    async fn privacy_records_clear_keeps_derived_blocked_taint() {
+        let (_cache, _config, app) = test_app().await;
+        insert_session(&app, "derived-clear", vec![]).await;
+        let session = app
+            .gcx
+            .chat_sessions
+            .read()
+            .await
+            .get("derived-clear")
+            .cloned()
+            .unwrap();
+        for (path, zone) in [
+            ("/derived-blocked", "blocked"),
+            ("/derived-composite", "effective:blocked+secrets"),
+        ] {
+            session
+                .lock()
+                .await
+                .derived_privacy_zones
+                .write()
+                .unwrap()
+                .insert(
+                    std::path::PathBuf::from(path),
+                    crate::privacy::records::DerivedZone {
+                        zone: zone.into(),
+                        origin: None,
+                    },
+                );
+        }
+        let router = crate::http::routers::make_refact_http_server(app);
+        let (status, _) = json_request(router, post_json("/v1/privacy/records/clear", json!({"chat_id": "derived-clear", "paths": ["/derived-blocked", "/derived-composite"]}))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            session
+                .lock()
+                .await
+                .derived_privacy_zones
+                .read()
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn privacy_records_clear_removes_nested_records_persists_and_keeps_blocked() {
+        let (_cache, config, app) = test_app().await;
+        *app.gcx.documents_state.workspace_folders.lock().unwrap() =
+            vec![config.path().to_path_buf()];
+        let stale = "/home/user/.ssh/config";
+        let payload = vec![message_with(
+            "payload",
+            vec![
+                guarded(stale, "secrets"),
+                guarded("/blocked.key", "blocked"),
+            ],
+        )];
+        let report =
+            refact_core::active_context::make_reconstruction_report(payload, Default::default())
+                .unwrap();
+        let mut summary_report = report.clone();
+        crate::privacy::records::merge_records(
+            &mut summary_report,
+            vec![guarded(stale, "secrets"), guarded("/kept.rs", "secrets")],
+        );
+        insert_session(
+            &app,
+            "chat-clear",
+            vec![
+                message_with("raw", vec![guarded(stale, "secrets")]),
+                summary_report,
+                message_with("after", vec![guarded(stale, "secrets")]),
+            ],
+        )
+        .await;
+        {
+            let sessions = app.gcx.chat_sessions.read().await;
+            let session = sessions.get("chat-clear").unwrap().lock().await;
+            session.derived_privacy_zones.write().unwrap().insert(
+                std::path::PathBuf::from(stale),
+                crate::privacy::records::DerivedZone {
+                    zone: "secrets".to_string(),
+                    origin: None,
+                },
+            );
+        }
+        let router = crate::http::routers::make_refact_http_server(app.clone());
+
+        let (status, cleared) = json_request(
+            router.clone(),
+            post_json(
+                "/v1/privacy/records/clear",
+                json!({"chat_id": "chat-clear", "paths": [stale, "/blocked.key"]}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(cleared, json!({"cleared": 4, "remaining": 2}));
+
+        let (status, inspected) = json_request(
+            router,
+            post_json(
+                "/v1/privacy/inspect",
+                json!({
+                    "chat_id": "chat-clear",
+                    "destination": {"id": "x", "kind": "provider", "display_name": "x"},
+                    "include_messages": false
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(!inspected["records"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|record| record["path"] == stale));
+
+        let has_stale = |messages: &[ChatMessage]| {
+            let active = refact_core::active_context::active_context(messages).unwrap();
+            refact_privacy::records_from_messages(&active.messages)
+                .unwrap()
+                .into_iter()
+                .chain(refact_privacy::records_from_messages(messages).unwrap())
+                .map(|(_, record)| record)
+                .collect::<Vec<_>>()
+        };
+        let session = app
+            .gcx
+            .chat_sessions
+            .read()
+            .await
+            .get("chat-clear")
+            .cloned()
+            .unwrap();
+        let live = has_stale(&session.lock().await.messages);
+        assert!(!live.iter().any(|record| record.path == stale));
+        assert!(live.contains(&guarded("/blocked.key", "blocked")));
+        assert!(live.contains(&guarded("/kept.rs", "secrets")));
+        assert!(session
+            .lock()
+            .await
+            .derived_privacy_zones
+            .read()
+            .unwrap()
+            .is_empty());
+
+        let loaded =
+            crate::chat::trajectories::load_trajectory_for_chat(app.gcx.clone(), "chat-clear")
+                .await
+                .unwrap();
+        let persisted = has_stale(&loaded.messages);
+        assert!(!persisted.iter().any(|record| record.path == stale));
+        assert!(persisted.contains(&guarded("/blocked.key", "blocked")));
+    }
+
+    #[tokio::test]
+    async fn privacy_records_clear_current_blocked_and_busy_sessions() {
+        let (_cache, config, app) = test_app().await;
+        let blocked = config
+            .path()
+            .join("now-blocked.key")
+            .to_string_lossy()
+            .into_owned();
+        let parsed = PrivacyPolicy {
+            blocked: vec![blocked.clone()],
+            ..Default::default()
+        };
+        crate::privacy::save_privacy_policy(app.gcx.clone(), parsed)
+            .await
+            .unwrap();
+        insert_session(
+            &app,
+            "busy-clear",
+            vec![message_with(
+                "m",
+                vec![
+                    guarded(&blocked, "secrets"),
+                    guarded("/composite", "effective:blocked+secrets"),
+                    guarded("/ordinary", "old-zone"),
+                ],
+            )],
+        )
+        .await;
+        let session = app
+            .gcx
+            .chat_sessions
+            .read()
+            .await
+            .get("busy-clear")
+            .unwrap()
+            .clone();
+        let router = crate::http::routers::make_refact_http_server(app.clone());
+        let request = || {
+            post_json(
+                "/v1/privacy/records/clear",
+                json!({
+                    "chat_id": "busy-clear", "paths": [&blocked, "/composite", "/ordinary"]
+                }),
+            )
+        };
+        for state in [
+            crate::chat::types::SessionState::Generating,
+            crate::chat::types::SessionState::ExecutingTools,
+        ] {
+            session.lock().await.runtime.state = state;
+            let response = router.clone().oneshot(request()).await.unwrap();
+            assert_eq!(response.status(), StatusCode::CONFLICT);
+        }
+        {
+            let mut session = session.lock().await;
+            session.runtime.state = crate::chat::types::SessionState::Idle;
+            session
+                .claim_runner(
+                    "owner".into(),
+                    Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                )
+                .unwrap();
+        }
+        assert_eq!(
+            router.clone().oneshot(request()).await.unwrap().status(),
+            StatusCode::CONFLICT
+        );
+        session.lock().await.release_runner("owner");
+        let (status, response) = json_request(router, request()).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(response["cleared"], 1);
+        assert_eq!(response["remaining"], 2);
+        let records =
+            refact_privacy::records_from_messages(&session.lock().await.messages).unwrap();
+        assert!(records.iter().any(|(_, record)| record.path == blocked));
+        assert!(records
+            .iter()
+            .any(|(_, record)| record.zone == "effective:blocked+secrets"));
+    }
+
+    #[tokio::test]
+    async fn privacy_records_clear_reports_failed_persistence_and_keeps_dirty_memory() {
+        let (_cache, config, app) = test_app().await;
+        *app.gcx.documents_state.workspace_folders.lock().unwrap() =
+            vec![config.path().to_path_buf()];
+        crate::privacy::load_privacy_if_needed(app.gcx.clone()).await;
+        std::fs::write(config.path().join(".refact"), "not a directory").unwrap();
+        insert_session(
+            &app,
+            "clear-save-failure",
+            vec![message_with("m", vec![guarded("/ordinary", "old-zone")])],
+        )
+        .await;
+        let router = crate::http::routers::make_refact_http_server(app.clone());
+        let (status, response) = json_request(
+            router,
+            post_json(
+                "/v1/privacy/records/clear",
+                json!({"chat_id": "clear-save-failure", "paths": ["/ordinary"]}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            response,
+            json!({"cleared": 1, "remaining": 0, "persisted": false})
+        );
+        let sessions = app.gcx.chat_sessions.read().await;
+        let session = sessions.get("clear-save-failure").unwrap().lock().await;
+        assert!(session.trajectory_dirty);
+        assert!(refact_privacy::records_from_messages(&session.messages)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn privacy_records_clear_rejects_empty_paths_and_unknown_chat() {
+        let (_cache, _config, app) = test_app().await;
+        insert_session(&app, "chat-known", Vec::new()).await;
+        let router = crate::http::routers::make_refact_http_server(app);
+        for (body, expected) in [
+            (
+                json!({"chat_id": "chat-known", "paths": []}),
+                StatusCode::BAD_REQUEST,
+            ),
+            (json!({"chat_id": "chat-known"}), StatusCode::BAD_REQUEST),
+            (
+                json!({"chat_id": "missing", "paths": ["/a"]}),
+                StatusCode::NOT_FOUND,
+            ),
+        ] {
+            let response = router
+                .clone()
+                .oneshot(post_json("/v1/privacy/records/clear", body))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn privacy_records_clear_requires_operator_when_token_configured() {
+        let mut gcx = crate::global_context::tests::make_test_gcx().await;
+        Arc::get_mut(&mut gcx).unwrap().cmdline.daemon_auth_token = Some("clear-secret".into());
+        let app = AppState::from_gcx(gcx).await;
+        for token in [None, Some("Bearer wrong"), Some("Bearer clear-secret")] {
+            let mut headers = axum::http::HeaderMap::new();
+            if let Some(token) = token {
+                headers.insert("authorization", token.parse().unwrap());
+            }
+            let error = handle_v1_privacy_records_clear(
+                State(app.clone()),
+                headers,
+                hyper::body::Bytes::from_static(br#"{"chat_id":"missing","paths":["/a"]}"#),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(
+                error.status_code,
+                if token == Some("Bearer clear-secret") {
+                    StatusCode::NOT_FOUND
+                } else {
+                    StatusCode::FORBIDDEN
+                }
+            );
+        }
+    }
+
     #[tokio::test]
     async fn privacy_inspect_keeps_large_allowed_histories_out_of_the_response() {
         let (_cache, config, app) = test_app().await;
@@ -817,5 +1400,76 @@ mod tests {
         assert!(allowed.get("would_send").is_none());
         assert_eq!(allowed["blocked"], json!([]));
         assert!(serde_json::to_vec(&allowed).unwrap().len() < 4096);
+    }
+
+    #[tokio::test]
+    async fn privacy_inspect_agrees_with_enforcement_for_removed_zones() {
+        let (_cache, config, app) = test_app().await;
+        let secret = config.path().join("secret.env");
+        let normal = config.path().join("normal.rs");
+        tokio::fs::write(&secret, "secret").await.unwrap();
+        tokio::fs::write(&normal, "normal").await.unwrap();
+        let parsed: PrivacyPolicy =
+            serde_json::from_value(policy(&secret.to_string_lossy())).unwrap();
+        crate::privacy::save_privacy_policy(app.gcx.clone(), parsed)
+            .await
+            .unwrap();
+        let stale_record = |path: &std::path::Path, zone: &str| FileRecord {
+            path: path.to_string_lossy().into_owned(),
+            zone: zone.to_string(),
+            attribution: refact_privacy::Attribution::Observed,
+        };
+        let records = vec![
+            stale_record(&normal, "removed-zone"),
+            stale_record(&secret, "another-removed-zone"),
+        ];
+        insert_session(
+            &app,
+            "chat-removed",
+            vec![message_with("m", records.clone())],
+        )
+        .await;
+        let router = crate::http::routers::make_refact_http_server(app.clone());
+        let destination = |id: &str| json!({"id": id, "kind": "provider", "display_name": id});
+
+        for (id, expected_sendable) in [("untrusted", false), ("trusted", true)] {
+            let (status, inspected) = json_request(
+                router.clone(),
+                post_json(
+                    "/v1/privacy/inspect",
+                    json!({
+                        "chat_id": "chat-removed",
+                        "destination": destination(id),
+                        "include_messages": false
+                    }),
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(inspected["sendable"], expected_sendable, "{id}");
+            let blocked_paths = inspected["blocked"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|entry| entry["record"]["path"].as_str().unwrap().to_string())
+                .collect::<std::collections::HashSet<_>>();
+            let expected_blocked = if expected_sendable {
+                std::collections::HashSet::new()
+            } else {
+                std::collections::HashSet::from([secret.to_string_lossy().into_owned()])
+            };
+            assert_eq!(blocked_paths, expected_blocked, "{id}");
+
+            let destination: refact_privacy::Destination =
+                serde_json::from_value(destination(id)).unwrap();
+            let enforced = crate::privacy::destinations::clear_current(
+                &app.gcx,
+                AuditedMessages {
+                    records: Ok(records.iter().cloned().enumerate().collect()),
+                },
+                &destination,
+            );
+            assert_eq!(enforced.is_ok(), expected_sendable, "{id}");
+        }
     }
 }

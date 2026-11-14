@@ -252,6 +252,18 @@ impl Tool for ToolMv {
             )
         })?;
 
+        crate::tools::file_edit::auxiliary::refuse_protected_path_repair(
+            &gcx,
+            execution_scope.as_ref(),
+            &src_str,
+            &src_true_path,
+        )?;
+        crate::tools::file_edit::auxiliary::refuse_protected_path_repair(
+            &gcx,
+            execution_scope.as_ref(),
+            &dst_str,
+            &dst_true_path,
+        )?;
         check_scope_guard(&ccx, &src_true_path).await?;
         check_scope_guard(&ccx, &dst_true_path).await?;
         if let Some(parent) = dst_true_path.parent() {

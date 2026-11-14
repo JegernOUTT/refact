@@ -1,3 +1,4 @@
+import type { Dispatch } from "@reduxjs/toolkit";
 import { createApi, fetchBaseQuery } from "@reduxjs/toolkit/query/react";
 import { RootState } from "../../app/store";
 import { buildApiUrlFromState } from "./apiUrl";
@@ -92,6 +93,17 @@ export type PrivacyInspectResponse = {
   records: PrivacyFileRecord[];
   blocked: PrivacyBlockedRecord[];
   refusal: string | null;
+};
+
+export type PrivacyClearRecordsRequest = {
+  chat_id: string;
+  paths: string[];
+};
+
+export type PrivacyClearRecordsResponse = {
+  cleared: number;
+  remaining: number;
+  persisted?: boolean;
 };
 
 export type PrivacyRecordMetadata = {
@@ -248,12 +260,43 @@ export const privacyApi = createApi({
         return { data: response.data as PrivacyInspectResponse };
       },
     }),
+    clearPrivacyRecords: builder.mutation<
+      PrivacyClearRecordsResponse,
+      PrivacyClearRecordsRequest
+    >({
+      invalidatesTags: ["PRIVACY_POLICY"],
+      async queryFn(request, api, extraOptions, baseQuery) {
+        const state = api.getState() as RootState;
+        const url = buildApiUrlFromState(state, "/v1/privacy/records/clear");
+        const response = await baseQuery({
+          url,
+          method: "POST",
+          body: { chat_id: request.chat_id, paths: request.paths },
+          ...extraOptions,
+        });
+        if (response.error) return { error: response.error };
+        return { data: response.data as PrivacyClearRecordsResponse };
+      },
+    }),
   }),
 });
+
+export async function invalidatePrivacyPolicyAfter(
+  queryFulfilled: Promise<unknown>,
+  dispatch: Dispatch,
+): Promise<void> {
+  try {
+    await queryFulfilled;
+  } catch {
+    return;
+  }
+  dispatch(privacyApi.util.invalidateTags(["PRIVACY_POLICY"]));
+}
 
 export const {
   useGetPrivacyPolicyQuery,
   useUpdatePrivacyPolicyMutation,
   useGetPrivacyStatusQuery,
   useInspectPrivacyQuery,
+  useClearPrivacyRecordsMutation,
 } = privacyApi;

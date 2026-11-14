@@ -4231,7 +4231,7 @@ mod tests {
             Err(error) => error,
         };
 
-        assert!(error.starts_with("Output withheld by user privacy policy"));
+        assert!(error.starts_with("Request not sent: user privacy policy"));
     }
 
     #[tokio::test]
@@ -4278,7 +4278,7 @@ mod tests {
             Ok(_) => panic!("primary provider should be refused"),
             Err(error) => error,
         };
-        assert!(first_error.starts_with("Output withheld by user privacy policy"));
+        assert!(first_error.starts_with("Request not sent: user privacy policy"));
         assert_eq!(second.unwrap().body["model"], allowed.name);
     }
 

@@ -71,6 +71,7 @@ pub mod tool_goal_pursuit_controls;
 pub(crate) mod tool_handoff_to_mode;
 mod tool_image_region;
 mod tool_knowledge;
+mod tool_manage_mcp;
 mod tool_mark_elements;
 mod tool_mcp_search;
 pub mod tool_metrics;

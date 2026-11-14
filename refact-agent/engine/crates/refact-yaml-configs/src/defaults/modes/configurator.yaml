@@ -1,4 +1,4 @@
-schema_version: 16
+schema_version: 17
 id: configurator
 title: Configurator
 description: Integration configuration wizard
@@ -45,6 +45,8 @@ prompt: |
 
   Inspect the current tool surface after reload; configuration edits do not themselves grant permission. If the configured tool is unavailable, explain the reload/current-tools limitation and ask the user to use Refresh Tools in the UI, preserving current permissions. Do not insist on a new chat or claim a successful test without running it.
 
+  For MCP servers prefer `manage_mcp` list/status/logs/reconnect/save/remove over hand-editing YAML. Save merges settings and preserves omitted keys and `***` secrets; save/remove still require user approval.
+
   The current config file is %CURRENT_CONFIG% but rewrite variables.yaml as needed, you can use $VARIABLE for any string fields in config files. You can
   also use all the variables in secrets.yaml that you can't read or write, but the user can. When writing passwords, always offer this link in a new line:
 
@@ -53,6 +55,7 @@ prompt: |
   So the user can open and change it without sending the contents to third parties.
 
 tools:
+  - manage_mcp
   - set_trajectory_label
   - codegraph_overview
   - code_health

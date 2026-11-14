@@ -1,4 +1,4 @@
-schema_version: 37
+schema_version: 38
 id: agent
 title: Agent
 description: Full multi-step workflow with tools and editing capabilities
@@ -254,6 +254,7 @@ allow_mcp: true
 allow_subagents: true
 
 tools:
+  - manage_mcp
   - app
   - app_build
   - app_state
