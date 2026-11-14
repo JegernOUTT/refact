@@ -855,9 +855,8 @@ for line in sys.stdin:
             .verify(&first, &receipt.expected_post_version)
             .await
             .unwrap());
-        let path = temp
-            .path()
-            .join(".refact/integrations.d/mcp_fixture.yaml")
+        let path = files::checked_path(&project, "integrations.d/mcp_fixture.yaml")
+            .unwrap()
             .to_string_lossy()
             .into_owned();
         let native = gcx

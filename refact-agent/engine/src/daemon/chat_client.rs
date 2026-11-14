@@ -330,10 +330,11 @@ mod tests {
         server.abort();
     }
 
-    #[tokio::test(start_paused = true)]
+    #[tokio::test]
     async fn subscribe_does_not_timeout_sse_body_stream() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
+        let (body_tx, body_rx) = tokio::sync::oneshot::channel();
         let server = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
             let mut request = Vec::new();
@@ -347,7 +348,7 @@ mod tests {
                 )
                 .await
                 .unwrap();
-            tokio::time::sleep(CHAT_REQUEST_TIMEOUT + Duration::from_secs(5)).await;
+            body_rx.await.unwrap();
             socket
                 .write_all(b"data: {\"type\":\"snapshot\",\"messages\":[]}\n\n")
                 .await
@@ -358,12 +359,21 @@ mod tests {
             ProxyChatClient::new(format!("http://127.0.0.1:{port}"), "p".to_string(), None)
                 .unwrap();
         let mut stream = client.subscribe("chat").await.unwrap();
+        let next = stream.next();
+        tokio::pin!(next);
+        tokio::time::pause();
+        assert!(futures::poll!(next.as_mut()).is_pending());
         tokio::time::advance(CHAT_REQUEST_TIMEOUT + Duration::from_secs(5)).await;
-        let event = stream.next().await.unwrap().unwrap();
+        assert!(futures::poll!(next.as_mut()).is_pending());
+        body_tx.send(()).unwrap();
+        tokio::time::resume();
+        let event = tokio::time::timeout(Duration::from_secs(5), next).await;
+        server.abort();
+        let _ = server.await;
+        let event = event.unwrap().unwrap().unwrap();
         assert_eq!(
             event.get("type").and_then(serde_json::Value::as_str),
             Some("snapshot")
         );
-        server.abort();
     }
 }
