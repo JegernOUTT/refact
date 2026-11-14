@@ -1,109 +1,34 @@
 name: Refact Agent Engine CI Release (Rust)
 
+# Legacy manual entry point. There is no engine-only stable path: this delegates to the gated
+# release.yml, which publishes engine/v<ver> runtime assets before the IDE plugins.
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: Version without a leading v; tag pushes derive it from engine/v<ver>.
-        required: false
+        description: Stable version X.Y.Z
         type: string
-  push:
-    tags:
-      - engine/*
-
-# Release URL contract for installers, self-update, and IDE plugin downloaders:
-# https://github.com/JegernOUTT/refact/releases/download/engine/v<ver>/refact-<ver>-<target>.<ext>
-# Windows uses .zip, Unix uses .tar.gz, each archive contains only refact at its root,
-# and every archive is uploaded with a matching .sha256 sidecar. Latest uses GitHub
-# /releases/latest; this workflow marks engine/v<ver> releases as latest.
-#
-# Binaries are built by the reusable agent_engine_build.yml workflow (same artifacts
-# CI tests and plugin releases ship), so release assets never diverge from CI builds.
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
-  cancel-in-progress: true
+        required: true
+      source_sha:
+        description: Full commit SHA to release
+        type: string
+        required: true
 
 permissions:
-  actions: read
-  contents: write
+  contents: read
 
 jobs:
-  engine:
-    uses: ./.github/workflows/agent_engine_build.yml
-
   release:
-    name: Engine release
-    needs: [engine]
-    runs-on: ubuntu-latest
     permissions:
-      actions: read
       contents: write
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Download engine artifacts
-        uses: actions/download-artifact@v4
-        with:
-          pattern: dist-*
-          path: engine-dist
-
-      - name: Package engine release assets
-        id: engine-assets
-        run: |
-          version="${{ inputs.version }}"
-          if [[ -z "$version" ]]; then
-            version="${GITHUB_REF_NAME#engine/v}"
-          fi
-          bash tools/dev/package_engine_release_assets.sh \
-            --version "$version" \
-            --input-dir engine-dist \
-            --output-dir engine-release-assets
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-
-      - name: Resolve release notes
-        id: release_notes
-        run: |
-          notes_path="docs/release-notes/v${{ steps.engine-assets.outputs.version }}.md"
-          if [[ -f "$notes_path" ]]; then
-            echo "found=true" >> "$GITHUB_OUTPUT"
-            echo "body_path=$notes_path" >> "$GITHUB_OUTPUT"
-          else
-            echo "found=false" >> "$GITHUB_OUTPUT"
-            echo "Release notes file $notes_path not found; using generated notes."
-          fi
-
-      - name: Publish engine release
-        if: ${{ steps.release_notes.outputs.found == 'true' }}
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: engine/v${{ steps.engine-assets.outputs.version }}
-          name: Engine v${{ steps.engine-assets.outputs.version }}
-          body_path: ${{ steps.release_notes.outputs.body_path }}
-          prerelease: false
-          make_latest: true
-          overwrite_files: true
-          fail_on_unmatched_files: true
-          files: |
-            engine-release-assets/*
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-
-      - name: Publish engine release with generated notes
-        if: ${{ steps.release_notes.outputs.found != 'true' }}
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: engine/v${{ steps.engine-assets.outputs.version }}
-          name: Engine v${{ steps.engine-assets.outputs.version }}
-          generate_release_notes: true
-          prerelease: false
-          make_latest: true
-          overwrite_files: true
-          fail_on_unmatched_files: true
-          files: |
-            engine-release-assets/*
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
+      actions: read
+    uses: ./.github/workflows/release.yml
+    with:
+      version: ${{ inputs.version }}
+      source_sha: ${{ inputs.source_sha }}
+    secrets:
+      VSCE_PAT: ${{ secrets.VSCE_PAT }}
+      PUBLISH_TOKEN: ${{ secrets.PUBLISH_TOKEN }}
+      CERTIFICATE_CHAIN: ${{ secrets.CERTIFICATE_CHAIN }}
+      PRIVATE_KEY: ${{ secrets.PRIVATE_KEY }}
+      PRIVATE_KEY_PASSWORD: ${{ secrets.PRIVATE_KEY_PASSWORD }}

@@ -1307,10 +1307,10 @@ mod tests {
     use std::time::Instant;
 
     use super::*;
-    use refact_sandbox::Enforcement;
     #[cfg(unix)]
     use crate::types::ExecEnvPolicy;
     use crate::types::{ExecProcessFilter, ExecSandboxMode, ExecSandboxSpec, ExecStatusKind};
+    use refact_sandbox::Enforcement;
 
     struct UnusableSandboxProvider;
 
@@ -1459,40 +1459,110 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
-    fn processes_with_env_marker(marker: &str) -> Vec<u32> {
-        let expected = format!("{marker}=1").into_bytes();
-        let mut process_ids = Vec::new();
-        for entry in std::fs::read_dir("/proc").unwrap().flatten() {
-            let Some(process_id) = entry
-                .file_name()
-                .to_str()
-                .and_then(|name| name.parse::<u32>().ok())
-            else {
-                continue;
-            };
-            let Ok(environ) = std::fs::read(entry.path().join("environ")) else {
-                continue;
-            };
-            if environ
-                .split(|byte| *byte == 0)
-                .any(|variable| variable == expected)
-            {
-                process_ids.push(process_id);
-            }
-        }
-        process_ids
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct OwnedProcessStat {
+        pid: u32,
+        state: char,
+        parent: u32,
+        group: u32,
+        session: u32,
+        start_time: u64,
     }
 
     #[cfg(target_os = "linux")]
-    async fn wait_for_marked_processes(marker: &str, minimum: usize) -> Vec<u32> {
-        for _ in 0..100 {
-            let process_ids = processes_with_env_marker(marker);
-            if process_ids.len() >= minimum {
-                return process_ids;
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
+    impl OwnedProcessStat {
+        fn parse(stat: &str) -> Option<Self> {
+            // comm may contain spaces and parentheses, including ") ". The final
+            // closing parenthesis separates it from field 3 (state).
+            let (pid, _) = stat.split_once(" (")?;
+            let (_, fields) = stat.rsplit_once(") ")?;
+            let fields = fields.split_whitespace().collect::<Vec<_>>();
+            Some(Self {
+                pid: pid.parse().ok()?,
+                state: fields.first()?.parse().ok()?,
+                parent: fields.get(1)?.parse().ok()?,
+                group: fields.get(2)?.parse().ok()?,
+                session: fields.get(3)?.parse().ok()?,
+                start_time: fields.get(19)?.parse().ok()?,
+            })
         }
-        processes_with_env_marker(marker)
+
+        fn read(pid: u32) -> std::io::Result<Option<Self>> {
+            match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+                Ok(stat) => {
+                    let parsed = Self::parse(&stat).filter(|stat| stat.pid == pid);
+                    parsed.map(Some).ok_or_else(|| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "invalid owned PID stat",
+                        )
+                    })
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Err(error) => Err(error),
+            }
+        }
+
+        fn is_same_live_process(&self, current: Option<&Self>) -> bool {
+            current.is_some_and(|current| {
+                current.pid == self.pid
+                    && current.start_time == self.start_time
+                    && !matches!(current.state, 'Z' | 'X')
+            })
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn owned_process_stat_parses_parenthesized_names() {
+        let stat = OwnedProcessStat::parse(
+            "42 (sleep (odd) ) name) S 7 42 42 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1234 0",
+        )
+        .unwrap();
+        assert_eq!(
+            stat,
+            OwnedProcessStat {
+                pid: 42,
+                state: 'S',
+                parent: 7,
+                group: 42,
+                session: 42,
+                start_time: 1234,
+            }
+        );
+        assert!(OwnedProcessStat::parse("42 (truncated) S 7").is_none());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn owned_process_identity_rejects_missing_zombie_and_reused_pid() {
+        let original = OwnedProcessStat {
+            pid: 42,
+            state: 'S',
+            parent: 7,
+            group: 42,
+            session: 42,
+            start_time: 1234,
+        };
+        assert!(original.is_same_live_process(Some(&original)));
+        assert!(!original.is_same_live_process(None));
+        for state in ['Z', 'X'] {
+            let current = OwnedProcessStat {
+                state,
+                ..original.clone()
+            };
+            assert!(!original.is_same_live_process(Some(&current)));
+        }
+        let reused = OwnedProcessStat {
+            start_time: 1235,
+            ..original.clone()
+        };
+        assert!(!original.is_same_live_process(Some(&reused)));
+        let other_pid = OwnedProcessStat {
+            pid: 43,
+            ..original.clone()
+        };
+        assert!(!original.is_same_live_process(Some(&other_pid)));
     }
 
     fn workspace_write_sandbox(cwd: &std::path::Path) -> ExecSandboxSpec {
@@ -1699,36 +1769,147 @@ mod tests {
     #[tokio::test]
     async fn tty_kill_terminates_background_descendants() {
         let registry = ExecRegistry::new();
-        let marker = format!("REFACT_TEST_MARKER_{}", uuid::Uuid::new_v4().simple());
-        let result = registry
-            .spawn(
-                ExecSpawnRequest::background("bash -c 'sleep 300 & sleep 300 & wait'")
-                    .with_tty(true)
-                    .with_env(&marker, "1"),
-            )
+        let temp = tempfile::tempdir().unwrap();
+        let pid_file = temp.path().join("owned-pids");
+        // A regular file in a private directory is a handshake, not a global
+        // process search. Exact env and noninteractive bash avoid user startup files.
+        // Finite sleeps also bound failure cleanup without signalling arbitrary PIDs.
+        let request = ExecSpawnRequest::background("owned PTY descendants")
+            .with_argv(vec![
+                "/bin/bash".into(), "--noprofile".into(), "--norc".into(), "-c".into(),
+                "/bin/sleep 30 & first=$!; /bin/sleep 30 & second=$!; printf '%s %s %s\\n' \"$$\" \"$first\" \"$second\" > \"$1\"; wait".into(),
+                "owned-pty-test".into(), pid_file.to_str().unwrap().into(),
+            ])
+            .with_tty(true)
+            .with_env_policy(ExecEnvPolicy::Exact);
+        let owned = Arc::new(Mutex::new(Vec::<OwnedProcessStat>::new()));
+        let task_registry = registry.clone();
+        let task_owned = owned.clone();
+        // Assertions run in a child task so panic/error/timeout cannot skip the
+        // outer task's registry cleanup. No cleanup action precedes the kill oracle.
+        let mut assertions = tokio::spawn(async move {
+            let result = task_registry.spawn(request).await.unwrap();
+            let process_id = result.snapshot.meta.process_id;
+            let pids = tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let contents = std::fs::read_to_string(&pid_file).unwrap_or_default();
+                    if contents.ends_with('\n') {
+                        let pids = contents
+                            .split_whitespace()
+                            .map(|pid| pid.parse::<u32>().unwrap())
+                            .collect::<Vec<_>>();
+                        assert_eq!(pids.len(), 3, "incomplete owned PID handshake");
+                        break pids;
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
             .await
-            .unwrap();
-        let process_id = result.snapshot.meta.process_id;
-        let spawned_processes = wait_for_marked_processes(&marker, 3).await;
-        let kill_result = registry.kill(&process_id).await;
-        assert!(
-            spawned_processes.len() >= 3,
-            "expected PTY leader and background descendants, found {spawned_processes:?}"
-        );
-        let snapshot = kill_result.unwrap();
-        assert_eq!(snapshot.status, ExecStatus::Killed);
-
-        for _ in 0..40 {
-            if processes_with_env_marker(&marker).is_empty() {
-                return;
+            .expect("owned PID handshake timed out");
+            let shell = OwnedProcessStat::read(pids[0]).unwrap().expect("live bash");
+            assert_eq!(shell.group, shell.session, "PTY group/session leader");
+            let leader = OwnedProcessStat::read(shell.group)
+                .unwrap()
+                .expect("live PTY leader");
+            assert_eq!(leader.pid, leader.group);
+            assert_eq!(leader.pid, leader.session);
+            if leader.pid != shell.pid {
+                assert_eq!(shell.parent, leader.pid, "bash must belong to PTY leader");
             }
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            let mut captured = vec![shell.clone()];
+            for &pid in &pids[1..] {
+                let child = OwnedProcessStat::read(pid)
+                    .unwrap()
+                    .expect("live background child");
+                assert_eq!(child.parent, shell.pid, "background child parent");
+                assert_eq!(child.group, shell.group, "background child group");
+                assert_eq!(child.session, shell.session, "background child session");
+                assert!(!captured.iter().any(|known| known.pid == child.pid));
+                captured.push(child);
+            }
+            if leader.pid != shell.pid {
+                captured.push(leader);
+            }
+            assert!(captured.len() >= 3, "must capture bash and both children");
+            for identity in &captured {
+                assert!(
+                    identity.is_same_live_process(
+                        OwnedProcessStat::read(identity.pid).unwrap().as_ref()
+                    ),
+                    "owned process must actually be live before kill: {identity:?}"
+                );
+            }
+            *task_owned.lock().await = captured.clone();
+            let snapshot =
+                tokio::time::timeout(Duration::from_secs(5), task_registry.kill(&process_id))
+                    .await
+                    .expect("registry kill timed out")
+                    .unwrap();
+            assert_eq!(snapshot.status, ExecStatus::Killed);
+
+            for _ in 0..40 {
+                let survivors = captured
+                    .iter()
+                    .filter(|identity| {
+                        identity.is_same_live_process(
+                            OwnedProcessStat::read(identity.pid).unwrap().as_ref(),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                if survivors.is_empty() {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            let survivors = captured
+                .iter()
+                .filter(|identity| {
+                    identity.is_same_live_process(
+                        OwnedProcessStat::read(identity.pid).unwrap().as_ref(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            assert!(
+                survivors.is_empty(),
+                "PTY descendants survived registry kill: {survivors:?}"
+            );
+        });
+        let outcome = tokio::time::timeout(Duration::from_secs(15), &mut assertions).await;
+        if outcome.is_err() {
+            assertions.abort();
+            let _ = assertions.await;
         }
-        let survivors = processes_with_env_marker(&marker);
-        assert!(
-            survivors.is_empty(),
-            "PTY descendants survived registry kill: {survivors:?}"
-        );
+        // Retry only this private registry's cleanup on failure, never global PIDs.
+        let cleanup = tokio::time::timeout(
+            Duration::from_secs(5),
+            registry.cleanup_shutdown(Duration::from_secs(4)),
+        )
+        .await;
+        let joined =
+            tokio::time::timeout(Duration::from_secs(5), registry.join_monitors_for_test()).await;
+        // Even if kill regresses, the owned finite-lived children cannot leak
+        // indefinitely. This does not turn a failed kill oracle into success.
+        let captured = owned.lock().await;
+        let cleanup_gone = tokio::time::timeout(Duration::from_secs(35), async {
+            loop {
+                let live = captured.iter().any(|identity| {
+                    identity.is_same_live_process(
+                        OwnedProcessStat::read(identity.pid).unwrap().as_ref(),
+                    )
+                });
+                if !live {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await;
+        assert!(cleanup.is_ok(), "owned registry cleanup timed out");
+        assert!(joined.is_ok(), "owned monitor cleanup timed out");
+        assert!(cleanup_gone.is_ok(), "owned subprocess cleanup timed out");
+        outcome
+            .expect("PTY assertions timed out")
+            .expect("PTY assertions failed");
     }
 
     #[cfg(unix)]

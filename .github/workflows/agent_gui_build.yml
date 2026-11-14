@@ -1,65 +1,89 @@
 name: Refact Agent GUI CI build (Node.js)
 
 on:
-  push:
-    tags:
-      - "*"
   workflow_call:
+    inputs:
+      source_sha:
+        type: string
+        required: true
+      node_version:
+        type: string
+        required: true
+      build_version:
+        type: string
+        required: true
+
+permissions:
+  contents: read
 
 concurrency:
-  group: agent-gui-build-${{ github.run_id }}
+  group: agent-gui-build-${{ github.run_id }}-${{ inputs.source_sha }}
   cancel-in-progress: false
 
 defaults:
   run:
+    shell: bash
     working-directory: refact-agent/gui
 
 env:
   NODE_OPTIONS: --max-old-space-size=8192
+  REFACT_BUILD_VERSION: ${{ inputs.build_version }}
 
 jobs:
   build:
     runs-on: ubuntu-latest
-
-    strategy:
-      matrix:
-        node-version: [lts/*, latest]
-
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_sha }}
+          persist-credentials: false
 
-      - name: Use Node.js ${{ matrix.node-version }}
+      - name: Assert source SHA and inputs
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          NODE_VERSION: ${{ inputs.node_version }}
+        run: |
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ && "$NODE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          [[ "$REFACT_BUILD_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+
+      - name: Use Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: ${{ matrix.node-version }}
+          node-version: ${{ inputs.node_version }}
           cache: "npm"
           cache-dependency-path: refact-agent/gui/package-lock.json
 
-      # Disable Husky install during npm install --prefer-offline
-      - name: Install dependencies
+      - name: Install native canvas build dependencies
+        working-directory: .
         run: |
-          sudo apt update
-          sudo apt install -y libcairo2-dev libjpeg-dev libpango1.0-dev libgif-dev librsvg2-dev
-          npm pkg delete scripts.prepare
-          npm install --prefer-offline
+          sudo apt-get update
+          sudo apt-get install -y libcairo2-dev libjpeg-dev libpango1.0-dev libgif-dev librsvg2-dev
 
-      - run: npm run test
-      - run: npm run format:check
+      - name: Install exact locked dependencies
+        env:
+          HUSKY: "0"
+        run: npm ci
+
       - run: npm run types
-      - run: npm run lint
       - run: npm run build
-      - run: npm pack
 
-      - run: |
-          name=$(echo -n "${{ matrix.node-version }}" | tr -cd '[[:alnum:]]')
-          pkg_name=$(ls refact-chat-js-*.tgz)
-          echo "ARTIFACT_NAME=$name" >> $GITHUB_ENV
-          echo "PACKAGE_NAME=$pkg_name" >> $GITHUB_ENV
+      - name: Pack
+        id: pack
+        run: |
+          set -euo pipefail
+          npm pack
+          shopt -s nullglob
+          packages=(refact-chat-js-*.tgz)
+          [[ ${#packages[@]} -eq 1 ]] || { echo "expected exactly one packed GUI tarball" >&2; exit 1; }
+          tar -xzOf "${packages[0]}" package/package.json | node -e 'JSON.parse(require("fs").readFileSync(0))'
+          echo "package=${packages[0]}" >> "$GITHUB_OUTPUT"
 
-      - name: Upload artifacts
+      # Artifact name kept as lts-<tarball> for existing consumers.
+      - name: Upload GUI package
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.ARTIFACT_NAME }}-${{ env.PACKAGE_NAME }}
-          if-no-files-found: ignore
-          path: refact-agent/gui/${{env.PACKAGE_NAME}}
+          name: lts-${{ steps.pack.outputs.package }}
+          if-no-files-found: error
+          path: refact-agent/gui/${{ steps.pack.outputs.package }}
           compression-level: 0

@@ -4950,7 +4950,31 @@ mod tests {
             notify::Event::new(notify::EventKind::Create(notify::event::CreateKind::File))
                 .add_path(new_file.clone());
         file_watcher_event(create_event, Arc::downgrade(&gcx)).await;
-        tokio::time::sleep(FILE_EVENT_DEBOUNCE_WINDOW + Duration::from_millis(80)).await;
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let worker_finished = gcx
+                    .documents_state
+                    .file_event_debounce_task
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .map(|task| task.is_finished())
+                    .unwrap_or(true);
+                if worker_finished
+                    && gcx
+                        .documents_state
+                        .file_event_debounce
+                        .lock()
+                        .unwrap()
+                        .is_empty()
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("owned file-event debounce worker did not finish flushing");
 
         let workspace_files = gcx.documents_state.workspace_files.lock().unwrap().clone();
         assert!(!workspace_files.contains(&normalized(&old_file)));

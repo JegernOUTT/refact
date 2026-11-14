@@ -1,0 +1,1399 @@
+{
+  "schema": 1,
+  "required_jobs": [
+    "engine",
+    "browser",
+    "windows-browser",
+    "performance",
+    "gui",
+    "vscode",
+    "jetbrains",
+    "tooling",
+    "build-freshness"
+  ],
+  "entries": [
+    {
+      "id": "gui-types",
+      "lane": "gui",
+      "cwd": "refact-agent/gui",
+      "command": [
+        "npm",
+        "run",
+        "types"
+      ],
+      "required": true,
+      "platform": "linux-x64",
+      "prerequisites": [],
+      "features": [],
+      "secrets": [],
+      "kind": "check"
+    },
+    {
+      "id": "gui-lint",
+      "lane": "gui",
+      "cwd": "refact-agent/gui",
+      "command": [
+        "npm",
+        "run",
+        "lint"
+      ],
+      "required": true,
+      "platform": "linux-x64",
+      "prerequisites": [],
+      "features": [],
+      "secrets": [],
+      "kind": "check"
+    },
+    {
+      "id": "gui-lint:css",
+      "lane": "gui",
+      "cwd": "refact-agent/gui",
+      "command": [
+        "npm",
+        "run",
+        "lint:css"
+      ],
+      "required": true,
+      "platform": "linux-x64",
+      "prerequisites": [],
+      "features": [],
+      "secrets": [],
+      "kind": "check"
+    },
+    {
+      "id": "gui-lint:boundaries",
+      "lane": "gui",
+      "cwd": "refact-agent/gui",
+      "command": [
+        "npm",
+        "run",
+        "lint:boundaries"
+      ],
+      "required": true,
+      "platform": "linux-x64",
+      "prerequisites": [],
+      "features": [],
+      "secrets": [],
+      "kind": "check"
+    },
+    {
+      "id": "gui-format:check",
+      "lane": "gui",
+      "cwd": "refact-agent/gui",
+      "command": [
+        "npm",
+        "run",
+        "format:check"
+      ],
+      "required": true,
+      "platform": "linux-x64",
+      "prerequisites": [],
+      "features": [],
+      "secrets": [],
+      "kind": "check"
+    },
+    {
+      "id": "gui-test:unit",
+      "lane": "gui",
+      "cwd": "refact-agent/gui",
+      "command": [
+        "npm",
+        "run",
+        "test:unit",
+        "--",
+        "--reporter=verbose"
+      ],
+      "required": true,
+      "platform": "linux-x64",
+      "prerequisites": [],
+      "features": [],
+      "secrets": [],
+      "kind": "test",
+      "positive_evidence": "Tests\\s+[^\\n]*[1-9][0-9]* passed",
+      "reject_evidence": "\\b[1-9][0-9]* (?:skipped|todo)\\b"
+    },
+    {
+      "id": "gui-test:integration",
+      "lane": "gui",
+      "cwd": "refact-agent/gui",
+      "command": [
+        "npm",
+        "run",
+        "test:integration",
+        "--",
+        "--reporter=verbose",
+        "--exclude",
+        "src/__tests__/integration/chatSubscription.live.integration.test.ts"
+      ],
+      "required": true,
+      "platform": "linux-x64",
+      "prerequisites": [],
+      "features": [],
+      "secrets": [],
+      "kind": "test",
+      "positive_evidence": "Tests\\s+[^\\n]*[1-9][0-9]* passed",
+      "reject_evidence": "\\b[1-9][0-9]* (?:skipped|todo)\\b"
+    },
+    {
+      "id": "gui-test:stress",
+      "lane": "gui",
+      "cwd": "refact-agent/gui",
+      "command": [
+        "npm",
+        "run",
+        "test:stress",
+        "--",
+        "--reporter=verbose"
+      ],
+      "required": true,
+      "platform": "linux-x64",
+      "prerequisites": [],
+      "features": [],
+      "secrets": [],
+      "kind": "test",
+      "positive_evidence": "Tests\\s+[^\\n]*[1-9][0-9]* passed",
+      "reject_evidence": "\\b[1-9][0-9]* (?:skipped|todo)\\b"
+    },
+    {
+      "id": "gui-playwright",
+      "lane": "gui",
+      "cwd": "refact-agent/gui",
+      "command": [
+        "npx",
+        "--no-install",
+        "playwright",
+        "test",
+        "--reporter=list"
+      ],
+      "required": true,
+      "platform": "linux-x64",
+      "prerequisites": [
+        "npm ci exact GUI lock",
+        "Playwright Chromium"
+      ],
+      "features": [],
+      "secrets": [],
+      "kind": "test",
+      "positive_evidence": "\\b[1-9][0-9]* passed",
+      "reject_evidence": "\\b[1-9][0-9]* skipped"
+    },
+    {
+      "id": "vscode-npm-test",
+      "lane": "vscode",
+      "cwd": ".",
+      "command": [
+        "python3",
+        "tools/dev/ci_tests.py",
+        "vscode-test"
+      ],
+      "required": true,
+      "platform": "linux-x64",
+      "prerequisites": [
+        "npm ci exact plugin lock",
+        "GUI test-subject build; local file dependency",
+        "pretest compile and lint",
+        "exact package.json test script validated; pretest compile/lint then four named Node script subprocesses; witnesses certify suite execution not individual test counts"
+      ],
+      "features": [],
+      "secrets": [],
+      "kind": "test",
+      "positive_evidence": "(?m)^CI_SUITE_COMPLETED (?:sidebar|refactDaemon|launchRustHealth|hostRelease)\\.test\\.js$",
+      "required_evidence": [
+        "(?m)^CI_SUITE_COMPLETED sidebar\\.test\\.js$",
+        "(?m)^CI_SUITE_COMPLETED refactDaemon\\.test\\.js$",
+        "(?m)^CI_SUITE_COMPLETED launchRustHealth\\.test\\.js$",
+        "(?m)^CI_SUITE_COMPLETED hostRelease\\.test\\.js$"
+      ]
+    },
+    {
+      "id": "jetbrains-check",
+      "lane": "jetbrains",
+      "cwd": ".",
+      "command": [
+        "python3",
+        "tools/dev/ci_tests.py",
+        "jetbrains-test"
+      ],
+      "required": true,
+      "platform": "linux-x64",
+      "prerequisites": [
+        "JDK17",
+        "Gradle wrapper downloads",
+        "verifyPlugin packages compatibility test subject only; no distribution publication"
+      ],
+      "features": [],
+      "secrets": [],
+      "kind": "test",
+      "positive_evidence": "(?m)^CI_JUNIT_COMPLETED [1-9][0-9]*$",
+      "reject_evidence": "CI_JUNIT_COMPLETED 0"
+    },
+    {
+      "id": "python-offline",
+      "lane": "tooling",
+      "cwd": ".",
+      "command": [
+        "python3",
+        "tools/dev/ci_tests.py",
+        "unittest",
+        "tools/dev/test_ci_tests.py",
+        "tools/dev/test_rust_dev.py",
+        "tools/dev/test_worktree_deps.py",
+        "refact-agent/engine/tests/test_review_quality_smoke.py",
+        "tools/dev/test_runtime_manifest.py"
+      ],
+      "required": true,
+      "platform": "linux-x64",
+      "prerequisites": [],
+      "features": [],
+      "secrets": [],
+      "kind": "test",
+      "positive_evidence": "Ran [1-9][0-9]* tests",
+      "reject_evidence": "\\bskipped="
+    },
+    {
+      "id": "engine-reusable",
+      "lane": "engine",
+      "cwd": "refact-agent/engine",
+      "command": [
+        "cargo",
+        "test",
+        "--workspace",
+        "--profile",
+        "ci-test"
+      ],
+      "required": true,
+      "platform": "linux-x64",
+      "prerequisites": [
+        "native Linux x64/ARM64 Windows x64 macOS ARM64",
+        "daemon isolated fake worker"
+      ],
+      "features": [],
+      "secrets": [],
+      "kind": "reusable",
+      "source": ".github/workflows/agent_engine_check.yml",
+      "commands": [
+        [
+          "cargo",
+          "test",
+          "--workspace",
+          "--profile",
+          "ci-test",
+          "--lib"
+        ],
+        [
+          "cargo",
+          "test",
+          "--workspace",
+          "--profile",
+          "ci-test",
+          "--test",
+          "*"
+        ],
+        [
+          "cargo",
+          "build",
+          "--bin",
+          "refact",
+          "--profile",
+          "ci-test"
+        ],
+        [
+          "cargo",
+          "test",
+          "--profile",
+          "ci-test",
+          "--test",
+          "it",
+          "--",
+          "daemon_e2e::",
+          "--nocapture",
+          "--test-threads=1"
+        ],
+        [
+          "cargo",
+          "test",
+          "--workspace",
+          "--profile",
+          "ci-test",
+          "--doc"
+        ]
+      ],
+      "platforms": [
+        "linux-x64",
+        "linux-arm64",
+        "windows-x64",
+        "macos-arm64"
+      ],
+      "env": {
+        "REFACT_DAEMON_E2E": "1",
+        "PYTHON3": "python3"
+      }
+    },
+    {
+      "id": "browser-reusable",
+      "lane": "browser",
+      "cwd": "refact-agent/engine",
+      "command": [
+        "cargo",
+        "test",
+        "--test",
+        "it",
+        "--",
+        "browser_e2e::",
+        "--ignored",
+        "--test-threads=1"
+      ],
+      "required": true,
+      "platform": "linux-x64",
+      "prerequisites": [
+        "owned Chrome",
+        "Xvfb",
+        "generated bundle freshness"
+      ],
+      "features": [],
+      "secrets": [],
+      "kind": "reusable",
+      "source": ".github/workflows/agent_browser_e2e.yml",
+      "commands": [
+        [
+          "cargo",
+          "test",
+          "--test",
+          "it",
+          "--",
+          "browser_e2e::",
+          "--ignored",
+          "--test-threads=1"
+        ],
+        [
+          "cargo",
+          "test",
+          "--test",
+          "it",
+          "--",
+          "browser_differentiators::",
+          "--ignored",
+          "--test-threads=1"
+        ],
+        [
+          "cargo",
+          "test",
+          "--locked",
+          "-p",
+          "refact-browser",
+          "--lib",
+          "owned_chrome_",
+          "--",
+          "--ignored",
+          "--test-threads=1"
+        ],
+        [
+          "bash",
+          "tools/dev/build_injected.sh"
+        ],
+        [
+          "git",
+          "diff",
+          "--exit-code",
+          "refact-agent/engine/crates/refact-browser/src/generated/injected_bundle.js"
+        ]
+      ],
+      "env": {
+        "REFACT_BROWSER_E2E": "1",
+        "REFACT_NETWORK_CHROME": "1",
+        "REFACT_DISCOVERY_CHROME": "1"
+      }
+    },
+    {
+      "id": "windows-browser-reusable",
+      "lane": "windows-browser",
+      "cwd": "refact-agent/engine",
+      "command": [
+        "pwsh",
+        "-File",
+        "tools/dev/browser_windows_roadmap_qualification.ps1"
+      ],
+      "required": true,
+      "platform": "windows-x64",
+      "prerequisites": [
+        "native Windows Chrome",
+        "artifact witnesses"
+      ],
+      "features": [],
+      "secrets": [],
+      "kind": "reusable",
+      "source": ".github/workflows/agent_engine_check.yml",
+      "commands": [
+        [
+          "cargo",
+          "test",
+          "--locked",
+          "--profile",
+          "ci-test",
+          "-p",
+          "refact-browser",
+          "--lib"
+        ],
+        [
+          "cargo",
+          "test",
+          "--locked",
+          "--profile",
+          "ci-test",
+          "-p",
+          "headless_chrome",
+          "--lib",
+          "pending_stderr_obeys_original_startup_deadline"
+        ],
+        [
+          "python",
+          "tools/dev/browser_artifact_witness.py"
+        ],
+        [
+          "pwsh",
+          "-File",
+          "tools/dev/browser_windows_roadmap_qualification.ps1"
+        ]
+      ]
+    },
+    {
+      "id": "performance-reusable",
+      "lane": "performance",
+      "cwd": "refact-agent/engine",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "refact-lsp",
+        "--lib",
+        "--features",
+        "perf-tests",
+        "--",
+        "chat::perf_harness",
+        "--include-ignored",
+        "--test-threads=1",
+        "--nocapture"
+      ],
+      "required": true,
+      "platform": "linux-x64",
+      "prerequisites": [
+        "hosted Linux; wall-clock observations report-only by default; execution/correctness gates retained"
+      ],
+      "features": [],
+      "secrets": [],
+      "kind": "reusable",
+      "source": ".github/workflows/engine_perf.yml",
+      "commands": [
+        [
+          "cargo",
+          "test",
+          "-p",
+          "refact-lsp",
+          "--lib",
+          "--features",
+          "perf-tests",
+          "--",
+          "chat::perf_harness",
+          "--include-ignored",
+          "--test-threads=1",
+          "--nocapture"
+        ],
+        [
+          "cargo",
+          "test",
+          "-p",
+          "refact-lsp",
+          "--lib",
+          "--features",
+          "perf-tests",
+          "--",
+          "coordination::",
+          "--ignored",
+          "--test-threads=1",
+          "--nocapture"
+        ]
+      ]
+    },
+    {
+      "id": "buddy-live",
+      "lane": "external",
+      "cwd": ".",
+      "command": [],
+      "required": false,
+      "platform": "linux-x64",
+      "prerequisites": [],
+      "features": [],
+      "secrets": [],
+      "kind": "check",
+      "unavailable": "Manual/live operator soak needs running daemon, model and owned interactive browser; not fixture Playwright coverage.",
+      "source": "refact-agent/gui/tests/e2e/buddy-operator-live.spec.ts"
+    },
+    {
+      "id": "build-freshness-fixtures",
+      "lane": "build-freshness",
+      "cwd": ".",
+      "command": [
+        "python3",
+        "tools/dev/ci_tests.py",
+        "unittest",
+        "tools/dev/test_build_freshness.py"
+      ],
+      "required": true,
+      "platform": "linux-x64",
+      "prerequisites": [
+        "Linux",
+        "Python3.11",
+        "exact resolved Rust toolchain",
+        "cargo fetch --locked workspace download cache bootstrap; fixtures retain CARGO_NET_OFFLINE=true"
+      ],
+      "features": [],
+      "secrets": [],
+      "kind": "test",
+      "source": "tools/dev/test_build_freshness.py",
+      "positive_evidence": "Ran [1-9][0-9]* tests",
+      "reject_evidence": "\\bskipped=",
+      "timeout": 3300
+    },
+    {
+      "id": "jetbrains-compatibility",
+      "lane": "external",
+      "cwd": ".",
+      "command": [],
+      "required": false,
+      "platform": "conditional",
+      "prerequisites": [],
+      "features": [],
+      "secrets": [],
+      "kind": "coverage-gap",
+      "unavailable": "Recommended IDE compatibility verifier runs in JetBrains lane; full manual IDE/runtime matrix remains external certification."
+    },
+    {
+      "lane": "external",
+      "cwd": ".",
+      "command": [],
+      "platform": "linux-x64",
+      "prerequisites": [],
+      "features": [],
+      "secrets": [],
+      "kind": "excluded",
+      "id": "gui-live-backend-certification",
+      "required": false,
+      "source": "refact-agent/gui/src/__tests__/integration/chatSubscription.live.integration.test.ts",
+      "unavailable": "Optional original nine real-backend compatibility cases require explicit REFACT_RUN_LIVE_CHAT_TESTS=1, owned server8001 and configured refact/gpt-4.1-nano provider. Frontend HTTP/SSE fixture tests run separately; they do not certify Rust engine behavior or real model generation."
+    },
+    {
+      "id": "tool-jobs-owned-stub",
+      "lane": "engine",
+      "cwd": "refact-agent/engine",
+      "command": [
+        "python3",
+        "tests/test_tool_jobs_smoke.py",
+        "--binary",
+        "target/ci-test/refact-lsp",
+        "--binary-sha256",
+        "<sha256 of freshly built subject>"
+      ],
+      "commands": [
+        [
+          "cargo",
+          "build",
+          "--locked",
+          "--bin",
+          "refact-lsp",
+          "--profile",
+          "ci-test"
+        ],
+        [
+          "python3",
+          "../../tools/dev/ci_tests.py",
+          "unittest",
+          "tests/test_tool_jobs_smoke.py"
+        ]
+      ],
+      "required": true,
+      "platform": "linux-x64",
+      "prerequisites": [
+        "fresh same-SHA refact-lsp ci-test binary",
+        "aiohttp==3.11.18",
+        "owned isolated loopback ports8017/8018; no live providers"
+      ],
+      "features": [],
+      "secrets": [],
+      "kind": "reusable",
+      "source": ".github/workflows/agent_engine_check.yml"
+    },
+    {
+      "id": "python-test_native_browser_smoke.py",
+      "lane": "tooling",
+      "cwd": ".",
+      "command": [
+        "python3",
+        "refact-agent/engine/tests/test_native_browser_smoke.py",
+        "--self-check"
+      ],
+      "required": true,
+      "platform": "linux-x64",
+      "prerequisites": [
+        "stdlib only; self-check does not launch browser/engine"
+      ],
+      "features": [],
+      "secrets": [],
+      "kind": "test",
+      "positive_evidence": "Ran [1-9][0-9]* tests",
+      "reject_evidence": "\\bskipped="
+    },
+    {
+      "id": "python-test_native_browser_roadmap.py",
+      "lane": "tooling",
+      "cwd": ".",
+      "command": [
+        "python3",
+        "refact-agent/engine/tests/test_native_browser_roadmap.py",
+        "--self-check"
+      ],
+      "required": true,
+      "platform": "linux-x64",
+      "prerequisites": [
+        "stdlib only; self-check does not launch browser/engine"
+      ],
+      "features": [],
+      "secrets": [],
+      "kind": "test",
+      "positive_evidence": "Ran [1-9][0-9]* tests",
+      "reject_evidence": "\\bskipped="
+    },
+    {
+      "id": "python-test01_completion_edge_cases.py",
+      "lane": "external",
+      "cwd": ".",
+      "command": [
+        "python3",
+        "refact-agent/engine/tests/test01_completion_edge_cases.py"
+      ],
+      "required": false,
+      "platform": "conditional",
+      "prerequisites": [
+        "per-file applicability audit; see unavailability reason"
+      ],
+      "features": [],
+      "secrets": [],
+      "kind": "excluded",
+      "source": "refact-agent/engine/tests/test01_completion_edge_cases.py",
+      "unavailable": "Opt-in real-model/provider certification; requires isolated worker, configured model and read-only provider credentials; not executed by fixture qualification."
+    },
+    {
+      "id": "python-test02_completion_with_rag.py",
+      "lane": "external",
+      "cwd": ".",
+      "command": [
+        "python3",
+        "refact-agent/engine/tests/test02_completion_with_rag.py"
+      ],
+      "required": false,
+      "platform": "conditional",
+      "prerequisites": [
+        "per-file applicability audit; see unavailability reason"
+      ],
+      "features": [],
+      "secrets": [],
+      "kind": "excluded",
+      "source": "refact-agent/engine/tests/test02_completion_with_rag.py",
+      "unavailable": "Opt-in real-model/provider certification; requires isolated worker, configured model and read-only provider credentials; not executed by fixture qualification."
+    },
+    {
+      "id": "python-test03_at_commands_completion.py",
+      "lane": "engine",
+      "cwd": "refact-agent/engine",
+      "command": [
+        "python3",
+        "tests/owned_utility_tests.py",
+        "--binary",
+        "target/ci-test/refact-lsp",
+        "--binary-sha256",
+        "<sha256 of freshly built subject>"
+      ],
+      "required": true,
+      "platform": "linux-x64",
+      "prerequisites": [
+        "same-SHA freshly built owned refact-lsp subject",
+        "Linux nonroot runner; isolated indexed workspace, seeded knowledge graph and symlink fixtures",
+        "isolated GitHub authorization rules; no GitHub API calls",
+        "strict exact Counter test inventory and self-check; zero skips/xfail/xpass",
+        "pinned aiohttp/pytest/pytest-asyncio/httpx; no live services"
+      ],
+      "features": [],
+      "secrets": [],
+      "kind": "reusable",
+      "source": "refact-agent/engine/tests/test03_at_commands_completion.py",
+      "evidence_path": ".refact/verification/owned-utility/"
+    },
+    {
+      "id": "python-test04_completion_lsp.py",
+      "lane": "external",
+      "cwd": ".",
+      "command": [
+        "python3",
+        "refact-agent/engine/tests/test04_completion_lsp.py"
+      ],
+      "required": false,
+      "platform": "conditional",
+      "prerequisites": [
+        "per-file applicability audit; see unavailability reason"
+      ],
+      "features": [],
+      "secrets": [],
+      "kind": "excluded",
+      "source": "refact-agent/engine/tests/test04_completion_lsp.py",
+      "unavailable": "Opt-in real-model/provider certification; requires isolated worker, configured model and read-only provider credentials; not executed by fixture qualification."
+    },
+    {
+      "id": "python-test05_is_openai_compatible.py",
+      "lane": "external",
+      "cwd": ".",
+      "command": [
+        "python3",
+        "refact-agent/engine/tests/test05_is_openai_compatible.py"
+      ],
+      "required": false,
+      "platform": "conditional",
+      "prerequisites": [
+        "per-file applicability audit; see unavailability reason"
+      ],
+      "features": [],
+      "secrets": [],
+      "kind": "excluded",
+      "source": "refact-agent/engine/tests/test05_is_openai_compatible.py",
+      "unavailable": "Opt-in real-model/provider certification; requires isolated worker, configured model and read-only provider credentials; not executed by fixture qualification."
+    },
+    {
+      "id": "python-test06_tool_not_tool.py",
+      "lane": "external",
+      "cwd": ".",
+      "command": [
+        "python3",
+        "refact-agent/engine/tests/test06_tool_not_tool.py"
+      ],
+      "required": false,
+      "platform": "conditional",
+      "prerequisites": [
+        "per-file applicability audit; see unavailability reason"
+      ],
+      "features": [],
+      "secrets": [],
+      "kind": "excluded",
+      "source": "refact-agent/engine/tests/test06_tool_not_tool.py",
+      "unavailable": "Opt-in real-model/provider certification; requires isolated worker, configured model and read-only provider credentials; not executed by fixture qualification."
+    },
+    {
+      "id": "python-test08_post_processing.py",
+      "lane": "external",
+      "cwd": ".",
+      "command": [
+        "python3",
+        "refact-agent/engine/tests/test08_post_processing.py"
+      ],
+      "required": false,
+      "platform": "conditional",
+      "prerequisites": [
+        "per-file applicability audit; see unavailability reason"
+      ],
+      "features": [],
+      "secrets": [],
+      "kind": "excluded",
+      "source": "refact-agent/engine/tests/test08_post_processing.py",
+      "unavailable": "Old SDK/API names; obsolete executable applicability, not passed."
+    },
+    {
+      "id": "python-test09_ast_pick_up_changes.py",
+      "lane": "external",
+      "cwd": ".",
+      "command": [
+        "python3",
+        "refact-agent/engine/tests/test09_ast_pick_up_changes.py"
+      ],
+      "required": false,
+      "platform": "conditional",
+      "prerequisites": [
+        "per-file applicability audit; see unavailability reason"
+      ],
+      "features": [],
+      "secrets": [],
+      "kind": "excluded",
+      "source": "refact-agent/engine/tests/test09_ast_pick_up_changes.py",
+      "unavailable": "Old SDK/API names; obsolete executable applicability, not passed."
+    },
+    {
+      "id": "python-test12_tools_authorize_calls.py",
+      "lane": "engine",
+      "cwd": "refact-agent/engine",
+      "command": [
+        "python3",
+        "tests/owned_utility_tests.py",
+        "--binary",
+        "target/ci-test/refact-lsp",
+        "--binary-sha256",
+        "<sha256 of freshly built subject>"
+      ],
+      "required": true,
+      "platform": "linux-x64",
+      "prerequisites": [
+        "same-SHA freshly built owned refact-lsp subject",
+        "Linux nonroot runner; isolated indexed workspace, seeded knowledge graph and symlink fixtures",
+        "isolated GitHub authorization rules; no GitHub API calls",
+        "strict exact Counter test inventory and self-check; zero skips/xfail/xpass",
+        "pinned aiohttp/pytest/pytest-asyncio/httpx; no live services"
+      ],
+      "features": [],
+      "secrets": [],
+      "kind": "reusable",
+      "source": "refact-agent/engine/tests/test12_tools_authorize_calls.py",
+      "evidence_path": ".refact/verification/owned-utility/"
+    },
+    {
+      "id": "python-test13_vision.py",
+      "lane": "external",
+      "cwd": ".",
+      "command": [
+        "python3",
+        "refact-agent/engine/tests/test13_vision.py"
+      ],
+      "required": false,
+      "platform": "conditional",
+      "prerequisites": [
+        "per-file applicability audit; see unavailability reason"
+      ],
+      "features": [],
+      "secrets": [],
+      "kind": "excluded",
+      "source": "refact-agent/engine/tests/test13_vision.py",
+      "unavailable": "Opt-in real-model/provider certification; requires isolated worker, configured model and read-only provider credentials; not executed by fixture qualification."
+    },
+    {
+      "id": "python-test_background_agents.py",
+      "lane": "external",
+      "cwd": ".",
+      "command": [
+        "python3",
+        "refact-agent/engine/tests/test_background_agents.py"
+      ],
+      "required": false,
+      "platform": "conditional",
+      "prerequisites": [
+        "per-file applicability audit; see unavailability reason"
+      ],
+      "features": [],
+      "secrets": [],
+      "kind": "excluded",
+      "source": "refact-agent/engine/tests/test_background_agents.py",
+      "unavailable": "Opt-in real-model/provider certification; requires isolated worker, configured model and read-only provider credentials; not executed by fixture qualification."
+    },
+    {
+      "id": "python-test_background_notifications_e2e.py",
+      "lane": "engine",
+      "cwd": "refact-agent/engine",
+      "command": [
+        "python3",
+        "tests/owned_engine.py",
+        "--binary",
+        "target/ci-test/refact-lsp",
+        "--binary-sha256",
+        "<sha256 of freshly built subject>"
+      ],
+      "required": true,
+      "platform": "linux-x64",
+      "prerequisites": [
+        "same-SHA freshly built owned refact-lsp subject",
+        "strict owned_engine.py required 18-test suite; zero skips",
+        "pinned aiohttp/pytest/pytest-asyncio/httpx",
+        "loopback-only disposable worker/provider; no live services"
+      ],
+      "features": [],
+      "secrets": [],
+      "kind": "reusable",
+      "source": "refact-agent/engine/tests/test_background_notifications_e2e.py",
+      "evidence_path": ".refact/verification/owned-integration/"
+    },
+    {
+      "id": "python-test_chat_session_abort.py",
+      "lane": "engine",
+      "cwd": "refact-agent/engine",
+      "command": [
+        "python3",
+        "tests/owned_chat_sessions.py",
+        "--binary",
+        "target/ci-test/refact-lsp",
+        "--binary-sha256",
+        "<sha256 of freshly built subject>"
+      ],
+      "required": true,
+      "platform": "linux-x64",
+      "prerequisites": [
+        "same-selected-SHA freshly built owned refact-lsp ci-test subject; selected GITHUB_SHA exported at build",
+        "Python3.11; aiohttp==3.11.18 pytest==8.4.2 pytest-asyncio==0.25.3 httpx==0.28.1",
+        "strict owned_chat_sessions.py exact 27-test suite; zero skips; collection and pass counts enforced",
+        "loopback-only disposable worker/provider; no live services"
+      ],
+      "features": [],
+      "secrets": [],
+      "kind": "reusable",
+      "source": "refact-agent/engine/tests/test_chat_session_abort.py",
+      "evidence_path": ".refact/verification/owned-chat-sessions/"
+    },
+    {
+      "id": "python-test_chat_session_attachments.py",
+      "lane": "engine",
+      "cwd": "refact-agent/engine",
+      "command": [
+        "python3",
+        "tests/owned_chat_sessions.py",
+        "--binary",
+        "target/ci-test/refact-lsp",
+        "--binary-sha256",
+        "<sha256 of freshly built subject>"
+      ],
+      "required": true,
+      "platform": "linux-x64",
+      "prerequisites": [
+        "same-selected-SHA freshly built owned refact-lsp ci-test subject; selected GITHUB_SHA exported at build",
+        "Python3.11; aiohttp==3.11.18 pytest==8.4.2 pytest-asyncio==0.25.3 httpx==0.28.1",
+        "strict owned_chat_sessions.py exact 27-test suite; zero skips; collection and pass counts enforced",
+        "loopback-only disposable worker/provider; no live services"
+      ],
+      "features": [],
+      "secrets": [],
+      "kind": "reusable",
+      "source": "refact-agent/engine/tests/test_chat_session_attachments.py",
+      "evidence_path": ".refact/verification/owned-chat-sessions/"
+    },
+    {
+      "id": "python-test_chat_session_basic.py",
+      "lane": "engine",
+      "cwd": "refact-agent/engine",
+      "command": [
+        "python3",
+        "tests/owned_chat_sessions.py",
+        "--binary",
+        "target/ci-test/refact-lsp",
+        "--binary-sha256",
+        "<sha256 of freshly built subject>"
+      ],
+      "required": true,
+      "platform": "linux-x64",
+      "prerequisites": [
+        "same-selected-SHA freshly built owned refact-lsp ci-test subject; selected GITHUB_SHA exported at build",
+        "Python3.11; aiohttp==3.11.18 pytest==8.4.2 pytest-asyncio==0.25.3 httpx==0.28.1",
+        "strict owned_chat_sessions.py exact 27-test suite; zero skips; collection and pass counts enforced",
+        "loopback-only disposable worker/provider; no live services"
+      ],
+      "features": [],
+      "secrets": [],
+      "kind": "reusable",
+      "source": "refact-agent/engine/tests/test_chat_session_basic.py",
+      "evidence_path": ".refact/verification/owned-chat-sessions/"
+    },
+    {
+      "id": "python-test_chat_session_editing.py",
+      "lane": "engine",
+      "cwd": "refact-agent/engine",
+      "command": [
+        "python3",
+        "tests/owned_chat_sessions.py",
+        "--binary",
+        "target/ci-test/refact-lsp",
+        "--binary-sha256",
+        "<sha256 of freshly built subject>"
+      ],
+      "required": true,
+      "platform": "linux-x64",
+      "prerequisites": [
+        "same-selected-SHA freshly built owned refact-lsp ci-test subject; selected GITHUB_SHA exported at build",
+        "Python3.11; aiohttp==3.11.18 pytest==8.4.2 pytest-asyncio==0.25.3 httpx==0.28.1",
+        "strict owned_chat_sessions.py exact 27-test suite; zero skips; collection and pass counts enforced",
+        "loopback-only disposable worker/provider; no live services"
+      ],
+      "features": [],
+      "secrets": [],
+      "kind": "reusable",
+      "source": "refact-agent/engine/tests/test_chat_session_editing.py",
+      "evidence_path": ".refact/verification/owned-chat-sessions/"
+    },
+    {
+      "id": "python-test_chat_session_errors.py",
+      "lane": "engine",
+      "cwd": "refact-agent/engine",
+      "command": [
+        "python3",
+        "tests/owned_chat_sessions.py",
+        "--binary",
+        "target/ci-test/refact-lsp",
+        "--binary-sha256",
+        "<sha256 of freshly built subject>"
+      ],
+      "required": true,
+      "platform": "linux-x64",
+      "prerequisites": [
+        "same-selected-SHA freshly built owned refact-lsp ci-test subject; selected GITHUB_SHA exported at build",
+        "Python3.11; aiohttp==3.11.18 pytest==8.4.2 pytest-asyncio==0.25.3 httpx==0.28.1",
+        "strict owned_chat_sessions.py exact 27-test suite; zero skips; collection and pass counts enforced",
+        "loopback-only disposable worker/provider; no live services"
+      ],
+      "features": [],
+      "secrets": [],
+      "kind": "reusable",
+      "source": "refact-agent/engine/tests/test_chat_session_errors.py",
+      "evidence_path": ".refact/verification/owned-chat-sessions/"
+    },
+    {
+      "id": "python-test_chat_session_queued.py",
+      "lane": "external",
+      "cwd": ".",
+      "command": [
+        "python3",
+        "refact-agent/engine/tests/test_chat_session_queued.py"
+      ],
+      "required": false,
+      "platform": "conditional",
+      "prerequisites": [
+        "per-file applicability audit; see unavailability reason"
+      ],
+      "features": [],
+      "secrets": [],
+      "kind": "excluded",
+      "source": "refact-agent/engine/tests/test_chat_session_queued.py",
+      "unavailable": "Opt-in real-model/provider certification; requires isolated worker, configured model and read-only provider credentials; not executed by fixture qualification."
+    },
+    {
+      "id": "python-test_chat_session_reliability.py",
+      "lane": "engine",
+      "cwd": "refact-agent/engine",
+      "command": [
+        "python3",
+        "tests/owned_chat_sessions.py",
+        "--binary",
+        "target/ci-test/refact-lsp",
+        "--binary-sha256",
+        "<sha256 of freshly built subject>"
+      ],
+      "required": true,
+      "platform": "linux-x64",
+      "prerequisites": [
+        "same-selected-SHA freshly built owned refact-lsp ci-test subject; selected GITHUB_SHA exported at build",
+        "Python3.11; aiohttp==3.11.18 pytest==8.4.2 pytest-asyncio==0.25.3 httpx==0.28.1",
+        "strict owned_chat_sessions.py exact 27-test suite; zero skips; collection and pass counts enforced",
+        "loopback-only disposable worker/provider; no live services"
+      ],
+      "features": [],
+      "secrets": [],
+      "kind": "reusable",
+      "source": "refact-agent/engine/tests/test_chat_session_reliability.py",
+      "evidence_path": ".refact/verification/owned-chat-sessions/"
+    },
+    {
+      "id": "python-test_chat_session_thread_params.py",
+      "lane": "external",
+      "cwd": ".",
+      "command": [
+        "python3",
+        "refact-agent/engine/tests/test_chat_session_thread_params.py"
+      ],
+      "required": false,
+      "platform": "conditional",
+      "prerequisites": [
+        "per-file applicability audit; see unavailability reason"
+      ],
+      "features": [],
+      "secrets": [],
+      "kind": "excluded",
+      "source": "refact-agent/engine/tests/test_chat_session_thread_params.py",
+      "unavailable": "Uppercase thread parameter contract is outdated; needs contract rewrite before executable applicability."
+    },
+    {
+      "id": "python-test_claude_corner_cases.py",
+      "lane": "external",
+      "cwd": ".",
+      "command": [
+        "python3",
+        "refact-agent/engine/tests/test_claude_corner_cases.py"
+      ],
+      "required": false,
+      "platform": "conditional",
+      "prerequisites": [
+        "per-file applicability audit; see unavailability reason"
+      ],
+      "features": [],
+      "secrets": [],
+      "kind": "excluded",
+      "source": "refact-agent/engine/tests/test_claude_corner_cases.py",
+      "unavailable": "Opt-in real-model/provider certification; requires isolated worker, configured model and read-only provider credentials; not executed by fixture qualification."
+    },
+    {
+      "id": "python-test_create_task_with_planner.py",
+      "lane": "external",
+      "cwd": ".",
+      "command": [
+        "python3",
+        "refact-agent/engine/tests/test_create_task_with_planner.py"
+      ],
+      "required": false,
+      "platform": "conditional",
+      "prerequisites": [
+        "per-file applicability audit; see unavailability reason"
+      ],
+      "features": [],
+      "secrets": [],
+      "kind": "excluded",
+      "source": "refact-agent/engine/tests/test_create_task_with_planner.py",
+      "unavailable": "Vacuous script; excluded, not positive test coverage."
+    },
+    {
+      "id": "python-test_diff_handlers.py",
+      "lane": "external",
+      "cwd": ".",
+      "command": [
+        "python3",
+        "refact-agent/engine/tests/test_diff_handlers.py"
+      ],
+      "required": false,
+      "platform": "conditional",
+      "prerequisites": [
+        "per-file applicability audit; see unavailability reason"
+      ],
+      "features": [],
+      "secrets": [],
+      "kind": "excluded",
+      "source": "refact-agent/engine/tests/test_diff_handlers.py",
+      "unavailable": "Absent routes and fixture writes; not supported current endpoint coverage."
+    },
+    {
+      "id": "python-test_file.py",
+      "lane": "external",
+      "cwd": ".",
+      "command": [
+        "python3",
+        "refact-agent/engine/tests/test_file.py"
+      ],
+      "required": false,
+      "platform": "conditional",
+      "prerequisites": [
+        "per-file applicability audit; see unavailability reason"
+      ],
+      "features": [],
+      "secrets": [],
+      "kind": "excluded",
+      "source": "refact-agent/engine/tests/test_file.py",
+      "unavailable": "Fixture source, not an executable test suite."
+    },
+    {
+      "id": "python-test_hidden_roles_e2e.py",
+      "lane": "engine",
+      "cwd": "refact-agent/engine",
+      "command": [
+        "python3",
+        "tests/owned_engine.py",
+        "--binary",
+        "target/ci-test/refact-lsp",
+        "--binary-sha256",
+        "<sha256 of freshly built subject>"
+      ],
+      "required": true,
+      "platform": "linux-x64",
+      "prerequisites": [
+        "same-SHA freshly built owned refact-lsp subject",
+        "strict owned_engine.py required 18-test suite; zero skips",
+        "pinned aiohttp/pytest/pytest-asyncio/httpx",
+        "loopback-only disposable worker/provider; no live services"
+      ],
+      "features": [],
+      "secrets": [],
+      "kind": "reusable",
+      "source": "refact-agent/engine/tests/test_hidden_roles_e2e.py",
+      "evidence_path": ".refact/verification/owned-integration/"
+    },
+    {
+      "id": "python-test_knowledge_graph_content_param.py",
+      "lane": "engine",
+      "cwd": "refact-agent/engine",
+      "command": [
+        "python3",
+        "tests/owned_utility_tests.py",
+        "--binary",
+        "target/ci-test/refact-lsp",
+        "--binary-sha256",
+        "<sha256 of freshly built subject>"
+      ],
+      "required": true,
+      "platform": "linux-x64",
+      "prerequisites": [
+        "same-SHA freshly built owned refact-lsp subject",
+        "Linux nonroot runner; isolated indexed workspace, seeded knowledge graph and symlink fixtures",
+        "isolated GitHub authorization rules; no GitHub API calls",
+        "strict exact Counter test inventory and self-check; zero skips/xfail/xpass",
+        "pinned aiohttp/pytest/pytest-asyncio/httpx; no live services"
+      ],
+      "features": [],
+      "secrets": [],
+      "kind": "reusable",
+      "source": "refact-agent/engine/tests/test_knowledge_graph_content_param.py",
+      "evidence_path": ".refact/verification/owned-utility/"
+    },
+    {
+      "id": "python-test_knowledge_ops.py",
+      "lane": "engine",
+      "cwd": "refact-agent/engine",
+      "command": [
+        "python3",
+        "tests/owned_utility_tests.py",
+        "--binary",
+        "target/ci-test/refact-lsp",
+        "--binary-sha256",
+        "<sha256 of freshly built subject>"
+      ],
+      "required": true,
+      "platform": "linux-x64",
+      "prerequisites": [
+        "same-SHA freshly built owned refact-lsp subject",
+        "Linux nonroot runner; isolated indexed workspace, seeded knowledge graph and symlink fixtures",
+        "isolated GitHub authorization rules; no GitHub API calls",
+        "strict exact Counter test inventory and self-check; zero skips/xfail/xpass",
+        "pinned aiohttp/pytest/pytest-asyncio/httpx; no live services"
+      ],
+      "features": [],
+      "secrets": [],
+      "kind": "reusable",
+      "source": "refact-agent/engine/tests/test_knowledge_ops.py",
+      "evidence_path": ".refact/verification/owned-utility/"
+    },
+    {
+      "id": "python-test_native_browser_benchmark.py",
+      "lane": "browser",
+      "cwd": "refact-agent/engine",
+      "command": [
+        "python3",
+        "tests/owned_browser_benchmark.py",
+        "--binary",
+        "target/debug/refact-lsp",
+        "--binary-sha256",
+        "<sha256 of freshly built subject>",
+        "--samples",
+        "7",
+        "--actions",
+        "24",
+        "--transport",
+        "readiness_mio",
+        "--output",
+        "../../.refact/verification/owned-browser-benchmark/details.json"
+      ],
+      "commands": [
+        ["cargo", "build", "--locked", "--bin", "refact-lsp"],
+        ["python3", "-m", "pytest", "-q", "tests/test_native_browser_benchmark.py"]
+      ],
+      "required": true,
+      "platform": "linux-x64",
+      "prerequisites": [
+        "fresh same-selected-SHA refact-lsp default dev binary; GITHUB_SHA exported from REFACT_SOURCE_SHA",
+        "Google Chrome at /usr/bin/google-chrome, sandbox user namespaces and Xvfb",
+        "Rust and Node with npm ci --include=dev for engine-served GUI test subject",
+        "Python3.11; aiohttp==3.11.18 pytest==8.4.2 pytest-asyncio==0.25.3 httpx==0.28.1",
+        "two offline cleanup tests; isolated loopback fixture and owned worker/browser; no live providers",
+        "7 measured samples plus 1 warmup; 24 actions; exact effects and per-call profiling required; latency report-only",
+        "transport_requested=readiness_mio is a label only; transport_observed remains unverified",
+        "fatal tool/completion/profile/cleanup errors; observer confirms only observed Chrome descendants are gone"
+      ],
+      "features": [],
+      "secrets": [],
+      "kind": "reusable",
+      "source": ".github/workflows/agent_browser_e2e.yml",
+      "evidence_path": ".refact/verification/owned-browser-benchmark/"
+    },
+    {
+      "id": "python-test_pty_stdin_e2e.py",
+      "lane": "engine",
+      "cwd": "refact-agent/engine",
+      "command": [
+        "python3",
+        "tests/owned_engine.py",
+        "--binary",
+        "target/ci-test/refact-lsp",
+        "--binary-sha256",
+        "<sha256 of freshly built subject>"
+      ],
+      "required": true,
+      "platform": "linux-x64",
+      "prerequisites": [
+        "same-SHA freshly built owned refact-lsp subject",
+        "strict owned_engine.py required 18-test suite; zero skips",
+        "pinned aiohttp/pytest/pytest-asyncio/httpx",
+        "loopback-only disposable worker/provider; no live services"
+      ],
+      "features": [],
+      "secrets": [],
+      "kind": "reusable",
+      "source": "refact-agent/engine/tests/test_pty_stdin_e2e.py",
+      "evidence_path": ".refact/verification/owned-integration/"
+    },
+    {
+      "id": "python-test_review_tool_smoke.py",
+      "lane": "external",
+      "cwd": ".",
+      "command": [
+        "python3",
+        "refact-agent/engine/tests/test_review_tool_smoke.py"
+      ],
+      "required": false,
+      "platform": "conditional",
+      "prerequisites": [
+        "per-file applicability audit; see unavailability reason"
+      ],
+      "features": [],
+      "secrets": [],
+      "kind": "excluded",
+      "source": "refact-agent/engine/tests/test_review_tool_smoke.py",
+      "unavailable": "Opt-in real-model/provider certification; requires isolated worker, configured model and read-only provider credentials; not executed by fixture qualification."
+    },
+    {
+      "id": "python-test_scheduler_e2e.py",
+      "lane": "engine",
+      "cwd": "refact-agent/engine",
+      "command": [
+        "python3",
+        "tests/owned_engine.py",
+        "--binary",
+        "target/ci-test/refact-lsp",
+        "--binary-sha256",
+        "<sha256 of freshly built subject>"
+      ],
+      "required": true,
+      "platform": "linux-x64",
+      "prerequisites": [
+        "same-SHA freshly built owned refact-lsp subject",
+        "strict owned_engine.py required 18-test suite; zero skips",
+        "pinned aiohttp/pytest/pytest-asyncio/httpx",
+        "loopback-only disposable worker/provider; no live services"
+      ],
+      "features": [],
+      "secrets": [],
+      "kind": "reusable",
+      "source": "refact-agent/engine/tests/test_scheduler_e2e.py",
+      "evidence_path": ".refact/verification/owned-integration/"
+    },
+    {
+      "id": "python-test_task_agent_failure.py",
+      "lane": "external",
+      "cwd": ".",
+      "command": [
+        "python3",
+        "refact-agent/engine/tests/test_task_agent_failure.py"
+      ],
+      "required": false,
+      "platform": "conditional",
+      "prerequisites": [
+        "per-file applicability audit; see unavailability reason"
+      ],
+      "features": [],
+      "secrets": [],
+      "kind": "excluded",
+      "source": "refact-agent/engine/tests/test_task_agent_failure.py",
+      "unavailable": "Imports absent modules; obsolete until migrated."
+    }
+  ]
+}

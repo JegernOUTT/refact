@@ -46,7 +46,7 @@ fn daemon_auth_token_from_env() -> Option<String> {
 }
 
 #[derive(Debug, Parser, Clone)]
-#[command(name = "refact-lsp", version)]
+#[command(name = "refact-lsp", version = crate::version::VERSION)]
 pub struct CommandLine {
     #[arg(
         long,
@@ -226,6 +226,13 @@ pub struct CommandLine {
 
 impl CommandLine {
     pub fn from_args() -> Self {
+        if std::env::args_os()
+            .skip(1)
+            .eq([std::ffi::OsString::from("--build-info")])
+        {
+            println!("{}", crate::version::build_info_json());
+            std::process::exit(0);
+        }
         match Self::try_parse() {
             Ok(cmdline) => cmdline,
             Err(error) => {

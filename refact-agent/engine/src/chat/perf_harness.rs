@@ -4329,6 +4329,114 @@ fn sample_machine_metrics() -> MachineMetrics {
 mod tests {
     use super::*;
 
+    const ENFORCE_TIMING_ENV: &str = "REFACT_PERF_ENFORCE_TIMING";
+
+    fn timing_policy_from_value(value: Option<&str>) -> bool {
+        value == Some("1")
+    }
+
+    fn enforce_timing() -> bool {
+        timing_policy_from_value(std::env::var(ENFORCE_TIMING_ENV).ok().as_deref())
+    }
+
+    // Hosted runners report comparisons; controlled runners may opt into timing gates.
+    fn timing_gate(enforce: bool, passed: bool, comparison: &str) -> Result<(), String> {
+        eprintln!("perf timing enforce={enforce} passed={passed}: {comparison}");
+        if enforce && !passed {
+            Err(format!("timing gate failed: {comparison}"))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn check_tool_pool_timing(
+        comparison: &ToolPoolComparison,
+        enforce: bool,
+    ) -> Result<(), String> {
+        timing_gate(
+            enforce,
+            comparison.tool_start_p95_us < 100_000,
+            "tool pool start overhead p95 < 100000us",
+        )?;
+        let consistent = match comparison.remaining_stage.as_deref() {
+            None => {
+                comparison.tool_start_p95_us < 100_000
+                    && comparison.warm_schema_alias_p95_us < 1_000
+            }
+            Some("warm_schema_alias_preparation") => {
+                comparison.tool_start_p95_us < 100_000
+                    && comparison.warm_schema_alias_p95_us >= 1_000
+            }
+            Some("tool_start_overhead") => comparison.tool_start_p95_us >= 100_000,
+            Some(stage) => return Err(format!("unexpected remaining stage: {stage}")),
+        };
+        if !consistent {
+            return Err("tool pool remaining stage disagrees with measured timing".to_string());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn timing_policy_requires_explicit_opt_in() {
+        for value in [None, Some(""), Some("0"), Some("true"), Some(" 1")] {
+            assert!(!timing_policy_from_value(value));
+        }
+        assert!(timing_policy_from_value(Some("1")));
+    }
+
+    #[test]
+    fn timing_policy_reports_failures_but_only_enforces_when_requested() {
+        for enforce in [false, true] {
+            assert!(timing_gate(enforce, true, "passing comparison").is_ok());
+            assert_eq!(
+                timing_gate(enforce, false, "failing comparison").is_err(),
+                enforce
+            );
+        }
+    }
+
+    #[test]
+    fn timing_policy_preserves_tool_pool_stage_validation() {
+        let mut comparison = ToolPoolComparison {
+            legacy_catalog_preflight_operations: 100,
+            pooled_catalog_preflight_operations: 10,
+            catalog_preflight_operation_reduction_percent: 90.0,
+            tool_start_p95_us: 100_000,
+            warm_schema_alias_p95_us: 2_000,
+            remaining_stage: Some("tool_start_overhead".to_string()),
+        };
+        assert!(check_tool_pool_timing(&comparison, false).is_ok());
+        assert!(check_tool_pool_timing(&comparison, true).is_err());
+        for enforce in [false, true] {
+            for tool_start_p95_us in [1, 100_000] {
+                for warm_schema_alias_p95_us in [1, 1_000] {
+                    comparison.tool_start_p95_us = tool_start_p95_us;
+                    comparison.warm_schema_alias_p95_us = warm_schema_alias_p95_us;
+                    comparison.remaining_stage = None;
+                    assert_eq!(
+                        check_tool_pool_timing(&comparison, enforce).is_ok(),
+                        tool_start_p95_us < 100_000 && warm_schema_alias_p95_us < 1_000,
+                        "None stage: enforce={enforce}, comparison={comparison:?}"
+                    );
+                    comparison.remaining_stage = Some("warm_schema_alias_preparation".to_string());
+                    assert_eq!(
+                        check_tool_pool_timing(&comparison, enforce).is_ok(),
+                        tool_start_p95_us < 100_000 && warm_schema_alias_p95_us >= 1_000,
+                        "warm stage: enforce={enforce}, comparison={comparison:?}"
+                    );
+                    comparison.remaining_stage = Some("tool_start_overhead".to_string());
+                    assert_eq!(
+                        check_tool_pool_timing(&comparison, enforce).is_ok(),
+                        !enforce && tool_start_p95_us >= 100_000,
+                        "start stage: enforce={enforce}, comparison={comparison:?}"
+                    );
+                    comparison.remaining_stage = Some("unexpected".to_string());
+                    assert!(check_tool_pool_timing(&comparison, enforce).is_err());
+                }
+            }
+        }
+    }
+
     #[test]
     #[serial_test::serial]
     #[cfg_attr(
@@ -4337,6 +4445,10 @@ mod tests {
     )]
     fn auto_enrichment_fixture_measures_real_fanout_lock_contention_and_privacy() {
         let report = run_auto_enrichment_ci_fixture().expect("auto enrichment fixture runs");
+        eprintln!(
+            "{}",
+            serde_json::to_string_pretty(&report).expect("auto enrichment report serializes")
+        );
 
         assert_eq!(report.workload.chat_count, 10);
         assert_eq!(report.privacy_exclusion_violations, 0);
@@ -4383,6 +4495,10 @@ mod tests {
                 privacy_exclusion_count: 1,
             }))
             .expect("fallback fixture runs");
+        eprintln!(
+            "{}",
+            serde_json::to_string_pretty(&report).expect("fallback report serializes")
+        );
 
         assert_eq!(report.repeated_work.fallback_files_read, 0);
         assert_eq!(report.privacy_exclusion_violations, 0);
@@ -4397,6 +4513,10 @@ mod tests {
     )]
     fn fanout_fixture_measures_high_rate_deltas_large_history_and_lag_recovery() {
         let report = run_fanout_benchmark().expect("fanout fixture should run");
+        eprintln!(
+            "{}",
+            render_fanout_json(&report).expect("fanout report serializes")
+        );
 
         assert_eq!(report.schema, FANOUT_BENCHMARK_SCHEMA);
         assert_eq!(
@@ -4426,8 +4546,19 @@ mod tests {
         assert_eq!(report.delta.first_delta_latency.sample_count, 1);
         assert_eq!(report.delta.baseline_event_count, FANOUT_DELTA_COUNT);
         assert!(report.delta.coalesced_event_count < report.delta.baseline_event_count);
-        assert!(report.delta.serialization_cpu_reduction_percent >= 50.0);
-        assert!(report.delta.projected_first_delta_latency_us <= 50_000);
+        let enforce = enforce_timing();
+        timing_gate(
+            enforce,
+            report.delta.serialization_cpu_reduction_percent >= 50.0,
+            "fanout serialization CPU reduction >= 50%",
+        )
+        .expect("fanout serialization timing policy");
+        timing_gate(
+            enforce,
+            report.delta.projected_first_delta_latency_us <= 50_000,
+            "fanout projected first delta latency <= 50000us",
+        )
+        .expect("fanout first delta timing policy");
         assert_eq!(report.snapshot.snapshot_count, FANOUT_SNAPSHOT_RUNS + 1);
         assert!(report.snapshot.clone_bytes.p95_us > 1_000_000);
         assert!(report.snapshot.serialized_bytes.p95_us > 1_000_000);
@@ -4441,6 +4572,10 @@ mod tests {
     )]
     fn tool_pool_fixture_compares_real_legacy_and_pooled_operations() {
         let report = run_tool_pool_ci_fixture().expect("tool pool fixture should run");
+        eprintln!(
+            "{}",
+            serde_json::to_string_pretty(&report).expect("tool pool report serializes")
+        );
         let legacy = &report.variants[0];
         let pooled = &report.variants[1];
         let expected_calls =
@@ -4473,14 +4608,8 @@ mod tests {
             "{:#?}",
             report.comparison
         );
-        assert!(pooled.tool_start_overhead_latency.p95_us < 100_000);
-        match report.comparison.remaining_stage.as_deref() {
-            None => assert!(report.comparison.warm_schema_alias_p95_us < 1_000),
-            Some("warm_schema_alias_preparation") => {
-                assert!(report.comparison.warm_schema_alias_p95_us >= 1_000)
-            }
-            Some(stage) => panic!("unexpected remaining stage: {stage}"),
-        }
+        check_tool_pool_timing(&report.comparison, enforce_timing())
+            .expect("tool pool timing policy and stage consistency");
     }
 
     #[test]
@@ -4491,6 +4620,10 @@ mod tests {
     )]
     fn ci_fixture_measures_real_saves_and_diagnostics() {
         let report = run_ci_fixture().expect("CI fixture should run");
+        eprintln!(
+            "{}",
+            serde_json::to_string_pretty(&report).expect("CI fixture report serializes")
+        );
         assert_eq!(report.variants.len(), 2);
         let variant = &report.variants[0];
         assert_eq!(variant.variant, "legacy");
@@ -4510,6 +4643,10 @@ mod tests {
     )]
     fn full_soak_ci_fixture_starts_required_subsystems() {
         let report = run_full_soak_ci_fixture().expect("full soak CI fixture should run");
+        eprintln!(
+            "{}",
+            serde_json::to_string_pretty(&report).expect("full soak report serializes")
+        );
 
         assert_eq!(report.workload.chat_count, 1);
         assert_eq!(report.variants.len(), 2);

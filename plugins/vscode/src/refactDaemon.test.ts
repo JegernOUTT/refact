@@ -183,6 +183,7 @@ export async function runRefactDaemonTests() {
     await runDaemonUpgradeTimeoutTest();
     await runSha256OfFileCacheTest();
     await runCompatibleDaemonSkipsMissingBinaryTest();
+    await runPrereleaseRuntimeDaemonRequirementTest();
     await runDaemonJsonDiscoveryTest();
     await runDaemonReportedPortFallbackTest(0);
     await runDaemonReportedPortFallbackTest(-1);
@@ -1214,6 +1215,30 @@ async function runCompatibleDaemonSkipsMissingBinaryTest() {
     assert.strictEqual(status.version, "8.1.0");
     assert.strictEqual(reads, 1);
     assert.strictEqual(spawned, false);
+}
+
+async function runPrereleaseRuntimeDaemonRequirementTest() {
+    const runtimeVersion = "8.7.0-main-4053-d8e6abb9";
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "refact-runtime-daemon-"));
+    try {
+        const options = {
+            daemonJsonPath: path.join(root, "missing-daemon.json"),
+            readDaemonInfo: async () => daemonStatus(runtimeVersion),
+        };
+        assert.strictEqual(await findExistingDaemon({ ...options, pluginVersion: "8.7.0" }), undefined,
+            "numeric IDE version must continue to reject an older prerelease");
+        const found = await findExistingDaemon({ ...options, pluginVersion: runtimeVersion });
+        assert.strictEqual(found?.version, runtimeVersion);
+        const reused = await ensureDaemon(path.join(root, "missing-refact"), {
+            ...options,
+            pluginVersion: runtimeVersion,
+            spawnDaemon: () => { throw new Error("matching runtime daemon must not spawn"); },
+            shutdownDaemon: async () => { throw new Error("matching runtime daemon must not shut down"); },
+        });
+        assert.strictEqual(reused.version, runtimeVersion);
+    } finally {
+        fs.rmSync(root, { recursive: true, force: true });
+    }
 }
 
 async function runSha256OfFileCacheTest() {

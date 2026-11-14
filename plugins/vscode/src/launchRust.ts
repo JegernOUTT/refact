@@ -407,28 +407,28 @@ export class RustBinaryBlob {
         }
         this.warn_about_ignored_roots(rootSelection);
 
-        const pluginVersion = this.plugin_version();
+        const runtimeVersion = this.runtime_requirement_version();
         this.attachStage = "engine_resolution";
         const localResolved = await refactBinary.resolveLocalRefactBinaryDetailedOrNull({
             explicitPath: vscode.workspace.getConfiguration().get<string>("refactai.binaryPath")?.trim(),
             bundledDir: this.asset_path,
-            minVersion: pluginVersion,
-            pinnedVersion: pluginVersion,
+            minVersion: runtimeVersion,
+            pinnedVersion: runtimeVersion,
             cacheDir: this.binary_cache_path,
         });
         if (!this.is_current_generation(generation)) { return; }
-        this.runtimeVersions.requestedVersion = pluginVersion;
+        this.runtimeVersions.requestedVersion = runtimeVersion;
         this.runtimeVersions.selected = localResolved ? observedVersion("local", localResolved.version) : null;
         const expectedExecutableSha256 = localResolved ? await refactDaemon.sha256OfFile(localResolved.binPath) : undefined;
         if (!this.is_current_generation(generation)) { return; }
-        const expectedEngineVersion = localResolved?.version ?? pluginVersion;
+        const expectedEngineVersion = localResolved?.version ?? runtimeVersion;
         let daemon = await refactDaemon.findExistingDaemon({ port: daemonPort, pluginVersion: expectedEngineVersion, expectedExecutableSha256 });
         if (!this.is_current_generation(generation)) {
             return;
         }
         this.set_attach_state(attachStateForDaemonOpenProject(), heldIssue);
         if (daemon) {
-            const sharedResolved = await refactBinary.resolveCompatibleSharedRefactBinaryOrNull(os.homedir(), pluginVersion);
+            const sharedResolved = await refactBinary.resolveCompatibleSharedRefactBinaryOrNull(os.homedir(), runtimeVersion);
             if (!this.is_current_generation(generation)) { return; }
             if (sharedResolved) {
                 this.maybe_register_shared_refact_path(sharedResolved.binPath);
@@ -445,8 +445,8 @@ export class RustBinaryBlob {
             const resolved = await refactBinary.resolveRefactBinaryDetailed({
                 explicitPath: configuredBinary,
                 bundledDir: this.asset_path,
-                minVersion: pluginVersion,
-                pinnedVersion: pluginVersion,
+                minVersion: runtimeVersion,
+                pinnedVersion: runtimeVersion,
                 cacheDir: this.binary_cache_path,
                 onDownloadStart: () => {
                     if (this.is_current_generation(generation)) {
@@ -465,7 +465,7 @@ export class RustBinaryBlob {
             this.attachStage = "daemon_start";
             daemon = await refactDaemon.ensureDaemon(resolved.binPath, {
                 port: daemonPort,
-                pluginVersion: resolved.version ?? pluginVersion,
+                pluginVersion: resolved.version ?? runtimeVersion,
             }, explicitDaemonPort);
         }
         if (!this.is_current_generation(generation)) {
@@ -997,8 +997,19 @@ export class RustBinaryBlob {
             });
     }
 
-    private plugin_version(): string {
-        return this.plugin_metadata_version() ?? "0.0.0";
+    private runtime_requirement_version(): string {
+        const metadata = vscode.extensions.getExtension("smallcloud.codify")?.packageJSON;
+        if (!metadata || !Object.prototype.hasOwnProperty.call(metadata, "refactRuntimeVersion")) {
+            return this.plugin_metadata_version() ?? "0.0.0";
+        }
+        const version: unknown = metadata.refactRuntimeVersion;
+        const numeric = "(?:0|[1-9][0-9]*)";
+        const prerelease = `(?:${numeric}|[0-9]*[A-Za-z-][0-9A-Za-z-]*)`;
+        const semver = new RegExp(`^${numeric}\\.${numeric}\\.${numeric}(?:-${prerelease}(?:\\.${prerelease})*)?(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?$`);
+        if (typeof version !== "string" || version.trim() !== version || !semver.test(version)) {
+            throw new Error("Invalid packageJSON.refactRuntimeVersion: expected an exact SemVer runtime version.");
+        }
+        return version;
     }
 
     private plugin_metadata_version(): string | undefined {

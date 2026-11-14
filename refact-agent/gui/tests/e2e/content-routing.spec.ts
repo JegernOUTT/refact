@@ -71,6 +71,7 @@ test("copyable legacy hrefs omit secrets and middle-click creates an independent
   const newTab = context.waitForEvent("page");
   await link.click({ button: "middle" });
   const child = await newTab;
+  await child.waitForLoadState("domcontentloaded");
   await expect(child.getByTestId("surface")).toHaveText(
     "file:/workspace/example.ts",
   );

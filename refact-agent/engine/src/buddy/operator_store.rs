@@ -91,7 +91,7 @@ impl OperatorLockOwner {
                 .duration_since(UNIX_EPOCH)
                 .map(|duration| duration.as_millis() as u64)
                 .unwrap_or(0),
-            version: env!("CARGO_PKG_VERSION").to_string(),
+            version: crate::version::VERSION.to_string(),
             command: std::env::args().collect::<Vec<_>>().join(" "),
         }
     }

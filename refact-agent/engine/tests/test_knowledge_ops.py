@@ -1,481 +1,200 @@
-#!/usr/bin/env python3
-"""
-Tests for knowledge operations (update/delete memory) endpoints.
+import os
 
-Run with:
-  python tests/test_knowledge_ops.py
+import pytest
 
-Requires:
-  - refact-lsp running on port 8001
-  - pip install requests
-"""
-
-import sys
-import tempfile
-import requests
-from pathlib import Path
-
-LSP_URL = "http://127.0.0.1:8001"
+from owned_utility_tests import memory_text, until, utility_engine
 
 
-def test_update_memory():
-    """Test updating a memory file"""
-    print("\n=== Test: Update memory ===")
-    
-    with tempfile.TemporaryDirectory() as tmpdir:
-        knowledge_dir = Path(tmpdir) / ".refact" / "knowledge"
-        knowledge_dir.mkdir(parents=True, exist_ok=True)
-        
-        test_file = knowledge_dir / "test_memory.md"
-        initial_content = """---
-id: "test-123"
-title: "Original Title"
-tags: ["test", "original"]
-kind: code
-created: 2024-01-01
-updated: 2024-01-01
-filenames: []
-links: []
-status: active
----
-
-Original content here."""
-        
-        test_file.write_text(initial_content)
-        
-        update_payload = {
-            "file_path": str(test_file),
-            "title": "Updated Title",
-            "content": "Updated content here.",
-            "tags": ["test", "updated"],
-            "kind": "decision",
-            "filenames": ["src/main.rs"]
-        }
-        
-        try:
-            response = requests.post(
-                f"{LSP_URL}/v1/knowledge/update-memory",
-                json=update_payload,
-                timeout=10
-            )
-            
-            if response.status_code != 200:
-                print(f"✗ Expected 200, got {response.status_code}: {response.text}")
-                return False
-            
-            result = response.json()
-            if not result.get("success"):
-                print(f"✗ Expected success=true, got {result}")
-                return False
-            
-            updated_content = test_file.read_text()
-            checks = [
-                ("Updated Title" in updated_content, "Title updated"),
-                ("Updated content here." in updated_content, "Content updated"),
-                ("updated" in updated_content, "Tags updated"),
-                ("decision" in updated_content, "Kind updated"),
-                ("src/main.rs" in updated_content, "Filenames updated"),
-            ]
-            
-            all_passed = True
-            for passed, desc in checks:
-                status = "✓" if passed else "✗"
-                print(f"  {status} {desc}")
-                all_passed = all_passed and passed
-            
-            return all_passed
-            
-        except Exception as e:
-            print(f"✗ Error: {e}")
-            return False
+def write_memory(utility_engine, name, identifier, body="Original content here."):
+    path = utility_engine.knowledge / name
+    path.write_text(memory_text(identifier, "Original Title", ["test", "original"], "code", [], [], body))
+    return path
 
 
-def test_update_memory_not_found():
-    """Test updating a non-existent memory file"""
-    print("\n=== Test: Update non-existent memory ===")
-    
-    update_payload = {
-        "file_path": "/nonexistent/path/memory.md",
-        "content": "Some content",
-        "tags": []
-    }
-    
-    try:
-        response = requests.post(
-            f"{LSP_URL}/v1/knowledge/update-memory",
-            json=update_payload,
-            timeout=10
-        )
-        
-        if response.status_code == 404:
-            print("✓ Correctly returned 404 for non-existent file")
-            return True
-        else:
-            print(f"✗ Expected 404, got {response.status_code}")
-            return False
-            
-    except Exception as e:
-        print(f"✗ Error: {e}")
-        return False
+async def graph_ids(client):
+    response = await client.get("/knowledge-graph")
+    assert response.status_code == 200, response.text
+    return {n["id"] for n in response.json()["nodes"] if n["node_type"].startswith("doc")}
 
 
-def test_delete_memory_permanent():
-    """Test permanently deleting a memory file"""
-    print("\n=== Test: Delete memory permanently ===")
-    
-    with tempfile.TemporaryDirectory() as tmpdir:
-        knowledge_dir = Path(tmpdir) / ".refact" / "knowledge"
-        knowledge_dir.mkdir(parents=True, exist_ok=True)
-        
-        test_file = knowledge_dir / "test_delete.md"
-        test_file.write_text("""---
-id: "test-delete"
-title: "To Delete"
----
-
-Content to delete.""")
-        
-        if not test_file.exists():
-            print("✗ Test file was not created")
-            return False
-        
-        delete_payload = {
-            "file_path": str(test_file),
-            "archive": False
-        }
-        
-        try:
-            response = requests.post(
-                f"{LSP_URL}/v1/knowledge/delete-memory",
-                json=delete_payload,
-                timeout=10
-            )
-            
-            if response.status_code != 200:
-                print(f"✗ Expected 200, got {response.status_code}: {response.text}")
-                return False
-            
-            result = response.json()
-            if not result.get("success"):
-                print(f"✗ Expected success=true, got {result}")
-                return False
-            
-            if test_file.exists():
-                print("✗ File still exists after deletion")
-                return False
-            
-            print("✓ File deleted successfully")
-            return True
-            
-        except Exception as e:
-            print(f"✗ Error: {e}")
-            return False
+async def wait_indexed(client, identifier):
+    await until(f"{identifier} visible in knowledge graph",
+                lambda: _contains(client, identifier))
 
 
-def test_delete_memory_archive():
-    """Test archiving a memory file"""
-    print("\n=== Test: Archive memory ===")
-    
-    with tempfile.TemporaryDirectory() as tmpdir:
-        knowledge_dir = Path(tmpdir) / ".refact" / "knowledge"
-        knowledge_dir.mkdir(parents=True, exist_ok=True)
-        
-        test_file = knowledge_dir / "test_archive.md"
-        test_file.write_text("""---
-id: "test-archive"
-title: "To Archive"
----
-
-Content to archive.""")
-        
-        if not test_file.exists():
-            print("✗ Test file was not created")
-            return False
-        
-        delete_payload = {
-            "file_path": str(test_file),
-            "archive": True
-        }
-        
-        try:
-            response = requests.post(
-                f"{LSP_URL}/v1/knowledge/delete-memory",
-                json=delete_payload,
-                timeout=10
-            )
-            
-            if response.status_code != 200:
-                print(f"✗ Expected 200, got {response.status_code}: {response.text}")
-                return False
-            
-            result = response.json()
-            if not result.get("success"):
-                print(f"✗ Expected success=true, got {result}")
-                return False
-            
-            if test_file.exists():
-                print("✗ Original file still exists")
-                return False
-            
-            archive_dir = knowledge_dir / "archive"
-            archived_file = archive_dir / "test_archive.md"
-            if not archived_file.exists():
-                print(f"✗ Archived file not found at {archived_file}")
-                return False
-            
-            print("✓ File archived successfully")
-            return True
-            
-        except Exception as e:
-            print(f"✗ Error: {e}")
-            return False
+async def _contains(client, identifier):
+    return identifier in await graph_ids(client)
 
 
-def test_delete_memory_not_found():
-    """Test deleting a non-existent memory file"""
-    print("\n=== Test: Delete non-existent memory ===")
-    
-    delete_payload = {
-        "file_path": "/nonexistent/path/memory.md",
-        "archive": False
-    }
-    
-    try:
-        response = requests.delete(
-            f"{LSP_URL}/v1/knowledge/delete-memory",
-            json=delete_payload,
-            timeout=10
-        )
-        
-        if response.status_code == 404:
-            print("✓ Correctly returned 404 for non-existent file")
-            return True
-        else:
-            print(f"✗ Expected 404, got {response.status_code}")
-            return False
-            
-    except Exception as e:
-        print(f"✗ Error: {e}")
-        return False
+async def update(client, payload):
+    return await client.post("/knowledge/update-memory", json=payload)
 
 
-def test_path_traversal_attack():
-    """Test that path traversal attacks are blocked"""
-    print("\n=== Test: Path traversal attack (../../../etc/passwd) ===")
-    
-    with tempfile.TemporaryDirectory() as tmpdir:
-        knowledge_dir = Path(tmpdir) / ".refact" / "knowledge"
-        knowledge_dir.mkdir(parents=True, exist_ok=True)
-        
-        attack_paths = [
-            "../../../etc/passwd",
-            "../../.ssh/id_rsa",
-            knowledge_dir / ".." / ".." / "sensitive.md",
-        ]
-        
-        all_blocked = True
-        for attack_path in attack_paths:
-            update_payload = {
-                "file_path": str(attack_path),
-                "content": "Malicious content",
-                "tags": []
-            }
-            
-            try:
-                response = requests.post(
-                    f"{LSP_URL}/v1/knowledge/update-memory",
-                    json=update_payload,
-                    timeout=10
-                )
-                
-                if response.status_code in [403, 404]:
-                    print(f"  ✓ Blocked: {attack_path}")
-                else:
-                    print(f"  ✗ Not blocked (got {response.status_code}): {attack_path}")
-                    all_blocked = False
-                    
-            except Exception as e:
-                print(f"  ✗ Error testing {attack_path}: {e}")
-                all_blocked = False
-        
-        return all_blocked
+async def delete(client, payload):
+    return await client.post("/knowledge/delete-memory", json=payload)
 
 
-def test_symlink_escape_attack():
-    """Test that symlink escapes are blocked"""
-    print("\n=== Test: Symlink escape attack ===")
-    
-    with tempfile.TemporaryDirectory() as tmpdir:
-        knowledge_dir = Path(tmpdir) / ".refact" / "knowledge"
-        knowledge_dir.mkdir(parents=True, exist_ok=True)
-        
-        outside_dir = Path(tmpdir) / "outside"
-        outside_dir.mkdir(exist_ok=True)
-        
-        target_file = outside_dir / "secret.md"
-        target_file.write_text("Secret content")
-        
-        symlink_path = knowledge_dir / "escape.md"
-        try:
-            symlink_path.symlink_to(target_file)
-        except OSError:
-            print("  ⚠ Cannot create symlinks (Windows?), skipping test")
-            return True
-        
-        update_payload = {
-            "file_path": str(symlink_path),
-            "content": "Trying to overwrite via symlink",
-            "tags": []
-        }
-        
-        try:
-            response = requests.post(
-                f"{LSP_URL}/v1/knowledge/update-memory",
-                json=update_payload,
-                timeout=10
-            )
-            
-            if response.status_code == 403:
-                print("✓ Symlink escape blocked with 403 Forbidden")
-                return True
-            else:
-                print(f"✗ Expected 403, got {response.status_code}")
-                return False
-                
-        except Exception as e:
-            print(f"✗ Error: {e}")
-            return False
+@pytest.mark.asyncio
+async def test_update_memory(utility_engine):
+    test_file = write_memory(utility_engine, "test_memory.md", "test-123")
+    async with utility_engine.client() as client:
+        response = await update(client, {
+            "file_path": str(test_file), "title": "Updated Title", "content": "Updated content here.",
+            "tags": ["test", "updated"], "kind": "decision", "filenames": ["src/main.rs"], "auto_link": False})
+        assert response.status_code == 200, response.text
+        assert response.json() == {"success": True}
+        graph = (await client.get("/knowledge-graph?include_content=1")).json()
+    text = test_file.read_text()
+    assert 'title: "Updated Title"' in text
+    assert text.rstrip().endswith("Updated content here.")
+    assert "Original content here." not in text
+    assert 'tags: ["test", "updated"]' in text
+    assert "kind: decision" in text
+    assert 'filenames: ["src/main.rs"]' in text
+    assert 'id: "test-123"' in text
+    node = next(n for n in graph["nodes"] if n["id"] == "test-123")
+    assert node["node_type"] == "doc_decision" and node["title"] == "Updated Title", node
+    assert node["content"].strip() == "Updated content here."
 
 
-def test_non_markdown_file_rejected():
-    """Test that non-.md files are rejected"""
-    print("\n=== Test: Non-.md file rejection ===")
-    
-    with tempfile.TemporaryDirectory() as tmpdir:
-        knowledge_dir = Path(tmpdir) / ".refact" / "knowledge"
-        knowledge_dir.mkdir(parents=True, exist_ok=True)
-        
-        test_files = [
-            knowledge_dir / "test.txt",
-            knowledge_dir / "test.py",
-            knowledge_dir / "test.sh",
-            knowledge_dir / "test",
-        ]
-        
-        all_rejected = True
-        for test_file in test_files:
+@pytest.mark.asyncio
+async def test_update_memory_not_found(utility_engine):
+    missing = utility_engine.knowledge / "missing.md"
+    async with utility_engine.client() as client:
+        response = await update(client, {"file_path": str(missing), "content": "Some content", "tags": []})
+    assert response.status_code == 404, response.text
+    assert not missing.exists()
+
+
+@pytest.mark.asyncio
+async def test_update_rejects_invalid_status(utility_engine):
+    test_file = write_memory(utility_engine, "invalid_status.md", "invalid-status")
+    before = test_file.read_text()
+    async with utility_engine.client() as client:
+        response = await update(client, {"file_path": str(test_file), "status": "bogus"})
+    assert response.status_code == 400, response.text
+    assert "Invalid status" in response.text
+    assert test_file.read_text() == before
+
+
+@pytest.mark.asyncio
+async def test_delete_memory_permanent(utility_engine):
+    test_file = write_memory(utility_engine, "test_delete.md", "test-delete")
+    async with utility_engine.client() as client:
+        await wait_indexed(client, "test-delete")
+        response = await delete(client, {"file_path": str(test_file), "archive": False})
+        assert response.status_code == 200, response.text
+        assert response.json() == {"success": True}
+        ids = await graph_ids(client)
+    assert not test_file.exists()
+    assert "test-delete" not in ids and {"kg-alpha", "kg-beta"} <= ids
+
+
+@pytest.mark.asyncio
+async def test_delete_memory_archive(utility_engine):
+    test_file = write_memory(utility_engine, "test_archive.md", "test-archive", "Content to archive.")
+    async with utility_engine.client() as client:
+        await wait_indexed(client, "test-archive")
+        response = await delete(client, {"file_path": str(test_file), "archive": True})
+        assert response.status_code == 200, response.text
+        assert response.json() == {"success": True}
+        ids = await graph_ids(client)
+    assert test_file.exists()
+    text = test_file.read_text()
+    assert "status: archived" in text and "deprecated_at:" in text
+    assert text.rstrip().endswith("Content to archive.")
+    assert "test-archive" not in ids
+
+
+@pytest.mark.asyncio
+async def test_delete_memory_not_found(utility_engine):
+    missing = utility_engine.knowledge / "missing.md"
+    async with utility_engine.client() as client:
+        response = await delete(client, {"file_path": str(missing), "archive": False})
+        wrong_method = await client.request("DELETE", "/knowledge/delete-memory",
+                                            json={"file_path": str(missing), "archive": False})
+    assert response.status_code == 404, response.text
+    assert wrong_method.status_code == 405, wrong_method.text
+
+
+@pytest.mark.asyncio
+async def test_path_traversal_attack(utility_engine):
+    outside = utility_engine.workspace / "outside.md"
+    before = outside.read_text()
+    attacks = [
+        "../../../etc/passwd",
+        "../../.ssh/id_rsa",
+        str(utility_engine.knowledge / ".." / ".." / "outside.md"),
+        str(utility_engine.knowledge / ".." / ".." / ".." / "config" / ".config" / "refact" / "privacy.yaml"),
+    ]
+    async with utility_engine.client() as client:
+        for attack in attacks:
+            response = await update(client, {"file_path": attack, "content": "Malicious content", "tags": []})
+            assert response.status_code in (403, 404), (attack, response.status_code, response.text)
+        direct = await update(client, {"file_path": attacks[2], "content": "Malicious content"})
+    assert direct.status_code == 403 and "outside knowledge" in direct.text, direct.text
+    assert outside.read_text() == before
+
+
+@pytest.mark.asyncio
+async def test_symlink_escape_attack(utility_engine):
+    outside_dir = utility_engine.workspace.parent / "outside"
+    outside_dir.mkdir()
+    target_file = outside_dir / "secret.md"
+    target_file.write_text("Secret content")
+    symlink_path = utility_engine.knowledge / "escape.md"
+    symlink_path.symlink_to(target_file)
+    async with utility_engine.client() as client:
+        updated = await update(client, {"file_path": str(symlink_path), "content": "Overwrite via symlink"})
+        deleted = await delete(client, {"file_path": str(symlink_path), "archive": False})
+    assert updated.status_code == 403 and "symlink" in updated.text, updated.text
+    assert deleted.status_code == 403 and "symlink" in deleted.text, deleted.text
+    assert target_file.read_text() == "Secret content"
+    assert symlink_path.is_symlink()
+
+
+@pytest.mark.asyncio
+async def test_non_markdown_file_rejected(utility_engine):
+    async with utility_engine.client() as client:
+        for name in ("test.txt", "test.py", "test.sh", "test"):
+            test_file = utility_engine.knowledge / name
             test_file.write_text("Some content")
-            
-            update_payload = {
-                "file_path": str(test_file),
-                "content": "Content",
-                "tags": []
-            }
-            
-            try:
-                response = requests.post(
-                    f"{LSP_URL}/v1/knowledge/update-memory",
-                    json=update_payload,
-                    timeout=10
-                )
-                
-                if response.status_code == 400:
-                    print(f"  ✓ Rejected: {test_file.name}")
-                else:
-                    print(f"  ✗ Not rejected (got {response.status_code}): {test_file.name}")
-                    all_rejected = False
-                    
-            except Exception as e:
-                print(f"  ✗ Error testing {test_file.name}: {e}")
-                all_rejected = False
-        
-        return all_rejected
+            response = await update(client, {"file_path": str(test_file), "content": "Content", "tags": []})
+            assert response.status_code == 400, (name, response.text)
+            assert test_file.read_text() == "Some content"
+        directory = utility_engine.knowledge / "folder.md"
+        directory.mkdir()
+        response = await update(client, {"file_path": str(directory), "content": "Content"})
+    assert response.status_code == 400, response.text
 
 
-def test_path_outside_knowledge_dir():
-    """Test that paths outside knowledge directory are rejected"""
-    print("\n=== Test: Path outside knowledge directory ===")
-    
-    with tempfile.TemporaryDirectory() as tmpdir:
-        knowledge_dir = Path(tmpdir) / ".refact" / "knowledge"
-        knowledge_dir.mkdir(parents=True, exist_ok=True)
-        
-        outside_file = Path(tmpdir) / "outside.md"
-        outside_file.write_text("Outside content")
-        
-        update_payload = {
-            "file_path": str(outside_file),
-            "content": "Trying to update outside file",
-            "tags": []
-        }
-        
-        try:
-            response = requests.post(
-                f"{LSP_URL}/v1/knowledge/update-memory",
-                json=update_payload,
-                timeout=10
-            )
-            
-            if response.status_code == 403:
-                print("✓ Path outside knowledge dir blocked with 403 Forbidden")
-                return True
-            else:
-                print(f"✗ Expected 403, got {response.status_code}")
-                return False
-                
-        except Exception as e:
-            print(f"✗ Error: {e}")
-            return False
+@pytest.mark.asyncio
+async def test_path_outside_knowledge_dir(utility_engine):
+    outside_file = utility_engine.workspace / "outside.md"
+    before = outside_file.read_text()
+    async with utility_engine.client() as client:
+        updated = await update(client, {"file_path": str(outside_file), "content": "Outside update"})
+        deleted = await delete(client, {"file_path": str(outside_file), "archive": False})
+    assert updated.status_code == 403, updated.text
+    assert deleted.status_code == 403, deleted.text
+    assert outside_file.read_text() == before
 
 
-def main():
-    print("=" * 60)
-    print("Knowledge Operations Tests")
-    print("=" * 60)
-    print(f"Testing against: {LSP_URL}")
-    
+@pytest.mark.asyncio
+async def test_readonly_knowledge_dir_update_fails_without_mutation(utility_engine):
+    if os.geteuid() == 0:
+        raise AssertionError("readonly lane requires a non-root test user")
+    test_file = write_memory(utility_engine, "readonly.md", "readonly-doc")
+    before = test_file.read_text()
+    mode = utility_engine.knowledge.stat().st_mode
+    utility_engine.knowledge.chmod(0o555)
     try:
-        response = requests.get(f"{LSP_URL}/v1/ping", timeout=2)
-        if response.status_code != 200:
-            print(f"\n✗ Server not responding correctly at {LSP_URL}")
-            sys.exit(1)
-    except Exception as e:
-        print(f"\n✗ Cannot connect to server at {LSP_URL}: {e}")
-        print("  Make sure refact-lsp is running with: cargo run")
-        sys.exit(1)
-    
-    print("✓ Server is running\n")
-    
-    results = []
-    results.append(("Update memory", test_update_memory()))
-    results.append(("Update non-existent memory", test_update_memory_not_found()))
-    results.append(("Delete memory permanently", test_delete_memory_permanent()))
-    results.append(("Archive memory", test_delete_memory_archive()))
-    results.append(("Delete non-existent memory", test_delete_memory_not_found()))
-    
-    print("\n" + "=" * 60)
-    print("Security Tests")
-    print("=" * 60)
-    results.append(("Path traversal attack blocked", test_path_traversal_attack()))
-    results.append(("Symlink escape blocked", test_symlink_escape_attack()))
-    results.append(("Non-.md files rejected", test_non_markdown_file_rejected()))
-    results.append(("Paths outside knowledge dir blocked", test_path_outside_knowledge_dir()))
-    
-    print("\n" + "=" * 60)
-    print("Summary")
-    print("=" * 60)
-    
-    passed = sum(1 for _, r in results if r)
-    total = len(results)
-    
-    for name, result in results:
-        status = "✓ PASS" if result else "✗ FAIL"
-        print(f"  {status}: {name}")
-    
-    print(f"\nTotal: {passed}/{total} passed")
-    
-    sys.exit(0 if passed == total else 1)
-
-
-if __name__ == "__main__":
-    main()
+        async with utility_engine.client() as client:
+            response = await update(client, {"file_path": str(test_file), "content": "Should not land"})
+            deleted = await delete(client, {"file_path": str(test_file), "archive": False})
+    finally:
+        utility_engine.knowledge.chmod(mode)
+    assert response.status_code == 500, response.text
+    assert deleted.status_code == 500, deleted.text
+    assert test_file.read_text() == before
+    assert not [p for p in utility_engine.knowledge.iterdir() if p.name.startswith(".readonly.md.tmp")]

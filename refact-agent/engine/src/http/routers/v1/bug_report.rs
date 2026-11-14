@@ -256,7 +256,7 @@ fn build_context_response_from_parts(
     daemon: ResolvedLogSource,
 ) -> BugReportContextResponse {
     BugReportContextResponse {
-        engine_version: env!("CARGO_PKG_VERSION"),
+        engine_version: crate::version::VERSION,
         os: format!("{} {}", std::env::consts::OS, std::env::consts::ARCH),
         http_port,
         cache_dir: cache_dir.to_string_lossy().to_string(),

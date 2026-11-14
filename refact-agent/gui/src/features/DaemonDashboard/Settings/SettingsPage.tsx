@@ -2,6 +2,7 @@ import { SettingsSection } from "../../Settings/SettingsSection";
 import { DaemonSection } from "./DaemonSection";
 import { DangerSection } from "./DangerSection";
 import { ProvidersSection } from "./ProvidersSection";
+import { RuntimeCoordinatorSection } from "./RuntimeCoordinatorSection";
 import { UpdatesSection } from "./UpdatesSection";
 import styles from "./SettingsPage.module.css";
 
@@ -16,6 +17,7 @@ export function SettingsPage() {
       <DaemonSection />
       <ProvidersSection />
       <UpdatesSection />
+      <RuntimeCoordinatorSection />
       <DangerSection />
     </SettingsSection>
   );

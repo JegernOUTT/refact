@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "repository": {"owner": "example", "name": "refact", "id": 123},
+  "source_sha": "1111111111111111111111111111111111111111",
+  "workflow": {"path": ".github/workflows/runtime.yml", "id": 456},
+  "run": {"id": 789, "attempt": 2},
+  "build": {"version": "8.7.0-main-138-abcdef", "channel": "preview"},
+  "build_inputs": {
+    "rust_toolchain": "1.88.0", "node_version": "22.14.0", "profile": "ci-release",
+    "cargo_lock_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+    "javascript_locks_sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+    "config_sha256": "4444444444444444444444444444444444444444444444444444444444444444"
+  },
+  "component_versions": {"runtime": "8.7.0-main-138-abcdef", "gui": "2.1.0", "vscode": "8.7.138", "jetbrains": "8.7.0.138-EAP"},
+  "compatibility": {"daemon_api": {"min": 1, "max": 2}, "worker_api": {"min": 2, "max": 2}, "host_bridge": {"min": 1, "max": 3}},
+  "artifacts": [
+    {"component": "runtime", "target": "x86_64-unknown-linux-gnu", "filename": "refact-linux.tar.gz", "format": "tar_gz", "size": 100,
+     "sha256": "5555555555555555555555555555555555555555555555555555555555555555",
+     "extracted_files": [{"path": "bin/refact", "size": 80, "sha256": "6666666666666666666666666666666666666666666666666666666666666666"}]},
+    {"component": "gui", "target": "universal", "filename": "gui.tgz", "format": "tar_gz", "size": 20, "sha256": "7777777777777777777777777777777777777777777777777777777777777777"},
+    {"component": "vscode", "target": "universal", "filename": "refact.vsix", "format": "vsix", "size": 20, "sha256": "8888888888888888888888888888888888888888888888888888888888888888"},
+    {"component": "jetbrains", "target": "universal", "filename": "refact.zip", "format": "zip", "size": 20, "sha256": "9999999999999999999999999999999999999999999999999999999999999999"}
+  ],
+  "tests": "not_run"
+}

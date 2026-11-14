@@ -14,6 +14,8 @@ use crate::daemon::events::DaemonEvent;
 use crate::daemon::projects::ProjectEntry;
 use crate::daemon::state::{DaemonInfo, WorkerRow};
 use crate::daemon::supervisor::WorkerState;
+use refact_self_update::runtime_selection::{RuntimeSelection, SelectionSpec};
+use crate::daemon::runtime_coordinator::{RevisionRequest, SelectRequest, StageKey};
 
 #[cfg(not(test))]
 const LOG_FOLLOW_POLL_INTERVAL: Duration = Duration::from_millis(500);
@@ -38,6 +40,10 @@ const API_PATH_SEGMENT: &AsciiSet = &CONTROLS
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CliCommand {
+    Runtime {
+        command: RuntimeCommand,
+        json: bool,
+    },
     Ui {
         path: Option<PathBuf>,
         json: bool,
@@ -96,6 +102,26 @@ pub enum ProjectsCommand {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuntimeCommand {
+    Status {
+        key: Option<(String, u64)>,
+    },
+    Plan {
+        key: Option<(String, u64)>,
+    },
+    Select {
+        revision: u64,
+        selection: RuntimeSelection,
+    },
+    Resolve {
+        revision: u64,
+    },
+    Stage {
+        revision: u64,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CronCommand {
     List { project: Option<String> },
     Add(CronAddOptions),
@@ -149,6 +175,9 @@ pub struct CliOptions {
 impl CliOptions {
     fn json_output(&self) -> bool {
         match &self.command {
+            CliCommand::Runtime {
+                json, ..
+            } => *json,
             CliCommand::Ui {
                 json, ..
             }
@@ -269,6 +298,7 @@ pub fn parse_cli_args(args: &[std::ffi::OsString]) -> Result<CliOptions, String>
             },
         },
         "cron" => parse_cron(&mut args)?,
+        "runtime" => parse_runtime(&mut args)?,
         "projects" => parse_projects(&mut args)?,
         "restart" => parse_restart_stop(&mut args, true)?,
         "stop" => parse_restart_stop(&mut args, false)?,
@@ -304,6 +334,105 @@ pub fn parse_cli_args(args: &[std::ffi::OsString]) -> Result<CliOptions, String>
         ));
     }
     Ok(options)
+}
+
+fn parse_runtime(args: &mut Vec<String>) -> Result<CliOptions, String> {
+    use refact_self_update::runtime_manifest::Channel;
+    let action = take_one(args, "runtime command")?;
+    let mut values = std::collections::HashMap::new();
+    let mut json = false;
+    while !args.is_empty() {
+        let flag = args.remove(0);
+        if flag == "--json" && !json {
+            json = true;
+            continue;
+        }
+        let allowed = match action.as_str() {
+            "status" | "plan" => matches!(flag.as_str(), "--revision" | "--manifest-digest"),
+            "select" => matches!(
+                flag.as_str(),
+                "--revision" | "--source" | "--channel" | "--local"
+            ),
+            "resolve" | "stage" => flag == "--revision",
+            _ => return Err(format!("unknown runtime command `{action}`")),
+        };
+        if !allowed || values.contains_key(&flag) {
+            return Err(format!("unexpected or duplicate runtime option `{flag}`"));
+        }
+        let value = take_one(args, &format!("value for {flag}"))?;
+        if value.starts_with('-') {
+            return Err(format!("missing value for {flag}"));
+        }
+        values.insert(flag, value);
+    }
+    let revision = values
+        .remove("--revision")
+        .map(|v| {
+            if v.is_empty() || !v.bytes().all(|b| b.is_ascii_digit()) {
+                return Err("--revision requires an unsigned integer".to_string());
+            }
+            v.parse::<u64>()
+                .map_err(|_| "invalid --revision".to_string())
+        })
+        .transpose()?;
+    let command = match action.as_str() {
+        "status" | "plan" => {
+            let key = match (values.remove("--manifest-digest"), revision) {
+                (None, None) => None,
+                (Some(digest), Some(revision)) if revision > 0 && digest.len() == 64 && digest.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) => Some((digest, revision)),
+                _ => return Err("provide --manifest-digest (64 lowercase hex characters) and positive --revision together".into()),
+            };
+            if action == "plan" {
+                RuntimeCommand::Plan {
+                    key,
+                }
+            } else {
+                RuntimeCommand::Status {
+                    key,
+                }
+            }
+        }
+        "select" => {
+            let revision =
+                revision.ok_or("select requires --revision (0 for initial selection)")?;
+            let selection = match (values.remove("--local"), values.remove("--source"), values.remove("--channel")) {
+                (Some(absolute_path), None, None) => RuntimeSelection::try_from(SelectionSpec::Local { absolute_path })?,
+                (None, Some(source), Some(channel)) => {
+                    let channel = match channel.as_str() {
+                        "stable" => Channel::Stable, "preview" => Channel::Preview, "nightly" => Channel::Nightly,
+                        _ => return Err("--channel must be stable, preview, or nightly".into()),
+                    };
+                    refact_self_update::public_release::parse_source_url(&source, channel).map_err(|e| format!("invalid runtime source: {e:?}"))?
+                }
+                _ => return Err("select requires --source URL --channel stable|preview|nightly, or --local <absolute-path> alone".into()),
+            };
+            RuntimeCommand::Select {
+                revision,
+                selection,
+            }
+        }
+        "resolve" | "stage" => {
+            let revision = revision
+                .filter(|v| *v > 0)
+                .ok_or("resolve/stage requires positive --revision")?;
+            if action == "resolve" {
+                RuntimeCommand::Resolve {
+                    revision,
+                }
+            } else {
+                RuntimeCommand::Stage {
+                    revision,
+                }
+            }
+        }
+        _ => return Err(format!("unknown runtime command `{action}`")),
+    };
+    Ok(CliOptions {
+        command: CliCommand::Runtime {
+            command,
+            json,
+        },
+    })
 }
 
 fn parse_ui(args: &mut Vec<String>) -> Result<CliOptions, String> {
@@ -644,6 +773,13 @@ pub async fn run_with_io(
 
 async fn run_inner(options: CliOptions, out: &mut dyn Write) -> Result<i32, CliError> {
     match options.command {
+        CliCommand::Runtime {
+            command,
+            json,
+        } => {
+            let daemon = existing_daemon().await?;
+            run_runtime(&daemon, command, json, out).await
+        }
         CliCommand::Ui {
             path,
             json,
@@ -740,6 +876,194 @@ async fn run_inner(options: CliOptions, out: &mut dyn Write) -> Result<i32, CliE
         CliCommand::Status {
             json,
         } => run_status(json, out).await,
+    }
+}
+
+fn runtime_status_path(key: Option<(String, u64)>) -> String {
+    let mut path = "/daemon/v1/runtime/status".to_string();
+    if let Some((manifest_digest, selection_revision)) = key {
+        let key = StageKey {
+            manifest_digest,
+            selection_revision,
+        };
+        let query = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("manifest_digest", &key.manifest_digest)
+            .append_pair("selection_revision", &key.selection_revision.to_string())
+            .finish();
+        path.push('?');
+        path.push_str(&query);
+    }
+    path
+}
+
+async fn run_runtime(
+    daemon: &DaemonInfo,
+    command: RuntimeCommand,
+    json_output: bool,
+    out: &mut dyn Write,
+) -> Result<i32, CliError> {
+    let value: Value = match command {
+        RuntimeCommand::Status {
+            key,
+        }
+        | RuntimeCommand::Plan {
+            key,
+        } => client_get(daemon, &runtime_status_path(key)).await?,
+        command => {
+            // Validate the destination before reading configured native-user credentials.
+            let base = runtime_loopback_url(daemon)?;
+            let config = crate::daemon::config::load().await.map_err(|_| {
+                CliError::runtime("cannot load daemon native-user authentication configuration")
+            })?;
+            let (username, password) = runtime_credentials(&config.auth)?;
+            let (path, body) = runtime_mutation(command)?;
+            runtime_post(&base, path, &body, username, password).await?
+        }
+    };
+    if !json_output {
+        writeln!(out, "Runtime observation/preparation only: no installation, activation, or restart. IDE plugins remain IDE-owned.").map_err(write_error)?;
+    }
+    print_json(out, &value)?;
+    Ok(0)
+}
+
+fn runtime_credentials(auth: &crate::daemon::config::AuthConfig) -> Result<(&str, &str), CliError> {
+    match (auth.enabled, auth.username.as_deref(), auth.password.as_deref()) {
+        (true, Some(user), Some(password)) if !user.is_empty() && !password.is_empty() => Ok((user, password)),
+        _ => Err(CliError::runtime("runtime mutation requires configured native-user Basic authentication; daemon/worker bearer tokens do not authorize it")),
+    }
+}
+
+fn runtime_loopback_url(daemon: &DaemonInfo) -> Result<String, CliError> {
+    let ip: std::net::IpAddr = daemon.bind.parse().map_err(|_| {
+        CliError::runtime("runtime mutation requires a literal loopback daemon address")
+    })?;
+    let ip = if ip.is_unspecified() {
+        if ip.is_ipv4() {
+            std::net::IpAddr::from([127, 0, 0, 1])
+        } else {
+            std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST)
+        }
+    } else {
+        ip
+    };
+    if !ip.is_loopback() || daemon.port == 0 {
+        return Err(CliError::runtime(
+            "runtime mutation requires a loopback daemon address and nonzero port",
+        ));
+    }
+    Ok(format!(
+        "http://{}",
+        std::net::SocketAddr::new(ip, daemon.port)
+    ))
+}
+
+fn runtime_mutation(command: RuntimeCommand) -> Result<(&'static str, Value), CliError> {
+    let encode_revision = |revision| {
+        serde_json::to_value(RevisionRequest {
+            expected_revision: revision,
+        })
+        .map_err(|e| CliError::runtime(e.to_string()))
+    };
+    match command {
+        RuntimeCommand::Select {
+            revision,
+            selection,
+        } => Ok((
+            "/daemon/v1/runtime/select",
+            serde_json::to_value(SelectRequest {
+                expected_revision: revision,
+                selection,
+            })
+            .map_err(|e| CliError::runtime(e.to_string()))?,
+        )),
+        RuntimeCommand::Resolve {
+            revision,
+        } => Ok(("/daemon/v1/runtime/resolve", encode_revision(revision)?)),
+        RuntimeCommand::Stage {
+            revision,
+        } => Ok(("/daemon/v1/runtime/stage", encode_revision(revision)?)),
+        _ => Err(CliError::runtime("runtime read is not a mutation")),
+    }
+}
+
+async fn runtime_post(
+    base: &str,
+    path: &str,
+    body: &Value,
+    username: &str,
+    password: &str,
+) -> Result<Value, CliError> {
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(Duration::from_secs(2))
+        .timeout(Duration::from_secs(180))
+        .build()
+        .map_err(|_| CliError::runtime("cannot build runtime HTTP client"))?;
+    let mut response = client
+        .post(format!("{base}{path}"))
+        .basic_auth(username, Some(password))
+        .json(body)
+        .send()
+        .await
+        .map_err(|_| runtime_outcome_error("runtime request failed"))?;
+    let status = response.status();
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|_| runtime_outcome_error("runtime response interrupted"))?
+    {
+        if chunk.len() > (1024 * 1024usize).saturating_sub(bytes.len()) {
+            return Err(runtime_outcome_error("runtime response exceeds 1 MiB"));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    let parsed = serde_json::from_slice::<Value>(&bytes);
+    if !status.is_success() {
+        let detail = parsed
+            .as_ref()
+            .map(runtime_backend_error)
+            .unwrap_or("backend error details withheld");
+        return Err(runtime_outcome_error(&format!(
+            "runtime request failed with status {status}: {detail}"
+        )));
+    }
+    parsed.map_err(|_| runtime_outcome_error("invalid runtime response JSON"))
+}
+
+fn runtime_outcome_error(message: &str) -> CliError {
+    CliError::runtime(format!(
+        "{message}; completion may be unknown, inspect runtime status before retry"
+    ))
+}
+
+/// Backend errors can contain filesystem paths, URLs and transport diagnostics. Extract only
+/// the structured error field and translate recognized facts to fixed, bounded public text.
+/// Never echo arbitrary server text (including apparent credentials) into terminal/JSON output.
+fn runtime_backend_error(value: &Value) -> &'static str {
+    let Some(error) = value
+        .get("error")
+        .and_then(Value::as_str)
+        .filter(|s| s.len() <= 4096)
+    else {
+        return "backend error details withheld";
+    };
+    if error.contains("stage outcome may already be cached") {
+        "stage outcome may already be cached"
+    } else if error.contains("selection revision conflict") {
+        "selection revision conflict"
+    } else if error.contains("daemon update/shutdown active") {
+        "daemon update/shutdown active"
+    } else if error.contains("AuthenticationRequired") {
+        "source authentication required"
+    } else if error.contains("local runtime is unmanaged") {
+        "local runtime is unmanaged; overwrite forbidden"
+    } else if error.contains("selection absent") {
+        "runtime selection absent"
+    } else {
+        "backend error details withheld"
     }
 }
 
@@ -1492,7 +1816,7 @@ async fn run_version(json_output: bool, out: &mut dyn Write) -> Result<i32, CliE
     if json_output {
         print_json(
             out,
-            &json!({"client": env!("CARGO_PKG_VERSION"), "daemon": daemon}),
+            &json!({"client": crate::version::VERSION, "daemon": daemon}),
         )?;
     } else {
         writeln!(out, "{}", crate::cli_dispatch::version_text()).map_err(write_error)?;
@@ -1633,13 +1957,13 @@ async fn doctor_report() -> DoctorReport {
                 format!("unreachable at port {}", info.port)
             },
         ));
-        let version_ok = info.version == env!("CARGO_PKG_VERSION");
+        let version_ok = info.version == crate::version::VERSION;
         checks.push(check(
             "version match",
             version_ok,
             format!(
                 "client {}, daemon {}",
-                env!("CARGO_PKG_VERSION"),
+                crate::version::VERSION,
                 info.version
             ),
         ));
@@ -2085,13 +2409,18 @@ pub fn doctor_exit_code(checks: &[DoctorCheck]) -> i32 {
     }
 }
 
+pub fn runtime_help_text() -> &'static str {
+    "refact runtime <status|select|resolve|stage|plan> [--json]\n\n    status|plan [--manifest-digest <sha256> --revision <N>]\n    select --revision <N> --source <URL> --channel stable|preview|nightly\n    select --revision <N> --local <absolute-path>\n    resolve|stage --revision <N>\n\nUses an existing daemon only; never starts or replaces one. Select accepts revision 0 for the initial selection; resolve/stage require a positive revision. Status and plan only observe local state (plan is not a resolved update plan; use resolve for that). Stage prepares a cache, it does not install, activate, or restart. CLI, daemon, workers and embedded GUI belong together; VS Code and JetBrains plugins remain IDE-owned. Local paths are explicitly unmanaged and cannot be overwritten. Mutations require configured native-user Basic authentication. Actions URLs can be selected but resolution requires authentication and is unsupported by this public-only resolver. Pinned release/run URLs derive their channel from the manifest; --channel applies to repository/release-list URLs."
+}
+
 pub fn usage_text() -> &'static str {
-    "refact <SUBCOMMAND> [OPTIONS]\n\nSUBCOMMANDS:\n    ui [<path>] [--json] [--no-open]\n    ps [--json]\n    projects [--json] [open <path>|pin <id|path>|unpin <id|path>|forget <id|path>]\n    cron [--json] <list|add|run|rm|pause|resume> [--project <id|path>]\n    restart [--json] (--daemon|<id|path>)\n    stop [--json] (--daemon|<id|path>)\n    logs [--json] [-f] [--daemon|<id|path>]\n    events [--json] [-f] [--kind <kind>]\n    status [--json]\n    doctor [--json]\n    version [--json]"
+    "refact <SUBCOMMAND> [OPTIONS]\n\nSUBCOMMANDS:\n    ui [<path>] [--json] [--no-open]\n    ps [--json]\n    projects [--json] [open <path>|pin <id|path>|unpin <id|path>|forget <id|path>]\n    cron [--json] <list|add|run|rm|pause|resume> [--project <id|path>]\n    restart [--json] (--daemon|<id|path>)\n    stop [--json] (--daemon|<id|path>)\n    logs [--json] [-f] [--daemon|<id|path>]\n    events [--json] [-f] [--kind <kind>]\n    status [--json]\n    doctor [--json]\n    version [--json]\n    runtime <status|select|resolve|stage|plan> [--json]"
 }
 
 pub fn subcommand_usage_text(subcommand: &str) -> Option<&'static str> {
     match subcommand {
         "ui" => Some("refact ui [<path>] [--json] [--no-open]\n\nOpen the dashboard or a project workspace in the default browser.\n\nOPTIONS:\n    --json                      Emit the URL as JSON without opening a browser\n    --no-open                   Print the URL without opening a browser"),
+        "runtime" => Some(runtime_help_text()),
         "ps" => Some("refact ps [--json]\n\nList daemon workers."),
         "projects" => Some("refact projects [--json] [open <path>|pin <id|path>|unpin <id|path>|forget <id|path>]\n\nManage daemon project registry."),
         "cron" => Some("refact cron [--json] <list|add|run|rm|pause|resume> [--project <id|path>]\n\nManage worker scheduler jobs through the daemon proxy."),
@@ -2110,6 +2439,416 @@ pub fn subcommand_usage_text(subcommand: &str) -> Option<&'static str> {
 mod tests {
     use super::*;
     use crate::daemon::supervisor::WorkerState;
+
+    fn runtime_args(args: &[&str]) -> Result<CliOptions, String> {
+        parse_cli_args(
+            &args
+                .iter()
+                .map(|arg| std::ffi::OsString::from(*arg))
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    #[test]
+    fn runtime_parser_and_wire_contract() {
+        for action in ["status", "plan"] {
+            assert!(runtime_args(&["runtime", action, "--json"])
+                .unwrap()
+                .json_output());
+            assert!(runtime_args(&[
+                "runtime",
+                action,
+                "--revision",
+                "1",
+                "--manifest-digest",
+                &"a".repeat(64)
+            ])
+            .is_ok());
+        }
+        for action in ["resolve", "stage"] {
+            let options = runtime_args(&["runtime", action, "--revision", "2"]).unwrap();
+            let CliCommand::Runtime {
+                command, ..
+            } = options.command
+            else {
+                panic!()
+            };
+            let (path, body) = runtime_mutation(command).unwrap();
+            assert_eq!(path, format!("/daemon/v1/runtime/{action}"));
+            assert_eq!(body, json!({"expected_revision": 2}));
+        }
+        for channel in ["stable", "preview", "nightly"] {
+            for source in [
+                "https://github.com/JegernOUTT/refact",
+                "https://github.com/JegernOUTT/refact/releases/tag/engine/v1.0.0",
+                "https://github.com/JegernOUTT/refact/actions/runs/123",
+            ] {
+                let options = runtime_args(&[
+                    "runtime",
+                    "select",
+                    "--source",
+                    source,
+                    "--channel",
+                    channel,
+                    "--revision",
+                    "0",
+                ])
+                .unwrap();
+                let CliCommand::Runtime {
+                    command, ..
+                } = options.command
+                else {
+                    panic!()
+                };
+                let (path, body) = runtime_mutation(command).unwrap();
+                assert_eq!(path, "/daemon/v1/runtime/select");
+                assert_eq!(body["expected_revision"], 0);
+                assert!(body["selection"].is_object());
+            }
+        }
+        let local = tempfile::tempdir().unwrap();
+        let options = runtime_args(&[
+            "runtime",
+            "select",
+            "--local",
+            local.path().to_str().unwrap(),
+            "--revision",
+            "0",
+        ])
+        .unwrap();
+        let CliCommand::Runtime {
+            command: RuntimeCommand::Select {
+                selection, ..
+            },
+            ..
+        } = options.command
+        else {
+            panic!()
+        };
+        assert!(!selection.is_managed());
+        assert!(selection.require_managed_overwrite().is_err());
+    }
+
+    #[test]
+    fn runtime_parser_rejects_invalid_arguments() {
+        for tail in [
+            vec![],
+            vec!["install"],
+            vec!["stage"],
+            vec!["resolve", "--revision", "0"],
+            vec!["stage", "--revision", "-1"],
+            vec!["stage", "--revision", "18446744073709551616"],
+            vec!["stage", "--revision", "1", "--revision", "2"],
+            vec!["status", "target"],
+            vec!["status", "--revision", "1"],
+            vec!["status", "--manifest-digest", "abc", "--revision", "1"],
+            vec!["plan", "--activate"],
+            vec!["status", "--json", "--json"],
+            vec!["select", "--revision", "0", "--local", "relative"],
+            vec![
+                "select",
+                "--revision",
+                "0",
+                "--source",
+                "https://github.com/foreign/refact",
+                "--channel",
+                "stable",
+            ],
+            vec![
+                "select",
+                "--revision",
+                "0",
+                "--source",
+                "https://github.com/JegernOUTT/refact",
+            ],
+            vec![
+                "select",
+                "--revision",
+                "0",
+                "--local",
+                "/tmp/runtime",
+                "--channel",
+                "stable",
+            ],
+            vec![
+                "select",
+                "--revision",
+                "0",
+                "--source",
+                "https://github.com/JegernOUTT/refact",
+                "--channel",
+                "beta",
+            ],
+        ] {
+            let args = [vec!["runtime"], tail].concat();
+            assert!(runtime_args(&args).is_err(), "accepted {args:?}");
+        }
+    }
+
+    #[test]
+    fn runtime_native_auth_and_destination_fail_closed() {
+        let mut auth = crate::daemon::config::AuthConfig::default();
+        auth.token = Some("worker-token".into());
+        assert!(runtime_credentials(&auth).is_err());
+        auth.enabled = true;
+        auth.username = Some("fixture-user".into());
+        auth.password = Some("fixture-password".into());
+        assert_eq!(
+            runtime_credentials(&auth).unwrap(),
+            ("fixture-user", "fixture-password")
+        );
+        let mut info = daemon_info(1234);
+        assert_eq!(
+            runtime_loopback_url(&info).unwrap(),
+            "http://127.0.0.1:1234"
+        );
+        for bind in [
+            "example.com",
+            "192.0.2.1",
+            "127.0.0.1@evil",
+            "http://127.0.0.1",
+        ] {
+            info.bind = bind.into();
+            assert!(runtime_loopback_url(&info).is_err());
+        }
+        info.bind = "::1".into();
+        assert_eq!(runtime_loopback_url(&info).unwrap(), "http://[::1]:1234");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(daemon)]
+    async fn runtime_all_commands_missing_daemon_are_passive_json_errors() {
+        let cache = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let _guard = EnvGuard::set_basic(cache.path(), config.path());
+        for command in [
+            RuntimeCommand::Status {
+                key: None,
+            },
+            RuntimeCommand::Plan {
+                key: None,
+            },
+            RuntimeCommand::Resolve {
+                revision: 1,
+            },
+            RuntimeCommand::Stage {
+                revision: 1,
+            },
+            RuntimeCommand::Select {
+                revision: 0,
+                selection: RuntimeSelection::try_from(SelectionSpec::Local {
+                    absolute_path: cache.path().to_string_lossy().into_owned(),
+                })
+                .unwrap(),
+            },
+        ] {
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            assert_eq!(
+                run_with_io(
+                    CliOptions {
+                        command: CliCommand::Runtime {
+                            command,
+                            json: true
+                        }
+                    },
+                    &mut stdout,
+                    &mut stderr
+                )
+                .await,
+                1
+            );
+            assert!(stderr.is_empty());
+            assert_eq!(
+                serde_json::from_slice::<Value>(&stdout).unwrap()["ok"],
+                false
+            );
+            assert!(!crate::daemon::paths::daemon_json_path().exists());
+            assert_eq!(std::fs::read_dir(config.path()).unwrap().count(), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn runtime_mutation_failures_are_sanitized_unknown_and_never_retried() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let conflict = serde_json::to_vec(&json!({"error": "daemon update/shutdown active; stage outcome may already be cached; inspect runtime status before retry https://fixture-user:fixture-password@example.invalid/private"})).unwrap();
+        let arbitrary = serde_json::to_vec(
+            &json!({"error": "<html>fixture-password https://example.invalid/private</html>"}),
+        )
+        .unwrap();
+        let cases = [
+            (0, Vec::new(), None, "runtime request failed"),
+            (409, conflict, None, "stage outcome may already be cached"),
+            (409, arbitrary, None, "backend error details withheld"),
+            (
+                503,
+                b"<html>fixture-password</html>".to_vec(),
+                None,
+                "backend error details withheld",
+            ),
+            (
+                200,
+                b"not JSON fixture-password".to_vec(),
+                None,
+                "invalid runtime response JSON",
+            ),
+            (
+                200,
+                vec![b'x'; 1024 * 1024 + 1],
+                None,
+                "runtime response exceeds 1 MiB",
+            ),
+            (
+                200,
+                b"{\"partial\":".to_vec(),
+                Some(1000usize),
+                "runtime response interrupted",
+            ),
+        ];
+        for (status, bytes, advertised_size, expected) in cases {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                while !request.ends_with(b"\r\n\r\n") {
+                    request.push(socket.read_u8().await.unwrap());
+                    assert!(request.len() <= 16 * 1024);
+                }
+                let headers = String::from_utf8(request).unwrap();
+                let length = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().unwrap())
+                    })
+                    .unwrap();
+                let mut body = vec![0; length];
+                socket.read_exact(&mut body).await.unwrap();
+                assert_eq!(
+                    serde_json::from_slice::<Value>(&body).unwrap(),
+                    json!({"expected_revision": 3})
+                );
+                let header = format!("HTTP/1.1 {status} Fixture\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", advertised_size.unwrap_or(bytes.len()));
+                if status != 0 {
+                    socket.write_all(header.as_bytes()).await.unwrap();
+                    // Oversize responses can be rejected while the fixture is still writing.
+                    let _ = socket.write_all(&bytes).await;
+                }
+                drop(socket);
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(150), listener.accept())
+                        .await
+                        .is_err(),
+                    "mutation was retried"
+                );
+            });
+            let error = runtime_post(
+                &format!("http://127.0.0.1:{port}"),
+                "/daemon/v1/runtime/stage",
+                &json!({"expected_revision": 3}),
+                "fixture-user",
+                "fixture-password",
+            )
+            .await
+            .unwrap_err();
+            assert!(error.message.contains(expected), "{}", error.message);
+            assert!(error.message.contains("completion may be unknown"));
+            assert!(error
+                .message
+                .contains("inspect runtime status before retry"));
+            assert!(!error.message.contains("fixture-password"));
+            assert!(!error.message.contains("example.invalid"));
+            assert!(!error.message.contains("<html>"));
+            assert!(error.message.len() < 512);
+            if status != 200 && status != 0 {
+                assert!(error.message.contains(&status.to_string()));
+            }
+            server.await.unwrap();
+        }
+    }
+
+    #[test]
+    fn runtime_backend_error_only_preserves_bounded_recognized_facts() {
+        assert_eq!(
+            runtime_backend_error(&json!({"error": "selection revision conflict; secret"})),
+            "selection revision conflict"
+        );
+        assert_eq!(
+            runtime_backend_error(
+                &json!({"error": format!("stage outcome may already be cached{}", "x".repeat(4096))})
+            ),
+            "backend error details withheld"
+        );
+        assert_eq!(
+            runtime_backend_error(&json!({"error": {"password": "secret"}})),
+            "backend error details withheld"
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_fake_http_basic_request_and_passive_plan_json() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let expected = json!({"activation_supported": false, "restart_dispatched": false, "diagnostics": ["fixture"]});
+        let response = expected.clone();
+        let app = axum::Router::new()
+            .route("/daemon/v1/runtime/stage", axum::routing::post(|headers: axum::http::HeaderMap, axum::Json(body): axum::Json<Value>| async move {
+                use base64::Engine;
+                assert_eq!(headers.get_all("authorization").iter().count(), 1);
+                assert_eq!(headers["authorization"].to_str().unwrap(), format!("Basic {}", base64::prelude::BASE64_STANDARD.encode("fixture-user:fixture-password")));
+                assert_eq!(body, json!({"expected_revision": 3}));
+                assert!(!headers.contains_key("x-refact-approval"));
+                axum::Json(json!({"staged": true}))
+            }))
+            .route("/daemon/v1/runtime/status", axum::routing::get(move || { let value = response.clone(); async move { axum::Json(value) } }));
+        let task = tokio::spawn(
+            axum::Server::from_tcp(listener.into_std().unwrap())
+                .unwrap()
+                .serve(app.into_make_service()),
+        );
+        let info = daemon_info(port);
+        let (path, body) = runtime_mutation(RuntimeCommand::Stage {
+            revision: 3,
+        })
+        .unwrap();
+        assert_eq!(
+            runtime_post(
+                &runtime_loopback_url(&info).unwrap(),
+                path,
+                &body,
+                "fixture-user",
+                "fixture-password"
+            )
+            .await
+            .unwrap(),
+            json!({"staged": true})
+        );
+        for command in [
+            RuntimeCommand::Status {
+                key: None,
+            },
+            RuntimeCommand::Plan {
+                key: None,
+            },
+        ] {
+            let mut out = Vec::new();
+            assert_eq!(
+                run_runtime(&info, command, true, &mut out).await.unwrap(),
+                0
+            );
+            assert_eq!(serde_json::from_slice::<Value>(&out).unwrap(), expected);
+        }
+        assert_eq!(
+            runtime_status_path(Some(("a".repeat(64), 3))),
+            format!(
+                "/daemon/v1/runtime/status?manifest_digest={}&selection_revision=3",
+                "a".repeat(64)
+            )
+        );
+        task.abort();
+    }
 
     fn worker(project_id: &str, slug: &str) -> WorkerRow {
         WorkerRow {
@@ -2330,7 +3069,7 @@ mod tests {
             pid: 1,
             port,
             bind: "127.0.0.1".to_string(),
-            version: env!("CARGO_PKG_VERSION").to_string(),
+            version: crate::version::VERSION.to_string(),
             executable_sha256: None,
             auth_token: Some("secret".to_string()),
             started_at_ms: 0,

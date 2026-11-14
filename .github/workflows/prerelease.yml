@@ -1,0 +1,172 @@
+name: Prerelease
+
+# UNTESTED channel: Build All, then a GitHub prerelease only. Manifest declares "tests": "not_run".
+
+on:
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: Untested channel
+        type: choice
+        options: [preview, nightly]
+        default: preview
+      source_sha:
+        description: Full commit SHA (empty = the dispatched ref head)
+        type: string
+        default: ""
+      publish:
+        description: Publish the GitHub prerelease (false = build only)
+        type: boolean
+        default: false
+  workflow_call:
+    inputs:
+      channel:
+        type: string
+        default: preview
+      source_sha:
+        type: string
+        default: ""
+      publish:
+        type: boolean
+        default: false
+  schedule:
+    - cron: "17 3 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: prerelease-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  version:
+    name: Resolve prerelease version
+    if: github.event_name != 'schedule' || vars.REFACT_NIGHTLY_PRERELEASE == 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      source_sha: ${{ steps.v.outputs.source_sha }}
+      version: ${{ steps.v.outputs.version }}
+      channel: ${{ steps.v.outputs.channel }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - id: v
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha || github.sha }}
+          CHANNEL: ${{ github.event_name == 'schedule' && 'nightly' || inputs.channel || 'preview' }}
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          [[ "$CHANNEL" == preview || "$CHANNEL" == nightly ]] || { echo "prerelease channel must be preview or nightly" >&2; exit 1; }
+          version="$(PUBLISH_EAP=0 bash tools/dev/compute_build_version.sh)"
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+-[0-9A-Za-z.-]+$ ]] || { echo "prerelease version must carry a suffix: $version" >&2; exit 1; }
+          {
+            echo "source_sha=$SOURCE_SHA"
+            echo "version=$version"
+            echo "channel=$CHANNEL"
+          } >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: version
+    permissions:
+      contents: read
+      actions: read
+    uses: ./.github/workflows/build_all.yml
+    with:
+      source_sha: ${{ needs.version.outputs.source_sha }}
+      version: ${{ needs.version.outputs.version }}
+      channel: ${{ needs.version.outputs.channel }}
+
+  authorize:
+    name: Authorize publication source
+    needs: version
+    if: inputs.publish || (github.event_name == 'schedule' && vars.REFACT_NIGHTLY_PRERELEASE == 'true')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Same-repository main-history policy
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ needs.version.outputs.source_sha }}
+          WORKFLOW_SHA: ${{ github.workflow_sha }}
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+          ALLOWED_CALLERS: prerelease.yml plugin_build.yml
+        run: |
+          set -euo pipefail
+          case "$GITHUB_EVENT_NAME" in workflow_dispatch|schedule) ;; *) echo "event $GITHUB_EVENT_NAME may not publish" >&2; exit 1 ;; esac
+          path="${WORKFLOW_REF#"$GITHUB_REPOSITORY/.github/workflows/"}"
+          [[ "$path" != "$WORKFLOW_REF" ]] || { echo "foreign caller $WORKFLOW_REF" >&2; exit 1; }
+          [[ " $ALLOWED_CALLERS " == *" ${path%%@*} "* ]] || { echo "caller ${path%%@*} may not publish" >&2; exit 1; }
+          for sha in "$SOURCE_SHA" "$WORKFLOW_SHA"; do
+            [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "invalid sha $sha" >&2; exit 1; }
+            status="$(gh api "repos/$GITHUB_REPOSITORY/compare/$sha...main" --jq .status)"
+            [[ "$status" == ahead || "$status" == identical ]] || { echo "$sha is not in main history" >&2; exit 1; }
+          done
+
+  publish:
+    name: GitHub prerelease (UNTESTED)
+    needs: [version, build, authorize]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - name: Recheck trusted workflow code
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WORKFLOW_SHA: ${{ github.workflow_sha }}
+        run: |
+          status="$(gh api "repos/$GITHUB_REPOSITORY/compare/$WORKFLOW_SHA...main" --jq .status)"
+          [[ "$status" == ahead || "$status" == identical ]]
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: trusted
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build.outputs.release_artifact }}
+          path: ${{ runner.temp }}/release
+      - name: Verify bundle against manifest and publish prerelease
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TRUSTED_DIR: ${{ github.workspace }}/trusted
+          SOURCE_SHA: ${{ needs.version.outputs.source_sha }}
+          VERSION: ${{ needs.build.outputs.version }}
+          CHANNEL: ${{ needs.build.outputs.channel }}
+          MANIFEST_SHA256: ${{ needs.build.outputs.manifest_sha256 }}
+        run: |
+          set -euo pipefail
+          dir="$RUNNER_TEMP/release"
+          cd "$(mktemp -d)"
+          test "$(sha256sum "$dir/runtime-manifest.json" | cut -d' ' -f1)" = "$MANIFEST_SHA256"
+          workflow_path="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" --jq .path)"
+          python3 -I "$TRUSTED_DIR/tools/dev/runtime_manifest.py" verify-bundle \
+            --manifest "$dir/runtime-manifest.json" --dir "$dir" --source-sha "$SOURCE_SHA" \
+            --channel "$CHANNEL" --version "$VERSION" --workflow-path "${workflow_path%%@*}" \
+            --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT" --assets-out "$RUNNER_TEMP/assets.txt"
+          mapfile -t assets < "$RUNNER_TEMP/assets.txt"
+          [[ ${#assets[@]} -eq 18 ]] || { echo "expected 18 release assets, got ${#assets[@]}" >&2; exit 1; }
+          assets+=("$dir/runtime-manifest.json")
+          tag="engine/v$VERSION"
+          notes="$RUNNER_TEMP/notes.md"
+          printf '%s\n' "UNTESTED $CHANNEL build of $SOURCE_SHA." "" \
+            "Tests were NOT run for this prerelease (runtime-manifest.json: \"tests\": \"not_run\")." > "$notes"
+          if gh release view "$tag" > /dev/null 2>&1; then
+            existing="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" --jq .object.sha)"
+            test "$existing" = "$SOURCE_SHA" || { echo "$tag already exists for $existing" >&2; exit 1; }
+            gh release upload "$tag" "${assets[@]}" --clobber
+          else
+            gh release create "$tag" "${assets[@]}" --target "$SOURCE_SHA" --prerelease --latest=false \
+              --title "Refact v$VERSION (UNTESTED $CHANNEL)" --notes-file "$notes"
+          fi

@@ -20,6 +20,9 @@ use tower_http::cors::{AllowCredentials, AllowHeaders, AllowMethods, AllowOrigin
 use crate::daemon::config::DaemonConfig;
 use crate::daemon::state::{DaemonState, DaemonUpdateState, UpdatePhase};
 
+#[path = "runtime_routes.rs"]
+mod runtime_routes;
+
 const UPDATE_CHECK_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
 
 #[derive(Debug, Serialize)]
@@ -109,6 +112,7 @@ pub fn make_router(state: Arc<DaemonState>, port: u16) -> Router {
     let open_hooks_allowed =
         crate::daemon::auth::hooks_unauthenticated_allowed_for_bind(&state.config.bind);
     let control = Router::new()
+        .merge(runtime_routes::routes())
         .merge(crate::daemon::console::routes(state.clone()))
         .route("/", get(crate::daemon::web::handle_dashboard_index))
         .route("/picker", get(crate::daemon::web::handle_project_picker))
@@ -2914,7 +2918,7 @@ mod tests {
                 headers.clone(),
                 Json(GrantInstallationRequest {
                     prepared_hash: hash.clone(),
-                    expires_in_seconds: 60,
+                    expires_in_seconds: 3600,
                 }),
             )
             .await,

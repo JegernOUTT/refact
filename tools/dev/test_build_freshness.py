@@ -93,7 +93,7 @@ os.execv(sys.argv[1], sys.argv[1:])
             output.write('\n[dependencies]\nshadow-rs = ' + toml_value(self.runtime_shadow) + '\n[profile.ci-test]\ninherits = "dev"\ndebug = false\n')
         shutil.copyfile(ENGINE / "Cargo.lock", self.engine / "Cargo.lock")
         (self.engine / "build.rs").write_bytes(self.script)
-        for relative in ["build_support/gui_artifact.rs", "build_support/gui_artifact/trusted_controller.rs", "assets/chat/index.html", "src/daemon/web_picker.html"]:
+        for relative in ["build_support/runtime_version.rs", "build_support/gui_artifact.rs", "build_support/gui_artifact/trusted_controller.rs", "assets/chat/index.html", "src/daemon/web_picker.html"]:
             target = self.engine / relative
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(ENGINE / relative, target)
@@ -262,10 +262,28 @@ else:
     def test_skip_gui_settles_without_controller_or_gui_inputs(self):
         self.env.update(REFACT_SKIP_GUI_BUILD="1", REFACT_GUI_ALWAYS_BUILD="1", REFACT_USE_PREBUILT_GUI="1")
         shutil.rmtree(self.gui)
+        self.git("checkout", "-b", "freshness/nested/identity")
         self.cargo()
         self.assertEqual(self.lines(self.log), [])
         self.warm()
         self.assertTrue(self.cargo("run")[0])
+        self.assertEqual(self.lines(self.log), [])
+        self.git("pack-refs", "--all", "--prune")
+        self.cargo()
+        self.warm()
+        previous = self.git("rev-parse", "HEAD")
+        self.git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                 "commit", "--allow-empty", "-qm", "advance packed ref")
+        current = self.git("rev-parse", "HEAD")
+        self.assertNotEqual(previous, current)
+        self.assertFalse(self.cargo()[0], "a new loose ref must invalidate packed-ref identity")
+        frames = list(self.target.rglob("runtime-build-info.bin"))
+        self.assertEqual(len(frames), 1, frames)
+        frame = frames[0].read_bytes()
+        prefix, suffix = b"\0REFACT_BUILD_INFO_V1\0", b"\0END_REFACT_BUILD_INFO\0"
+        self.assertTrue(frame.startswith(prefix) and frame.endswith(suffix))
+        self.assertEqual(json.loads(frame[len(prefix):-len(suffix)])["source_sha"], current)
+        self.warm()
         self.assertEqual(self.lines(self.log), [])
 
     def test_prebuilt_precedes_always_and_refuses_before_compiler(self):

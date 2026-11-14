@@ -1,448 +1,352 @@
 /**
- * Chat Subscription Integration Tests
- *
- * Integration tests that use the actual refact-lsp server.
- * Requires: refact-lsp running on port 8001
- *
- * Run with: npm run test:no-watch -- chatSubscription.integration
- *
- * Note: These tests are skipped in CI if no server is available.
+ * Required, offline frontend HTTP/SSE integration lane. The owned wire peer tests
+ * production command serialization and subscription parsing, not Rust engine or
+ * provider correctness. Real-engine compatibility remains in the opt-in sibling
+ * chatSubscription.live.integration.test.ts.
  */
-
-/* eslint-disable @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-assignment */
-import { describe, it, expect, vi } from "vitest";
-
-// Increase test timeout for integration tests
-vi.setConfig({ testTimeout: 30000 });
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  abortGeneration,
+  ChatCommandHttpError,
+  resetChatParamsSyncState,
   sendChatCommand,
   sendUserMessage,
   updateChatParams,
-  abortGeneration,
 } from "../../services/refact/chatCommands";
+import {
+  subscribeToChatEvents,
+  type EventEnvelope,
+} from "../../services/refact/chatSubscription";
+import { startChatSubscriptionFixture } from "./chatSubscriptionFixture";
 
-const LSP_PORT = 8001;
-const LSP_URL = `http://127.0.0.1:${LSP_PORT}`;
-
-// Check if server is available
-async function isServerAvailable(): Promise<boolean> {
-  try {
-    const response = await fetch(`${LSP_URL}/v1/ping`, {
-      signal: AbortSignal.timeout(2000),
+describe(
+  "Chat subscription frontend transport (owned HTTP fixture)",
+  { retry: 0 },
+  () => {
+    let fixture: Awaited<ReturnType<typeof startChatSubscriptionFixture>>;
+    const stops: (() => void)[] = [];
+    beforeEach(async () => {
+      resetChatParamsSyncState();
+      fixture = await startChatSubscriptionFixture();
     });
-    return response.ok;
-  } catch {
-    return false;
-  }
-}
-
-// Generate unique chat ID
-function generateChatId(prefix: string): string {
-  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-}
-
-async function withRetry<T>(
-  operation: () => Promise<T>,
-  retries = 3,
-  delayMs = 250,
-): Promise<T> {
-  let lastError: unknown;
-
-  for (let attempt = 0; attempt < retries; attempt++) {
-    try {
-      return await operation();
-    } catch (error) {
-      lastError = error;
-      const message =
-        error instanceof Error ? error.message : String(error ?? "");
-      const isConnectionIssue = /ECONNREFUSED|fetch failed|NetworkError/i.test(
-        message,
-      );
-      if (!isConnectionIssue || attempt === retries - 1) {
-        throw error;
+    afterEach(async () => {
+      try {
+        for (const stop of stops.splice(0)) stop();
+        await fixture.close();
+        expect(fixture.failures).toEqual([]);
+      } finally {
+        resetChatParamsSyncState();
       }
-      await new Promise((resolve) =>
-        setTimeout(resolve, delayMs * (attempt + 1)),
-      );
+    });
+
+    async function connect(chatId: string) {
+      const events: EventEnvelope[] = [];
+      const errors: Error[] = [];
+      const disconnected = vi.fn();
+      const activity = vi.fn();
+      const stop = subscribeToChatEvents(chatId, fixture.config, {
+        onEvent: (event) => events.push(event),
+        onError: (error) => errors.push(error),
+        onDisconnected: disconnected,
+        onActivity: activity,
+      });
+      stops.push(stop);
+      await vi.waitFor(() => expect(events[0]?.type).toBe("snapshot"));
+      return { events, errors, disconnected, activity, stop };
     }
-  }
 
-  throw lastError;
-}
-
-// Collect events from SSE stream
-async function collectEvents(
-  chatId: string,
-  {
-    maxEvents,
-    timeoutMs,
-    stopWhen,
-  }: {
-    maxEvents: number;
-    timeoutMs: number;
-    stopWhen?: (event: unknown, events: unknown[]) => boolean;
-  },
-): Promise<unknown[]> {
-  const events: unknown[] = [];
-
-  return new Promise((resolve) => {
-    const controller = new AbortController();
-    let settled = false;
-    const finish = () => {
-      if (settled) {
-        return;
-      }
-      settled = true;
-      clearTimeout(timeout);
-      controller.abort();
-      resolve(events);
-    };
-    const timeout = setTimeout(() => {
-      finish();
-    }, timeoutMs);
-
-    fetch(`${LSP_URL}/v1/chats/subscribe?chat_id=${chatId}`, {
-      signal: controller.signal,
-    })
-      .then(async (response) => {
-        if (!response.ok) {
-          finish();
-          return;
-        }
-
-        const reader = response.body?.getReader();
-        if (!reader) {
-          finish();
-          return;
-        }
-
-        const decoder = new TextDecoder();
-        let buffer = "";
-
-        while (!settled && events.length < maxEvents) {
-          const { done, value } = await reader.read();
-          if (done) break;
-
-          buffer += decoder.decode(value, { stream: true });
-          const blocks = buffer.split("\n\n");
-          buffer = blocks.pop() ?? "";
-
-          for (const block of blocks) {
-            const dataLines = block
-              .split("\n")
-              .filter((line) => line.startsWith("data:"))
-              .map((line) => line.slice(5).trimStart());
-
-            if (dataLines.length === 0) {
-              continue;
-            }
-
-            const payload = dataLines.join("\n");
-            if (payload === "[DONE]") {
-              continue;
-            }
-
-            try {
-              const event = JSON.parse(payload);
-              events.push(event);
-
-              if (
-                (stopWhen?.(event, events) ?? false) ||
-                events.length >= maxEvents
-              ) {
-                finish();
-                return;
-              }
-            } catch {
-              // Ignore parse errors
-            }
-          }
-        }
-
-        finish();
-      })
-      .catch(() => {
-        finish();
+    it("sends abort through the command API and returns its request ID", async () => {
+      const id = await sendChatCommand("abort", fixture.port, undefined, {
+        type: "abort",
       });
-  });
-}
+      expect(id).toEqual(expect.any(String));
+      expect(fixture.requests).toEqual([
+        { chatId: "abort", command: { type: "abort", client_request_id: id } },
+      ]);
+    });
 
-describe.skipIf(
-  process.env.REFACT_RUN_LIVE_CHAT_TESTS !== "1" ||
-    !(await isServerAvailable()),
-)("Chat Subscription Integration Tests", () => {
-  describe("sendChatCommand", () => {
-    it("should accept abort command", async () => {
-      const chatId = generateChatId("test-abort");
-
+    it("serializes set_params and suppresses already-applied patches", async () => {
+      const patch = { model: "fixture-model", mode: "explore" };
       await expect(
-        sendChatCommand(chatId, LSP_PORT, undefined, {
-          type: "abort" as const,
-        }),
+        updateChatParams("params", patch, fixture.port),
       ).resolves.toBeUndefined();
-    });
-
-    it("should accept set_params command", async () => {
-      const chatId = generateChatId("test-params");
-
-      await expect(
-        updateChatParams(
-          chatId,
-          { model: "refact/gpt-4.1-nano", mode: "NO_TOOLS" },
-          LSP_PORT,
-        ),
-      ).resolves.toBeUndefined();
-    });
-
-    it("should accept user_message command", async () => {
-      const chatId = generateChatId("test-message");
-
-      await updateChatParams(
-        chatId,
-        { model: "refact/gpt-4.1-nano", mode: "NO_TOOLS" },
-        LSP_PORT,
-      );
-
-      await expect(
-        sendUserMessage(chatId, "Hello, test!", LSP_PORT),
-      ).resolves.toBeUndefined();
-    });
-
-    it("should detect duplicate commands", async () => {
-      const chatId = generateChatId("test-duplicate");
-      const requestId = `test-${Date.now()}`;
-
-      // First request
-      const response1 = await fetch(`${LSP_URL}/v1/chats/${chatId}/commands`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          client_request_id: requestId,
-          type: "set_params",
-          patch: { model: "test" },
-        }),
+      await updateChatParams("params", patch, fixture.port);
+      expect(fixture.requests).toHaveLength(1);
+      expect(fixture.requests[0].command).toMatchObject({
+        type: "set_params",
+        patch,
       });
-
-      expect(response1.status).toBe(200);
-
-      // Second request with same ID should be detected as duplicate
-      const response2 = await fetch(`${LSP_URL}/v1/chats/${chatId}/commands`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          client_request_id: requestId,
-          type: "set_params",
-          patch: { model: "test" },
-        }),
-      });
-
-      expect(response2.status).toBe(200);
-      const data = await response2.json();
-      // Backend may return duplicate status or just accept it idempotently
-      expect(
-        ["duplicate", "ok", "queued"].includes(data.status as string),
-      ).toBe(true);
-    });
-  });
-
-  describe("SSE Subscription", () => {
-    it("should receive snapshot on connect", async () => {
-      const chatId = generateChatId("test-snapshot");
-
-      const events = await collectEvents(chatId, {
-        maxEvents: 1,
-        timeoutMs: 5000,
-      });
-
-      expect(events.length).toBeGreaterThanOrEqual(1);
-      expect(events[0]).toHaveProperty("type", "snapshot");
-      expect(events[0]).toHaveProperty("chat_id", chatId);
-      expect(events[0]).toHaveProperty("thread");
-      expect(events[0]).toHaveProperty("runtime");
-      expect(events[0]).toHaveProperty("messages");
     });
 
-    it("should receive events after sending command", async () => {
-      const chatId = generateChatId("test-events");
-
-      // Start collecting events
-      const eventsPromise = collectEvents(chatId, {
-        maxEvents: 10,
-        timeoutMs: 10000,
-      });
-
-      // Wait a bit for subscription to establish
-      await new Promise((r) => setTimeout(r, 300));
-
-      // Send commands
-      await withRetry(() =>
-        updateChatParams(
-          chatId,
-          { model: "refact/gpt-4.1-nano", mode: "NO_TOOLS" },
-          LSP_PORT,
-        ),
-      );
-
-      await withRetry(() => sendUserMessage(chatId, "Say hi", LSP_PORT));
-
-      const events = await eventsPromise;
-
-      // Check we got expected events
-      const eventTypes = events.map(
-        (e: unknown) => (e as { type: string }).type,
-      );
-
-      expect(eventTypes).toContain("snapshot");
-      expect(eventTypes).toContain("ack"); // Command acknowledgments
-    });
-
-    it("should receive stream events during generation", async () => {
-      const chatId = generateChatId("test-stream");
-
-      // Start collecting events
-      const eventsPromise = collectEvents(chatId, {
-        maxEvents: 20,
-        timeoutMs: 15000,
-      });
-
-      await new Promise((r) => setTimeout(r, 300));
-
-      // Set up chat and send message
-      await withRetry(() =>
-        updateChatParams(
-          chatId,
-          { model: "refact/gpt-4.1-nano", mode: "NO_TOOLS" },
-          LSP_PORT,
-        ),
-      );
-
-      await withRetry(() => sendUserMessage(chatId, "Say hello", LSP_PORT));
-
-      const events = await eventsPromise;
-      const eventTypes = events.map(
-        (e: unknown) => (e as { type: string }).type,
-      );
-
-      // Should have streaming events
-      expect(eventTypes).toContain("snapshot");
-      expect(eventTypes).toContain("message_added"); // User message
-      expect(eventTypes).toContain("stream_started");
-
-      // May have stream_delta and stream_finished depending on timing
-      // Debug: eventTypes contains the received event types
-    });
-  });
-
-  describe("Abort Functionality", () => {
-    it("should abort generation and receive message_removed", async () => {
-      const chatId = generateChatId("test-abort-stream");
-
-      // Start collecting events
-      const eventsPromise = collectEvents(chatId, {
-        maxEvents: 1000,
-        timeoutMs: 30000,
-        stopWhen: (event: unknown) => {
-          const type = (event as { type?: string }).type;
-          return type === "message_removed" || type === "stream_finished";
+    it("serializes client user-message content and URL-encodes chat IDs", async () => {
+      await sendUserMessage("chat /?é", "Hello 🌍", fixture.port);
+      expect(fixture.requests[0]).toMatchObject({
+        chatId: "chat /?é",
+        command: {
+          type: "user_message",
+          content: "Hello 🌍",
+          client_request_id: expect.any(String) as unknown,
         },
       });
+    });
 
-      await new Promise((r) => setTimeout(r, 300));
-
-      // Set up chat with a long prompt
-      await withRetry(() =>
-        updateChatParams(
-          chatId,
-          { model: "refact/gpt-4.1-nano", mode: "NO_TOOLS" },
-          LSP_PORT,
-        ),
+    it("reuses explicit client request IDs and accepts fixture applied responses", async () => {
+      const chat = await connect("retry");
+      const command = {
+        type: "set_params" as const,
+        patch: { model: "fixture-model" },
+      };
+      for (let i = 0; i < 2; i++) {
+        await expect(
+          sendChatCommand(
+            "retry",
+            fixture.port,
+            undefined,
+            command,
+            false,
+            "same-request",
+          ),
+        ).resolves.toBe("same-request");
+      }
+      await vi.waitFor(() =>
+        expect(
+          chat.events.filter((event) => event.type === "ack"),
+        ).toHaveLength(2),
       );
-
-      await withRetry(() =>
-        sendUserMessage(
-          chatId,
-          "Write a long essay about programming",
-          LSP_PORT,
-        ),
-      );
-
-      // Wait briefly for generation to start, then abort.
-      await new Promise((r) => setTimeout(r, 200));
-
-      // Send abort
-      await withRetry(() => abortGeneration(chatId, LSP_PORT));
-
-      const events = await eventsPromise;
-      const eventTypes = events.map(
-        (e: unknown) => (e as { type: string }).type,
-      );
-
-      // Debug: eventTypes contains abort test events
-
-      // Should have stream_started and either message_removed (abort) or stream_finished (too late)
-      expect(eventTypes).toContain("stream_started");
       expect(
-        eventTypes.includes("message_removed") ||
-          eventTypes.includes("stream_finished"),
-      ).toBe(true);
+        fixture.requests.map(({ command: value }) => value.client_request_id),
+      ).toEqual(["same-request", "same-request"]);
+      expect(chat.events.filter((event) => event.type === "ack")).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            client_request_id: "same-request",
+            accepted: true,
+            result: { applied: true },
+          }),
+        ]),
+      );
     });
-  });
 
-  describe("Multiple Chats", () => {
-    it("should handle multiple independent chats", async () => {
-      const chatId1 = generateChatId("test-multi-1");
-      const chatId2 = generateChatId("test-multi-2");
-
-      // Connect to both chats
-      const events1Promise = collectEvents(chatId1, {
-        maxEvents: 5,
-        timeoutMs: 8000,
+    it("receives a snapshot through the production subscriber", async () => {
+      const chat = await connect("snapshot /é");
+      expect(chat.events[0]).toMatchObject({
+        chat_id: "snapshot /é",
+        seq: "1",
+        thread: { id: "snapshot /é" },
+        runtime: { state: "idle" },
+        messages: [],
       });
-      const events2Promise = collectEvents(chatId2, {
-        maxEvents: 5,
-        timeoutMs: 8000,
+      expect(fixture.subscriptions[0].searchParams.get("snapshot_chunks")).toBe(
+        "1",
+      );
+      expect(chat.errors).toEqual([]);
+    });
+
+    it("receives late command acknowledgments on an established subscription", async () => {
+      const chat = await connect("events");
+      await updateChatParams(
+        "events",
+        { model: "fixture-model" },
+        fixture.port,
+      );
+      await sendUserMessage("events", "Say hi", fixture.port);
+      await vi.waitFor(() =>
+        expect(chat.events.map((event) => event.type)).toEqual([
+          "snapshot",
+          "thread_updated",
+          "ack",
+          "ack",
+          "message_added",
+          "stream_started",
+        ]),
+      );
+      expect(
+        chat.events.find((event) => event.type === "message_added"),
+      ).toMatchObject({ message: { content: "Say hi", role: "user" } });
+    });
+
+    it("parses fragmented UTF-8/CRLF stream deltas and completion, ignoring invalid frames", async () => {
+      const chat = await connect("stream");
+      await sendUserMessage("stream", "Say hello", fixture.port);
+      await vi.waitFor(() =>
+        expect(chat.events.at(-1)?.type).toBe("stream_started"),
+      );
+      chat.activity.mockClear();
+      await fixture.wire(
+        "stream",
+        ': heartbeat\r\n\r\ndata: not-json\r\n\r\ndata: [DONE]\r\n\r\ndata: {"type":"stream_delta","chat_id":"stream","seq":42,"message_id":"assistant-1","ops":[{"op":"append_content","text":"hé🌍"}]}\r\n\r\n',
+      );
+      await vi.waitFor(() =>
+        expect(chat.events.at(-1)?.type).toBe("stream_delta"),
+      );
+      expect(chat.activity.mock.calls.length).toBeGreaterThan(1);
+      fixture.emit("stream", {
+        type: "stream_finished",
+        message_id: "assistant-1",
+        finish_reason: "stop",
       });
-
-      await new Promise((r) => setTimeout(r, 300));
-
-      // Send different messages to each
-      await withRetry(() =>
-        updateChatParams(
-          chatId1,
-          { model: "refact/gpt-4.1-nano", mode: "NO_TOOLS" },
-          LSP_PORT,
-        ),
+      await vi.waitFor(() =>
+        expect(chat.events.at(-1)?.type).toBe("stream_finished"),
       );
-      await withRetry(() =>
-        updateChatParams(
-          chatId2,
-          { model: "refact/gpt-4.1-nano", mode: "NO_TOOLS" },
-          LSP_PORT,
-        ),
-      );
-
-      await withRetry(() =>
-        sendUserMessage(chatId1, "Chat 1 message", LSP_PORT),
-      );
-      await withRetry(() =>
-        sendUserMessage(chatId2, "Chat 2 message", LSP_PORT),
-      );
-
-      const [events1, events2] = await Promise.all([
-        events1Promise,
-        events2Promise,
+      expect(
+        chat.events.filter((event) => event.type === "stream_delta"),
+      ).toEqual([
+        {
+          type: "stream_delta",
+          chat_id: "stream",
+          seq: "42",
+          message_id: "assistant-1",
+          ops: [{ op: "append_content", text: "hé🌍" }],
+        },
       ]);
-
-      // Each should only have events for its own chat
-      const chat1Ids = events1.map(
-        (e: unknown) => (e as { chat_id: string }).chat_id,
-      );
-      const chat2Ids = events2.map(
-        (e: unknown) => (e as { chat_id: string }).chat_id,
-      );
-
-      expect(chat1Ids.every((id: string) => id === chatId1)).toBe(true);
-      expect(chat2Ids.every((id: string) => id === chatId2)).toBe(true);
+      expect(chat.errors).toEqual([]);
     });
-  });
-});
+
+    it("sends client abort and delivers the fixture removal event", async () => {
+      const chat = await connect("abort-stream");
+      await sendUserMessage("abort-stream", "Long response", fixture.port);
+      await vi.waitFor(() =>
+        expect(chat.events.at(-1)?.type).toBe("stream_started"),
+      );
+      await abortGeneration("abort-stream", fixture.port);
+      await vi.waitFor(() =>
+        expect(chat.events.at(-1)).toMatchObject({
+          type: "message_removed",
+          message_id: "assistant-1",
+        }),
+      );
+      expect(
+        chat.events.some((event) => event.type === "stream_finished"),
+      ).toBe(false);
+      expect(fixture.requests.at(-1)?.command.type).toBe("abort");
+    });
+
+    it("isolates independent chats and filters misrouted envelopes", async () => {
+      const first = await connect("one");
+      const second = await connect("two");
+      await sendUserMessage("one", "first", fixture.port);
+      await sendUserMessage("two", "second", fixture.port);
+      await fixture.wire(
+        "one",
+        'data: {"type":"stream_started","chat_id":"two","seq":"999","message_id":"wrong"}\n\n',
+      );
+      fixture.emit("one", {
+        type: "stream_finished",
+        message_id: "assistant-1",
+        finish_reason: "stop",
+      });
+      await vi.waitFor(() => {
+        expect(first.events.at(-1)?.type).toBe("stream_finished");
+        expect(second.events.at(-1)?.type).toBe("stream_started");
+      });
+      expect(first.events.every((event) => event.chat_id === "one")).toBe(true);
+      expect(second.events.every((event) => event.chat_id === "two")).toBe(
+        true,
+      );
+    });
+
+    it("explicitly re-subscribes after EOF and releases both sessions", async () => {
+      const first = await connect("reconnect");
+      fixture.end("reconnect");
+      await vi.waitFor(() => expect(first.disconnected).toHaveBeenCalledOnce());
+      const second = await connect("reconnect");
+      expect(second.events[0].seq).toBe("2");
+      fixture.emit("reconnect", { type: "stream_started", message_id: "new" });
+      await vi.waitFor(() =>
+        expect(second.events.at(-1)?.type).toBe("stream_started"),
+      );
+      expect(first.events).toHaveLength(1);
+      second.stop();
+      await vi.waitFor(() => expect(fixture.active("reconnect")).toBe(0));
+      expect(second.errors).toEqual([]);
+    });
+
+    it("cancels subscriptions without delivering late events or abort errors", async () => {
+      const chat = await connect("cancel");
+      chat.stop();
+      fixture.emit("cancel", { type: "stream_started", message_id: "late" });
+      await vi.waitFor(() => expect(fixture.active("cancel")).toBe(0));
+      expect(chat.events).toHaveLength(1);
+      expect(chat.errors).toEqual([]);
+      expect(chat.disconnected).not.toHaveBeenCalled();
+    });
+
+    it("assembles chunked snapshots before exposing messages to consumers", async () => {
+      const chat = await connect("chunks");
+      fixture.emit("chunks", {
+        ...fixture.snapshot("chunks"),
+        seq: "100",
+        snapshot_chunked: true,
+        chunk_count: 2,
+        message_count: 2,
+      });
+      fixture.emit("chunks", {
+        type: "snapshot_chunk",
+        seq: "100",
+        chunk_index: 0,
+        chunk_count: 2,
+        messages: [{ role: "user", content: "first" }],
+      });
+      await fixture.wire("chunks", ": chunk boundary\n\n");
+      expect(chat.events).toHaveLength(1);
+      fixture.emit("chunks", {
+        type: "snapshot_chunk",
+        seq: "100",
+        chunk_index: 1,
+        chunk_count: 2,
+        messages: [{ role: "assistant", content: "second" }],
+      });
+      fixture.emit("chunks", {
+        type: "snapshot_end",
+        seq: "100",
+        chunk_count: 2,
+        message_count: 2,
+      });
+      await vi.waitFor(() => expect(chat.events).toHaveLength(2));
+      expect(chat.events[1]).toMatchObject({
+        type: "snapshot",
+        seq: "100",
+        messages: [{ content: "first" }, { content: "second" }],
+      });
+      expect(chat.errors).toEqual([]);
+    });
+
+    it("reports truncated chunked-snapshot EOF without exposing partial messages", async () => {
+      const chat = await connect("truncated");
+      fixture.emit("truncated", {
+        ...fixture.snapshot("truncated"),
+        seq: "100",
+        snapshot_chunked: true,
+        chunk_count: 2,
+        message_count: 2,
+      });
+      fixture.emit("truncated", {
+        type: "snapshot_chunk",
+        seq: "100",
+        chunk_index: 0,
+        chunk_count: 2,
+        messages: [{ role: "user", content: "partial" }],
+      });
+      fixture.end("truncated");
+      await vi.waitFor(() => expect(chat.errors).toHaveLength(1));
+      expect(chat.errors[0].message).toBe(
+        "SSE stream ended before chunked snapshot completed; reconnecting",
+      );
+      expect(chat.events).toHaveLength(1);
+      expect(chat.disconnected).not.toHaveBeenCalled();
+      await vi.waitFor(() => expect(fixture.active("truncated")).toBe(0));
+    });
+
+    it("propagates HTTP command rejection instead of silently accepting it", async () => {
+      await expect(
+        sendUserMessage("reject", "no", fixture.port),
+      ).rejects.toBeInstanceOf(ChatCommandHttpError);
+      await expect(
+        sendUserMessage("reject", "no", fixture.port),
+      ).rejects.toMatchObject({
+        status: 409,
+        message: expect.stringContaining("fixture rejection") as unknown,
+      });
+    });
+  },
+);

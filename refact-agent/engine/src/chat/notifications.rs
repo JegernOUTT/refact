@@ -457,17 +457,42 @@ mod tests {
         }
     }
 
-    async fn wait_for_process_completed(session: &Arc<AMutex<ChatSession>>) -> ChatMessage {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
-        loop {
-            if let Some(message) = find_process_completed(session).await {
-                return message;
+    const PROCESS_COMPLETION_DEADLINE: Duration = Duration::from_secs(10);
+    const SUBSCRIBER_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
+
+    struct SubscriberGuard {
+        gcx: SharedGlobalContext,
+        handle: Option<JoinHandle<()>>,
+    }
+
+    impl SubscriberGuard {
+        fn spawn(gcx: &SharedGlobalContext) -> Self {
+            Self {
+                gcx: gcx.clone(),
+                handle: Some(spawn_notification_subscriber(gcx.clone())),
             }
-            assert!(
-                tokio::time::Instant::now() < deadline,
-                "process completion event not injected"
-            );
-            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        async fn shutdown(mut self) {
+            self.gcx.shutdown_flag.store(true, Ordering::SeqCst);
+            let mut handle = self.handle.take().expect("subscriber already stopped");
+            match tokio::time::timeout(SUBSCRIBER_JOIN_TIMEOUT, &mut handle).await {
+                Ok(joined) => joined.expect("notification subscriber task failed"),
+                Err(_) => {
+                    handle.abort();
+                    let _ = handle.await;
+                    panic!("notification subscriber did not stop after shutdown");
+                }
+            }
+        }
+    }
+
+    impl Drop for SubscriberGuard {
+        fn drop(&mut self) {
+            if let Some(handle) = self.handle.take() {
+                self.gcx.shutdown_flag.store(true, Ordering::SeqCst);
+                handle.abort();
+            }
         }
     }
 
@@ -642,11 +667,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (gcx, _workspace) = test_gcx_with_workspace().await;
         *gcx.documents_state.workspace_folders.lock().unwrap() = vec![dir.path().to_path_buf()];
-        let subscriber = spawn_notification_subscriber(gcx.clone());
+        let subscriber = SubscriberGuard::spawn(&gcx);
         let chat_id = "process-completion-restores-unloaded-session";
         save_trajectory_snapshot(gcx.clone(), notification_test_snapshot(chat_id))
             .await
             .unwrap();
+        assert!(
+            !gcx.chat_sessions.read().await.contains_key(chat_id),
+            "session must start unloaded so the completion has to restore it"
+        );
 
         let process_id = spawn_notification_test_process(
             &gcx.exec_registry,
@@ -655,24 +684,56 @@ mod tests {
             sleep_command("0.1"),
         )
         .await;
-        let _ = gcx.exec_registry.wait(&process_id).await.unwrap();
+        let deadline = tokio::time::Instant::now() + PROCESS_COMPLETION_DEADLINE;
+        let finished = tokio::time::timeout_at(deadline, gcx.exec_registry.wait(&process_id))
+            .await
+            .expect("test process did not finish before the completion deadline")
+            .unwrap();
+        assert!(
+            matches!(
+                finished.status,
+                ExecStatus::Exited {
+                    exit_code: Some(0)
+                }
+            ),
+            "unexpected test process status: {}",
+            status_label(&finished.status)
+        );
 
-        let session = tokio::time::timeout(Duration::from_secs(1), async {
+        let (session, message) = tokio::time::timeout_at(deadline, async {
             loop {
-                if let Some(session) = gcx.chat_sessions.read().await.get(chat_id).cloned() {
-                    return session;
+                let session = gcx.chat_sessions.read().await.get(chat_id).cloned();
+                if let Some(session) = session {
+                    if let Some(message) = find_process_completed(&session).await {
+                        return (session, message);
+                    }
                 }
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
         })
         .await
-        .expect("unloaded session was not restored for process completion");
-        let message = wait_for_process_completed(&session).await;
+        .expect("unloaded session was not restored with the process completion event");
         let payload = process_payload(&message);
         assert_eq!(payload["process_id"], json!(process_id));
         assert_eq!(payload["status"], json!("exited"));
         assert_eq!(payload["exit_code"], json!(0));
-        subscriber.abort();
+        subscriber.shutdown().await;
+        {
+            let session = session.lock().await;
+            let completions = session
+                .messages
+                .iter()
+                .filter(|message| is_process_completed_message(message))
+                .count();
+            assert_eq!(completions, 1, "completion must be injected exactly once");
+            let user_history: Vec<String> = session
+                .messages
+                .iter()
+                .filter(|message| message.role == "user")
+                .map(|message| message.content.content_text_only())
+                .collect();
+            assert_eq!(user_history, vec!["hello".to_string()]);
+        }
     }
 
     #[tokio::test]

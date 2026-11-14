@@ -1,11 +1,16 @@
 #[path = "build_support/gui_artifact.rs"]
 mod gui_artifact;
+#[path = "build_support/runtime_version.rs"]
+mod runtime_version;
 
 use std::env;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn main() {
+    let root = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap());
+    let version = runtime_version::emit(&root.join("Cargo.toml"));
+    emit_build_identity(&root, &version);
     if env::var("TARGET").as_deref() == Ok("i686-pc-windows-msvc") {
         cc::Build::new()
             .file("build_support/sqlite_vec_i686_popcnt.c")
@@ -214,4 +219,81 @@ fn watch_inputs(gui: &Path, inputs: &gui_artifact::Inputs) {
             }
         }
     }
+}
+
+fn emit_build_identity(root: &Path, version: &str) {
+    println!("cargo:rerun-if-env-changed=GITHUB_SHA");
+    let git = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(root)
+        .output();
+    let source = git.ok().filter(|o| o.status.success()).map(|o| {
+        String::from_utf8(o.stdout)
+            .expect("Git SHA UTF-8")
+            .trim()
+            .to_string()
+    });
+    let supplied = env::var("GITHUB_SHA").ok();
+    if let (Some(actual), Some(supplied)) = (&source, &supplied) {
+        assert_eq!(actual, supplied, "GITHUB_SHA must match checkout HEAD");
+    }
+    let source = source.or(supplied).unwrap_or_else(|| "unknown".to_string());
+    assert!(
+        source == "unknown"
+            || (source.len() == 40 && source.bytes().all(|b| b.is_ascii_hexdigit())),
+        "invalid source SHA"
+    );
+    for name in ["HEAD", "packed-refs"] {
+        if let Ok(output) = Command::new("git")
+            .args(["rev-parse", "--path-format=absolute", "--git-path", name])
+            .current_dir(root)
+            .output()
+        {
+            if output.status.success() {
+                let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if Path::new(&path).exists() {
+                    println!("cargo:rerun-if-changed={path}");
+                }
+            }
+        }
+    }
+    if let Ok(output) = Command::new("git")
+        .args(["rev-parse", "--symbolic-full-name", "HEAD"])
+        .current_dir(root)
+        .output()
+    {
+        let reference = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if output.status.success() && reference.starts_with("refs/") {
+            if let Ok(path) = Command::new("git")
+                .args([
+                    "rev-parse",
+                    "--path-format=absolute",
+                    "--git-path",
+                    &reference,
+                ])
+                .current_dir(root)
+                .output()
+            {
+                if path.status.success() {
+                    let path = PathBuf::from(String::from_utf8_lossy(&path.stdout).trim());
+                    if let Some(watched) = path.ancestors().find(|candidate| candidate.exists()) {
+                        println!("cargo:rerun-if-changed={}", watched.display());
+                    }
+                }
+            }
+        }
+    }
+    let payload = serde_json::json!({"schema_version": 1, "version": version, "source_sha": source, "target": env::var("TARGET").unwrap()}).to_string();
+    assert!(payload.len() <= 1024, "build identity exceeds frame bound");
+    let frame = [
+        b"\0REFACT_BUILD_INFO_V1\0".as_slice(),
+        payload.as_bytes(),
+        b"\0END_REFACT_BUILD_INFO\0".as_slice(),
+    ]
+    .concat();
+    std::fs::write(
+        PathBuf::from(env::var_os("OUT_DIR").unwrap()).join("runtime-build-info.bin"),
+        frame,
+    )
+    .unwrap();
 }

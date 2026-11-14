@@ -1,9 +1,13 @@
 import { test, expect } from "@playwright/test";
+import { openReviewFixture } from "./reviewFixtureReady";
 
 test("HTML pages discover dynamic pinned slots, preserve JS state and submit host comments", async ({
   page,
 }) => {
-  await page.goto("/tests/e2e/review-canvas.html?tour=html-pages");
+  await openReviewFixture(
+    page,
+    "/tests/e2e/review-canvas.html?tour=html-pages",
+  );
   const frame = page
     .frameLocator('iframe[title="Input trimming"]')
     .frameLocator("iframe");
@@ -66,7 +70,10 @@ test("reduced motion starts with short static fallback and live page is keyboard
   page,
 }) => {
   await page.emulateMedia({ reducedMotion: "reduce" });
-  await page.goto("/tests/e2e/review-canvas.html?tour=html-pages");
+  await openReviewFixture(
+    page,
+    "/tests/e2e/review-canvas.html?tour=html-pages",
+  );
   await expect(page.locator('iframe[title="Input trimming"]')).toHaveCount(0);
   await page
     .getByRole("button", { name: "Show live explanation" })
@@ -88,7 +95,10 @@ test("reduced motion starts with short static fallback and live page is keyboard
 test("opaque frame accepts only registered IDs and flags duplicate slots", async ({
   page,
 }) => {
-  await page.goto("/tests/e2e/review-canvas.html?tour=html-pages");
+  await openReviewFixture(
+    page,
+    "/tests/e2e/review-canvas.html?tour=html-pages",
+  );
   const iframe = page.locator('iframe[title="Input trimming"]');
   const frame = page
     .frameLocator('iframe[title="Input trimming"]')
@@ -134,7 +144,10 @@ test("opaque frame accepts only registered IDs and flags duplicate slots", async
 });
 
 test("host-fed source bytes remain inert DOM text", async ({ page }) => {
-  await page.goto("/tests/e2e/review-canvas.html?tour=html-pages");
+  await openReviewFixture(
+    page,
+    "/tests/e2e/review-canvas.html?tour=html-pages",
+  );
   const iframe = page.locator('iframe[title="Input trimming"]');
   const frame = page
     .frameLocator('iframe[title="Input trimming"]')
@@ -174,7 +187,10 @@ test("host-fed source bytes remain inert DOM text", async ({ page }) => {
 test("applying a different page version creates a fresh context, host refresh alone does not", async ({
   page,
 }) => {
-  await page.goto("/tests/e2e/review-canvas.html?tour=html-pages");
+  await openReviewFixture(
+    page,
+    "/tests/e2e/review-canvas.html?tour=html-pages",
+  );
   const first = page
     .frameLocator('iframe[title="Input trimming"]')
     .frameLocator("iframe");
@@ -209,7 +225,10 @@ test("authored self-navigation cannot exfiltrate pinned source outside trusted w
     requests++;
     return route.abort();
   });
-  await page.goto("/tests/e2e/review-canvas.html?tour=html-pages");
+  await openReviewFixture(
+    page,
+    "/tests/e2e/review-canvas.html?tour=html-pages",
+  );
   const frame = page
     .frameLocator('iframe[title="Input trimming"]')
     .frameLocator("iframe");

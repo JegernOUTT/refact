@@ -5195,18 +5195,22 @@ dependencies = [
 name = "refact-self-update"
 version = "0.1.0"
 dependencies = [
+ "dunce",
+ "fd-lock",
  "flate2",
  "hex",
  "libc",
  "percent-encoding",
  "refact-core",
  "reqwest",
+ "rustls",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "tar",
  "tempfile",
  "tokio",
+ "tokio-rustls",
  "zip 2.4.2",
 ]
 

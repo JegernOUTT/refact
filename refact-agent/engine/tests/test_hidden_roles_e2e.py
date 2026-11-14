@@ -6,20 +6,13 @@ from pathlib import Path
 
 import pytest
 
-httpx = pytest.importorskip("httpx")
-
-def _base_url() -> str:
-    port = os.environ.get("REFACT_LSP_PORT")
-    if not port:
-        pytest.skip("REFACT_LSP_PORT is unset; live refact-lsp integration tests skipped")
-    return f"http://127.0.0.1:{port}"
-
-
-def _workspace_root() -> Path:
-    return Path(__file__).resolve().parents[2]
+import httpx
+from owned_engine import owned_engine, MODEL, native_messages
 
 
 async def _post_command(client: httpx.AsyncClient, base_url: str, chat_id: str, payload: dict) -> dict:
+    if payload.get("type") == "set_params":
+        payload = {**payload, "patch": {"model": MODEL, **payload["patch"]}}
     response = await client.post(
         f"{base_url}/v1/chats/{chat_id}/commands",
         json={"client_request_id": str(uuid.uuid4()), **payload},
@@ -31,7 +24,7 @@ async def _post_command(client: httpx.AsyncClient, base_url: str, chat_id: str, 
 async def _init_workspace(client: httpx.AsyncClient, base_url: str) -> None:
     response = await client.post(
         f"{base_url}/v1/lsp-initialize",
-        json={"project_roots": [_workspace_root().as_uri()]},
+        json={"project_roots": []},
     )
     assert response.status_code == 200, response.text
 
@@ -58,7 +51,10 @@ async def _collect_until(base_url: str, chat_id: str, predicate, timeout: float 
                 remaining = deadline - asyncio.get_running_loop().time()
                 if remaining <= 0:
                     raise AssertionError(f"timed out waiting for events; saw {events!r}")
-                event = await asyncio.wait_for(_read_sse_event(lines), timeout=remaining)
+                try:
+                    event = await asyncio.wait_for(_read_sse_event(lines), timeout=remaining)
+                except TimeoutError:
+                    raise AssertionError(f"SSE timed out; saw {events!r}") from None
                 events.append(event)
                 if predicate(events):
                     return events
@@ -69,11 +65,11 @@ def _message(event: dict) -> dict:
 
 
 def _event_meta(message: dict) -> dict:
-    return message.get("extra", {}).get("event") or {}
+    return message.get("event") or {}
 
 
 def _plan_meta(message: dict) -> dict:
-    return message.get("extra", {}).get("plan") or {}
+    return _event_meta(message).get("payload", {}).get("plan", {})
 
 
 def _messages(events: list[dict]) -> list[dict]:
@@ -95,13 +91,23 @@ def _event_message(events: list[dict], subkind: str) -> dict | None:
 
 def _plan_message(events: list[dict], version: int) -> dict | None:
     for message in _messages(events):
-        if message.get("role") == "plan" and _plan_meta(message).get("version") == version:
+        payload = _event_meta(message).get("payload", {})
+        plan = payload.get("plan", {})
+        if payload.get("target") == "plan" and plan.get("version") == version:
+            return message
+    return None
+
+
+def _plan_delta(events):
+    for message in _messages(events):
+        payload = _event_meta(message).get("payload", {})
+        if payload.get("target") == "plan" and payload.get("seq") == 1:
             return message
     return None
 
 
 def _goal_meta(message: dict) -> dict:
-    return message.get("extra", {}).get("goal") or {}
+    return message.get("goal") or {}
 
 
 def _goal_message(events: list[dict], version: int | None = None) -> dict | None:
@@ -140,6 +146,8 @@ async def _drive_commands_and_collect(
 
 def _goal_budget(**overrides) -> dict:
     budget = {
+        "supervised": True,
+        "explicit": True,
         "max_turns": 10,
         "max_minutes": 15,
         "max_tokens": 200_000,
@@ -181,7 +189,7 @@ def _goal_hidden_message(content: str, **overrides) -> dict:
         "message_id": f"goal-{uuid.uuid4().hex[:8]}",
         "role": "goal",
         "content": content,
-        "extra": {"goal": meta},
+        "goal": meta,
     }
 
 
@@ -190,12 +198,10 @@ def _goal_pursuit_message(content: str, payload: dict) -> dict:
         "message_id": f"goal-pursuit-{uuid.uuid4().hex[:8]}",
         "role": "event",
         "content": content,
-        "extra": {
-            "event": {
+        "event": {
                 "subkind": "goal_pursuit",
                 "source": "chat.goal_verifier",
                 "payload": payload,
-            }
         },
     }
 
@@ -218,8 +224,9 @@ async def _execute_tool(
     name: str,
     arguments: dict,
     *,
-    model_name: str = "gpt-4o-mini",
+    model_name: str = MODEL,
 ) -> list[dict]:
+    await _post_command(client, base_url, chat_id, {"type": "set_params", "patch": {"model": MODEL}})
     assistant = {
         "role": "assistant",
         "content": "",
@@ -229,7 +236,7 @@ async def _execute_tool(
         f"{base_url}/v1/tools-execute",
         json={
             "messages": [{"role": "user", "content": f"Call {name}"}, assistant],
-            "n_ctx": 4096,
+            "n_ctx": 32768,
             "maxgen": 256,
             "subchat_tool_parameters": {},
             "postprocess_parameters": {
@@ -250,8 +257,7 @@ async def _execute_tool(
     )
     assert response.status_code == 200, response.text
     data = response.json()
-    assert data["tools_ran"] is True
-    return data["messages"]
+    return await native_messages(client, base_url, chat_id, data)
 
 
 def _tool_json(message: dict) -> dict:
@@ -262,21 +268,23 @@ def _tool_json(message: dict) -> dict:
 
 
 @pytest.mark.asyncio
-async def test_mode_switch_installs_plan_and_emits_event():
-    base_url = _base_url()
+async def test_mode_switch_installs_plan_and_emits_event(owned_engine):
+    base_url = owned_engine.base_url
     chat_id = f"test-hidden-mode-{uuid.uuid4().hex[:8]}"
+
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        await _post_command(client, base_url, chat_id, {"type": "set_goal", "content": "Integration goal"})
+    before = await _collect_until(base_url, chat_id, lambda seen: _goal_message(seen, 1) is not None)
+    before_snapshot = await _snapshot(base_url, chat_id)
+    assert before_snapshot["goal"].get("plan") is None
+    assert _plan_message(before, 1) is None
 
     async def drive() -> None:
         async with httpx.AsyncClient(timeout=10.0) as client:
-            await _post_command(
-                client,
-                base_url,
-                chat_id,
-                {
-                    "type": "set_params",
-                    "patch": {"mode": "task_agent", "reason": "Install an integration-test plan"},
-                },
-            )
+            await _post_command(client, base_url, chat_id, {
+                "type": "set_params",
+                "patch": {"mode": "task_agent", "reason": "Install an integration-test plan"},
+            })
 
     waiter = asyncio.create_task(
         _collect_until(
@@ -296,11 +304,19 @@ async def test_mode_switch_installs_plan_and_emits_event():
     plan = _plan_message(events, 1)
     assert plan is not None
     assert _plan_meta(plan)["mode"] == "task_agent"
+    assert _event_meta(plan)["source"] == "goal.plan_install"
+    assert "Mode: Task Agent" in plan["content"]
+    assert "Understand this single card and its acceptance criteria." in plan["content"]
+    assert "%MODE_NAME%" not in plan["content"]
+    snapshot = await _snapshot(base_url, chat_id)
+    assert snapshot["goal"]["plan"]["content"] == plan["content"]
+    assert snapshot["goal"]["content"] == "Integration goal"
+    assert _messages(events).index(mode_event) < _messages(events).index(plan)
 
 
 @pytest.mark.asyncio
-async def test_set_plan_tool_creates_v2():
-    base_url = _base_url()
+async def test_update_goal_tool_appends_plan_delta(owned_engine):
+    base_url = owned_engine.base_url
     chat_id = f"test-hidden-set-plan-{uuid.uuid4().hex[:8]}"
 
     async with httpx.AsyncClient(timeout=10.0) as client:
@@ -309,29 +325,36 @@ async def test_set_plan_tool_creates_v2():
         )
         await asyncio.sleep(0.1)
         await _post_command(client, base_url, chat_id, {"type": "set_params", "patch": {"mode": "task_agent"}})
+        await _post_command(client, base_url, chat_id, {"type": "set_goal", "content": "Integration goal", "plan": {"content": "## Initial plan"}})
         await waiter_v1
 
         messages = await _execute_tool(
             client,
             base_url,
             chat_id,
-            "set_plan",
-            {"content": "## Updated plan\n- Verify hidden role v2", "summary": "E2E v2"},
+            "update_goal",
+            {"plan": {"note": "Verify hidden role v2"}},
         )
 
     result = _tool_json(messages[-1])
-    assert result["version"] == 2
+    assert result["plan"]["seq"] == 1
 
-    events = await _collect_until(base_url, chat_id, lambda seen: _plan_message(seen, 2) is not None)
-    plan = _plan_message(events, 2)
+    events = await _collect_until(base_url, chat_id, lambda seen: _plan_delta(seen) is not None)
+    plan = _plan_message(events, 1)
     assert plan is not None
-    assert _plan_meta(plan)["version"] == 2
-    assert "Verify hidden role v2" in plan.get("content", "")
+    assert plan["content"] == "## Initial plan"
+    delta = _plan_delta(events)
+    assert "Verify hidden role v2" in delta["content"]
+    assert _event_meta(delta)["source"] == "tool.update_goal"
+    assert _messages(events).index(plan) < _messages(events).index(delta)
+    snapshot = await _snapshot(base_url, chat_id)
+    assert snapshot["goal"]["plan"]["version"] == 1
+    assert "Verify hidden role v2" in snapshot["goal"]["plan"]["content"]
 
 
 @pytest.mark.asyncio
-async def test_goal_role_command_happy_path_projection():
-    base_url = _base_url()
+async def test_goal_role_command_happy_path_projection(owned_engine):
+    base_url = owned_engine.base_url
     chat_id = f"test-goal-met-{uuid.uuid4().hex[:8]}"
 
     events = await _drive_commands_and_collect(
@@ -372,8 +395,8 @@ async def test_goal_role_command_happy_path_projection():
 
 
 @pytest.mark.asyncio
-async def test_goal_met_pursuit_restore_projection_completed():
-    base_url = _base_url()
+async def test_goal_met_pursuit_restore_projection_completed(owned_engine):
+    base_url = owned_engine.base_url
     chat_id = f"test-goal-met-{uuid.uuid4().hex[:8]}"
     goal = _goal_hidden_message(
         "Ship the pond",
@@ -419,8 +442,8 @@ async def test_goal_met_pursuit_restore_projection_completed():
 
 
 @pytest.mark.asyncio
-async def test_goal_unmet_rearm_restore_projection():
-    base_url = _base_url()
+async def test_goal_unmet_rearm_restore_projection(owned_engine):
+    base_url = owned_engine.base_url
     chat_id = f"test-goal-unmet-{uuid.uuid4().hex[:8]}"
     goal = _goal_hidden_message(
         "Ship the pond",
@@ -466,8 +489,8 @@ async def test_goal_unmet_rearm_restore_projection():
 
 
 @pytest.mark.asyncio
-async def test_goal_budget_exhaustion_restore_projection_stops_pursuit():
-    base_url = _base_url()
+async def test_goal_budget_exhaustion_restore_projection_stops_pursuit(owned_engine):
+    base_url = owned_engine.base_url
     chat_id = f"test-goal-budget-{uuid.uuid4().hex[:8]}"
     goal = _goal_hidden_message(
         "Stop when budget is exhausted",
@@ -497,8 +520,8 @@ async def test_goal_budget_exhaustion_restore_projection_stops_pursuit():
 
 
 @pytest.mark.asyncio
-async def test_goal_ownership_transfer_restore_projection():
-    base_url = _base_url()
+async def test_goal_ownership_transfer_restore_projection(owned_engine):
+    base_url = owned_engine.base_url
     source_chat_id = f"test-goal-transfer-source-{uuid.uuid4().hex[:8]}"
     target_chat_id = f"test-goal-transfer-target-{uuid.uuid4().hex[:8]}"
 
@@ -545,8 +568,8 @@ async def test_goal_ownership_transfer_restore_projection():
 
 
 @pytest.mark.asyncio
-async def test_goal_restart_restore_same_owner_counters_survive():
-    base_url = _base_url()
+async def test_goal_restart_restore_same_owner_counters_survive(owned_engine):
+    base_url = owned_engine.base_url
     chat_id = f"test-goal-restart-{uuid.uuid4().hex[:8]}"
     goal = _goal_hidden_message(
         "Restore the same owner after restart",

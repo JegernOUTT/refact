@@ -1,20 +1,13 @@
-"""Deliberate isolated-worker performance lane (not collected as a default timing test).
-
-Run: python3 tests/test_native_browser_benchmark.py --engine http://127.0.0.1:18990
- --binary target/ci-test/refact-lsp --output /tmp/refact-browser-perf-current.json
-Worker must be yours, REFACT_BROWSER_PROFILE=1, unique HOME/cache/profile/project.
-No native chrome tool, MCP, external web sites, or existing daemon is used.
-"""
-import argparse
+"""Required owned native-browser benchmark; entry point: owned_browser_benchmark.py."""
 import hashlib
 import json
 import math
 from pathlib import Path
 import statistics
+import sys
 import subprocess
 import threading
 import time
-import urllib.parse
 import urllib.request
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -32,9 +25,9 @@ def sha(path):
 
 class Client:
     def __init__(self, engine):
-        parsed = urllib.parse.urlsplit(engine)
-        assert parsed.scheme == 'http' and parsed.hostname == '127.0.0.1' and parsed.port in (18990, 18991) and not parsed.path.strip('/') and not parsed.query and not parsed.fragment and not parsed.username, 'refuse any unapproved/shared endpoint'
-        self.engine = engine
+        from owned_engine import owns_listener
+        assert engine.process.poll() is None and owns_listener(engine.process.pid, engine.port)
+        self.engine = f'http://127.0.0.1:{engine.port}'
         self.chat = 'isolated-perf-' + uuid.uuid4().hex
         self.generation = None
         self.http = urllib.request.build_opener(urllib.request.ProxyHandler({}))
@@ -54,8 +47,27 @@ class Client:
         start = time.perf_counter_ns()
         with self.http.open(req, timeout=120) as response:
             envelope = json.loads(response.read(24 * 1024 * 1024))
+        resolved = []
+        for message in envelope['messages']:
+            job = message.get('tool_job')
+            if not job:
+                resolved.append(message)
+                continue
+            assert message.get('tool_call_id', job.get('tool_call_id')) == call, message
+            deadline = time.monotonic() + 120
+            while time.monotonic() < deadline:
+                with self.http.open(self.engine + f"/v1/chats/{self.chat}/tool-jobs/{job['job_id']}", timeout=20) as response:
+                    state = json.loads(response.read(24 * 1024 * 1024))
+                if state.get('result') is not None:
+                    assert state['status'] == 'succeeded', state
+                    resolved.extend(state['result']['messages'])
+                    break
+                time.sleep(.01)
+            else:
+                raise AssertionError(f'native browser job timed out: {job}')
         elapsed = (time.perf_counter_ns() - start) / 1e9
-        messages = [m for m in envelope['messages'] if m.get('tool_call_id') == call and m['role'] == 'tool']
+        messages = [m for m in resolved if m.get('tool_call_id') == call and m['role'] == 'tool']
+        assert all(not m.get('tool_failed') for m in messages), messages
         assert len(messages) == 1
         content = messages[0]['content']
         if isinstance(content, list):
@@ -73,9 +85,38 @@ class Client:
             self.generation = generation
         assert generation == self.generation, 'generation changed during baseline'
         profile = report.get('browser_profile', envelope.get('browser_profile'))
-        if profile is not None:
-            self.profiles.append(profile)
+        assert isinstance(profile, dict) and profile, 'browser_profile evidence required for every completed call'
+        self.profiles.append(profile)
         return report, elapsed
+
+
+    def stop_browser(self):
+        request = urllib.request.Request(self.engine + '/v1/browser/stop',
+            data=json.dumps({'chat_id': self.chat}).encode(),
+            headers={'Content-Type': 'application/json'})
+        with self.http.open(request, timeout=30) as response:
+            assert response.status == 200
+
+
+def require(condition, message):
+    if not condition:
+        raise AssertionError(message)
+
+
+def close_owned_tabs(client, owned, attempt):
+    for tab in sorted(owned):
+        def close(tab=tab):
+            client.call([action('close_tab', tab=dict(type='id', id=tab))])
+            owned.remove(tab)
+        attempt(close)
+
+
+def finish_cleanup(primary_error, errors):
+    if primary_error is not None:
+        for error in errors:
+            primary_error.add_note(f'Cleanup failed: {error!r}')
+    elif errors:
+        raise BaseExceptionGroup('Benchmark cleanup failed', errors)
 
 
 def action(name, **kw):
@@ -95,16 +136,8 @@ def summary(values):
     return dict(samples=values, median=statistics.median(values), p95=ordered[math.ceil(.95 * len(values)) - 1])
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--engine', default='http://127.0.0.1:18990')
-    parser.add_argument('--binary', required=True)
-    parser.add_argument('--output', required=True)
-    parser.add_argument('--samples', type=int, default=7)
-    parser.add_argument('--actions', type=int, default=24)
-    parser.add_argument('--transport', choices=['polling_10ms', 'readiness_mio'], required=True)
-    args = parser.parse_args()
-    assert args.samples >= 3 and 1 <= args.actions <= 30
+def run(engine, args):
+    assert args.samples >= 3 and 2 <= args.actions <= 30 and args.actions % 2 == 0
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
@@ -117,28 +150,31 @@ def main():
         def log_message(self, *_args):
             pass
 
-    server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
-    thread = threading.Thread(target=server.serve_forever)
-    thread.start()
-    c = Client(args.engine)
-    rows = {name: [] for name in ['click', 'form', 'tab_churn', 'empty_report']}
-    profiles = []
-    output = dict(timer_scope='client perf_counter_ns HTTP request send through response parse; setup/oracles excluded except final exact-effect oracle per batch',
-                  warmup_samples=1, browser_version=subprocess.check_output(['/usr/bin/google-chrome', '--version'], text=True).strip(),
-                  fixture_sha256=hashlib.sha256(HTML).hexdigest(), binary_sha256=sha(args.binary),
-                  build_profile='ci-test API-only', source_head=subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
-                  source_hashes_scope='observed at run time, not compiled-source proof; see external build/prebuild pins',
-                   source_hashes={}, requested_actions_per_sample=args.actions,
-                  config=dict(headless=True, chromium_sandbox=True, gpu='disabled', viewport='1280x720', transport=args.transport))
-    source_paths = ['crates/refact-browser/src', 'vendor/headless_chrome/src/browser/transport', 'src/integrations/browser_controller.rs', 'src/tools/tool_chrome.rs']
-    for source in source_paths:
-        path = Path(source)
-        for file in sorted(path.rglob('*') if path.is_dir() else [path]):
-            if file.is_file():
-                output['source_hashes'][str(file)] = sha(file)
+    server = thread = c = None
     owned = set()
-    url = f'http://127.0.0.1:{server.server_port}/'
+    output = {}
     try:
+        server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        thread = threading.Thread(target=server.serve_forever)
+        c = Client(engine)
+        rows = {name: [] for name in ['click', 'form', 'tab_churn', 'empty_report']}
+        profiles = []
+        output = dict(timer_scope='client perf_counter_ns HTTP send through native-job completion/response parse including 10ms receipt polling; setup/oracles excluded except final exact-effect oracle per batch',
+                      warmup_samples=1, browser_version=subprocess.check_output(['/usr/bin/google-chrome', '--version'], text=True).strip(),
+                      fixture_sha256=hashlib.sha256(HTML).hexdigest(), binary_sha256=sha(args.binary),
+                      build_profile='explicit prebuilt binary; compiled-source provenance unverified', source_head=subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
+                      source_hashes_scope='observed at run time, not compiled-source proof; see external build/prebuild pins',
+                       source_hashes={}, requested_actions_per_sample=args.actions,
+                      config=dict(headless=True, chromium_sandbox=True, gpu='disabled', viewport='1280x720', transport_requested=args.transport, transport_observed='unverified'))
+        source_paths = ['crates/refact-browser/src', 'vendor/headless_chrome/src/browser/transport', 'src/integrations/browser_controller.rs', 'src/tools/tool_chrome.rs']
+        for source in source_paths:
+            path = Path(__file__).resolve().parents[1] / source
+            assert path.exists(), path
+            for file in sorted(path.rglob('*') if path.is_dir() else [path]):
+                if file.is_file():
+                    output['source_hashes'][str(file)] = sha(file)
+        url = f'http://127.0.0.1:{server.server_port}/'
+        thread.start()
         report, _ = c.call([action('open_tab', url=url)])
         primary = report['steps'][0]['data']['tab_id']
         owned.add(primary)
@@ -179,20 +215,85 @@ def main():
                       exact_effects=dict(clicks=args.actions * (args.samples + 1), submits=(args.actions // 2) * (args.samples + 1), tabs_opened_and_closed=2 * (args.samples + 1)),
                       profile_present=bool(c.profiles))
     finally:
-        try:
-            for tab in list(owned):
-                c.call([action('close_tab', tab=dict(type='id', id=tab))])
-                owned.remove(tab)
+        primary_error = sys.exception()
+        errors = []
+        def attempt(callback):
+            try:
+                callback()
+            except BaseException as error:
+                errors.append(error)
+        if c is not None:
+            close_owned_tabs(c, owned, attempt)
             output['cleanup_owned_tabs_remaining'] = len(owned)
-        finally:
-            server.shutdown()
-            thread.join()
-            server.server_close()
-            output['fixture_closed'] = True
-            Path(args.output).write_text(json.dumps(output, indent=2))
+            if c.generation is not None:
+                attempt(c.stop_browser)
+        if server is not None:
+            if thread is not None and thread.ident is not None:
+                attempt(server.shutdown)
+                attempt(lambda: thread.join(timeout=10))
+                attempt(lambda: require(not thread.is_alive(), 'fixture thread still alive'))
+            attempt(server.server_close)
+            output['fixture_closed'] = server.socket.fileno() == -1
+        output['profile_present'] = bool(c and c.profiles)
+        output['cleanup_errors'] = [repr(error) for error in errors]
+        attempt(lambda: Path(args.output).write_text(json.dumps(output, indent=2, allow_nan=False)))
+        finish_cleanup(primary_error, errors)
     print(json.dumps({k: v for k, v in output.items() if k in ('results', 'profile_present', 'exact_effects')}, indent=2))
     assert output.get('profile_present'), 'instrumented baseline requires browser_profile evidence'
+    return output
+
+
+def test_cleanup_attempts_every_tab_and_retains_primary():
+    from types import SimpleNamespace
+    seen, errors = [], []
+    def call(steps):
+        tab = steps[0]['tab']['id']
+        seen.append(tab)
+        if tab in ('a', 'b'):
+            raise RuntimeError(tab)
+    def attempt(callback):
+        try:
+            callback()
+        except BaseException as error:
+            errors.append(error)
+    owned = {'a', 'b', 'c'}
+    close_owned_tabs(SimpleNamespace(call=call), owned, attempt)
+    assert seen == ['a', 'b', 'c'] and owned == {'a', 'b'}
+    primary = ValueError('primary')
+    finish_cleanup(primary, errors)
+    assert len(primary.__notes__) == 2 and str(primary) == 'primary'
+    try:
+        finish_cleanup(None, errors)
+    except BaseExceptionGroup as error:
+        assert len(error.exceptions) == 2
+    else:
+        raise AssertionError('cleanup errors must be fatal')
+
+
+def test_early_setup_failure_closes_fixture(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+    closed = []
+    class Server:
+        server_port = 1
+        socket = SimpleNamespace(fileno=lambda: -1)
+        def serve_forever(self):
+            raise AssertionError('must not start')
+        def server_close(self):
+            closed.append(True)
+    monkeypatch.setattr(__import__(__name__), 'ThreadingHTTPServer', lambda *args: Server())
+    def fail(_engine):
+        raise ValueError('early setup')
+    monkeypatch.setattr(__import__(__name__), 'Client', fail)
+    output = tmp_path / 'failure.json'
+    try:
+        run(None, SimpleNamespace(samples=7, actions=24, output=output))
+    except ValueError as error:
+        assert str(error) == 'early setup'
+    else:
+        raise AssertionError('primary failure lost')
+    assert closed == [True] and json.loads(output.read_text())['fixture_closed']
 
 
 if __name__ == '__main__':
+    from owned_browser_benchmark import main
     main()

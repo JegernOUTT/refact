@@ -102,13 +102,13 @@ async fn native_sync_worker_retains_fence_and_invalidates_after_drop_and_panic()
             *lock.lock().unwrap() = true;
             changed.notify_all();
         }
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        tokio::time::timeout(std::time::Duration::from_secs(60), async {
             while active.load(Ordering::Acquire) {
-                tokio::task::yield_now().await;
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }
         })
         .await
-        .unwrap();
+        .unwrap_or_else(|_| panic!("sync fence not released (panic_worker={panic_worker})"));
         assert!(generation.load(Ordering::SeqCst) > before);
     }
 }

@@ -1,26 +1,37 @@
 name: Refact Agent Engine CI check
 
 on:
-  pull_request:
-    branches:
-      - main
-    paths:
-      - "refact-agent/engine/**"
-      - ".cargo/config.toml"
-      - "rust-toolchain.toml"
-      - ".github/workflows/agent_engine_check.yml"
-  push:
-    branches:
-      - main
-    tags:
-      - "*"
-    paths:
-      - "refact-agent/engine/**"
-      - ".cargo/config.toml"
-      - "rust-toolchain.toml"
-      - ".github/workflows/agent_engine_check.yml"
+  workflow_call:
+    inputs:
+      source_sha:
+        type: string
+        required: true
+      rust_toolchain:
+        type: string
+        required: true
+      node_version:
+        type: string
+        default: "22"
+      browser_artifacts_only:
+        type: boolean
+        default: false
+      browser_artifact_witnesses:
+        type: boolean
+        default: false
+      browser_roadmap_windows:
+        type: boolean
+        default: false
+      expected_sha:
+        type: string
+        default: ""
   workflow_dispatch:
     inputs:
+      source_sha:
+        type: string
+        default: ""
+      rust_toolchain:
+        type: string
+        default: stable
       browser_artifacts_only:
         description: Run focused Windows browser artifact qualification
         type: boolean
@@ -38,8 +49,11 @@ on:
         type: string
         default: ""
 
+permissions:
+  contents: read
+
 concurrency:
-  group: engine-check-${{ github.ref }}
+  group: engine-check-${{ github.workflow }}-${{ github.run_id }}-${{ inputs.browser_artifacts_only }}-${{ inputs.browser_roadmap_windows }}
   cancel-in-progress: true
 
 defaults:
@@ -47,7 +61,8 @@ defaults:
     working-directory: refact-agent/engine
 
 env:
-  RUSTUP_TOOLCHAIN: stable
+  REFACT_SOURCE_SHA: ${{ inputs.source_sha || inputs.expected_sha || github.sha }}
+  RUSTUP_TOOLCHAIN: ${{ inputs.rust_toolchain || 'stable' }}
   REFACT_SKIP_GUI_BUILD: "1"
   CARGO_INCREMENTAL: 0
   CARGO_NET_RETRY: 10
@@ -55,13 +70,26 @@ env:
 jobs:
   check:
     name: Engine correctness (Linux x86_64)
-    if: ${{ !inputs.browser_artifacts_only && !inputs.browser_roadmap_windows && (github.event_name != 'push' || github.ref == 'refs/heads/main') }}
+    if: ${{ !inputs.browser_artifacts_only && !inputs.browser_roadmap_windows && (inputs.source_sha != '' || github.event_name != 'push' || github.ref == 'refs/heads/main') }}
     runs-on: ubuntu-22.04
     env:
       CARGO_BUILD_JOBS: "2"
     steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_sha || inputs.expected_sha || github.sha }}
+          persist-credentials: false
+      - name: Verify immutable checkout
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha || inputs.expected_sha || github.sha }}
+        run: |
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
 
       - name: Disable local development defaults and install stable CI toolchain
         shell: bash
@@ -98,36 +126,130 @@ jobs:
 
       - name: Compile workspace library tests
         timeout-minutes: 120
-        run: cargo test --workspace --profile ci-test --lib --no-run
+        shell: bash
+        run: |
+          export GITHUB_SHA="$REFACT_SOURCE_SHA"
+          cargo test --workspace --profile ci-test --lib --no-run
 
       - name: Run workspace library tests
         env:
           RUST_MIN_STACK: "16777216"
-        run: cargo test --workspace --profile ci-test --lib
+        shell: bash
+        run: |
+          export GITHUB_SHA="$REFACT_SOURCE_SHA"
+          set -o pipefail
+          cargo test --workspace --profile ci-test --lib 2>&1 | tee test-output.txt
+          python ../../tools/dev/ci_tests.py verify-output test-output.txt
 
       - name: Compile workspace integration tests
         timeout-minutes: 120
-        run: cargo test --workspace --profile ci-test --test '*' --no-run
+        shell: bash
+        run: |
+          export GITHUB_SHA="$REFACT_SOURCE_SHA"
+          cargo test --workspace --profile ci-test --test '*' --no-run
 
       - name: Run workspace integration tests
         env:
           RUST_MIN_STACK: "16777216"
-        run: cargo test --workspace --profile ci-test --test '*'
+        shell: bash
+        run: |
+          export GITHUB_SHA="$REFACT_SOURCE_SHA"
+          set -o pipefail
+          cargo test --workspace --profile ci-test --test '*' 2>&1 | tee test-output.txt
+          python ../../tools/dev/ci_tests.py verify-output test-output.txt
 
       - name: Build refact daemon binary
-        run: cargo build --bin refact --profile ci-test
+        run: |
+          export GITHUB_SHA="$REFACT_SOURCE_SHA"
+          cargo build --bin refact --profile ci-test
 
       - name: Run daemon E2E suite
         env:
           RUST_MIN_STACK: "16777216"
-        run: "REFACT_DAEMON_E2E=1 PYTHON3=python3 cargo test --profile ci-test --test it -- daemon_e2e:: --nocapture --test-threads=1"
+        shell: bash
+        run: |
+          export GITHUB_SHA="$REFACT_SOURCE_SHA"
+          set -o pipefail
+          REFACT_DAEMON_E2E=1 PYTHON3=python3 cargo test --profile ci-test --test it -- daemon_e2e:: --nocapture --test-threads=1 2>&1 | tee daemon-output.txt
+          python ../../tools/dev/ci_tests.py verify-output daemon-output.txt
+
+      - name: Build owned tool-job fixture subject
+        run: |
+          export GITHUB_SHA="$REFACT_SOURCE_SHA"
+          cargo build --locked --bin refact-lsp --profile ci-test
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install isolated fixture Python dependencies
+        run: python3 -m pip install aiohttp==3.11.18 pytest==8.4.2 pytest-asyncio==0.25.3 httpx==0.28.1
+
+      - name: Run tool-job fixture unit tests
+        run: python3 ../../tools/dev/ci_tests.py unittest tests/test_tool_jobs_smoke.py
+
+      - name: Run required owned worker integration suites
+        shell: bash
+        run: |
+          binary="$PWD/target/ci-test/refact-lsp"
+          python3 tests/owned_engine.py --binary "$binary" --binary-sha256 "$(sha256sum "$binary" | cut -d' ' -f1)"
+
+      - name: Retain owned integration evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: owned-integration-${{ inputs.source_sha || inputs.expected_sha || github.sha }}
+          path: .refact/verification/owned-integration/
+          include-hidden-files: true
+          if-no-files-found: error
+
+      - name: Run required owned utility integration suites
+        shell: bash
+        run: |
+          binary="$PWD/target/ci-test/refact-lsp"
+          python3 tests/owned_utility_tests.py --binary "$binary" --binary-sha256 "$(sha256sum "$binary" | cut -d' ' -f1)"
+
+      - name: Retain owned utility evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: owned-utility-${{ inputs.source_sha || inputs.expected_sha || github.sha }}
+          path: .refact/verification/owned-utility/
+          include-hidden-files: true
+          if-no-files-found: error
+
+      - name: Run owned tool-job local-provider smoke
+        shell: bash
+        run: |
+          binary="$PWD/target/ci-test/refact-lsp"
+          python3 tests/test_tool_jobs_smoke.py --binary "$binary" --binary-sha256 "$(sha256sum "$binary" | cut -d' ' -f1)"
+
+      - name: Run required owned chat session suites
+        shell: bash
+        run: |
+          binary="$PWD/target/ci-test/refact-lsp"
+          python3 tests/owned_chat_sessions.py --binary "$binary" --binary-sha256 "$(sha256sum "$binary" | cut -d' ' -f1)"
+
+      - name: Retain owned chat session evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: owned-chat-sessions-${{ inputs.source_sha || inputs.expected_sha || github.sha }}
+          path: .refact/verification/owned-chat-sessions/
+          include-hidden-files: true
+          if-no-files-found: error
 
       - name: Run workspace documentation tests
-        run: cargo test --workspace --profile ci-test --doc
+        shell: bash
+        run: |
+          export GITHUB_SHA="$REFACT_SOURCE_SHA"
+          set -o pipefail
+          cargo test --workspace --profile ci-test --doc 2>&1 | tee doc-output.txt
+          python ../../tools/dev/ci_tests.py verify-output doc-output.txt
 
   platform-tests:
     name: Platform tests (${{ matrix.target }})
-    if: ${{ !inputs.browser_artifacts_only && !inputs.browser_roadmap_windows && (github.event_name != 'push' || startsWith(github.ref, 'refs/tags/')) }}
+    if: ${{ !inputs.browser_artifacts_only && !inputs.browser_roadmap_windows && (inputs.source_sha != '' || github.event_name != 'push' || startsWith(github.ref, 'refs/tags/')) }}
     env:
       REFACT_SKIP_GUI_BUILD: "1"
     strategy:
@@ -142,8 +264,21 @@ jobs:
             target: aarch64-apple-darwin
     runs-on: ${{ matrix.os }}
     steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_sha || inputs.expected_sha || github.sha }}
+          persist-credentials: false
+      - name: Verify immutable checkout
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha || inputs.expected_sha || github.sha }}
+        run: |
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
 
       - name: Disable local development defaults and install stable CI toolchain
         shell: bash
@@ -183,7 +318,9 @@ jobs:
           CMAKE_POLICY_DEFAULT_CMP0091: NEW
           CMAKE_MSVC_RUNTIME_LIBRARY: MultiThreaded
         shell: bash
-        run: cargo test --workspace --profile ci-test --lib --target ${{ matrix.target }} --no-run
+        run: |
+          export GITHUB_SHA="$REFACT_SOURCE_SHA"
+          cargo test --workspace --profile ci-test --lib --target ${{ matrix.target }} --no-run
 
       - name: Run workspace library tests (Windows)
         if: startsWith(matrix.os, 'windows')
@@ -194,21 +331,35 @@ jobs:
           CMAKE_POLICY_DEFAULT_CMP0091: NEW
           CMAKE_MSVC_RUNTIME_LIBRARY: MultiThreaded
         shell: bash
-        run: cargo test --workspace --profile ci-test --lib --target ${{ matrix.target }} -- --nocapture --test-threads=1
+        run: |
+          export GITHUB_SHA="$REFACT_SOURCE_SHA"
+          set -o pipefail
+          cargo test --workspace --profile ci-test --lib --target ${{ matrix.target }} -- --nocapture --test-threads=1 2>&1 | tee test-output.txt
+          python ../../tools/dev/ci_tests.py verify-output test-output.txt
 
       - name: Run workspace library tests (macOS)
         if: startsWith(matrix.os, 'macos')
         env:
           RUST_MIN_STACK: "16777216"
           OPENSSL_STATIC: "1"
-        run: cargo test --workspace --exclude refact-lsp --profile ci-test --lib --target ${{ matrix.target }}
+        shell: bash
+        run: |
+          export GITHUB_SHA="$REFACT_SOURCE_SHA"
+          set -o pipefail
+          cargo test --workspace --profile ci-test --lib --target ${{ matrix.target }} 2>&1 | tee test-output.txt
+          python ../../tools/dev/ci_tests.py verify-output test-output.txt
 
       - name: Run workspace library tests (Linux ARM)
         if: startsWith(matrix.os, 'ubuntu')
         env:
           RUST_MIN_STACK: "16777216"
           OPENSSL_STATIC: "1"
-        run: cargo test --workspace --exclude refact-lsp --profile ci-test --lib --target ${{ matrix.target }}
+        shell: bash
+        run: |
+          export GITHUB_SHA="$REFACT_SOURCE_SHA"
+          set -o pipefail
+          cargo test --workspace --profile ci-test --lib --target ${{ matrix.target }} 2>&1 | tee test-output.txt
+          python ../../tools/dev/ci_tests.py verify-output test-output.txt
 
       - name: Run workspace integration tests (Windows)
         if: startsWith(matrix.os, 'windows')
@@ -219,35 +370,62 @@ jobs:
           CMAKE_POLICY_DEFAULT_CMP0091: NEW
           CMAKE_MSVC_RUNTIME_LIBRARY: MultiThreaded
         shell: bash
-        run: cargo test --workspace --profile ci-test --test '*' --target ${{ matrix.target }} -- --nocapture --test-threads=1
+        run: |
+          export GITHUB_SHA="$REFACT_SOURCE_SHA"
+          set -o pipefail
+          cargo test --workspace --profile ci-test --test '*' --target ${{ matrix.target }} -- --nocapture --test-threads=1 2>&1 | tee test-output.txt
+          python ../../tools/dev/ci_tests.py verify-output test-output.txt
 
       - name: Run workspace integration tests (macOS)
         if: startsWith(matrix.os, 'macos')
         env:
           RUST_MIN_STACK: "16777216"
           OPENSSL_STATIC: "1"
-        run: cargo test --workspace --exclude refact-lsp --profile ci-test --test '*' --target ${{ matrix.target }}
+        shell: bash
+        run: |
+          export GITHUB_SHA="$REFACT_SOURCE_SHA"
+          set -o pipefail
+          cargo test --workspace --profile ci-test --test '*' --target ${{ matrix.target }} 2>&1 | tee test-output.txt
+          python ../../tools/dev/ci_tests.py verify-output test-output.txt
 
       - name: Run workspace integration tests (Linux ARM)
         if: startsWith(matrix.os, 'ubuntu')
         env:
           RUST_MIN_STACK: "16777216"
           OPENSSL_STATIC: "1"
-        run: cargo test --workspace --exclude refact-lsp --profile ci-test --test '*' --target ${{ matrix.target }}
+        shell: bash
+        run: |
+          export GITHUB_SHA="$REFACT_SOURCE_SHA"
+          set -o pipefail
+          cargo test --workspace --profile ci-test --test '*' --target ${{ matrix.target }} 2>&1 | tee test-output.txt
+          python ../../tools/dev/ci_tests.py verify-output test-output.txt
 
   browser-artifacts-windows:
     name: Browser artifact qualification (Windows x86_64)
-    if: ${{ github.event_name == 'workflow_dispatch' && (inputs.browser_artifacts_only || inputs.browser_roadmap_windows) }}
+    if: ${{ (github.event_name == 'workflow_dispatch' || inputs.source_sha != '') && (inputs.browser_artifacts_only || inputs.browser_roadmap_windows) }}
     runs-on: windows-latest
     timeout-minutes: 120
     permissions:
       contents: read
     env:
       RUST_MIN_STACK: "16777216"
-      BROWSER_QUALIFICATION_SHA: ${{ inputs.expected_sha }}
+      BROWSER_QUALIFICATION_SHA: ${{ inputs.source_sha || inputs.expected_sha }}
     steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
       - name: Checkout qualification revision
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_sha || inputs.expected_sha || github.sha }}
+          persist-credentials: false
+      - name: Verify immutable checkout
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha || inputs.expected_sha || github.sha }}
+        run: |
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
 
       - name: Verify qualification revision
         shell: bash
@@ -271,17 +449,24 @@ jobs:
       - name: Verify browser crate and artifact consumers
         shell: bash
         run: |
+          export GITHUB_SHA="$REFACT_SOURCE_SHA"
           git rev-parse HEAD
           cargo test --locked --profile ci-test -p refact-browser --lib -- --nocapture --test-threads=1
 
       - name: Verify pending Chrome startup pipe deadline
         shell: bash
-        run: cargo test --locked --profile ci-test -p headless_chrome --lib pending_stderr_obeys_original_startup_deadline -- --nocapture --test-threads=1
+        run: |
+          export GITHUB_SHA="$REFACT_SOURCE_SHA"
+          set -o pipefail
+          cargo test --locked --profile ci-test -p headless_chrome --lib pending_stderr_obeys_original_startup_deadline -- --nocapture --test-threads=1 2>&1 | tee test-output.txt
+          python ../../tools/dev/ci_tests.py verify-output test-output.txt
 
       - name: Execute controlled production fault witnesses
         if: ${{ inputs.browser_artifact_witnesses }}
         shell: bash
-        run: python ../../tools/dev/browser_artifact_witness.py
+        run: |
+          export GITHUB_SHA="$REFACT_SOURCE_SHA"
+          python ../../tools/dev/browser_artifact_witness.py
 
       - name: Install LLVM for full engine build
         if: ${{ inputs.browser_roadmap_windows }}
@@ -291,6 +476,7 @@ jobs:
         if: ${{ inputs.browser_roadmap_windows }}
         shell: pwsh
         run: |
+          $env:GITHUB_SHA = $env:REFACT_SOURCE_SHA
           $errors = $null
           [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path '../../tools/dev/browser_windows_roadmap_qualification.ps1').Path, [ref]$null, [ref]$errors) | Out-Null
           if ($errors.Count) { $errors | ForEach-Object { Write-Error $_ }; exit 1 }
@@ -302,7 +488,9 @@ jobs:
           REFACT_GUI_DIR: ${{ github.workspace }}\refact-agent\gui
           CMAKE_POLICY_DEFAULT_CMP0091: NEW
           CMAKE_MSVC_RUNTIME_LIBRARY: MultiThreaded
-        run: ../../tools/dev/browser_windows_roadmap_qualification.ps1
+        run: |
+          $env:GITHUB_SHA = $env:REFACT_SOURCE_SHA
+          ../../tools/dev/browser_windows_roadmap_qualification.ps1
 
       - name: Retain Windows roadmap evidence
         if: ${{ always() && inputs.browser_roadmap_windows }}

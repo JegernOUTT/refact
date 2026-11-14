@@ -6,7 +6,25 @@ name: Engine Performance
 # something. Linux only: the CPU and IO counters are cfg(target_os = "linux").
 
 on:
+  workflow_call:
+    inputs:
+      source_sha:
+        type: string
+        required: true
+      rust_toolchain:
+        type: string
+        required: true
+      node_version:
+        type: string
+        default: "22"
   workflow_dispatch:
+    inputs:
+      source_sha:
+        type: string
+        default: ""
+      rust_toolchain:
+        type: string
+        default: stable
   schedule:
     - cron: "0 5 * * *"
   pull_request:
@@ -16,7 +34,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: engine-perf-${{ github.event.pull_request.number || github.run_id }}
+  group: engine-perf-${{ github.workflow }}-${{ github.run_id }}
   cancel-in-progress: true
 
 defaults:
@@ -24,7 +42,8 @@ defaults:
     working-directory: refact-agent/engine
 
 env:
-  RUSTUP_TOOLCHAIN: stable
+  REFACT_SOURCE_SHA: ${{ inputs.source_sha || github.sha }}
+  RUSTUP_TOOLCHAIN: ${{ inputs.rust_toolchain || 'stable' }}
   CARGO_INCREMENTAL: 0
   CARGO_NET_RETRY: 10
   RUSTUP_MAX_RETRIES: 10
@@ -32,18 +51,28 @@ env:
 
 jobs:
   engine-perf:
-    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' || contains(github.event.pull_request.labels.*.name, 'engine-perf')
+    if: inputs.source_sha != '' || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' || contains(github.event.pull_request.labels.*.name, 'engine-perf')
     name: Engine performance benchmarks (Linux x86_64)
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_sha || github.sha }}
+          persist-credentials: false
+      - name: Verify immutable checkout
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha || github.sha }}
+        run: |
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
 
       - name: Install Node.js for engine-served GUI bundle
         uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: ${{ inputs.node_version || '22' }}
           cache: npm
           cache-dependency-path: refact-agent/gui/package-lock.json
 
@@ -55,7 +84,7 @@ jobs:
         shell: bash
         run: |
           rm -f ../../.cargo/config.toml
-          rustup toolchain install stable --profile minimal --component rust-src --no-self-update
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component rust-src --no-self-update
 
       - name: Install build tools
         run: |
@@ -71,4 +100,28 @@ jobs:
           cache-bin: false
 
       - name: Run engine performance benchmarks
-        run: cargo test -p refact-lsp --lib --features perf-tests -- chat::perf_harness --test-threads=1 --nocapture
+        shell: bash
+        run: |
+          export GITHUB_SHA="$REFACT_SOURCE_SHA"
+          set -o pipefail
+          cargo test -p refact-lsp --lib --features perf-tests -- chat::perf_harness --include-ignored --test-threads=1 --nocapture 2>&1 | tee test-output.txt
+          python3 ../../tools/dev/ci_tests.py verify-output test-output.txt
+
+      - name: Run all ignored coordination benchmarks
+        shell: bash
+        run: |
+          export GITHUB_SHA="$REFACT_SOURCE_SHA"
+          set -o pipefail
+          cargo test -p refact-lsp --lib --features perf-tests -- coordination:: --ignored --test-threads=1 --nocapture 2>&1 | tee coordination-output.txt
+          python3 ../../tools/dev/ci_tests.py verify-output coordination-output.txt
+
+      - name: Retain benchmark comparison evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: engine-perf-${{ inputs.source_sha || github.sha }}
+          path: |
+            refact-agent/engine/test-output.txt
+            refact-agent/engine/coordination-output.txt
+            refact-agent/engine/target/*benchmark*.json
+          if-no-files-found: error

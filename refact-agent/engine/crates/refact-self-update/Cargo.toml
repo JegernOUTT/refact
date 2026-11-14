@@ -14,10 +14,15 @@ sha2.workspace = true
 tar = "0.4"
 zip.workspace = true
 serde_json.workspace = true
+fd-lock.workspace = true
+dunce.workspace = true
+tempfile.workspace = true
 
-[target.'cfg(target_os = "linux")'.dependencies]
+[target.'cfg(unix)'.dependencies]
 libc.workspace = true
 
 [dev-dependencies]
 tokio.workspace = true
 tempfile.workspace = true
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
+tokio-rustls = "0.26.4"

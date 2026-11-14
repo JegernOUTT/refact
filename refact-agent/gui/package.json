@@ -5,8 +5,7 @@
   "license": "BSD-3-Clause",
   "files": [
     "dist",
-    "dist/chat/style.css",
-    "THIRD_PARTY_NOTICES.md"
+    "dist/chat/style.css"
   ],
   "main": "dist/chat/index.umd.cjs",
   "module": "dist/chat/index.js",

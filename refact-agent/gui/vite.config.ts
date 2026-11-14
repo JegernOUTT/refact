@@ -8,6 +8,7 @@ import { configDefaults, coverageConfigDefaults } from "vitest/config";
 import dts from "vite-plugin-dts";
 
 import { execSync } from "child_process";
+import { bundledLicenses } from "./vitePlugins/bundledLicenses";
 
 function resolveCommitHash(): string {
   const envSha =
@@ -115,6 +116,9 @@ function makeConfig(library: "browser" | "node") {
     };
 
     if (command !== "serve") {
+      if (library === "browser") {
+        CONFIG.plugins?.push(bundledLicenses(__dirname));
+      }
       CONFIG.mode = "production";
       CONFIG.define = {
         ...CONFIG.define,

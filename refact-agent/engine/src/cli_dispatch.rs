@@ -70,12 +70,15 @@ where
         return parse_control(&[OsString::from("refact"), OsString::from("ui")]);
     };
     match subcommand.to_string_lossy().as_ref() {
+        "--build-info" if args.len() == 2 => {
+            Ok(RefactCliCommand::Help(crate::version::build_info_json()))
+        }
         "worker" => parse_worker(args),
         "daemon" => parse_daemon(&args),
         "run" => parse_run(&args),
         "self-update" => parse_self_update(&args),
         "ui" | "ps" | "projects" | "cron" | "restart" | "stop" | "logs" | "events" | "status"
-        | "doctor" | "version" => parse_control(&args),
+        | "doctor" | "version" | "runtime" => parse_control(&args),
         "--version" | "-V" => parse_control(&[OsString::from("refact"), OsString::from("version")]),
         "help" | "--help" | "-h" => Ok(RefactCliCommand::Help(help_text())),
         other => Err(if contains_json(args.iter().skip(1)) {
@@ -107,7 +110,7 @@ pub fn dispatch(command: RefactCliCommand) -> DispatchResult {
 }
 
 pub fn help_text() -> &'static str {
-    "refact <SUBCOMMAND> [OPTIONS]\n\nUSAGE:\n    refact                       Open the GUI dashboard\n    refact <SUBCOMMAND> [OPTIONS]\n\nSUBCOMMANDS:\n    ui [<path>] [--json] [--no-open]\n                                Open the dashboard or a project workspace\n    worker [engine flags...]    Run the refact worker engine\n    daemon [--foreground] [--port <N>]\n                                Run the refact daemon\n    run [OPTIONS] <prompt>      Run one headless chat turn through the daemon\n    ps                          List daemon workers\n    projects                    Manage daemon project registry\n    cron                        Manage scheduler jobs\n    restart                     Restart a project worker or daemon\n    stop                        Stop a project worker or daemon\n    logs                        Print daemon or worker logs\n    events                      Print daemon events\n    status                      Print daemon health\n    doctor                      Diagnose daemon setup\n    version                     Print version and build information\n    self-update [OPTIONS]       Update this refact binary from GitHub Releases\n\nRUN OPTIONS:\n    --project <path>            Project root (default: cwd)\n    --mode agent|explore        Chat mode (default: agent)\n    --model <model>             Model id\n    --approve deny|ask|auto     Tool approval policy (default: deny)\n    --json                      Emit final JSON instead of streaming text\n    --timeout-secs <N>          Timeout in seconds (default: 600)\n\nAll management commands support --json. Run `refact worker --help` for engine flags."
+    "refact <SUBCOMMAND> [OPTIONS]\n\nUSAGE:\n    refact                       Open the GUI dashboard\n    refact <SUBCOMMAND> [OPTIONS]\n\nSUBCOMMANDS:\n    ui [<path>] [--json] [--no-open]\n                                Open the dashboard or a project workspace\n    worker [engine flags...]    Run the refact worker engine\n    daemon [--foreground] [--port <N>]\n                                Run the refact daemon\n    run [OPTIONS] <prompt>      Run one headless chat turn through the daemon\n    ps                          List daemon workers\n    projects                    Manage daemon project registry\n    cron                        Manage scheduler jobs\n    restart                     Restart a project worker or daemon\n    stop                        Stop a project worker or daemon\n    logs                        Print daemon or worker logs\n    events                      Print daemon events\n    status                      Print daemon health\n    doctor                      Diagnose daemon setup\n    version                     Print version and build information\n    runtime <COMMAND>           Observe/select/resolve/stage runtime (never activate)\n    self-update [OPTIONS]       Update this refact binary from GitHub Releases\n\nRUN OPTIONS:\n    --project <path>            Project root (default: cwd)\n    --mode agent|explore        Chat mode (default: agent)\n    --model <model>             Model id\n    --approve deny|ask|auto     Tool approval policy (default: deny)\n    --json                      Emit final JSON instead of streaming text\n    --timeout-secs <N>          Timeout in seconds (default: 600)\n\nAll management commands support --json. Run `refact worker --help` for engine flags."
 }
 
 pub fn daemon_help_text() -> &'static str {
@@ -123,7 +126,7 @@ pub fn self_update_help_text() -> &'static str {
 }
 
 pub fn version_text() -> String {
-    let mut lines = vec![format!("refact {}", env!("CARGO_PKG_VERSION"))];
+    let mut lines = vec![format!("refact {}", crate::version::VERSION)];
     lines.extend(
         crate::http::routers::info::get_build_info()
             .into_iter()
@@ -273,6 +276,36 @@ fn json_usage_error(message: String) -> CliDispatchError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn runtime_dispatch_help_and_json_usage() {
+        assert!(matches!(
+            parse_from(["refact", "runtime", "status", "--json"]).unwrap(),
+            RefactCliCommand::Control(_)
+        ));
+        let RefactCliCommand::Help(help) =
+            parse_from(["refact", "runtime", "stage", "--help"]).unwrap()
+        else {
+            panic!("expected runtime help")
+        };
+        assert!(help.contains("it does not install"));
+        assert!(help.contains("IDE-owned"));
+        assert!(help.contains("Actions URLs"));
+        assert!(help_text().contains("runtime <COMMAND>"));
+        for args in [
+            vec!["refact", "runtime", "install", "--json"],
+            vec!["refact", "runtime", "stage", "--json"],
+        ] {
+            let error = parse_from(args).unwrap_err();
+            assert_eq!(error.exit_code, 2);
+            assert!(error.json);
+            assert_eq!(error.kind, Some("usage"));
+        }
+        assert!(matches!(
+            parse_from(["refact", "self-update", "--check"]).unwrap(),
+            RefactCliCommand::SelfUpdate(_)
+        ));
+    }
 
     #[test]
     fn parse_worker_tail_flags() {

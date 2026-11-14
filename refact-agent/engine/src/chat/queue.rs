@@ -334,6 +334,24 @@ fn command_triggers_generation(cmd: &ChatCommand) -> bool {
     )
 }
 
+fn reset_stale_abort_for_selected_turn(session: &mut ChatSession, command: &ChatCommand) {
+    if command_triggers_generation(command)
+        || matches!(
+            command,
+            ChatCommand::UpdateMessage {
+                regenerate: true,
+                ..
+            } | ChatCommand::RemoveMessage {
+                regenerate: true,
+                ..
+            }
+        )
+    {
+        session.abort_flag.store(false, Ordering::SeqCst);
+        session.user_interrupt_flag.store(false, Ordering::SeqCst);
+    }
+}
+
 fn answer_questions_content(tool_call_id: &str, answers: &[QuestionAnswer]) -> String {
     serde_json::json!({"type":"ask_questions_answer","tool_call_id":tool_call_id,"answers":answers})
         .to_string()
@@ -1875,6 +1893,7 @@ async fn select_next_command(session_arc: &Arc<AMutex<ChatSession>>) -> Option<S
             })
             .and_then(|index| session.command_queue.remove(index));
         if let Some(request) = command.as_ref() {
+            reset_stale_abort_for_selected_turn(&mut session, &request.command);
             session.record_command_queue_wait(&request.client_request_id);
             session.emit_queue_update();
             (command, None)
@@ -1921,6 +1940,7 @@ async fn select_next_command(session_arc: &Arc<AMutex<ChatSession>>) -> Option<S
                     session.record_command_queue_wait(&request_id);
                 }
             }
+            reset_stale_abort_for_selected_turn(&mut session, &req.command);
             if command_triggers_generation(&req.command) {
                 session.set_runtime_state(SessionState::Idle, None);
             }
@@ -4059,6 +4079,255 @@ mod tests {
         assert_eq!(locked.live_diagnostics.accepted_count, 0);
         assert!(locked.live_diagnostics.accepted_at.is_none());
         assert!(locked.live_diagnostics.phase.is_none());
+    }
+
+    fn generation_requests() -> Vec<CommandRequest> {
+        vec![
+            serde_json::from_value(json!({
+                "client_request_id": "new-user", "type": "user_message", "content": "next turn"
+            }))
+            .unwrap(),
+            make_request(ChatCommand::RetryFromIndex {
+                index: 0,
+                content: json!("retry turn"),
+                attachments: vec![],
+            }),
+            make_request(ChatCommand::Regenerate {}),
+        ]
+    }
+
+    #[tokio::test]
+    async fn idle_abort_new_dequeue_reaches_generation_boundary() {
+        for request in generation_requests() {
+            let mut session = ChatSession::new("idle-abort-new-turn".into());
+            session.abort_stream();
+            assert_eq!(session.runtime.state, SessionState::Idle);
+            assert!(session.abort_flag.load(Ordering::SeqCst));
+            assert!(session.user_interrupt_flag.load(Ordering::SeqCst));
+            let request_id = request.client_request_id.clone();
+            assert_eq!(
+                session.enqueue_command(request),
+                EnqueueCommandOutcome::Accepted
+            );
+            let session = Arc::new(AMutex::new(session));
+            let selected = select_next_command(&session)
+                .await
+                .unwrap()
+                .command
+                .unwrap();
+            assert_eq!(selected.client_request_id, request_id);
+            assert!(command_triggers_generation(&selected.command));
+            assert!(session.lock().await.command_queue.is_empty());
+            assert!(
+                !aborted_before_start_generation(&session).await,
+                "idle abort silently suppressed new command: {:?}",
+                selected.command
+            );
+            let locked = session.lock().await;
+            assert!(!locked.abort_flag.load(Ordering::SeqCst));
+            assert!(!locked.user_interrupt_flag.load(Ordering::SeqCst));
+        }
+    }
+
+    #[tokio::test]
+    async fn idle_abort_after_dequeue_still_suppresses_selected_turn() {
+        for request in generation_requests() {
+            let mut session = ChatSession::new("abort-after-dequeue".into());
+            assert_eq!(
+                session.enqueue_command(request),
+                EnqueueCommandOutcome::Accepted
+            );
+            let session = Arc::new(AMutex::new(session));
+            let selected = select_next_command(&session)
+                .await
+                .unwrap()
+                .command
+                .unwrap();
+            assert!(command_triggers_generation(&selected.command));
+            session.lock().await.abort_stream();
+            assert!(aborted_before_start_generation(&session).await);
+        }
+    }
+
+    #[tokio::test]
+    async fn idle_abort_busy_dequeue_preserves_interrupt_flags() {
+        for busy_gate in ["runner", "turn_depth", "generating", "tools", "compression"] {
+            let mut session = ChatSession::new("busy-abort".into());
+            session.abort_stream();
+            assert_eq!(
+                session.enqueue_command(make_request(ChatCommand::Regenerate {})),
+                EnqueueCommandOutcome::Accepted
+            );
+            match busy_gate {
+                "runner" => {
+                    session.runner_lease = Some(("runner".into(), Arc::new(AtomicBool::new(false))))
+                }
+                "turn_depth" => session.turn_depth = 1,
+                "generating" => session.set_runtime_state(SessionState::Generating, None),
+                "tools" => session.set_runtime_state(SessionState::ExecutingTools, None),
+                "compression" => {
+                    session.is_compressing = true;
+                }
+                _ => unreachable!(),
+            }
+            let session = Arc::new(AMutex::new(session));
+            let selected = select_next_command(&session).await.unwrap();
+            assert!(
+                selected.command.is_none(),
+                "busy gate bypassed: {busy_gate}"
+            );
+            assert!(selected.waiter.is_some());
+            let locked = session.lock().await;
+            assert_eq!(locked.command_queue.len(), 1);
+            assert!(locked.abort_flag.load(Ordering::SeqCst), "{busy_gate}");
+            assert!(
+                locked.user_interrupt_flag.load(Ordering::SeqCst),
+                "{busy_gate}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn idle_abort_dequeue_preserves_old_execution_abort_until_new_origin() {
+        let mut session = ChatSession::new("execution-abort-dequeue".into());
+        session.begin_execution_origin();
+        let old_origin = session.execution_abort.clone();
+        session.abort_stream();
+        assert!(old_origin.load(Ordering::SeqCst));
+        assert_eq!(
+            session.enqueue_command(make_request(ChatCommand::Regenerate {})),
+            EnqueueCommandOutcome::Accepted
+        );
+        let session = Arc::new(AMutex::new(session));
+        assert!(select_next_command(&session)
+            .await
+            .unwrap()
+            .command
+            .is_some());
+        let mut locked = session.lock().await;
+        assert!(Arc::ptr_eq(&old_origin, &locked.execution_abort));
+        assert!(locked.execution_abort.load(Ordering::SeqCst));
+        locked.begin_execution_origin();
+        assert!(!Arc::ptr_eq(&old_origin, &locked.execution_abort));
+        assert!(!locked.execution_abort.load(Ordering::SeqCst));
+        assert!(old_origin.load(Ordering::SeqCst));
+    }
+
+    fn edit_requests(regenerate: bool) -> Vec<CommandRequest> {
+        vec![
+            make_request(ChatCommand::UpdateMessage {
+                message_id: "existing-user".into(),
+                content: json!("edited"),
+                attachments: vec![],
+                regenerate,
+            }),
+            make_request(ChatCommand::RemoveMessage {
+                message_id: "existing-user".into(),
+                regenerate,
+            }),
+        ]
+    }
+
+    fn pending_browser_fixture() -> PendingBrowserMessage {
+        PendingBrowserMessage {
+            pending_message_id: "held-browser".into(),
+            content: json!("held"),
+            attachments: vec![],
+            client_message_id: None,
+            checkpoints: vec![],
+            context_files: vec![],
+            suppress_auto_enrichment: false,
+            skill_activation_name: None,
+            skill_context_msg: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn idle_abort_browser_and_edit_dequeues_reset_only_selected_turn() {
+        for browser_pending in [false, true] {
+            let mut requests = generation_requests();
+            requests[0].priority = true;
+            requests.extend(edit_requests(true));
+            for request in requests {
+                let expected = serde_json::to_value(&request.command).unwrap();
+                let mut session = ChatSession::new("idle-abort-selected-edge".into());
+                if browser_pending {
+                    session.pending_browser_message = Some(pending_browser_fixture());
+                }
+                session.apply_priority_abort();
+                assert!(session.abort_flag.load(Ordering::SeqCst));
+                assert!(session.user_interrupt_flag.load(Ordering::SeqCst));
+                let old_origin = session.execution_abort.clone();
+                session.command_queue.push_back(request);
+                let session = Arc::new(AMutex::new(session));
+                let selected = select_next_command(&session)
+                    .await
+                    .unwrap()
+                    .command
+                    .unwrap();
+                assert_eq!(serde_json::to_value(selected.command).unwrap(), expected);
+                {
+                    let locked = session.lock().await;
+                    assert!(locked.command_queue.is_empty());
+                    assert_eq!(locked.pending_browser_message.is_some(), browser_pending);
+                    assert!(Arc::ptr_eq(&old_origin, &locked.execution_abort));
+                    assert!(old_origin.load(Ordering::SeqCst));
+                    assert!(!locked.abort_flag.load(Ordering::SeqCst));
+                    assert!(!locked.user_interrupt_flag.load(Ordering::SeqCst));
+                }
+                assert!(!aborted_before_start_generation(&session).await);
+                session.lock().await.abort_stream();
+                assert!(aborted_before_start_generation(&session).await);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn idle_abort_browser_hold_and_non_generation_preserve_flags() {
+        let mut held = ChatSession::new("idle-abort-browser-held".into());
+        held.pending_browser_message = Some(pending_browser_fixture());
+        held.apply_priority_abort();
+        held.command_queue
+            .push_back(generation_requests().remove(0));
+        let held = Arc::new(AMutex::new(held));
+        let selected = select_next_command(&held).await.unwrap();
+        assert!(selected.command.is_none());
+        assert!(selected.waiter.is_some());
+        {
+            let locked = held.lock().await;
+            assert_eq!(locked.command_queue.len(), 1);
+            assert!(locked.pending_browser_message.is_some());
+            assert!(locked.abort_flag.load(Ordering::SeqCst));
+            assert!(locked.user_interrupt_flag.load(Ordering::SeqCst));
+        }
+        for browser_pending in [false, true] {
+            let mut requests = edit_requests(false);
+            requests.push(make_request(ChatCommand::SetParams {
+                patch: json!({}),
+            }));
+            for request in requests {
+                let expected = serde_json::to_value(&request.command).unwrap();
+                let mut session = ChatSession::new("idle-abort-non-generation".into());
+                if browser_pending {
+                    session.pending_browser_message = Some(pending_browser_fixture());
+                }
+                session.apply_priority_abort();
+                session.command_queue.push_back(request);
+                let session = Arc::new(AMutex::new(session));
+                let selected = select_next_command(&session)
+                    .await
+                    .unwrap()
+                    .command
+                    .unwrap();
+                assert_eq!(serde_json::to_value(selected.command).unwrap(), expected);
+                let locked = session.lock().await;
+                assert!(locked.command_queue.is_empty());
+                assert_eq!(locked.pending_browser_message.is_some(), browser_pending);
+                assert!(locked.abort_flag.load(Ordering::SeqCst));
+                assert!(locked.user_interrupt_flag.load(Ordering::SeqCst));
+                assert!(locked.execution_abort.load(Ordering::SeqCst));
+            }
+        }
     }
 
     fn make_request(cmd: ChatCommand) -> CommandRequest {

@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { openReviewFixture } from "./reviewFixtureReady";
 
 for (const { width, height, theme, motion } of [
   { width: 1440, height: 900, theme: "light", motion: "no-preference" },
@@ -10,7 +11,10 @@ for (const { width, height, theme, motion } of [
   }) => {
     await page.setViewportSize({ width, height });
     await page.emulateMedia({ colorScheme: theme, reducedMotion: motion });
-    await page.goto(`/tests/e2e/review-canvas.html?tour=rich&theme=${theme}`);
+    await openReviewFixture(
+      page,
+      `/tests/e2e/review-canvas.html?tour=rich&theme=${theme}`,
+    );
     if (width <= 680) {
       await page
         .getByRole("radio", { name: "Canvas", exact: true })
@@ -54,7 +58,10 @@ for (const { width, height, theme, motion } of [
 test("empty review activates without stealing composer focus", async ({
   page,
 }) => {
-  await page.goto("/tests/e2e/review-canvas.html?state=empty&tour=rich");
+  await openReviewFixture(
+    page,
+    "/tests/e2e/review-canvas.html?state=empty&tour=rich",
+  );
   const chat = page.getByRole("textbox", { name: "Chat composer" });
   await chat.fill("Draft survives activation");
   await chat.focus();
@@ -67,7 +74,7 @@ test("empty review activates without stealing composer focus", async ({
 });
 
 test("worker cancellation is requested in fixture", async ({ page }) => {
-  await page.goto("/tests/e2e/review-canvas.html?tour=rich");
+  await openReviewFixture(page, "/tests/e2e/review-canvas.html?tour=rich");
   await expect(
     page.getByRole("heading", { name: "Input trimming" }),
   ).toBeVisible();
@@ -84,7 +91,7 @@ test("worker cancellation is requested in fixture", async ({ page }) => {
 test("candidate selector returns from history and sources reveal a file", async ({
   page,
 }) => {
-  await page.goto("/tests/e2e/review-canvas.html?tour=rich");
+  await openReviewFixture(page, "/tests/e2e/review-canvas.html?tour=rich");
   await expect(
     page.getByRole("heading", { name: "Input trimming" }),
   ).toBeVisible();
@@ -119,7 +126,7 @@ test("short mobile viewport reaches file navigation and diff", async ({
   page,
 }) => {
   await page.setViewportSize({ width: 390, height: 420 });
-  await page.goto("/tests/e2e/review-canvas.html?tour=rich");
+  await openReviewFixture(page, "/tests/e2e/review-canvas.html?tour=rich");
   await page
     .getByRole("radio", { name: "Canvas", exact: true })
     .locator("..")
@@ -162,7 +169,7 @@ test("short mobile viewport reaches file navigation and diff", async ({
 test("failed refresh preserves read-only review and recovers", async ({
   page,
 }) => {
-  await page.goto("/tests/e2e/review-canvas.html?tour=rich");
+  await openReviewFixture(page, "/tests/e2e/review-canvas.html?tour=rich");
   await expect(
     page.getByRole("heading", { name: "Input trimming" }),
   ).toBeVisible();
@@ -187,7 +194,7 @@ test("failed refresh preserves read-only review and recovers", async ({
 test("line comment draft survives candidate change and read-only recovery", async ({
   page,
 }) => {
-  await page.goto("/tests/e2e/review-canvas.html?tour=rich");
+  await openReviewFixture(page, "/tests/e2e/review-canvas.html?tour=rich");
   await expect(
     page.getByRole("heading", { name: "Input trimming" }),
   ).toBeVisible();
@@ -222,7 +229,7 @@ test("line comment draft survives candidate change and read-only recovery", asyn
 test("range comment retries the identical unknown-outcome request", async ({
   page,
 }) => {
-  await page.goto("/tests/e2e/review-canvas.html?tour=rich");
+  await openReviewFixture(page, "/tests/e2e/review-canvas.html?tour=rich");
   await expect(
     page.getByRole("heading", { name: "Input trimming" }),
   ).toBeVisible();

@@ -1,0 +1,327 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "release/v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Stable version X.Y.Z
+        type: string
+        required: true
+      source_sha:
+        description: Full commit SHA to release
+        type: string
+        required: true
+  workflow_call:
+    inputs:
+      version:
+        type: string
+        required: true
+      source_sha:
+        type: string
+        required: true
+    secrets:
+      VSCE_PAT:
+        required: true
+      PUBLISH_TOKEN:
+        required: true
+      CERTIFICATE_CHAIN:
+        required: true
+      PRIVATE_KEY:
+        required: true
+      PRIVATE_KEY_PASSWORD:
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.version || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  NODE_VERSION: "22.23.4"
+  JETBRAINS_PLUGIN_ID: com.smallcloud.codify
+  ZIP_SIGNER_URL: https://github.com/JetBrains/marketplace-zip-signer/releases/download/0.1.45/marketplace-zip-signer-cli.jar
+  ZIP_SIGNER_SHA256: fc48b8a4165907e8164fc2a1256ed0d0fe6f7b25acb33ac48660ab13e7f64bb8
+  JETBRAINS_UPLOAD_URL: https://plugins.jetbrains.com/api/updates/upload
+
+jobs:
+  resolve:
+    name: Resolve release identity
+    runs-on: ubuntu-latest
+    outputs:
+      source_sha: ${{ steps.id.outputs.source_sha }}
+      version: ${{ steps.id.outputs.version }}
+      rust_toolchain: ${{ steps.id.outputs.rust_toolchain }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_sha || github.sha }}
+          persist-credentials: false
+      - id: id
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha || github.sha }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_EVENT_NAME" == push ]]; then
+            [[ "$GITHUB_REF" == refs/tags/release/v* ]] || { echo "release requires a release/v tag" >&2; exit 1; }
+            version="${GITHUB_REF_NAME#release/v}"
+          else
+            version="$INPUT_VERSION"
+          fi
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "stable version must be X.Y.Z: $version" >&2; exit 1; }
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "source_sha must be a full SHA" >&2; exit 1; }
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          plugin_version="$(sed -nE 's/^[[:space:]]*pluginVersion[[:space:]]*=[[:space:]]*([^[:space:]]+).*/\1/p' plugins/intellij/gradle.properties)"
+          vscode_version="$(python3 -c 'import json; print(json.load(open("plugins/vscode/package.json"))["version"])')"
+          cargo_version="$(sed -n '/^\[package\]/,/^\[/s/^version = "\(.*\)"$/\1/p' refact-agent/engine/Cargo.toml)"
+          [[ "$plugin_version" == "$version" && "$vscode_version" == "$version" && "$cargo_version" == "$version" ]] || {
+            echo "version $version != JetBrains $plugin_version / VS Code $vscode_version / Cargo $cargo_version" >&2; exit 1; }
+          rustup toolchain install stable --profile minimal --no-self-update
+          {
+            echo "source_sha=$SOURCE_SHA"
+            echo "version=$version"
+            echo "rust_toolchain=$(rustup run stable rustc --version | cut -d' ' -f2)"
+          } >> "$GITHUB_OUTPUT"
+
+  tests:
+    needs: resolve
+    permissions:
+      contents: read
+      actions: read
+    uses: ./.github/workflows/tests.yml
+    with:
+      source_sha: ${{ needs.resolve.outputs.source_sha }}
+      rust_toolchain: ${{ needs.resolve.outputs.rust_toolchain }}
+      node_version: "22.23.4"
+      build_profile: ci-release
+
+  build:
+    needs: [resolve, tests]
+    if: needs.tests.outputs.status == 'PASS' && needs.tests.outputs.source_sha == needs.resolve.outputs.source_sha && needs.tests.outputs.rust_toolchain == needs.resolve.outputs.rust_toolchain
+    permissions:
+      contents: read
+      actions: read
+    uses: ./.github/workflows/build_all.yml
+    with:
+      source_sha: ${{ needs.resolve.outputs.source_sha }}
+      version: ${{ needs.resolve.outputs.version }}
+      channel: stable
+      rust_toolchain: ${{ needs.resolve.outputs.rust_toolchain }}
+      node_version: ${{ needs.tests.outputs.node_version }}
+      qualification_artifact_id: ${{ needs.tests.outputs.qualification_artifact_id }}
+      qualification_sha256: ${{ needs.tests.outputs.qualification_sha256 }}
+
+  authorize:
+    name: Authorize publication source
+    needs: [resolve, tests, build]
+    if: needs.build.result == 'success' && needs.build.outputs.build_inputs_digest == needs.tests.outputs.build_inputs_digest
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Same-repository main-history policy
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ needs.resolve.outputs.source_sha }}
+          WORKFLOW_SHA: ${{ github.workflow_sha }}
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+          ALLOWED_CALLERS: release.yml plugin_release.yml agent_engine_release.yml
+        run: |
+          set -euo pipefail
+          case "$GITHUB_EVENT_NAME" in
+            push) [[ "$GITHUB_REF" == refs/tags/release/v* ]] || exit 1 ;;
+            workflow_dispatch) ;;
+            *) echo "event $GITHUB_EVENT_NAME may not publish" >&2; exit 1 ;;
+          esac
+          path="${WORKFLOW_REF#"$GITHUB_REPOSITORY/.github/workflows/"}"
+          [[ "$path" != "$WORKFLOW_REF" ]] || { echo "foreign caller $WORKFLOW_REF" >&2; exit 1; }
+          [[ " $ALLOWED_CALLERS " == *" ${path%%@*} "* ]] || { echo "caller ${path%%@*} may not publish" >&2; exit 1; }
+          for sha in "$SOURCE_SHA" "$WORKFLOW_SHA"; do
+            [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "invalid sha $sha" >&2; exit 1; }
+            status="$(gh api "repos/$GITHUB_REPOSITORY/compare/$sha...main" --jq .status)"
+            [[ "$status" == ahead || "$status" == identical ]] || { echo "$sha is not in main history" >&2; exit 1; }
+          done
+
+  publish-runtime:
+    name: Publish runtime release and manifest
+    needs: [resolve, tests, build, authorize]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - name: Recheck trusted workflow code
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WORKFLOW_SHA: ${{ github.workflow_sha }}
+        run: |
+          set -euo pipefail
+          status="$(gh api "repos/$GITHUB_REPOSITORY/compare/$WORKFLOW_SHA...main" --jq .status)"
+          [[ "$status" == ahead || "$status" == identical ]]
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: trusted
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build.outputs.release_artifact }}
+          path: ${{ runner.temp }}/release
+      - name: Read-only publication source inventory
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.source_sha }}
+          path: publication-source
+          persist-credentials: false
+      - name: Verify bundle and publish
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TRUSTED_DIR: ${{ github.workspace }}/trusted
+          SOURCE_DIR: ${{ github.workspace }}/publication-source
+          SOURCE_SHA: ${{ needs.resolve.outputs.source_sha }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+          MANIFEST_SHA256: ${{ needs.build.outputs.manifest_sha256 }}
+          QUALIFICATION_SHA256: ${{ needs.tests.outputs.qualification_sha256 }}
+          QUALIFICATION_ID: ${{ needs.tests.outputs.qualification_artifact_id }}
+          REPOSITORY_ID: ${{ github.repository_id }}
+        run: |
+          set -euo pipefail
+          dir="$RUNNER_TEMP/release"
+          cd "$(mktemp -d)"
+          test "$(sha256sum "$dir/runtime-manifest.json" | cut -d' ' -f1)" = "$MANIFEST_SHA256"
+          workflow_path="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" --jq .path)"
+          python3 -I "$TRUSTED_DIR/tools/dev/runtime_manifest.py" verify-bundle \
+            --manifest "$dir/runtime-manifest.json" --dir "$dir" --source-sha "$SOURCE_SHA" \
+            --channel stable --version "$VERSION" --workflow-path "${workflow_path%%@*}" \
+            --root "$SOURCE_DIR" --trusted-inventory "$TRUSTED_DIR/tools/dev/ci_test_inventory.json" \
+            --qualification-sha256 "$QUALIFICATION_SHA256" --qualification-artifact-id "$QUALIFICATION_ID" --repository-id "$REPOSITORY_ID" \
+            --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT" --assets-out "$RUNNER_TEMP/assets.txt"
+          mapfile -t assets < "$RUNNER_TEMP/assets.txt"
+          [[ ${#assets[@]} -eq 19 ]] || { echo "expected 18 component assets and one qualification report, got ${#assets[@]}" >&2; exit 1; }
+          assets+=("$dir/runtime-manifest.json")
+          tag="engine/v$VERSION"
+          notes=(--generate-notes)
+          [[ -f "$TRUSTED_DIR/docs/release-notes/v$VERSION.md" ]] && notes=(--notes-file "$TRUSTED_DIR/docs/release-notes/v$VERSION.md")
+          if gh release view "$tag" > /dev/null 2>&1; then
+            existing="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" --jq .object.sha)"
+            test "$existing" = "$SOURCE_SHA" || { echo "$tag already exists for $existing" >&2; exit 1; }
+            gh release upload "$tag" "${assets[@]}" --clobber
+          else
+            gh release create "$tag" "${assets[@]}" --target "$SOURCE_SHA" --latest \
+              --title "Refact v$VERSION" "${notes[@]}"
+          fi
+
+  publish-vscode:
+    name: Publish VS Code Marketplace
+    needs: [resolve, build, publish-runtime]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Recheck trusted workflow code
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WORKFLOW_SHA: ${{ github.workflow_sha }}
+        run: |
+          set -euo pipefail
+          status="$(gh api "repos/$GITHUB_REPOSITORY/compare/$WORKFLOW_SHA...main" --jq .status)"
+          [[ "$status" == ahead || "$status" == identical ]]
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build.outputs.release_artifact }}
+          path: ${{ runner.temp }}/release
+      - name: Publish verified VSIX
+        shell: bash
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+          MANIFEST_SHA256: ${{ needs.build.outputs.manifest_sha256 }}
+        run: |
+          set -euo pipefail
+          dir="$RUNNER_TEMP/release"
+          cd "$(mktemp -d)"
+          test "$(sha256sum "$dir/runtime-manifest.json" | cut -d' ' -f1)" = "$MANIFEST_SHA256"
+          test "$(jq -r .tests "$dir/runtime-manifest.json")" = passed
+          test "$(jq -r .component_versions.vscode "$dir/runtime-manifest.json")" = "$VERSION"
+          vsix="$(jq -r '[.artifacts[] | select(.component=="vscode")] | if length == 1 then .[0].filename else error("vsix") end' "$dir/runtime-manifest.json")"
+          digest="$(jq -r '.artifacts[] | select(.component=="vscode") | .sha256' "$dir/runtime-manifest.json")"
+          test "$(sha256sum "$dir/$vsix" | cut -d' ' -f1)" = "$digest"
+          npx --yes --ignore-scripts @vscode/vsce@3.9.2 publish --skip-duplicate --packagePath "$dir/$vsix"
+
+  publish-jetbrains:
+    name: Publish JetBrains Marketplace
+    needs: [resolve, build, publish-runtime]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Recheck trusted workflow code
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WORKFLOW_SHA: ${{ github.workflow_sha }}
+        run: |
+          set -euo pipefail
+          status="$(gh api "repos/$GITHUB_REPOSITORY/compare/$WORKFLOW_SHA...main" --jq .status)"
+          [[ "$status" == ahead || "$status" == identical ]]
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: trusted
+          persist-credentials: false
+      - uses: actions/setup-java@v4
+        with:
+          distribution: zulu
+          java-version: 17
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build.outputs.release_artifact }}
+          path: ${{ runner.temp }}/release
+      - name: Sign verified ZIP and upload
+        shell: bash
+        env:
+          TRUSTED_DIR: ${{ github.workspace }}/trusted
+          VERSION: ${{ needs.resolve.outputs.version }}
+          MANIFEST_SHA256: ${{ needs.build.outputs.manifest_sha256 }}
+          PUBLISH_TOKEN: ${{ secrets.PUBLISH_TOKEN }}
+          CERTIFICATE_CHAIN: ${{ secrets.CERTIFICATE_CHAIN }}
+          PRIVATE_KEY: ${{ secrets.PRIVATE_KEY }}
+          PRIVATE_KEY_PASSWORD: ${{ secrets.PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          dir="$RUNNER_TEMP/release"
+          work="$(mktemp -d)"
+          trap 'rm -rf "$work"' EXIT
+          cd "$work"
+          test "$(sha256sum "$dir/runtime-manifest.json" | cut -d' ' -f1)" = "$MANIFEST_SHA256"
+          test "$(jq -r .tests "$dir/runtime-manifest.json")" = passed
+          test "$(jq -r .component_versions.jetbrains "$dir/runtime-manifest.json")" = "$VERSION"
+          zip="$(jq -r '[.artifacts[] | select(.component=="jetbrains")] | if length == 1 then .[0].filename else error("zip") end' "$dir/runtime-manifest.json")"
+          digest="$(jq -r '.artifacts[] | select(.component=="jetbrains") | .sha256' "$dir/runtime-manifest.json")"
+          test "$(sha256sum "$dir/$zip" | cut -d' ' -f1)" = "$digest"
+          curl --proto '=https' --tlsv1.2 -fsSL "$ZIP_SIGNER_URL" -o signer.jar
+          echo "$ZIP_SIGNER_SHA256  signer.jar" | sha256sum -c -
+          umask 077
+          printf '%s' "$CERTIFICATE_CHAIN" > chain.crt
+          printf '%s' "$PRIVATE_KEY" > private.pem
+          java -jar signer.jar sign -in "$dir/$zip" -out signed.zip \
+            -cert-file chain.crt -key-file private.pem -key-pass "$PRIVATE_KEY_PASSWORD"
+          status="$(curl --proto '=https' --tlsv1.2 -sS -o response.txt -w '%{http_code}' \
+            -H "Authorization: Bearer $PUBLISH_TOKEN" -F "xmlId=$JETBRAINS_PLUGIN_ID" \
+            -F "file=@signed.zip" "$JETBRAINS_UPLOAD_URL")"
+          python3 -I "$TRUSTED_DIR/tools/dev/runtime_manifest.py" jetbrains-upload-result --status "$status" --body response.txt

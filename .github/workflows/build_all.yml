@@ -1,0 +1,398 @@
+name: Build All
+
+on:
+  workflow_call:
+    inputs:
+      source_sha:
+        description: Full 40-hex commit SHA to build
+        type: string
+        required: true
+      version:
+        description: Build version (semver) stamped into runtime, VSIX and JetBrains plugin
+        type: string
+        required: true
+      channel:
+        description: stable | preview | nightly
+        type: string
+        required: true
+      rust_toolchain:
+        description: Exact Rust toolchain (x.y.z or nightly-YYYY-MM-DD); empty resolves stable once
+        type: string
+        default: ""
+      node_version:
+        description: Exact Node.js version; must equal the pin used by Linux build containers
+        type: string
+        default: "22.23.4"
+      qualification_artifact_id:
+        description: Tests qualify-job artifact id from this run (stable only)
+        type: string
+        default: ""
+      qualification_sha256:
+        description: Tests qualify-job report sha256 output (stable only)
+        type: string
+        default: ""
+    outputs:
+      source_sha:
+        value: ${{ jobs.resolve.outputs.source_sha }}
+      version:
+        value: ${{ jobs.resolve.outputs.version }}
+      channel:
+        value: ${{ jobs.resolve.outputs.channel }}
+      rust_toolchain:
+        value: ${{ jobs.resolve.outputs.rust_toolchain }}
+      node_version:
+        value: ${{ jobs.resolve.outputs.node_version }}
+      build_inputs_digest:
+        value: ${{ jobs.resolve.outputs.build_inputs_digest }}
+      release_artifact:
+        value: ${{ jobs.bundle.outputs.release_artifact }}
+      manifest_sha256:
+        value: ${{ jobs.bundle.outputs.manifest_sha256 }}
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  BUILD_PROFILE: ci-release
+
+jobs:
+  resolve:
+    name: Resolve build identity
+    runs-on: ubuntu-latest
+    outputs:
+      source_sha: ${{ steps.identity.outputs.source_sha }}
+      version: ${{ steps.identity.outputs.version }}
+      channel: ${{ steps.identity.outputs.channel }}
+      rust_toolchain: ${{ steps.identity.outputs.rust_toolchain }}
+      node_version: ${{ steps.identity.outputs.node_version }}
+      build_inputs_digest: ${{ steps.identity.outputs.build_inputs_digest }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_sha }}
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        if: inputs.channel == 'stable'
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: trusted
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        if: inputs.channel == 'stable' && inputs.qualification_artifact_id != ''
+        with:
+          artifact-ids: ${{ inputs.qualification_artifact_id }}
+          path: ${{ runner.temp }}/qualification
+          merge-multiple: true
+      - name: Resolve and validate inputs once
+        id: identity
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          VERSION: ${{ inputs.version }}
+          CHANNEL: ${{ inputs.channel }}
+          TOOLCHAIN: ${{ inputs.rust_toolchain }}
+          NODE_VERSION: ${{ inputs.node_version }}
+          QUALIFICATION: ${{ inputs.qualification_artifact_id }}
+          QUALIFICATION_SHA256: ${{ inputs.qualification_sha256 }}
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "source_sha must be a full SHA" >&2; exit 1; }
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || { echo "invalid version $VERSION" >&2; exit 1; }
+          case "$CHANNEL" in
+            stable)
+              [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "stable version must be X.Y.Z" >&2; exit 1; }
+              [[ "$QUALIFICATION" =~ ^[0-9]+$ && "$QUALIFICATION_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "stable build requires Tests qualification id and sha256" >&2; exit 1; } ;;
+            preview|nightly)
+              [[ -z "$QUALIFICATION$QUALIFICATION_SHA256" ]] || { echo "untested channels must not carry qualification evidence" >&2; exit 1; } ;;
+            *) echo "invalid channel $CHANNEL" >&2; exit 1 ;;
+          esac
+          pinned="$(sed -nE 's#.*nodejs\.org/dist/v([0-9]+\.[0-9]+\.[0-9]+)/.*#\1#p' tools/dev/prepare_ci_gui.sh | sort -u)"
+          [[ "$NODE_VERSION" == "$pinned" ]] || { echo "node_version $NODE_VERSION != container pin $pinned" >&2; exit 1; }
+          if [[ -z "$TOOLCHAIN" ]]; then
+            rustup toolchain install stable --profile minimal --no-self-update
+            TOOLCHAIN="$(rustup run stable rustc --version | cut -d' ' -f2)"
+          fi
+          python3 tools/dev/runtime_manifest.py build-inputs --root . --rust-toolchain "$TOOLCHAIN" \
+            --node-version "$NODE_VERSION" --profile "$BUILD_PROFILE" > build-inputs.json
+          if [[ "$CHANNEL" == stable ]]; then
+            cargo_version="$(sed -n '/^\[package\]/,/^\[/s/^version = "\(.*\)"$/\1/p' refact-agent/engine/Cargo.toml)"
+            [[ "$cargo_version" == "$VERSION" ]] || { echo "Cargo version $cargo_version != $VERSION" >&2; exit 1; }
+            python3 -I trusted/tools/dev/runtime_manifest.py verify-qualification --root . --source-sha "$SOURCE_SHA" \
+              --rust-toolchain "$TOOLCHAIN" --node-version "$NODE_VERSION" --profile "$BUILD_PROFILE" \
+              --qualification "$RUNNER_TEMP/qualification/tests-qualification.json" \
+              --qualification-sha256 "$QUALIFICATION_SHA256" --trusted-inventory trusted/tools/dev/ci_test_inventory.json \
+              --repository-id "$GITHUB_REPOSITORY_ID" --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT"
+          fi
+          {
+            echo "source_sha=$SOURCE_SHA"
+            echo "version=$VERSION"
+            echo "channel=$CHANNEL"
+            echo "rust_toolchain=$TOOLCHAIN"
+            echo "node_version=$NODE_VERSION"
+            echo "build_inputs_digest=$(python3 -c 'import json; print(json.load(open("build-inputs.json"))["build_inputs_digest"])')"
+          } >> "$GITHUB_OUTPUT"
+
+  engine:
+    needs: resolve
+    uses: ./.github/workflows/agent_engine_build.yml
+    with:
+      source_sha: ${{ needs.resolve.outputs.source_sha }}
+      rust_toolchain: ${{ needs.resolve.outputs.rust_toolchain }}
+      node_version: ${{ needs.resolve.outputs.node_version }}
+      build_version: ${{ needs.resolve.outputs.version }}
+
+  gui:
+    needs: resolve
+    uses: ./.github/workflows/agent_gui_build.yml
+    with:
+      source_sha: ${{ needs.resolve.outputs.source_sha }}
+      node_version: ${{ needs.resolve.outputs.node_version }}
+      build_version: ${{ needs.resolve.outputs.version }}
+
+  vscode:
+    name: VS Code package
+    needs: [resolve, gui]
+    runs-on: ubuntu-latest
+    env:
+      REFACT_BUILD_VERSION: ${{ needs.resolve.outputs.version }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: plugins/vscode
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.source_sha }}
+          persist-credentials: false
+      - name: Assert source SHA
+        env:
+          SOURCE_SHA: ${{ needs.resolve.outputs.source_sha }}
+        run: test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ needs.resolve.outputs.node_version }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: lts-refact-chat-js-*.tgz
+          path: plugins/vscode/chat_package
+          merge-multiple: true
+      - name: Install locked dependencies and the built GUI package
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          packages=(./chat_package/*.tgz)
+          [[ ${#packages[@]} -eq 1 ]] || { echo "expected exactly one GUI package" >&2; exit 1; }
+          npm ci --ignore-scripts
+          npm install "${packages[0]}" --no-save --ignore-scripts
+          REFACT_CHAT_JS_VERSION=$(node -p "require('./node_modules/refact-chat-js/package.json').version")
+          npm pkg set "dependencies.refact-chat-js=${REFACT_CHAT_JS_VERSION}"
+          npm pkg set "refactRuntimeVersion=${REFACT_BUILD_VERSION}"
+          rm -rf ./chat_package
+          test "$(node -p "require('./package.json').version")" = "${REFACT_BUILD_VERSION%%-*}"
+      - name: Package universal VSIX
+        env:
+          CHANNEL: ${{ needs.resolve.outputs.channel }}
+        run: |
+          set -euo pipefail
+          flags=()
+          [[ "$CHANNEL" == stable ]] || flags=(--pre-release)
+          npx --yes @vscode/vsce@3.9.2 package "${flags[@]}" --out "codify-${REFACT_BUILD_VERSION}.vsix"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vscode-plugin
+          path: plugins/vscode/codify-${{ needs.resolve.outputs.version }}.vsix
+          if-no-files-found: error
+          compression-level: 0
+
+  jetbrains:
+    name: JetBrains package
+    needs: [resolve, gui]
+    runs-on: ubuntu-latest
+    env:
+      REFACT_BUILD_VERSION: ${{ needs.resolve.outputs.version }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: plugins/intellij
+    steps:
+      - name: Maximize build space
+        working-directory: /
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.source_sha }}
+          persist-credentials: false
+      - name: Assert source SHA
+        env:
+          SOURCE_SHA: ${{ needs.resolve.outputs.source_sha }}
+        run: test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: lts-refact-chat-js-*.tgz
+          path: plugins/intellij/chat_package
+          merge-multiple: true
+      - name: Embed GUI webview bundle
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          packages=(./chat_package/*.tgz)
+          [[ ${#packages[@]} -eq 1 ]] || { echo "expected exactly one GUI package" >&2; exit 1; }
+          mkdir -p ./chat_package_fixed
+          tar -xzf "${packages[0]}" -C ./chat_package_fixed/
+          rm -rf ./src/main/resources/webview/dist
+          mv ./chat_package_fixed/package/dist ./src/main/resources/webview/dist
+          rm -rf ./chat_package ./chat_package_fixed
+      - uses: actions/setup-java@v4
+        with:
+          distribution: zulu
+          java-version: 17
+      - name: Build plugin ZIP
+        run: |
+          set -euo pipefail
+          ./gradlew buildPlugin --console=plain
+          shopt -s nullglob
+          zips=(build/distributions/*.zip)
+          [[ ${#zips[@]} -eq 1 ]] || { echo "expected exactly one plugin ZIP" >&2; exit 1; }
+          [[ "$(basename "${zips[0]}")" == *"-${REFACT_BUILD_VERSION}.zip" ]] || { echo "plugin ZIP version mismatch" >&2; exit 1; }
+          ./gradlew printProductsReleases --console=plain
+      - uses: actions/cache@v4
+        with:
+          path: ~/.pluginVerifier/ides
+          key: plugin-verifier-${{ hashFiles('plugins/intellij/build/listProductsReleases.txt') }}
+      - name: Plugin compatibility verifier
+        run: |
+          for attempt in 1 2; do
+            if ./gradlew verifyPlugin -Dplugin.verifier.home.dir="$HOME/.pluginVerifier"; then
+              exit 0
+            fi
+            [[ "$attempt" == "2" ]] && exit 1
+            rm -rf build/reports/pluginVerifier
+            sleep 10
+          done
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: intellij-pluginVerifier-result
+          path: plugins/intellij/build/reports/pluginVerifier
+          if-no-files-found: ignore
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jetbrains-plugin
+          path: plugins/intellij/build/distributions/*.zip
+          if-no-files-found: error
+          compression-level: 0
+
+  bundle:
+    name: Release bundle and runtime manifest
+    needs: [resolve, engine, gui, vscode, jetbrains]
+    runs-on: ubuntu-latest
+    outputs:
+      release_artifact: ${{ steps.manifest.outputs.release_artifact }}
+      manifest_sha256: ${{ steps.manifest.outputs.manifest_sha256 }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.source_sha }}
+          persist-credentials: false
+      - name: Assert source SHA
+        env:
+          SOURCE_SHA: ${{ needs.resolve.outputs.source_sha }}
+        run: test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          path: ${{ runner.temp }}/engine-dist
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: lts-refact-chat-js-*.tgz
+          path: ${{ runner.temp }}/plugins
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: vscode-plugin
+          path: ${{ runner.temp }}/plugins
+      - uses: actions/download-artifact@v4
+        with:
+          name: jetbrains-plugin
+          path: ${{ runner.temp }}/plugins
+      - uses: actions/download-artifact@v4
+        if: needs.resolve.outputs.channel == 'stable'
+        with:
+          artifact-ids: ${{ inputs.qualification_artifact_id }}
+          path: ${{ runner.temp }}/qualification
+          merge-multiple: true
+      - uses: actions/checkout@v4
+        if: needs.resolve.outputs.channel == 'stable'
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: trusted
+          persist-credentials: false
+      - name: Package runtime archives, sidecars and manifest
+        id: manifest
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+          CHANNEL: ${{ needs.resolve.outputs.channel }}
+          SOURCE_SHA: ${{ needs.resolve.outputs.source_sha }}
+          TOOLCHAIN: ${{ needs.resolve.outputs.rust_toolchain }}
+          NODE_VERSION: ${{ needs.resolve.outputs.node_version }}
+          EXPECTED_DIGEST: ${{ needs.resolve.outputs.build_inputs_digest }}
+          QUALIFICATION_ID: ${{ inputs.qualification_artifact_id }}
+          QUALIFICATION_SHA256: ${{ inputs.qualification_sha256 }}
+          REPOSITORY_ID: ${{ github.repository_id }}
+          REPOSITORY_OWNER: ${{ github.repository_owner }}
+          REPOSITORY_FULL: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/release"
+          mkdir -p "$out"
+          bash tools/dev/package_engine_release_assets.sh --version "$VERSION" \
+            --input-dir "$RUNNER_TEMP/engine-dist" --output-dir "$out" > /dev/null
+          for file in "$RUNNER_TEMP"/plugins/*; do
+            name="$(basename "$file")"
+            cp "$file" "$out/$name"
+            (cd "$out" && sha256sum "$name" > "$name.sha256")
+          done
+          run_json="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID")"
+          workflow_id="$(jq -r .workflow_id <<<"$run_json")"
+          workflow_path="$(jq -r .path <<<"$run_json")"
+          workflow_path="${workflow_path%%@*}"
+          qualification_args=()
+          if [[ "$CHANNEL" == "stable" ]]; then
+            report="$RUNNER_TEMP/qualification/tests-qualification.json"
+            qualification_args=(--qualification "$report" --qualification-sha256 "$QUALIFICATION_SHA256"
+              --trusted-inventory "$GITHUB_WORKSPACE/trusted/tools/dev/ci_test_inventory.json"
+              --qualification-ref "github-artifact:$REPOSITORY_ID/$GITHUB_RUN_ID/$GITHUB_RUN_ATTEMPT/$QUALIFICATION_ID/$QUALIFICATION_SHA256")
+          fi
+          python3 tools/dev/runtime_manifest.py produce --root . \
+            --source-sha "$SOURCE_SHA" --version "$VERSION" --channel "$CHANNEL" \
+            --rust-toolchain "$TOOLCHAIN" --node-version "$NODE_VERSION" --profile "$BUILD_PROFILE" \
+            --repository-owner "$REPOSITORY_OWNER" --repository-name "${REPOSITORY_FULL#*/}" --repository-id "$REPOSITORY_ID" \
+            --workflow-path "$workflow_path" --workflow-id "$workflow_id" \
+            --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --artifacts-dir "$out" --output "$RUNNER_TEMP/runtime-manifest.json" "${qualification_args[@]}"
+          digest="$(python3 -c 'import json,sys; sys.path.insert(0,"tools/dev"); import runtime_manifest as r; print(r.build_inputs_digest(json.load(open(sys.argv[1]))["build_inputs"]))' "$RUNNER_TEMP/runtime-manifest.json")"
+          [[ "$digest" == "$EXPECTED_DIGEST" ]] || { echo "build inputs changed during the run" >&2; exit 1; }
+          verification_args=()
+          if [[ "$CHANNEL" == stable ]]; then
+            # produce strictly verified these exact bytes against the Tests digest and inventory.
+            cp "$report" "$out/tests-qualification.json"
+            verification_args=(--root "$GITHUB_WORKSPACE" --trusted-inventory "$GITHUB_WORKSPACE/trusted/tools/dev/ci_test_inventory.json"
+              --qualification-sha256 "$QUALIFICATION_SHA256" --qualification-artifact-id "$QUALIFICATION_ID" --repository-id "$REPOSITORY_ID")
+          fi
+          mv "$RUNNER_TEMP/runtime-manifest.json" "$out/runtime-manifest.json"
+          python3 tools/dev/runtime_manifest.py verify-bundle --manifest "$out/runtime-manifest.json" --dir "$out" \
+            --source-sha "$SOURCE_SHA" --channel "$CHANNEL" --version "$VERSION" --workflow-path "$workflow_path" \
+            --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT" --assets-out "$RUNNER_TEMP/assets.txt" "${verification_args[@]}"
+          echo "release_artifact=release-bundle" >> "$GITHUB_OUTPUT"
+          echo "manifest_sha256=$(sha256sum "$out/runtime-manifest.json" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          ls -l "$out"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-bundle
+          path: ${{ runner.temp }}/release/*
+          if-no-files-found: error
+          compression-level: 0

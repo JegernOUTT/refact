@@ -23,7 +23,7 @@ use crate::app_state::AppState;
 use crate::global_context::{CommandLine, GlobalContext};
 use crate::http::routers::v1::code_completion::handle_v1_code_completion;
 
-const VERSION: &str = env!("CARGO_PKG_VERSION");
+const VERSION: &str = crate::version::VERSION;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum LspTransport {

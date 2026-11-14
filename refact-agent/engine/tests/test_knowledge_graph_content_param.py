@@ -1,198 +1,87 @@
-#!/usr/bin/env python3
-"""
-Test knowledge graph content parameter.
+import pytest
 
-Run with:
-  python tests/test_knowledge_graph_content_param.py
+from owned_utility_tests import ALPHA_BODY, ALPHA_FILE, BETA_BODY, BETA_FILE, utility_engine
 
-Requires:
-  - refact-lsp running on port 8001
-  - pip install requests
-"""
-"""
-NOTE: If tests fail with "content should not be None", the server needs to be
-restarted to pick up the new code changes:
-  1. Stop the running refact-lsp server
-  2. Rebuild: cargo build --release
-  3. Restart the server
-  4. Run tests again
-"""
-
-import requests
-import sys
-
-LSP_URL = "http://127.0.0.1:8001"
+EXPECTED_DOCS = {"kg-alpha": "doc_code", "kg-beta": "doc_decision"}
 
 
-def test_knowledge_graph_without_content():
-    """Test that default behavior excludes content"""
-    print("\n=== Test: Default behavior excludes content ===")
-    response = requests.get(
-        f"{LSP_URL}/v1/knowledge-graph",
-        timeout=10
-    )
-    assert response.status_code == 200, f"Expected 200, got {response.status_code}"
-    
+async def graph(client, query=""):
+    response = await client.get("/knowledge-graph" + query)
+    assert response.status_code == 200, f"Expected 200, got {response.status_code}: {response.text}"
     data = response.json()
-    assert "nodes" in data
-    assert "edges" in data
-    assert "stats" in data
-    
-    doc_nodes = [n for n in data["nodes"] if n["node_type"].startswith("doc")]
-    print(f"  Found {len(doc_nodes)} doc nodes")
-    
-    if doc_nodes:
-        for node in doc_nodes:
-            assert node.get("content") is None, f"Node {node['id']} should not have content by default"
-        print(f"  ✓ All doc nodes have content=None by default")
-    else:
-        print(f"  ⚠ No doc nodes found (empty knowledge base)")
-    
-    return True
+    assert {"nodes", "edges", "stats"} <= set(data), data
+    return response, data
 
 
-def test_knowledge_graph_with_content_param_0():
-    """Test that include_content=0 excludes content"""
-    print("\n=== Test: include_content=0 excludes content ===")
-    response = requests.get(
-        f"{LSP_URL}/v1/knowledge-graph?include_content=0",
-        timeout=10
-    )
-    assert response.status_code == 200, f"Expected 200, got {response.status_code}"
-    
-    data = response.json()
-    doc_nodes = [n for n in data["nodes"] if n["node_type"].startswith("doc")]
-    
-    if doc_nodes:
-        for node in doc_nodes:
-            assert node.get("content") is None, f"Node {node['id']} should not have content with include_content=0"
-        print(f"  ✓ All {len(doc_nodes)} doc nodes have content=None")
-    else:
-        print(f"  ⚠ No doc nodes found")
-    
-    return True
+def doc_nodes(data):
+    nodes = {n["id"]: n for n in data["nodes"] if n["node_type"].startswith("doc")}
+    assert {k: v["node_type"] for k, v in nodes.items()} == EXPECTED_DOCS, data["nodes"]
+    return nodes
 
 
-def test_knowledge_graph_with_content_param_1():
-    """Test that include_content=1 includes content"""
-    print("\n=== Test: include_content=1 includes content ===")
-    response = requests.get(
-        f"{LSP_URL}/v1/knowledge-graph?include_content=1",
-        timeout=10
-    )
-    assert response.status_code == 200, f"Expected 200, got {response.status_code}"
-    
-    data = response.json()
-    doc_nodes = [n for n in data["nodes"] if n["node_type"].startswith("doc")]
-    
-    if doc_nodes:
-        for node in doc_nodes:
-            assert "content" in node, f"Node {node['id']} should have content field with include_content=1"
-            if node["content"] is not None:
-                print(f"  ✓ Node {node['id']}: content length = {len(node['content'])} chars")
-        print(f"  ✓ All {len(doc_nodes)} doc nodes have content field")
-    else:
-        print(f"  ⚠ No doc nodes found")
-    
-    return True
+@pytest.mark.asyncio
+async def test_seeded_graph_structure(utility_engine):
+    async with utility_engine.client() as client:
+        _, data = await graph(client)
+    stats = data["stats"]
+    assert stats["doc_count"] == 2 and stats["active_docs"] == 2, stats
+    nodes = doc_nodes(data)
+    assert nodes["kg-alpha"]["title"] == "Utility Alpha Knowledge"
+    assert nodes["kg-alpha"]["file_path"] == str(utility_engine.knowledge / "alpha.md")
+    edges = {(e["source"], e["target"], e["edge_type"]) for e in data["edges"]}
+    assert ("kg-alpha", "kg-beta", "links_to") in edges, edges
+    assert ("kg-alpha", "tag:component:utility-shared", "tagged_with") in edges, edges
+    assert ("kg-beta", "tag:component:utility-shared", "tagged_with") in edges, edges
+    assert ("kg-alpha", "entity:UtilityAlphaEntity", "mentions") in edges, edges
+    assert ("kg-beta", "entity:UtilityBetaEntity", "mentions") in edges, edges
+    assert ("kg-alpha", f"file:{ALPHA_FILE}", "references_file") in edges, edges
+    assert ("kg-beta", f"file:{BETA_FILE}", "references_file") in edges, edges
+    assert stats["edge_count"] == len(data["edges"]), stats
 
 
-def test_knowledge_graph_response_size_difference():
-    """Test that response without content is significantly smaller"""
-    print("\n=== Test: Response size difference ===")
-    response_without = requests.get(
-        f"{LSP_URL}/v1/knowledge-graph?include_content=0",
-        timeout=10
-    )
-    response_with = requests.get(
-        f"{LSP_URL}/v1/knowledge-graph?include_content=1",
-        timeout=10
-    )
-    
-    assert response_without.status_code == 200
-    assert response_with.status_code == 200
-    
-    size_without = len(response_without.content)
-    size_with = len(response_with.content)
-    
-    print(f"  Response without content: {size_without:,} bytes")
-    print(f"  Response with content: {size_with:,} bytes")
-    
-    data_with = response_with.json()
-    doc_nodes = [n for n in data_with["nodes"] if n["node_type"].startswith("doc")]
-    
-    if doc_nodes:
-        assert size_without < size_with, "Response without content should be smaller"
-        reduction_percent = ((size_with - size_without) / size_with) * 100
-        print(f"  ✓ Size reduction: {reduction_percent:.1f}% ({size_with:,} → {size_without:,} bytes)")
-    else:
-        print(f"  ⚠ No doc nodes found, cannot measure size difference")
-    
-    return True
+@pytest.mark.asyncio
+async def test_knowledge_graph_without_content(utility_engine):
+    async with utility_engine.client() as client:
+        _, data = await graph(client)
+    for node in doc_nodes(data).values():
+        assert "content" not in node, f"Node {node['id']} should not have content by default"
 
 
-def main():
-    print("=" * 60)
-    print("Knowledge Graph Content Parameter Tests")
-    print("=" * 60)
-    print(f"Testing against: {LSP_URL}")
-
-    # Check if server is running
-    try:
-        response = requests.get(f"{LSP_URL}/v1/ping", timeout=2)
-        if response.status_code != 200:
-            print(f"\n✗ Server not responding correctly at {LSP_URL}")
-            sys.exit(1)
-    except Exception as e:
-        print(f"\n✗ Cannot connect to server at {LSP_URL}: {e}")
-        print("  Make sure refact-lsp is running with: cargo run")
-        sys.exit(1)
-
-    print("✓ Server is running\n")
-
-    results = []
-
-    # Run tests
-    try:
-        results.append(("Default excludes content", test_knowledge_graph_without_content()))
-    except Exception as e:
-        print(f"✗ Error: {e}")
-        results.append(("Default excludes content", False))
-
-    try:
-        results.append(("include_content=0 excludes", test_knowledge_graph_with_content_param_0()))
-    except Exception as e:
-        print(f"✗ Error: {e}")
-        results.append(("include_content=0 excludes", False))
-
-    try:
-        results.append(("include_content=1 includes", test_knowledge_graph_with_content_param_1()))
-    except Exception as e:
-        print(f"✗ Error: {e}")
-        results.append(("include_content=1 includes", False))
-
-    try:
-        results.append(("Response size difference", test_knowledge_graph_response_size_difference()))
-    except Exception as e:
-        print(f"✗ Error: {e}")
-        results.append(("Response size difference", False))
-
-    # Summary
-    print("\n" + "=" * 60)
-    print("Summary")
-    print("=" * 60)
-
-    passed = sum(1 for _, r in results if r)
-    total = len(results)
-
-    for name, result in results:
-        status = "✓ PASS" if result else "✗ FAIL"
-        print(f"  {status}: {name}")
-
-    print(f"\nTotal: {passed}/{total} passed")
-
-    sys.exit(0 if passed == total else 1)
+@pytest.mark.asyncio
+async def test_knowledge_graph_with_content_param_0(utility_engine):
+    async with utility_engine.client() as client:
+        _, data = await graph(client, "?include_content=0")
+    for node in doc_nodes(data).values():
+        assert "content" not in node, f"Node {node['id']} should not have content with include_content=0"
 
 
-if __name__ == "__main__":
-    main()
+@pytest.mark.asyncio
+async def test_knowledge_graph_with_content_param_1(utility_engine):
+    async with utility_engine.client() as client:
+        _, data = await graph(client, "?include_content=1")
+    nodes = doc_nodes(data)
+    assert nodes["kg-alpha"]["content"].strip() == ALPHA_BODY
+    assert nodes["kg-beta"]["content"].strip() == BETA_BODY
+    assert all("content" not in n for n in data["nodes"] if not n["node_type"].startswith("doc"))
+
+
+@pytest.mark.asyncio
+async def test_invalid_include_content_defaults_to_excluded(utility_engine):
+    async with utility_engine.client() as client:
+        _, data = await graph(client, "?include_content=yes")
+    for node in doc_nodes(data).values():
+        assert "content" not in node
+
+
+@pytest.mark.asyncio
+async def test_knowledge_graph_response_size_difference(utility_engine):
+    async with utility_engine.client() as client:
+        without, data_without = await graph(client, "?include_content=0")
+        with_content, data_with = await graph(client, "?include_content=1")
+    assert data_without["stats"] == data_with["stats"]
+    expected_growth = sum(len(n["content"]) for n in doc_nodes(data_with).values())
+    assert expected_growth > 0
+    assert len(without.content) < len(with_content.content)
+    assert len(with_content.content) - len(without.content) >= expected_growth
+    assert b"KG_ALPHA_BODY_MARKER" in with_content.content
+    assert b"KG_ALPHA_BODY_MARKER" not in without.content

@@ -1,7 +1,25 @@
 name: Browser E2E
 
 on:
+  workflow_call:
+    inputs:
+      source_sha:
+        type: string
+        required: true
+      rust_toolchain:
+        type: string
+        required: true
+      node_version:
+        type: string
+        default: "22"
   workflow_dispatch:
+    inputs:
+      source_sha:
+        type: string
+        default: ""
+      rust_toolchain:
+        type: string
+        default: stable
   schedule:
     - cron: "0 3 * * *"
   pull_request:
@@ -11,7 +29,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: agent-browser-e2e-${{ github.event.pull_request.number || github.run_id }}
+  group: agent-browser-e2e-${{ github.workflow }}-${{ github.run_id }}
   cancel-in-progress: true
 
 defaults:
@@ -19,7 +37,8 @@ defaults:
     working-directory: refact-agent/engine
 
 env:
-  RUSTUP_TOOLCHAIN: stable
+  REFACT_SOURCE_SHA: ${{ inputs.source_sha || github.sha }}
+  RUSTUP_TOOLCHAIN: ${{ inputs.rust_toolchain || 'stable' }}
   CARGO_INCREMENTAL: 0
   CARGO_NET_RETRY: 10
   RUSTUP_MAX_RETRIES: 10
@@ -36,11 +55,21 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_sha || github.sha }}
+          persist-credentials: false
+      - name: Verify immutable checkout
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha || github.sha }}
+        run: |
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
 
       - name: Install Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: ${{ inputs.node_version || '22' }}
 
       - name: Rebuild the injected bundle
         run: bash tools/dev/build_injected.sh
@@ -49,18 +78,28 @@ jobs:
         run: git diff --exit-code refact-agent/engine/crates/refact-browser/src/generated/injected_bundle.js
 
   browser-e2e:
-    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' || contains(github.event.pull_request.labels.*.name, 'browser-e2e')
+    if: inputs.source_sha != '' || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' || contains(github.event.pull_request.labels.*.name, 'browser-e2e')
     name: Browser E2E (Linux x86_64)
     runs-on: ubuntu-latest
     timeout-minutes: 150
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_sha || github.sha }}
+          persist-credentials: false
+      - name: Verify immutable checkout
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha || github.sha }}
+        run: |
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
 
       - name: Install Node.js for engine-served GUI bundle
         uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: ${{ inputs.node_version || '22' }}
           cache: npm
           cache-dependency-path: refact-agent/gui/package-lock.json
 
@@ -68,11 +107,19 @@ jobs:
         working-directory: refact-agent/gui
         run: npm ci --include=dev
 
+      - name: Install Python for owned browser benchmark
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install pinned owned benchmark dependencies
+        run: python3 -m pip install aiohttp==3.11.18 pytest==8.4.2 pytest-asyncio==0.25.3 httpx==0.28.1
+
       - name: Disable local development defaults and install stable Rust
         shell: bash
         run: |
           rm -f ../../.cargo/config.toml
-          rustup toolchain install stable --profile minimal --component rust-src --no-self-update
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component rust-src --no-self-update
 
       - name: Install build tools and Google Chrome
         run: |
@@ -92,15 +139,63 @@ jobs:
           shared-key: ubuntu-browser-e2e-cargo-bundled-whisper-v1
           cache-bin: false
 
-      # V-15: headless_chrome 1.0.20 drops Input.dragIntercepted on its non-flattened target transport.
+      - name: Build fresh owned browser benchmark subject (dev)
+        shell: bash
+        run: |
+          export GITHUB_SHA="$REFACT_SOURCE_SHA"
+          cargo build --locked --bin refact-lsp
+
+      - name: Test owned browser benchmark cleanup offline
+        run: python3 -m pytest -q tests/test_native_browser_benchmark.py
+
+      - name: Run required owned browser benchmark
+        shell: bash
+        run: |
+          export GITHUB_SHA="$REFACT_SOURCE_SHA"
+          set -o pipefail
+          evidence="$GITHUB_WORKSPACE/.refact/verification/owned-browser-benchmark"
+          mkdir -p "$evidence"
+          binary="$PWD/target/debug/refact-lsp"
+          binary_sha256="$(sha256sum "$binary" | cut -d ' ' -f 1)"
+          # Transport is a requested label only; reports retain transport_observed=unverified.
+          xvfb-run -a python3 tests/owned_browser_benchmark.py --binary "$binary" --binary-sha256 "$binary_sha256" --samples 7 --actions 24 --transport readiness_mio --output "$evidence/details.json" 2>&1 | tee "$evidence/runner.log"
+
+      - name: Retain owned browser benchmark evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: owned-browser-benchmark-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .refact/verification/owned-browser-benchmark/
+          include-hidden-files: true
+          if-no-files-found: error
+
       - name: Run browser E2E suite
         env:
           REFACT_BROWSER_E2E: "1"
+        shell: bash
         run: |
-          xvfb-run -a cargo test --test it -- browser_e2e:: --ignored --test-threads=1 --skip html5_drag_and_drop_reaches_page_handler
+          export GITHUB_SHA="$REFACT_SOURCE_SHA"
+          set -o pipefail
+          xvfb-run -a cargo test --test it -- browser_e2e:: --ignored --nocapture --test-threads=1 2>&1 | tee test-output.txt
+          python3 ../../tools/dev/ci_tests.py verify-output test-output.txt
 
       - name: Run browser differentiators suite
         env:
           REFACT_BROWSER_E2E: "1"
+        shell: bash
         run: |
-          xvfb-run -a cargo test --test it -- browser_differentiators:: --ignored --test-threads=1
+          export GITHUB_SHA="$REFACT_SOURCE_SHA"
+          set -o pipefail
+          xvfb-run -a cargo test --test it -- browser_differentiators:: --ignored --nocapture --test-threads=1 2>&1 | tee test-output.txt
+          python3 ../../tools/dev/ci_tests.py verify-output test-output.txt
+
+      - name: Run owned Chrome discovery and network tests
+        env:
+          REFACT_DISCOVERY_CHROME: "1"
+          REFACT_NETWORK_CHROME: "1"
+        shell: bash
+        run: |
+          export GITHUB_SHA="$REFACT_SOURCE_SHA"
+          set -o pipefail
+          xvfb-run -a cargo test --locked -p refact-browser --lib owned_chrome_ -- --ignored --nocapture --test-threads=1 2>&1 | tee test-output.txt
+          python3 ../../tools/dev/ci_tests.py verify-output test-output.txt

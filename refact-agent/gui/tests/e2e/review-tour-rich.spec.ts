@@ -1,7 +1,8 @@
 import { expect, test } from "@playwright/test";
+import { openReviewFixture } from "./reviewFixtureReady";
 
 test.beforeEach(async ({ page }) => {
-  await page.goto("/tests/e2e/review-canvas.html?tour=rich");
+  await openReviewFixture(page, "/tests/e2e/review-canvas.html?tour=rich");
   await expect(
     page.getByRole("heading", { name: "Input trimming" }),
   ).toBeVisible({ timeout: 15000 });
@@ -30,7 +31,10 @@ for (const version of [1, 2]) {
   test(`chat reveal selects exact cross-topic version ${version} and second discussion`, async ({
     page,
   }) => {
-    await page.goto("/tests/e2e/review-canvas.html?tour=rich&navigation=exact");
+    await openReviewFixture(
+      page,
+      "/tests/e2e/review-canvas.html?tour=rich&navigation=exact",
+    );
     await expect(
       page.getByRole("heading", { name: "Input trimming" }),
     ).toBeVisible();
@@ -87,7 +91,10 @@ for (const version of [1, 2]) {
 test("native lazy mount and topic refresh preserve the document reader position", async ({
   page,
 }) => {
-  await page.goto("/tests/e2e/review-canvas.html?tour=rich&reader=delayed");
+  await openReviewFixture(
+    page,
+    "/tests/e2e/review-canvas.html?tour=rich&reader=delayed",
+  );
   const reader = page.locator("[data-review-document]");
   const code = page.locator('[data-block-id="code"]');
   await code.scrollIntoViewIfNeeded();

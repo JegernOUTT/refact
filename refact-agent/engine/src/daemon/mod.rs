@@ -31,6 +31,7 @@ pub mod projects;
 pub mod proxy;
 pub mod resources;
 pub mod run_cmd;
+pub mod runtime_coordinator;
 pub mod server;
 pub mod state;
 pub mod supervisor;

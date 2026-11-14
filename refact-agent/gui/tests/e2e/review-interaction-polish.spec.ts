@@ -1,4 +1,5 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
+import { openReviewFixture } from "./reviewFixtureReady";
 
 // All transport data and agent replies in this suite are synthetic fixture data.
 // These screenshots demonstrate production UI behaviour, not actual backend proof.
@@ -8,7 +9,8 @@ async function open(page: Page, width = 1600, theme = "light") {
     colorScheme: theme as "light" | "dark",
     reducedMotion: "reduce",
   });
-  await page.goto(
+  await openReviewFixture(
+    page,
     `/tests/e2e/review-canvas.html?tour=rich&polish=1&theme=${theme}`,
   );
   if (width <= 680) {

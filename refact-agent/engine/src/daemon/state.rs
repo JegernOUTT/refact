@@ -281,7 +281,7 @@ impl DaemonState {
             config,
             auth_token,
             started_at_ms: now_ms(),
-            version: env!("CARGO_PKG_VERSION").to_string(),
+            version: crate::version::VERSION.to_string(),
             relaunch_executable,
             projects: RwLock::new(crate::daemon::projects::ProjectRegistry::empty(
                 daemon_dir.join("projects.json"),

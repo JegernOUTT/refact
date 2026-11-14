@@ -501,8 +501,15 @@ mod tests {
         let (_dir, state, entry) = harness(1).await;
         state.supervisor.ensure_worker(&entry).await.unwrap();
         tokio::time::sleep(Duration::from_millis(1100)).await;
+        let old_activity = state
+            .worker_idle_snapshot(&entry.id)
+            .await
+            .unwrap()
+            .last_proxy_activity_ms;
+        let now = now_ms();
+        assert!(now.saturating_sub(old_activity) >= state.config.idle_timeout_secs * 1000);
         let mut report = idle_report(&entry.id);
-        report.last_activity_ts = now_ms();
+        report.last_activity_ts = now;
         let worker = state.supervisor.worker_info(&entry.id).await.unwrap();
         report.pid = worker.pid.unwrap();
         report.instance_token = state
@@ -512,7 +519,20 @@ mod tests {
             .unwrap();
         state.store_worker_status(report).await;
 
-        tick_at(&state, now_ms()).await;
+        let snapshot = state.worker_idle_snapshot(&entry.id).await.unwrap();
+        assert_eq!(snapshot.last_proxy_activity_ms, now);
+        assert_eq!(
+            idle_decision(now, &snapshot, &state.config),
+            IdleDecision::Keep
+        );
+        let mut without_heartbeat_activity = snapshot.clone();
+        without_heartbeat_activity.last_proxy_activity_ms = old_activity;
+        assert_eq!(
+            idle_decision(now, &without_heartbeat_activity, &state.config),
+            IdleDecision::Stop
+        );
+
+        tick_at(&state, now).await;
 
         assert_eq!(
             state.supervisor.worker_info(&entry.id).await.unwrap().state,

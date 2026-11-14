@@ -173,7 +173,7 @@ pub async fn ping_daemon(info: &DaemonInfo) -> DaemonPingStatus {
 }
 
 pub async fn ensure_daemon_running() -> Result<DaemonInfo, String> {
-    if let Some(info) = shutdown_for_upgrade_if_stale(env!("CARGO_PKG_VERSION")).await? {
+    if let Some(info) = shutdown_for_upgrade_if_stale(crate::version::VERSION).await? {
         return Ok(info);
     }
     ensure_daemon_running_with_starter(spawn_detached_daemon).await
@@ -713,7 +713,7 @@ mod tests {
     fn daemon_needs_upgrade_detects_older_version() {
         let mut info = daemon_info(8488, None);
         info.version = "0.0.1".to_string();
-        assert!(daemon_needs_upgrade(&info, env!("CARGO_PKG_VERSION")));
+        assert!(daemon_needs_upgrade(&info, crate::version::VERSION));
         assert!(daemon_upgrade_is_enabled(
             DaemonUpgradeReason::OlderVersion,
             true,
@@ -726,13 +726,13 @@ mod tests {
         let mut info = daemon_info(8488, None);
         info.version = "999.0.0".to_string();
         info.executable_sha256 = Some("differs-from-current".to_string());
-        assert!(!daemon_needs_upgrade(&info, env!("CARGO_PKG_VERSION")));
+        assert!(!daemon_needs_upgrade(&info, crate::version::VERSION));
     }
 
     #[test]
     fn daemon_needs_upgrade_same_version_without_hash_is_kept() {
         let info = daemon_info(8488, None);
-        assert!(!daemon_needs_upgrade(&info, env!("CARGO_PKG_VERSION")));
+        assert!(!daemon_needs_upgrade(&info, crate::version::VERSION));
     }
 
     #[test]
@@ -740,7 +740,7 @@ mod tests {
         let mut info = daemon_info(8488, None);
         info.executable_sha256 = crate::daemon::state::current_executable_sha256();
         assert!(info.executable_sha256.is_some());
-        assert!(!daemon_needs_upgrade(&info, env!("CARGO_PKG_VERSION")));
+        assert!(!daemon_needs_upgrade(&info, crate::version::VERSION));
     }
 
     #[test]
@@ -748,11 +748,11 @@ mod tests {
         let mut info = daemon_info(8488, None);
         info.executable_sha256 = Some("0".repeat(64));
         assert_eq!(
-            daemon_needs_upgrade(&info, env!("CARGO_PKG_VERSION")),
+            daemon_needs_upgrade(&info, crate::version::VERSION),
             !cfg!(debug_assertions)
         );
         assert_eq!(
-            daemon_upgrade_reason(&info, env!("CARGO_PKG_VERSION")),
+            daemon_upgrade_reason(&info, crate::version::VERSION),
             Some(DaemonUpgradeReason::SameVersionDifferentExecutable)
         );
     }
@@ -811,7 +811,7 @@ mod tests {
             pid: 1,
             port,
             bind: "127.0.0.1".to_string(),
-            version: env!("CARGO_PKG_VERSION").to_string(),
+            version: crate::version::VERSION.to_string(),
             executable_sha256: None,
             auth_token: auth_token.map(str::to_string),
             started_at_ms: 0,

@@ -104,6 +104,21 @@ function installBaseHandlers(settings = daemonSettings()) {
     http.get("*/daemon/v1/update/status", () =>
       HttpResponse.json(idleUpdateStatus()),
     ),
+    http.get("*/daemon/v1/runtime/status", () =>
+      HttpResponse.json({
+        status: {
+          selection_revision: 0,
+          selected: { state: "unknown" },
+          installed: { state: "unknown" },
+          staged: { state: "unknown" },
+          running: { state: "unknown" },
+        },
+        target: "x86_64-unknown-linux-gnu",
+        diagnostics: [],
+        activation_supported: false,
+        restart_dispatched: false,
+      }),
+    ),
   );
 }
 

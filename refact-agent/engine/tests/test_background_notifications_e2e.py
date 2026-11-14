@@ -6,20 +6,13 @@ from pathlib import Path
 
 import pytest
 
-httpx = pytest.importorskip("httpx")
-
-def _base_url() -> str:
-    port = os.environ.get("REFACT_LSP_PORT")
-    if not port:
-        pytest.skip("REFACT_LSP_PORT is unset; live refact-lsp integration tests skipped")
-    return f"http://127.0.0.1:{port}"
-
-
-def _workspace_root() -> Path:
-    return Path(__file__).resolve().parents[2]
+import httpx
+from owned_engine import owned_engine, MODEL, native_messages
 
 
 async def _post_command(client: httpx.AsyncClient, base_url: str, chat_id: str, payload: dict) -> dict:
+    if payload.get("type") == "set_params":
+        payload = {**payload, "patch": {"model": MODEL, **payload["patch"]}}
     response = await client.post(
         f"{base_url}/v1/chats/{chat_id}/commands",
         json={"client_request_id": str(uuid.uuid4()), **payload},
@@ -31,7 +24,7 @@ async def _post_command(client: httpx.AsyncClient, base_url: str, chat_id: str, 
 async def _init_workspace(client: httpx.AsyncClient, base_url: str) -> None:
     response = await client.post(
         f"{base_url}/v1/lsp-initialize",
-        json={"project_roots": [_workspace_root().as_uri()]},
+        json={"project_roots": []},
     )
     assert response.status_code == 200, response.text
 
@@ -58,7 +51,10 @@ async def _collect_until(base_url: str, chat_id: str, predicate, timeout: float 
                 remaining = deadline - asyncio.get_running_loop().time()
                 if remaining <= 0:
                     raise AssertionError(f"timed out waiting for events; saw {events!r}")
-                event = await asyncio.wait_for(_read_sse_event(lines), timeout=remaining)
+                try:
+                    event = await asyncio.wait_for(_read_sse_event(lines), timeout=remaining)
+                except TimeoutError:
+                    raise AssertionError(f"SSE timed out; saw {events!r}") from None
                 events.append(event)
                 if predicate(events):
                     return events
@@ -69,11 +65,11 @@ def _message(event: dict) -> dict:
 
 
 def _event_meta(message: dict) -> dict:
-    return message.get("extra", {}).get("event") or {}
+    return message.get("event") or {}
 
 
 def _plan_meta(message: dict) -> dict:
-    return message.get("extra", {}).get("plan") or {}
+    return message.get("plan") or {}
 
 
 def _messages(events: list[dict]) -> list[dict]:
@@ -118,8 +114,9 @@ async def _execute_tool(
     name: str,
     arguments: dict,
     *,
-    model_name: str = "gpt-4o-mini",
+    model_name: str = MODEL,
 ) -> list[dict]:
+    await _post_command(client, base_url, chat_id, {"type": "set_params", "patch": {"model": MODEL}})
     assistant = {
         "role": "assistant",
         "content": "",
@@ -129,7 +126,7 @@ async def _execute_tool(
         f"{base_url}/v1/tools-execute",
         json={
             "messages": [{"role": "user", "content": f"Call {name}"}, assistant],
-            "n_ctx": 4096,
+            "n_ctx": 32768,
             "maxgen": 256,
             "subchat_tool_parameters": {},
             "postprocess_parameters": {
@@ -150,8 +147,7 @@ async def _execute_tool(
     )
     assert response.status_code == 200, response.text
     data = response.json()
-    assert data["tools_ran"] is True
-    return data["messages"]
+    return await native_messages(client, base_url, chat_id, data)
 
 
 def _tool_json(message: dict) -> dict:
@@ -162,8 +158,8 @@ def _tool_json(message: dict) -> dict:
 
 
 @pytest.mark.asyncio
-async def test_background_sleep_emits_process_completed_event_and_sse():
-    base_url = _base_url()
+async def test_background_sleep_emits_process_completed_event_and_sse(owned_engine):
+    base_url = owned_engine.base_url
     chat_id = f"test-bg-notify-{uuid.uuid4().hex[:8]}"
     process_id = None
 
@@ -175,7 +171,7 @@ async def test_background_sleep_emits_process_completed_event_and_sse():
                     base_url,
                     chat_id,
                     lambda seen: _event_message(seen, "process_completed") is not None
-                    and any(event.get("type") == "process_completed" for event in seen),
+                    and any(event.get("type") == "exec_process_spawned" for event in seen),
                     timeout=15.0,
                 )
             )
@@ -187,7 +183,7 @@ async def test_background_sleep_emits_process_completed_event_and_sse():
                 "process_start",
                 {"command": "sleep 2", "description": "short background sleep", "mode": "background"},
             )
-            process_id = messages[-1].get("extra", {}).get("exec", {})["process_id"]
+            process_id = messages[-1].get("exec", {})["process_id"]
             events = await waiter
 
             message_event = _event_message(events, "process_completed")
@@ -195,9 +191,12 @@ async def test_background_sleep_emits_process_completed_event_and_sse():
             payload = _event_meta(message_event).get("payload", {})
             assert payload.get("process_id") == process_id
             assert payload.get("exit_code") == 0
-            dedicated = [event for event in events if event.get("type") == "process_completed"]
+            assert "short background sleep" in message_event["content"]
+            assert len([m for m in _messages(events) if _event_meta(m).get("subkind") == "process_completed"]) == 1
+            dedicated = [event for event in events if event.get("type") == "exec_process_spawned"]
             assert dedicated
-            assert dedicated[-1]["process_id"] == process_id
+            assert dedicated[-1]["process"]["processId"] == process_id
         finally:
-            if process_id is not None:
-                await _execute_tool(client, base_url, chat_id, "process_kill", {"process_id": process_id})
+            if not waiter.done():
+                waiter.cancel()
+                await asyncio.gather(waiter, return_exceptions=True)

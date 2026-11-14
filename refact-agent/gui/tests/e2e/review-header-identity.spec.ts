@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { openReviewFixture } from "./reviewFixtureReady";
 
 for (const { width, height } of [
   { width: 1600, height: 900 },
@@ -16,7 +17,7 @@ for (const { width, height } of [
     page,
   }, testInfo) => {
     await page.setViewportSize({ width, height });
-    await page.goto("/tests/e2e/review-canvas.html?tour=rich");
+    await openReviewFixture(page, "/tests/e2e/review-canvas.html?tour=rich");
     const draft = page.getByRole("textbox", { name: "Chat composer" });
     await draft.fill("Keep this unsent draft");
     if (width <= 680) {
@@ -252,7 +253,7 @@ for (const canvasWidth of [780, 660, 480, 360]) {
     page,
   }, testInfo) => {
     await page.setViewportSize({ width: 1440, height: 900 });
-    await page.goto("/tests/e2e/review-canvas.html?tour=rich");
+    await openReviewFixture(page, "/tests/e2e/review-canvas.html?tour=rich");
     const canvas = page.getByRole("region", { name: "Review canvas" });
     await expect(canvas).toBeVisible();
     await canvas.evaluate((element, width) => {
@@ -341,7 +342,7 @@ test("short identity reserves no empty width and long identity respects its cap"
   page,
 }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
-  await page.goto("/tests/e2e/review-canvas.html?tour=rich");
+  await openReviewFixture(page, "/tests/e2e/review-canvas.html?tour=rich");
   const canvas = page.getByRole("region", { name: "Review canvas" });
   await expect(canvas).toBeVisible();
   for (const title of [

@@ -57,7 +57,7 @@ impl WorkspaceLeaseInfo {
             pid: std::process::id(),
             http_port,
             lsp_port,
-            version: env!("CARGO_PKG_VERSION").to_string(),
+            version: crate::version::VERSION.to_string(),
             started_at_ms: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map(|d| d.as_millis() as u64)
