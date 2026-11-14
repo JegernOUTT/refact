@@ -113,6 +113,26 @@ function errorMessage(error: unknown): string {
   return "The command could not be evaluated.";
 }
 
+function policyLoadErrorDescription(error: unknown): string {
+  if (typeof error === "object" && error !== null && "status" in error) {
+    const httpStatus =
+      "originalStatus" in error ? error.originalStatus : error.status;
+    if (
+      typeof httpStatus === "number" &&
+      (httpStatus < 200 || httpStatus > 299)
+    ) {
+      return `The shell policy endpoint returned HTTP ${String(httpStatus)}.`;
+    }
+    if (error.status === "CUSTOM_ERROR" || error.status === "PARSING_ERROR") {
+      return "The engine returned a shell policy in an unexpected format.";
+    }
+    if (error.status === "FETCH_ERROR" || error.status === "TIMEOUT_ERROR") {
+      return "The shell policy endpoint could not be reached.";
+    }
+  }
+  return "The shell policy could not be loaded.";
+}
+
 type ShellRuleTone = "deny" | "ask" | "allow";
 
 const RULE_PLACEHOLDER: Record<ShellRuleTone, string> = {
@@ -254,7 +274,7 @@ export function ShellSettingsSection() {
       <SettingsSection title="Shell" description={sectionDescription}>
         <ErrorState
           title="Failed to load shell policy"
-          description="The shell policy endpoint could not be reached."
+          description={policyLoadErrorDescription(policyQuery.error)}
           retry={
             <Button variant="soft" onClick={() => void policyQuery.refetch()}>
               Retry
@@ -630,27 +650,6 @@ export function ShellSettingsSection() {
       </SettingsGroup>
 
       <SettingsGroup title="Execution defaults">
-        <SettingItem
-          title="Foreground timeout seconds"
-          control={
-            <FieldText
-              aria-label="Foreground timeout seconds"
-              disabled={saving}
-              inputMode="numeric"
-              type="number"
-              value={String(draft.execution.foreground_timeout_secs)}
-              onChange={(value) =>
-                setDraft({
-                  ...draft,
-                  execution: {
-                    ...draft.execution,
-                    foreground_timeout_secs: Number(value),
-                  },
-                })
-              }
-            />
-          }
-        />
         <SettingItem
           title="Output line limit"
           control={

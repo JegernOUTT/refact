@@ -37,7 +37,6 @@ export type ShellLlmValidation = {
 };
 
 export type ShellExecutionDefaults = {
-  foreground_timeout_secs: number;
   output_limit_lines: number;
 };
 
@@ -152,7 +151,6 @@ export function isShellPolicy(value: unknown): value is ShellPolicy {
     (llm.on_failure === "pass" || llm.on_failure === "ask") &&
     typeof llm.cache_per_chat === "boolean" &&
     isRecord(execution) &&
-    typeof execution.foreground_timeout_secs === "number" &&
     typeof execution.output_limit_lines === "number" &&
     Array.isArray(value.catalogue) &&
     value.catalogue.every(isRiskEntry)
