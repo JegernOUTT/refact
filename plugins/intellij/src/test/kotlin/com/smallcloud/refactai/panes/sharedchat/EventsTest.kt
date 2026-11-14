@@ -1,6 +1,9 @@
 package com.smallcloud.refactai.panes.sharedchat
 
 import com.smallcloud.refactai.lsp.LSPBackendConnectionStatus
+import com.smallcloud.refactai.lsp.LSPConnectionIssue
+import com.smallcloud.refactai.lsp.LSPConnectionIssueCode
+import com.smallcloud.refactai.lsp.LSPStartupStage
 import com.smallcloud.refactai.panes.sharedchat.Events.ActiveFile.ActiveFileToChat
 import com.smallcloud.refactai.panes.sharedchat.Events.Editor
 import java.net.URI
@@ -8,6 +11,32 @@ import kotlin.test.Test
 import org.junit.Assert.*
 
 class EventsTest {
+
+    @Test
+    fun runtimeVersionsPlainGsonInitialStateAndUpdateHaveExplicitNullParity() {
+        val snapshot = com.smallcloud.refactai.lsp.RuntimeVersions(
+            selected = com.smallcloud.refactai.lsp.RuntimeVersionObservation(source = "local", observedAtMs = 123),
+        )
+        val payload = Events.Config.UpdatePayload(
+            Events.Config.Features(true, false), null, 0, Events.Config.KeyBindings(""),
+            runtimeVersions = snapshot,
+        )
+        val initial = com.google.gson.JsonParser.parseString(com.google.gson.Gson().toJson(payload)).asJsonObject
+        val update = com.google.gson.JsonParser.parseString(Events.stringify(Events.Config.Update(payload)))
+            .asJsonObject.getAsJsonObject("payload")
+        assertEquals(initial.get("runtimeVersions"), update.get("runtimeVersions"))
+        val versions = initial.getAsJsonObject("runtimeVersions")
+        listOf("plugin", "installed", "staged", "daemon", "worker", "requestedVersion").forEach {
+            assertTrue(it, versions.has(it))
+            assertTrue(it, versions.get(it).isJsonNull)
+        }
+        assertTrue(versions.getAsJsonObject("selected").get("version").isJsonNull)
+        val empty = payload.copy(runtimeVersions = null)
+        assertTrue(com.google.gson.JsonParser.parseString(com.google.gson.Gson().toJson(empty))
+            .asJsonObject.get("runtimeVersions").isJsonNull)
+        assertTrue(com.google.gson.JsonParser.parseString(Events.stringify(Events.Config.Update(empty)))
+            .asJsonObject.getAsJsonObject("payload").get("runtimeVersions").isJsonNull)
+    }
 
     @Test
     fun formatSnippetToChatTest() {
@@ -37,7 +66,7 @@ class EventsTest {
             Events.Config.KeyBindings("foo"))
         val message = Events.Config.Update(payload)
         val result = Events.stringify(message)
-        val expected = """{"type":"config/update","payload":{"features":{"ast":true,"vecdb":false,"codegraph":true,"images":true,"statistics":true,"knowledge":false},"themeProps":{"appearance":"light","hasBackground":false,"scale":"90%","accentColor":"gray"},"lspPort":8001,"keyBindings":{"completeManual":"foo"},"backendReady":true,"connectionStatus":"ready","tabbed":false,"host":"jetbrains"}}"""
+        val expected = """{"type":"config/update","payload":{"features":{"ast":true,"vecdb":false,"codegraph":true,"images":true,"statistics":true,"knowledge":false},"themeProps":{"appearance":"light","hasBackground":false,"scale":"90%","accentColor":"gray"},"lspPort":8001,"keyBindings":{"completeManual":"foo"},"backendReady":true,"connectionStatus":"ready","tabbed":false,"host":"jetbrains","connectionIssue":null,"runtimeVersions":null}}"""
         assertEquals(expected, result)
     }
 
@@ -53,7 +82,7 @@ class EventsTest {
         )
         val message = Events.Config.Update(payload)
         val result = Events.stringify(message)
-        val expected = """{"type":"config/update","payload":{"features":{"ast":true,"vecdb":false,"codegraph":true,"images":true,"statistics":true,"knowledge":false},"themeProps":{"appearance":"light","hasBackground":false,"scale":"90%","accentColor":"gray"},"lspPort":8001,"keyBindings":{"completeManual":"foo"},"lspUrl":"http://127.0.0.1:8488/p/project-123/","backendReady":true,"connectionStatus":"ready","browserUrl":"http://host.local:8488/p/project-123/","tabbed":false,"host":"jetbrains"}}"""
+        val expected = """{"type":"config/update","payload":{"features":{"ast":true,"vecdb":false,"codegraph":true,"images":true,"statistics":true,"knowledge":false},"themeProps":{"appearance":"light","hasBackground":false,"scale":"90%","accentColor":"gray"},"lspPort":8001,"keyBindings":{"completeManual":"foo"},"lspUrl":"http://127.0.0.1:8488/p/project-123/","backendReady":true,"connectionStatus":"ready","browserUrl":"http://host.local:8488/p/project-123/","tabbed":false,"host":"jetbrains","connectionIssue":null,"runtimeVersions":null}}"""
         assertEquals(expected, result)
     }
 
@@ -93,8 +122,67 @@ class EventsTest {
         )
         val message = Events.Config.Update(payload)
         val result = Events.stringify(message)
-        val expected = """{"type":"config/update","payload":{"features":{"ast":true,"vecdb":false,"codegraph":true,"images":true,"statistics":true,"knowledge":false},"themeProps":{"appearance":"light","hasBackground":false,"scale":"90%","accentColor":"gray"},"lspPort":0,"keyBindings":{"completeManual":"foo"},"backendReady":false,"connectionStatus":"starting","tabbed":false,"host":"jetbrains"}}"""
+        val expected = """{"type":"config/update","payload":{"features":{"ast":true,"vecdb":false,"codegraph":true,"images":true,"statistics":true,"knowledge":false},"themeProps":{"appearance":"light","hasBackground":false,"scale":"90%","accentColor":"gray"},"lspPort":0,"keyBindings":{"completeManual":"foo"},"backendReady":false,"connectionStatus":"starting","tabbed":false,"host":"jetbrains","connectionIssue":null,"runtimeVersions":null}}"""
         assertEquals(expected, result)
+    }
+
+    @Test
+    fun configMessageWithWorkspaceBusyIssueAndDaemonPort() {
+        val payload = Events.Config.UpdatePayload(
+            Events.Config.Features(true, false),
+            Events.Config.ThemeProps("light"),
+            0,
+            Events.Config.KeyBindings("foo"),
+            backendReady = false,
+            connectionStatus = LSPBackendConnectionStatus.FAILED.wireName,
+            connectionIssue = configConnectionIssue(
+                LSPBackendConnectionStatus.FAILED,
+                LSPConnectionIssue(LSPConnectionIssueCode.WORKSPACE_BUSY, holderPid = 4082485, holderHttpPort = 8005),
+            ),
+            daemonPort = configDaemonPort(8488),
+        )
+        val result = Events.stringify(Events.Config.Update(payload))
+        val expected = """{"type":"config/update","payload":{"features":{"ast":true,"vecdb":false,"codegraph":true,"images":true,"statistics":true,"knowledge":false},"themeProps":{"appearance":"light","hasBackground":false,"scale":"90%","accentColor":"gray"},"lspPort":0,"keyBindings":{"completeManual":"foo"},"backendReady":false,"connectionStatus":"failed","tabbed":false,"host":"jetbrains","connectionIssue":{"code":"workspace_busy","holderPid":4082485,"holderHttpPort":8005},"daemonPort":8488,"runtimeVersions":null}}"""
+        assertEquals(expected, result)
+    }
+
+    @Test
+    fun configMessageEngineStartFailedIncludesStageOnly() {
+        val issue = configConnectionIssue(
+            LSPBackendConnectionStatus.FAILED,
+            LSPConnectionIssue(LSPConnectionIssueCode.ENGINE_START_FAILED, stage = LSPStartupStage.PROJECT_OPEN),
+        )
+        assertEquals(Events.Config.ConnectionIssue("engine_start_failed", stage = "project_open"), issue)
+        val required = configConnectionIssue(
+            LSPBackendConnectionStatus.FAILED,
+            LSPConnectionIssue(LSPConnectionIssueCode.WORKSPACE_REQUIRED),
+        )
+        assertEquals(Events.Config.ConnectionIssue("workspace_required"), required)
+    }
+
+    @Test
+    fun configConnectionIssueClearsWhenNotFailedAndSanitizesNumbers() {
+        val busy = LSPConnectionIssue(LSPConnectionIssueCode.WORKSPACE_BUSY, holderPid = -1, holderHttpPort = 70000)
+        val engine = LSPConnectionIssue(LSPConnectionIssueCode.ENGINE_START_FAILED, stage = LSPStartupStage.PROJECT_OPEN)
+        assertNull(configConnectionIssue(LSPBackendConnectionStatus.READY, busy))
+        assertNull(configConnectionIssue(LSPBackendConnectionStatus.STARTING, engine))
+        assertNull(configConnectionIssue(LSPBackendConnectionStatus.CONNECTING, engine))
+        assertNull(configConnectionIssue(LSPBackendConnectionStatus.FAILED, null))
+        assertNull(configConnectionIssue(LSPBackendConnectionStatus.STARTING, null))
+        assertEquals(
+            Events.Config.ConnectionIssue("workspace_busy"),
+            configConnectionIssue(LSPBackendConnectionStatus.FAILED, busy),
+        )
+        listOf(
+            LSPBackendConnectionStatus.CONNECTING,
+            LSPBackendConnectionStatus.STARTING,
+            LSPBackendConnectionStatus.INSTALLING,
+        ).forEach { status ->
+            assertEquals(Events.Config.ConnectionIssue("workspace_busy"), configConnectionIssue(status, busy))
+        }
+        assertNull(configDaemonPort(0))
+        assertNull(configDaemonPort(65536))
+        assertNull(configDaemonPort(null))
     }
 
     @Test

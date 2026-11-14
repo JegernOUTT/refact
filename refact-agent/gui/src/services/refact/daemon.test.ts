@@ -40,6 +40,79 @@ const workers = [
 ];
 
 describe("daemonApi", () => {
+  it.each(["vscode", "jetbrains", "ide"] as const)(
+    "uses an independent loopback daemonPort for %s while the engine is not ready",
+    async (host) => {
+      const requested: { method: string; url: string; auth: string | null }[] =
+        [];
+      server.use(
+        http.all("http://127.0.0.1:9495/*", ({ request }) => {
+          requested.push({
+            method: request.method,
+            url: request.url,
+            auth: request.headers.get("Authorization"),
+          });
+          return HttpResponse.json(
+            request.url.endsWith("/status") ? status : [],
+          );
+        }),
+      );
+      const store = setUpStore({
+        config: {
+          host,
+          daemonPort: 9495,
+          backendReady: false,
+          connectionStatus: "failed",
+          lspPort: 0,
+          themeProps: {},
+          apiKey: "model-secret",
+        },
+      });
+      const result = await store.dispatch(
+        daemonApi.endpoints.getDaemonInfo.initiate(undefined),
+      );
+      expect(result.data?.workers).toEqual([]);
+      expect(requested).toEqual([
+        {
+          method: "GET",
+          url: "http://127.0.0.1:9495/daemon/v1/status",
+          auth: null,
+        },
+        {
+          method: "GET",
+          url: "http://127.0.0.1:9495/daemon/v1/workers",
+          auth: null,
+        },
+      ]);
+      expect(
+        resolveDaemonBaseUrl({
+          host,
+          daemonPort: 9495,
+          lspUrl: "https://unused.example/p/project",
+        }),
+      ).toBe("http://127.0.0.1:9495");
+    },
+  );
+
+  it.each([0, -1, 65536, NaN, Infinity, 8488.5])(
+    "rejects invalid daemon port %s",
+    (daemonPort) => {
+      expect(
+        resolveDaemonBaseUrl({ host: "vscode", daemonPort, lspPort: 0 }),
+      ).toBe("http://127.0.0.1:8488");
+    },
+  );
+
+  it("does not change web URL resolution when daemonPort is supplied", () => {
+    expect(
+      resolveDaemonBaseUrl({
+        host: "web",
+        daemonPort: 9495,
+        lspUrl: "https://daemon.example/p/project",
+      }),
+    ).toBe("https://daemon.example");
+  });
+
   it("builds encoded project proxy API URLs", () => {
     expect(
       projectApiUrl(

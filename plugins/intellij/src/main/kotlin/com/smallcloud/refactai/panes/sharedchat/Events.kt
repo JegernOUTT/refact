@@ -4,6 +4,10 @@ import com.google.gson.GsonBuilder
 import com.google.gson.JsonDeserializationContext
 import com.google.gson.JsonDeserializer
 import com.google.gson.JsonElement
+import com.google.gson.TypeAdapter
+import com.google.gson.annotations.JsonAdapter
+import com.google.gson.stream.JsonReader
+import com.google.gson.stream.JsonWriter
 import com.google.gson.annotations.SerializedName
 import com.google.gson.reflect.TypeToken
 import com.smallcloud.refactai.struct.ChatMessage
@@ -448,6 +452,36 @@ class Events {
 
         data class KeyBindings(val completeManual: String)
 
+        data class ConnectionIssue(
+            val code: String,
+            val holderPid: Int? = null,
+            val holderHttpPort: Int? = null,
+            val stage: String? = null,
+        )
+
+        class ExplicitNullConnectionIssueAdapter : TypeAdapter<ConnectionIssue?>() {
+            override fun write(out: JsonWriter, value: ConnectionIssue?) {
+                if (value == null) {
+                    val serializeNulls = out.serializeNulls
+                    out.serializeNulls = true
+                    out.nullValue()
+                    out.serializeNulls = serializeNulls
+                    return
+                }
+                out.beginObject()
+                out.name("code").value(value.code)
+                value.holderPid?.let { out.name("holderPid").value(it.toLong()) }
+                value.holderHttpPort?.let { out.name("holderHttpPort").value(it.toLong()) }
+                value.stage?.let { out.name("stage").value(it) }
+                out.endObject()
+            }
+
+            override fun read(reader: JsonReader): ConnectionIssue? {
+                reader.skipValue()
+                return null
+            }
+        }
+
         data class UpdatePayload(
             val features: Config.Features,
             val themeProps: Config.ThemeProps?,
@@ -458,7 +492,12 @@ class Events {
             val connectionStatus: String = if (backendReady) "ready" else "connecting",
             val browserUrl: String? = null,
             val tabbed: Boolean? = false,
-            val host: String? = "jetbrains"
+            val host: String? = "jetbrains",
+            @field:JsonAdapter(ExplicitNullConnectionIssueAdapter::class, nullSafe = false)
+            val connectionIssue: ConnectionIssue? = null,
+            val daemonPort: Int? = null,
+            @field:JsonAdapter(com.smallcloud.refactai.lsp.RuntimeVersionsAdapter::class, nullSafe = false)
+            val runtimeVersions: com.smallcloud.refactai.lsp.RuntimeVersions? = null,
         ) : Payload()
 
         class Update(payload: UpdatePayload) : ToChat<Payload>(EventNames.ToChat.UPDATE_CONFIG, payload)

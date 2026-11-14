@@ -11,6 +11,36 @@ import { useGetConfiguredProvidersView } from "../Providers/ProvidersView/useCon
 import { push } from "../Pages/pagesSlice";
 import { getProviderName } from "../Providers/getProviderName";
 import styles from "./LoginPage.module.css";
+import type { RefactConnectionIssue } from "../Config/configSlice";
+import { RuntimeVersionsSummary } from "../RuntimeVersions/RuntimeVersions";
+
+function startupFailureDescription(
+  stage: RefactConnectionIssue["stage"],
+): string {
+  switch (stage) {
+    case "engine_resolution":
+      return "Refact could not locate or install the local engine.";
+    case "daemon_start":
+      return "Refact could not start or reach the local daemon.";
+    case "project_open":
+      return "The local daemon could not open this workspace.";
+    case "lsp_attach":
+      return "Refact could not connect the IDE to the workspace engine.";
+    case "health_check":
+      return "The workspace engine did not become ready.";
+    default:
+      return "The local Refact engine could not start.";
+  }
+}
+
+function validHolderNumber(value: number | undefined, max: number): boolean {
+  return (
+    Number.isSafeInteger(value) &&
+    value !== undefined &&
+    value > 0 &&
+    value <= max
+  );
+}
 
 export const LoginPage: React.FC = () => {
   const dispatch = useAppDispatch();
@@ -48,6 +78,27 @@ export const LoginPage: React.FC = () => {
 
   const bootstrapCopy = React.useMemo(() => {
     switch (surfaceStatus) {
+      case "engine_start_failed":
+        return {
+          title: "Refact engine could not start",
+          subtitle: `${startupFailureDescription(
+            providerBootstrap.connectionIssue?.stage,
+          )} Open daemon diagnostics or check your IDE logs for details.`,
+          status: "Engine startup failed",
+        };
+      case "workspace_required":
+        return {
+          title: "Open a folder to use Refact",
+          subtitle: "Open a folder in your IDE.",
+          status: "A workspace folder is required",
+        };
+      case "workspace_busy":
+        return {
+          title: "Another Refact engine is using this folder",
+          subtitle:
+            "Use the IDE running that engine, or close that engine yourself to let this plugin connect.",
+          status: "Workspace already in use",
+        };
       case "backend_connecting":
         return {
           title: "Connecting to Refact",
@@ -94,7 +145,42 @@ export const LoginPage: React.FC = () => {
           status: "Enable at least one model to continue",
         };
     }
-  }, [surfaceStatus]);
+  }, [surfaceStatus, providerBootstrap.connectionIssue?.stage]);
+
+  const isWorkspaceIssue =
+    surfaceStatus === "workspace_required" ||
+    surfaceStatus === "workspace_busy";
+  const showDiagnostics =
+    isWorkspaceIssue ||
+    surfaceStatus === "engine_start_failed" ||
+    surfaceStatus === "backend_offline";
+  const diagnosticsAction = (
+    <Button
+      variant="soft"
+      onClick={() => dispatch(push({ name: "refact daemon" }))}
+    >
+      Open daemon diagnostics
+    </Button>
+  );
+  const holderDetails =
+    surfaceStatus === "workspace_busy"
+      ? [
+          validHolderNumber(
+            providerBootstrap.connectionIssue?.holderPid,
+            Number.MAX_SAFE_INTEGER,
+          )
+            ? `PID ${providerBootstrap.connectionIssue?.holderPid}`
+            : null,
+          validHolderNumber(
+            providerBootstrap.connectionIssue?.holderHttpPort,
+            65535,
+          )
+            ? `HTTP port ${providerBootstrap.connectionIssue?.holderHttpPort}`
+            : null,
+        ]
+          .filter(Boolean)
+          .join(" · ")
+      : "";
 
   const onContinue = useCallback(() => {
     dispatch(push({ name: "history" }));
@@ -133,7 +219,14 @@ export const LoginPage: React.FC = () => {
 
         {!visibleCurrentProvider && !canShowProviderSetup && (
           <div className={styles.bootstrapState}>
-            {showProviderError ? (
+            {showDiagnostics ? (
+              <EmptyState
+                title={bootstrapCopy.status}
+                description={holderDetails || undefined}
+                variant="full"
+                action={diagnosticsAction}
+              />
+            ) : showProviderError ? (
               <EmptyState
                 title="Unable to load providers"
                 description="Check that the local Refact engine is running and the UI is using the correct port."
@@ -149,8 +242,12 @@ export const LoginPage: React.FC = () => {
                 }
               />
             ) : (
-              <LoadingState label={bootstrapCopy.status} variant="full" />
+              <>
+                <LoadingState label={bootstrapCopy.status} variant="full" />
+                {diagnosticsAction}
+              </>
             )}
+            <RuntimeVersionsSummary />
           </div>
         )}
 
@@ -186,6 +283,7 @@ export const LoginPage: React.FC = () => {
             variant="primary"
             onClick={onContinue}
             disabled={
+              !providerBootstrap.canAccessApp ||
               !providersQuery.isSuccess ||
               providersQuery.isFetching ||
               !hasAnyActiveProvider

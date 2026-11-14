@@ -5,6 +5,7 @@ import * as http from "http";
 import type { AddressInfo, Socket } from "net";
 import * as os from "os";
 import * as path from "path";
+import { runRustBinaryBlobLifecycleTests } from "./launchRustLifecycle.test";
 import {
     DAEMON_OPEN_PROJECT_TIMEOUT_MS,
     DAEMON_POLL_TIMEOUT_MS,
@@ -27,6 +28,8 @@ import {
     missingBundledRefactError,
     normalizeDaemonSpawnPort,
     openProject,
+    WorkspaceBusyError,
+    workspaceBusyIssue,
     projectProxyFetchWithRetry,
     projectProxyBaseUrl,
     resolveBundledRefactPath,
@@ -63,10 +66,12 @@ import {
     backendConfigForStatus,
     effectiveLspPortForStatus,
     shouldReadCapsForCompletion,
+    WorkspaceRequiredError,
 } from "./backendStatus";
 import {
     attachStateForDaemonOpenProject,
     browserUrlForBackendStatus,
+    connectionIssueForAttachError,
     lspSocketCloseAction,
     shouldRunLifecycleGeneration,
 } from "./launchRustLifecycle";
@@ -162,6 +167,8 @@ export async function runRefactDaemonTests() {
     assert.strictEqual(INSTALL_LOCK_STALE_MS, 900000);
 
     runBackendStatusTests();
+    await runRustBinaryBlobLifecycleTests();
+    await runWorkspaceBusyTests();
     runLaunchRustLifecycleTests();
 
     await runBundledRefactSpawnTests();
@@ -237,10 +244,12 @@ function runBackendStatusTests() {
     assert.deepStrictEqual(backendConfigForStatus("connecting"), {
         backendReady: false,
         connectionStatus: "connecting",
+        connectionIssue: null,
     });
     assert.deepStrictEqual(backendConfigForStatus("ready"), {
         backendReady: true,
         connectionStatus: "ready",
+        connectionIssue: null,
     });
     assert.strictEqual(effectiveLspPortForStatus(8001, "connecting"), 0);
     assert.strictEqual(effectiveLspPortForStatus(8001, "ready"), 8001);
@@ -250,6 +259,10 @@ function runBackendStatusTests() {
 }
 
 function runLaunchRustLifecycleTests() {
+    assert.deepStrictEqual(connectionIssueForAttachError(new WorkspaceRequiredError()), { code: "workspace_required" });
+    assert.strictEqual(connectionIssueForAttachError(new Error("Open a workspace folder before starting Refact.")), null);
+    assert.strictEqual(connectionIssueForAttachError(new Error("workspace_busy secret path")), null);
+    assert.deepStrictEqual(connectionIssueForAttachError(new Error("raw token private/path"), "engine_resolution"), { code: "engine_start_failed", stage: "engine_resolution" });
     assert.strictEqual(attachStateForDaemonOpenProject(), "starting");
     assert.strictEqual(browserUrlForBackendStatus({
         status: "connecting",
@@ -322,6 +335,50 @@ function runLaunchRustLifecycleTests() {
         socketIsCurrent: true,
         debug: true,
     }), "disconnect");
+}
+
+async function runWorkspaceBusyTests() {
+    /* eslint-disable @typescript-eslint/naming-convention */
+    const busy = { project_id: "test", holder: "private holder", root: "/private/path", lease_path: "/private/lease", observed_at_ms: 1, holder_pid: 4082485, holder_http_port: 8005 };
+    const body = JSON.stringify({ error: "private raw error", workspace_busy: busy });
+    const expected = { code: "workspace_busy", holderPid: 4082485, holderHttpPort: 8005 };
+    assert.deepStrictEqual(workspaceBusyIssue(409, body), expected);
+    assert.strictEqual(workspaceBusyIssue(500, body), null);
+    for (const invalid of ["not json", "{}", '{"workspace_busy":null}', '{"workspace_busy":[]}', '{"workspace_busy":{}}']) {
+        assert.strictEqual(workspaceBusyIssue(409, invalid), null);
+    }
+    for (const invalid of [0, -1, 1.5, "8005", 4294967296]) {
+        assert.deepStrictEqual(workspaceBusyIssue(409, JSON.stringify({ workspace_busy: { ...busy, holder_pid: invalid, holder_http_port: invalid } })), { code: "workspace_busy" });
+    }
+    assert.deepStrictEqual(workspaceBusyIssue(409, JSON.stringify({ workspace_busy: { ...busy, holder_http_port: 65536 } })), { code: "workspace_busy", holderPid: 4082485 });
+    const requests: string[] = [];
+    const sockets = new Set<Socket>();
+    const server = http.createServer((request, response) => {
+        requests.push(`${request.method} ${request.url}`);
+        response.setHeader("Connection", "close");
+        response.statusCode = 409;
+        response.end(body);
+    });
+    server.on("connection", socket => {
+        sockets.add(socket);
+        socket.once("close", () => sockets.delete(socket));
+    });
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    try {
+        await assert.rejects(openProject("/test", { port: (server.address() as AddressInfo).port, authToken: "test-only", timeoutMs: 1000 }), error => {
+            assert.ok(error instanceof WorkspaceBusyError);
+            assert.deepStrictEqual(connectionIssueForAttachError(error), expected);
+            assert.strictEqual(error.message.includes("private"), false);
+            return true;
+        });
+        assert.deepStrictEqual(requests, ["POST /daemon/v1/projects/open"], "busy does not retry auth, shutdown, unlock, or adopt the holder");
+    } finally {
+        for (const socket of sockets) {
+            socket.destroy();
+        }
+        await new Promise<void>(resolve => server.close(() => resolve()));
+    }
+    /* eslint-enable @typescript-eslint/naming-convention */
 }
 
 async function runBundledRefactSpawnTests() {

@@ -1,10 +1,15 @@
 import { beforeEach, describe, expect, test, vi } from "vitest";
 import { http, HttpResponse } from "msw";
+import { act as testingAct } from "@testing-library/react";
+import type { act as reactAct } from "react-dom/test-utils";
 
 import { MCPInteractionCenter } from "../components/MCPInteractionCenter";
+import { updateConfig, type Config } from "../features/Config/configSlice";
 import type { MCPInteraction } from "../services/refact/mcpInteractions";
 import { server } from "../utils/mockServer";
 import { render, screen, waitFor } from "../utils/test-utils";
+
+const act = testingAct as typeof reactAct;
 
 const PRELOADED_STATE = {
   config: {
@@ -50,6 +55,199 @@ describe("MCPInteractionCenter", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockRespond();
+  });
+
+  test.each(
+    (["ide", "vscode", "jetbrains"] as const).flatMap((host) => [
+      { host, lspPort: 0 },
+      {
+        host,
+        lspPort: 8001,
+        backendReady: false,
+        connectionStatus: "failed" as const,
+      },
+    ]),
+  )("polling follows plugin endpoint readiness: %j", async (config) => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    const requests = vi.fn();
+    server.use(
+      http.get("*/v1/mcp/interactions", () => {
+        requests();
+        return HttpResponse.json({ interactions: [] });
+      }),
+    );
+    const { store, unmount } = render(<MCPInteractionCenter />, {
+      preloadedState: {
+        config: { ...PRELOADED_STATE.config, ...config },
+      },
+    });
+
+    try {
+      await act(() => vi.advanceTimersByTimeAsync(6500));
+      expect(fetchSpy).not.toHaveBeenCalled();
+
+      act(() => {
+        store.dispatch(
+          updateConfig({
+            lspPort: 8001,
+            backendReady: true,
+            connectionStatus: "ready",
+          }),
+        );
+      });
+      await waitFor(() => expect(requests).toHaveBeenCalledTimes(1));
+      await act(() => vi.advanceTimersByTimeAsync(3100));
+      expect(requests).toHaveBeenCalledTimes(2);
+
+      act(() => {
+        store.dispatch(
+          updateConfig({ backendReady: false, connectionStatus: "failed" }),
+        );
+      });
+      await act(() => vi.advanceTimersByTimeAsync(6500));
+      expect(requests).toHaveBeenCalledTimes(2);
+
+      act(() => {
+        store.dispatch(
+          updateConfig({ backendReady: true, connectionStatus: "ready" }),
+        );
+      });
+      await act(() => vi.advanceTimersByTimeAsync(3100));
+      expect(requests).toHaveBeenCalledTimes(3);
+    } finally {
+      unmount();
+      fetchSpy.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  test.each([
+    interaction({ kind: "sampling_approval", preview: "Approval sentinel" }),
+    interaction({
+      message: "Authorization sentinel",
+      url: "https://example.com/oauth",
+    }),
+  ])(
+    "hides retained interactions without HTTP when unavailable: $kind",
+    async (pending) => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      const fetchSpy = vi.spyOn(globalThis, "fetch");
+      const openSpy = vi.spyOn(window, "open").mockImplementation(() => null);
+      const requests: {
+        method: string;
+        url: string;
+        authorization: string | null;
+      }[] = [];
+      server.use(
+        http.all("*", ({ request }) => {
+          requests.push({
+            method: request.method,
+            url: request.url,
+            authorization: request.headers.get("Authorization"),
+          });
+          return HttpResponse.json({ interactions: [pending] });
+        }),
+      );
+      const { store, user, unmount } = render(<MCPInteractionCenter />, {
+        preloadedState: {
+          config: {
+            ...PRELOADED_STATE.config,
+            apiKey: "sentinel-provider-key",
+            backendReady: true,
+            connectionStatus: "ready",
+          },
+        },
+      });
+
+      try {
+        expect(await screen.findByRole("dialog")).toBeInTheDocument();
+        expect(requests).toEqual([
+          {
+            method: "GET",
+            url: "http://127.0.0.1:8001/v1/mcp/interactions",
+            authorization: "Bearer sentinel-provider-key",
+          },
+        ]);
+        fetchSpy.mockClear();
+        act(() => {
+          store.dispatch(
+            updateConfig({
+              lspPort: 0,
+              backendReady: false,
+              connectionStatus: "failed",
+            }),
+          );
+        });
+        expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+        await user.keyboard("{Escape}");
+        await act(() => vi.advanceTimersByTimeAsync(6500));
+        expect(fetchSpy).not.toHaveBeenCalled();
+        expect(openSpy).not.toHaveBeenCalled();
+        expect(requests).toHaveLength(1);
+
+        act(() => {
+          store.dispatch(
+            updateConfig({
+              lspPort: 8001,
+              backendReady: true,
+              connectionStatus: "ready",
+            }),
+          );
+        });
+        await act(() => vi.advanceTimersByTimeAsync(3100));
+        expect(screen.getByRole("dialog")).toBeInTheDocument();
+        expect(requests).toHaveLength(2);
+        expect(
+          requests.every(
+            ({ method, url }) =>
+              method === "GET" &&
+              url === "http://127.0.0.1:8001/v1/mcp/interactions",
+          ),
+        ).toBe(true);
+
+        act(() => {
+          store.dispatch(
+            updateConfig({
+              lspPort: 0,
+              backendReady: false,
+              connectionStatus: "failed",
+            }),
+          );
+        });
+        fetchSpy.mockClear();
+        unmount();
+        await act(() => vi.advanceTimersByTimeAsync(100));
+        expect(fetchSpy).not.toHaveBeenCalled();
+        expect(requests).toHaveLength(2);
+      } finally {
+        unmount();
+        fetchSpy.mockRestore();
+        openSpy.mockRestore();
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  test.each<Partial<Config>>([
+    { dev: true },
+    { engineServed: true },
+    { lspUrl: "http://127.0.0.1:8001" },
+  ])("preserves configured web requests: %j", async (config) => {
+    const requests = vi.fn();
+    server.use(
+      http.get("*/v1/mcp/interactions", () => {
+        requests();
+        return HttpResponse.json({ interactions: [] });
+      }),
+    );
+    render(<MCPInteractionCenter />, {
+      preloadedState: {
+        config: { ...PRELOADED_STATE.config, host: "web", ...config },
+      },
+    });
+
+    await waitFor(() => expect(requests).toHaveBeenCalledTimes(1));
   });
 
   test("renders nothing when no interactions", async () => {

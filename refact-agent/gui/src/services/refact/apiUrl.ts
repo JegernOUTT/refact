@@ -8,6 +8,7 @@ export type RefactBackendConnectionStatus =
 export type EngineApiConfig = {
   host?: "web" | "ide" | "vscode" | "jetbrains";
   lspPort?: number;
+  daemonPort?: number;
   lspUrl?: string;
   browserUrl?: string;
   dev?: boolean;

@@ -1,0 +1,32 @@
+.root {
+  width: 100%;
+  min-width: 0;
+  color: var(--rf-color-fg);
+  font-size: var(--rf-text-2);
+  line-height: var(--rf-line-2);
+  text-align: left;
+}
+
+.list {
+  display: grid;
+  gap: var(--rf-space-3);
+  margin: var(--rf-space-3) 0;
+}
+
+.row {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.row dt {
+  font-weight: var(--rf-weight-semibold);
+}
+
+.row dd {
+  margin: var(--rf-space-1) 0 0;
+}
+
+.metadata {
+  display: block;
+  color: var(--rf-color-muted);
+}

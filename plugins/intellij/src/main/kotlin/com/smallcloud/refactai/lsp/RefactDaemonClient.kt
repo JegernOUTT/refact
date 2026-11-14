@@ -256,6 +256,36 @@ internal class DaemonHttpStatusException(
     val method: String,
 ) : IOException("$method $uri failed with HTTP $statusCode: $responseBody")
 
+data class WorkspaceBusyConflict(
+    val holderPid: Int? = null,
+    val holderHttpPort: Int? = null,
+)
+
+class DaemonWorkspaceBusyException(val conflict: WorkspaceBusyConflict) :
+    IOException("daemon workspace busy")
+
+private const val MAX_WORKSPACE_BUSY_BODY_CHARS = 64 * 1024
+
+internal fun parseWorkspaceBusyConflict(statusCode: Int, body: String): WorkspaceBusyConflict? {
+    if (statusCode != HttpURLConnection.HTTP_CONFLICT) return null
+    if (body.isBlank() || body.length > MAX_WORKSPACE_BUSY_BODY_CHARS) return null
+    val root = runCatching { com.google.gson.JsonParser.parseString(body) }.getOrNull() ?: return null
+    if (!root.isJsonObject) return null
+    val busy = root.asJsonObject.get("workspace_busy") ?: return null
+    if (!busy.isJsonObject) return null
+    val fields = busy.asJsonObject
+    fun boundedInt(name: String, range: IntRange): Int? {
+        val element = fields.get(name) ?: return null
+        if (!element.isJsonPrimitive || !element.asJsonPrimitive.isNumber) return null
+        val value = runCatching { element.asBigDecimal.longValueExact() }.getOrNull() ?: return null
+        return value.takeIf { it in range.first.toLong()..range.last.toLong() }?.toInt()
+    }
+    return WorkspaceBusyConflict(
+        holderPid = boundedInt("holder_pid", 1..Int.MAX_VALUE),
+        holderHttpPort = boundedInt("holder_http_port", 1..65535),
+    )
+}
+
 class HttpRefactDaemonClient(
     private val portProvider: () -> Int = { InferenceGlobalContext.xDebugLSPPort?.takeIf { it > 0 } ?: DEFAULT_REFACT_DAEMON_PORT },
     private val pluginVersionProvider: () -> String = { Resources.version },
@@ -316,14 +346,19 @@ class HttpRefactDaemonClient(
                 "settings" to settings.toOpenProjectSettings(),
             )
         )
-        val response = authenticatedRequest(
-            URI("http://127.0.0.1:${daemon.port}/daemon/v1/projects/open"),
-            "POST",
-            payload,
-            daemon.port,
-            daemon.authToken,
-            DaemonRequestTimeouts(readTimeoutMs = DAEMON_OPEN_PROJECT_READ_TIMEOUT_MS),
-        )
+        val response = try {
+            authenticatedRequest(
+                URI("http://127.0.0.1:${daemon.port}/daemon/v1/projects/open"),
+                "POST",
+                payload,
+                daemon.port,
+                daemon.authToken,
+                DaemonRequestTimeouts(readTimeoutMs = DAEMON_OPEN_PROJECT_READ_TIMEOUT_MS),
+            )
+        } catch (error: DaemonHttpStatusException) {
+            val conflict = parseWorkspaceBusyConflict(error.statusCode, error.responseBody) ?: throw error
+            throw DaemonWorkspaceBusyException(conflict)
+        }
         val parsed = gson.fromJson(response.body, OpenProjectResponseWire::class.java)
         val projectId = parsed.projectId ?: throw IOException("daemon project open response missing project_id")
         val encodedProjectId = encodePathSegment(projectId)

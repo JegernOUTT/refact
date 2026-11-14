@@ -202,10 +202,20 @@ export type DaemonFolderBrowseResponse = {
 };
 
 function validPort(port: number | undefined): port is number {
-  return port !== undefined && Number.isFinite(port) && port > 0;
+  return (
+    port !== undefined && Number.isInteger(port) && port > 0 && port <= 65535
+  );
 }
 
 export function resolveDaemonBaseUrl(config: EngineApiConfig): string {
+  if (
+    (config.host === "ide" ||
+      config.host === "vscode" ||
+      config.host === "jetbrains") &&
+    validPort(config.daemonPort)
+  ) {
+    return `http://127.0.0.1:${config.daemonPort}`;
+  }
   if (
     config.host === "web" &&
     config.engineServed === true &&

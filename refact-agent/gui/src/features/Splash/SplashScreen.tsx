@@ -2,6 +2,10 @@ import React, { useEffect, useState } from "react";
 import { RefactIcon } from "../../images";
 import { LogoAnimation } from "../../components/LogoAnimation";
 import styles from "./SplashScreen.module.css";
+import { Button } from "../../components/ui";
+import { useAppDispatch } from "../../hooks/useAppDispatch";
+import { push } from "../Pages/pagesSlice";
+import { RuntimeVersionsSummary } from "../RuntimeVersions/RuntimeVersions";
 
 type SplashScreenProps = {
   message?: string;
@@ -10,6 +14,7 @@ type SplashScreenProps = {
 export const SplashScreen: React.FC<SplashScreenProps> = ({
   message = "Starting local Refact engine…",
 }) => {
+  const dispatch = useAppDispatch();
   const [reducedMotion, setReducedMotion] = useState(false);
 
   useEffect(() => {
@@ -68,6 +73,13 @@ export const SplashScreen: React.FC<SplashScreenProps> = ({
             <LogoAnimation isWaiting={false} isStreaming size="8" />
           </div>
         )}
+        <Button
+          variant="soft"
+          onClick={() => dispatch(push({ name: "refact daemon" }))}
+        >
+          Open daemon diagnostics
+        </Button>
+        <RuntimeVersionsSummary />
       </div>
     </div>
   );

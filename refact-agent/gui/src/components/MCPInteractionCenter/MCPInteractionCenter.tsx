@@ -9,6 +9,8 @@ import {
 } from "../../services/refact/mcpInteractions";
 import { useIsDocumentVisible } from "../../hooks/useIsDocumentVisible";
 import { useOpenUrl } from "../../hooks/useOpenUrl";
+import { useAppSelector } from "../../hooks/useAppSelector";
+import { hasUsableEngineEndpoint } from "../../services/refact/apiUrl";
 import { Badge, Button, Dialog, Flex, Icon, Surface, Text } from "../ui";
 import { ElicitationForm } from "./ElicitationForm";
 import styles from "./MCPInteractionCenter.module.css";
@@ -41,14 +43,18 @@ function getInteractionLabel(interaction: MCPInteraction) {
 
 export function MCPInteractionCenter() {
   const visible = useIsDocumentVisible();
+  const ready = useAppSelector((state) =>
+    hasUsableEngineEndpoint(state.config),
+  );
   const { data } = useListMcpInteractionsQuery(undefined, {
+    skip: !ready,
     pollingInterval: visible ? 3000 : 0,
   });
   const [respond, { isLoading }] = useRespondMcpInteractionMutation();
   const openUrl = useOpenUrl();
   const [openedUrlId, setOpenedUrlId] = useState<string | null>(null);
 
-  const interactions = data?.interactions ?? [];
+  const interactions = ready ? data?.interactions ?? [] : [];
   const interaction = interactions.at(0);
   const now = useNow(interactions.length > 0);
 
@@ -58,7 +64,7 @@ export function MCPInteractionCenter() {
 
   const respondToInteraction = useCallback(
     async (action: MCPInteractionAction, content?: Record<string, unknown>) => {
-      if (!interaction) return;
+      if (!ready || !interaction) return;
 
       try {
         await respond({ id: interaction.id, action, content }).unwrap();
@@ -68,14 +74,14 @@ export function MCPInteractionCenter() {
         setOpenedUrlId(null);
       }
     },
-    [interaction, respond],
+    [ready, interaction, respond],
   );
 
   const handleOpenUrl = useCallback(() => {
-    if (!interaction?.url) return;
+    if (!ready || !interaction?.url) return;
     openUrl(interaction.url);
     setOpenedUrlId(interaction.id);
-  }, [interaction, openUrl]);
+  }, [ready, interaction, openUrl]);
 
   const title = useMemo(() => {
     if (!interaction) return "MCP interaction";

@@ -4,7 +4,9 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { setUpStore, type AppStore } from "../app/store";
 import { InnerApp } from "../features/App";
 import { setBackendStatus } from "../features/Connection";
-import { render } from "../utils/test-utils";
+import { render, screen, waitFor } from "../utils/test-utils";
+import { push, pop } from "../features/Pages/pagesSlice";
+import { updateConfig } from "../features/Config/configSlice";
 import {
   chatSessionSubscribe,
   goodCaps,
@@ -18,6 +20,9 @@ type BootstrapStatus =
   | "backend_connecting"
   | "backend_installing"
   | "backend_offline"
+  | "workspace_busy"
+  | "workspace_required"
+  | "engine_start_failed"
   | "provider_loading"
   | "provider_error"
   | "setup_required"
@@ -122,7 +127,8 @@ vi.mock("../features/Knowledge", async () => {
 vi.mock("../features/RefactDaemon", async () => {
   const React = await vi.importActual<typeof import("react")>("react");
   return {
-    RefactDaemonPage: () => React.createElement("section"),
+    RefactDaemonPage: () =>
+      React.createElement("section", { "data-testid": "daemon-page" }),
   };
 });
 
@@ -153,6 +159,47 @@ function lastPageName(store: AppStore) {
 }
 
 describe("App connection problem grace", () => {
+  it.each([
+    "workspace_busy",
+    "workspace_required",
+    "engine_start_failed",
+    "backend_offline",
+  ] as const)(
+    "allows daemon diagnostics and back while %s without granting app access",
+    async (status) => {
+      bootstrapMock.status = status;
+      const store = createAppStore();
+      store.dispatch(
+        updateConfig({
+          backendReady: false,
+          connectionStatus: "failed",
+          lspPort: 0,
+        }),
+      );
+      store.dispatch(setBackendStatus({ status: "offline" }));
+      store.dispatch(push({ name: "login page" }));
+      render(<InnerApp />, { store });
+      await waitFor(() =>
+        expect(screen.getByTestId("login-page")).toBeInTheDocument(),
+      );
+      act(() => {
+        store.dispatch(push({ name: "refact daemon" }));
+      });
+      await waitFor(() =>
+        expect(screen.getByTestId("daemon-page")).toBeInTheDocument(),
+      );
+      expect(lastPageName(store)).toBe("refact daemon");
+      expect(screen.queryByTestId("workspace-view")).not.toBeInTheDocument();
+      act(() => {
+        store.dispatch(pop());
+      });
+      await waitFor(() =>
+        expect(screen.getByTestId("login-page")).toBeInTheDocument(),
+      );
+      expect(lastPageName(store)).toBe("login page");
+    },
+  );
+
   afterEach(() => {
     bootstrapMock.status = "ready";
     vi.useRealTimers();

@@ -46,6 +46,7 @@ import {
   useUpdateDaemonSettingsMutation,
 } from "../../services/refact/daemon";
 import styles from "./RefactDaemonPage.module.css";
+import { RuntimeVersionsSummary } from "../RuntimeVersions/RuntimeVersions";
 
 const MINUTE_SECONDS = 60;
 const HOUR_SECONDS = MINUTE_SECONDS * 60;
@@ -860,6 +861,19 @@ export function RefactDaemonPage({ backFromDaemon }: RefactDaemonPageProps) {
           </Button>
         </ButtonGroup>
       </header>
+
+      <RuntimeVersionsSummary
+        daemonOverride={
+          status
+            ? {
+                state: isError ? "last_observed" : "observed",
+                version: status.version,
+                source: "daemon",
+                observedAtMs: fulfilledTimeStamp,
+              }
+            : undefined
+        }
+      />
 
       {isLoading ? (
         <LoadingState kind="skeleton" label="Loading daemon status" />

@@ -2,6 +2,14 @@ import { createReducer, createAction, createSelector } from "@reduxjs/toolkit";
 import { type ThemeProps } from "../../components/Theme";
 import { RootState } from "../../app/store";
 import { resolveCapabilities } from "../../utils/capabilities";
+import {
+  sanitizeRuntimeVersions,
+  type RuntimeVersions,
+} from "../RuntimeVersions/types";
+export type {
+  RuntimeVersions,
+  RuntimeVersionObservation,
+} from "../RuntimeVersions/types";
 
 export type RefactBackendConnectionStatus =
   | "connecting"
@@ -11,6 +19,18 @@ export type RefactBackendConnectionStatus =
   | "failed";
 
 export type Surface = "dashboard" | "workspace";
+
+export type RefactConnectionIssue = {
+  code: "workspace_required" | "workspace_busy" | "engine_start_failed";
+  stage?:
+    | "engine_resolution"
+    | "daemon_start"
+    | "project_open"
+    | "lsp_attach"
+    | "health_check";
+  holderPid?: number;
+  holderHttpPort?: number;
+};
 
 export type Capabilities = {
   filesPanel: boolean;
@@ -25,6 +45,7 @@ export type Capabilities = {
 export type Config = {
   host: "web" | "ide" | "vscode" | "jetbrains";
   lspPort: number;
+  daemonPort?: number;
   surface?: Surface;
   capabilities?: Partial<Capabilities>;
   tabbed?: boolean;
@@ -34,6 +55,8 @@ export type Config = {
   engineServed?: boolean;
   backendReady?: boolean;
   connectionStatus?: RefactBackendConnectionStatus;
+  connectionIssue?: RefactConnectionIssue | null;
+  runtimeVersions?: RuntimeVersions | null;
   // todo: handle light / darkmode
   themeProps: Omit<ThemeProps, "children">;
   features?: {
@@ -95,6 +118,14 @@ function hasConfigProperty(
 export const reducer = createReducer<Config>(initialState, (builder) => {
   // TODO: toggle darkmode for web host?
   builder.addCase(updateConfig, (state, action) => {
+    const previousEndpoint = [
+      state.host,
+      state.lspUrl,
+      state.lspPort,
+      state.daemonPort,
+      state.dev,
+      state.engineServed,
+    ];
     state.dev = action.payload.dev ?? state.dev;
     state.engineServed = action.payload.engineServed ?? state.engineServed;
     if (hasConfigProperty(action.payload, "backendReady")) {
@@ -110,6 +141,14 @@ export const reducer = createReducer<Config>(initialState, (builder) => {
       } else {
         state.connectionStatus = action.payload.connectionStatus;
       }
+    }
+    if (hasConfigProperty(action.payload, "connectionIssue")) {
+      state.connectionIssue = action.payload.connectionIssue ?? null;
+    } else if (
+      action.payload.connectionStatus !== undefined &&
+      action.payload.connectionStatus !== "failed"
+    ) {
+      state.connectionIssue = null;
     }
 
     state.features = action.payload.features
@@ -157,11 +196,30 @@ export const reducer = createReducer<Config>(initialState, (builder) => {
       : state.themeProps;
     state.apiKey = action.payload.apiKey ?? state.apiKey;
     state.lspPort = action.payload.lspPort ?? state.lspPort;
+    if (hasConfigProperty(action.payload, "daemonPort")) {
+      state.daemonPort = action.payload.daemonPort;
+    }
     state.keyBindings = action.payload.keyBindings ?? state.keyBindings;
     state.currentWorkspaceName =
       action.payload.currentWorkspaceName ?? state.currentWorkspaceName;
     state.shiftEnterToSubmit =
       action.payload.shiftEnterToSubmit ?? state.shiftEnterToSubmit;
+    if (hasConfigProperty(action.payload, "runtimeVersions")) {
+      state.runtimeVersions = sanitizeRuntimeVersions(
+        action.payload.runtimeVersions,
+      );
+    } else if (state.runtimeVersions) {
+      const endpointChanged =
+        previousEndpoint[0] !== state.host ||
+        previousEndpoint[1] !== state.lspUrl ||
+        previousEndpoint[2] !== state.lspPort ||
+        previousEndpoint[4] !== state.dev ||
+        previousEndpoint[5] !== state.engineServed;
+      const daemonChanged =
+        endpointChanged || previousEndpoint[3] !== state.daemonPort;
+      if (daemonChanged) state.runtimeVersions.daemon = null;
+      if (daemonChanged) state.runtimeVersions.worker = null;
+    }
   });
 
   builder.addCase(setThemeMode, (state, action) => {
@@ -184,6 +242,8 @@ export const selectThemeMode = (state: RootState) =>
   state.config.themeProps.appearance;
 
 export const selectConfig = (state: RootState) => state.config;
+export const selectRuntimeVersions = (state: RootState) =>
+  state.config.runtimeVersions;
 export const selectLspPort = (state: RootState) => state.config.lspPort;
 
 export const selectFeatures = (state: RootState) => state.config.features;

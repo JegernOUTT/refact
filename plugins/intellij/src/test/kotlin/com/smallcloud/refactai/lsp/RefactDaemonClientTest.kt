@@ -9,6 +9,7 @@ import mockwebserver3.RecordedRequest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.ByteArrayOutputStream
@@ -854,6 +855,65 @@ class RefactDaemonClientTest {
             System.setProperty("user.home", originalHome)
             restoreDaemonDirProperty(originalDaemonDir)
             root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun parseWorkspaceBusyConflictExtractsOnlyBoundedNumbers() {
+        val body = """{"error":"workspace lease held by refact-lsp","workspace_busy":{"project_id":"p","root":"/secret/root","holder":"refact-lsp 8.7.0 pid 4082485","holder_pid":4082485,"holder_http_port":8005,"lease_path":"/secret/lease"}}"""
+        assertEquals(WorkspaceBusyConflict(holderPid = 4082485, holderHttpPort = 8005), parseWorkspaceBusyConflict(409, body))
+        assertEquals(
+            WorkspaceBusyConflict(),
+            parseWorkspaceBusyConflict(409, """{"workspace_busy":{"holder_pid":-3,"holder_http_port":99999}}"""),
+        )
+        assertEquals(
+            WorkspaceBusyConflict(),
+            parseWorkspaceBusyConflict(409, """{"workspace_busy":{"holder_pid":"12","holder_http_port":1.5}}"""),
+        )
+        assertNull(parseWorkspaceBusyConflict(409, """{"error":"conflict"}"""))
+        assertNull(parseWorkspaceBusyConflict(409, """{"workspace_busy":null}"""))
+        assertNull(parseWorkspaceBusyConflict(409, """{"workspace_busy":"yes"}"""))
+        assertNull(parseWorkspaceBusyConflict(409, "not json"))
+        assertNull(parseWorkspaceBusyConflict(409, ""))
+        assertNull(parseWorkspaceBusyConflict(502, body))
+    }
+
+    @Test
+    fun openProjectClassifiesWorkspaceBusyConflictOnly() {
+        val server = MockWebServer()
+        try {
+            server.start()
+            server.enqueue(
+                MockResponse.Builder()
+                    .code(409)
+                    .addHeader("Content-Type", "application/json")
+                    .body("{\"error\":\"busy\",\"workspace_busy\":{\"holder_pid\":4082485,\"holder_http_port\":8005}}")
+                    .build()
+            )
+            server.enqueue(
+                MockResponse.Builder()
+                    .code(409)
+                    .addHeader("Content-Type", "application/json")
+                    .body("{\"error\":\"other conflict\"}")
+                    .build()
+            )
+            val client = HttpRefactDaemonClient(portProvider = { server.port }, pluginVersionProvider = { "8.1.0" })
+            val daemon = DaemonStatus(version = "8.1.0", port = server.port)
+
+            val busy = runCatching { client.openProject("/tmp/project", LSPConfig(), daemon) }.exceptionOrNull()
+            assertTrue("expected busy exception, got $busy", busy is DaemonWorkspaceBusyException)
+            assertEquals(
+                WorkspaceBusyConflict(holderPid = 4082485, holderHttpPort = 8005),
+                (busy as DaemonWorkspaceBusyException).conflict,
+            )
+            assertFalse(busy.message.orEmpty().contains("busy\""))
+
+            val generic = runCatching { client.openProject("/tmp/project", LSPConfig(), daemon) }.exceptionOrNull()
+            assertTrue("expected generic HTTP exception, got $generic", generic is DaemonHttpStatusException)
+            assertEquals(409, (generic as DaemonHttpStatusException).statusCode)
+            assertEquals(2, server.requestCount)
+        } finally {
+            server.shutdown()
         }
     }
 

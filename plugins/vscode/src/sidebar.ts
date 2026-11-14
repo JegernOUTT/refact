@@ -63,12 +63,13 @@ import { backendConfigForStatus, effectiveLspPortForStatus, type RefactBackendCo
 import { webviewEndpointConfig } from "./sidebarConfig";
 import { getIdeLogSnapshot } from "./ideLogBuffer";
 import { HostDecisionNotifications } from "./hostDecisions";
+import { emptyRuntimeVersions, type RuntimeVersions } from "./runtimeVersions";
 
 const OPEN_CHAT_IN_BROWSER_EVENT = "ide/openChatInBrowser";
 
 type FeatureConfig = NonNullable<Parameters<typeof updateConfig>[0]["features"]> & { codegraph?: boolean };
-type ConfigUpdatePayload = Omit<Parameters<typeof updateConfig>[0], "features"> & { features?: FeatureConfig } & RefactBackendConfig & { lspUrl?: string };
-type InitialConfig = Omit<InitialState["config"], "features"> & { features?: FeatureConfig };
+type ConfigUpdatePayload = Omit<Parameters<typeof updateConfig>[0], "features"> & { features?: FeatureConfig } & RefactBackendConfig & { lspUrl?: string; daemonPort?: number; runtimeVersions?: RuntimeVersions };
+type InitialConfig = Omit<InitialState["config"], "features"> & { features?: FeatureConfig; runtimeVersions?: RuntimeVersions };
 
 type QueuedWebviewMessage = {
     generation: number;
@@ -167,6 +168,7 @@ export class PanelWebview implements vscode.WebviewViewProvider {
         }));
 
         this._disposables.push(vscode.workspace.onDidChangeWorkspaceFolders(() => {
+            global.rust_binary_blob?.workspace_folders_changed();
             this.sendCurrentProjectInfo();
             this.handleSettingsChange();
         }));
@@ -376,8 +378,15 @@ export class PanelWebview implements vscode.WebviewViewProvider {
         return createCurrentProjectInfo(vscode.workspace.name ?? "", this.getWorkspaceRoots());
     }
 
+    private runtimeVersionsConfig(): RuntimeVersions {
+        return global.rust_binary_blob?.runtime_versions?.() ?? emptyRuntimeVersions(vscode.extensions.getExtension("smallcloud.codify")?.packageJSON?.version);
+    }
+
     private backendConfig(): RefactBackendConfig {
-        return backendConfigForStatus(global.rust_binary_blob?.backend_status?.() ?? "connecting");
+        return backendConfigForStatus(
+            global.rust_binary_blob?.backend_status?.() ?? "connecting",
+            global.rust_binary_blob?.connection_issue?.() ?? null,
+        );
     }
 
     private backendLspPort(rawPort: number | undefined): number {
@@ -410,6 +419,8 @@ export class PanelWebview implements vscode.WebviewViewProvider {
 
         const backendConfig = this.backendConfig();
         const config: ConfigUpdatePayload = {
+            runtimeVersions: this.runtimeVersionsConfig(),
+            daemonPort: global.rust_binary_blob?.daemon_control_port?.(),
             lspPort: port,
             shiftEnterToSubmit: submitChatWithShiftEnter,
             features: {vecdb, ast, codegraph},
@@ -1174,7 +1185,9 @@ export class PanelWebview implements vscode.WebviewViewProvider {
         const currentProject = this.getCurrentProjectInfo();
 
         const backendConfig = this.backendConfig();
-        const config: InitialConfig & RefactBackendConfig = {
+        const config: InitialConfig & RefactBackendConfig & { daemonPort?: number } = {
+            runtimeVersions: this.runtimeVersionsConfig(),
+            daemonPort: global.rust_binary_blob?.daemon_control_port?.(),
             host: "vscode",
             tabbed,
             shiftEnterToSubmit,

@@ -13,6 +13,8 @@ import com.intellij.psi.PsiDocumentManager
 import com.intellij.util.application
 import com.smallcloud.refactai.lsp.LSPProcessHolder
 import com.smallcloud.refactai.lsp.LSPBackendConnectionStatus
+import com.smallcloud.refactai.lsp.LSPConnectionIssue
+import com.smallcloud.refactai.lsp.LSPConnectionIssueCode
 import com.smallcloud.refactai.settings.AppSettingsState
 import java.io.File
 import java.net.URI
@@ -33,6 +35,24 @@ internal fun ensureBackendStartedForConfig(
 }
 
 internal data class BackendConfigUrls(val lspUrl: String?, val browserUrl: String?)
+
+internal fun configConnectionIssue(
+    connectionStatus: LSPBackendConnectionStatus,
+    issue: LSPConnectionIssue?,
+): Events.Config.ConnectionIssue? {
+    if (connectionStatus == LSPBackendConnectionStatus.READY || issue == null) return null
+    if (connectionStatus != LSPBackendConnectionStatus.FAILED && issue.code != LSPConnectionIssueCode.WORKSPACE_BUSY) {
+        return null
+    }
+    return Events.Config.ConnectionIssue(
+        code = issue.code.wireName,
+        holderPid = issue.holderPid?.takeIf { it > 0 },
+        holderHttpPort = issue.holderHttpPort?.takeIf { it in 1..65535 },
+        stage = issue.stage?.wireName,
+    )
+}
+
+internal fun configDaemonPort(port: Int?): Int? = port?.takeIf { it in 1..65535 }
 
 internal fun backendConfigUrls(
     backendReady: Boolean,
@@ -143,6 +163,7 @@ class Editor (val project: Project) {
         val lspPort = if (rawPort > 0) rawPort else 0
         val urls = backendConfigUrls(backendReady, lspHolder?.baseUrlOrNull(), lspHolder?.browserUrlOrNull())
         val keyBindings = Events.Config.KeyBindings("")
+        val connectionIssue = configConnectionIssue(connectionStatus, lspHolder?.connectionIssue())
 
         return Events.Config.UpdatePayload(
             features = features,
@@ -153,6 +174,9 @@ class Editor (val project: Project) {
             backendReady = backendReady,
             connectionStatus = connectionStatus.wireName,
             browserUrl = urls.browserUrl,
+            connectionIssue = connectionIssue,
+            daemonPort = configDaemonPort(lspHolder?.daemonPort()),
+            runtimeVersions = lspHolder?.runtimeVersions(),
         )
     }
 

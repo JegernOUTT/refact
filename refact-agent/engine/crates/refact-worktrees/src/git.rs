@@ -3051,6 +3051,7 @@ mod rollback_tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn ignored_collision_probe_handles_paths_starting_with_a_colon() {
         let temp = simple_repo();
         let root = temp.path();

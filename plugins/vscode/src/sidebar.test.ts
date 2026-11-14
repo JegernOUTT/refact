@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/naming-convention */
 import * as assert from "assert";
 import * as path from "path";
 import {
@@ -5,6 +6,7 @@ import {
     resolveFilePathWithinWorkspace,
 } from "./sidebarPaths";
 import { webviewEndpointConfig } from "./sidebarConfig";
+import { backendConfigForStatus, effectiveLspPortForStatus } from "./backendStatus";
 import { HostDecisionNotifications } from "./hostDecisions";
 import { HOST_DECISION_PARITY_CASES, decisionQuestionsDigest, sanitizeEngineBaseUrl } from "refact-chat-js/dist/events";
 
@@ -40,6 +42,15 @@ export function runSidebarPathBoundaryTests() {
 }
 
 function runWebviewEndpointConfigTests() {
+    for (const code of ["workspace_required", "workspace_busy", "engine_start_failed"] as const) {
+        const backend = backendConfigForStatus("failed", { code });
+        const payload = { ...backend, lspPort: effectiveLspPortForStatus(8005, backend.connectionStatus), ...webviewEndpointConfig(backend.backendReady, "http://private/proxy", "http://private/?token=secret") };
+        assert.deepStrictEqual(JSON.parse(JSON.stringify(payload)), { backendReady: false, connectionStatus: "failed", connectionIssue: { code }, lspPort: 0 });
+        for (const status of ["connecting", "starting", "installing", "ready", "failed"] as const) {
+            assert.strictEqual(backendConfigForStatus(status).connectionIssue, null);
+        }
+        assert.strictEqual(backendConfigForStatus("ready", { code }).connectionIssue, null);
+    }
     const lspUrl = "http://127.0.0.1:8488/p/PID/";
     const browserUrl = "http://machine.local:8488/p/PID/";
 
@@ -165,6 +176,68 @@ function runLegacyDecisionNotificationTests() {
 runLegacyDecisionNotificationTests();
 
 void runHostDecisionNotificationTests().catch(error => {
+    console.error(error);
+    process.exitCode = 1;
+});
+
+
+async function runRuntimeVersionsPayloadTests() {
+    const loader = require("module");
+    const originalLoad = loader._load;
+    const modulePath = require.resolve("./sidebar");
+    const previous = require.cache[modulePath];
+    const originalBlob = global.rust_binary_blob;
+    const versions = {
+        plugin: { state: "observed", version: "8.7.0", source: "plugin" },
+        requestedVersion: "8.7.0",
+        selected: { state: "observed", version: "8.8.0", source: "local" },
+        installed: null, staged: null,
+        daemon: { state: "observed", version: "8.9.0", source: "daemon" },
+        worker: { state: "observed", version: "9.0.0", commit: "worker-commit", source: "worker" },
+    };
+    try {
+        loader._load = function(request: string, parent: { filename?: string }, isMain: boolean) {
+            if (parent?.filename === modulePath) {
+                if (request === "vscode") { return { workspace: { getConfiguration: () => ({ get: () => undefined }) } }; }
+                if (request === "./getKeybindings") { return { getKeyBindingForChat: async () => "" }; }
+                if (request.startsWith("./") && !["./backendStatus", "./sidebarConfig", "./runtimeVersions", "./sidebarPaths"].includes(request)) { return {}; }
+            }
+            return originalLoad.call(this, request, parent, isMain);
+        };
+        delete require.cache[modulePath];
+        const { PanelWebview } = require("./sidebar");
+        const panel = Object.create(PanelWebview.prototype);
+        panel.bindDecisionScope = () => undefined;
+        panel.getActiveWorkspace = () => "repo";
+        panel.getCurrentProjectInfo = () => ({ name: "repo" });
+        panel.getColorTheme = () => "dark";
+        panel.getActiveFileInfo = () => null;
+        panel.getSnippetFromEditor = () => null;
+        let payload: unknown;
+        panel.postMessageToChat = (message: { payload: unknown }) => { payload = message.payload; };
+        global.rust_binary_blob = {
+            runtime_versions: () => JSON.parse(JSON.stringify(versions)),
+            backend_status: () => "ready", connection_issue: () => null,
+            get_port: () => 8488, daemon_control_port: () => 8488,
+            rust_url: () => "http://localhost:8488/p/test/", browser_url: () => "http://localhost:8488/p/test/",
+        } as unknown as typeof global.rust_binary_blob;
+        const initial = await panel.createInitialState();
+        panel.handleSettingsChange();
+        assert.deepStrictEqual(initial.config.runtimeVersions, versions);
+        assert.deepStrictEqual((payload as { runtimeVersions: unknown }).runtimeVersions, versions);
+        versions.selected.version = "unknown";
+        versions.daemon = null as unknown as typeof versions.daemon;
+        versions.worker = null as unknown as typeof versions.worker;
+        panel.handleSettingsChange();
+        assert.strictEqual((payload as { runtimeVersions: typeof versions }).runtimeVersions.worker, null, "updates carry full clearing snapshot");
+    } finally {
+        loader._load = originalLoad;
+        global.rust_binary_blob = originalBlob;
+        if (previous) { require.cache[modulePath] = previous; } else { delete require.cache[modulePath]; }
+    }
+}
+
+void runRuntimeVersionsPayloadTests().catch(error => {
     console.error(error);
     process.exitCode = 1;
 });

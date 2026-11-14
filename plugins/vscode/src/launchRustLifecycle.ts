@@ -1,9 +1,19 @@
-import { backendReadyForStatus, type RefactBackendConnectionStatus } from "./backendStatus";
+import { backendReadyForStatus, WorkspaceRequiredError, type RefactConnectionIssue, type RefactBackendConnectionStatus } from "./backendStatus";
 import * as refactDaemon from "./refactDaemon";
 
 export const lspSocketConnectTimeoutMs = 10000;
 export const lspClientReadyTimeoutMs = 20000;
 export const lspClientStopTimeoutMs = 5000;
+
+export function connectionIssueForAttachError(error: unknown, stage?: RefactConnectionIssue["stage"]): RefactConnectionIssue | null {
+    if (error instanceof WorkspaceRequiredError) {
+        return { code: "workspace_required" };
+    }
+    if (error instanceof refactDaemon.WorkspaceBusyError) {
+        return error.issue;
+    }
+    return stage ? { code: "engine_start_failed", stage } : null;
+}
 
 export type LspSocketCloseAction = "ignore" | "reconnect" | "disconnect";
 

@@ -5,6 +5,7 @@ import * as crypto from "crypto";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
+import { type RefactConnectionIssue } from "./backendStatus";
 
 export const DEFAULT_DAEMON_PORT = 8488;
 export const DEFAULT_BROWSER_HOST = "127.0.0.1";
@@ -112,10 +113,46 @@ type RequestOptions = Partial<fetchH2.RequestInit>;
 
 class DaemonRequestError extends Error {
     readonly status: number;
+    readonly body: string;
 
     constructor(status: number, url: string, body: string) {
         super(`daemon request failed ${status} ${url}: ${body}`);
         this.status = status;
+        this.body = body;
+    }
+}
+
+export class WorkspaceBusyError extends Error {
+    constructor(public readonly issue: RefactConnectionIssue) {
+        super("This workspace is in use by another Refact engine.");
+    }
+}
+
+export function workspaceBusyIssue(status: number, body: string): RefactConnectionIssue | null {
+    if (status !== 409) {
+        return null;
+    }
+    try {
+        const parsed: unknown = JSON.parse(body);
+        if (!parsed || typeof parsed !== "object" || !("workspace_busy" in parsed)) {
+            return null;
+        }
+        const busy = parsed.workspace_busy;
+        if (!busy || typeof busy !== "object" || Array.isArray(busy)
+            || !("project_id" in busy) || typeof busy.project_id !== "string" || !busy.project_id.trim()
+            || !("holder" in busy) || typeof busy.holder !== "string" || !busy.holder.trim()) {
+            return null;
+        }
+        const issue: RefactConnectionIssue = { code: "workspace_busy" };
+        if ("holder_pid" in busy && typeof busy.holder_pid === "number" && Number.isInteger(busy.holder_pid) && busy.holder_pid > 0 && busy.holder_pid <= 4294967295) {
+            issue.holderPid = busy.holder_pid;
+        }
+        if ("holder_http_port" in busy && typeof busy.holder_http_port === "number" && Number.isInteger(busy.holder_http_port) && busy.holder_http_port > 0 && busy.holder_http_port <= 65535) {
+            issue.holderHttpPort = busy.holder_http_port;
+        }
+        return issue;
+    } catch {
+        return null;
     }
 }
 
@@ -585,18 +622,26 @@ export async function openProject(root: string, options: OpenProjectOptions = {}
         client_kind: options.clientKind ?? "vscode",
         settings: options.settings,
     };
-    return requestJsonWithAuthRetry<OpenProjectResponse>(
-        port,
-        authToken,
-        options,
-        endpoint => daemonOpenProjectUrl(endpoint.port),
-        endpoint => ({
-            method: "POST",
-            headers: daemonRequestHeaders(endpoint.authToken, { "Content-Type": "application/json" }),
-            body: JSON.stringify(payload),
-        }),
-        options.timeoutMs ?? DAEMON_OPEN_PROJECT_TIMEOUT_MS,
-    );
+    try {
+        return await requestJsonWithAuthRetry<OpenProjectResponse>(
+            port,
+            authToken,
+            options,
+            endpoint => daemonOpenProjectUrl(endpoint.port),
+            endpoint => ({
+                method: "POST",
+                headers: daemonRequestHeaders(endpoint.authToken, { "Content-Type": "application/json" }),
+                body: JSON.stringify(payload),
+            }),
+            options.timeoutMs ?? DAEMON_OPEN_PROJECT_TIMEOUT_MS,
+        );
+    } catch (error) {
+        const issue = error instanceof DaemonRequestError ? workspaceBusyIssue(error.status, error.body) : null;
+        if (issue) {
+            throw new WorkspaceBusyError(issue);
+        }
+        throw error;
+    }
 }
 
 export async function detach(): Promise<void> {

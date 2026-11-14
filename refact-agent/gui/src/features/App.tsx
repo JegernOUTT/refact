@@ -361,12 +361,16 @@ const WorkspaceApp: React.FC<AppProps> = ({ style }: AppProps) => {
   }, [backendStatus, providerBootstrap.status]);
 
   const showStartupSplash =
+    desiredPage.name !== "refact daemon" &&
     !startupDeadlineReached &&
     (hasEndpoint || isBackendInstalling) &&
     !startupResolved &&
     backendLastOkAt === null &&
     providerBootstrap.status !== "ready" &&
     providerBootstrap.status !== "setup_required" &&
+    providerBootstrap.status !== "workspace_required" &&
+    providerBootstrap.status !== "workspace_busy" &&
+    providerBootstrap.status !== "engine_start_failed" &&
     providerBootstrap.status !== "provider_error";
   useEffect(() => {
     if (canAccessApp) {
@@ -381,7 +385,12 @@ const WorkspaceApp: React.FC<AppProps> = ({ style }: AppProps) => {
       providerBootstrap.status !== "backend_connecting" &&
       providerBootstrap.status !== "backend_installing" &&
       providerBootstrap.status !== "provider_loading";
-    if (!shouldShowLoginPage || desiredPage.name === "login page") return;
+    if (
+      !shouldShowLoginPage ||
+      desiredPage.name === "login page" ||
+      desiredPage.name === "refact daemon"
+    )
+      return;
 
     if (!hadAppAccessRef.current) {
       dispatch(popBackTo({ name: "login page" }));

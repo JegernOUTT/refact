@@ -12,6 +12,9 @@ import {
 } from "../services/refact/apiUrl";
 
 export type ProviderBootstrapStatus =
+  | "workspace_required"
+  | "workspace_busy"
+  | "engine_start_failed"
   | "backend_connecting"
   | "backend_installing"
   | "backend_offline"
@@ -73,7 +76,13 @@ export function useProviderBootstrapState() {
   }, [refetchProviders, refetchCaps]);
 
   let status: ProviderBootstrapStatus = "provider_loading";
-  if (!hasReadyPluginBackend(config)) {
+  if (
+    config.connectionIssue?.code === "workspace_required" ||
+    config.connectionIssue?.code === "workspace_busy" ||
+    config.connectionIssue?.code === "engine_start_failed"
+  ) {
+    status = config.connectionIssue.code;
+  } else if (!hasReadyPluginBackend(config)) {
     if (config.connectionStatus === "failed") {
       status = "backend_offline";
     } else if (config.connectionStatus === "installing") {
@@ -100,6 +109,7 @@ export function useProviderBootstrapState() {
     providersQuery,
     capsQuery,
     status,
+    connectionIssue: config.connectionIssue,
     hasAnyActiveProvider,
     canAccessApp: status === "ready",
     canShowProviderSetup: status === "setup_required",

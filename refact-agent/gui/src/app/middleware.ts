@@ -153,6 +153,7 @@ import {
   getEngineEndpointIdentity,
   hasUsableEngineEndpoint,
 } from "../services/refact/apiUrl";
+import { daemonApi, resolveDaemonBaseUrl } from "../services/refact/daemon";
 import {
   collectTabIds,
   findLeaf,
@@ -1364,6 +1365,12 @@ startListening({
     );
     if (namespaceChanged) {
       hydratePersistedChatUi(listenerApi);
+    }
+
+    if (
+      resolveDaemonBaseUrl(previousConfig) !== resolveDaemonBaseUrl(nextConfig)
+    ) {
+      listenerApi.dispatch(daemonApi.util.resetApiState());
     }
 
     if (endpointConfigChanged(previousConfig, nextConfig)) {

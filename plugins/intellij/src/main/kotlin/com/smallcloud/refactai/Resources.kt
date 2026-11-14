@@ -36,10 +36,11 @@ private fun getHomePath(): File? {
     return if (jarDir.name == "lib") jarDir.parentFile ?: jarDir else jarDir
 }
 
-private val resolvedPluginVersion: String by lazy {
-    readOwnPluginXmlVersion()
-        ?: Resources::class.java.`package`?.implementationVersion?.takeIf { it.isNotBlank() }
-        ?: UNKNOWN_PLUGIN_VERSION
+internal fun resolveObservedPluginVersion(xmlVersion: String?, manifestVersion: String?): String? =
+    xmlVersion?.takeIf { it.isNotBlank() } ?: manifestVersion?.takeIf { it.isNotBlank() }
+
+private val resolvedPluginVersion: String? by lazy {
+    resolveObservedPluginVersion(readOwnPluginXmlVersion(), Resources::class.java.`package`?.implementationVersion)
 }
 
 // Reads the version stamped into this plugin's own META-INF/plugin.xml. All
@@ -59,7 +60,7 @@ private fun readOwnPluginXmlVersion(): String? {
     }.getOrNull()
 }
 
-private fun getVersion(): String = resolvedPluginVersion
+private fun getVersion(): String = resolvedPluginVersion ?: UNKNOWN_PLUGIN_VERSION
 
 private fun getPluginId(): PluginId = PluginId.getId(REFACT_PLUGIN_ID)
 
@@ -90,6 +91,7 @@ object Resources {
 
     const val defaultCodeCompletionUrlSuffix: String = "v1/code-completion"
     val version: String = getVersion()
+    val observedVersion: String? = resolvedPluginVersion
     const val client: String = "jetbrains"
     const val titleStr: String = "Refact.ai"
     val pluginId: PluginId = getPluginId()
