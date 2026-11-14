@@ -420,7 +420,7 @@ fn status_label(status: &ExecStatus) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::exec::{ExecMode, ExecOwnerMeta, ExecProcessId, ExecRegistry, ExecSpawnRequest};
+    use crate::exec::{ExecMode, ExecOwnerMeta, ExecProcessId, ExecSpawnRequest};
     use crate::chat::trajectories::{save_trajectory_snapshot, TrajectorySnapshot};
 
     async fn test_gcx_with_workspace() -> (SharedGlobalContext, tempfile::TempDir) {
@@ -532,22 +532,6 @@ mod tests {
 
     fn process_payload(message: &ChatMessage) -> serde_json::Value {
         message.extra["event"]["payload"].clone()
-    }
-
-    async fn spawn_notification_test_process(
-        registry: &ExecRegistry,
-        mode: ExecMode,
-        chat_id: &str,
-        command: String,
-    ) -> ExecProcessId {
-        let mut request = ExecSpawnRequest::new(mode, command)
-            .with_owner(owner(chat_id))
-            .with_short_description("test process");
-        if matches!(request.mode, ExecMode::Service) {
-            request = request.with_startup_wait(Duration::from_millis(10));
-        }
-        let result = registry.spawn(request).await.unwrap();
-        result.snapshot.meta.process_id
     }
 
     fn notification_test_snapshot(chat_id: &str) -> TrajectorySnapshot {
@@ -677,13 +661,30 @@ mod tests {
             "session must start unloaded so the completion has to restore it"
         );
 
-        let process_id = spawn_notification_test_process(
-            &gcx.exec_registry,
-            ExecMode::Background,
-            chat_id,
-            sleep_command("0.1"),
-        )
-        .await;
+        let request = if cfg!(windows) {
+            let cmd = std::path::PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+                .join("System32")
+                .join("cmd.exe");
+            assert!(cmd.is_absolute());
+            ExecSpawnRequest::background("exit 0").with_argv(vec![
+                cmd.to_str().unwrap().to_string(),
+                "/D".to_string(),
+                "/C".to_string(),
+                "exit 0".to_string(),
+            ])
+        } else {
+            ExecSpawnRequest::background(sleep_command("0.1"))
+        }
+        .with_owner(owner(chat_id))
+        .with_short_description("test process");
+        let process_id = gcx
+            .exec_registry
+            .spawn(request)
+            .await
+            .unwrap()
+            .snapshot
+            .meta
+            .process_id;
         let deadline = tokio::time::Instant::now() + PROCESS_COMPLETION_DEADLINE;
         let finished = tokio::time::timeout_at(deadline, gcx.exec_registry.wait(&process_id))
             .await

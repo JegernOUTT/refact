@@ -1048,7 +1048,7 @@ mod tests {
 
         assert_eq!(error, format!(
             "Request not sent: user privacy policy does not allow \"untrusted\" to receive data from these guarded files present in this chat's context:\n  - {} (zone \"secrets\", declared)\nRetrying the same request will be refused again. Ask the user to allow \"untrusted\" for zone(s) \"secrets\" in Privacy settings, or to clear this chat's privacy record for these files.",
-            secret.to_string_lossy()
+            refact_core::chat_types::normalize_file_name(secret.to_string_lossy().into_owned())
         ));
         assert_eq!(dispatched.load(Ordering::Relaxed), 0);
     }

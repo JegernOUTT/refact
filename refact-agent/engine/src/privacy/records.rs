@@ -1298,7 +1298,9 @@ mod tests {
         assert_eq!(
             records,
             [folder.clone(), file, missing].map(|path| FileRecord {
-                path: path.to_string_lossy().into_owned(),
+                path: refact_core::chat_types::normalize_file_name(
+                    path.to_string_lossy().into_owned()
+                ),
                 zone: "private".into(),
                 attribution: Attribution::Observed,
             })

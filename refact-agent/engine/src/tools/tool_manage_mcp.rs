@@ -723,7 +723,13 @@ mod manage_mcp_tests {
             "TEST_URL: substituted-private\n",
         )
         .unwrap();
-        let key = path.to_string_lossy().into_owned();
+        let key = configs::integrations_all(gcx.clone(), false)
+            .await
+            .integrations
+            .into_iter()
+            .find(|record| record.integr_name == "mcp_http_fixture")
+            .expect("saved MCP fixture record must exist")
+            .integr_config_path;
         integr_mcp_common::remove_mcp_session_for_config(gcx.clone(), &key).await;
         let mut session = SessionMCP::detached(&key);
         session.connection_status = MCPConnectionStatus::Failed {
@@ -748,7 +754,15 @@ mod manage_mcp_tests {
                 lines: Some(2),
             },
         ] {
+            let is_status = matches!(&request, Request::Status { .. });
+            let is_logs = matches!(&request, Request::Logs { .. });
             let value = execute(ccx.clone(), request).await.unwrap();
+            if is_status {
+                assert_eq!(value["status"], "disabled");
+            }
+            if is_logs {
+                assert_eq!(value["logs"], json!(["Authorization: ***", "*** ***"]));
+            }
             let text = value.to_string();
             for secret in [
                 "bearer-private",
