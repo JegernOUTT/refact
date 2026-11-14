@@ -364,6 +364,41 @@ class InventoryTests(unittest.TestCase):
                 self.assertIn('${{ inputs.browser_artifacts_only }}-${{ inputs.browser_roadmap_windows }}', text)
             self.assertIn('test "$(git rev-parse HEAD)" = "$SOURCE_SHA"', text)
 
+    def test_freshness_removes_local_cargo_defaults_before_cache_and_cargo(self):
+        import yaml
+        workflow = yaml.safe_load((ci.ROOT / '.github/workflows/tests.yml').read_text())
+        steps = workflow['jobs']['build-freshness']['steps']
+        checkout = next(i for i, step in enumerate(steps) if step.get('uses') == 'actions/checkout@v4')
+        cleanup = next(i for i, step in enumerate(steps) if step.get('name') == 'Disable local nightly Cargo defaults for stable fixtures')
+        cache = next(i for i, step in enumerate(steps) if step.get('uses') == 'swatinem/rust-cache@v2')
+        self.assertLess(checkout, cleanup)
+        self.assertLess(cleanup, cache)
+        self.assertNotIn('working-directory', steps[cleanup])
+        self.assertEqual(steps[cleanup]['run'], 'rm -f .cargo/config.toml')
+        self.assertTrue(all(cleanup < i for i, step in enumerate(steps) if 'cargo ' in step.get('run', '')))
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / '.cargo').mkdir()
+            local = root / '.cargo/config.toml'
+            local.write_text('[unstable]\nprofile-rustflags = true\n')
+            sentinel = root / 'Cargo.lock'
+            sentinel.write_text('unchanged')
+            subprocess.run(['bash', '-eu', '-c', steps[cleanup]['run']], cwd=root, check=True)
+            self.assertFalse(local.exists())
+            self.assertEqual(sentinel.read_text(), 'unchanged')
+
+    def test_gui_runner_matches_locked_playwright_supported_platform(self):
+        import yaml
+        workflow = yaml.safe_load((ci.ROOT / '.github/workflows/tests.yml').read_text())
+        gui = workflow['jobs']['gui']
+        self.assertEqual(gui['runs-on'], 'ubuntu-24.04')
+        steps = gui['steps']
+        install = next(i for i, step in enumerate(steps) if step.get('run') == 'npx --no-install playwright install --with-deps chromium')
+        execute = next(i for i, step in enumerate(steps) if step.get('name') == 'Execute required gui inventory')
+        self.assertLess(install, execute)
+        self.assertEqual(steps[install]['working-directory'], 'refact-agent/gui')
+        self.assertNotIn('continue-on-error', steps[install])
+
 
 if __name__ == '__main__':
     unittest.main()
