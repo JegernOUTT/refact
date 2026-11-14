@@ -412,6 +412,18 @@ class InventoryTests(unittest.TestCase):
             self.assertNotIn('continue-on-error', step)
             self.assertNotIn('if', step)
 
+    def test_windows_native_compilation_precedes_isolated_test_profiles(self):
+        script = (ci.ROOT / 'tools/dev/browser_windows_roadmap_qualification.ps1').read_text()
+        library = "Run-Logged 'precompile-root-lib-tests' 'cargo' @('test','--locked','--profile','ci-test','--lib','--no-run')"
+        engine = "Run-Logged 'precompile-engine' 'cargo' @('build','--locked','--profile','ci-test','--bin','refact-lsp')"
+        isolation = "$env:HOME = Join-Path $owned 'home'"
+        self.assertLess(script.index('$env:LIBCLANG_PATH ='), script.index(library))
+        self.assertLess(script.index(library), script.index(engine))
+        self.assertLess(script.index(engine), script.index(isolation))
+        for name in ['windows-profiles', 'named-sessions', 'named-live-chrome', 'tool-chrome']:
+            self.assertLess(script.index(isolation), script.index(f"Run-Logged '{name}'"))
+        self.assertNotIn('--no-default-features', script)
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -70,6 +70,9 @@ try {
     if (-not (Test-Path (Join-Path $env:LIBCLANG_PATH 'libclang.dll'))) { throw 'LLVM libclang.dll missing' }
     $env:RUST_MIN_STACK = '16777216'
     $env:REFACT_BROWSER_E2E = '1'
+    Set-Location $engine
+    Run-Logged 'precompile-root-lib-tests' 'cargo' @('test','--locked','--profile','ci-test','--lib','--no-run')
+    Run-Logged 'precompile-engine' 'cargo' @('build','--locked','--profile','ci-test','--bin','refact-lsp')
     # Isolate tests as well as worker; do not modify the hosted runner's real profile.
     if (-not $env:RUSTUP_HOME) { $env:RUSTUP_HOME = Join-Path $env:USERPROFILE '.rustup' }
     if (-not $env:CARGO_HOME) { $env:CARGO_HOME = Join-Path $env:USERPROFILE '.cargo' }
