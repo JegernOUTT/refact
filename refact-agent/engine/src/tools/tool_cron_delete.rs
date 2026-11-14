@@ -196,7 +196,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn cron_delete_removes_durable_task() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_paths::tempdir();
         let durable_store: Arc<dyn CronStore> =
             Arc::new(JsonFileCronStore::new(temp.path()).unwrap());
         durable_store
@@ -222,7 +222,7 @@ mod tests {
     async fn cron_delete_uses_same_durable_path_as_list() {
         use crate::tools::tool_cron_list::CronListRuntime;
 
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_paths::tempdir();
         let durable_store: Arc<dyn CronStore> =
             Arc::new(JsonFileCronStore::new(temp.path()).unwrap());
         durable_store

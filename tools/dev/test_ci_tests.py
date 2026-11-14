@@ -424,6 +424,32 @@ class InventoryTests(unittest.TestCase):
             self.assertLess(script.index(isolation), script.index(f"Run-Logged '{name}'"))
         self.assertNotIn('--no-default-features', script)
 
+    def test_windows_plain_chrome_control_is_diagnostic_and_never_replaces_named_gate(self):
+        script = (ci.ROOT / 'tools/dev/browser_windows_roadmap_qualification.ps1').read_text()
+        isolation = "$env:HOME = Join-Path $owned 'home'"
+        probe = 'try { $controlFailure = Invoke-PlainChromeControl $chrome }'
+        named = "Run-Logged 'named-sessions'"
+        self.assertEqual(script.count(probe), 1)
+        self.assertLess(script.index(isolation), script.index(probe))
+        self.assertLess(script.index(probe), script.index(named))
+        self.assertIn('if ($controlFailure) { Fail "Plain Chrome control: $controlFailure" }', script)
+        body = script.split('function Invoke-PlainChromeControl', 1)[1].split('\nfunction ', 1)[0]
+        self.assertIn("Join-Path $env:RUNNER_TEMP ('browser-control-'", body)
+        self.assertIn('[DateTime]::UtcNow.AddSeconds(30)', body)
+        self.assertIn('-RedirectStandardError $stderr', body)
+        self.assertEqual(body.count('.Kill()'), 1)
+        self.assertIn('$proc.Kill()', body)
+        self.assertNotIn('Stop-Process', script)
+        self.assertNotIn('taskkill', script.lower())
+        self.assertNotIn('--no-sandbox', script.split('function Invoke-PlainChromeControl', 1)[0])
+        for arg in ['--headless', '--disable-gpu', '--log-level=2', '--remote-debugging-port=0']:
+            self.assertIn(f"'{arg}'", body)
+        self.assertIn("Run-Logged 'named-live-chrome' 'cargo' @('test','--locked','--profile','ci-test','--lib',"
+                      "'live_named_children_are_isolated_and_generation_fenced','--','--include-ignored',"
+                      "'--nocapture','--test-threads=1') $true", script)
+        self.assertIn('no unknown process was killed', script)
+        self.assertIn("Fail \"Found $($profiles.Count) named profile leftovers\"", script)
+
 
 if __name__ == '__main__':
     unittest.main()

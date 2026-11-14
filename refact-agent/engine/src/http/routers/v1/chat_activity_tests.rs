@@ -9,7 +9,7 @@ use tokio::sync::Mutex;
 use tower::ServiceExt;
 
 async fn fixture() -> (tempfile::TempDir, AppState) {
-    let root = tempfile::tempdir().unwrap();
+    let root = crate::test_paths::tempdir();
     let gcx = crate::global_context::tests::make_test_gcx().await;
     *gcx.documents_state.workspace_folders.lock().unwrap() = vec![root.path().to_path_buf()];
     let app = AppState::from_gcx(gcx).await;

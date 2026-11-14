@@ -511,7 +511,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn cron_update_updates_durable_task() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_paths::tempdir();
         let durable_store: Arc<dyn CronStore> =
             Arc::new(JsonFileCronStore::new(temp.path()).unwrap());
         durable_store

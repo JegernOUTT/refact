@@ -13,6 +13,7 @@ $failed = $false
 $failures = [System.Collections.Generic.List[string]]::new()
 $observed = @{}
 $inspectionFailed = $false
+$controlRoot = $null
 function Capture-OwnedTree {
     # PID plus creation time, not PID alone, is the process identity. Only follow
     # parent links while the parent identity is still present in the same snapshot.
@@ -39,6 +40,71 @@ function Capture-OwnedTree {
     }
 }
 function Fail([string]$message) { $script:failed = $true; $script:failures.Add($message); Write-Warning $message }
+function Invoke-PlainChromeControl([string]$chromePath) {
+    $root = Join-Path $env:RUNNER_TEMP ('browser-control-' + [guid]::NewGuid().ToString('N'))
+    $script:controlRoot = $root
+    $profileDir = Join-Path $root 'profile'
+    New-Item -ItemType Directory -Force $profileDir | Out-Null
+    $profileArg = '--user-data-dir="' + $profileDir + '"'
+    $vendorDefaults = @('--disable-background-networking','--disable-background-timer-throttling','--disable-backgrounding-occluded-windows','--disable-breakpad','--disable-client-side-phishing-detection','--disable-component-extensions-with-background-pages','--disable-default-apps','--disable-dev-shm-usage','--disable-extensions','--disable-features=TranslateUI,BlinkGenPropertyTrees','--disable-hang-monitor','--disable-ipc-flooding-protection','--disable-popup-blocking','--disable-prompt-on-repost','--disable-renderer-backgrounding','--disable-sync','--force-color-profile=srgb','--metrics-recording-only','--no-first-run','--password-store=basic','--use-mock-keychain')
+    $mandatory = @('--no-restore-last-session','--no-first-run','--no-startup-window','--disable-blink-features=AutomationControlled','--no-default-browser-check','--disable-search-engine-choice-screen','--disable-back-forward-cache','--log-level=2')
+    $arguments = @('--remote-debugging-port=0','--verbose','--log-level=0','--no-first-run',$profileArg) + $vendorDefaults + $mandatory + @('--headless','--ignore-certificate-errors','--disable-gpu','--no-sandbox','--disable-setuid-sandbox')
+    $stderr = Join-Path $evidence 'plain-control.stderr.log'
+    $receipt = [ordered]@{ chrome = $chromePath; chrome_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $chromePath).Hash; root = $root; profile_argument = $profileArg; arguments = $arguments; pid = $null; created = $null; command = $null; devtools_ready = $false; kill_requested = $false; root_exit_confirmed = $false; exit_code = $null; descendants = @(); leftovers = @(); root_associated_alive = @(); errors = @() }
+    $proc = $null
+    try {
+        $proc = Start-Process -FilePath $chromePath -ArgumentList $arguments -PassThru -NoNewWindow -RedirectStandardOutput (Join-Path $evidence 'plain-control.stdout.log') -RedirectStandardError $stderr
+        $receipt.pid = $proc.Id
+        $self = Get-CimInstance Win32_Process -Filter "ProcessId = $($proc.Id)" -ErrorAction Stop
+        if ($self -and $self.CreationDate) { $receipt.created = $self.CreationDate.ToUniversalTime().ToString('o'); $receipt.command = $self.CommandLine }
+        $deadline = [DateTime]::UtcNow.AddSeconds(30)
+        while (-not $proc.HasExited -and [DateTime]::UtcNow -lt $deadline) {
+            if ((Test-Path -LiteralPath (Join-Path $profileDir 'DevToolsActivePort') -PathType Leaf) -or ((Test-Path -LiteralPath $stderr) -and (Select-String -LiteralPath $stderr -Pattern 'DevTools listening on ws://' -SimpleMatch -Quiet -ErrorAction SilentlyContinue))) { $receipt.devtools_ready = $true; break }
+            Start-Sleep -Milliseconds 250
+        }
+        if ($receipt.created) {
+            $all = @(Get-CimInstance Win32_Process -ErrorAction Stop)
+            $known = @{ ([int]$proc.Id) = $self.CreationDate }
+            do {
+                $added = $false
+                foreach ($p in $all) {
+                    $id = [int]$p.ProcessId; $parent = [int]$p.ParentProcessId
+                    if (-not $known.ContainsKey($id) -and $known.ContainsKey($parent) -and $p.CreationDate -and $p.CreationDate -ge $known[$parent]) {
+                        $known[$id] = $p.CreationDate; $added = $true
+                        $receipt.descendants += [ordered]@{ pid = $id; parent = $parent; created = $p.CreationDate.ToUniversalTime().ToString('o'); name = $p.Name; command = $p.CommandLine; profile_associated = [bool]($p.CommandLine -and $p.CommandLine.Contains($root)) }
+                    }
+                }
+            } while ($added)
+        }
+    } catch { $receipt.errors += "probe: $_" }
+    finally {
+        if ($proc) {
+            try {
+                if (-not $proc.HasExited) { $receipt.kill_requested = $true; $proc.Kill() }
+                $receipt.root_exit_confirmed = $proc.WaitForExit(10000)
+                if ($receipt.root_exit_confirmed) { $receipt.exit_code = $proc.ExitCode }
+            } catch { $receipt.errors += "root cleanup: $_" }
+        }
+        try {
+            Start-Sleep -Seconds 2
+            foreach ($d in $receipt.descendants) {
+                $p = Get-CimInstance Win32_Process -Filter "ProcessId = $($d.pid)" -ErrorAction Stop
+                if ($p -and $p.CreationDate -and $p.CreationDate.ToUniversalTime().ToString('o') -eq $d.created) { $receipt.leftovers += $d }
+            }
+            $receipt.root_associated_alive = @(Get-CimInstance Win32_Process -ErrorAction Stop | Where-Object { $_.CommandLine -and $_.CommandLine.Contains($root) } | ForEach-Object { [ordered]@{ pid = [int]$_.ProcessId; parent = [int]$_.ParentProcessId; name = $_.Name; command = $_.CommandLine } })
+        } catch { $receipt.errors += "leftover inspection: $_" }
+        if ($receipt.root_exit_confirmed -and $receipt.leftovers.Count -eq 0 -and $receipt.root_associated_alive.Count -eq 0) {
+            try { Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction Stop; $receipt.root_removed = $true } catch { $receipt.errors += "root removal: $_" }
+        } else { $receipt.root_removed = $false }
+        $receipt | ConvertTo-Json -Depth 6 | Set-Content -Encoding utf8 (Join-Path $evidence 'plain-control.json')
+    }
+    $problems = @()
+    if (-not $receipt.devtools_ready) { $problems += 'no DevTools endpoint within 30s' }
+    if (-not $receipt.root_exit_confirmed) { $problems += 'root exit unconfirmed' }
+    if ($receipt.leftovers.Count -or $receipt.root_associated_alive.Count) { $problems += 'control processes still alive; none killed beyond the receipt root' }
+    if ($receipt.errors.Count) { $problems += $receipt.errors }
+    return ($problems -join '; ')
+}
 function Run-Logged([string]$name, [string]$exe, [string[]]$arguments, [bool]$requireTests = $false) {
     $log = Join-Path $evidence ($name + '.log')
     Write-Host "Running $name"
@@ -89,6 +155,8 @@ try {
     Run-Logged 'vendor-owned-process' 'cargo' @('test','--locked','--profile','ci-test','-p','headless_chrome','--lib','owned_process_','--','--nocapture','--test-threads=1') $true
     Run-Logged 'vendor-startup-deadline' 'cargo' @('test','--locked','--profile','ci-test','-p','headless_chrome','--lib','pending_stderr_obeys_original_startup_deadline','--','--nocapture','--test-threads=1') $true
     'Launch-tracker spawned-child fault fixtures are Unix-only; Windows runs the missing-executable tracker test, owned-process tests, startup deadline test and real Chrome lifecycle.' | Set-Content -Encoding utf8 (Join-Path $evidence 'coverage-limitations.txt')
+    try { $controlFailure = Invoke-PlainChromeControl $chrome } catch { $controlFailure = "$_" }
+    if ($controlFailure) { Fail "Plain Chrome control: $controlFailure" }
     Run-Logged 'named-sessions' 'cargo' @('test','--locked','--profile','ci-test','--lib','integrations::browser_runtime::named_sessions::tests','--','--include-ignored','--nocapture','--test-threads=1') $true
     Run-Logged 'named-live-chrome' 'cargo' @('test','--locked','--profile','ci-test','--lib','live_named_children_are_isolated_and_generation_fenced','--','--include-ignored','--nocapture','--test-threads=1') $true
     Run-Logged 'tool-chrome' 'cargo' @('test','--locked','--profile','ci-test','--lib','tools::tool_chrome::tests','--','--include-ignored','--nocapture','--test-threads=1') $true
@@ -160,11 +228,11 @@ finally {
         $remaining | ConvertTo-Json -Depth 5 | Set-Content -Encoding utf8 (Join-Path $evidence 'observed-leftovers.json')
         if ($remaining.Count) { Fail "Found $($remaining.Count) observed owned processes still alive" }
         $left = @(Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'chrome.exe' -and $_.CommandLine -and $_.CommandLine.Contains($owned) })
-        $left | Select-Object ProcessId,ParentProcessId,CommandLine | ConvertTo-Json | Set-Content -Encoding utf8 (Join-Path $evidence 'chrome-leftovers.json')
+        $left | Select-Object ProcessId,ParentProcessId,CreationDate,Name,CommandLine | ConvertTo-Json | Set-Content -Encoding utf8 (Join-Path $evidence 'chrome-leftovers.json')
         if ($left.Count) { Fail "Found $($left.Count) profile-associated Chrome processes after shutdown; no unknown process was killed" }
         $profiles = @(Get-ChildItem -Path $owned -Directory -Recurse -ErrorAction Stop | Where-Object { $_.Name -eq 'named_browser_profiles' } | ForEach-Object { Get-ChildItem -Force $_.FullName -ErrorAction Stop } | Where-Object { -not ($_.Name -eq '.allocation.lock' -and -not $_.PSIsContainer -and -not ($_.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) })
         if ($profiles.Count) { Fail "Found $($profiles.Count) named profile leftovers" }
     } catch { Fail "Cleanup inspection: $_" }
-    @{ passed = -not $failed; failures = @($failures); owned_root = $owned } | ConvertTo-Json -Depth 4 | Set-Content -Encoding utf8 (Join-Path $evidence 'qualification-result.json')
+    @{ passed = -not $failed; failures = @($failures); owned_root = $owned; control_root = $controlRoot } | ConvertTo-Json -Depth 4 | Set-Content -Encoding utf8 (Join-Path $evidence 'qualification-result.json')
 }
 if ($failed) { exit 1 }

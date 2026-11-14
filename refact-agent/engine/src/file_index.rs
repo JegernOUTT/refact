@@ -1290,8 +1290,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn rebuild_keeps_live_hardlink_aliases_until_atomic_publication() {
-        let temp = tempfile::tempdir().unwrap();
-        let external = tempfile::tempdir().unwrap();
+        let temp = crate::test_paths::tempdir();
+        let external = crate::test_paths::tempdir();
         let secret = external.path().join(".env");
         let alias = temp.path().join("plain.txt");
         std::fs::write(&secret, "private").unwrap();
@@ -1388,8 +1388,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn racing_external_lookup_alias_survives_staged_publication() {
-        let temp = tempfile::tempdir().unwrap();
-        let external = tempfile::tempdir().unwrap();
+        let temp = crate::test_paths::tempdir();
+        let external = crate::test_paths::tempdir();
         let alias = temp.path().join("plain.txt");
         let secret = external.path().join(".env");
         std::fs::write(&secret, "private").unwrap();

@@ -73,7 +73,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn collector_outbox_reaches_only_granted_app_topic_without_model() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_paths::tempdir();
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let host = gcx.apps.get(temp.path().into(), gcx.clone()).await.unwrap();
         host.automation
@@ -168,7 +168,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn pending_collector_payload_cannot_be_retargeted_by_reapproval() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_paths::tempdir();
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let host = gcx.apps.get(temp.path().into(), gcx.clone()).await.unwrap();
         // Both exact-topic consumers exist and are eligible before the old event
@@ -311,7 +311,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn transform_outbox_projects_fields_into_same_app_broker() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_paths::tempdir();
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let host = gcx.apps.get(temp.path().into(), gcx.clone()).await.unwrap();
         host.automation
@@ -389,7 +389,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn trusted_publication_replay_is_durable_but_equal_independent_updates_survive() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_paths::tempdir();
         let service = AutomationService::new(temp.path()).unwrap();
         for invalid_seq in [i64::MIN, -1, 0] {
             assert!(publish(

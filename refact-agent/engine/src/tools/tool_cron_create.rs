@@ -762,7 +762,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn valid_recurring_creates() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_paths::tempdir();
         let gcx = crate::global_context::tests::make_test_gcx().await;
         *gcx.documents_state.workspace_folders.lock().unwrap() = vec![temp.path().to_path_buf()];
         let app = crate::app_state::AppState::from_gcx(gcx).await;
@@ -954,7 +954,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn durable_writes_to_disk() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_paths::tempdir();
         let session_store: Arc<dyn CronStore> = Arc::new(InMemoryCronStore::new());
         let durable_store: Arc<dyn CronStore> =
             Arc::new(JsonFileCronStore::new(temp.path()).unwrap());
@@ -998,7 +998,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn omitted_durable_defaults_to_project_store() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_paths::tempdir();
         let session_store: Arc<dyn CronStore> = Arc::new(InMemoryCronStore::new());
         let durable_store: Arc<dyn CronStore> =
             Arc::new(JsonFileCronStore::new(temp.path()).unwrap());
@@ -1026,7 +1026,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn explicit_session_only_overrides_project_store_default() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_paths::tempdir();
         let session_store: Arc<dyn CronStore> = Arc::new(InMemoryCronStore::new());
         let durable_store: Arc<dyn CronStore> =
             Arc::new(JsonFileCronStore::new(temp.path()).unwrap());

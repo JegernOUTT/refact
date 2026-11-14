@@ -156,7 +156,7 @@ mod tests {
     use serial_test::serial;
     use std::path::PathBuf;
     use std::time::{Duration, Instant};
-    use tempfile::{tempdir, TempDir};
+    use tempfile::TempDir;
     use tower::ServiceExt;
 
     struct EnvGuard {
@@ -371,7 +371,7 @@ mod tests {
         Arc<DaemonState>,
         crate::daemon::projects::ProjectEntry,
     ) {
-        let dir = tempdir().unwrap();
+        let dir = crate::test_paths::tempdir();
         let project_root = dir.path().join("idle-project");
         std::fs::create_dir_all(&project_root).unwrap();
         let state = DaemonState::new(

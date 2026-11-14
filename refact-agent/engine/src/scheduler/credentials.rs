@@ -616,8 +616,8 @@ mod tests {
 
     #[test]
     fn persistent_rotation_is_identity_bound_and_metadata_is_value_free() {
-        let project = tempfile::tempdir().unwrap();
-        let private = tempfile::tempdir().unwrap();
+        let project = crate::test_paths::tempdir();
+        let private = crate::test_paths::tempdir();
         let store = AutomationCredentialStore::open(project.path(), Some(private.path())).unwrap();
         let m = store
             .set(identity(), "fixture-secret-first".into(), None)
@@ -687,8 +687,8 @@ mod tests {
     #[test]
     fn tenant_and_principal_changes_require_new_explicit_approval() {
         for change_tenant in [false, true] {
-            let project = tempfile::tempdir().unwrap();
-            let private = tempfile::tempdir().unwrap();
+            let project = crate::test_paths::tempdir();
+            let private = crate::test_paths::tempdir();
             let store =
                 AutomationCredentialStore::open(project.path(), Some(private.path())).unwrap();
             let m = store
@@ -720,8 +720,8 @@ mod tests {
 
     #[test]
     fn exact_context_header_scheme_and_revision_required() {
-        let project = tempfile::tempdir().unwrap();
-        let private = tempfile::tempdir().unwrap();
+        let project = crate::test_paths::tempdir();
+        let private = crate::test_paths::tempdir();
         let store = AutomationCredentialStore::open(project.path(), Some(private.path())).unwrap();
         let m = store.set(identity(), "fixture-only".into(), None).unwrap();
         let b = binding(&m);
@@ -890,8 +890,8 @@ mod tests {
                 }
             }
         }
-        let project = tempfile::tempdir().unwrap();
-        let private = tempfile::tempdir().unwrap();
+        let project = crate::test_paths::tempdir();
+        let private = crate::test_paths::tempdir();
         let store = AutomationCredentialStore::open(project.path(), Some(private.path())).unwrap();
         let m = store.set(identity(), "fixture-only".into(), None).unwrap();
         let b = binding(&m);
@@ -986,8 +986,8 @@ mod tests {
 
     #[test]
     fn private_permissions_and_unsafe_seed_rejected_without_following_links() {
-        let project = tempfile::tempdir().unwrap();
-        let private = tempfile::tempdir().unwrap();
+        let project = crate::test_paths::tempdir();
+        let private = crate::test_paths::tempdir();
         let store = AutomationCredentialStore::open(project.path(), Some(private.path())).unwrap();
         let location = path(project.path(), private.path());
         assert!(!location.starts_with(project.path()));
@@ -1018,10 +1018,10 @@ mod tests {
 
     #[test]
     fn project_local_and_symlinked_private_directory_are_rejected() {
-        let project = tempfile::tempdir().unwrap();
+        let project = crate::test_paths::tempdir();
         assert!(AutomationCredentialStore::open(project.path(), Some(project.path())).is_err());
-        let private = tempfile::tempdir().unwrap();
-        let elsewhere = tempfile::tempdir().unwrap();
+        let private = crate::test_paths::tempdir();
+        let elsewhere = crate::test_paths::tempdir();
         symlink(
             elsewhere.path(),
             private.path().join("refact-automation-runtime"),
@@ -1032,8 +1032,8 @@ mod tests {
 
     #[test]
     fn memory_only_resolution_and_disk_cas_conflict() {
-        let project = tempfile::tempdir().unwrap();
-        let private = tempfile::tempdir().unwrap();
+        let project = crate::test_paths::tempdir();
+        let private = crate::test_paths::tempdir();
         let store = AutomationCredentialStore::open(project.path(), Some(private.path())).unwrap();
         let m = store
             .set(identity(), "fixture-memory".into(), None)

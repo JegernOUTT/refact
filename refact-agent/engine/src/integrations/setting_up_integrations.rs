@@ -928,7 +928,7 @@ mod tests {
 
     #[tokio::test]
     async fn write_config_atomically_replaces_contents_without_residue() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_paths::tempdir();
         let path = dir.path().join("mcp_thing.yaml");
         std::fs::write(&path, "old: 1\n").unwrap();
         super::write_config_atomically(&path, "new: 2\n")

@@ -404,7 +404,7 @@ mod tests {
     }
     #[tokio::test]
     async fn native_write_invalidates_explicit_cas_snapshot() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_paths::tempdir();
         let path = temp.path().join("command.md");
         write_file_atomic(&path, "initial").await.unwrap();
         let before = read_path(&path).unwrap();

@@ -15202,7 +15202,17 @@ mod tests {
     #[tokio::test]
     async fn macos_system_temp_symlink_roots_are_allowed_for_save() {
         let dir = tempfile::tempdir_in(std::env::temp_dir()).unwrap();
-        let (gcx, _) = make_app_with_workspace(dir.path()).await;
+        let canonical_root = dir.path().canonicalize().unwrap();
+        let workspace_root = canonical_root
+            .strip_prefix("/private")
+            .map(|relative| Path::new("/").join(relative))
+            .unwrap_or_else(|_| dir.path().to_path_buf());
+        assert!(workspace_root.starts_with("/var") || workspace_root.starts_with("/tmp"));
+        assert_ne!(workspace_root, canonical_root);
+        assert_eq!(workspace_root.canonicalize().unwrap(), canonical_root);
+        ensure_real_dir_tree(&workspace_root).await.unwrap();
+        let (gcx, _) = make_app_with_workspace(&workspace_root).await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![workspace_root.clone()];
         let chat_id = "macos-var-save-ok";
 
         save_trajectory_snapshot(
@@ -15216,14 +15226,13 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(tokio::fs::try_exists(
-            dir.path()
-                .join(".refact")
-                .join("trajectories")
-                .join(format!("{chat_id}.json"))
-        )
-        .await
-        .unwrap());
+        let nested = nested_trajectory_path(&workspace_root, chat_id, chat_id);
+        assert!(tokio::fs::try_exists(&nested).await.unwrap());
+        let flat = workspace_root
+            .join(".refact")
+            .join("trajectories")
+            .join(format!("{chat_id}.json"));
+        assert!(!tokio::fs::try_exists(&flat).await.unwrap());
     }
 
     #[cfg(unix)]
@@ -15266,8 +15275,9 @@ mod tests {
     async fn symlinked_task_trajectory_container_does_not_escape_discovery() {
         let workspace = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
-        let (gcx, app) = make_app_with_workspace(workspace.path()).await;
-        let task_dir = workspace.path().join(".refact/tasks/container-task");
+        let workspace_root = normalized_test_path(workspace.path());
+        let (gcx, app) = make_app_with_workspace(&workspace_root).await;
+        let task_dir = workspace_root.join(".refact/tasks/container-task");
         tokio::fs::create_dir_all(&task_dir).await.unwrap();
         std::os::unix::fs::symlink(outside.path(), task_dir.join("trajectories")).unwrap();
         let chat_id = "symlink-container-chat";
@@ -15282,7 +15292,7 @@ mod tests {
             "2024-01-01T00:00:00Z",
         )
         .await;
-        let valid_dirs = seed_agent_task_dirs(workspace.path(), 1).await;
+        let valid_dirs = seed_agent_task_dirs(&workspace_root, 1).await;
         let discovered = list_task_trajectory_dirs(&gcx).await;
         assert!(discovered.contains(&valid_dirs[0]));
         assert!(!discovered

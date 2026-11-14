@@ -1243,7 +1243,7 @@ mod tests {
         };
         use crate::scheduler::credentials::{AutomationCredentialStore, CredentialIdentity};
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_paths::tempdir();
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -1412,7 +1412,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn non_resuming_source_starts_this_session_but_not_on_host_rebuild() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_paths::tempdir();
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let host = gcx.apps.get(temp.path().into(), gcx.clone()).await.unwrap();
         let definition = continuous_definition(false);
@@ -1484,7 +1484,7 @@ mod tests {
     #[tokio::test]
     async fn invalid_catalog_fences_an_already_pending_http_response() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_paths::tempdir();
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -1566,7 +1566,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn invalid_catalog_blocks_source_publish_before_tick_and_recovery_requires_approval() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_paths::tempdir();
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let host = gcx.apps.get(temp.path().into(), gcx.clone()).await.unwrap();
         let definition = continuous_definition(true);
@@ -1640,7 +1640,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn exact_approval_and_stale_action_snapshot_are_fenced() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_paths::tempdir();
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let sources = AutomationService::new(temp.path()).unwrap();
         let runtime =
@@ -1735,7 +1735,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn cancelled_finite_demand_cleanup_is_owned_and_joined() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_paths::tempdir();
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let sources = AutomationService::new(temp.path()).unwrap();
         let runtime =

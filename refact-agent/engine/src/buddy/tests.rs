@@ -1465,7 +1465,14 @@ async fn registry_validation_error_does_not_consume_draft() {
     use hyper::{Body, Request, StatusCode};
     use tower::ServiceExt;
 
-    let app = make_gcx_with_buddy().await;
+    let directory = crate::test_paths::tempdir();
+    let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
+        directory.path().join("cache"),
+        directory.path().join("config"),
+    )
+    .await;
+    let app = crate::app_state::AppState::from_gcx(gcx).await;
+    *app.buddy.buddy.lock().await = Some(make_service());
     let _gcx = app.gcx.clone();
     let config_dir = app.paths.config_dir.clone();
     tokio::fs::create_dir_all(config_dir.join("modes"))
@@ -1514,7 +1521,7 @@ async fn registry_validation_error_does_not_consume_draft() {
 
 #[tokio::test]
 async fn concurrent_ext_atomic_writes_use_unique_temp_files() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = crate::test_paths::tempdir();
     let path = dir.path().join("commands").join("same.md");
     let first = crate::http::routers::v1::ext_management::write_file_atomic(&path, "first");
     let second = crate::http::routers::v1::ext_management::write_file_atomic(&path, "second");

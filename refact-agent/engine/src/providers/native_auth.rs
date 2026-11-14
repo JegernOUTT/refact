@@ -744,7 +744,10 @@ mod tests {
         symlink(&target, &link).unwrap();
         let resolved = resolve_cli("gcloud", dir.path().as_os_str()).unwrap();
         assert_eq!(resolved, link);
-        assert_eq!(resolved.canonicalize().unwrap(), target);
+        assert_eq!(
+            resolved.canonicalize().unwrap(),
+            target.canonicalize().unwrap()
+        );
     }
 
     #[cfg(unix)]

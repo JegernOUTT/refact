@@ -674,7 +674,7 @@ mod tests {
 
     #[tokio::test]
     async fn observer_missing_project_does_not_create_storage() {
-        let dir = tempdir().unwrap();
+        let dir = crate::test_paths::tempdir();
         let root = dir.path().join("project");
         tokio::fs::create_dir(&root).await.unwrap();
         assert!(observe_automation(&root, 100).await.unwrap().is_none());
@@ -686,7 +686,7 @@ mod tests {
     async fn observer_background_lease_requires_approval_and_expires_at_boundary() {
         use crate::daemon::idle::{idle_decision, IdleDecision, WorkerIdleSnapshot};
         use refact_scheduler_core::automation::{GrantRecord, SourceControl};
-        let dir = tempdir().unwrap();
+        let dir = crate::test_paths::tempdir();
         let _storage = TestJournalStorage::create(dir.path());
         let journal = AutomationJournal::open(dir.path()).unwrap();
         journal
@@ -847,7 +847,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn corrupt_journal_is_error_not_legacy_or_wake_authority() {
-        let dir = tempdir().unwrap();
+        let dir = crate::test_paths::tempdir();
         let root = dir.path().join("project");
         tokio::fs::create_dir(&root).await.unwrap();
         let storage = TestJournalStorage::create(&root);
@@ -887,7 +887,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn corrupt_observer_retries_coarsely_without_starting_worker() {
-        let dir = tempdir().unwrap();
+        let dir = crate::test_paths::tempdir();
         let root = dir.path().join("project");
         tokio::fs::create_dir(&root).await.unwrap();
         let storage = TestJournalStorage::create(&root);
@@ -931,7 +931,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn observer_ignores_project_local_symlink_and_seeded_database() {
-        let dir = tempdir().unwrap();
+        let dir = crate::test_paths::tempdir();
         let root = dir.path().join("project");
         let outside = dir.path().join("outside");
         std::fs::create_dir(&root).unwrap();
@@ -1040,7 +1040,7 @@ mod tests {
         let Some(_env) = EnvGuard::fake_worker() else {
             return;
         };
-        let dir = tempdir().unwrap();
+        let dir = crate::test_paths::tempdir();
         let root = dir.path().join("project");
         tokio::fs::create_dir_all(&root).await.unwrap();
         let now = now_ms();
@@ -1085,7 +1085,7 @@ mod tests {
         let Some(_env) = EnvGuard::fake_worker() else {
             return;
         };
-        let dir = tempdir().unwrap();
+        let dir = crate::test_paths::tempdir();
         let root = dir.path().join("project");
         tokio::fs::create_dir_all(&root).await.unwrap();
         let now = now_ms();
@@ -1130,7 +1130,7 @@ mod tests {
         let Some(_env) = EnvGuard::fake_worker() else {
             return;
         };
-        let dir = tempdir().unwrap();
+        let dir = crate::test_paths::tempdir();
         let root = dir.path().join("project");
         tokio::fs::create_dir_all(&root).await.unwrap();
         let now = now_ms();

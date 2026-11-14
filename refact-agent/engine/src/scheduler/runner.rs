@@ -2371,7 +2371,7 @@ mod tests {
     }
 
     async fn gcx_with_session(state: SessionState) -> (tempfile::TempDir, SharedGlobalContext) {
-        let workspace = tempfile::tempdir().unwrap();
+        let workspace = crate::test_paths::tempdir();
         let gcx = crate::global_context::tests::make_test_gcx().await;
         *gcx.documents_state.workspace_folders.lock().unwrap() =
             vec![workspace.path().to_path_buf()];
@@ -2391,7 +2391,7 @@ mod tests {
     where
         F: FnOnce(&mut crate::scheduler::types::SchedulerConfig),
     {
-        let workspace = tempfile::tempdir().unwrap();
+        let workspace = crate::test_paths::tempdir();
         let mut gcx = crate::global_context::tests::make_test_gcx().await;
         *gcx.documents_state.workspace_folders.lock().unwrap() =
             vec![workspace.path().to_path_buf()];
@@ -2412,7 +2412,7 @@ mod tests {
     async fn gcx_with_session_in_own_cache(
         state: SessionState,
     ) -> (tempfile::TempDir, SharedGlobalContext) {
-        let workspace = tempfile::tempdir().unwrap();
+        let workspace = crate::test_paths::tempdir();
         let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
             workspace.path().join("cache"),
             workspace.path().join("config"),
@@ -3467,7 +3467,7 @@ mod tests {
     #[tokio::test]
     async fn durable_runner_refreshes_selected_controls_and_discovers_new_jobs() {
         let now = now_ms();
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_paths::tempdir();
         let store: Arc<dyn CronStore> = Arc::new(JsonFileCronStore::new(temp.path()).unwrap());
         let controls = JsonFileCronStore::new(temp.path()).unwrap();
         let (_workspace, gcx) = gcx_with_session(SessionState::Idle).await;
@@ -3649,7 +3649,7 @@ mod tests {
     #[tokio::test]
     async fn durable_completion_preserves_edits_and_deleted_jobs() {
         let now = now_ms();
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_paths::tempdir();
         let store: Arc<dyn CronStore> = Arc::new(JsonFileCronStore::new(temp.path()).unwrap());
         let controls = JsonFileCronStore::new(temp.path()).unwrap();
         controls.add(due_task("completion", now)).await.unwrap();
@@ -4151,7 +4151,7 @@ mod tests {
         one_shot.set_existing_chat(Some("refused-open-chat".to_string()));
         one_shot.durable = true;
         store.add(one_shot).await.unwrap();
-        let workspace = tempfile::tempdir().unwrap();
+        let workspace = crate::test_paths::tempdir();
         let gcx = crate::global_context::tests::make_test_gcx().await;
         *gcx.documents_state.workspace_folders.lock().unwrap() =
             vec![workspace.path().to_path_buf()];
@@ -4248,7 +4248,7 @@ mod tests {
         one_shot.durable = true;
         store.add(one_shot).await.unwrap();
 
-        let workspace = tempfile::tempdir().unwrap();
+        let workspace = crate::test_paths::tempdir();
         let gcx = crate::global_context::tests::make_test_gcx().await;
         *gcx.documents_state.workspace_folders.lock().unwrap() =
             vec![workspace.path().to_path_buf()];

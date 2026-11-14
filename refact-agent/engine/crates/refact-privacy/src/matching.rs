@@ -152,29 +152,30 @@ pub fn compile_patterns(patterns: &[String]) -> Result<Vec<Pattern>, PolicyError
         if pattern.trim().is_empty() {
             continue;
         }
-        let normalized = normalize(pattern);
-        let expanded = if normalized.contains(['*', '?', '[']) {
-            vec![normalized]
+        let slashed = pattern.replace('\\', "/");
+        let expanded = if slashed.contains(['*', '?', '[']) {
+            vec![slashed]
         } else {
-            let literal = normalized.trim_end_matches('/');
+            let literal = slashed.trim_end_matches('/');
             if literal.is_empty()
                 || (literal.len() == 2
                     && literal.as_bytes()[0].is_ascii_alphabetic()
                     && literal.ends_with(':'))
             {
-                vec![normalized]
+                vec![slashed]
             } else {
                 vec![literal.to_string(), format!("{literal}/**")]
             }
         };
-        for normalized in expanded {
+        for expanded in expanded {
+            let normalized = normalize(&expanded);
             compiled.push(
                 Pattern::new(&normalized).map_err(|error| PolicyError::InvalidGlob {
                     pattern: pattern.clone(),
                     message: error.to_string(),
                 })?,
             );
-            for alias in canonical_pattern_aliases(&normalized) {
+            for alias in canonical_pattern_aliases(&expanded) {
                 if let Ok(alias) = Pattern::new(&alias) {
                     compiled.push(alias);
                 }
@@ -200,13 +201,16 @@ fn drive_root_literals_load_without_descendant_expansion() {
         .any(|p| p.matches("c:/secret.txt")));
 }
 
-#[cfg(windows)]
-fn canonical_pattern_aliases(normalized: &str) -> Vec<String> {
-    let literal_end = normalized.find(['*', '?', '[']).unwrap_or(normalized.len());
-    let boundary = normalized[..literal_end]
+fn canonical_pattern_aliases(pattern: &str) -> Vec<String> {
+    #[cfg(unix)]
+    if !Path::new(pattern).is_absolute() {
+        return Vec::new();
+    }
+    let literal_end = pattern.find(['*', '?', '[']).unwrap_or(pattern.len());
+    let boundary = pattern[..literal_end]
         .rfind('/')
         .map_or(0, |index| index + 1);
-    let (base, tail) = normalized.split_at(boundary);
+    let (base, tail) = pattern.split_at(boundary);
     if base.is_empty() {
         return Vec::new();
     }
@@ -214,17 +218,16 @@ fn canonical_pattern_aliases(normalized: &str) -> Vec<String> {
         return Vec::new();
     };
     let canonical = normalize(&canonical.to_string_lossy());
-    let alias = format!("{}/{tail}", canonical.trim_end_matches('/'));
-    if alias == normalized {
+    let alias = format!(
+        "{}/{}",
+        Pattern::escape(canonical.trim_end_matches('/')),
+        normalize(tail)
+    );
+    if alias == normalize(pattern) {
         Vec::new()
     } else {
         vec![alias]
     }
-}
-
-#[cfg(not(windows))]
-fn canonical_pattern_aliases(_normalized: &str) -> Vec<String> {
-    Vec::new()
 }
 
 impl PrivacyPolicy {
@@ -1634,6 +1637,19 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn relative_patterns_do_not_gain_canonical_aliases() {
+        for source in ["./*", "./?", "./[ab]", "./**", "../*", "./literal"] {
+            assert!(canonical_pattern_aliases(source).is_empty(), "{source}");
+        }
+        for source in ["./*", "./?", "./[ab]", "./**", "../*"] {
+            let patterns = compile_patterns(&[source.into()]).unwrap();
+            assert_eq!(patterns.len(), 1);
+            assert_eq!(patterns[0].as_str(), source);
+        }
+    }
+
     fn policy(zones: Vec<Zone>) -> PrivacyPolicy {
         PrivacyPolicy {
             blocked: Vec::new(),
@@ -2067,6 +2083,127 @@ mod tests {
                 .name,
             "secrets"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn absolute_literal_policy_through_symlink_guards_real_and_indirect_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        let real = temp.path().join("MixedCaseReal");
+        std::fs::create_dir(&real).unwrap();
+        let real = dunce::canonicalize(&real).unwrap();
+        let secret = real.join("Secret.txt");
+        let sibling = real.join("Secret.txt.bak");
+        std::fs::write(&secret, "secret").unwrap();
+        std::fs::write(&sibling, "ordinary").unwrap();
+        let spelling = temp.path().join("MixedCaseSpelling");
+        let indirect = temp.path().join("indirect.txt");
+        std::os::unix::fs::symlink(&real, &spelling).unwrap();
+        std::os::unix::fs::symlink(&secret, &indirect).unwrap();
+        let pattern = spelling.join("Secret.txt").to_string_lossy().into_owned();
+        let compiled = policy(vec![zone_with_shell_behavior(
+            "guarded",
+            &[&pattern],
+            &[],
+            ShellBehavior::Deny,
+        )])
+        .compile()
+        .unwrap();
+
+        for path in [&indirect, &secret, &spelling.join("Secret.txt")] {
+            let zone = compiled.zone_for_path(path);
+            assert_eq!(zone.name, "guarded", "{}", path.display());
+            assert!(zone.send_to.is_empty());
+            assert_eq!(zone.on_shell_read, ShellBehavior::Deny);
+        }
+        assert_eq!(compiled.zone_for_path(&sibling).name, "normal");
+        assert_eq!(
+            compiled
+                .zone_for_path(&spelling.join("Secret.txt.bak"))
+                .name,
+            "normal"
+        );
+        let strictest = compiled.strictest_zone_for_paths([&sibling, &indirect]);
+        assert_eq!(strictest.name, "guarded");
+        assert!(strictest.send_to.is_empty());
+        assert_eq!(strictest.on_shell_read, ShellBehavior::Deny);
+        assert!(compile_patterns(&[pattern.clone()])
+            .unwrap()
+            .iter()
+            .any(|compiled| compiled.as_str() == normalize(&pattern)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn canonical_alias_bases_keep_glob_characters_literal() {
+        for name in ["real[ab]", "real*", "real?"] {
+            let temp = tempfile::tempdir().unwrap();
+            let real = temp.path().join(name);
+            let sibling = temp.path().join("reala");
+            std::fs::create_dir(&real).unwrap();
+            std::fs::create_dir(&sibling).unwrap();
+            let secret = dunce::canonicalize(&real).unwrap().join("ok.txt");
+            let unrelated = dunce::canonicalize(&sibling).unwrap().join("ok.txt");
+            std::fs::write(&secret, "allowed").unwrap();
+            std::fs::write(&unrelated, "denied").unwrap();
+            let spelling = temp.path().join("spelling");
+            std::os::unix::fs::symlink(&real, &spelling).unwrap();
+            let pattern = spelling.join("ok.txt").to_string_lossy().into_owned();
+            let compiled = policy(vec![
+                zone("allowed", &[&pattern], &["*"]),
+                zone_with_shell_behavior("denied", &["**"], &[], ShellBehavior::Deny),
+            ])
+            .compile()
+            .unwrap();
+
+            assert_eq!(compiled.zone_for_path(&secret).name, "allowed", "{name}");
+            let denied = compiled.zone_for_path(&unrelated);
+            assert_eq!(denied.name, "denied", "{name}");
+            assert!(denied.send_to.is_empty());
+            assert_eq!(denied.on_shell_read, ShellBehavior::Deny);
+            let paths = [&secret, &unrelated];
+            let strictest = compiled.strictest_zone_for_paths(paths);
+            assert_eq!(strictest.name, "denied", "{name}");
+            assert!(strictest.send_to.is_empty());
+            assert_eq!(strictest.on_shell_read, ShellBehavior::Deny);
+            let mut batch = ClassificationBatch::new(compiled);
+            assert_eq!(
+                batch.strictest_zone_for_paths_with_roots(paths, [] as [&Path; 0]),
+                strictest,
+                "{name}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn absolute_glob_policy_through_symlink_preserves_suffix_matching() {
+        let temp = tempfile::tempdir().unwrap();
+        let real = temp.path().join("MixedCaseReal");
+        std::fs::create_dir(&real).unwrap();
+        let real = dunce::canonicalize(&real).unwrap();
+        for name in ["SecretA.txt", "SecretAB.txt", "SecretA.log"] {
+            std::fs::write(real.join(name), "fixture").unwrap();
+        }
+        let spelling = temp.path().join("MixedCaseSpelling");
+        let indirect = temp.path().join("indirect.txt");
+        std::os::unix::fs::symlink(&real, &spelling).unwrap();
+        std::os::unix::fs::symlink(real.join("SecretA.txt"), &indirect).unwrap();
+        let pattern = spelling.join("Secret?.txt").to_string_lossy().into_owned();
+        let compiled = policy(vec![zone("guarded", &[&pattern], &[])])
+            .compile()
+            .unwrap();
+
+        for path in [&indirect, &real.join("SecretA.txt")] {
+            assert_eq!(compiled.zone_for_path(path).name, "guarded");
+        }
+        for name in ["SecretAB.txt", "SecretA.log", "SecretA.txt/child"] {
+            assert_eq!(
+                compiled.zone_for_path(&real.join(name)).name,
+                "normal",
+                "{name}"
+            );
+        }
     }
 
     #[test]

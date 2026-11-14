@@ -16,7 +16,7 @@ use crate::http::routers::v1::scheduler::{
 use crate::scheduler::{Action, AgentTarget, CronRunRecord, CronStore, Delivery, Job, Trigger};
 
 async fn test_app() -> (tempfile::TempDir, AppState, Router) {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = crate::test_paths::tempdir();
     let gcx = crate::global_context::tests::make_test_gcx().await;
     *gcx.documents_state.workspace_folders.lock().unwrap() = vec![temp.path().to_path_buf()];
     let app_state = AppState::from_gcx(gcx).await;

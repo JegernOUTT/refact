@@ -247,7 +247,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn rejected_host_policy_does_not_commit_desired_catalog() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_paths::tempdir();
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let sources = refact_scheduler_core::sources::AutomationService::new(temp.path()).unwrap();
         let runtime =
