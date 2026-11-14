@@ -424,6 +424,23 @@ class InventoryTests(unittest.TestCase):
             self.assertLess(script.index(isolation), script.index(f"Run-Logged '{name}'"))
         self.assertNotIn('--no-default-features', script)
 
+    def test_windows_isolated_known_folder_layout_and_evidence_order(self):
+        import re
+        script = (ci.ROOT / 'tools/dev/browser_windows_roadmap_qualification.ps1').read_text()
+        assignments = dict(re.findall(r"\$env:(HOME|LOCALAPPDATA|APPDATA) = Join-Path (\$\w+(?::\w+)? '[^']+')", script))
+        self.assertEqual(assignments, {'HOME': "$owned 'home'",
+                                      'LOCALAPPDATA': "$env:USERPROFILE 'AppData/Local'",
+                                      'APPDATA': "$env:USERPROFILE 'AppData/Roaming'"})
+        self.assertIn('$env:USERPROFILE = $env:HOME', script)
+        ordered = ['$env:CHROME = $chrome', "Write-KnownFolderEvidence 'before-isolation'",
+                   "$env:HOME = Join-Path $owned 'home'", '$env:LOCALAPPDATA =',
+                   'foreach ($dir in @($env:HOME,$env:LOCALAPPDATA,$env:APPDATA,',
+                   "Write-KnownFolderEvidence 'after-isolation'", "Run-Logged 'windows-profiles'",
+                   'try { $controlFailure = Invoke-PlainChromeControl $chrome }']
+        positions = [script.index(token) for token in ordered]
+        self.assertEqual(positions, sorted(positions))
+        self.assertEqual(script.count("Write-KnownFolderEvidence '"), 2)
+
     def test_windows_plain_chrome_control_is_diagnostic_and_never_replaces_named_gate(self):
         script = (ci.ROOT / 'tools/dev/browser_windows_roadmap_qualification.ps1').read_text()
         isolation = "$env:HOME = Join-Path $owned 'home'"

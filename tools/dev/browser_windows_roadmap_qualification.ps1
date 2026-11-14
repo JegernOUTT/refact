@@ -40,6 +40,37 @@ function Capture-OwnedTree {
     }
 }
 function Fail([string]$message) { $script:failed = $true; $script:failures.Add($message); Write-Warning $message }
+function Write-KnownFolderEvidence([string]$phase) {
+    $receipt = [ordered]@{ phase = $phase; chrome = [ordered]@{ path = $env:CHROME }; environment = [ordered]@{}; known_folders = [ordered]@{}; policies = @() }
+    try {
+        $receipt.chrome.file_version = (Get-Item -LiteralPath $env:CHROME).VersionInfo.FileVersion
+        $receipt.chrome.sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $env:CHROME).Hash
+    } catch { $receipt.chrome.error = "$_" }
+    foreach ($name in @('USERPROFILE','LOCALAPPDATA','APPDATA','TEMP','TMP')) { $receipt.environment[$name] = [Environment]::GetEnvironmentVariable($name, 'Process') }
+    foreach ($folder in @('LocalApplicationData','ApplicationData','UserProfile')) {
+        foreach ($option in @('None','DoNotVerify')) {
+            try { $receipt.known_folders["$folder/$option"] = [Environment]::GetFolderPath([Environment+SpecialFolder]$folder, [Environment+SpecialFolderOption]$option) }
+            catch { $receipt.known_folders["$folder/$option"] = [ordered]@{ error = "$_" } }
+        }
+    }
+    foreach ($hive in @('LocalMachine','CurrentUser')) {
+        foreach ($view in @('Registry64','Registry32')) {
+            $base = $null; $key = $null
+            $policy = [ordered]@{ hive = $hive; view = $view; path = 'SOFTWARE\Policies\Google\Chrome'; values = [ordered]@{} }
+            try {
+                $base = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]$hive, [Microsoft.Win32.RegistryView]$view)
+                $key = $base.OpenSubKey($policy.path, $false)
+                foreach ($name in @('UserDataDir','RemoteDebuggingAllowed')) {
+                    $value = if ($key) { $key.GetValue($name, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames) } else { $null }
+                    $policy.values[$name] = [ordered]@{ present = ($null -ne $value); value = $value }
+                }
+            } catch { $policy.error = "$_" }
+            finally { if ($key) { $key.Dispose() }; if ($base) { $base.Dispose() } }
+            $receipt.policies += $policy
+        }
+    }
+    $receipt | ConvertTo-Json -Depth 7 | Set-Content -Encoding utf8 (Join-Path $evidence ("known-folders-$phase.json"))
+}
 function Invoke-PlainChromeControl([string]$chromePath) {
     $root = Join-Path $env:RUNNER_TEMP ('browser-control-' + [guid]::NewGuid().ToString('N'))
     $script:controlRoot = $root
@@ -132,6 +163,7 @@ try {
     $chrome = @("${env:ProgramFiles}\Google\Chrome\Application\chrome.exe", "${env:ProgramFiles(x86)}\Google\Chrome\Application\chrome.exe") | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
     if (-not $chrome) { throw 'Hosted Chrome executable not found' }
     $env:CHROME = $chrome
+    Write-KnownFolderEvidence 'before-isolation'
     $env:LIBCLANG_PATH = Join-Path $env:ProgramFiles 'LLVM/bin'
     if (-not (Test-Path (Join-Path $env:LIBCLANG_PATH 'libclang.dll'))) { throw 'LLVM libclang.dll missing' }
     $env:RUST_MIN_STACK = '16777216'
@@ -144,9 +176,10 @@ try {
     if (-not $env:CARGO_HOME) { $env:CARGO_HOME = Join-Path $env:USERPROFILE '.cargo' }
     $env:TEMP = $owned; $env:TMP = $owned
     $env:HOME = Join-Path $owned 'home'; $env:USERPROFILE = $env:HOME
-    $env:LOCALAPPDATA = Join-Path $owned 'local'; $env:APPDATA = Join-Path $owned 'roaming'
+    $env:LOCALAPPDATA = Join-Path $env:USERPROFILE 'AppData/Local'; $env:APPDATA = Join-Path $env:USERPROFILE 'AppData/Roaming'
     $env:XDG_CACHE_HOME = Join-Path $owned 'cache'; $env:XDG_CONFIG_HOME = Join-Path $owned 'config'
     foreach ($dir in @($env:HOME,$env:LOCALAPPDATA,$env:APPDATA,$env:XDG_CACHE_HOME,$env:XDG_CONFIG_HOME)) { New-Item -ItemType Directory -Force $dir | Out-Null }
+    Write-KnownFolderEvidence 'after-isolation'
     Set-Location $engine
     Run-Logged 'python-version' 'python' @('--version')
     Run-Logged 'windows-profiles' 'cargo' @('test','--locked','--profile','ci-test','-p','refact-browser','--lib','windows_profiles::tests','--','--nocapture','--test-threads=1') $true
