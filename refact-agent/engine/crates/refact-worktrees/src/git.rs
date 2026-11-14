@@ -501,6 +501,7 @@ pub const MERGE_COMMITTER_EMAIL: &str = "agent@refact.ai";
 pub enum Landing<'a> {
     Merge { source: &'a str },
     Squash { tree: &'a str },
+    SquashOperation { tree: &'a str, marker: &'a str },
 }
 
 fn landing_matches(root: &Path, commit: &str, pre_merge_head: &str, landing: Landing<'_>) -> bool {
@@ -521,13 +522,17 @@ fn landing_matches(root: &Path, commit: &str, pre_merge_head: &str, landing: Lan
         } => rev(format!("{commit}^2")).as_deref() == Some(source),
         Landing::Squash {
             tree,
+        }
+        | Landing::SquashOperation {
+            tree, ..
         } => {
             if rev(format!("{commit}^2")).is_some() {
                 return false;
             }
             (!tree.is_empty() && rev(format!("{commit}^{{tree}}")).as_deref() == Some(tree))
-                || run_git(root, &["log", "-1", "--format=%ce", commit])
-                    .is_ok_and(|email| email.trim() == MERGE_COMMITTER_EMAIL)
+                || matches!(landing, Landing::SquashOperation { marker, .. }
+                    if !marker.is_empty() && run_git(root, &["log", "-1", "--format=%B", commit])
+                        .is_ok_and(|message| message.trim_end().rsplit_once("\n\n").is_some_and(|(_, trailer)| trailer == marker)))
         }
     }
 }
@@ -1406,10 +1411,34 @@ pub fn rollback_merge_owned(
     stash: Option<&DirtyWorktreeStash>,
 ) -> RestoreStashedChangesResult {
     crate::locking::with_git_phase(None, || {
-        if let (Some(pre), Ok(head)) = (pre_merge_head, head_rev(root)) {
-            if head != pre && Some(head.as_str()) != own_commit {
-                return restore_over_foreign_head(root, head, stash);
+        let baseline = pre_merge_head.or_else(|| stash.map(|stash| stash.original_head.as_str()));
+        let head = match (baseline, head_rev(root)) {
+            (Some(_), Ok(head)) => head,
+            (_, head) => {
+                return RestoreStashedChangesResult {
+                    critical_ok: false,
+                    warnings: vec![format!("Rollback ownership could not be established; nothing was rolled back; {}; {}", head.err().unwrap_or_else(|| "missing pre-merge baseline".into()), stash.map(|stash| stash.describe()).unwrap_or_default())],
+                    rolled_back: false,
+                    stash_restored: stash.is_none(),
+                    foreign_head: None,
+                };
             }
+        };
+        if let Some(stash) = stash {
+            if discover_repo(root).map(|repo| current_branch(&repo)).ok()
+                != Some(stash.original_branch.clone())
+            {
+                return RestoreStashedChangesResult {
+                    critical_ok: false,
+                    warnings: vec![format!("Target checkout branch changed; nothing was rolled back; edits are saved in {}", stash.describe())],
+                    rolled_back: false,
+                    stash_restored: false,
+                    foreign_head: Some(head),
+                };
+            }
+        }
+        if Some(head.as_str()) != baseline && Some(head.as_str()) != own_commit {
+            return restore_over_foreign_head(root, head, stash);
         }
         let mut warnings = cleanup_failed_merge(root);
         let mut rolled_back = warnings.is_empty();
@@ -2797,7 +2826,7 @@ mod rollback_tests {
     }
 
     #[test]
-    fn squash_identity_accepts_a_restaged_tree_only_from_the_merge_committer() {
+    fn squash_identity_accepts_a_restaged_tree_only_from_this_operation() {
         let temp = repo_with_conflicting_branch();
         let root = temp.path();
         git(root, &["checkout", "-q", "-b", "clean-base", "HEAD~1"]);
@@ -2807,8 +2836,10 @@ mod rollback_tests {
         std::fs::write(root.join("other.txt"), "formatted\n").unwrap();
         git(root, &["add", "other.txt"]);
         git(root, &["commit", "-q", "-m", "user squash"]);
-        let landing = Landing::Squash {
+        let marker = format!("Refact-Merge-Operation: {}", Uuid::new_v4());
+        let landing = Landing::SquashOperation {
             tree: &tree,
+            marker: &marker,
         };
         assert_eq!(landed_commit(root, &before, landing), None);
 
@@ -2817,6 +2848,9 @@ mod rollback_tests {
         std::fs::write(root.join("other.txt"), "formatted\n").unwrap();
         git(root, &["add", "other.txt"]);
         run_git_with_refact_author(root, &["commit", "-q", "-m", "agent squash"]).unwrap();
+        assert_eq!(landed_commit(root, &before, landing), None);
+        let message = format!("agent squash\n\n{marker}");
+        run_git_with_refact_author(root, &["commit", "--amend", "-q", "-m", &message]).unwrap();
         let own = head_rev(root).unwrap();
         assert_eq!(landed_commit(root, &before, landing), Some(own.clone()));
 
@@ -2932,6 +2966,56 @@ mod rollback_tests {
         );
         assert!(git(root, &["diff", "--cached", "--name-only"]).contains("side.txt"));
         assert!(!git(root, &["stash", "list"]).trim().is_empty());
+    }
+
+    #[test]
+    fn safety_rollback_retains_stash_when_head_is_unreadable_or_branch_changed() {
+        for unreadable in [false, true] {
+            let temp = repo_with_conflicting_branch();
+            let root = temp.path();
+            dirty_user_edits(root);
+            let stash = stash_dirty_worktree(root, "Target", Some("main"))
+                .unwrap()
+                .unwrap();
+            if unreadable {
+                std::fs::write(root.join(".git/HEAD"), "ref: refs/heads/missing\n").unwrap();
+            } else {
+                git(root, &["checkout", "-b", "other-branch"]);
+            }
+            let result = rollback_merge_owned(root, None, None, Some(&stash));
+            assert!(!result.critical_ok, "{result:?}");
+            assert!(!result.rolled_back, "{result:?}");
+            assert!(!result.stash_restored, "{result:?}");
+            assert!(git(root, &["stash", "list"]).contains("Refact worktree merge target"));
+            if unreadable {
+                assert_eq!(
+                    std::fs::read_to_string(root.join(".git/HEAD")).unwrap(),
+                    "ref: refs/heads/missing\n"
+                );
+            } else {
+                assert_eq!(
+                    git(root, &["branch", "--show-current"]).trim(),
+                    "other-branch"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn safety_rollback_without_explicit_baseline_preserves_foreign_head() {
+        let temp = repo_with_conflicting_branch();
+        let root = temp.path();
+        dirty_user_edits(root);
+        let stash = stash_dirty_worktree(root, "Target", Some("main"))
+            .unwrap()
+            .unwrap();
+        git(root, &["commit", "--allow-empty", "-m", "foreign"]);
+        let foreign = head_rev(root).unwrap();
+        let result = rollback_merge_owned(root, None, None, Some(&stash));
+        assert_eq!(head_rev(root).unwrap(), foreign);
+        assert!(!result.rolled_back, "{result:?}");
+        assert_eq!(result.foreign_head.as_deref(), Some(foreign.as_str()));
+        assert_user_edits(root, &foreign);
     }
 
     #[test]

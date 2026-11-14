@@ -240,7 +240,6 @@ impl Tool for ToolSubagent {
             }
             None => crate::file_activity::settings(),
         };
-        let ignored_sandbox = args.contains_key("sandbox");
         let args = parse_subagent_args_with_limits(args, &limits)?;
         if let Some(goal) = &args.goal {
             let policy = crate::chat::verify_cmd::VerifyCommandPolicy::load(gcx.clone()).await;
@@ -585,7 +584,6 @@ impl Tool for ToolSubagent {
                     }),
                 );
             }
-            append_ignored_sandbox_notice(&mut preview, ignored_sandbox);
             return Ok((false, vec![preview]));
         }
 
@@ -628,7 +626,7 @@ impl Tool for ToolSubagent {
         }
         crate::review::runs::prepare_launch(&app, &mut req).await?;
         let handle = spawn_background_agent(app.clone(), req).await?;
-        let mut result = build_background_start_tool_result(
+        let result = build_background_start_tool_result(
             &handle,
             &args.task,
             &parent_chat_id,
@@ -637,7 +635,6 @@ impl Tool for ToolSubagent {
             &peer_snapshot,
             tool_call_id,
         );
-        append_ignored_sandbox_notice(&mut result, ignored_sandbox);
         Ok((false, vec![result]))
     }
 
@@ -655,6 +652,9 @@ fn parse_subagent_args_with_limits(
     args: &HashMap<String, Value>,
     limits: &refact_work_core::CoordinationSettings,
 ) -> Result<SubagentArgs, String> {
+    if args.contains_key("sandbox") {
+        return Err("argument `sandbox` is no longer supported; the requested confinement cannot be guaranteed. No child was launched. Omit this field only when the default execution policy is acceptable.".into());
+    }
     let task = parse_required_string(args, "task")?;
     let expected_result = parse_required_string(args, "expected_result").map_err(|error| {
         format!("{error}. Supply the required root field, for example {{\"task\":\"Inspect the parser\",\"expected_result\":\"Findings with evidence\"}}")
@@ -1387,16 +1387,6 @@ fn build_launch_preview_tool_result(
     tool_message(lines.join("\n"), tool_call_id, extra)
 }
 
-fn append_ignored_sandbox_notice(result: &mut ContextEnum, supplied: bool) {
-    if supplied {
-        if let ContextEnum::ChatMessage(message) = result {
-            if let ChatContent::SimpleText(text) = &mut message.content {
-                text.push_str("\n\nNotice: `sandbox` is no longer supported and was ignored. The child runs under the default policy; `tools` restricts callable tools, not OS execution.");
-            }
-        }
-    }
-}
-
 fn preview_value(value: &str) -> String {
     let mut chars = value.trim().chars();
     let mut text = chars
@@ -1544,7 +1534,7 @@ mod tests {
 
     #[serial(test_runner)]
     #[tokio::test]
-    async fn obsolete_sandbox_is_ignored_with_notice_in_preview_and_launch() {
+    async fn unsupported_sandbox_is_refused_before_preview_or_launch() {
         let (ccx, workspace) = test_context("parent").await;
         let app = ccx.lock().await.app.clone();
         let mut parent = crate::chat::types::ChatSession::new("parent".into());
@@ -1567,31 +1557,28 @@ mod tests {
                 })
             }));
         for action in ["preview", "run"] {
-            let mut request = args();
-            request.insert("sandbox".into(), json!({"obsolete": true}));
-            request.insert("action".into(), json!(action));
-            let (_, contexts) = ToolSubagent {
-                config_path: String::new(),
-            }
-            .tool_execute(ccx.clone(), &action.into(), &request)
-            .await
-            .unwrap();
-            let result = message(contexts);
-            let text = result.content.content_text_only();
-            assert!(text.contains("`sandbox` is no longer supported and was ignored"));
-            assert!(text.contains("default policy"));
-            assert!(text.contains("`tools` restricts callable tools"));
-            assert!(result.extra.get("sandbox_preflight").is_none());
-            if action == "preview" {
-                assert!(result.extra.get("effective_launch").is_some());
+            for sandbox in [
+                json!("read_only"),
+                json!("workspace_write"),
+                json!("full_access"),
+                json!({"obsolete": true}),
+                Value::Null,
+            ] {
+                let mut request = args();
+                request.insert("sandbox".into(), sandbox);
+                request.insert("action".into(), json!(action));
+                let result = ToolSubagent {
+                    config_path: String::new(),
+                }
+                .tool_execute(ccx.clone(), &action.into(), &request)
+                .await;
+                let error = match result {
+                    Err(error) => error,
+                    Ok(_) => panic!("explicit sandbox must be refused before {action}"),
+                };
+                assert_eq!(error, "argument `sandbox` is no longer supported; the requested confinement cannot be guaranteed. No child was launched. Omit this field only when the default execution policy is acceptable.");
                 assert!(app.agents.list_all().await.is_empty());
-            } else {
-                assert_eq!(app.agents.list_all().await.len(), 1);
-                let agent = result.extra["background_agent_id"].as_str().unwrap();
-                app.agents
-                    .wait("parent", agent, Duration::from_secs(5))
-                    .await
-                    .unwrap();
+                assert_eq!(app.work_scheduler.snapshot().outstanding, 0);
             }
         }
     }

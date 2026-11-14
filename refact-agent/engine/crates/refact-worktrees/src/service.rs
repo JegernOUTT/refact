@@ -2276,6 +2276,8 @@ impl WorktreeService {
         }
         try_restoring!(self.validate_merge_phase());
         let squash = request.strategy.as_str() == "squash";
+        let squash_marker = format!("Refact-Merge-Operation: {}", uuid::Uuid::new_v4());
+        let squash_message = format!("{commit_message}\n\n{squash_marker}");
         let mut post_commit_warnings = Vec::new();
         let source_oid = try_restoring!(git::run_git(
             target_root,
@@ -2409,7 +2411,7 @@ impl WorktreeService {
             } else {
                 None
             };
-            let commit_args = ["commit", "-m", &commit_message, "--no-gpg-sign"];
+            let commit_args = ["commit", "-m", &squash_message, "--no-gpg-sign"];
             let committed = if let Some((exact, observer)) = observer {
                 git::run_git_with_refact_author_observed(target_root, &commit_args, || {
                     let repo = git2::Repository::open(target_root).map_err(|e| e.to_string())?;
@@ -2447,8 +2449,9 @@ impl WorktreeService {
                         if git::find_landed_commit(
                             target_root,
                             &pre_merge_head,
-                            git::Landing::Squash {
+                            git::Landing::SquashOperation {
                                 tree: &squash_tree,
+                                marker: &squash_marker,
                             },
                         )
                         .is_some() =>
@@ -2464,8 +2467,9 @@ impl WorktreeService {
                     guard.set_own_commit(git::landed_commit(
                         target_root,
                         &pre_merge_head,
-                        git::Landing::Squash {
+                        git::Landing::SquashOperation {
                             tree: &squash_tree,
+                            marker: &squash_marker,
                         },
                     ));
                     return Err(guard.fail(format!("Observed landing stopped; retain source and target, inspect without replay: {e}")));
@@ -2496,8 +2500,9 @@ impl WorktreeService {
         }
         let mut warnings = preflight_warnings;
         let landing = if squash {
-            git::Landing::Squash {
+            git::Landing::SquashOperation {
                 tree: &squash_tree,
+                marker: &squash_marker,
             }
         } else {
             git::Landing::Merge {
@@ -2509,12 +2514,7 @@ impl WorktreeService {
         let merge_commit = verified_head
             .or_else(|| git::landed_commit_below_head(target_root, &pre_merge_head, landing));
         if merge_commit.is_none() {
-            let head = crate::locking::with_git_phase(None, || git::head_rev(target_root))
-                .unwrap_or_else(|e| format!("<unreadable: {e}>"));
-            warnings.push(format!(
-                "The target HEAD is {} and this merge's own commit could not be identified on it; inspect the target history before relying on this merge",
-                head
-            ));
+            return Err(guard.fail("Merge outcome unknown: this operation's commit could not be identified; source was kept; inspect the target history without replay".into()));
         }
         let mut source_kept = false;
         if guard.holds_stash() {
@@ -7927,6 +7927,56 @@ mod worktree_registry_tests {
             );
             assert!(run_git(root, &["stash", "list"]).trim().is_empty());
         }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn safety_registered_unknown_success_preserves_source() {
+        let fixture = dirty_target_fixture("refact/chat/unknown").await;
+        let root = &fixture.source;
+        install_hook(root, "post-commit", "oid=$(git commit-tree HEAD^1^{tree} -p HEAD^1 -m replacement) || exit 2\ngit update-ref HEAD \"$oid\"");
+        let result = fixture
+            .service
+            .merge_worktree(
+                &fixture.id,
+                MergeWorktreeRequest {
+                    delete_after_merge: true,
+                    ..dirty_merge_request(WorktreeMergeStrategy::Squash)
+                },
+            )
+            .await;
+        assert!(result.is_err(), "{result:?}");
+        assert_eq!(
+            run_git(root, &["log", "-1", "--format=%s"]).trim(),
+            "replacement"
+        );
+        assert!(fixture.service.get_worktree(&fixture.id).await.is_ok());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn safety_registered_failed_hook_helper_is_not_a_squash_landing() {
+        let fixture = dirty_target_fixture("refact/chat/helper").await;
+        let root = &fixture.source;
+        install_hook(root, "pre-commit", "oid=$(git commit-tree HEAD^{tree} -p HEAD -m helper) || exit 2\ngit update-ref HEAD \"$oid\" || exit 2\nexit 1");
+        let result = fixture
+            .service
+            .merge_worktree(
+                &fixture.id,
+                MergeWorktreeRequest {
+                    delete_after_merge: true,
+                    ..dirty_merge_request(WorktreeMergeStrategy::Squash)
+                },
+            )
+            .await;
+        assert!(result.is_err(), "{result:?}");
+        assert_eq!(
+            run_git(root, &["log", "-1", "--format=%s"]).trim(),
+            "helper"
+        );
+        assert_eq!(run_git(root, &["show", "HEAD:file.txt"]), "hello\n");
+        assert!(fixture.service.get_worktree(&fixture.id).await.is_ok());
+        assert!(!run_git(root, &["stash", "list"]).trim().is_empty());
     }
 
     #[cfg(unix)]

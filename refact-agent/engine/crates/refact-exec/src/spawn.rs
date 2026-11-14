@@ -504,15 +504,31 @@ async fn finish_pumps_with_timeout(
     mut stderr_task: AbortOnDropTask,
     timeout: Duration,
 ) -> bool {
+    let mut stdout_done = false;
+    let mut stderr_done = false;
     let wait = async {
-        let _ = tokio::join!(&mut stdout_task.0, &mut stderr_task.0);
+        tokio::join!(
+            async {
+                let _ = (&mut stdout_task.0).await;
+                stdout_done = true;
+            },
+            async {
+                let _ = (&mut stderr_task.0).await;
+                stderr_done = true;
+            },
+        );
     };
     if tokio::time::timeout(timeout, wait).await.is_ok() {
         return true;
     }
     stdout_task.0.abort();
     stderr_task.0.abort();
-    let _ = tokio::join!(&mut stdout_task.0, &mut stderr_task.0);
+    if !stdout_done {
+        let _ = (&mut stdout_task.0).await;
+    }
+    if !stderr_done {
+        let _ = (&mut stderr_task.0).await;
+    }
     false
 }
 
@@ -1637,6 +1653,46 @@ mod tests {
             Err("pty is already released; process is not running".to_string())
         );
         assert!(child.lock().await.take_pty_master().is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn pump_drain_timeout_aborts_pending_pump_after_other_pump_completed() {
+        for completed_is_stdout in [true, false] {
+            let (alive_tx, mut alive_rx) = tokio::sync::oneshot::channel::<()>();
+            let completed = AbortOnDropTask(tokio::spawn(async {}));
+            let pending = AbortOnDropTask(tokio::spawn(async move {
+                let _alive = alive_tx;
+                std::future::pending::<()>().await;
+            }));
+            let (stdout_task, stderr_task) = if completed_is_stdout {
+                (completed, pending)
+            } else {
+                (pending, completed)
+            };
+
+            assert!(
+                !finish_pumps_with_timeout(stdout_task, stderr_task, Duration::from_millis(500))
+                    .await
+            );
+            assert_eq!(
+                alive_rx.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Closed)
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn pump_drain_reports_quiescence_when_both_pumps_complete() {
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+        let stdout_task = AbortOnDropTask(tokio::spawn(async {}));
+        let stderr_task = AbortOnDropTask(tokio::spawn(async move {
+            let _ = release_rx.await;
+        }));
+        release_tx.send(()).unwrap();
+
+        assert!(
+            finish_pumps_with_timeout(stdout_task, stderr_task, Duration::from_millis(500)).await
+        );
     }
 
     #[cfg(target_os = "linux")]

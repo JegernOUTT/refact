@@ -2655,6 +2655,8 @@ fn run_legacy_merge_section(
     }
     let mut squash_nothing_to_commit = false;
     let mut squash_tree = String::new();
+    let squash_marker = format!("Refact-Merge-Operation: {}", uuid::Uuid::new_v4());
+    let squash_message = format!("{}\n\n{}", input.commit_msg, squash_marker);
     if input.squash {
         let captured = refact_worktrees::locking::with_git_phase(None, || {
             legacy_fault_point(&root, LegacyFaultPoint::WriteTree)
@@ -2681,7 +2683,7 @@ fn run_legacy_merge_section(
         let committed = refact_worktrees::locking::with_git_phase(None, || {
             git::run_git_with_refact_author(
                 &root,
-                &["commit", "--no-gpg-sign", "-m", &input.commit_msg],
+                &["commit", "--no-gpg-sign", "-m", &squash_message],
             )
             .and_then(|out| legacy_fault_point(&root, LegacyFaultPoint::CommitWindow).map(|_| out))
         });
@@ -2689,8 +2691,9 @@ fn run_legacy_merge_section(
             if git::find_landed_commit(
                 &root,
                 &pre_merge_head,
-                git::Landing::Squash {
+                git::Landing::SquashOperation {
                     tree: &squash_tree,
+                    marker: &squash_marker,
                 },
             )
             .is_some()
@@ -2726,8 +2729,9 @@ fn run_legacy_merge_section(
         None
     } else {
         let landing = if input.squash {
-            git::Landing::Squash {
+            git::Landing::SquashOperation {
                 tree: &squash_tree,
+                marker: &squash_marker,
             }
         } else {
             git::Landing::Merge {
@@ -2739,12 +2743,7 @@ fn run_legacy_merge_section(
         let found = verified_head
             .or_else(|| git::landed_commit_below_head(&root, &pre_merge_head, landing));
         if found.is_none() {
-            let head = refact_worktrees::locking::with_git_phase(None, || git::head_rev(&root))
-                .unwrap_or_else(|e| format!("<unreadable: {e}>"));
-            warnings.push(format!(
-                "The target HEAD is {} and this merge's own commit could not be identified on it; inspect the target history before relying on this merge",
-                head
-            ));
+            return LegacySectionOutcome::Failed(guard.recovery_error("Merge outcome unknown: this operation's commit could not be identified; source was kept; inspect the target history without replay".into()));
         }
         found
     };

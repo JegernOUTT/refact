@@ -1074,6 +1074,43 @@ async fn hook_commit_on_top_is_never_reset_away_and_the_marker_names_this_merge(
 #[cfg(unix)]
 #[tokio::test]
 #[serial_test::serial(runtime_settings, coordination_metrics)]
+async fn safety_legacy_unknown_success_preserves_source() {
+    let fixture = Fixture::new(true).await;
+    resolve_agent_conflicts(&fixture);
+    make_user_edits(&fixture.target);
+    install_hook(&fixture, "post-commit", "oid=$(git commit-tree HEAD^1^{tree} -p HEAD^1 -m replacement) || exit 2\ngit update-ref HEAD \"$oid\"");
+    let result = fixture.merge("squash").await;
+    assert!(result.is_err(), "unexpected successful merge");
+    assert_eq!(
+        git(&fixture.target, &["log", "-1", "--format=%s"]).trim(),
+        "replacement"
+    );
+    assert!(merge_markers(&fixture).is_empty());
+    assert!(fixture.agent.exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[serial_test::serial(runtime_settings, coordination_metrics)]
+async fn safety_legacy_failed_hook_helper_is_not_a_squash_landing() {
+    let fixture = Fixture::new(true).await;
+    resolve_agent_conflicts(&fixture);
+    make_user_edits(&fixture.target);
+    install_hook(&fixture, "pre-commit", "oid=$(git commit-tree HEAD^{tree} -p HEAD -m helper) || exit 2\ngit update-ref HEAD \"$oid\" || exit 2\nexit 1");
+    let result = fixture.merge("squash").await;
+    assert!(result.is_err(), "unexpected successful merge");
+    assert_eq!(
+        git(&fixture.target, &["log", "-1", "--format=%s"]).trim(),
+        "helper"
+    );
+    assert!(merge_markers(&fixture).is_empty());
+    assert!(fixture.agent.exists());
+    assert!(!git(&fixture.target, &["stash", "list"]).trim().is_empty());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[serial_test::serial(runtime_settings, coordination_metrics)]
 async fn squash_restaged_by_pre_commit_hook_is_merged_after_commit_window_error() {
     use super::tool_task_merge_agent::legacy_fault::{install, Action, Point};
 
