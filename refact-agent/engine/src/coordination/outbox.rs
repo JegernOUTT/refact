@@ -676,6 +676,7 @@ mod tests {
         assert_eq!(beta.status_of("alpha-only").await.unwrap(), None);
     }
 
+    #[serial_test::serial(runtime_settings)]
     #[tokio::test]
     async fn outbox_deliver_to_chat_persists_before_accepting_and_settles() {
         let workspace = tempfile::tempdir().unwrap();
