@@ -995,7 +995,7 @@ mod tests {
             .contains("failed to spawn worker"));
     }
 
-    #[tokio::test(start_paused = true)]
+    #[tokio::test]
     async fn stream_request_times_out_waiting_for_headers() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -1007,15 +1007,30 @@ mod tests {
         });
         let client = reqwest::Client::builder().no_proxy().build().unwrap();
         let request = client.get(format!("http://127.0.0.1:{port}/v1/chats/subscribe"));
-        let task = tokio::spawn(send_worker_request(request, true));
+        let mut task = tokio::spawn(send_worker_request(request, true));
 
-        accepted_rx.await.unwrap();
-        tokio::time::advance(PROXY_STREAM_HEADER_TIMEOUT + Duration::from_millis(1)).await;
+        let accepted = tokio::time::timeout(Duration::from_secs(10), accepted_rx).await;
+        let outcome = tokio::time::timeout(
+            PROXY_STREAM_HEADER_TIMEOUT + Duration::from_secs(5),
+            &mut task,
+        )
+        .await;
+        server.abort();
+        let _ = server.await;
+        if outcome.is_err() {
+            task.abort();
+            let _ = task.await;
+        }
+        assert!(
+            matches!(accepted, Ok(Ok(()))),
+            "server did not accept request"
+        );
         assert!(matches!(
-            task.await.unwrap(),
+            outcome
+                .expect("header request did not settle")
+                .expect("header request task panicked"),
             Err(ProxySendError::StreamHeaderTimeout)
         ));
-        server.abort();
     }
 
     #[tokio::test]
