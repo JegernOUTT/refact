@@ -504,32 +504,41 @@ async fn finish_pumps_with_timeout(
     mut stderr_task: AbortOnDropTask,
     timeout: Duration,
 ) -> bool {
-    let mut stdout_done = false;
-    let mut stderr_done = false;
-    let wait = async {
+    let drained = wait_pumps_with_timeout(&mut stdout_task, &mut stderr_task, timeout).await;
+    if !drained {
+        stdout_task.0.abort();
+        stderr_task.0.abort();
+        if !stdout_task.0.is_finished() {
+            let _ = (&mut stdout_task.0).await;
+        }
+        if !stderr_task.0.is_finished() {
+            let _ = (&mut stderr_task.0).await;
+        }
+    }
+    drained
+}
+
+async fn wait_pumps_with_timeout(
+    stdout_task: &mut AbortOnDropTask,
+    stderr_task: &mut AbortOnDropTask,
+    timeout: Duration,
+) -> bool {
+    tokio::time::timeout(timeout, async {
         tokio::join!(
             async {
-                let _ = (&mut stdout_task.0).await;
-                stdout_done = true;
+                if !stdout_task.0.is_finished() {
+                    let _ = (&mut stdout_task.0).await;
+                }
             },
             async {
-                let _ = (&mut stderr_task.0).await;
-                stderr_done = true;
+                if !stderr_task.0.is_finished() {
+                    let _ = (&mut stderr_task.0).await;
+                }
             },
         );
-    };
-    if tokio::time::timeout(timeout, wait).await.is_ok() {
-        return true;
-    }
-    stdout_task.0.abort();
-    stderr_task.0.abort();
-    if !stdout_done {
-        let _ = (&mut stdout_task.0).await;
-    }
-    if !stderr_done {
-        let _ = (&mut stderr_task.0).await;
-    }
-    false
+    })
+    .await
+    .is_ok()
 }
 
 fn pump_drain_timeout_status(timeout: Duration) -> ExecStatus {
@@ -864,30 +873,32 @@ async fn monitor_process(
             });
             #[cfg(not(target_os = "linux"))]
             let observation_ended_early = false;
-            if observation_ended_early {
+            let drain_timeout = if observation_ended_early {
+                KILL_PUMP_DRAIN_TIMEOUT
+            } else {
+                output_drain_timeout.unwrap_or(EXIT_PUMP_DRAIN_TIMEOUT)
+            };
+            let mut stdout_task = stdout_task;
+            let mut stderr_task = stderr_task;
+            if wait_pumps_with_timeout(&mut stdout_task, &mut stderr_task, drain_timeout).await {
+                terminal_status
+            } else {
+                if let Err(error) = kill_and_reap_observed(&child, &observation).await {
+                    quiescent = false;
+                    tracing::warn!("exec kill/reap after output drain timeout failed for {process_id}: {error}");
+                }
                 quiescent &=
                     finish_pumps_with_timeout(stdout_task, stderr_task, KILL_PUMP_DRAIN_TIMEOUT)
                         .await;
-                terminal_status
-            } else {
-                let drain_timeout = output_drain_timeout.unwrap_or(EXIT_PUMP_DRAIN_TIMEOUT);
-                if finish_pumps_with_timeout(stdout_task, stderr_task, drain_timeout).await {
+                if observation_ended_early {
                     terminal_status
                 } else if child.lock().await.is_pty() {
-                    quiescent = false;
-                    // The drain timeout detects a descendant holding the pipes, which is a pipe
-                    // condition. A pty ends its output when the console closes, and closing it can
-                    // outlast the drain, so a slow close must not fail a process that exited fine.
                     tracing::warn!(
                         "pty output drain timed out after {:.3}s for {process_id}; keeping the exit status",
                         drain_timeout.as_secs_f64()
                     );
                     terminal_status
                 } else {
-                    quiescent = false;
-                    if let Err(error) = kill_and_reap_observed(&child, &observation).await {
-                        tracing::warn!("exec kill/reap after output drain timeout failed for {process_id}: {error}");
-                    }
                     pump_drain_timeout_status(drain_timeout)
                 }
             }
@@ -1498,7 +1509,12 @@ mod tests {
                         )
                     })
                 }
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::NotFound
+                        || error.raw_os_error() == Some(libc::ESRCH) =>
+                {
+                    Ok(None)
+                }
                 Err(error) => Err(error),
             }
         }
@@ -1763,6 +1779,231 @@ mod tests {
         assert!(
             finish_pumps_with_timeout(stdout_task, stderr_task, Duration::from_millis(500)).await
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[derive(Debug, Default)]
+    struct MonitorSettlement(std::sync::atomic::AtomicUsize);
+
+    #[cfg(target_os = "linux")]
+    impl crate::types::ExecLifecycleGuard for MonitorSettlement {
+        fn settle(&self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn inherited_output_monitor_settles(
+        tty: bool,
+        observe: bool,
+        interrupt: bool,
+        escaped: bool,
+    ) {
+        let registry = ExecRegistry::new();
+        let temp = tempfile::tempdir().unwrap();
+        let ready = temp.path().join("ready");
+        let release = temp.path().join("release");
+        let guard = Arc::new(MonitorSettlement::default());
+        let mut request = ExecSpawnRequest::background("owned inherited output")
+            .with_argv(vec![
+                "/bin/bash".into(), "--noprofile".into(), "--norc".into(), "-c".into(),
+                format!("trap '' HUP; {} /bin/sleep 30 & child=$!; printf '%s %s\\n' \"$$\" \"$child\" > \"$1\"; for ((attempt=0; attempt<500; attempt++)); do if [ -f \"$2\" ]; then exit 7; fi; /bin/sleep 0.02; done; kill -KILL \"$child\"; exit 8", if escaped { "/usr/bin/setsid" } else { "" }),
+                "owned-monitor-test".into(), ready.to_str().unwrap().into(), release.to_str().unwrap().into(),
+            ])
+            .with_tty(tty)
+            .with_observe(observe)
+            .with_env_policy(ExecEnvPolicy::Exact)
+            .with_output_drain_timeout(Duration::from_millis(100));
+        request.execution_guard = Some(guard.clone());
+        let owned = Arc::new(Mutex::new(Vec::<OwnedProcessStat>::new()));
+        let task_owned = owned.clone();
+        let task_registry = registry.clone();
+        let task_guard = guard.clone();
+        let mut assertions = tokio::spawn(async move {
+            let result = task_registry.spawn(request).await.unwrap();
+            let id = result.snapshot.meta.process_id;
+            let pids = tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let contents = std::fs::read_to_string(&ready).unwrap_or_default();
+                    if contents.ends_with('\n') {
+                        break contents
+                            .split_whitespace()
+                            .map(|pid| pid.parse::<u32>().unwrap())
+                            .collect::<Vec<_>>();
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("owned process handshake timed out");
+            assert_eq!(pids.len(), 2);
+            let captured = pids
+                .iter()
+                .map(|&pid| {
+                    OwnedProcessStat::read(pid)
+                        .unwrap()
+                        .expect("live owned process")
+                })
+                .collect::<Vec<_>>();
+            *task_owned.lock().await = captured.clone();
+            assert_eq!(captured[1].parent, captured[0].pid);
+            if escaped {
+                tokio::time::timeout(Duration::from_secs(2), async {
+                    loop {
+                        if OwnedProcessStat::read(captured[1].pid)
+                            .unwrap()
+                            .is_some_and(|stat| stat.group == stat.pid)
+                        {
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .expect("escaped child session handshake timed out");
+            } else {
+                assert_eq!(captured[1].group, captured[0].group);
+            }
+            assert!(captured
+                .iter()
+                .all(|identity| identity.is_same_live_process(Some(identity))));
+            assert_eq!(
+                task_guard.0.load(Ordering::SeqCst),
+                0,
+                "live command must retain its guard"
+            );
+            if observe {
+                assert!(
+                    matches!(result.observation, ObservationStatus::Pending(_)),
+                    "observer prerequisite: {:?}",
+                    result.observation
+                );
+            }
+            if interrupt {
+                assert_eq!(
+                    unsafe { libc::kill(captured[0].pid as i32, libc::SIGKILL) },
+                    0
+                );
+            } else {
+                std::fs::write(&release, "exit").unwrap();
+            }
+            let terminal = tokio::time::timeout(Duration::from_secs(5), task_registry.wait(&id))
+                .await
+                .expect("terminal wait timed out")
+                .unwrap();
+            if tty {
+                assert_eq!(
+                    terminal.status,
+                    ExecStatus::Exited {
+                        exit_code: Some(7)
+                    }
+                );
+            } else if observe {
+                assert_eq!(
+                    terminal.status,
+                    ExecStatus::Exited {
+                        exit_code: None
+                    }
+                );
+            } else {
+                assert_eq!(
+                    terminal.status,
+                    pump_drain_timeout_status(Duration::from_millis(100))
+                );
+            }
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                task_registry.join_monitors_for_test(),
+            )
+            .await
+            .expect("monitor join timed out");
+            if escaped {
+                assert!(
+                    captured[1].is_same_live_process(
+                        OwnedProcessStat::read(captured[1].pid).unwrap().as_ref()
+                    ),
+                    "escaped output holder must still be live"
+                );
+                assert_eq!(
+                    task_guard.0.load(Ordering::SeqCst),
+                    0,
+                    "live inherited output must retain guard"
+                );
+                return;
+            }
+            assert_eq!(
+                task_guard.0.load(Ordering::SeqCst),
+                1,
+                "terminal monitor retained guard after incomplete output capture"
+            );
+            tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    if captured.iter().all(|identity| {
+                        !identity.is_same_live_process(
+                            OwnedProcessStat::read(identity.pid).unwrap().as_ref(),
+                        )
+                    }) {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("owned descendants survived monitor settlement");
+        });
+        let outcome = tokio::time::timeout(Duration::from_secs(15), &mut assertions).await;
+        if outcome.is_err() {
+            assertions.abort();
+            let _ = assertions.await;
+        }
+        let cleanup = tokio::time::timeout(
+            Duration::from_secs(5),
+            registry.cleanup_shutdown(Duration::from_secs(4)),
+        )
+        .await;
+        for identity in owned.lock().await.iter() {
+            if identity.is_same_live_process(OwnedProcessStat::read(identity.pid).unwrap().as_ref())
+            {
+                unsafe {
+                    libc::kill(identity.pid as i32, libc::SIGKILL);
+                }
+            }
+        }
+        assert!(cleanup.is_ok(), "private registry cleanup timed out");
+        outcome
+            .expect("monitor assertions timed out")
+            .expect("monitor assertions failed");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn terminal_pipe_inherited_output_settles_monitor_guard() {
+        inherited_output_monitor_settles(false, false, false, false).await;
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn terminal_pty_inherited_output_settles_monitor_guard() {
+        inherited_output_monitor_settles(true, false, false, false).await;
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn interrupted_pipe_inherited_output_settles_monitor_guard() {
+        inherited_output_monitor_settles(false, false, true, false).await;
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    #[ignore = "requires Linux ptrace"]
+    async fn interrupted_observed_pipe_inherited_output_settles_monitor_guard() {
+        inherited_output_monitor_settles(false, true, true, false).await;
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn escaped_inherited_output_retains_monitor_guard() {
+        inherited_output_monitor_settles(false, false, false, true).await;
     }
 
     #[cfg(target_os = "linux")]
