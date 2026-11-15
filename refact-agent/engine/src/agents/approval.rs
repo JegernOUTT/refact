@@ -1343,10 +1343,55 @@ pub(crate) mod tests {
             .messages
             .iter()
             .all(|message| message.tool_failed != Some(true)));
+        let outcome = match tokio::time::timeout(std::time::Duration::from_secs(30), step.as_mut())
+            .await
+        {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                let mut diagnostics = Vec::new();
+                let inspection = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+                    let registry = &fixture.app.runtime.exec_registry;
+                    let snapshots = registry.list(Default::default()).await;
+                    diagnostics.push(format!("exec_total={}", snapshots.len()));
+                    for snapshot in snapshots.iter().take(4) {
+                        let id = &snapshot.meta.process_id;
+                        diagnostics.push(format!("id={id} status={:?}", snapshot.status.kind()));
+                        let observation = registry.observation_reader(id).await.map(|reader| {
+                            match reader.status() {
+                                refact_exec::observe::ObservationStatus::Observed(_) => "observed",
+                                refact_exec::observe::ObservationStatus::Pending(_) => "pending",
+                                refact_exec::observe::ObservationStatus::Incomplete(_) => {
+                                    "incomplete"
+                                }
+                                refact_exec::observe::ObservationStatus::Unavailable(_) => {
+                                    "unavailable"
+                                }
+                            }
+                        });
+                        diagnostics.push(format!("observation={observation:?}"));
+                        let read = registry.read(id, 0, Some(4)).await;
+                        let byte_lengths = read
+                            .chunks
+                            .iter()
+                            .map(|chunk| chunk.text.len())
+                            .collect::<Vec<_>>();
+                        diagnostics.push(format!(
+                            "chunks={} byte_lengths={byte_lengths:?}",
+                            read.chunks.len()
+                        ));
+                    }
+                })
+                .await;
+                panic!(
+                    "child tool step timed out: {error}; execution={:?}; approval_file_exists={}; diagnostics_complete={}; diagnostics={diagnostics:?}",
+                    fixture.execution.state(),
+                    fixture.dir.path().join("approval.txt").exists(),
+                    inspection.is_ok(),
+                );
+            }
+        };
         assert!(matches!(
-            tokio::time::timeout(std::time::Duration::from_secs(30), step)
-                .await
-                .unwrap(),
+            outcome,
             crate::chat::tools::ToolStepOutcome::Continue
         ));
         let child_tool_results = session

@@ -529,6 +529,23 @@ class InventoryTests(unittest.TestCase):
         self.assertIn('no unknown process was killed', script)
         self.assertIn("Fail \"Found $($profiles.Count) named profile leftovers\"", script)
 
+    def test_windows_profile_leftover_diagnostics_are_bounded_and_keep_failure_gate(self):
+        script = (ci.ROOT / 'tools/dev/browser_windows_roadmap_qualification.ps1').read_text()
+        body = script.split('function Write-ProfileLeftoversEvidence', 1)[1].split('\nfunction ', 1)[0]
+        for token in ['Select-Object -First 128', 'Select-Object -First 16',
+                      'total_count = $profiles.Count', 'records = $records.ToArray()',
+                      'omitted_count = [Math]::Max(0, $profiles.Count - $records.Count)',
+                      "classification = 'fixture_or_other'", "$record.classification = 'engine'",
+                      "'home/.cache/refact/named_browser_profiles'", 'DirectorySeparatorChar',
+                      '$record.inspection_error = "$_"; Fail', "'profile-leftovers.json'"]:
+            self.assertIn(token, body)
+        for forbidden in ['Get-Content', 'Remove-Item', '-Recurse', 'New-Item', 'Set-Acl']:
+            self.assertNotIn(forbidden, body)
+        self.assertIn('try { Write-ProfileLeftoversEvidence $profiles }\n'
+                      '        finally { if ($profiles.Count) { Fail "Found $($profiles.Count) named profile leftovers" } }', script)
+        self.assertIn('} catch { Fail "Cleanup inspection: $_" }', script)
+        self.assertIn('if ($failed) { exit 1 }', script)
+
     def test_windows_owned_tree_identity_does_not_require_command_line(self):
         script = (ci.ROOT / 'tools/dev/browser_windows_roadmap_qualification.ps1').read_text()
         body = script.split('function Capture-OwnedTree', 1)[1].split('\nfunction ', 1)[0]

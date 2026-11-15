@@ -61,6 +61,24 @@ function Capture-OwnedTree {
     }
 }
 function Fail([string]$message) { $script:failed = $true; $script:failures.Add($message); Write-Warning $message }
+function Write-ProfileLeftoversEvidence([object[]]$profiles) {
+    $records = [System.Collections.Generic.List[object]]::new()
+    $engineRoot = [System.IO.Path]::GetFullPath((Join-Path $owned 'home/.cache/refact/named_browser_profiles')).TrimEnd('\','/')
+    foreach ($profile in ($profiles | Select-Object -First 128)) {
+        $record = [ordered]@{ FullName = $profile.FullName; name = $profile.Name; attributes = $null; classification = 'fixture_or_other'; children = @(); inspection_error = $null }
+        try {
+            $record.attributes = $profile.Attributes.ToString()
+            $fullName = [System.IO.Path]::GetFullPath($profile.FullName)
+            if ($fullName.StartsWith($engineRoot + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase)) { $record.classification = 'engine' }
+            if ($profile.Attributes -band [System.IO.FileAttributes]::ReparsePoint) { throw 'Direct-child inspection skipped for reparse point' }
+            if ($profile.PSIsContainer) {
+                $record.children = @(Get-ChildItem -LiteralPath $profile.FullName -Force -ErrorAction Stop | Select-Object -First 16 | ForEach-Object { [ordered]@{ name = $_.Name; type = $(if ($_.PSIsContainer) { 'directory' } else { 'file' }); attributes = $_.Attributes.ToString() } })
+            }
+        } catch { $record.inspection_error = "$_"; Fail "Profile leftover inspection: $_" }
+        $records.Add($record)
+    }
+    [ordered]@{ total_count = $profiles.Count; records = $records.ToArray(); omitted_count = [Math]::Max(0, $profiles.Count - $records.Count) } | ConvertTo-Json -Depth 6 | Set-Content -Encoding utf8 (Join-Path $evidence 'profile-leftovers.json')
+}
 function Write-KnownFolderEvidence([string]$phase) {
     $receipt = [ordered]@{ phase = $phase; chrome = [ordered]@{ path = $env:CHROME }; environment = [ordered]@{}; known_folders = [ordered]@{}; policies = @() }
     try {
@@ -285,7 +303,8 @@ finally {
         $left | Select-Object ProcessId,ParentProcessId,CreationDate,Name,CommandLine | ConvertTo-Json | Set-Content -Encoding utf8 (Join-Path $evidence 'chrome-leftovers.json')
         if ($left.Count) { Fail "Found $($left.Count) profile-associated Chrome processes after shutdown; no unknown process was killed" }
         $profiles = @(Get-ChildItem -Path $owned -Directory -Recurse -ErrorAction Stop | Where-Object { $_.Name -eq 'named_browser_profiles' } | ForEach-Object { Get-ChildItem -Force $_.FullName -ErrorAction Stop } | Where-Object { -not ($_.Name -eq '.allocation.lock' -and -not $_.PSIsContainer -and -not ($_.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) })
-        if ($profiles.Count) { Fail "Found $($profiles.Count) named profile leftovers" }
+        try { Write-ProfileLeftoversEvidence $profiles }
+        finally { if ($profiles.Count) { Fail "Found $($profiles.Count) named profile leftovers" } }
     } catch { Fail "Cleanup inspection: $_" }
     @{ passed = -not $failed; failures = @($failures); owned_root = $owned; control_root = $controlRoot; inspection_gaps = $inspectionGaps.ToArray(); inspection_gaps_omitted = $inspectionGapsOmitted } | ConvertTo-Json -Depth 4 | Set-Content -Encoding utf8 (Join-Path $evidence 'qualification-result.json')
 }
