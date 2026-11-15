@@ -14,10 +14,6 @@ pub fn e2e_enabled() -> bool {
     std::env::var(E2E_ENV).ok().as_deref() == Some("1")
 }
 
-pub fn print_skip() {
-    println!("skipped: set REFACT_DAEMON_E2E=1");
-}
-
 pub struct E2eDirs {
     _tmp: TempDir,
     pub daemon_dir: PathBuf,

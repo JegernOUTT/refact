@@ -170,8 +170,8 @@ jobs:
         run: |
           export GITHUB_SHA="$REFACT_SOURCE_SHA"
           set -o pipefail
-          REFACT_DAEMON_E2E=1 PYTHON3=python3 cargo test --profile ci-test --test it -- daemon_e2e:: --nocapture --test-threads=1 2>&1 | tee daemon-output.txt
-          python ../../tools/dev/ci_tests.py verify-output daemon-output.txt
+          REFACT_DAEMON_E2E=1 PYTHON3=python3 cargo test --profile ci-test --test it -- daemon_e2e:: --ignored --nocapture --test-threads=1 2>&1 | tee daemon-output.txt
+          python ../../tools/dev/ci_tests.py verify-daemon-e2e daemon-output.txt
 
       - name: Build owned tool-job fixture subject
         run: |

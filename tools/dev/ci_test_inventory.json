@@ -306,6 +306,7 @@
           "it",
           "--",
           "daemon_e2e::",
+          "--ignored",
           "--nocapture",
           "--test-threads=1"
         ],

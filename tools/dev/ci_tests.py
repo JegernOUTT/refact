@@ -114,6 +114,25 @@ def test_output_valid(output):
     return bool(re.search(r'test result: ok\. [1-9][0-9]* passed', output)) and 'skipped: set ' not in output
 
 
+DAEMON_E2E_TESTS = (
+    'real_worker_smoke_lifecycle_through_daemon',
+    'durable_cron_fires_without_clients_attached',
+    'past_due_durable_cron_wakes_dead_worker_without_clients',
+    'worker_lsp_tcp_accepts_two_clients_concurrently',
+    'idle_stop_then_proxy_rewakes_worker',
+)
+
+
+def daemon_e2e_output_valid(output):
+    completed = re.findall(r'^test daemon_e2e::(\w+) \.\.\. ok$', output, re.MULTILINE)
+    summaries = re.findall(r'^test result: .+$', output, re.MULTILINE)
+    return (test_output_valid(output)
+            and sorted(completed) == sorted(DAEMON_E2E_TESTS)
+            and len(summaries) == 1
+            and bool(re.fullmatch(r'test result: ok\. 5 passed; 0 failed; 0 ignored; '
+                                 r'0 measured; \d+ filtered out; finished in .+', summaries[0])))
+
+
 VSCODE_SUITE_FILES = ('sidebar.test.js', 'refactDaemon.test.js', 'launchRustHealth.test.js', 'hostRelease.test.js')
 
 
@@ -223,6 +242,9 @@ if __name__ == '__main__':
     if len(sys.argv) > 1 and sys.argv[1] == 'verify-output':
         output = Path(sys.argv[2]).read_text()
         sys.exit(0 if test_output_valid(output) else 1)
+    if len(sys.argv) > 1 and sys.argv[1] == 'verify-daemon-e2e':
+        output = Path(sys.argv[2]).read_text()
+        sys.exit(0 if daemon_e2e_output_valid(output) else 1)
     if len(sys.argv) > 1 and sys.argv[1] == 'unittest':
         sys.exit(strict_unittest(sys.argv[2:]))
     sys.exit(main())

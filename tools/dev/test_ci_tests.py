@@ -131,6 +131,68 @@ class InventoryTests(unittest.TestCase):
         self.assertFalse(ci.test_output_valid('skipped: set REFACT_BROWSER_E2E=1\ntest result: ok. 12 passed'))
         self.assertFalse(ci.test_output_valid('compilation finished'))
 
+    def test_daemon_e2e_requires_exact_five_named_passes(self):
+        lines = ['test daemon_e2e::' + name + ' ... ok' for name in ci.DAEMON_E2E_TESTS]
+        summary = 'test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 321 filtered out; finished in 123.45s'
+        complete = '\n'.join(['running 5 tests', *lines, '', summary, ''])
+        self.assertEqual(len(set(ci.DAEMON_E2E_TESTS)), 5)
+        self.assertTrue(ci.daemon_e2e_output_valid(complete))
+        for line in lines:
+            for output in [complete.replace(line, ''), complete + line + '\n',
+                           complete.replace(line, line.replace(' ... ok', ' ... ignored')),
+                           complete.replace(line, line.replace(' ... ok', ' ... FAILED'))]:
+                with self.subTest(output=output):
+                    self.assertFalse(ci.daemon_e2e_output_valid(output))
+        for output in ['', 'compilation finished', complete + summary + '\n',
+                       complete + 'skipped: set REFACT_DAEMON_E2E=1\n',
+                       complete + 'test daemon_e2e::unexpected ... ok\n']:
+            with self.subTest(output=output):
+                self.assertFalse(ci.daemon_e2e_output_valid(output))
+        for before, after in [('5 passed', '0 passed'), ('5 passed', '4 passed'),
+                              ('5 passed', '6 passed'), ('0 failed', '1 failed'),
+                              ('0 ignored', '1 ignored')]:
+            with self.subTest(after=after):
+                self.assertFalse(ci.daemon_e2e_output_valid(complete.replace(before, after)))
+
+    def test_daemon_e2e_registration_requires_owned_runner(self):
+        import re
+        source = (ci.ROOT / 'refact-agent/engine/tests/it/daemon_e2e.rs').read_text()
+        registered = re.findall(r'#\[tokio::test\([^\n]+\)\]\n'
+                                r'#\[ignore = "requires owned daemon E2E runner"\]\n'
+                                r'async fn (\w+)\(\) \{\n'
+                                r'    assert!\(\n        e2e_enabled\(\),\n'
+                                r'        "set REFACT_DAEMON_E2E=1[^"\n]+"\n    \);', source)
+        self.assertEqual(sorted(registered), sorted(ci.DAEMON_E2E_TESTS))
+        self.assertEqual(source.count('#[tokio::test('), 5)
+        self.assertEqual(source.count('#[ignore = "requires owned daemon E2E runner"]'), 5)
+        self.assertNotIn('print_skip', source)
+        self.assertNotIn('if !e2e_enabled()', source)
+        self.assertNotIn('#[cfg(unix)]', source)
+        self.assertIn('daemon_e2e:: --ignored --nocapture --test-threads=1', source)
+        self.assertRegex(source, r'fake_worker_cmd\(\)\s*\.expect\(\s*"install Python 3 and set PYTHON3')
+
+    def test_daemon_e2e_linux_runner_is_required_and_explicit(self):
+        import yaml
+        entry = next(e for e in ci.load_inventory()['entries'] if e['id'] == 'engine-reusable')
+        self.assertTrue(entry['required'])
+        self.assertEqual(entry['source'], '.github/workflows/agent_engine_check.yml')
+        daemon_command = next(command for command in entry['commands'] if 'daemon_e2e::' in command)
+        self.assertIn('--ignored', daemon_command)
+        workflow = yaml.safe_load((ci.ROOT / entry['source']).read_text())
+        self.assertEqual(workflow['jobs']['check']['runs-on'], 'ubuntu-22.04')
+        steps = workflow['jobs']['check']['steps']
+        build = next(step for step in steps if step.get('name') == 'Build refact daemon binary')
+        run = next(step for step in steps if step.get('name') == 'Run daemon E2E suite')
+        self.assertLess(steps.index(build), steps.index(run))
+        self.assertIn('cargo build --bin refact --profile ci-test', build['run'])
+        self.assertIn('set -o pipefail', run['run'])
+        self.assertIn('REFACT_DAEMON_E2E=1 PYTHON3=python3 cargo test --profile ci-test --test it -- '
+                      'daemon_e2e:: --ignored --nocapture --test-threads=1 2>&1 | tee daemon-output.txt\n'
+                      'python ../../tools/dev/ci_tests.py verify-daemon-e2e daemon-output.txt\n', run['run'])
+        for step in [build, run]:
+            self.assertNotIn('if', step)
+            self.assertNotIn('continue-on-error', step)
+
     def test_inventory_job_entry_collision_rejected(self):
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / 'inventory.json'

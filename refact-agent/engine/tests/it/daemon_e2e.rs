@@ -1,16 +1,16 @@
 //! Real daemon/worker E2E suite.
 //!
 //! Run with:
-//! `REFACT_SKIP_GUI_BUILD=1 cargo build && REFACT_DAEMON_E2E=1 REFACT_SKIP_GUI_BUILD=1 cargo test --test it -- daemon_e2e:: --nocapture`
+//! `REFACT_SKIP_GUI_BUILD=1 cargo build --bin refact && REFACT_DAEMON_E2E=1 PYTHON3=python3 REFACT_SKIP_GUI_BUILD=1 cargo test --test it -- daemon_e2e:: --ignored --nocapture --test-threads=1`
 //!
-//! Without `REFACT_DAEMON_E2E=1`, every test prints `skipped: set REFACT_DAEMON_E2E=1` and
-//! returns before spawning the daemon. The tests set `REFACT_DAEMON_DIR` and `HOME` per process so
+//! These five tests are ignored by default and require `REFACT_DAEMON_E2E=1` when explicitly run.
+//! The owned runner needs the compiled daemon and Python 3. Tests set `REFACT_DAEMON_DIR` and `HOME` per process so
 //! daemon state, config, worker logs, and engine user dirs stay inside a temp directory.
 
 use std::time::Duration;
 
 use chrono::{Datelike, Timelike, Utc};
-use crate::e2e_helpers::{e2e_enabled, make_project, print_skip, wait_for, DaemonProcess, E2eDirs};
+use crate::e2e_helpers::{e2e_enabled, make_project, wait_for, DaemonProcess, E2eDirs};
 use serde_json::{json, Value};
 
 fn future_minute_cron(offset_secs: i64) -> (String, u64) {
@@ -141,11 +141,12 @@ async fn open_project(daemon: &DaemonProcess, root: &std::path::Path) -> Value {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires owned daemon E2E runner"]
 async fn real_worker_smoke_lifecycle_through_daemon() {
-    if !e2e_enabled() {
-        print_skip();
-        return;
-    }
+    assert!(
+        e2e_enabled(),
+        "set REFACT_DAEMON_E2E=1 and build the refact binary before running owned daemon E2E tests"
+    );
     let dirs = E2eDirs::new();
     dirs.write_daemon_config(1800);
     let project = make_project("daemon-smoke");
@@ -246,11 +247,12 @@ async fn ready_worker_cron_rows(daemon: &DaemonProcess, project_id: &str) -> Vec
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires owned daemon E2E runner"]
 async fn durable_cron_fires_without_clients_attached() {
-    if !e2e_enabled() {
-        print_skip();
-        return;
-    }
+    assert!(
+        e2e_enabled(),
+        "set REFACT_DAEMON_E2E=1 and build the refact binary before running owned daemon E2E tests"
+    );
     let dirs = E2eDirs::new();
     dirs.write_daemon_config(1800);
     let project = make_project("daemon-cron");
@@ -327,15 +329,15 @@ async fn durable_cron_fires_without_clients_attached() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires owned daemon E2E runner"]
 async fn past_due_durable_cron_wakes_dead_worker_without_clients() {
-    if !e2e_enabled() {
-        print_skip();
-        return;
-    }
-    let Some(worker_cmd) = fake_worker_cmd() else {
-        print_skip();
-        return;
-    };
+    assert!(
+        e2e_enabled(),
+        "set REFACT_DAEMON_E2E=1 and build the refact binary before running owned daemon E2E tests"
+    );
+    let worker_cmd = fake_worker_cmd().expect(
+        "install Python 3 and set PYTHON3 to its executable for the owned fake-worker fixture",
+    );
     let dirs = E2eDirs::new();
     dirs.write_daemon_config(1800);
     let project = make_project("daemon-cron-past-due");
@@ -386,11 +388,12 @@ async fn past_due_durable_cron_wakes_dead_worker_without_clients() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires owned daemon E2E runner"]
 async fn worker_lsp_tcp_accepts_two_clients_concurrently() {
-    if !e2e_enabled() {
-        print_skip();
-        return;
-    }
+    assert!(
+        e2e_enabled(),
+        "set REFACT_DAEMON_E2E=1 and build the refact binary before running owned daemon E2E tests"
+    );
     let dirs = E2eDirs::new();
     dirs.write_daemon_config(1800);
     let project = make_project("daemon-lsp");
@@ -411,11 +414,12 @@ async fn worker_lsp_tcp_accepts_two_clients_concurrently() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires owned daemon E2E runner"]
 async fn idle_stop_then_proxy_rewakes_worker() {
-    if !e2e_enabled() {
-        print_skip();
-        return;
-    }
+    assert!(
+        e2e_enabled(),
+        "set REFACT_DAEMON_E2E=1 and build the refact binary before running owned daemon E2E tests"
+    );
     let dirs = E2eDirs::new();
     dirs.write_daemon_config(5);
     let project = make_project("daemon-idle");
