@@ -423,9 +423,14 @@ pub async fn open_whole(
     let comparisons = request
         .members
         .iter()
-        .map(|member| MemberComparison {
+        .enumerate()
+        .map(|(index, member)| MemberComparison {
             member: member.key.clone(),
-            base_ref: member.base_oid.clone(),
+            base_ref: if live && index > 0 {
+                request.members[index - 1].branch_ref.clone()
+            } else {
+                member.base_oid.clone()
+            },
             head_ref: member.head_oid.clone(),
         })
         .collect();

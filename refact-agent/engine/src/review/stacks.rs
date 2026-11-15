@@ -422,7 +422,70 @@ pub async fn refresh(
     request_key: String,
     expected_revision: u64,
 ) -> std::result::Result<StackManifest, String> {
+    refresh_internal(app, chat, request_key, Some(expected_revision), None).await
+}
+
+pub(super) fn validate_open_comparisons(
+    repo: &git2::Repository,
+    manifest: &StackManifest,
+    comparisons: &[(String, Option<String>, Option<String>)],
+) -> Result<()> {
+    if comparisons.len() != manifest.members.len()
+        || comparisons
+            .iter()
+            .zip(&manifest.members)
+            .any(|((branch, _, _), member)| branch != &member.branch_ref)
+    {
+        return Err(invalid("Stack branches changed while reopening"));
+    }
+    for (index, ((_, base, head), member)) in comparisons.iter().zip(&manifest.members).enumerate()
+    {
+        for (field, supplied, pin) in [
+            ("base", base, &member.resolved_base_oid),
+            ("head", head, &member.head_oid),
+        ] {
+            if let Some(supplied) = supplied {
+                let resolved = repo
+                    .revparse_single(supplied)?
+                    .peel_to_commit()?
+                    .id()
+                    .to_string();
+                if pin.as_deref() != Some(resolved.as_str()) {
+                    let guidance = if super::stack_entry::is_historical(manifest) {
+                        "this chat reviews the recorded comparison; omit head/base or review a different comparison in a new chat"
+                    } else {
+                        "this chat reviews the live branches; omit head/base or review a pinned comparison in a new chat"
+                    };
+                    return Err(invalid(format!(
+                        "stack[{index}].{field} differs from the stored comparison: {guidance}"
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+pub(super) async fn refresh_on_open(
+    app: &AppState,
+    chat: &str,
+    request_key: String,
+    comparisons: Vec<(String, Option<String>, Option<String>)>,
+) -> std::result::Result<StackManifest, String> {
+    refresh_internal(app, chat, request_key, None, Some(comparisons)).await
+}
+
+async fn refresh_internal(
+    app: &AppState,
+    chat: &str,
+    request_key: String,
+    expected_revision: Option<u64>,
+    comparisons: Option<Vec<(String, Option<String>, Option<String>)>>,
+) -> std::result::Result<StackManifest, String> {
     let mut manifest = get(app, chat).await?.ok_or("Stack not found")?;
+    let original = manifest.clone();
+    let expected_revision = expected_revision.unwrap_or(manifest.revision);
+    let skip_unchanged = comparisons.is_some();
     if super::stack_entry::is_historical(&manifest) {
         return Err("Recorded historical comparisons are immutable; prepare a fresh explicitly disclosed import instead of refreshing live refs".into());
     }
@@ -481,6 +544,23 @@ pub async fn refresh(
         }
         if !entry_single {
             validate_parent_pins(&manifest)?;
+        }
+        for member in &manifest.members {
+            if member.state == StackMemberState::Removed || (entry_single && member.id != manifest.scope_choice.selected_member_id) {
+                continue;
+            }
+            if let Some(parent) = member.parent_member_id.as_ref().and_then(|id| manifest.members.iter().find(|parent| &parent.id == id)) {
+                if member.declared_base_ref == parent.branch_ref {
+                    let base = git2::Oid::from_str(member.resolved_base_oid.as_deref().ok_or_else(|| invalid("Missing base pin"))?)?;
+                    let head = git2::Oid::from_str(member.head_oid.as_deref().ok_or_else(|| invalid("Missing head pin"))?)?;
+                    if base != head && !repo.graph_descendant_of(head, base)? {
+                        return Err(invalid(format!("Stack member `{}` must be restacked onto its updated parent `{}` before refreshing", member.branch_ref, parent.branch_ref)));
+                    }
+                }
+            }
+        }
+        if let Some(comparisons) = comparisons {
+            validate_open_comparisons(&repo, &manifest, &comparisons)?;
         }
         let candidates = manifest
             .members
@@ -543,6 +623,15 @@ pub async fn refresh(
         })
         .collect::<std::result::Result<Vec<_>, String>>()?;
     super::service::with_store(root, move |store| {
+        if skip_unchanged && manifest == original {
+            if !store.stack_scope_confirmed(&manifest.owner_chat_id)? {
+                return Err(invalid("stack preparation awaits current scope consent"));
+            }
+            if store.get_stack_for_chat(&manifest.owner_chat_id)?.as_ref() != Some(&original) {
+                return Err(invalid("Stale stack revision"));
+            }
+            return Ok(manifest);
+        }
         store.publish_stack_refresh_with_privacy(
             manifest,
             expected_revision,

@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 id: buddy_test_coverage_watcher
 title: Test Coverage Watcher
 description: Detect changed Rust files that may need focused tests
@@ -21,7 +21,7 @@ messages:
 
     You look for focused test coverage gaps in recently changed Rust files.
     1. Inspect the listed files and nearby tests.
-    2. Identify the smallest meaningful test addition or test plan.
+    2. Identify the smallest meaningful test addition or test plan: one that would fail on a plausible bug in the changed code. Name that bug, and assert outcomes rather than mere execution.
     3. Describe the smallest meaningful test addition or test plan in your
        buddy_runtime_event description; never edit files.
     4. Record completion with buddy_runtime_event, and open an issue if follow-up is needed.

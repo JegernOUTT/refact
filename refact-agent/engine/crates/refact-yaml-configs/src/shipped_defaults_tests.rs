@@ -689,3 +689,67 @@ fn audited_mode_semantic_workflows_and_confirmation_boundaries() {
         .prompt
         .contains("independently monotonic"));
 }
+
+#[test]
+fn shipped_coding_and_review_guidance_stays_aligned() {
+    let text = |kind: &str, name: &str| {
+        embedded_defaults(kind)
+            .into_iter()
+            .find(|(file, _)| file == name)
+            .map(|(_, text)| text)
+            .unwrap_or_else(|| panic!("missing {kind}/{name}"))
+    };
+    for (kind, name) in [
+        ("modes", "agent.yaml"),
+        ("modes", "solo.yaml"),
+        ("modes", "task_agent.yaml"),
+        ("subagents", "subagent.yaml"),
+    ] {
+        let prompt = text(kind, name);
+        for rule in [
+            "Keep failures visible",
+            "Never weaken verification",
+            "fail when the change is reverted or plausibly broken",
+            "reinterpret",
+            "skipping the check that raised it",
+            "contract changes on purpose",
+        ] {
+            assert!(prompt.contains(rule), "{kind}/{name} missing {rule}");
+        }
+        for retired in [
+            "remove fallback code",
+            "Never create fallbacks, dead code",
+            "fallback code, unused imports",
+        ] {
+            assert!(!prompt.contains(retired), "{kind}/{name}: {retired}");
+        }
+    }
+    let domains: Vec<String> = ["agent.yaml", "task_planner.yaml", "debug.yaml"]
+        .into_iter()
+        .map(|name| {
+            let prompt = text("modes", name);
+            assert!(
+                prompt.contains("no finding rests on presumed authorship"),
+                "{name}"
+            );
+            prompt
+                .lines()
+                .find(|line| line.trim_start().starts_with("Select relevant domains:"))
+                .unwrap_or_else(|| panic!("{name} missing review domains"))
+                .trim()
+                .to_string()
+        })
+        .collect();
+    assert!(domains[0].contains("**verification integrity**"));
+    assert!(domains.iter().all(|line| line == &domains[0]));
+    let review = text("modes", "review.yaml");
+    for rule in [
+        "verification integrity, launched first",
+        "Do not modify the review checkout",
+        "presumed authorship",
+        "revalidate every open finding",
+    ] {
+        assert!(review.contains(rule), "review missing {rule}");
+    }
+    assert!(text("subagents", "subagent.yaml").contains("presumed authorship"));
+}

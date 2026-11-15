@@ -379,6 +379,357 @@ async fn results_stay_compact_and_declare_only_the_files_they_quote() {
 }
 
 #[tokio::test]
+async fn finding_evidence_replaces_deduplicates_preserves_and_clears() {
+    let f = Fixture::new().await;
+    f.open().await;
+    for id in ["spec", "context"] {
+        f.call(
+            ReviewToolKind::Source,
+            json!({"id":id,"summary":"The required value.","path":"tracked.py","lines":"2"}),
+        )
+        .await
+        .unwrap();
+    }
+    let created = f
+        .call(
+            ReviewToolKind::Finding,
+            json!({"id":"value","title":"Wrong value","body":"Use the required value.","path":"tracked.py","lines":"2","evidence":["spec"]}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(created["evidence_total"], 1);
+    assert_eq!(f.active().annotations[0].evidence_ids, ["spec"]);
+
+    f.call(
+        ReviewToolKind::Finding,
+        json!({"id":"value","evidence":["context","spec","context","spec"]}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(f.active().annotations[0].evidence_ids, ["context", "spec"]);
+
+    f.call(
+        ReviewToolKind::Finding,
+        json!({"id":"value","title":"Updated title"}),
+    )
+    .await
+    .unwrap();
+    let kept = f.active().annotations[0].clone();
+    assert_eq!(kept.title, "Updated title");
+    assert_eq!(kept.evidence_ids, ["context", "spec"]);
+
+    let cleared = f
+        .call(ReviewToolKind::Finding, json!({"id":"value","evidence":[]}))
+        .await
+        .unwrap();
+    assert_eq!(cleared["evidence_total"], 0);
+    assert!(f.active().annotations[0].evidence_ids.is_empty());
+}
+
+#[tokio::test]
+async fn unknown_finding_evidence_leaves_creates_and_updates_unwritten() {
+    let f = Fixture::new().await;
+    f.open().await;
+    f.call(
+        ReviewToolKind::Source,
+        json!({"id":"spec","summary":"The required value.","path":"tracked.py"}),
+    )
+    .await
+    .unwrap();
+    let before_create = serde_json::to_value(f.active()).unwrap();
+    let error = f
+        .call(
+            ReviewToolKind::Finding,
+            json!({"id":"value","title":"Wrong value","body":"Use the required value.","path":"tracked.py","lines":"2","evidence":["spec","missing"]}),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error, "Evidence or source `missing` is not in this review");
+    assert_eq!(serde_json::to_value(f.active()).unwrap(), before_create);
+
+    f.call(
+        ReviewToolKind::Finding,
+        json!({"id":"value","title":"Wrong value","body":"Use the required value.","path":"tracked.py","lines":"2","evidence":["spec"]}),
+    )
+    .await
+    .unwrap();
+    let before_update = serde_json::to_value(f.active()).unwrap();
+    let error = f
+        .call(
+            ReviewToolKind::Finding,
+            json!({"id":"value","title":"Must not be written","evidence":["missing"]}),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error, "Evidence or source `missing` is not in this review");
+    assert_eq!(serde_json::to_value(f.active()).unwrap(), before_update);
+}
+
+#[tokio::test]
+async fn source_needing_revalidation_is_rejected_without_writing() {
+    use refact_review_core::{Actor, AnchorStatus, Applicability, EvidenceSource, Mutation, Operation};
+
+    let f = Fixture::new().await;
+    f.open().await;
+    f.call(
+        ReviewToolKind::Source,
+        json!({"id":"spec","summary":"The anchored specification.","path":"tracked.py","lines":"2"}),
+    )
+    .await
+    .unwrap();
+    let review = f.active();
+    let mut evidence = review
+        .evidence
+        .iter()
+        .find(|item| item.id == "spec")
+        .unwrap()
+        .clone();
+    assert_eq!(evidence.applicability, Applicability::Current);
+    let EvidenceSource::Source {
+        anchor: Some(anchor),
+        ..
+    } = &mut evidence.source
+    else {
+        panic!("source must have a file anchor");
+    };
+    assert_eq!(anchor.status, AnchorStatus::Current);
+    anchor.status = AnchorStatus::Stalled;
+    anchor.stalled_reason = Some("requires revalidation".into());
+    evidence.id = "stalled-spec".into();
+    evidence.applicability = Applicability::NeedsRevalidation;
+    let changed = f
+        .store()
+        .mutate(
+            &review.id,
+            Mutation {
+                expected_revision: review.revision,
+                request_key: "stalled-source".into(),
+                actor: Actor {
+                    kind: ActorKind::System,
+                    id: "test".into(),
+                },
+                at_ms: 1,
+                operation: Operation::AddEvidence {
+                    evidence,
+                },
+            },
+        )
+        .unwrap();
+    let stalled = changed
+        .evidence
+        .iter()
+        .find(|item| item.id == "stalled-spec")
+        .unwrap();
+    assert_eq!(stalled.applicability, Applicability::NeedsRevalidation);
+    assert!(matches!(
+        stalled.source,
+        EvidenceSource::Source {
+            anchor: Some(_),
+            ..
+        }
+    ));
+    let before = serde_json::to_value(changed).unwrap();
+    let error = f.call(
+        ReviewToolKind::Finding,
+        json!({"id":"value","title":"Wrong value","body":"Use the required value.","path":"tracked.py","lines":"2","evidence":["stalled-spec"]}),
+    ).await.unwrap_err();
+    assert_eq!(error, "Source `stalled-spec` needs revalidation against the current comparison; record it again with review_source before citing it");
+    assert_eq!(serde_json::to_value(f.active()).unwrap(), before);
+}
+
+#[tokio::test]
+async fn execution_finding_evidence_is_rejected_without_writing() {
+    use crate::exec::{ExecOwnerMeta, ExecSpawnRequest};
+    use refact_review_core::{Applicability, EvidenceSource};
+    use std::time::Duration;
+
+    let f = Fixture::new().await;
+    f.open().await;
+    let (app, cwd) = {
+        let context = f.ccx.lock().await;
+        (
+            context.app.clone(),
+            context.execution_scope_worktree().unwrap().root,
+        )
+    };
+    let spawned = app
+        .gcx
+        .exec_registry
+        .spawn(
+            ExecSpawnRequest::foreground("echo review-evidence")
+                .with_cwd(cwd)
+                .with_owner(ExecOwnerMeta {
+                    chat_id: Some(CHAT.into()),
+                    ..Default::default()
+                })
+                .with_timeout(Duration::from_secs(10)),
+        )
+        .await
+        .unwrap();
+    let process_id = spawned.snapshot.meta.process_id;
+    tokio::time::timeout(
+        Duration::from_secs(15),
+        app.gcx.exec_registry.wait(&process_id),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let recorded = f
+        .call(
+            ReviewToolKind::RecordEvidence,
+            json!({"process_id":process_id.0,"summary":"The execution completed."}),
+        )
+        .await
+        .unwrap();
+    let id = recorded["evidence"]["id"].as_str().unwrap();
+    let review = f.active();
+    let evidence = review.evidence.iter().find(|item| item.id == id).unwrap();
+    assert!(matches!(evidence.source, EvidenceSource::Executed { .. }));
+    assert_eq!(evidence.applicability, Applicability::Unknown);
+    let before = serde_json::to_value(review).unwrap();
+    let error = f
+        .call(
+            ReviewToolKind::Finding,
+            json!({"id":"value","title":"Wrong value","body":"Use the required value.","path":"tracked.py","lines":"2","evidence":[id]}),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error, format!("Evidence `{id}` is an execution record, which cannot be attributed to the current comparison; describe the run in the finding body or cite it on a tour page"));
+    assert_eq!(serde_json::to_value(f.active()).unwrap(), before);
+}
+
+#[tokio::test]
+async fn historical_finding_evidence_is_rejected_without_writing() {
+    use refact_review_core::{
+        Actor, Applicability, CapturePolicy, CaptureRequest, Mutation, Operation, Origin,
+    };
+
+    let f = Fixture::new().await;
+    f.open().await;
+    f.call(
+        ReviewToolKind::Source,
+        json!({"id":"spec","summary":"The original comparison.","path":"tracked.py"}),
+    )
+    .await
+    .unwrap();
+    let store = f.store();
+    let mut target = authoring::require(&f.ccx, None).await.unwrap();
+    let mut review = f.active();
+    assert_eq!(review.evidence[0].applicability, Applicability::Current);
+    let newer = store
+        .capture(
+            &f.source,
+            CaptureRequest {
+                base_oid: f.oids[0].clone(),
+                head_oid: f.oids[2].clone(),
+                policy: CapturePolicy::default(),
+                origin: Origin::Local,
+            },
+        )
+        .unwrap();
+    for (key, operation) in [
+        (
+            "stage-newer",
+            Operation::StageCandidate {
+                candidate: newer.clone(),
+            },
+        ),
+        (
+            "activate-newer",
+            Operation::ActivateCandidate {
+                candidate_id: newer.id.clone(),
+            },
+        ),
+    ] {
+        review = store
+            .mutate(
+                &review.id,
+                Mutation {
+                    expected_revision: review.revision,
+                    request_key: key.into(),
+                    actor: Actor {
+                        kind: ActorKind::System,
+                        id: "test".into(),
+                    },
+                    at_ms: 1,
+                    operation,
+                },
+            )
+            .unwrap();
+    }
+    assert_eq!(
+        review.current_candidate_id.as_deref(),
+        Some(newer.id.as_str())
+    );
+    assert_eq!(review.evidence[0].applicability, Applicability::Historical);
+    target.review = review;
+    let before = serde_json::to_value(f.active()).unwrap();
+    let error = write::finding(
+        &f.ccx,
+        &target,
+        write::FindingInput {
+            id: Some("value".into()),
+            title: Some("Wrong value".into()),
+            body: Some("Use the required value.".into()),
+            path: Some("tracked.py".into()),
+            lines: Some("2".into()),
+            evidence: Some(vec!["spec".into()]),
+            ..Default::default()
+        },
+        "historical-finding",
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error, "Evidence `spec` was recorded for an earlier version of the change; cite evidence for the current comparison");
+    assert_eq!(serde_json::to_value(f.active()).unwrap(), before);
+}
+
+#[tokio::test]
+async fn finding_evidence_is_scoped_to_the_selected_stack_member() {
+    let f = Fixture::new().await;
+    f.call(
+        ReviewToolKind::Open,
+        json!({"stack":[{"pr":1,"branch":"first","base":f.oids[0]},{"pr":2,"branch":"second"}]}),
+    )
+    .await
+    .unwrap();
+    f.call(
+        ReviewToolKind::Source,
+        json!({"member":"second","id":"top-spec","summary":"Top member context.","path":"tracked.py"}),
+    )
+    .await
+    .unwrap();
+    let stack = f.store().get_stack_for_chat(CHAT).unwrap().unwrap();
+    let second_id = stack.members[1].review_id.as_ref().unwrap();
+    let before_first = serde_json::to_value(f.active()).unwrap();
+    let before_second = serde_json::to_value(f.store().load(second_id).unwrap()).unwrap();
+    let error = f
+        .call(
+            ReviewToolKind::Finding,
+            json!({"member":"first","id":"value","title":"Wrong value","body":"Use the required value.","path":"tracked.py","lines":"2","evidence":["top-spec"]}),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error, "Evidence or source `top-spec` is not in this review");
+    assert_eq!(serde_json::to_value(f.active()).unwrap(), before_first);
+    assert_eq!(
+        serde_json::to_value(f.store().load(second_id).unwrap()).unwrap(),
+        before_second
+    );
+    f.call(
+        ReviewToolKind::Finding,
+        json!({"member":"second","id":"value","title":"Wrong value","body":"Use the required value.","path":"tracked.py","lines":"3","evidence":["top-spec"]}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        f.store().load(second_id).unwrap().annotations[0].evidence_ids,
+        ["top-spec"]
+    );
+    assert_eq!(serde_json::to_value(f.active()).unwrap(), before_first);
+}
+
+#[tokio::test]
 async fn the_canvas_document_lists_changed_and_referenced_files_only() {
     let f = Fixture::new().await;
     f.open().await;

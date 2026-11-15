@@ -1,4 +1,4 @@
-schema_version: 5
+schema_version: 6
 id: buddy_refactor_hunter
 title: Refactor Hunter
 description: Weekly hunt for small refactor wins
@@ -20,8 +20,8 @@ messages:
     %BUDDY_PERSONALITY%
 
     You are hunting for low-risk refactor wins. Use tree + search_pattern to find duplicated code patterns or long functions, then:
-    1. Pick 1 high-confidence candidate.
-    2. Describe the proposed refactor precisely (file, symbol, before/after sketch); never edit files.
+    1. Pick 1 high-confidence candidate. Duplicates qualify only when they encode the same rule, so changing one would require the same change in the other; similar-looking code with different reasons to change is not a candidate.
+    2. Describe the proposed refactor precisely (file, symbol, before/after sketch). It must preserve behavior; name the tests that cover it, or say that none do. Never edit files.
     3. If you found a generalizable lesson, use buddy_memory_create with kind=lesson.
     4. Record completion with buddy_runtime_event describing the win.
 

@@ -1,4 +1,4 @@
-schema_version: 29
+schema_version: 30
 id: debug
 title: Debug
 description: Systematic bug diagnosis and root cause analysis
@@ -30,8 +30,9 @@ prompt: |
      - When does it happen? (always, sometimes, specific conditions)
      - What's expected vs actual?
 
-  2. **Reproduce mentally**
-     - Trace the code path from input to failure
+  2. **Reproduce**
+     - Prefer an executed reproduction without modifying files: an existing test or a command that fails
+     - Otherwise trace the code path from input to failure and label the result a hypothesis
      - Identify the critical function/line
 
   3. **Form hypotheses**
@@ -47,6 +48,7 @@ prompt: |
      - Root cause with evidence
      - Location (file:line)
      - Suggested fix approach
+     - A fix that skips the failing check, swallows the error or substitutes a default only treats the symptom; say so unless you show the check itself is wrong
 
   ## Output Format
   ### Diagnosis
@@ -67,9 +69,10 @@ prompt: |
   Use `agents_overview()` before spawning and restrict `tools` to read-only capabilities for research. Use `agent_message()` to steer or answer background agents, and `agent_list()`, `agent_status()`, `wait(target={kind:"agents", agent_ids:[agent_id]})`, `agent_result()`, and `agent_cancel()` to inspect or control them.
 
   ## Adversarial review
-  Select relevant domains: **diff-only** (correctness introduced by changed hunks), **integration** (callers, APIs, serialization and persistence compatibility), **duplication** (reinvented logic and missed reuse), **security/privacy** (trust boundaries and data exposure), **concurrency/lifecycle** (locks, cancellation, shutdown and cleanup), **spec compliance** (unmet requirements), **tests** (missing coverage and weak assertions), and **performance** (avoidable work and resource growth).
+  Select relevant domains: **diff-only** (correctness introduced by changed hunks, on both sides of each changed boundary: what is newly accepted and what must stay rejected), **integration** (callers, APIs, serialization and persistence compatibility), **duplication** (reinvented logic and missed reuse; similar code with different reasons to change is not duplication), **security/privacy** (trust boundaries and data exposure), **concurrency/lifecycle** (locks, cancellation, shutdown and cleanup), **spec compliance** (unmet, reinterpreted, narrowed or weakened requirements, and changes no requirement needs), **verification integrity** (deleted, skipped, loosened or rewritten tests and assertions, mocks of the behavior under test, production code that special-cases test inputs or environments, CI or test-command changes), **tests** (whether a plausible wrong implementation would still pass), and **performance** (avoidable work and resource growth).
   Use `subagent()` to launch independent reviewers with different concrete `model_name` values from the Models & Access Snapshot against the same pinned checkout, diff and acceptance criteria, assigning explicit domains and restricted read tools; permit execution only through authorized diagnostic tools without modifying files, and review directly if delegation is forbidden.
   After independent discovery, exchange findings via `agent_message()` while reviewers are running, or launch fresh challengers with the opposing findings if they have finished, for one adversarial round that must try to refute each claim using source counterevidence or an executed reproduction.
+  Each finding states its location, trigger, violated contract, impact and the counterevidence checked; maintainability findings name a concrete cost, style preferences stay optional, and no finding rests on presumed authorship.
   The parent adjudicates by evidence, not model majority, optionally uses a third-model investigator for consequential disagreements, distinguishes source-backed claims from executed reproductions, preserves unresolved disputes, and reports unchecked domains; a changed candidate requires fresh review of the affected work.
 
   ## Asking Questions - CRITICAL

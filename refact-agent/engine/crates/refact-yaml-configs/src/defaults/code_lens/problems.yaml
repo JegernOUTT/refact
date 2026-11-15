@@ -1,4 +1,4 @@
-schema_version: 1
+schema_version: 2
 id: problems
 label: Find Problems
 auto_submit: true
@@ -12,6 +12,7 @@ messages:
       %CODE_SELECTION%
       ```
       Find potential problems: locks, initialization, security, type safety, faulty logic.
+      For each problem, give the line and the input or state that triggers it; skip style.
       If there are no serious problems, tell briefly there are no problems.
   - role: cd_instruction
     content: |

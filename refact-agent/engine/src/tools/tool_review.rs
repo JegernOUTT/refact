@@ -373,6 +373,7 @@ impl Tool for ToolReview {
                         confidence: parsed(args.get("confidence")),
                         assessment: parsed(args.get("assessment")),
                         disposition: parsed(args.get("status")),
+                        evidence: parsed(args.get("evidence")),
                     },
                     tool_call_id,
                 )

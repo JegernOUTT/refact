@@ -1,4 +1,4 @@
-schema_version: 1
+schema_version: 2
 id: bugs
 description: Find and fix bugs
 selection_needed: [1, 50]
@@ -11,3 +11,5 @@ messages:
       ```
       %CODE_SELECTION%
       ```
+      Fix only defects you can tie to a concrete input or state, and name that input or state for each
+      fix. Do not change other behavior, add fallbacks or silence errors. If you find no real bug, say so.

@@ -180,6 +180,7 @@ pub struct FindingInput {
     pub confidence: Option<Confidence>,
     pub assessment: Option<Assessment>,
     pub disposition: Option<Disposition>,
+    pub evidence: Option<Vec<String>>,
 }
 
 /// Adds a finding, or updates the one named by `id`; omitted fields keep their value.
@@ -230,6 +231,49 @@ pub async fn finding(
         Arc::new(move |store: &ReviewStore, review: &Review| {
             let current = candidate(review)?;
             let old = review.annotations.iter().find(|item| item.id == id);
+            let evidence_ids = match &input.evidence {
+                Some(ids) => {
+                    let mut seen = HashSet::new();
+                    let mut evidence_ids = Vec::new();
+                    for id in ids {
+                        let evidence = review
+                            .evidence
+                            .iter()
+                            .find(|item| &item.id == id)
+                            .ok_or_else(|| {
+                                format!("Evidence or source `{id}` is not in this review")
+                            })?;
+                        match evidence.applicability {
+                            Applicability::Current => {}
+                            Applicability::Historical => {
+                                return Err(format!(
+                                    "Evidence `{id}` was recorded for an earlier version of the change; cite evidence for the current comparison"
+                                ));
+                            }
+                            Applicability::NoLongerApplicable => {
+                                return Err(format!(
+                                    "Evidence `{id}` no longer applies to the current comparison; cite evidence for the current comparison"
+                                ));
+                            }
+                            Applicability::Unknown | Applicability::NeedsRevalidation => {
+                                return Err(match evidence.source {
+                                    EvidenceSource::Executed { .. } => format!(
+                                        "Evidence `{id}` is an execution record, which cannot be attributed to the current comparison; describe the run in the finding body or cite it on a tour page"
+                                    ),
+                                    _ => format!(
+                                        "Source `{id}` needs revalidation against the current comparison; record it again with review_source before citing it"
+                                    ),
+                                });
+                            }
+                        }
+                        if seen.insert(id) {
+                            evidence_ids.push(id.clone());
+                        }
+                    }
+                    evidence_ids
+                }
+                None => old.map(|item| item.evidence_ids.clone()).unwrap_or_default(),
+            };
             let anchors = match (&input.path, range) {
                 (Some(path), Some((start, end))) => {
                     let path = resolve_path(review, current, path)?;
@@ -298,9 +342,7 @@ pub async fn finding(
                         .or_else(|| old.map(|item| item.disposition.clone()))
                         .unwrap_or(Disposition::Open),
                     applicability: Applicability::Current,
-                    evidence_ids: old
-                        .map(|item| item.evidence_ids.clone())
-                        .unwrap_or_default(),
+                    evidence_ids,
                     run_id: None,
                 },
             })
@@ -314,6 +356,7 @@ pub async fn finding(
         .ok_or("The saved finding is unavailable")?;
     let receipt = json!({
         "finding": super::read::finding_line(saved),
+        "evidence_total": saved.evidence_ids.len(),
         "findings_total": review.annotations.len(),
     });
     Ok((review, receipt, quoted))

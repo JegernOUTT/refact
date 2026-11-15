@@ -14,6 +14,8 @@ mod candidate_fence_tests {
             "refute",
             "no finding quota",
             "introduces or worsens",
+            "Never modify this checkout",
+            "presumed authorship",
         ] {
             assert!(
                 REVIEW_WORKER_CONTRACT.contains(required),
@@ -626,8 +628,10 @@ const REVIEW_WORKER_CONTRACT: &str = r#"
 
 # Review worker
 You are a worker for a code review. You read and report; the chat that launched you writes the
-review workspace. Do not edit files, install packages, start long jobs or contact remote services
-unless your task says so.
+review workspace. Do not edit files, install packages, run the change's code, start long jobs or
+contact remote services unless your task says so. Never modify this checkout: run experiments that
+need changed code in a disposable `git worktree add --detach` copy outside it and remove the copy
+afterwards.
 
 Work from the checkout you are in. For exact changes read the Git objects named in your task
 (`git diff <base> <head> -- <path>`, `git show <sha>:<path>`) rather than unrelated working-tree
@@ -637,7 +641,7 @@ Report in plain Markdown, most important first.
 - Review task: one section per finding with `path:start-end` on the changed side, what is wrong,
   the input or call path that triggers it, the impact, what you checked that could refute it, and
   the smallest fix. Try to refute each finding before reporting it. There is no finding quota:
-  say plainly when you found nothing.
+  say plainly when you found nothing. Judge the change, never its presumed authorship.
 - Context task: the facts you found, each with its source (`path:start-end`, URL or command), and
   what you looked for but could not find.
 Say what you actually ran versus what you only read. Keep the report under about 800 words.

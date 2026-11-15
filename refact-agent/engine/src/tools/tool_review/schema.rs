@@ -94,6 +94,7 @@ pub fn spec(kind: ReviewToolKind) -> (&'static str, &'static str, Value) {
                     "confidence": choice(&["unknown", "low", "medium", "high"], "How sure you are. Default medium."),
                     "assessment": choice(&["unassessed", "supported", "disputed", "refuted"], "Whether evidence backs it. Default unassessed."),
                     "status": choice(&["open", "repair_proposed", "fixed", "risk_accepted", "dismissed"], "Default open."),
+                    "evidence": {"type":"array","items":{"type":"string"},"description":"Ids of review sources (from review_source) that support this finding. Replaces the finding's list when given; omit to keep it; an empty list clears it."},
                 }),
                 &[],
             ),
