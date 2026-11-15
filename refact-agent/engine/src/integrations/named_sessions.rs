@@ -719,6 +719,37 @@ pub(super) async fn maintain_named_sessions(app: &crate::app_state::AppState, sh
     reconcile_quarantines(&reg, &Arc::downgrade(&app.gcx));
 }
 
+pub(crate) async fn shutdown_named_sessions(
+    app: &crate::app_state::AppState,
+) -> Result<(), String> {
+    app.gcx
+        .shutdown_flag
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    maintain_named_sessions(app, true).await;
+    let owner = Arc::downgrade(&app.gcx);
+    let workers = WORKERS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let reg = registry();
+    let map = locked(&reg);
+    let entries = map
+        .values()
+        .filter(|entry| Weak::ptr_eq(&entry.owner.gcx, &owner))
+        .count();
+    let pending = workers
+        .iter()
+        .filter(|worker| Weak::ptr_eq(&worker.owner, &owner))
+        .count();
+    if entries == 0 && pending == 0 {
+        Ok(())
+    } else {
+        Err(format!(
+            "{entries} app-owned named session entries (including retained quarantines) and {pending} lifecycle workers remain"
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -878,31 +909,99 @@ mod tests {
     }
     #[tokio::test(flavor = "multi_thread")]
     async fn shutdown_reaps_only_own_workers_while_foreign_worker_is_blocked() {
-        let (_gcx, owner, _cache) = owner().await;
-        let (_foreign_gcx, foreign, _foreign_cache) = self::owner().await;
+        let (gcx, owner, _cache) = owner().await;
+        let (foreign_gcx, foreign, _foreign_cache) = self::owner().await;
+        let app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
+        let reg = registry();
+        let foreign_key = (foreign.key.clone(), "foreign".into());
+        locked(&reg).insert(
+            foreign_key.clone(),
+            reservation(foreign.clone(), "foreign", "foreign-generation"),
+        );
         let (started, ready) = tokio::sync::oneshot::channel();
         let (release, blocked) = std::sync::mpsc::channel();
         spawn_owned(foreign.gcx.clone(), "blocked".into(), move || {
             started.send(()).unwrap();
-            blocked.recv().unwrap();
+            let _ = blocked.recv();
         });
         ready.await.unwrap();
-        spawn_owned(owner.gcx.clone(), "ours".into(), || {});
-        // A completion deadline is only a hang guard: the channel proves the foreign
-        // worker cannot finish before this scoped shutdown returns.
-        let result =
-            tokio::time::timeout(Duration::from_secs(2), reap_workers(&owner.gcx, true)).await;
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let (own_release, blocked) = std::sync::mpsc::channel();
+        let mut create = Box::pin(create_named_session_with_launch(
+            owner.clone(),
+            "late-shutdown",
+            BrowserLaunchOptions::default(),
+            Instant::now() + Duration::from_secs(30),
+            move |profile, _| {
+                started.send(profile).unwrap();
+                let _ = blocked.recv();
+                Err("controlled late launch failure".into())
+            },
+        ));
+        let profile = tokio::select! {
+            result = &mut create => panic!("unexpected early result: {result:?}"),
+            profile = ready => profile.unwrap(),
+        };
+        drop(create);
+        let key = (owner.key.clone(), "late-shutdown".into());
+        let mut shutdown = Box::pin(shutdown_named_sessions(&app));
+        assert!(futures::poll!(&mut shutdown).is_pending());
+        assert!(gcx.shutdown_flag.load(std::sync::atomic::Ordering::Relaxed));
+        assert!(owner.check().is_err());
+        {
+            let map = locked(&reg);
+            let entry = map.get(&key).unwrap();
+            assert!(entry.closing);
+            assert!(entry.runtime.is_none());
+            assert_eq!(entry.info.state, "closing");
+            assert!(!map.get(&foreign_key).unwrap().closing);
+        }
+        assert!(profile.exists());
+        drop(shutdown);
+        assert!(WORKERS
+            .get()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|worker| Weak::ptr_eq(&worker.owner, &owner.gcx)));
+        let mut shutdown = Box::pin(shutdown_named_sessions(&app));
+        assert!(futures::poll!(&mut shutdown).is_pending());
+        own_release.send(()).unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(2), shutdown).await;
+        let foreign_retained =
+            WORKERS.get().unwrap().lock().unwrap().iter().any(|worker| {
+                Weak::ptr_eq(&worker.owner, &foreign.gcx) && !worker.task.is_finished()
+            });
         release.send(()).unwrap();
         reap_workers(&foreign.gcx, true).await;
-        assert!(
-            result.is_ok(),
-            "shutdown awaited a foreign application worker"
-        );
+        assert!(result
+            .expect("shutdown awaited a foreign application worker")
+            .is_ok());
+        assert!(foreign_retained);
+        assert!(!foreign_gcx
+            .shutdown_flag
+            .load(std::sync::atomic::Ordering::Relaxed));
+        assert!(!profile.exists());
+        assert!(!WORKERS
+            .get()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|worker| Weak::ptr_eq(&worker.owner, &owner.gcx)));
+        let mut map = locked(&reg);
+        assert!(!map
+            .values()
+            .any(|entry| Weak::ptr_eq(&entry.owner.gcx, &owner.gcx)));
+        assert!(!map.get(&foreign_key).unwrap().closing);
+        map.remove(&foreign_key);
     }
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn quarantined_failed_launch_releases_reservation_only_after_lock_clears() {
-        let (_gcx, owner, cache) = owner().await;
+        let (gcx, owner, cache) = owner().await;
+        let app = crate::app_state::AppState::from_gcx(gcx).await;
         let (profile_tx, profile_rx) = tokio::sync::oneshot::channel();
         let error = create_named_session_with_launch(
             owner.clone(),
@@ -927,13 +1026,13 @@ mod tests {
         assert!(error.session_id.is_some());
         let reg = registry();
         let key = (owner.key.clone(), "failed".into());
-        reconcile_quarantines(&reg, &owner.gcx);
+        assert!(shutdown_named_sessions(&app).await.is_err());
         assert!(
             locked(&reg).contains_key(&key),
             "ambiguous foreign process retains quota"
         );
         std::fs::remove_file(profile.join("SingletonLock")).unwrap();
-        reconcile_quarantines(&reg, &owner.gcx);
+        shutdown_named_sessions(&app).await.unwrap();
         assert!(
             !locked(&reg).contains_key(&key),
             "failed runtime-less launch must be reinspected"

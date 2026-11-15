@@ -467,6 +467,29 @@ class InventoryTests(unittest.TestCase):
         self.assertIn('no unknown process was killed', script)
         self.assertIn("Fail \"Found $($profiles.Count) named profile leftovers\"", script)
 
+    def test_windows_owned_tree_identity_does_not_require_command_line(self):
+        script = (ci.ROOT / 'tools/dev/browser_windows_roadmap_qualification.ps1').read_text()
+        body = script.split('function Capture-OwnedTree', 1)[1].split('\nfunction ', 1)[0]
+        self.assertNotIn('-not $p.CommandLine) { throw', script)
+        self.assertNotIn('CommandLine) { throw', body)
+        self.assertIn('$worker.StartTime.ToUniversalTime()', body)
+        self.assertIn("throw 'Cannot verify live worker identity'", body)
+        self.assertIn('$q.CreationDate -lt $parentCreated', body)
+        self.assertIn('command_unavailable = -not $q.CommandLine', body)
+        self.assertEqual(body.count('Get-CimInstance Win32_Process -Filter "ProcessId = $id"'), 1)
+        self.assertIn('$snapshotCreated = $q.CreationDate', body)
+        self.assertIn('$snapshotCreated -and $q.CreationDate -ne $snapshotCreated', body)
+        for reason in ["'vanished' $false", "'identity_unavailable' $true", "'reused_or_reparented' $false"]:
+            self.assertIn(reason, body)
+        gap = script.split('function Add-InspectionGap', 1)[1].split('\nfunction ', 1)[0]
+        self.assertIn('if ($incomplete) { $script:inspectionFailed = $true }', gap)
+        self.assertIn('-ge 128) { $script:inspectionGapsOmitted++; return }', gap)
+        self.assertIn("if ($inspectionFailed) { Fail 'Owned process inspection was incomplete' }", script)
+        self.assertIn('inspection_gaps = $inspectionGaps.ToArray(); inspection_gaps_omitted = $inspectionGapsOmitted', script)
+        self.assertIn("if ($p -and $p.CreationDate.ToUniversalTime().ToString('o') -eq $entry.created) { $remaining += $entry }", script)
+        for forbidden in ['Stop-Process', 'taskkill', '.Kill()', 'Set-Acl', 'Registry]::']:
+            self.assertNotIn(forbidden, body + gap)
+
 
 if __name__ == '__main__':
     unittest.main()

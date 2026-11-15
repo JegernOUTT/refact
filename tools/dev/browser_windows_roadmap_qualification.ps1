@@ -13,30 +13,51 @@ $failed = $false
 $failures = [System.Collections.Generic.List[string]]::new()
 $observed = @{}
 $inspectionFailed = $false
+$inspectionGaps = [System.Collections.Generic.List[object]]::new()
+$inspectionGapKeys = @{}
+$inspectionGapsOmitted = 0
 $controlRoot = $null
+function Add-InspectionGap([int]$id, [int]$parent, [string]$reason, [bool]$incomplete) {
+    if ($incomplete) { $script:inspectionFailed = $true }
+    $key = "$id/$parent/$reason"
+    if ($script:inspectionGapKeys.ContainsKey($key)) { return }
+    if ($script:inspectionGaps.Count -ge 128) { $script:inspectionGapsOmitted++; return }
+    $script:inspectionGapKeys[$key] = $true
+    $script:inspectionGaps.Add([ordered]@{ pid = $id; parent = $parent; reason = $reason; incomplete = $incomplete; at = [DateTime]::UtcNow.ToString('o') })
+}
 function Capture-OwnedTree {
     # PID plus creation time, not PID alone, is the process identity. Only follow
-    # parent links while the parent identity is still present in the same snapshot.
+    # parent links while the parent identity is still present in the same snapshot
+    # and the child was created no earlier than that parent. CommandLine is evidence only.
     $all = @(Get-CimInstance Win32_Process -ErrorAction Stop)
     $live = @{}
     foreach ($p in $all) { $live[[int]$p.ProcessId] = $p }
     $root = $live[[int]$worker.Id]
-    if (-not $root -or -not $root.CreationDate) { throw 'Cannot inspect live worker identity' }
-    $known = @{}; $known[[int]$worker.Id] = $true
+    if (-not $root -or -not $root.CreationDate -or [Math]::Abs(($root.CreationDate.ToUniversalTime() - $worker.StartTime.ToUniversalTime()).TotalSeconds) -gt 1) { throw 'Cannot verify live worker identity' }
+    $known = @{}; $known[[int]$worker.Id] = $root
+    $seen = @{}
     do {
         $added = $false
-        foreach ($p in $all) {
-            $id = [int]$p.ProcessId
-            if (-not $known.ContainsKey($id) -and $known.ContainsKey([int]$p.ParentProcessId)) {
-                if (-not $p.CreationDate -or -not $p.Name -or -not $p.CommandLine) { throw "Cannot inspect owned descendant $id" }
-                $known[$id] = $true; $added = $true
+        foreach ($candidate in $all) {
+            $id = [int]$candidate.ProcessId; $parentId = [int]$candidate.ParentProcessId
+            if ($known.ContainsKey($id) -or $seen.ContainsKey($id) -or -not $known.ContainsKey($parentId)) { continue }
+            $seen[$id] = $true; $q = $candidate
+            $parentCreated = $known[$parentId].CreationDate
+            if (-not $q.CreationDate -or -not $q.Name) {
+                $snapshotCreated = $q.CreationDate
+                $q = Get-CimInstance Win32_Process -Filter "ProcessId = $id" -ErrorAction Stop
+                if (-not $q) { Add-InspectionGap $id $parentId 'vanished' $false; continue }
+                if (-not $q.CreationDate -or -not $q.Name) { Add-InspectionGap $id $parentId 'identity_unavailable' $true; continue }
+                if ([int]$q.ParentProcessId -ne $parentId -or $q.CreationDate -lt $parentCreated -or ($snapshotCreated -and $q.CreationDate -ne $snapshotCreated)) { Add-InspectionGap $id $parentId 'reused_or_reparented' $false; continue }
             }
+            if ($q.CreationDate -lt $parentCreated) { continue }
+            $known[$id] = $q; $added = $true
         }
     } while ($added)
     foreach ($id in $known.Keys) {
-        $p = $live[$id]
-        $key = "$id/$($p.CreationDate.ToUniversalTime().ToString('o'))"
-        $script:observed[$key] = [ordered]@{ pid = $id; parent = [int]$p.ParentProcessId; created = $p.CreationDate.ToUniversalTime().ToString('o'); name = $p.Name; command = $p.CommandLine }
+        $q = $known[$id]
+        $created = $q.CreationDate.ToUniversalTime().ToString('o')
+        $script:observed["$id/$created"] = [ordered]@{ pid = $id; parent = [int]$q.ParentProcessId; created = $created; name = $q.Name; command = $q.CommandLine; command_unavailable = -not $q.CommandLine }
     }
 }
 function Fail([string]$message) { $script:failed = $true; $script:failures.Add($message); Write-Warning $message }
@@ -266,6 +287,6 @@ finally {
         $profiles = @(Get-ChildItem -Path $owned -Directory -Recurse -ErrorAction Stop | Where-Object { $_.Name -eq 'named_browser_profiles' } | ForEach-Object { Get-ChildItem -Force $_.FullName -ErrorAction Stop } | Where-Object { -not ($_.Name -eq '.allocation.lock' -and -not $_.PSIsContainer -and -not ($_.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) })
         if ($profiles.Count) { Fail "Found $($profiles.Count) named profile leftovers" }
     } catch { Fail "Cleanup inspection: $_" }
-    @{ passed = -not $failed; failures = @($failures); owned_root = $owned; control_root = $controlRoot } | ConvertTo-Json -Depth 4 | Set-Content -Encoding utf8 (Join-Path $evidence 'qualification-result.json')
+    @{ passed = -not $failed; failures = @($failures); owned_root = $owned; control_root = $controlRoot; inspection_gaps = $inspectionGaps.ToArray(); inspection_gaps_omitted = $inspectionGapsOmitted } | ConvertTo-Json -Depth 4 | Set-Content -Encoding utf8 (Join-Path $evidence 'qualification-result.json')
 }
 if ($failed) { exit 1 }
