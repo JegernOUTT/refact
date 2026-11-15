@@ -1107,6 +1107,16 @@ pub fn chrome_launch_options<'a>(
     }
 }
 
+#[cfg(windows)]
+fn windows_runtime_artifacts(
+) -> Result<Arc<std::sync::OnceLock<Result<Arc<artifact_store::ArtifactStore>, String>>>, String> {
+    let store = Arc::new(
+        artifact_store::ArtifactStore::new(&std::env::temp_dir())
+            .map_err(|error| format!("Failed to initialize Windows runtime artifacts: {error}"))?,
+    );
+    Ok(Arc::new(std::sync::OnceLock::from(Ok(store))))
+}
+
 impl BrowserRuntime {
     pub fn maintain_artifacts(&self) -> Result<(), String> {
         match self.artifact_store.get() {
@@ -1123,6 +1133,8 @@ impl BrowserRuntime {
     }
 
     pub fn launch(profile_dir: PathBuf, options: BrowserLaunchOptions) -> Result<Self, String> {
+        #[cfg(windows)]
+        let artifact_store = windows_runtime_artifacts()?;
         std::fs::create_dir_all(&profile_dir)
             .map_err(|e| format!("Failed to create profile dir {:?}: {}", profile_dir, e))?;
 
@@ -1181,6 +1193,9 @@ impl BrowserRuntime {
             profile_dir,
             downloads_dir,
             artifacts_dir,
+            #[cfg(windows)]
+            artifact_store,
+            #[cfg(not(windows))]
             artifact_store: Arc::new(std::sync::OnceLock::new()),
             allowed_roots: Vec::new(),
             launch_options: options,
@@ -1206,6 +1221,8 @@ impl BrowserRuntime {
     }
 
     pub fn connect(ws_url: String, options: BrowserLaunchOptions) -> Result<Self, String> {
+        #[cfg(windows)]
+        let artifact_store = windows_runtime_artifacts()?;
         let idle_timeout = options.idle_timeout_or_default();
         let mask_passwords = options.mask_passwords;
         let browser =
@@ -1254,6 +1271,9 @@ impl BrowserRuntime {
             profile_dir: PathBuf::new(),
             downloads_dir,
             artifacts_dir,
+            #[cfg(windows)]
+            artifact_store,
+            #[cfg(not(windows))]
             artifact_store: Arc::new(std::sync::OnceLock::new()),
             allowed_roots: Vec::new(),
             launch_options: options,
@@ -1310,6 +1330,10 @@ impl BrowserRuntime {
             roots.push(self.profile_dir.join("downloads"));
         }
         roots.push(self.downloads_dir.clone());
+        #[cfg(windows)]
+        if let Some(Ok(store)) = self.artifact_store.get() {
+            roots.push(store.managed_directory().to_path_buf());
+        }
         roots
     }
 
@@ -2573,6 +2597,163 @@ pub fn setup_recording_for_runtime(runtime: &mut BrowserRuntime) -> Result<(), S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_owned_profile_artifact_ancestry_is_rejected() {
+        let cache = tempfile::tempdir().unwrap();
+        let profile = windows_profiles::WindowsOwnedProfile::create(cache.path()).unwrap();
+        let old_root = profile.path().join("artifacts").join("runtime-fixture");
+        let error = match artifact_store::ArtifactStore::new(&old_root) {
+            Ok(_) => panic!("owned profile must not be pinned as an artifact ancestor"),
+            Err(error) => error,
+        };
+        assert!(error.contains("os error 32"), "unexpected error: {error}");
+        assert!(!old_root.exists());
+        profile.cleanup(true, true).unwrap();
+        assert!(!profile.path().exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_runtime_artifacts_are_isolated_and_outlive_runtime_state() {
+        const REPORT: &[u8] = br#"{"headers":{"Authorization":"[REDACTED]"},"ok":true}"#;
+        let cache = tempfile::tempdir().unwrap();
+        let profile = windows_profiles::WindowsOwnedProfile::create(cache.path()).unwrap();
+        let legacy_dir = profile.path().join("artifacts").join("runtime-fixture");
+        let legacy_nested = legacy_dir.join("nested");
+        std::fs::create_dir_all(&legacy_nested).unwrap();
+        let legacy_file = legacy_nested.join("report.json");
+        std::fs::write(&legacy_file, REPORT).unwrap();
+        let state = windows_runtime_artifacts().unwrap();
+        let shared_state = state.clone();
+        assert!(Arc::ptr_eq(&state, &shared_state));
+        let store = state.get().unwrap().as_ref().unwrap().clone();
+        let artifacts_dir = store.managed_directory().to_path_buf();
+        assert!(!artifacts_dir.starts_with(&legacy_dir));
+        assert_eq!(
+            artifacts_dir.parent().unwrap().canonicalize().unwrap(),
+            std::env::temp_dir().canonicalize().unwrap()
+        );
+        assert!(artifacts_dir
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .starts_with("managed-"));
+        assert!(!artifacts_dir
+            .canonicalize()
+            .unwrap()
+            .starts_with(profile.path().canonicalize().unwrap()));
+        assert!(std::fs::rename(&artifacts_dir, artifacts_dir.with_extension("moved")).is_err());
+        let saved = store.write(REPORT, "application/json").unwrap();
+        assert_eq!(saved.path.parent(), Some(artifacts_dir.as_path()));
+        let chunk = store.read_report(&saved.id, 0, REPORT.len()).unwrap();
+        assert_eq!(chunk.content.as_bytes(), REPORT);
+        assert_eq!(chunk.total_bytes, REPORT.len());
+        assert_eq!(chunk.next_offset, None);
+        assert_eq!(std::fs::read(&saved.path).unwrap(), REPORT);
+        let other_state = windows_runtime_artifacts().unwrap();
+        let other = other_state.get().unwrap().as_ref().unwrap();
+        let other_dir = other.managed_directory().to_path_buf();
+        assert_ne!(artifacts_dir, other_dir);
+        assert!(other.read_report(&saved.id, 0, REPORT.len()).is_err());
+        let sibling = other.write(REPORT, "application/json").unwrap();
+        let attached_dir = std::env::temp_dir()
+            .join("refact-browser-artifacts")
+            .join(Uuid::new_v4().to_string());
+        std::fs::create_dir_all(attached_dir.join("nested")).unwrap();
+        std::fs::write(attached_dir.join("nested/report.json"), REPORT).unwrap();
+        assert!(!artifacts_dir.starts_with(&attached_dir));
+        for legacy_root in [&legacy_dir, &attached_dir] {
+            let roots = [artifacts_dir.clone()];
+            assert!(resolve_contained_path(
+                saved.path.to_str().unwrap(),
+                "Report",
+                legacy_root,
+                &[],
+            )
+            .is_err());
+            assert_eq!(
+                resolve_contained_path(
+                    saved.path.to_str().unwrap(),
+                    "Report",
+                    legacy_root,
+                    &roots,
+                )
+                .unwrap(),
+                saved.path.canonicalize().unwrap()
+            );
+            assert_eq!(
+                resolve_contained_path("nested/report.json", "Report", legacy_root, &roots)
+                    .unwrap(),
+                legacy_root
+                    .join("nested/report.json")
+                    .canonicalize()
+                    .unwrap()
+            );
+            assert!(resolve_contained_path(&saved.id, "Report", legacy_root, &roots).is_err());
+            let error = resolve_contained_path(
+                sibling.path.to_str().unwrap(),
+                "Report",
+                legacy_root,
+                &roots,
+            )
+            .unwrap_err();
+            assert!(error.contains("escapes the allowed directories"), "{error}");
+        }
+        let traversal = format!(
+            "../../{}/{}",
+            other_dir.file_name().unwrap().to_str().unwrap(),
+            sibling.id
+        );
+        assert!(resolve_contained_path(
+            &traversal,
+            "Report",
+            &attached_dir,
+            &[artifacts_dir.clone()],
+        )
+        .is_err());
+        drop(other_state);
+        assert!(!other_dir.exists());
+
+        std::fs::remove_dir_all(&attached_dir).unwrap();
+        assert!(!attached_dir.exists());
+        profile.cleanup(true, true).unwrap();
+        assert!(!profile.path().exists());
+        assert!(!legacy_file.exists());
+        drop(state);
+        drop(shared_state);
+        assert!(artifacts_dir.exists());
+        assert_eq!(
+            store
+                .read_report(&saved.id, 0, REPORT.len())
+                .unwrap()
+                .content
+                .as_bytes(),
+            REPORT
+        );
+        drop(store);
+        assert!(!artifacts_dir.exists());
+        assert!(!saved.path.exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_unused_runtime_artifact_namespace_is_removed_on_drop() {
+        let state = windows_runtime_artifacts().unwrap();
+        let artifacts_dir = state
+            .get()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .managed_directory()
+            .to_path_buf();
+        assert!(state.get().unwrap().is_ok());
+        assert_eq!(std::fs::read_dir(&artifacts_dir).unwrap().count(), 0);
+        drop(state);
+        assert!(!artifacts_dir.exists());
+    }
 
     #[test]
     fn reconnect_waits_for_every_adopted_target_before_listener_bootstrap() {

@@ -753,6 +753,9 @@ mod windows_platform {
                 clock,
             })
         }
+        pub(crate) fn managed_directory(&self) -> &Path {
+            &self.display_dir
+        }
         fn evict(&self, state: &mut State, id: &str) -> Result<(), String> {
             let entry = state.entries.get_mut(id).ok_or("artifact not found")?;
             validate(entry, entry.bytes)?;
