@@ -324,7 +324,7 @@ mod tests {
     async fn reopen_scenario(scenario: u8) {
         use super::*;
         use crate::app_state::AppState;
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_paths::tempdir();
         let root = temp.path().join("repo");
         std::fs::create_dir(&root).unwrap();
         let repo = git2::Repository::init(&root).unwrap();

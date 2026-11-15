@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { act } from "react-dom/test-utils";
+import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import {
+  cleanup,
   render,
   screen,
   fireEvent,
@@ -18,7 +20,34 @@ import { AgentWorkSection } from "./AgentWorkSection";
 import { workApi } from "../../../services/refact/work";
 import * as subscription from "../../../services/refact/workSubscription";
 
-afterEach(() => vi.restoreAllMocks());
+let usesTooltipClock = false;
+
+function tooltipUser() {
+  vi.useFakeTimers({
+    toFake: ["setTimeout", "clearTimeout"],
+    shouldAdvanceTime: true,
+  });
+  usesTooltipClock = true;
+  return userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+}
+
+afterEach(async () => {
+  try {
+    if (usesTooltipClock) {
+      cleanup();
+      for (let pass = 0; pass < 3 && vi.getTimerCount() > 0; pass += 1) {
+        await act(async () => {
+          await vi.runOnlyPendingTimersAsync();
+        });
+      }
+      expect(vi.getTimerCount()).toBe(0);
+    }
+  } finally {
+    if (usesTooltipClock) vi.useRealTimers();
+    usesTooltipClock = false;
+    vi.restoreAllMocks();
+  }
+});
 
 const renderPanel = () =>
   render(<WorkPanel />, {
@@ -41,6 +70,7 @@ function settingsHandler() {
 
 describe("Work panel", () => {
   it("keeps project-work selections on the generic callback", async () => {
+    const user = tooltipUser();
     settingsHandler();
     server.use(
       http.get("*/v1/work", () =>
@@ -52,7 +82,7 @@ describe("Work panel", () => {
     );
     const onNavigate = vi.fn();
     const onAgentNavigate = vi.fn();
-    const { user } = render(
+    render(
       <AgentWorkSection
         chatId={null}
         onNavigate={onNavigate}
@@ -596,7 +626,8 @@ describe("Work panel", () => {
   });
 
   it("selects overflow views by keyboard and retains the current view label", async () => {
-    const { user } = render(<AgentWorkSection chatId={null} />);
+    const user = tooltipUser();
+    render(<AgentWorkSection chatId={null} />);
     const nav = screen.getByRole("group", { name: "Agent work scope" });
     const more = within(nav).getByRole("button", { name: "More views" });
     more.focus();
@@ -620,6 +651,7 @@ describe("Work panel", () => {
   });
 
   it("keeps every exact dock label keyboard reachable and mounts only the selected view", async () => {
+    const user = tooltipUser();
     const requests: string[] = [];
     server.use(
       http.get("*/v1/:surface", ({ request, params }) => {
@@ -638,7 +670,7 @@ describe("Work panel", () => {
       }),
     );
     settingsHandler();
-    const { user } = render(<AgentWorkSection chatId={null} />, {
+    render(<AgentWorkSection chatId={null} />, {
       preloadedState: {
         config: {
           host: "ide",
