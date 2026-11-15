@@ -1104,7 +1104,7 @@ mod tests {
                 supports_temperature: false,
                 supports_max_completion_tokens: false,
                 eof_is_done: false,
-                supports_web_search: false,
+                native_web_search_enabled: false,
                 supports_cache_control: false,
             }
         };

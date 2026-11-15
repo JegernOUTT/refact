@@ -69,6 +69,8 @@ describe("WebTool", () => {
             title: "Async Programming in Rust",
             url: "https://rust-lang.github.io/async-book/",
             snippet: "The official async book for Rust.",
+            sources: ["exa", "tavily"],
+            published_date: "2026-11-14",
           },
           {
             title: "Tokio Tutorial",
@@ -99,6 +101,9 @@ describe("WebTool", () => {
     expect(
       screen.getByText("The official async book for Rust."),
     ).toBeInTheDocument();
+    expect(screen.getByText("exa")).toBeInTheDocument();
+    expect(screen.getByText("tavily")).toBeInTheDocument();
+    expect(screen.getByText("2026-11-14")).toBeInTheDocument();
     expect(screen.queryByText("Old Text Only")).not.toBeInTheDocument();
   });
 
@@ -116,7 +121,7 @@ describe("WebTool", () => {
     const store = makeStore({
       tool_call_id: "tc-search-2",
       content:
-        'Web search results for "example search":\n\n1. [Example](https://example.com)\n   Example snippet\n\n2. [Docs](https://docs.example.com)\n   Another snippet\n',
+        'Web search results for "example search":\n\n1. [Example](https://example.com)\n   Example snippet\n\n2. [Docs](https://docs.example.com)\n   Another snippet\n   Published: 2026-11-14 · Sources: parallel, brave\n\nProvider notes:\n   3. [Ignore](https://ignore.example)\nRemember to cite sources.\n',
     });
 
     render(
@@ -135,6 +140,64 @@ describe("WebTool", () => {
     expect(screen.getByText("Example")).toBeInTheDocument();
     expect(screen.getByText("https://example.com")).toBeInTheDocument();
     expect(screen.getByText("Example snippet")).toBeInTheDocument();
+    expect(screen.getByText("parallel")).toBeInTheDocument();
+    expect(screen.getByText("brave")).toBeInTheDocument();
+    expect(screen.getByText("2026-11-14")).toBeInTheDocument();
+    expect(screen.queryByText("Ignore")).not.toBeInTheDocument();
+  });
+
+  test.each([
+    ["Published: 2026-11-14", "2026-11-14"],
+    ["Sources: exa, tavily", "tavily"],
+    ["Published: 2026-11-14 · Sources: exa", "exa"],
+  ])("parses metadata without a snippet: %s", async (metadata, visible) => {
+    const user = userEvent.setup();
+    const toolCall: ToolCall = {
+      id: "tc-metadata-only",
+      index: 0,
+      function: { name: "web_search", arguments: '{"query":"example"}' },
+    };
+    const store = makeStore({
+      tool_call_id: toolCall.id ?? "",
+      content: `1. [Example](https://example.com)\n   ${metadata}\n`,
+    });
+    render(
+      <Provider store={store}>
+        <Theme>
+          <WebTool toolCall={toolCall} toolType="web_search" />
+        </Theme>
+      </Provider>,
+    );
+    await user.click(screen.getByRole("button", { expanded: false }));
+    expect(screen.getByText(visible)).toBeInTheDocument();
+  });
+
+  test("preserves old snippets starting with metadata labels", async () => {
+    const user = userEvent.setup();
+    const toolCall: ToolCall = {
+      id: "tc-legacy-snippet",
+      index: 0,
+      function: { name: "web_search", arguments: '{"query":"example"}' },
+    };
+    const store = makeStore({
+      tool_call_id: toolCall.id ?? "",
+      content:
+        "1. [Example](https://example.com)\n   Sources: documentation explains the feature.\n   Sources: exa\n   Published: not a publication date\n",
+    });
+    render(
+      <Provider store={store}>
+        <Theme>
+          <WebTool toolCall={toolCall} toolType="web_search" />
+        </Theme>
+      </Provider>,
+    );
+    await user.click(screen.getByRole("button", { expanded: false }));
+    expect(
+      screen.getByText(
+        "Sources: documentation explains the feature. Sources: exa Published: not a publication date",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("exa")).not.toBeInTheDocument();
   });
 
   test("keeps the specialized web card when enrichment is present", async () => {

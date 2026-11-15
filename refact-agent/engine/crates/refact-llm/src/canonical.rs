@@ -9,6 +9,8 @@ use crate::params::{CacheControl, CommonParams, ReasoningIntent};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LlmRequest {
     pub model_id: String,
+    #[serde(default)]
+    pub native_web_search_enabled: bool,
     pub messages: Vec<ChatMessage>,
     pub params: CommonParams,
     #[serde(default)]
@@ -58,6 +60,7 @@ impl LlmRequest {
     pub fn new(model_id: String, messages: Vec<ChatMessage>) -> Self {
         Self {
             model_id,
+            native_web_search_enabled: false,
             messages,
             params: CommonParams::default(),
             reasoning: ReasoningIntent::Off,

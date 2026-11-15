@@ -235,6 +235,20 @@ fn canonicalize_url(url: &str) -> String {
     }
 }
 
+fn merge_search_metadata(existing: &mut SearchResult, incoming: &SearchResult) {
+    for source in incoming.sources.iter().chain(incoming.source.iter()) {
+        if !existing.sources.contains(source) {
+            existing.sources.push(source.clone());
+        }
+    }
+    if existing.published_date.is_none() {
+        existing.published_date = incoming.published_date.clone();
+    }
+    if incoming.snippet.chars().count() > existing.snippet.chars().count() {
+        existing.snippet = incoming.snippet.clone();
+    }
+}
+
 fn deduplicate_search_results_for_postprocessing(results: Vec<SearchResult>) -> Vec<SearchResult> {
     let mut deduped: Vec<SearchResult> = Vec::new();
     let mut by_url: HashMap<String, usize> = HashMap::new();
@@ -242,19 +256,22 @@ fn deduplicate_search_results_for_postprocessing(results: Vec<SearchResult>) -> 
 
     for mut result in results {
         result.title = result.title.trim().to_string();
-        result.url = canonicalize_url(&result.url);
+        result.url = result.url.trim().to_string();
         result.snippet = result.snippet.trim().to_string();
+        if let Some(source) = &result.source {
+            if !result.sources.contains(source) {
+                result.sources.insert(0, source.clone());
+            }
+        }
 
-        if result.title.is_empty() || result.url.is_empty() {
+        let url_key = canonicalize_url(&result.url);
+        if result.title.is_empty() || url_key.is_empty() {
             continue;
         }
 
-        let url_key = result.url.clone();
         if let Some(existing_idx) = by_url.get(&url_key).copied() {
             let existing = &mut deduped[existing_idx];
-            if existing.snippet.is_empty() && !result.snippet.is_empty() {
-                existing.snippet = result.snippet.clone();
-            }
+            merge_search_metadata(existing, &result);
             continue;
         }
 
@@ -264,9 +281,7 @@ fn deduplicate_search_results_for_postprocessing(results: Vec<SearchResult>) -> 
         );
         if let Some(existing_idx) = by_title_snippet.get(&key).copied() {
             let existing = &mut deduped[existing_idx];
-            if existing.snippet.is_empty() && !result.snippet.is_empty() {
-                existing.snippet = result.snippet.clone();
-            }
+            merge_search_metadata(existing, &result);
             continue;
         }
 
@@ -301,6 +316,14 @@ fn extract_search_results_from_extra(msg: &ChatMessage) -> Option<Vec<SearchResu
             url,
             snippet,
             source,
+            sources: obj
+                .get("sources")
+                .and_then(|v| serde_json::from_value(v.clone()).ok())
+                .unwrap_or_default(),
+            published_date: obj
+                .get("published_date")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
         });
     }
 
@@ -340,16 +363,64 @@ fn deduplicate_web_search_tool_results(
 
         let deduped = deduplicate_search_results_for_postprocessing(search_results);
         if let Some(extra_results) = msg.extra.get_mut("search_results") {
-            *extra_results = serde_json::json!(deduped.clone());
+            *extra_results = serde_json::json!(deduped
+                .iter()
+                .map(|r| {
+                    let mut value = serde_json::to_value(r).unwrap_or_default();
+                    value["sources"] = serde_json::json!(r.sources);
+                    value["citation_span"] = serde_json::json!(r.snippet.chars().count());
+                    value
+                })
+                .collect::<Vec<_>>());
         }
 
         if let ChatContent::SimpleText(text) = &mut msg.content {
             let query = text
                 .strip_prefix("Web search results for \"")
                 .and_then(|rest| rest.split_once("\":\n\n"))
-                .map(|(q, _)| q.to_string())
+                .map(|(query, _)| query.to_string())
+                .or_else(|| {
+                    existing_messages
+                        .iter()
+                        .filter_map(|message| message.tool_calls.as_ref())
+                        .flatten()
+                        .find(|call| call.id == msg.tool_call_id)
+                        .and_then(|call| {
+                            serde_json::from_str::<serde_json::Value>(&call.function.arguments).ok()
+                        })
+                        .and_then(|args| {
+                            let query = args.get("query")?.as_str()?.to_string();
+                            let extra: Vec<String> = match args.get("extra_queries") {
+                                Some(serde_json::Value::Array(values)) => values
+                                    .iter()
+                                    .filter_map(|value| value.as_str().map(str::to_string))
+                                    .collect(),
+                                Some(serde_json::Value::String(value)) => {
+                                    serde_json::from_str(value).unwrap_or_else(|_| {
+                                        value.split(',').map(str::to_string).collect()
+                                    })
+                                }
+                                _ => Vec::new(),
+                            };
+                            let mut queries = Vec::new();
+                            for query in std::iter::once(query).chain(extra) {
+                                let query = query.split_whitespace().collect::<Vec<_>>().join(" ");
+                                if !query.is_empty() && !queries.contains(&query) {
+                                    queries.push(query);
+                                }
+                            }
+                            (!queries.is_empty()).then(|| queries.join("\" | \""))
+                        })
+                })
                 .unwrap_or_else(|| "search".to_string());
-            *text = format_search_results(&query, &deduped);
+            let suffix_start = text
+                .find("\nProvider notes:")
+                .or_else(|| text.find("\n\nProvider notes:"))
+                .or_else(|| refact_core::chat_types::web_search_trailer_start(text));
+            let suffix = suffix_start
+                .map(|start| text[start..].to_string())
+                .unwrap_or_default();
+            *text = format!("{}{}", format_search_results(&query, &deduped), suffix);
         }
     }
 }
@@ -1361,12 +1432,14 @@ mod tests {
                     url: "https://doc.rust-lang.org/book/".to_string(),
                     snippet: "Official book".to_string(),
                     source: Some("searxng".to_string()),
+                    ..Default::default()
                 },
                 SearchResult {
                     title: "Rust Book".to_string(),
                     url: "https://doc.rust-lang.org/book".to_string(),
                     snippet: "".to_string(),
                     source: Some("duckduckgo".to_string()),
+                    ..Default::default()
                 },
             ],
         )];
@@ -1380,12 +1453,160 @@ mod tests {
             .and_then(|v| v.as_array())
             .expect("search_results array");
         assert_eq!(extra_results.len(), 1);
+        assert_eq!(extra_results[0]["url"], "https://doc.rust-lang.org/book/");
 
         let ChatContent::SimpleText(text) = &msg.content else {
             panic!("expected simple text");
         };
-        assert!(text.contains("1. [Rust Book](https://doc.rust-lang.org/book)"));
+        assert!(text.contains("1. [Rust Book](https://doc.rust-lang.org/book/)\n"));
         assert!(!text.contains("2. [Rust Book]"));
+    }
+
+    #[test]
+    fn web_search_dedup_keeps_first_ranked_original_url() {
+        let assistant = make_assistant_with_tool_calls(vec!["web_search"]);
+        let mut tool_messages = vec![make_web_search_tool_message(
+            "Web search results for \"rust\":\n\n1. [Rust Book](https://doc.rust-lang.org/book)\n   Official book\n",
+            "call_0",
+            vec![
+                SearchResult {
+                    title: "Rust Book".to_string(),
+                    url: " https://doc.rust-lang.org/book ".to_string(),
+                    snippet: "Official book".to_string(),
+                    source: Some("exa".to_string()),
+                    ..Default::default()
+                },
+                SearchResult {
+                    title: "The Rust Programming Language".to_string(),
+                    url: "https://doc.rust-lang.org/book/".to_string(),
+                    snippet: "Second copy".to_string(),
+                    source: Some("tavily".to_string()),
+                    ..Default::default()
+                },
+                SearchResult {
+                    title: "Root".to_string(),
+                    url: "/".to_string(),
+                    snippet: "No usable URL".to_string(),
+                    source: Some("parallel".to_string()),
+                    ..Default::default()
+                },
+            ],
+        )];
+
+        deduplicate_web_search_tool_results(&mut tool_messages, &[assistant]);
+
+        let extra_results = tool_messages[0]
+            .extra
+            .get("search_results")
+            .and_then(|v| v.as_array())
+            .expect("search_results array");
+        assert_eq!(extra_results.len(), 1);
+        assert_eq!(extra_results[0]["url"], "https://doc.rust-lang.org/book");
+        assert_eq!(
+            extra_results[0]["sources"],
+            serde_json::json!(["exa", "tavily"])
+        );
+        let ChatContent::SimpleText(text) = &tool_messages[0].content else {
+            panic!("expected simple text");
+        };
+        assert!(text.contains("1. [Rust Book](https://doc.rust-lang.org/book)\n"));
+        assert!(!text.contains("book/)"));
+    }
+
+    #[test]
+    fn web_search_rewrite_preserves_date_trailer_without_notes() {
+        let trailer = refact_core::chat_types::web_search_trailer("2026-01-01");
+        let mut messages = vec![make_web_search_tool_message(
+            &format!("Web search results for \"rust\":\n\n{trailer}"),
+            "call_0",
+            vec![SearchResult {
+                title: "Rust".into(),
+                url: "https://rust.test".into(),
+                ..Default::default()
+            }],
+        )];
+        deduplicate_web_search_tool_results(
+            &mut messages,
+            &[make_assistant_with_tool_calls(vec!["web_search"])],
+        );
+        assert!(messages[0].content.content_text_only().ends_with(&trailer));
+    }
+
+    #[test]
+    fn web_search_rewrite_preserves_metadata_queries_and_provider_notes() {
+        let mut assistant = make_assistant_with_tool_calls(vec!["web_search"]);
+        assistant.tool_calls.as_mut().expect("calls")[0]
+            .function
+            .arguments = serde_json::json!({"query":"rust","extra_queries":["tokio"]}).to_string();
+        let trailer = refact_core::chat_types::web_search_trailer("2026-01-01");
+        let input = format!("Web search results for \"rust\" | \"tokio\":\n\n1. [Doc](https://example.org)\n   snippet\n\nProvider notes:\n- exa: timeout\n{trailer}");
+        let mut messages = vec![make_web_search_tool_message(
+            &input,
+            "call_0",
+            vec![
+                SearchResult {
+                    title: "Doc".into(),
+                    url: "https://example.org".into(),
+                    snippet: "ü字".into(),
+                    source: Some("parallel".into()),
+                    sources: vec!["parallel".into()],
+                    published_date: Some("2026-01-01".into()),
+                },
+                SearchResult {
+                    title: "Doc".into(),
+                    url: "https://example.org/".into(),
+                    snippet: "longer snippet".into(),
+                    source: Some("tavily".into()),
+                    sources: vec!["tavily".into()],
+                    ..Default::default()
+                },
+            ],
+        )];
+        deduplicate_web_search_tool_results(&mut messages, &[assistant]);
+        let result = &messages[0].extra["search_results"][0];
+        assert_eq!(result["sources"], serde_json::json!(["parallel", "tavily"]));
+        assert_eq!(result["published_date"], "2026-01-01");
+        assert_eq!(result["citation_span"], 14);
+        let text = messages[0].content.content_text_only();
+        assert!(
+            text.starts_with("Web search results for \"rust\" | \"tokio\":"),
+            "{text}"
+        );
+        assert!(
+            text.ends_with(&format!("Provider notes:\n- exa: timeout\n{trailer}")),
+            "{text}"
+        );
+        assert!(text.contains("Published: 2026-01-01"), "{text}");
+    }
+
+    #[test]
+    fn web_search_rewrite_prefers_engine_header_and_normalizes_fallback() {
+        let mut assistant = make_assistant_with_tool_calls(vec!["web_search"]);
+        assistant.tool_calls.as_mut().unwrap()[0].function.arguments = serde_json::json!({
+            "query":"  rust   lang ","extra_queries":[" tokio   docs ","", " ","rust lang","tokio docs"]
+        }).to_string();
+        for (original, expected) in [
+            (
+                "Web search results for \"engine\" | \"normalized\":\n\n",
+                "engine\" | \"normalized",
+            ),
+            ("truncated output", "rust lang\" | \"tokio docs"),
+        ] {
+            let mut messages = vec![make_web_search_tool_message(
+                original,
+                "call_0",
+                vec![SearchResult {
+                    title: "Doc".into(),
+                    url: "https://example.org".into(),
+                    ..Default::default()
+                }],
+            )];
+            deduplicate_web_search_tool_results(&mut messages, &[assistant.clone()]);
+            assert!(messages[0]
+                .content
+                .content_text_only()
+                .starts_with(&format!("Web search results for \"{expected}\":")));
+        }
     }
 
     #[tokio::test]

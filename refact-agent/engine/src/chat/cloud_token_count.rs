@@ -189,7 +189,7 @@ fn cloud_count_http_parts(
         supports_temperature: true,
         supports_max_completion_tokens: model_rec.supports_max_completion_tokens,
         eof_is_done: model_rec.eof_is_done,
-        supports_web_search: model_rec.supports_web_search,
+        native_web_search_enabled: req.native_web_search_enabled,
         supports_cache_control: model_rec.supports_cache_control,
     };
 
@@ -322,6 +322,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn native_search_count_body_matches_stream_permission() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let mut model = base_model(
+            ANTHROPIC_CLOUD_TOKENIZER,
+            WireFormat::AnthropicMessages,
+            "https://api.anthropic.com/v1/messages",
+        );
+        model.supports_web_search = true;
+        for enabled in [false, true] {
+            let mut request = req();
+            request.native_web_search_enabled = enabled;
+            let (count, _) = cloud_count_http_parts(&gcx, &request, &model)
+                .unwrap()
+                .unwrap();
+            let mut settings = test_settings(&model);
+            settings.native_web_search_enabled = request.native_web_search_enabled;
+            let stream = crate::llm::adapters::anthropic::AnthropicAdapter
+                .build_http(&cleared(request.clone(), &model), &settings)
+                .unwrap();
+            assert_eq!(count.body.get("tools"), stream.body.get("tools"));
+            assert_eq!(count.body.get("tools").is_some(), enabled);
+        }
+    }
+
+    #[tokio::test]
     async fn native_claude_count_never_derives_anthropic_endpoint() {
         let gcx = crate::global_context::tests::make_test_gcx().await;
         for backend in ["bedrock", "vertex", "custom", "foundry", "anthropic"] {
@@ -366,7 +391,7 @@ mod tests {
             supports_temperature: true,
             supports_max_completion_tokens: model.supports_max_completion_tokens,
             eof_is_done: model.eof_is_done,
-            supports_web_search: model.supports_web_search,
+            native_web_search_enabled: false,
             supports_cache_control: model.supports_cache_control,
         }
     }

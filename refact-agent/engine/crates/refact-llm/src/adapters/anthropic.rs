@@ -80,8 +80,60 @@ impl LlmWireAdapter for AnthropicAdapter {
         } else {
             None
         };
-        let (system, messages) =
+        let (system, mut messages) =
             convert_to_anthropic(&req.messages, instruction_sanitizer.as_deref());
+
+        if !settings.native_web_search_enabled || !settings.supports_tools {
+            for message in &mut messages {
+                if let Some(blocks) = message.get_mut("content").and_then(Value::as_array_mut) {
+                    for block in blocks {
+                        if let Some(citations) =
+                            block.get_mut("citations").and_then(Value::as_array_mut)
+                        {
+                            citations.retain(|citation| {
+                                citation.get("type").and_then(Value::as_str)
+                                    != Some("web_search_result_location")
+                                    && citation.get("encrypted_index").is_none()
+                            });
+                            if citations.is_empty() {
+                                block.as_object_mut().unwrap().remove("citations");
+                            }
+                        }
+                        match block.get("type").and_then(Value::as_str) {
+                            Some("server_tool_use")
+                                if block.get("name").and_then(Value::as_str)
+                                    == Some("web_search") =>
+                            {
+                                let query = block
+                                    .pointer("/input/query")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("");
+                                *block = json!({"type": "text", "text": format!("[web search: {query}]")});
+                            }
+                            Some("web_search_tool_result") => {
+                                let mut text = String::from("[web search results]");
+                                if let Some(results) =
+                                    block.get("content").and_then(Value::as_array)
+                                {
+                                    for result in results {
+                                        if let Some(url) = result.get("url").and_then(Value::as_str)
+                                        {
+                                            let title = result
+                                                .get("title")
+                                                .and_then(Value::as_str)
+                                                .unwrap_or(url);
+                                            text.push_str(&format!("\n- {title}: {url}"));
+                                        }
+                                    }
+                                }
+                                *block = json!({"type": "text", "text": text});
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
 
         let mut body = json!({
             "model": settings.model_name,
@@ -116,14 +168,6 @@ impl LlmWireAdapter for AnthropicAdapter {
                     if is_cc {
                         claude_code_compat::apply_cc_tool_names(&mut converted_tools);
                     }
-                    if settings.supports_web_search {
-                        if let Some(arr) = converted_tools.as_array_mut() {
-                            arr.push(json!({
-                                "type": "web_search_20250305",
-                                "name": "web_search"
-                            }));
-                        }
-                    }
                     body["tools"] = converted_tools;
                     if let Some(choice) = &req.tool_choice {
                         let mut tc = tool_choice_to_anthropic(choice);
@@ -150,11 +194,16 @@ impl LlmWireAdapter for AnthropicAdapter {
                         body["tool_choice"] = tc;
                     }
                 }
-            } else if settings.supports_web_search {
-                body["tools"] = json!([{
-                    "type": "web_search_20250305",
-                    "name": "web_search"
-                }]);
+            }
+            if settings.native_web_search_enabled {
+                let tools = body
+                    .as_object_mut()
+                    .unwrap()
+                    .entry("tools")
+                    .or_insert_with(|| json!([]));
+                if let Some(tools) = tools.as_array_mut() {
+                    tools.push(json!({"type": "web_search_20250305", "name": "web_search"}));
+                }
             }
         }
 
@@ -1411,7 +1460,11 @@ fn is_cacheable_system_block(block: &Value) -> bool {
 
 fn is_server_side_tool(tool: &Value) -> bool {
     tool.get("type").and_then(Value::as_str) == Some("web_search_20250305")
-        || tool.get("name").and_then(Value::as_str) == Some("web_search")
+        || tool.get("type").and_then(Value::as_str) == Some("server_tool_use")
+        || tool
+            .get("id")
+            .and_then(Value::as_str)
+            .is_some_and(|id| id.starts_with("srvtoolu_"))
 }
 
 fn count_cache_control_markers(value: &Value) -> usize {
@@ -1503,6 +1556,159 @@ mod tests {
         refact_privacy::testing::cleared(request.clone())
     }
 
+    #[test]
+    fn native_search_replay_tracks_request_permission_without_mutating_history() {
+        let mut assistant = ChatMessage::new("assistant".into(), "Found it".into());
+        assistant.thinking_blocks = Some(vec![
+            json!({"type":"thinking", "thinking":"Reasoning", "signature":"signed-by-provider", "index":0}),
+            json!({"type":"redacted_thinking", "data":"opaque", "index":3}),
+        ]);
+        assistant.server_content_blocks = vec![
+            json!({"type":"server_tool_use", "id":"srvtoolu_1", "name":"web_search", "input":{"query":"rust"}, "_order_index":1}),
+            json!({"type":"web_search_tool_result", "tool_use_id":"srvtoolu_1", "content":[{"type":"web_search_result", "title":"Rust", "url":"https://rust-lang.org", "encrypted_content":"secret"}], "_order_index":2}),
+        ];
+        assistant.citations = vec![
+            json!({"type":"web_search_result_location", "encrypted_index":"encrypted-citation"}),
+            json!({"type":"char_location", "document_index":0, "start_char_index":0, "end_char_index":8}),
+        ];
+        let request = LlmRequest::new(
+            "claude".into(),
+            vec![
+                ChatMessage::new("user".into(), "Search".into()),
+                assistant,
+                ChatMessage::new("user".into(), "Continue".into()),
+            ],
+        );
+        let original = request.messages.clone();
+        let mut config = settings();
+        config.native_web_search_enabled = true;
+        let on = AnthropicAdapter
+            .build_http(&cleared(&request), &config)
+            .unwrap()
+            .body;
+        let (_, expected) = convert_to_anthropic(&request.messages, None);
+        assert_eq!(on["messages"], json!(expected));
+        config.native_web_search_enabled = false;
+        let off = AnthropicAdapter
+            .build_http(&cleared(&request), &config)
+            .unwrap()
+            .body;
+        let blocks = off["messages"][1]["content"].as_array().unwrap();
+        assert_eq!(blocks[0], on["messages"][1]["content"][0]);
+        assert_eq!(blocks[3], on["messages"][1]["content"][3]);
+        assert_eq!(blocks[1]["text"], "[web search: rust]");
+        assert!(blocks[2]["text"]
+            .as_str()
+            .unwrap()
+            .contains("Rust: https://rust-lang.org"));
+        assert!(!blocks.iter().any(|b| matches!(
+            b["type"].as_str(),
+            Some("server_tool_use" | "web_search_tool_result")
+        )));
+        assert!(!off["messages"].to_string().contains("secret"));
+        assert!(!off.to_string().contains("encrypted_index"));
+        assert!(!off.to_string().contains("web_search_result_location"));
+        let text = blocks.iter().find(|b| b["text"] == "Found it").unwrap();
+        assert_eq!(text["citations"], json!([request.messages[1].citations[1]]));
+        assert!(!blocks.iter().any(|b| b["citations"] == json!([])));
+
+        assert_eq!(
+            serde_json::to_value(&request.messages).unwrap(),
+            serde_json::to_value(original).unwrap()
+        );
+    }
+
+    #[test]
+    fn native_search_replay_drops_empty_citation_keys() {
+        for citation in [
+            json!({"type":"web_search_result_location"}),
+            json!({"type":"unknown", "encrypted_index":"secret"}),
+        ] {
+            let mut assistant = ChatMessage::new("assistant".into(), "Found it".into());
+            assistant.server_content_blocks = vec![
+                json!({"type":"server_tool_use", "id":"s", "name":"web_search", "input":{"query":"rust"}}),
+            ];
+            assistant.citations = vec![citation];
+            let request = LlmRequest::new("claude".into(), vec![assistant]);
+            let body = AnthropicAdapter
+                .build_http(&cleared(&request), &settings())
+                .unwrap()
+                .body;
+            assert!(body["messages"][0]["content"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|block| block.get("citations").is_none()));
+        }
+    }
+
+    #[test]
+    fn native_search_injection_respects_permission_and_empty_tools() {
+        for tools in [
+            None,
+            Some(vec![]),
+            Some(vec![
+                json!({"type": "function", "function": {"name": "cat", "description": "Read", "parameters": {"type": "object"}}}),
+            ]),
+        ] {
+            for enabled in [false, true] {
+                for supports_tools in [false, true] {
+                    let mut request = LlmRequest::new("claude".into(), vec![]);
+                    request.tools = tools.clone();
+                    let mut config = settings();
+                    config.native_web_search_enabled = enabled;
+                    config.supports_tools = supports_tools;
+                    let body = AnthropicAdapter
+                        .build_http(&cleared(&request), &config)
+                        .unwrap()
+                        .body;
+                    let count = body
+                        .get("tools")
+                        .and_then(Value::as_array)
+                        .map(|tools| {
+                            tools
+                                .iter()
+                                .filter(|tool| {
+                                    tool.get("type").and_then(Value::as_str)
+                                        == Some("web_search_20250305")
+                                })
+                                .count()
+                        })
+                        .unwrap_or(0);
+                    assert_eq!(count, usize::from(enabled && supports_tools));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn builtin_search_remains_a_client_tool_when_native_disabled() {
+        let mut request = LlmRequest::new("claude".into(), vec![]);
+        request.tools = Some(vec![
+            json!({"type": "function", "function": {"name": "web_search", "description": "Search", "parameters": {"type": "object"}}}),
+        ]);
+        let body = AnthropicAdapter
+            .build_http(&cleared(&request), &settings())
+            .unwrap()
+            .body;
+        assert_eq!(body["tools"][0]["name"], "web_search");
+        assert!(body["tools"][0].get("input_schema").is_some());
+        assert!(!is_server_side_tool(&body["tools"][0]));
+    }
+
+    #[test]
+    fn builtin_search_is_not_a_server_side_tool() {
+        assert!(!is_server_side_tool(
+            &json!({"name": "web_search", "input_schema": {}})
+        ));
+        assert!(is_server_side_tool(
+            &json!({"name": "web_search", "type": "web_search_20250305"})
+        ));
+        assert!(is_server_side_tool(
+            &json!({"name": "web_search", "type": "server_tool_use", "id": "srvtoolu_123"})
+        ));
+    }
+
     fn settings() -> AdapterSettings {
         AdapterSettings {
             api_key: "sk-ant-test".to_string(),
@@ -1516,7 +1722,7 @@ mod tests {
             supports_temperature: true,
             supports_max_completion_tokens: false,
             eof_is_done: false,
-            supports_web_search: false,
+            native_web_search_enabled: false,
             supports_cache_control: true,
         }
     }

@@ -1,4 +1,4 @@
-schema_version: 36
+schema_version: 37
 id: task_agent
 title: Task Agent
 description: Execute single task card
@@ -222,6 +222,8 @@ allow_mcp: true
 allow_subagents: true
 
 tools:
+  - web_search
+  - web
   - app
   - app_build
   - app_state

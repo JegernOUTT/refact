@@ -2726,7 +2726,7 @@ async fn prepare_llm_stream_request(
         supports_temperature: params.supports_temperature,
         supports_max_completion_tokens: params.model_rec.supports_max_completion_tokens,
         eof_is_done: params.model_rec.eof_is_done,
-        supports_web_search: params.model_rec.supports_web_search,
+        native_web_search_enabled: params.llm_request.native_web_search_enabled,
         supports_cache_control: params.model_rec.supports_cache_control,
     };
 
@@ -4185,7 +4185,7 @@ mod tests {
             supports_temperature: true,
             supports_max_completion_tokens: false,
             eof_is_done: false,
-            supports_web_search: false,
+            native_web_search_enabled: false,
             supports_cache_control: false,
         }
     }

@@ -39,6 +39,7 @@ export type SchemaFieldProps = {
   value: unknown;
   disabled?: boolean;
   onSave: (key: string, value: unknown) => Promise<void>;
+  onDraftChange?: (value: string) => void;
 };
 
 export const SchemaField: React.FC<SchemaFieldProps> = ({
@@ -46,6 +47,7 @@ export const SchemaField: React.FC<SchemaFieldProps> = ({
   value,
   disabled = false,
   onSave,
+  onDraftChange,
 }) => {
   const isSecret =
     field.f_secret === true ||
@@ -78,6 +80,7 @@ export const SchemaField: React.FC<SchemaFieldProps> = ({
   if (isSecret) {
     return (
       <SecretField
+        onDraftChange={onDraftChange}
         field={field}
         value={value}
         disabled={disabled}
@@ -307,6 +310,7 @@ const SecretField: React.FC<SchemaFieldProps> = ({
   value,
   disabled,
   onSave,
+  onDraftChange,
 }) => {
   const isMasked = value === "***";
   const [localValue, setLocalValue] = useState("");
@@ -370,7 +374,9 @@ const SecretField: React.FC<SchemaFieldProps> = ({
       ? ""
       : String(value ?? "");
   const placeholder =
-    isMasked && !editing ? "••••••••  (saved)" : field.f_placeholder ?? "";
+    isMasked && !editing
+      ? field.f_placeholder ?? "••••••••  (saved)"
+      : field.f_placeholder ?? "";
 
   return (
     <SettingItem
@@ -390,8 +396,18 @@ const SecretField: React.FC<SchemaFieldProps> = ({
               disabled={disabled}
               className={styles.fieldGrow}
               onFocus={() => setEditing(true)}
-              onChange={setLocalValue}
-              onBlur={() => void handleBlur()}
+              onChange={(nextValue) => {
+                setLocalValue(nextValue);
+                onDraftChange?.(nextValue);
+              }}
+              onBlur={() => {
+                if (!onDraftChange) void handleBlur();
+                else if (
+                  (isMasked && localValue === "") ||
+                  localValue === String(value ?? "")
+                )
+                  setEditing(false);
+              }}
               onKeyDown={(event) => {
                 if (event.key === "Enter") event.currentTarget.blur();
               }}

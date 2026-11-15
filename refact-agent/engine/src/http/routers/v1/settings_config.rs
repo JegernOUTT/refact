@@ -245,7 +245,7 @@ fn normalize_config(
     Ok(config)
 }
 
-async fn atomic_write(path: &Path, content: &str) -> Result<(), ScratchError> {
+pub(crate) async fn atomic_write(path: &Path, content: &str) -> Result<(), ScratchError> {
     let parent = path
         .parent()
         .ok_or_else(|| server_error(format!("{} has no parent directory", path.display())))?;

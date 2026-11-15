@@ -4865,6 +4865,14 @@ fn aggregate_metering_from_messages(
     serde_json::Map::new()
 }
 
+pub(crate) async fn subchat_tool_catalog(gcx: Arc<GlobalContext>) -> Vec<ToolDesc> {
+    get_available_tools(gcx)
+        .await
+        .into_iter()
+        .map(|tool| tool.tool_description())
+        .collect()
+}
+
 async fn subchat_single_internal(
     ccx: Arc<AMutex<AtCommandsContext>>,
     model_id: &str,
@@ -4891,11 +4899,7 @@ async fn subchat_single_internal(
     {
         vec![]
     } else {
-        let mut tools_turned_on_by_cmdline = get_available_tools(gcx.clone())
-            .await
-            .into_iter()
-            .map(|tool| tool.tool_description())
-            .collect::<Vec<_>>();
+        let mut tools_turned_on_by_cmdline = subchat_tool_catalog(gcx.clone()).await;
         let (app, chat_id) = {
             let context = ccx.lock().await;
             (context.app.clone(), context.chat_id.clone())
@@ -4937,6 +4941,25 @@ async fn subchat_single_internal(
 }
 #[cfg(test)]
 mod subchat_tests {
+    #[tokio::test]
+    async fn subchat_catalog_keeps_tools_outside_mode() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let tools = super::subchat_tool_catalog(gcx.clone()).await;
+        assert!(
+            !crate::tools::tools_list::get_tools_for_mode(gcx, "agent", Some("claude"))
+                .await
+                .iter()
+                .any(|tool| tool.tool_description().name == "design_system")
+        );
+        let subset = ["design_system"];
+        let supplied = tools
+            .into_iter()
+            .filter(|tool| subset.contains(&tool.name.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(supplied.len(), 1);
+        assert_eq!(supplied[0].name, "design_system");
+    }
+
     use super::{
         apply_subchat_reactive_compaction, apply_subchat_report_policy,
         emit_parent_compaction_diagnostics, gate_subchat_boundary,

@@ -229,6 +229,7 @@ pub mod v1_browser;
 mod v1_integrations;
 pub mod vecdb;
 pub mod voice;
+mod web_search_settings;
 mod work;
 mod workspace;
 mod worktrees;
@@ -500,6 +501,14 @@ fn project_configs_routes() -> Router<AppState> {
 
 fn settings_routes() -> Router<AppState> {
     Router::new()
+        .route(
+            "/web-search-settings",
+            get(web_search_settings::get_settings).post(web_search_settings::post_settings),
+        )
+        .route(
+            "/web-search-settings/test",
+            post(web_search_settings::test_settings),
+        )
         .route(
             "/indexing-settings",
             get(settings_config::handle_v1_indexing_settings_get)

@@ -171,6 +171,7 @@ export type Page =
   | PrivacySettingsPage
   | ShellSettingsPage
   | IndexingSettingsPage
+  | { name: "web search settings" }
   | BrowserSettingsPage
   | LimitsSettingsPage;
 

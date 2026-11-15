@@ -1,0 +1,45 @@
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--rf-space-3);
+}
+
+.fields {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-4);
+  border: none;
+  padding: 0;
+  margin: 0;
+  min-width: 0;
+}
+
+.provider {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-2);
+  padding-block: var(--rf-space-3);
+  border-bottom: var(--rf-hairline) solid var(--rf-border);
+}
+
+.error {
+  color: var(--rf-color-danger);
+}
+
+.tableScroll {
+  overflow-x: auto;
+}
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--rf-text-2);
+}
+
+.table th,
+.table td {
+  text-align: left;
+  padding: var(--rf-space-2);
+  overflow-wrap: anywhere;
+}

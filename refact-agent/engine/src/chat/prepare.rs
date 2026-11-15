@@ -256,7 +256,14 @@ async fn select_canonical_openai_tools(
     supports_tools: bool,
     frozen_request_prefix: Option<&FrozenRequestPrefix>,
 ) -> CanonicalOpenAiTools {
-    if let Some(openai_tools) = frozen_openai_tools(frozen_request_prefix) {
+    if let Some(openai_tools) = frozen_openai_tools(frozen_request_prefix).filter(|frozen| {
+        tools
+            .iter()
+            .any(crate::tools::tools_list::is_builtin_web_search)
+            == frozen.iter().any(|tool| {
+                tool.pointer("/function/name").and_then(Value::as_str) == Some("web_search")
+            })
+    }) {
         let tool_names: Vec<String> = tools.iter().map(|tool| tool.name.clone()).collect();
         return CanonicalOpenAiTools {
             tools: openai_tools,
@@ -511,7 +518,26 @@ pub async fn prepare_chat_passthrough(
         options.frozen_request_prefix.as_ref(),
     )
     .await;
-    let openai_tools = canonical_tools.tools;
+    let native_web_search_enabled = options.supports_tools
+        && crate::tools::tools_list::native_web_search_for_request(
+            gcx.clone(),
+            mode_id,
+            model_id,
+            model_record.base.supports_web_search,
+            model_record.base.wire_format,
+            &tools,
+        )
+        .await;
+    let mut openai_tools = canonical_tools.tools;
+    if native_web_search_enabled
+        && tools
+            .iter()
+            .any(crate::tools::tools_list::is_builtin_web_search)
+    {
+        openai_tools.retain(|tool| {
+            tool.pointer("/function/name").and_then(Value::as_str) != Some("web_search")
+        });
+    }
     let alias_registry = canonical_tools.alias_registry;
 
     // 7. Linearize summarization messages first (suppress summarized sources,
@@ -590,6 +616,8 @@ pub async fn prepare_chat_passthrough(
             options.parallel_tool_calls.unwrap_or(false) && model_record.supports_parallel_tools,
         )
         .with_cache_control(options.cache_control);
+
+    llm_request.native_web_search_enabled = native_web_search_enabled;
 
     if !companion && model_record.base.wire_format == WireFormat::OpenaiResponses {
         llm_request = llm_request.with_previous_response_id(thread.previous_response_id.clone());
@@ -909,6 +937,244 @@ mod tests {
 
     fn plan_message(mode: &str, version: u32, content: &str) -> ChatMessage {
         crate::chat::internal_roles::plan(mode, version, content, None)
+    }
+
+    #[tokio::test]
+    async fn cache_stability_search_preserves_frozen_date_and_integration_descriptions() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let mut tools = crate::tools::tools_list::get_tools_for_mode(gcx.clone(), "agent", None)
+            .await
+            .into_iter()
+            .map(|t| t.tool_description())
+            .collect::<Vec<_>>();
+        let initial = select_canonical_openai_tools(gcx.clone(), &tools, false, true, None).await;
+        let bytes = serde_json::to_vec(&initial.tools).unwrap();
+        let frozen = FrozenRequestPrefix {
+            tools_canonical: Some(json!(initial.tools)),
+            ..Default::default()
+        };
+        for tool in &mut tools {
+            tool.description = format!(
+                "Changed date 2099-01-01 or MCP description: {}",
+                tool.description
+            );
+        }
+        let next = select_canonical_openai_tools(gcx, &tools, false, true, Some(&frozen)).await;
+        assert_eq!(bytes, serde_json::to_vec(&next.tools).unwrap());
+    }
+
+    #[tokio::test]
+    async fn native_search_prepare_request_matrix() {
+        use refact_llm::adapter::{get_adapter, AdapterSettings};
+        use refact_tool_api::ToolSourceType;
+        for case in [
+            "builtin",
+            "preferred",
+            "no_mode",
+            "disabled",
+            "incapable",
+            "no_tools",
+            "integration",
+            "collision",
+        ] {
+            let gcx = crate::global_context::tests::make_test_gcx().await;
+            let model_id = "test/claude";
+            let model = ChatModelRecord {
+                base: crate::caps::BaseModelRecord {
+                    id: model_id.into(),
+                    name: model_id.into(),
+                    tokenizer: "fake".into(),
+                    n_ctx: 8192,
+                    supports_web_search: case != "incapable",
+                    wire_format: WireFormat::AnthropicMessages,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let mut caps = crate::caps::CodeAssistantCaps::default();
+            caps.chat_models
+                .insert(model_id.into(), Arc::new(model.clone()));
+            let app = AppState::from_gcx(gcx.clone()).await;
+            {
+                let mut state = app.model.caps.write().await;
+                state.caps = Some(Arc::new(caps));
+                state.last_attempted_ts = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs();
+            }
+            crate::web_search_settings::save_web_search_settings(
+                gcx.clone(),
+                json!({"prefer_builtin_over_native": case == "preferred"}),
+            )
+            .await
+            .unwrap();
+            if case == "disabled" {
+                std::fs::write(
+                    gcx.config_dir.join("builtin_tools.yaml"),
+                    "tools:\n  web_search:\n    enabled: false\n",
+                )
+                .unwrap();
+            }
+            let mode = if case == "no_mode" { "shell" } else { "agent" };
+            let mut tools = crate::tools::tools_list::get_tools_for_mode(gcx.clone(), mode, None)
+                .await
+                .into_iter()
+                .map(|t| t.tool_description())
+                .collect::<Vec<_>>();
+            tools.retain(|t| t.name == "web_search");
+            if case == "disabled" {
+                assert!(tools.is_empty());
+            }
+            if case == "integration" {
+                tools[0].source.source_type = ToolSourceType::Integration;
+            }
+            if case == "collision" {
+                let mut integration = tools[0].clone();
+                integration.source.source_type = ToolSourceType::Integration;
+                tools.push(integration);
+            }
+            let messages = vec![ChatMessage::new("user".into(), "hello".into())];
+            let ccx = AtCommandsContext::new_from_app(
+                app,
+                8192,
+                1,
+                false,
+                messages.clone(),
+                "native-matrix".into(),
+                None,
+                model_id.into(),
+                None,
+                None,
+            )
+            .await;
+            let tokenizer = crate::tokens::cached_tokenizer(gcx.clone(), &model.base)
+                .await
+                .unwrap();
+            let supports_tools = case != "no_tools";
+            let outcome = prepare_chat_passthrough(
+                gcx,
+                Arc::new(AMutex::new(ccx)),
+                &HasTokenizerAndEot::new(tokenizer),
+                messages,
+                &ThreadParams {
+                    model: model_id.into(),
+                    ..Default::default()
+                },
+                model_id,
+                mode,
+                tools,
+                &ChatMeta {
+                    chat_id: "native-matrix".into(),
+                    request_attempt_id: "attempt".into(),
+                    chat_remote: false,
+                    chat_mode: mode.into(),
+                    current_config_file: String::new(),
+                    include_project_info: false,
+                    context_tokens_cap: Some(8192),
+                    worktree: None,
+                },
+                &mut make_sampling_params(),
+                &ChatPrepareOptions {
+                    prepend_system_prompt: false,
+                    allow_at_commands: false,
+                    allow_tool_prerun: false,
+                    supports_tools,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+            let PrepareOutcome::Ready(prepared) = outcome else {
+                panic!("unexpected pending");
+            };
+            let expected_native = case == "builtin";
+            assert_eq!(
+                prepared.llm_request.native_web_search_enabled, expected_native,
+                "{case}"
+            );
+            let settings = AdapterSettings {
+                api_key: "test".into(),
+                auth_token: String::new(),
+                endpoint: "https://api.anthropic.com/v1/messages".into(),
+                extra_headers: Default::default(),
+                model_name: "claude".into(),
+                supports_tools,
+                supports_reasoning: false,
+                reasoning_type: None,
+                supports_temperature: true,
+                supports_max_completion_tokens: false,
+                eof_is_done: false,
+                native_web_search_enabled: prepared.llm_request.native_web_search_enabled,
+                supports_cache_control: false,
+            };
+            let body = get_adapter(WireFormat::AnthropicMessages)
+                .build_http(
+                    &refact_privacy::testing::cleared(prepared.llm_request),
+                    &settings,
+                )
+                .unwrap()
+                .body;
+            let sent = body
+                .get("tools")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            assert_eq!(
+                sent.iter()
+                    .filter(|t| t["type"] == "web_search_20250305")
+                    .count(),
+                usize::from(expected_native),
+                "{case}"
+            );
+            let expected_clients = match case {
+                "builtin" | "no_mode" | "disabled" | "no_tools" => 0,
+                "collision" => 2,
+                _ => 1,
+            };
+            assert_eq!(
+                sent.iter()
+                    .filter(|t| t["name"] == "web_search" && t.get("input_schema").is_some())
+                    .count(),
+                expected_clients,
+                "{case}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn search_catalog_does_not_reuse_stale_frozen_schemas() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let tools = crate::tools::tools_list::get_tools_for_mode(gcx.clone(), "agent", None)
+            .await
+            .into_iter()
+            .map(|tool| tool.tool_description())
+            .collect::<Vec<_>>();
+        let frozen = FrozenRequestPrefix {
+            tools_canonical: Some(json!([])),
+            ..Default::default()
+        };
+        let selected =
+            select_canonical_openai_tools(gcx.clone(), &tools, false, true, Some(&frozen)).await;
+        assert!(selected
+            .tools
+            .iter()
+            .any(
+                |tool| tool.pointer("/function/name").and_then(Value::as_str) == Some("web_search")
+            ));
+        let frozen = FrozenRequestPrefix {
+            tools_canonical: Some(
+                json!([{"type": "function", "function": {"name": "web_search"}}]),
+            ),
+            ..Default::default()
+        };
+        let selected = select_canonical_openai_tools(gcx, &[], false, true, Some(&frozen)).await;
+        assert!(!selected
+            .tools
+            .iter()
+            .any(
+                |tool| tool.pointer("/function/name").and_then(Value::as_str) == Some("web_search")
+            ));
     }
 
     #[tokio::test]

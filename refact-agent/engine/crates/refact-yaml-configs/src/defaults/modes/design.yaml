@@ -1,4 +1,4 @@
-schema_version: 32
+schema_version: 33
 id: design
 title: Design
 description: Evidence-driven UI implementation using the live design system and browser measurements
@@ -84,6 +84,8 @@ allow_mcp: false
 allow_subagents: true
 
 tools:
+  - web_search
+  - web
   - app
   - app_build
   - app_state

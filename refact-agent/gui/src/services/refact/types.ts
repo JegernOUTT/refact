@@ -2623,3 +2623,13 @@ export function isBuddyPulsePayload(
     typeof v.generated_at === "string"
   );
 }
+
+export type WebSearchResult = {
+  title: string;
+  url: string;
+  snippet: string;
+  source?: string;
+  sources?: string[];
+  published_date?: string;
+  citation_span?: number;
+};

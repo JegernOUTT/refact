@@ -23,6 +23,7 @@ const pages: Record<string, Page> = {
   "settings/privacy": { name: "privacy settings" },
   "settings/shell": { name: "shell settings" },
   "settings/indexing": { name: "indexing settings" },
+  "settings/web-search": { name: "web search settings" },
   "settings/browser": { name: "browser settings" },
   "settings/limits": { name: "limits settings" },
   "settings/providers": { name: "providers page" },

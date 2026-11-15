@@ -973,13 +973,56 @@ pub struct ChatMessage {
     pub output_filter: Option<OutputFilter>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SearchResult {
     pub title: String,
     pub url: String,
     pub snippet: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sources: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub published_date: Option<String>,
+}
+
+const WEB_SEARCH_TRAILER_PREFIX: &str = "Today is ";
+const WEB_SEARCH_CITATION_REMINDER: &str =
+    " (UTC). Cite the source URLs when using these search results.";
+
+pub fn web_search_trailer(date: &str) -> String {
+    format!("\n{WEB_SEARCH_TRAILER_PREFIX}{date}{WEB_SEARCH_CITATION_REMINDER}")
+}
+
+pub fn web_search_trailer_start(text: &str) -> Option<usize> {
+    text.rmatch_indices(WEB_SEARCH_TRAILER_PREFIX)
+        .find_map(|(index, _)| {
+            let line_start = index == 0 || text.as_bytes()[index - 1] == b'\n';
+            let line = text[index..].lines().next().unwrap_or_default();
+            (line_start && line.ends_with(WEB_SEARCH_CITATION_REMINDER)).then_some(if index == 0 {
+                0
+            } else {
+                index - 1
+            })
+        })
+}
+
+#[cfg(test)]
+mod web_search_trailer_tests {
+    #[test]
+    fn trailer_detection_uses_last_line_start() {
+        let first = super::web_search_trailer("2025-01-01");
+        let last = super::web_search_trailer("2026-01-01");
+        let text = format!(
+            "{first}\nsnippet Today is fake{}\n{last}",
+            super::WEB_SEARCH_CITATION_REMINDER
+        );
+        let index = super::web_search_trailer_start(&text).unwrap();
+        assert_eq!(&text[index..], last);
+        assert!(
+            super::web_search_trailer_start(&format!("inline{last}").replace('\n', "")).is_none()
+        );
+    }
 }
 
 pub fn format_search_results(query: &str, results: &[SearchResult]) -> String {
@@ -991,6 +1034,16 @@ pub fn format_search_results(query: &str, results: &[SearchResult]) -> String {
         output.push_str(&format!("{}. [{}]({})\n", i + 1, result.title, result.url));
         if !result.snippet.is_empty() {
             output.push_str(&format!("   {}\n", result.snippet));
+        }
+        let mut metadata = Vec::new();
+        if let Some(date) = &result.published_date {
+            metadata.push(format!("Published: {}", date));
+        }
+        if !result.sources.is_empty() {
+            metadata.push(format!("Sources: {}", result.sources.join(", ")));
+        }
+        if !metadata.is_empty() {
+            output.push_str(&format!("   {}\n", metadata.join(" · ")));
         }
         output.push('\n');
     }

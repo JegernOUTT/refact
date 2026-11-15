@@ -183,7 +183,7 @@ fn openai_settings(model_name: &str) -> AdapterSettings {
         supports_temperature: true,
         supports_max_completion_tokens: false,
         eof_is_done: false,
-        supports_web_search: false,
+        native_web_search_enabled: false,
         supports_cache_control: false,
     }
 }
@@ -201,7 +201,7 @@ fn claude_code_settings(model_name: &str) -> AdapterSettings {
         supports_temperature: true,
         supports_max_completion_tokens: false,
         eof_is_done: false,
-        supports_web_search: false,
+        native_web_search_enabled: false,
         supports_cache_control: true,
     }
 }

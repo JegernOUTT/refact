@@ -595,6 +595,11 @@ fn audited_mode_semantic_workflows_and_confirmation_boundaries() {
         }
     }
     assert_eq!(spawning, 16);
+    for id in ["design", "task_agent"] {
+        for tool in ["web_search", "web"] {
+            assert!(has(&modes[id], tool));
+        }
+    }
     let design = &modes["design"];
     for tool in [
         "worktree_create",

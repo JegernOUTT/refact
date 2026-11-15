@@ -72,6 +72,10 @@ vi.mock("./GeneralSettingsSection", () => ({
   GeneralSettingsSection: () => <div data-testid="general-section" />,
 }));
 
+vi.mock("./WebSearchSettingsSection", () => ({
+  WebSearchSettingsSection: () => <div data-testid="web-search-section" />,
+}));
+
 vi.mock("./IndexingSettingsSection", () => ({
   IndexingSettingsSection: () => <div data-testid="indexing-section" />,
 }));
@@ -111,6 +115,11 @@ function renderHub(page: Page, onBack = vi.fn()) {
 }
 
 describe("SettingsHub — section routing by page name", () => {
+  it("shows Web Search section", () => {
+    renderHub({ name: "web search settings" });
+    expect(screen.getByTestId("web-search-section")).toBeInTheDocument();
+  });
+
   it("shows Providers section for providers page", () => {
     renderHub({ name: "providers page" });
     expect(screen.getByTestId("providers-section")).toBeInTheDocument();

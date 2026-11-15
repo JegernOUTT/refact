@@ -3,7 +3,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use crate::caps::resolve_chat_model;
 use crate::chat::perf_diagnostics::{self, PerfComponent, PerfOutcome};
 use crate::custom_error::YamlError;
 use crate::global_context::{try_load_caps_quickly_if_not_present, GlobalContext};
@@ -1415,7 +1414,6 @@ mod tests {
                                     &desc.name == *name
                                         && availability.allows(tool)
                                         && tool.config().unwrap_or_default().enabled
-                                        && !(native_web && desc.name == "web_search")
                                 })
                             })
                             .cloned()
@@ -1572,8 +1570,13 @@ mod tests {
                     mode.id
                 );
             }
+            if mode.id == "task_agent" {
+                require(&["web_search", "web"]);
+            }
             match mode.id.as_str() {
                 "design" => require(&[
+                    "web_search",
+                    "web",
                     "design_system",
                     "ui_probe",
                     "chrome",
@@ -2805,7 +2808,7 @@ fn select_and_order_mode_tools(
     allow_integrations: bool,
     allow_mcp: bool,
     allow_subagents: bool,
-    model_supports_web_search: bool,
+    _native_web_search_enabled: bool,
     mcp_access: Option<(&refact_privacy::PrivacyPolicy, &str)>,
 ) -> Vec<Box<dyn Tool + Send>> {
     let allowed_tools: std::collections::HashSet<&str> =
@@ -2819,7 +2822,6 @@ fn select_and_order_mode_tools(
     let mut selected: Vec<(ToolDesc, Box<dyn Tool + Send>)> = described_tools
         .into_iter()
         .filter(|(_, _, tool)| tool.config().unwrap_or_default().enabled)
-        .filter(|(_, desc, _)| !(desc.name == "web_search" && model_supports_web_search))
         .filter(|(category, desc, _)| match category {
             ToolGroupCategory::Integration if allow_integrations => true,
             ToolGroupCategory::MCP if allow_mcp => true,
@@ -2893,19 +2895,6 @@ pub(crate) async fn get_tools_for_mode_with_intent(
         return vec![];
     }
 
-    let span = perf_diagnostics::span(PerfComponent::ToolModelCaps, None, None);
-    let model_supports_web_search = if let Some(mid) = model_id {
-        match try_load_caps_quickly_if_not_present(gcx.clone(), 0).await {
-            Ok(caps) => resolve_chat_model(caps, mid)
-                .map(|rec| rec.base.supports_web_search)
-                .unwrap_or(false),
-            Err(_) => false,
-        }
-    } else {
-        false
-    };
-
-    span.finish_tool(PerfOutcome::Success, 1, 1, None);
     let availability = ToolAvailability::from_gcx(gcx.clone()).await;
     let mut gated_tools = HashMap::new();
     let mut described_tools: Vec<DescribedTool> = get_available_tool_groups_with_availability(
@@ -2972,7 +2961,7 @@ pub(crate) async fn get_tools_for_mode_with_intent(
         mode_config.allow_integrations,
         mode_config.allow_mcp,
         mode_config.allow_subagents,
-        model_supports_web_search,
+        false,
         mcp_access
             .as_ref()
             .map(|(policy, provider)| (policy.as_ref(), provider.as_str())),
@@ -2997,4 +2986,183 @@ fn is_app_tool_name(name: &str) -> bool {
 
 fn is_builtin_app_tool(desc: &ToolDesc) -> bool {
     matches!(desc.source.source_type, ToolSourceType::Builtin) && is_app_tool_name(&desc.name)
+}
+
+pub(crate) fn is_builtin_web_search(tool: &ToolDesc) -> bool {
+    tool.name == "web_search" && matches!(tool.source.source_type, ToolSourceType::Builtin)
+}
+
+#[cfg(test)]
+pub(crate) fn native_web_search_policy(
+    capable: bool,
+    anthropic: bool,
+    mode_allows: bool,
+    builtin_enabled: bool,
+    prefer_builtin: bool,
+) -> bool {
+    capable && anthropic && mode_allows && builtin_enabled && !prefer_builtin
+}
+
+pub(crate) async fn native_web_search_for_request(
+    gcx: Arc<GlobalContext>,
+    mode_id: &str,
+    _model_id: &str,
+    capable: bool,
+    wire_format: crate::llm::WireFormat,
+    tools: &[ToolDesc],
+) -> bool {
+    if mode_id.eq_ignore_ascii_case("NO_TOOLS")
+        || !capable
+        || wire_format != crate::llm::WireFormat::AnthropicMessages
+        || !tools.iter().any(is_builtin_web_search)
+        || tools
+            .iter()
+            .any(|tool| tool.name == "web_search" && !is_builtin_web_search(tool))
+    {
+        return false;
+    }
+    let config_path = gcx.config_dir.join("builtin_tools.yaml");
+    if !crate::tools::tools_description::tool_config_from_yaml(
+        &config_path.to_string_lossy(),
+        "web_search",
+    )
+    .unwrap_or_default()
+    .enabled
+    {
+        return false;
+    }
+    let prefer_builtin = crate::web_search_settings::load_web_search_settings(gcx.clone())
+        .await
+        .prefer_builtin_over_native;
+    if prefer_builtin {
+        return false;
+    }
+    true
+}
+
+#[cfg(test)]
+mod native_search_policy_tests {
+    use super::*;
+    #[tokio::test]
+    async fn request_permission_reads_settings_and_respects_subchat_ceiling() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let tools = crate::subchat::subchat_tool_catalog(gcx.clone()).await;
+        assert!(tools.iter().any(|tool| tool.name == "web_search"));
+        let wire = crate::llm::WireFormat::AnthropicMessages;
+        assert!(
+            !native_web_search_for_request(gcx.clone(), "agent", "claude", true, wire, &tools)
+                .await
+        );
+        crate::web_search_settings::save_web_search_settings(
+            gcx.clone(),
+            serde_json::json!({"prefer_builtin_over_native": false}),
+        )
+        .await
+        .unwrap();
+        assert!(
+            native_web_search_for_request(gcx.clone(), "agent", "claude", true, wire, &tools).await
+        );
+        assert!(
+            !native_web_search_for_request(gcx.clone(), "agent", "claude", true, wire, &[]).await
+        );
+        let without_search = tools
+            .iter()
+            .filter(|tool| tool.name != "web_search")
+            .cloned()
+            .collect::<Vec<_>>();
+        assert!(
+            !native_web_search_for_request(
+                gcx.clone(),
+                "agent",
+                "claude",
+                true,
+                wire,
+                &without_search
+            )
+            .await
+        );
+        let mut external = tools
+            .iter()
+            .find(|tool| tool.name == "web_search")
+            .unwrap()
+            .clone();
+        external.source.source_type = ToolSourceType::Integration;
+        assert!(
+            !native_web_search_for_request(gcx.clone(), "agent", "claude", true, wire, &[external])
+                .await
+        );
+
+        assert!(
+            !native_web_search_for_request(gcx.clone(), "NO_TOOLS", "claude", true, wire, &tools)
+                .await
+        );
+        assert!(
+            !native_web_search_for_request(
+                gcx.clone(),
+                "agent",
+                "claude",
+                true,
+                crate::llm::WireFormat::OpenaiResponses,
+                &tools
+            )
+            .await
+        );
+        crate::web_search_settings::save_web_search_settings(
+            gcx.clone(),
+            serde_json::json!({"prefer_builtin_over_native": true}),
+        )
+        .await
+        .unwrap();
+        assert!(!native_web_search_for_request(gcx, "agent", "claude", true, wire, &tools).await);
+    }
+
+    #[tokio::test]
+    async fn disabled_builtin_blocks_subchat_native_search() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        crate::web_search_settings::save_web_search_settings(
+            gcx.clone(),
+            serde_json::json!({"prefer_builtin_over_native": false}),
+        )
+        .await
+        .unwrap();
+        std::fs::write(
+            gcx.config_dir.join("builtin_tools.yaml"),
+            "tools:\n  web_search:\n    enabled: false\n",
+        )
+        .unwrap();
+        let tools = crate::subchat::subchat_tool_catalog(gcx.clone()).await;
+        assert!(
+            !native_web_search_for_request(
+                gcx,
+                "agent",
+                "claude",
+                true,
+                crate::llm::WireFormat::AnthropicMessages,
+                &tools
+            )
+            .await
+        );
+    }
+
+    #[test]
+    fn native_search_policy_truth_table_and_preference_changes() {
+        for capable in [false, true] {
+            for anthropic in [false, true] {
+                for mode in [false, true] {
+                    for builtin in [false, true] {
+                        for preference in [false, true] {
+                            assert_eq!(
+                                native_web_search_policy(
+                                    capable, anthropic, mode, builtin, preference
+                                ),
+                                capable && anthropic && mode && builtin && !preference
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        assert!(!native_web_search_policy(true, true, true, true, true));
+        assert!(native_web_search_policy(true, true, true, true, false));
+    }
 }

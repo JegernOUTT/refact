@@ -69,6 +69,7 @@ const ENGINE_V1_ENDPOINT_SEGMENTS = new Set([
   "vecdb-search",
   "voice",
   "worktrees",
+  "web-search-settings",
   "work",
 ]);
 

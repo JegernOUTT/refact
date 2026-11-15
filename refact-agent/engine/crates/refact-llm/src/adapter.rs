@@ -28,7 +28,7 @@ pub struct AdapterSettings {
     pub supports_temperature: bool,
     pub supports_max_completion_tokens: bool,
     pub eof_is_done: bool,
-    pub supports_web_search: bool,
+    pub native_web_search_enabled: bool,
     pub supports_cache_control: bool,
 }
 

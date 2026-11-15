@@ -100,6 +100,7 @@ pub mod tokens;
 pub mod tool_jobs;
 pub mod tools;
 pub mod vecdb;
+pub mod web_search_settings;
 
 pub mod fetch_embedding;
 pub mod forward_to_openai_endpoint;

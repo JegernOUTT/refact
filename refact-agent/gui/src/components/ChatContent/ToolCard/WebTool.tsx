@@ -1,3 +1,5 @@
+import { Badge } from "../../ui";
+import type { WebSearchResult } from "../../../services/refact/types";
 import { Globe, Search } from "lucide-react";
 import React, { useMemo } from "react";
 
@@ -27,11 +29,7 @@ interface WebArgs {
 const MAX_RESULTS = 50;
 const MAX_MARKDOWN_CHARS = 50_000;
 
-type SearchResult = {
-  title: string;
-  url: string;
-  snippet: string;
-};
+type SearchResult = WebSearchResult;
 
 interface WebToolProps {
   toolCall: ToolCall;
@@ -92,7 +90,7 @@ function parseSearchResultsFromText(content: string): SearchResult[] {
   const results: SearchResult[] = [];
   let current: SearchResult | null = null;
 
-  for (const line of lines) {
+  for (const [index, line] of lines.entries()) {
     const parsedResult = parseSearchResultLine(line);
     if (parsedResult) {
       current = parsedResult;
@@ -100,7 +98,26 @@ function parseSearchResultsFromText(content: string): SearchResult[] {
       continue;
     }
 
+    if (line.trim() === "Provider notes:") break;
     if (!current) continue;
+    const metadata = line
+      .trim()
+      .match(
+        /^(?:Published: (\d{4}-\d{2}-\d{2})(?: · Sources: ([a-z0-9_]+(?:, [a-z0-9_]+)*))?|Sources: ([a-z0-9_]+(?:, [a-z0-9_]+)*))$/,
+      );
+    const nextLine = index + 1 < lines.length ? lines[index + 1] : "";
+    const lastIndentedLine =
+      !nextLine.startsWith("   ") ||
+      parseSearchResultLine(nextLine) !== null ||
+      nextLine.trim() === "Provider notes:";
+    if (line.startsWith("   ") && lastIndentedLine && metadata) {
+      current.published_date = metadata[1];
+      current.sources = (metadata[2] || metadata[3] || "")
+        .split(",")
+        .map((source) => source.trim())
+        .filter(Boolean);
+      continue;
+    }
     if (line.startsWith("   ")) {
       const snippet = line.trim();
       if (snippet) {
@@ -108,7 +125,7 @@ function parseSearchResultsFromText(content: string): SearchResult[] {
           ? `${current.snippet} ${snippet}`
           : snippet;
       }
-    } else if (line.trim() === "") {
+    } else {
       current = null;
     }
   }
@@ -125,7 +142,14 @@ function isSearchResult(value: unknown): value is SearchResult {
     "url" in value &&
     typeof value.url === "string" &&
     "snippet" in value &&
-    typeof value.snippet === "string"
+    typeof value.snippet === "string" &&
+    (!("source" in value) || typeof value.source === "string") &&
+    (!("sources" in value) ||
+      (Array.isArray(value.sources) &&
+        value.sources.every(
+          (source: unknown) => typeof source === "string",
+        ))) &&
+    (!("published_date" in value) || typeof value.published_date === "string")
   );
 }
 
@@ -210,6 +234,19 @@ export const WebTool: React.FC<WebToolProps> = ({
                 <span>{item.title}</span>
               )}
               {safeUrl && <span className={styles.inlineCode}>{safeUrl}</span>}
+              {(item.sources?.length
+                ? item.sources
+                : item.source
+                  ? [item.source]
+                  : []
+              ).map((source) => (
+                <Badge key={source}>{source}</Badge>
+              ))}
+              {item.published_date && (
+                <time dateTime={item.published_date}>
+                  {item.published_date}
+                </time>
+              )}
               {item.snippet && (
                 <span className={styles.snippet}>{item.snippet}</span>
               )}

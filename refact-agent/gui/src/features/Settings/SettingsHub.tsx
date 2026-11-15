@@ -19,6 +19,7 @@ import { PrivacySettingsSection } from "../Privacy";
 import { ShellSettingsSection } from "../Shell";
 import { GeneralSettingsSection } from "./GeneralSettingsSection";
 import { IndexingSettingsSection } from "./IndexingSettingsSection";
+import { WebSearchSettingsSection } from "./WebSearchSettingsSection";
 import { BrowserSettingsSection } from "./BrowserSettingsSection";
 import { TrajectorySettingsPanel } from "../Performance/TrajectorySettingsPanel";
 import { CoordinationSettingsPanel } from "../Performance/CoordinationSettingsPanel";
@@ -56,6 +57,8 @@ export const SettingsHub: React.FC<SettingsHubProps> = ({
         return <ShellSettingsSection />;
       case "indexing":
         return <IndexingSettingsSection />;
+      case "web-search":
+        return <WebSearchSettingsSection />;
       case "browser":
         return <BrowserSettingsSection />;
       case "limits":

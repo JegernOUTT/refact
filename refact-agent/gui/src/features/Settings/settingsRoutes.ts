@@ -11,6 +11,8 @@ export function settingsSectionToPage(section: SettingsSectionId): Page {
       return { name: "shell settings" };
     case "indexing":
       return { name: "indexing settings" };
+    case "web-search":
+      return { name: "web search settings" };
     case "browser":
       return { name: "browser settings" };
     case "limits":
@@ -42,6 +44,8 @@ export function settingsPageToSection(page: Page): SettingsSectionId | null {
       return "shell";
     case "indexing settings":
       return "indexing";
+    case "web search settings":
+      return "web-search";
     case "browser settings":
       return "browser";
     case "limits settings":
