@@ -474,6 +474,31 @@ class InventoryTests(unittest.TestCase):
             self.assertNotIn('continue-on-error', step)
             self.assertNotIn('if', step)
 
+    def test_windows_integration_compilation_is_separate_from_execution(self):
+        import yaml
+        workflow = yaml.safe_load((ci.ROOT / '.github/workflows/agent_engine_check.yml').read_text())
+        steps = workflow['jobs']['platform-tests']['steps']
+        compile_step = next(step for step in steps if step.get('name') == 'Compile workspace integration tests (Windows)')
+        run_step = next(step for step in steps if step.get('name') == 'Run workspace integration tests (Windows)')
+        self.assertLess(steps.index(compile_step), steps.index(run_step))
+        self.assertEqual(compile_step['timeout-minutes'], 120)
+        self.assertEqual(run_step['timeout-minutes'], 60)
+        expected_env = {'RUST_MIN_STACK': '16777216',
+                        'REFACT_GUI_DIR': '${{ github.workspace }}\\refact-agent\\gui',
+                        'CMAKE_POLICY_DEFAULT_CMP0091': 'NEW',
+                        'CMAKE_MSVC_RUNTIME_LIBRARY': 'MultiThreaded'}
+        for step in [compile_step, run_step]:
+            self.assertEqual(step['if'], "startsWith(matrix.os, 'windows')")
+            self.assertEqual(step['shell'], 'bash')
+            self.assertEqual(step['env'], expected_env)
+            self.assertNotIn('continue-on-error', step)
+        prefix = 'export GITHUB_SHA="$REFACT_SOURCE_SHA"\n'
+        command = "cargo test --locked --workspace --profile ci-test --test '*' --target ${{ matrix.target }}"
+        self.assertEqual(compile_step['run'], prefix + command + ' --no-run\n')
+        self.assertEqual(run_step['run'], prefix + 'set -o pipefail\n' + command
+                         + ' -- --nocapture --test-threads=1 2>&1 | tee test-output.txt\n'
+                         + 'python ../../tools/dev/ci_tests.py verify-output test-output.txt\n')
+
     def test_windows_native_compilation_precedes_isolated_test_profiles(self):
         script = (ci.ROOT / 'tools/dev/browser_windows_roadmap_qualification.ps1').read_text()
         library = "Run-Logged 'precompile-root-lib-tests' 'cargo' @('test','--locked','--profile','ci-test','--lib','--no-run')"

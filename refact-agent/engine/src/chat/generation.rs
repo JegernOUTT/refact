@@ -991,8 +991,8 @@ pub async fn prepare_project_work_context(app: &AppState, session_arc: &Arc<AMut
 }
 
 pub fn save_rag_results_to_session(session: &mut ChatSession, rag_results: &[serde_json::Value]) {
-    let last_user_idx = session
-        .messages
+    let tail_start = super::prepare::review_context_tail_start(&session.messages);
+    let last_user_idx = session.messages[..tail_start]
         .iter()
         .rposition(|m| is_prompt_turn_role(&m.role));
     if let Some(insert_idx) = last_user_idx {
@@ -4791,9 +4791,9 @@ mod tests {
                 .expect("readiness");
             prepared = prepare_chat_passthrough(
                 app.gcx.clone(),
-                ccx,
+                ccx.clone(),
                 &t,
-                messages,
+                messages.clone(),
                 &thread,
                 model_id,
                 "agent",
@@ -4809,6 +4809,159 @@ mod tests {
             panic!("readiness must admit once");
         };
         assert_eq!(context_positions(&prepared.llm_request.messages), expected);
+
+        assert!(ccx.lock().await.at_commands.contains_key("@file"));
+        let persisted = serde_json::to_value(&session.lock().await.messages).unwrap();
+        let mut with_file = messages.clone();
+        with_file[0].content = crate::call_validation::ChatContent::SimpleText(
+            "Review the change @file tracked".into(),
+        );
+        let expected_events = serde_json::to_value(&with_file[initial_len..]).unwrap();
+        let mut file_meta = meta.clone();
+        file_meta.request_attempt_id = "prepare-context-at-file".into();
+        let file_options = ChatPrepareOptions {
+            allow_at_commands: true,
+            ..options
+        };
+        let mut prepared = prepare_chat_passthrough(
+            app.gcx.clone(),
+            ccx.clone(),
+            &t,
+            with_file.clone(),
+            &thread,
+            model_id,
+            "agent",
+            vec![],
+            &file_meta,
+            &mut parameters,
+            &file_options,
+        )
+        .await
+        .expect("preparation expands file before review context");
+        if let PrepareOutcome::Pending {
+            receipt,
+            turn_nonce,
+        } = prepared
+        {
+            crate::review::readiness::wait_for_readiness(&app, &chat_id, &receipt, &turn_nonce)
+                .await
+                .expect("file context readiness");
+            prepared = prepare_chat_passthrough(
+                app.gcx.clone(),
+                ccx,
+                &t,
+                with_file,
+                &thread,
+                model_id,
+                "agent",
+                vec![],
+                &file_meta,
+                &mut parameters,
+                &file_options,
+            )
+            .await
+            .expect("admitted file context preparation");
+        }
+        let PrepareOutcome::Ready(prepared) = prepared else {
+            panic!("file context readiness must admit once");
+        };
+        let sent = &prepared.llm_request.messages;
+        let files = sent
+            .iter()
+            .find(|message| message.role == "context_file")
+            .expect("expanded file context");
+        let crate::call_validation::ChatContent::ContextFiles(files) = &files.content else {
+            panic!("structured file context");
+        };
+        assert_eq!(files.len(), 1);
+        assert!(std::path::Path::new(&files[0].file_name).ends_with("tracked"));
+        assert_eq!(files[0].file_content, "   1 | original\n");
+        assert_eq!((files[0].line1, files[0].line2), (1, 1));
+        let user = sent
+            .iter()
+            .find(|message| message.role == "user")
+            .expect("user");
+        assert!(!user.content.content_text_only().contains("@file"));
+        let user_text = user.content.content_text_only();
+        let expanded_path = user_text
+            .strip_prefix("Review the change ")
+            .expect("preserved request");
+        assert!(std::path::Path::new(expanded_path.trim()).ends_with("tracked"));
+        assert_eq!(
+            serde_json::to_value(&sent[sent.len() - 2..]).unwrap(),
+            expected_events
+        );
+        assert_eq!(
+            serde_json::to_value(&session.lock().await.messages).unwrap(),
+            persisted
+        );
+        let mut saved = session.lock().await;
+        let original_user = serde_json::to_value(&saved.messages[0]).unwrap();
+        save_rag_results_to_session(&mut saved, &prepared.rag_results);
+        assert_eq!(saved.messages.len(), initial_len + 3);
+        assert_eq!(saved.messages[0].role, "context_file");
+        assert_eq!(
+            serde_json::to_value(&saved.messages[0].content).unwrap(),
+            serde_json::to_value(
+                &sent
+                    .iter()
+                    .find(|m| m.role == "context_file")
+                    .unwrap()
+                    .content
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            serde_json::to_value(&saved.messages[1]).unwrap(),
+            original_user
+        );
+        assert_eq!(
+            serde_json::to_value(&saved.messages[2..]).unwrap(),
+            expected_events
+        );
+    }
+
+    #[test]
+    fn rag_save_keeps_non_review_prompt_boundaries() {
+        let review = crate::chat::internal_roles::event(
+            crate::chat::internal_roles::EventSubkind::SystemNotice,
+            "review.context",
+            serde_json::json!({"id": "review"}),
+            "Review context",
+        );
+        let other = crate::chat::internal_roles::event(
+            crate::chat::internal_roles::EventSubkind::SystemNotice,
+            "exec.registry",
+            serde_json::json!({}),
+            "Other event",
+        );
+        let context = ChatMessage::new("plain_text".into(), "Expanded context".into());
+        for boundary in [
+            other,
+            ChatMessage::new("event".into(), "Unknown event".into()),
+        ] {
+            let mut session = ChatSession::new("rag-boundary".into());
+            session.messages = vec![
+                ChatMessage::new("user".into(), "Request".into()),
+                review.clone(),
+                boundary.clone(),
+                review.clone(),
+            ];
+            save_rag_results_to_session(&mut session, &[serde_json::to_value(&context).unwrap()]);
+            assert_eq!(session.messages.len(), 5);
+            assert_eq!(
+                session.messages[2].content.content_text_only(),
+                "Expanded context"
+            );
+            assert_eq!(
+                serde_json::to_value(&session.messages[3]).unwrap(),
+                serde_json::to_value(&boundary).unwrap()
+            );
+            assert_eq!(
+                serde_json::to_value(&session.messages[4]).unwrap(),
+                serde_json::to_value(&review).unwrap()
+            );
+        }
     }
 
     fn ready_continuation(session: &ChatSession, nonce: &str) -> ReviewReadinessContinuation {

@@ -361,6 +361,19 @@ jobs:
           cargo test --workspace --profile ci-test --lib --target ${{ matrix.target }} 2>&1 | tee test-output.txt
           python ../../tools/dev/ci_tests.py verify-output test-output.txt
 
+      - name: Compile workspace integration tests (Windows)
+        if: startsWith(matrix.os, 'windows')
+        timeout-minutes: 120
+        env:
+          RUST_MIN_STACK: "16777216"
+          REFACT_GUI_DIR: ${{ github.workspace }}\refact-agent\gui
+          CMAKE_POLICY_DEFAULT_CMP0091: NEW
+          CMAKE_MSVC_RUNTIME_LIBRARY: MultiThreaded
+        shell: bash
+        run: |
+          export GITHUB_SHA="$REFACT_SOURCE_SHA"
+          cargo test --locked --workspace --profile ci-test --test '*' --target ${{ matrix.target }} --no-run
+
       - name: Run workspace integration tests (Windows)
         if: startsWith(matrix.os, 'windows')
         timeout-minutes: 60
@@ -373,7 +386,7 @@ jobs:
         run: |
           export GITHUB_SHA="$REFACT_SOURCE_SHA"
           set -o pipefail
-          cargo test --workspace --profile ci-test --test '*' --target ${{ matrix.target }} -- --nocapture --test-threads=1 2>&1 | tee test-output.txt
+          cargo test --locked --workspace --profile ci-test --test '*' --target ${{ matrix.target }} -- --nocapture --test-threads=1 2>&1 | tee test-output.txt
           python ../../tools/dev/ci_tests.py verify-output test-output.txt
 
       - name: Run workspace integration tests (macOS)

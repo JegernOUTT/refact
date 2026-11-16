@@ -183,6 +183,25 @@ fn last_system_message(messages: &[ChatMessage]) -> Option<ChatMessage> {
     messages.iter().rev().find(|m| m.role == "system").cloned()
 }
 
+pub(super) fn review_context_tail_start(messages: &[ChatMessage]) -> usize {
+    messages
+        .iter()
+        .rposition(|message| {
+            message.role != "event"
+                || message
+                    .extra
+                    .get("event")
+                    .and_then(|event| event.get("source"))
+                    .and_then(Value::as_str)
+                    != Some("review.context")
+        })
+        .map_or(0, |index| index + 1)
+}
+
+fn detach_trailing_review_context(messages: &mut Vec<ChatMessage>) -> Vec<ChatMessage> {
+    messages.split_off(review_context_tail_start(messages))
+}
+
 fn remove_visualization_only_messages(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
     messages
         .into_iter()
@@ -432,14 +451,18 @@ pub async fn prepare_chat_passthrough(
     };
     // 4. Run @-commands
     let (mut messages, _) = if options.allow_at_commands {
-        run_at_commands_locally(
+        let mut messages = messages;
+        let review_context = detach_trailing_review_context(&mut messages);
+        let (mut messages, context_produced) = run_at_commands_locally(
             ccx.clone(),
             t.tokenizer.clone(),
             sampling_parameters.max_new_tokens,
             messages,
             &mut has_rag_results,
         )
-        .await
+        .await;
+        messages.extend(review_context);
+        (messages, context_produced)
     } else {
         (messages, false)
     };
@@ -923,6 +946,73 @@ mod tests {
 
     fn plan_message(mode: &str, version: u32, content: &str) -> ChatMessage {
         crate::chat::internal_roles::plan(mode, version, content, None)
+    }
+
+    #[tokio::test]
+    async fn review_context_tail_does_not_reexpand_users_across_boundaries() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("tracked");
+        std::fs::write(&path, "original\n").unwrap();
+        let ccx = AtCommandsContext::new(
+            gcx,
+            8192,
+            1,
+            false,
+            vec![],
+            "review-tail-boundaries".into(),
+            None,
+            String::new(),
+            None,
+            None,
+        )
+        .await;
+        assert!(ccx.at_commands.contains_key("@file"));
+        let ccx = Arc::new(AMutex::new(ccx));
+        let review = crate::chat::internal_roles::event(
+            crate::chat::internal_roles::EventSubkind::SystemNotice,
+            "review.context",
+            json!({"id": "review"}),
+            "Review context",
+        );
+        let other = crate::chat::internal_roles::event(
+            crate::chat::internal_roles::EventSubkind::SystemNotice,
+            "exec.registry",
+            json!({}),
+            "Other event",
+        );
+        let mut assistant = review.clone();
+        assistant.role = "assistant".into();
+        let mut tool = review.clone();
+        tool.role = "tool".into();
+        for boundary in [
+            assistant,
+            tool,
+            other,
+            ChatMessage::new("event".into(), "unattributed event".into()),
+        ] {
+            let original = vec![
+                ChatMessage::new("user".into(), format!("Review @file {}", path.display())),
+                review.clone(),
+                boundary,
+                review.clone(),
+                review.clone(),
+            ];
+            let mut prefix = original.clone();
+            let tail = detach_trailing_review_context(&mut prefix);
+            assert_eq!(tail.len(), 2);
+            assert_eq!(prefix.len(), 3);
+            let mut rag = HasRagResults::new();
+            let (mut expanded, produced) =
+                run_at_commands_locally(ccx.clone(), None, 1024, prefix, &mut rag).await;
+            assert!(!produced);
+            assert!(rag.in_json.is_empty());
+            expanded.extend(tail);
+            assert_eq!(
+                serde_json::to_value(expanded).unwrap(),
+                serde_json::to_value(original).unwrap()
+            );
+        }
     }
 
     #[tokio::test]
