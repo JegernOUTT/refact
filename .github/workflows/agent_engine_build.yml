@@ -199,7 +199,7 @@ jobs:
         if: matrix.cross
         env:
           CARGO_BUILD_JOBS: "2"
-          CROSS_CONTAINER_OPTS: --volume "${{ github.workspace }}/refact-agent/gui:/gui:rw" --env REFACT_BUILD_VERSION --env REFACT_SOURCE_SHA
+          CROSS_CONTAINER_OPTS: --volume "${{ github.workspace }}/refact-agent/gui:/gui:rw" --mount "type=bind,source=${{ github.workspace }}/tools/dev/ci_test_inventory.json,target=/tools/dev/ci_test_inventory.json,readonly" --mount "type=bind,source=${{ github.workspace }}/packaging/runtime-compatibility.json,target=/packaging/runtime-compatibility.json,readonly" --env REFACT_BUILD_VERSION --env REFACT_SOURCE_SHA
         run: |
           GITHUB_SHA="$REFACT_SOURCE_SHA" CROSS_NO_WARNINGS=0 cross +${RUSTUP_TOOLCHAIN} build --workspace --profile ci-release --target ${{ matrix.target }}
           cp ./target/${{ matrix.target }}/ci-release/refact-lsp${{ matrix.ext }} ../..

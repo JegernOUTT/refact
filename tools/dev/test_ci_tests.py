@@ -420,6 +420,48 @@ class InventoryTests(unittest.TestCase):
         self.assertIn('cross +${RUSTUP_TOOLCHAIN} build', workflow)
         self.assertIn("if: matrix.target == 'aarch64-unknown-linux-gnu'", arm)
 
+    def test_cross_build_mounts_checked_out_compile_time_inputs_read_only(self):
+        import re
+        import yaml
+        workflow = yaml.safe_load((ci.ROOT / '.github/workflows/agent_engine_build.yml').read_text())
+        steps = workflow['jobs']['dist']['steps']
+        checkout = next(step for step in steps if step.get('uses') == 'actions/checkout@v4')
+        self.assertEqual(checkout['with']['ref'], '${{ inputs.source_sha }}')
+        self.assertIs(checkout['with']['persist-credentials'], False)
+        identity = next(step for step in steps if step.get('name') == 'Assert source SHA and toolchain inputs')
+        self.assertEqual(identity['env']['SOURCE_SHA'], '${{ inputs.source_sha }}')
+        self.assertIn('test "$(git rev-parse HEAD)" = "$SOURCE_SHA"', identity['run'])
+        build = next(step for step in steps if step.get('name') == 'Build linux-like artifact')
+        self.assertEqual(build['if'], 'matrix.cross')
+        self.assertLess(steps.index(checkout), steps.index(identity))
+        self.assertLess(steps.index(identity), steps.index(build))
+        workspace = '/checked out/source with spaces'
+        options = shlex.split(build['env']['CROSS_CONTAINER_OPTS'].replace('${{ github.workspace }}', workspace))
+        expected_mounts = []
+        for source, manifest_relative, repository_path, container_path in [
+            ('refact-agent/engine/crates/refact-self-update/src/public_release.rs', True,
+             'tools/dev/ci_test_inventory.json', '/tools/dev/ci_test_inventory.json'),
+            ('refact-agent/engine/src/daemon/runtime_coordinator.rs', False,
+             'packaging/runtime-compatibility.json', '/packaging/runtime-compatibility.json'),
+        ]:
+            text = (ci.ROOT / source).read_text()
+            if manifest_relative:
+                relative = re.search(r'include_bytes!\(concat!\(\s*env!\("CARGO_MANIFEST_DIR"\),\s*"([^"]+)"', text).group(1)
+                base = Path('/project/crates/refact-self-update')
+                resolved = os.path.normpath(str(base) + relative)
+                host = os.path.normpath(str(ci.ROOT / 'refact-agent/engine/crates/refact-self-update') + relative)
+            else:
+                relative = re.search(r'include_bytes!\(\s*"([^"]+)"', text).group(1)
+                base = Path('/project/src/daemon')
+                resolved = os.path.normpath(base / relative)
+                host = os.path.normpath(ci.ROOT / source / '..' / relative)
+            self.assertEqual(resolved, container_path)
+            self.assertEqual(Path(host), ci.ROOT / repository_path)
+            self.assertTrue(Path(host).is_file())
+            expected_mounts.extend(['--mount', f'type=bind,source={workspace}/{repository_path},target={container_path},readonly'])
+        self.assertEqual(options, ['--volume', f'{workspace}/refact-agent/gui:/gui:rw',
+                                   *expected_mounts, '--env', 'REFACT_BUILD_VERSION', '--env', 'REFACT_SOURCE_SHA'])
+
     def test_workflow_dependencies_and_sha(self):
         workflow = (ci.ROOT / '.github/workflows/tests.yml').read_text()
         for lane in ci.load_inventory()['required_jobs']:
