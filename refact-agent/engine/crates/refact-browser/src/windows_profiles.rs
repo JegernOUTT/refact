@@ -713,11 +713,19 @@ mod tests {
     #[test]
     fn windows_persistent_quota_survives_guard_drop_and_concurrency() {
         let cache = tempfile::tempdir().unwrap();
+        eprintln!(
+            "windows_persistent_quota_survives_guard_drop_and_concurrency cache: {}",
+            cache.path().display()
+        );
         for _ in 0..32 {
             drop(WindowsOwnedProfile::create(cache.path()).unwrap());
         }
         assert!(WindowsOwnedProfile::create(cache.path()).is_err());
         let cache2 = tempfile::tempdir().unwrap();
+        eprintln!(
+            "windows_persistent_quota_survives_guard_drop_and_concurrency cache2: {}",
+            cache2.path().display()
+        );
         let workers: Vec<_> = (0..64)
             .map(|_| {
                 let path = cache2.path().to_path_buf();
@@ -732,10 +740,16 @@ mod tests {
             .filter(|e| e.as_ref().unwrap().file_name() != ".allocation.lock")
             .count();
         assert!(count > 0 && count <= 32);
+        cache.close().expect("quota fixture cleanup: cache");
+        cache2.close().expect("quota fixture cleanup: cache2");
     }
     #[test]
     fn windows_protected_acl_is_exact_and_tampering_retains_profile() {
         let cache = tempfile::tempdir().unwrap();
+        eprintln!(
+            "windows_protected_acl_is_exact_and_tampering_retains_profile cache: {}",
+            cache.path().display()
+        );
         let profile = WindowsOwnedProfile::create(cache.path()).unwrap();
         let powershell =
             PathBuf::from(std::env::var_os("SystemRoot").expect("SystemRoot required"))
@@ -752,5 +766,7 @@ mod tests {
         assert!(profile.cleanup(true, true).is_err());
         assert!(profile.root.lock().unwrap().is_some());
         assert!(profile.path().exists());
+        drop(profile);
+        cache.close().expect("ACL fixture cleanup: cache");
     }
 }

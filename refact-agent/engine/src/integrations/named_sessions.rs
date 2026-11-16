@@ -1131,7 +1131,11 @@ mod tests {
     #[ignore = "launches two owned Chrome processes; run explicitly"]
     async fn live_named_children_are_isolated_and_generation_fenced() {
         use std::io::{Read, Write};
-        let (_gcx, owner, _cache) = owner().await;
+        let (_gcx, owner, cache) = owner().await;
+        eprintln!(
+            "live_named_children_are_isolated_and_generation_fenced cache: {}",
+            cache.path().display()
+        );
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         listener.set_nonblocking(true).unwrap();
@@ -1234,6 +1238,7 @@ mod tests {
             .await
             .unwrap();
         assert!(closed.process_exited);
+        assert_eq!(closed.profile_disposition, "removed");
         assert!(!pid_is_alive(old_pid));
         assert!(resolve_named_session(&owner, "a", &a.session_id).is_err());
         let recreated = create_named_session(owner.clone(), "a", options, deadline)
@@ -1253,19 +1258,21 @@ mod tests {
         assert!(close_named_session(&owner, "a", &a.session_id, deadline)
             .await
             .is_err());
-        assert!(
-            close_named_session(&owner, "a", &recreated.session_id, deadline)
-                .await
-                .unwrap()
-                .process_exited
-        );
-        assert!(
-            close_named_session(&owner, "b", &b.session_id, deadline)
-                .await
-                .unwrap()
-                .process_exited
-        );
+        let closed = close_named_session(&owner, "a", &recreated.session_id, deadline)
+            .await
+            .unwrap();
+        assert!(closed.process_exited);
+        assert_eq!(closed.profile_disposition, "removed");
+        let closed = close_named_session(&owner, "b", &b.session_id, deadline)
+            .await
+            .unwrap();
+        assert!(closed.process_exited);
+        assert_eq!(closed.profile_disposition, "removed");
+        drop(ra);
+        drop(rb);
+        drop(recreated_runtime);
         drop(cleanup_guard);
         reap_workers(&owner.gcx, true).await;
+        cache.close().expect("live named fixture cleanup: cache");
     }
 }
