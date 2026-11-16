@@ -1778,6 +1778,147 @@ mod tests {
         .unwrap();
     }
 
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_shell_echo_discovery_and_formatting_phase_probe() {
+        use std::io::Read;
+
+        const PHASES: [&str; 7] = [
+            "entered",
+            "before-resolve",
+            "resolved",
+            "echo-assigned",
+            "before-format",
+            "formatted",
+            "completed",
+        ];
+        let workspace = tempfile::Builder::new()
+            .prefix("shell-phase-'")
+            .tempdir()
+            .unwrap();
+        let root = normalize_workspace_path(&std::fs::canonicalize(workspace.path()).unwrap());
+        let sidecar = root.join("phase.txt");
+        std::fs::File::create(&sidecar).unwrap();
+        let sidecar = normalize_workspace_path(&std::fs::canonicalize(sidecar).unwrap());
+        assert!(
+            sidecar.parent() == Some(root.as_path()),
+            "sidecar escaped test workspace"
+        );
+        let literal = format!("'{}'", sidecar.to_str().unwrap().replace('\'', "''"));
+        let mark = |phase: &str| {
+            format!(
+                "[IO.File]::AppendAllText({literal}, \"{phase}`n\"); [Console]::WriteLine('{phase}'); "
+            )
+        };
+        let command = format!(
+            "{}[IO.File]::AppendAllText({literal}, ('ps-version=' + $PSVersionTable.PSVersion.ToString() + \"`n\")); {}$resolved = $ExecutionContext.InvokeCommand.GetCommand('echo', [System.Management.Automation.CommandTypes]::All); {}$v = echo approved; {}{}$v | Out-Default; {}{}",
+            mark("entered"),
+            mark("before-resolve"),
+            mark("resolved"),
+            mark("echo-assigned"),
+            mark("before-format"),
+            mark("formatted"),
+            mark("completed"),
+        );
+        let (gcx, ccx) = ccx_with_workspace(&root).await;
+        let registry = ccx.lock().await.app.runtime.exec_registry.clone();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        let result = tokio::time::timeout_at(deadline - Duration::from_secs(10), async {
+            ToolShell::default()
+                .tool_execute(
+                    ccx,
+                    &"windows-phase-probe".into(),
+                    &args(vec![
+                        ("command", json!(command)),
+                        ("description", json!("Probe PowerShell echo phases")),
+                        ("workdir", json!(root)),
+                        ("timeout", json!(10)),
+                    ]),
+                )
+                .await
+        })
+        .await;
+        let receipt_ok = match &result {
+            Ok(Ok((_, messages))) => messages.iter().any(|message| match message {
+                ContextEnum::ChatMessage(message) => {
+                    message.extra.get("exec").is_some_and(|exec| {
+                        exec["status"] == "exited"
+                            && exec["exit_code"] == 0
+                            && exec["detached"] != true
+                    })
+                }
+                _ => false,
+            }),
+            _ => false,
+        };
+        let cleanup = tokio::time::timeout_at(deadline, async {
+            let snapshots = registry.list(Default::default()).await;
+            let mut metadata = Vec::new();
+            let mut capture_ok = false;
+            let mut removed = true;
+            for snapshot in &snapshots {
+                let id = &snapshot.meta.process_id;
+                let raw = registry.read_raw_capture(id).await;
+                capture_ok = raw.as_ref().is_some_and(|raw| {
+                    raw.stdout.contains("formatted") && raw.stdout.contains("approved")
+                });
+                metadata.push((
+                    exec_status_label(&snapshot.status),
+                    exec_exit_code(&snapshot.status),
+                    raw.as_ref()
+                        .map(|raw| (raw.stdout_captured_bytes, raw.stderr_captured_bytes)),
+                ));
+                removed &= matches!(registry.remove(id).await, Ok(Some(_)));
+            }
+            (snapshots.len(), metadata, capture_ok, removed)
+        })
+        .await;
+        let sidecar_metadata = (|| -> Result<(Vec<&'static str>, Option<String>), &'static str> {
+            let file = std::fs::File::open(&sidecar).map_err(|_| "sidecar-open-failed")?;
+            let mut bytes = Vec::new();
+            file.take(8193)
+                .read_to_end(&mut bytes)
+                .map_err(|_| "sidecar-read-failed")?;
+            if bytes.len() > 8192 {
+                return Err("sidecar-over-limit");
+            }
+            let contents = std::str::from_utf8(&bytes).map_err(|_| "sidecar-invalid-utf8")?;
+            let mut phases = Vec::new();
+            let mut version = None;
+            for line in contents.lines() {
+                if let Some(phase) = PHASES.iter().find(|phase| **phase == line) {
+                    phases.push(*phase);
+                } else if let Some(value) = line.strip_prefix("ps-version=") {
+                    if version.is_some()
+                        || value.is_empty()
+                        || value.len() > 64
+                        || !value
+                            .bytes()
+                            .all(|byte| byte.is_ascii_digit() || byte == b'.')
+                    {
+                        return Err("sidecar-invalid-version");
+                    }
+                    version = Some(value.to_string());
+                } else {
+                    return Err("sidecar-unknown-record");
+                }
+            }
+            Ok((phases, version))
+        })();
+        let phases_ok = sidecar_metadata
+            .as_ref()
+            .is_ok_and(|(phases, version)| phases == &PHASES && version.is_some());
+        let cleanup_ok = cleanup
+            .as_ref()
+            .is_ok_and(|(count, _, capture_ok, removed)| *count == 1 && *capture_ok && *removed);
+        assert!(
+            receipt_ok && phases_ok && cleanup_ok,
+            "PowerShell phase probe: tool_completed={} receipt_ok={receipt_ok} sidecar={sidecar_metadata:?} cleanup={cleanup:?}",
+            matches!(result, Ok(Ok(_))),
+        );
+        drop(gcx);
+    }
+
     #[tokio::test]
     async fn python_nested_shell_stop_cancels_waiting_command() {
         tokio::time::timeout(Duration::from_secs(30), async {
