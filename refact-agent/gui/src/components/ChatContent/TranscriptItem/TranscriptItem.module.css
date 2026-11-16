@@ -228,7 +228,8 @@
   transform: translateY(var(--rf-motion-distance-none));
 }
 
-.panel {
+.panel,
+.preview {
   display: grid;
   gap: var(--rf-space-3);
   margin: var(--rf-space-1) 0 var(--rf-space-2)

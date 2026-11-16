@@ -11,6 +11,7 @@ import {
 import { ToolJobResultsContext } from "./ToolJobResultsContext";
 import { ToolJobResult } from "./ToolJobResult";
 import { ToolContent } from "../ToolsContent";
+import { CollapsibleStoreProvider } from "../useStoredOpen";
 import {
   ChatCommandHttpError,
   sendPythonRunControl,
@@ -149,6 +150,8 @@ describe("PythonTool", () => {
     extra: { python: { ...extra, ...python } },
   });
   const card = () => screen.getByTestId("script-card");
+  const toggle = () => within(card()).getAllByTestId("transcript-toggle")[0];
+  const openCard = () => fireEvent.click(toggle());
   const withCode = (code: string, description?: string): ToolCall => ({
     ...call,
     function: {
@@ -188,6 +191,7 @@ describe("PythonTool", () => {
         }}
       />,
     );
+    openCard();
     expect(screen.getByText("python tool is disabled")).toBeInTheDocument();
     expect(screen.getByText("Failed")).toBeInTheDocument();
   });
@@ -222,6 +226,7 @@ describe("PythonTool", () => {
         }}
       />,
     );
+    openCard();
     expect(screen.getByText("Background")).toBeInTheDocument();
     expect(screen.getByText(BACKGROUND_NOTE)).toBeInTheDocument();
     expect(screen.queryByText("receipt")).toBeNull();
@@ -280,6 +285,7 @@ describe("PythonTool", () => {
       expect(
         screen.getByText(status === "running" ? "Running" : "Background"),
       ).toBeInTheDocument();
+      openCard();
       if (status === "background")
         expect(screen.getByText(BACKGROUND_NOTE)).toBeInTheDocument();
       fireEvent.click(screen.getByRole("button", { name: "Stop" }));
@@ -315,6 +321,7 @@ describe("PythonTool", () => {
         <PythonTool toolCall={call} />
       </ToolJobResultsContext.Provider>,
     );
+    openCard();
     expect(screen.getByText("answer")).toBeInTheDocument();
     expect(screen.getByTestId("transcript-meta")).toHaveTextContent(
       "ran in background",
@@ -336,6 +343,7 @@ describe("PythonTool", () => {
         }}
       />,
     );
+    openCard();
     expect(screen.getByText("answer")).toBeInTheDocument();
   });
   it("highlights known tool calls lexically for calls without a line", () => {
@@ -347,6 +355,7 @@ describe("PythonTool", () => {
         result={done({ files_written: [] })}
       />,
     );
+    openCard();
     expect(container.querySelector("[class*=callee]")).toHaveTextContent(
       "shell",
     );
@@ -366,6 +375,7 @@ describe("PythonTool", () => {
         })}
       />,
     );
+    openCard();
     const preview = screen.getByTestId("script-preview");
     expect(preview.textContent?.length).toBeLessThanOrEqual(20_000);
     expect(preview.className).toMatch(/previewCompact/);
@@ -380,6 +390,7 @@ describe("PythonTool", () => {
         result={done({ result_preview: '{"total": 3}' })}
       />,
     );
+    openCard();
     await waitFor(() =>
       expect(screen.getByTestId("script-preview")).toHaveTextContent(
         '"total": 3',
@@ -392,6 +403,7 @@ describe("PythonTool", () => {
         result={done({ result_preview: '"src/models/__init__.py"' })}
       />,
     );
+    openCard();
     expect(screen.getByText('"src/models/__init__.py"')).toBeInTheDocument();
   });
   it("shows a result without valid metadata as plain text", () => {
@@ -402,6 +414,7 @@ describe("PythonTool", () => {
         result={{ tool_call_id: "t", content: "**bold** __init__.py" }}
       />,
     );
+    openCard();
     expect(screen.getByTestId("script-preview")).toHaveTextContent(
       "**bold** __init__.py",
     );
@@ -433,6 +446,7 @@ describe("PythonTool", () => {
         })}
       />,
     );
+    openCard();
     expect(screen.getByRole("region", { name: "Changes" })).toHaveTextContent(
       "Changes · 1",
     );
@@ -459,6 +473,7 @@ describe("PythonTool", () => {
         result={done({ files_written: files, artifacts: [] })}
       />,
     );
+    openCard();
     expect(screen.getAllByRole("button", { name: /^Open f/ })).toHaveLength(5);
     fireEvent.click(screen.getByRole("button", { name: "Show 2 more files" }));
     expect(screen.getAllByRole("button", { name: /^Open f/ })).toHaveLength(7);
@@ -484,6 +499,7 @@ describe("PythonTool", () => {
         )}
       />,
     );
+    openCard();
     expect(screen.getByTestId("transcript-status-pill")).toHaveTextContent(
       "Stopped",
     );
@@ -533,6 +549,7 @@ describe("PythonTool", () => {
         })}
       />,
     );
+    openCard();
     expect(screen.getByText("Limit exceeded")).toBeInTheDocument();
     expect(screen.getByText(text)).toBeInTheDocument();
   });
@@ -580,6 +597,7 @@ describe("PythonTool", () => {
         )}
       />,
     );
+    openCard();
     expect(screen.getByTestId("transcript-status-pill")).toHaveTextContent(
       "Unknown status",
     );
@@ -624,8 +642,146 @@ describe("PythonTool", () => {
         />
       </ToolJobResultsContext.Provider>,
     );
+    openCard();
     expect(screen.getByText("delivered")).toBeInTheDocument();
     expect(screen.queryByText("direct")).toBeNull();
+  });
+
+  describe("collapsed by default", () => {
+    const hasBody = () =>
+      within(card()).queryByTestId("script-code") !== null ||
+      within(card()).queryByTestId("transcript-panel") !== null;
+
+    it("shows only the header for a finished run", () => {
+      render(
+        <PythonTool
+          toolCall={withCode("print(42)", "Count the answer")}
+          result={done({})}
+        />,
+      );
+      expect(screen.getByTestId("transcript-verb")).toHaveTextContent("Script");
+      expect(screen.getByTestId("transcript-target")).toHaveTextContent(
+        "Count the answer",
+      );
+      expect(screen.getByTestId("transcript-meta")).toHaveTextContent(
+        "1 call · 1 file · 1.0 s",
+      );
+      expect(toggle()).toHaveAttribute("aria-expanded", "false");
+      expect(screen.queryByTestId("script-code")).toBeNull();
+      expect(screen.queryByRole("region", { name: "Result" })).toBeNull();
+      expect(screen.queryByRole("button", { name: "Details" })).toBeNull();
+      expect(screen.queryByTestId("transcript-panel")).toBeNull();
+    });
+    it("keeps the Failed status pill on a collapsed failed run", () => {
+      render(
+        <PythonTool
+          toolCall={call}
+          result={done({
+            status: "failed",
+            error: { type: "ValueError", message: "bad", traceback: "" },
+          })}
+        />,
+      );
+      expect(screen.getByTestId("transcript-status-pill")).toHaveTextContent(
+        "Failed",
+      );
+      expect(toggle()).toHaveAttribute("aria-expanded", "false");
+      expect(hasBody()).toBe(false);
+      expect(screen.queryByText("ValueError")).toBeNull();
+    });
+    it("opens from the header, switches to details and collapses again", async () => {
+      render(<PythonTool toolCall={call} result={done({})} />);
+      openCard();
+      expect(toggle()).toHaveAttribute("aria-expanded", "true");
+      expect(screen.getByTestId("script-code")).toBeInTheDocument();
+      const details = screen.getByRole("button", { name: "Details" });
+      expect(details).toHaveAttribute("aria-expanded", "false");
+      expect(screen.queryByRole("button", { name: "Copy code" })).toBeNull();
+      fireEvent.click(details);
+      expect(details).toHaveAttribute("aria-expanded", "true");
+      expect(toggle()).toHaveAttribute("aria-expanded", "true");
+      expect(screen.getByRole("button", { name: "Copy code" })).toBeVisible();
+      expect(screen.getByTestId("script-code")).toBeInTheDocument();
+      openCard();
+      expect(toggle()).toHaveAttribute("aria-expanded", "false");
+      await waitFor(() => expect(hasBody()).toBe(false));
+      expect(screen.queryByRole("button", { name: "Details" })).toBeNull();
+    });
+    it("is collapsed while running and still offers Stop", async () => {
+      vi.mocked(sendPythonRunControl).mockClear();
+      render(<PythonTool toolCall={call} />);
+      expect(toggle()).toHaveAttribute("aria-expanded", "false");
+      expect(hasBody()).toBe(false);
+      expect(screen.queryByRole("button", { name: "Details" })).toBeNull();
+      fireEvent.click(screen.getByRole("button", { name: "Stop" }));
+      await waitFor(() =>
+        expect(sendPythonRunControl).toHaveBeenCalledWith(
+          "chat",
+          "t",
+          "stop",
+          expect.anything(),
+          undefined,
+        ),
+      );
+      expect(sendPythonRunControl).toHaveBeenCalledTimes(1);
+      expect(toggle()).toHaveAttribute("aria-expanded", "false");
+      expect(hasBody()).toBe(false);
+    });
+    it("opens itself and shows the alert when Stop fails", async () => {
+      vi.mocked(sendPythonRunControl).mockRejectedValueOnce(new Error("boom"));
+      render(<PythonTool toolCall={call} />);
+      expect(toggle()).toHaveAttribute("aria-expanded", "false");
+      expect(screen.queryByRole("alert")).toBeNull();
+      fireEvent.click(screen.getByRole("button", { name: "Stop" }));
+      expect(await screen.findByRole("alert")).toHaveTextContent(
+        "Could not stop this script. Please try again.",
+      );
+      expect(toggle()).toHaveAttribute("aria-expanded", "true");
+      expect(screen.getByRole("button", { name: "Details" })).toBeVisible();
+    });
+    it("remembers the open state per tool call, apart from the details flag", () => {
+      const preferences = new Map<string, boolean>();
+      const collapseStore = {
+        get: (key: string) => preferences.get(key),
+        set: (key: string, value: boolean) => {
+          preferences.set(key, value);
+        },
+      };
+      const view = () => (
+        <CollapsibleStoreProvider value={collapseStore}>
+          <PythonTool toolCall={call} result={done({})} />
+        </CollapsibleStoreProvider>
+      );
+      const first = render(view());
+      expect(toggle()).toHaveAttribute("aria-expanded", "false");
+      expect(preferences.get("tc:t")).toBe(false);
+      openCard();
+      expect(preferences.get("tc:t")).toBe(true);
+      expect(preferences.get("script:t")).toBe(false);
+      first.unmount();
+
+      const second = render(view());
+      expect(toggle()).toHaveAttribute("aria-expanded", "true");
+      expect(screen.getByTestId("script-code")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Details" })).toHaveAttribute(
+        "aria-expanded",
+        "false",
+      );
+      fireEvent.click(screen.getByRole("button", { name: "Details" }));
+      expect(preferences.get("script:t")).toBe(true);
+      expect(preferences.get("tc:t")).toBe(true);
+      second.unmount();
+
+      render(view());
+      expect(toggle()).toHaveAttribute("aria-expanded", "true");
+      expect(screen.getByRole("button", { name: "Details" })).toHaveAttribute(
+        "aria-expanded",
+        "true",
+      );
+      openCard();
+      expect(preferences.get("tc:t")).toBe(false);
+      expect(preferences.get("script:t")).toBe(true);
+    });
   });
 
   const line = (number: number) =>
@@ -648,6 +804,7 @@ describe("PythonTool", () => {
           toolCall={withCode("x1 = await shell(command='ls')\nx2 = 2")}
         />,
       );
+      openCard();
       const before = new Map(rowRenders);
       const elapsed = screen.getByText(/ s$/);
       const first = elapsed.textContent;
@@ -677,6 +834,7 @@ describe("PythonTool", () => {
     ];
     rowRenders.clear();
     const view = render(<PythonTool toolCall={withCode(code)} />);
+    openCard();
     const before = new Map(rowRenders);
     live.calls = [
       live.calls[0],
@@ -714,6 +872,7 @@ describe("PythonTool", () => {
       ],
     };
     render(<PythonTool toolCall={withCode(code)} result={done(edited)} />);
+    openCard();
     const row = lineEl(2);
 
     expect(row).toHaveAccessibleName(/^await update_textdoc/);
@@ -747,16 +906,22 @@ describe("PythonTool", () => {
         result={done({ calls, calls_total: 3, files_written: [] })}
       />,
     );
+    openCard();
     const row = lineEl(1);
     expect(row).toHaveAccessibleDescription("Failed");
     expect(row).toHaveTextContent("×3");
     fireEvent.click(row);
-    expect(screen.getAllByRole("button", { name: /cat/ })).toHaveLength(4);
+    expect(
+      within(screen.getByTestId("transcript-panel")).getAllByRole("button", {
+        name: /cat/,
+      }),
+    ).toHaveLength(4);
   });
   it("marks a waiting call in the code, never cutting its annotation", () => {
     live.approvals = true;
     live.calls = [{ ...pythonCall, call_id: "c", status: "running", line: 1 }];
     render(<PythonTool toolCall={withCode("await shell(command='ls')")} />);
+    openCard();
     expect(screen.queryByRole("button", { name: "Allow once" })).toBeNull();
     expect(screen.getByText("Waiting for approval")).toBeInTheDocument();
     expect(screen.getByText(WAITING_NOTE)).toHaveAttribute("role", "status");
@@ -787,6 +952,7 @@ describe("PythonTool", () => {
         })}
       />,
     );
+    openCard();
     expect(screen.queryByRole("alert")).toBeNull();
     const error = screen.getByText("KeyError").closest("p");
     if (!error) throw new Error("no state line");
@@ -802,6 +968,7 @@ describe("PythonTool", () => {
   });
   it("announces a failure that happens while the card is watched", () => {
     const view = render(<PythonTool toolCall={call} />);
+    openCard();
     live.status = undefined;
     view.rerender(
       <PythonTool
@@ -835,6 +1002,7 @@ describe("PythonTool", () => {
     live.approvals = true;
     live.approvalList = [{ ...pythonApproval, call_id: "c58" }];
     render(<PythonTool toolCall={withCode(code)} />);
+    openCard();
     const shown = [...document.querySelectorAll("[data-line]")].map((node) =>
       node.getAttribute("data-line"),
     );
@@ -850,6 +1018,7 @@ describe("PythonTool", () => {
     render(
       <PythonTool toolCall={withCode(code)} result={done({ calls: [] })} />,
     );
+    openCard();
     expect(screen.getAllByTestId("script-code-fold")).toHaveLength(1);
     expect(document.querySelectorAll("[data-line]")).toHaveLength(8);
     fireEvent.click(screen.getByTestId("script-code-fold"));
@@ -864,8 +1033,9 @@ describe("PythonTool", () => {
     );
     expect(document.querySelectorAll("[data-line]")).toHaveLength(24);
   });
-  it("shows short code whole and puts details behind the header chevron", () => {
+  it("shows short code whole and puts details behind the Details button", () => {
     render(<PythonTool toolCall={call} result={done({})} />);
+    openCard();
     expect(line(1)).toHaveTextContent("print(42)");
     expect(screen.queryByRole("button", { name: /^Show all/ })).toBeNull();
     expect(screen.queryByRole("button", { name: "Copy code" })).toBeNull();
@@ -885,6 +1055,7 @@ describe("PythonTool", () => {
     render(
       <PythonTool toolCall={withCode(code)} result={done({ calls: [] })} />,
     );
+    openCard();
     fireEvent.click(screen.getByRole("button", { name: "Details" }));
     expect(document.querySelectorAll("[data-line]")).toHaveLength(400);
     fireEvent.click(
@@ -897,6 +1068,7 @@ describe("PythonTool", () => {
     render(
       <PythonTool toolCall={withCode(code)} result={done({ calls: [] })} />,
     );
+    openCard();
     fireEvent.click(screen.getByRole("button", { name: "Details" }));
     const row = lineEl(1);
     expect(row.textContent?.length).toBeLessThan(2_100);
@@ -913,12 +1085,14 @@ describe("PythonTool", () => {
         })}
       />,
     );
+    openCard();
     expect(screen.queryByRole("region", { name: "Tool calls" })).toBeNull();
     expect(screen.getByText("Showing 1 of 250 calls")).toBeInTheDocument();
   });
   it("says when the live output is only the last part", () => {
     live.stdout = "z".repeat(16_384);
     render(<PythonTool toolCall={call} />);
+    openCard();
     expect(screen.getByText("showing the last 16 KB")).toBeInTheDocument();
     live.stdout = "live print";
   });
@@ -929,6 +1103,7 @@ describe("PythonTool", () => {
         result={done({ stdout_preview: "a\nb\n" })}
       />,
     );
+    openCard();
     const hint = screen.getByRole("button", {
       name: "Printed output hidden · 2 lines",
     });
@@ -948,6 +1123,7 @@ describe("PythonTool", () => {
         result={done({})}
       />,
     );
+    openCard();
     expect(screen.getByText(/^Code truncated/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Details" }));
     expect(screen.getByRole("button", { name: "Copy code" })).toBeDisabled();
@@ -965,6 +1141,7 @@ describe("PythonTool", () => {
         })}
       />,
     );
+    openCard();
     expect(
       screen.getByRole("button", { name: "Open /p/a/x.txt" }),
     ).toBeInTheDocument();
@@ -1031,6 +1208,7 @@ describe("PythonTool", () => {
           })}
         />,
       );
+      openCard();
       expect(lineEl(2)).toHaveTextContent("×12 · 41.2k tokens · 14.0 s");
       expect(lineEl(1)).not.toHaveTextContent("tokens");
       const callees = [...container.querySelectorAll("[class*=callee]")].map(
@@ -1058,6 +1236,7 @@ describe("PythonTool", () => {
           result={done({ calls, calls_total: 2, files_written: [] })}
         />,
       );
+      openCard();
       const row = lineEl(1);
       expect(row).toHaveTextContent("×2 · 3.4k tokens");
       fireEvent.click(row);
@@ -1082,6 +1261,7 @@ describe("PythonTool", () => {
         }),
       ];
       const view = render(<PythonTool toolCall={withCode(code)} />);
+      openCard();
       expect(lineEl(2)).toHaveAccessibleDescription("Running");
       expect(lineEl(2)).not.toHaveTextContent("tokens");
       live.status = undefined;
@@ -1123,6 +1303,7 @@ describe("PythonTool", () => {
           })}
         />,
       );
+      openCard();
       fireEvent.click(screen.getByRole("button", { name: "Details" }));
       expect(
         screen.getByText("1 call · 3k in · 433 out · gpt-5-mini, claude-haiku"),
@@ -1140,6 +1321,7 @@ describe("PythonTool", () => {
           })}
         />,
       );
+      openCard();
       const region = screen.getByRole("region", { name: "Model calls" });
       expect(region).toHaveTextContent("Model calls · 1");
       expect(region).toHaveTextContent("gpt-5-mini · Summarise file 1");
@@ -1162,6 +1344,7 @@ describe("PythonTool", () => {
           })}
         />,
       );
+      openCard();
       expect(lineEl(1)).toHaveTextContent("Allowed for run · 1.5 s");
     });
   });
@@ -1179,6 +1362,7 @@ describe("PythonTool", () => {
     it("renders a live run's displays between the code and the output, then the stored ones", () => {
       live.displays = [display(1)];
       const view = render(<PythonTool toolCall={withCode("show(x)")} />);
+      openCard();
       const shown = screen.getByTestId("script-displays");
       expect(shown).toHaveTextContent("Table 1");
       expect(
@@ -1204,6 +1388,82 @@ describe("PythonTool", () => {
           ) & Node.DOCUMENT_POSITION_FOLLOWING,
       ).toBeTruthy();
       live.displays = undefined;
+    });
+    const inCard = () => within(card());
+    const follows = (first: HTMLElement, second: HTMLElement) =>
+      Boolean(
+        first.compareDocumentPosition(second) &
+          Node.DOCUMENT_POSITION_FOLLOWING,
+      );
+    const collapsedWithDisplays = () => {
+      live.status = undefined;
+      return render(
+        <PythonTool
+          toolCall={withCode("show(x)")}
+          result={done({ displays: [display(2), display(3)] })}
+        />,
+      );
+    };
+    it.each(["live", "stored"] as const)(
+      "keeps a collapsed card's %s displays under the header",
+      (kind) => {
+        if (kind === "live") {
+          live.displays = [display(1)];
+          render(<PythonTool toolCall={withCode("show(x)")} />);
+        } else collapsedWithDisplays();
+        try {
+          expect(toggle()).toHaveAttribute("aria-expanded", "false");
+          const shown = inCard().getByTestId("script-displays");
+          expect(inCard().getAllByTestId("script-displays")).toHaveLength(1);
+          expect(inCard().getByTestId("transcript-preview")).toContainElement(
+            shown,
+          );
+          expect(shown).toHaveTextContent(
+            kind === "live" ? "Table 1" : "Table 2",
+          );
+          expect(inCard().queryByTestId("script-code")).toBeNull();
+          expect(inCard().queryByRole("region", { name: "Result" })).toBeNull();
+          expect(inCard().queryByTestId("transcript-panel")).toBeNull();
+        } finally {
+          live.displays = undefined;
+        }
+      },
+    );
+    it("moves the displays into the body when the card opens", () => {
+      collapsedWithDisplays();
+      openCard();
+      expect(inCard().getAllByTestId("script-displays")).toHaveLength(1);
+      expect(inCard().queryByTestId("transcript-preview")).toBeNull();
+      const shown = inCard().getByTestId("script-displays");
+      expect(inCard().getByTestId("transcript-panel")).toContainElement(shown);
+      expect(follows(inCard().getByTestId("script-code"), shown)).toBe(true);
+      expect(
+        follows(shown, inCard().getByRole("region", { name: "Result" })),
+      ).toBe(true);
+    });
+    it("shows the displays under the header again as soon as the card collapses", async () => {
+      collapsedWithDisplays();
+      openCard();
+      openCard();
+      expect(toggle()).toHaveAttribute("aria-expanded", "false");
+      expect(inCard().getAllByTestId("script-displays")).toHaveLength(1);
+      expect(inCard().getByTestId("transcript-preview")).toContainElement(
+        inCard().getByTestId("script-displays"),
+      );
+      await waitFor(() =>
+        expect(inCard().queryByTestId("transcript-panel")).toBeNull(),
+      );
+      expect(inCard().getAllByTestId("script-displays")).toHaveLength(1);
+      expect(inCard().getByTestId("transcript-preview")).toContainElement(
+        inCard().getByTestId("script-displays"),
+      );
+      expect(inCard().queryByTestId("script-code")).toBeNull();
+    });
+    it("has no preview slot on a collapsed card without displays", () => {
+      render(<PythonTool toolCall={call} result={done({})} />);
+      expect(toggle()).toHaveAttribute("aria-expanded", "false");
+      expect(inCard().queryByTestId("transcript-preview")).toBeNull();
+      expect(inCard().queryByTestId("script-displays")).toBeNull();
     });
   });
   describe("engine calls and changes", () => {
@@ -1249,6 +1509,7 @@ describe("PythonTool", () => {
       const { container } = render(
         <PythonTool toolCall={withCode(code)} result={result()} />,
       );
+      openCard();
       expect(
         [...container.querySelectorAll("[class*=callee]")].map(
           (node) => node.textContent,
@@ -1259,6 +1520,7 @@ describe("PythonTool", () => {
     });
     it("details an engine call with its function, kind, result and arguments", () => {
       render(<PythonTool toolCall={withCode(code)} result={result()} />);
+      openCard();
       fireEvent.click(lineEl(3));
       const detail = lineEl(3).parentElement;
       expect(detail).toHaveTextContent("Functionchat.set_params");
@@ -1278,6 +1540,7 @@ describe("PythonTool", () => {
           })}
         />,
       );
+      openCard();
       const section = screen.getByRole("region", { name: "Engine changes" });
       expect(section).toHaveTextContent("Engine changes · 60");
       expect(section).toHaveTextContent("Showing 2 of 60");
@@ -1316,6 +1579,7 @@ describe("PythonTool", () => {
           })}
         />,
       );
+      openCard();
       const section = screen.getByRole("region", { name: "Engine changes" });
       const text = section.textContent ?? "";
       expect(text).not.toMatch(/[\u202A-\u202E\u200B]/);
@@ -1338,6 +1602,7 @@ describe("PythonTool", () => {
           })}
         />,
       );
+      openCard();
       expect(screen.getByTestId("transcript-meta")).not.toHaveTextContent(
         "engine",
       );
@@ -1361,6 +1626,7 @@ describe("PythonTool", () => {
           })}
         />,
       );
+      openCard();
       const rows = [
         ...screen.getByRole("list", { name: "Engine changes list" }).children,
       ] as HTMLElement[];
@@ -1413,6 +1679,7 @@ describe("PythonTool", () => {
           })}
         />,
       );
+      openCard();
       for (const number of [1, 2, 3, 4]) fireEvent.click(lineEl(number));
       const detail = (number: number) => lineEl(number).parentElement;
       expect(detail(1)).toHaveTextContent("KindChange (not applied)");
@@ -1442,6 +1709,7 @@ describe("PythonTool", () => {
           })}
         />,
       );
+      openCard();
       fireEvent.click(lineEl(1));
       const detail = lineEl(1).parentElement;
       if (!detail) throw new Error("line 1 has no detail");
@@ -1464,6 +1732,7 @@ describe("PythonTool", () => {
           })}
         />,
       );
+      openCard();
       const block = () => screen.getByRole("region", { name: "Result" });
       expect(block()).toHaveTextContent("Result cut by the engine");
       fireEvent.click(screen.getByRole("button", { name: "Details" }));
@@ -1480,6 +1749,7 @@ describe("PythonTool", () => {
           result={result({ result_preview: '{"total": 3}' })}
         />,
       );
+      openCard();
       expect(
         screen.getByRole("region", { name: "Result" }),
       ).not.toHaveTextContent("cut by the engine");

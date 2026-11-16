@@ -37,6 +37,7 @@ export interface TranscriptItemProps
   statusLabel?: React.ReactNode;
   statusDetail?: React.ReactNode;
   quickAction?: React.ReactNode;
+  preview?: React.ReactNode;
   summary?: readonly TranscriptFact[] | React.ReactNode;
   input?: React.ReactNode;
   output?: React.ReactNode;
@@ -113,6 +114,7 @@ export function TranscriptItem({
   statusLabel,
   statusDetail,
   quickAction,
+  preview,
   summary,
   input,
   output,
@@ -325,6 +327,11 @@ export function TranscriptItem({
       {...rootProps}
     >
       {row}
+      {hasContent(preview) ? (
+        <div className={styles.preview} data-testid="transcript-preview">
+          {preview}
+        </div>
+      ) : null}
       {renderPanel ? (
         <div
           className={classNames("rf-expand-grid", styles.panelGrid)}

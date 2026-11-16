@@ -272,10 +272,6 @@
 }
 
 /* Script card */
-/* The details chevron sits where an expandable row draws its chevron. */
-.scriptRow.scriptRow[data-expandable] {
-  padding-inline-end: 0;
-}
 /* The meta keeps its width; the title gives way. */
 .scriptRow [data-testid="transcript-meta"] {
   flex: 0 0 auto;
@@ -296,14 +292,6 @@
 }
 .detailsToggle svg {
   color: var(--rf-color-muted);
-}
-.detailsToggle[aria-expanded="true"] svg {
-  transform: rotate(180deg);
-}
-@media (prefers-reduced-motion: no-preference) {
-  .detailsToggle svg {
-    transition: transform var(--rf-dur-med) var(--rf-ease-standard);
-  }
 }
 /* Beats the transcript title reset, which makes every title child inherit. */
 .monoTitle.monoTitle.monoTitle.monoTitle {

@@ -173,6 +173,45 @@ describe("TranscriptItem", () => {
   });
 });
 
+describe("TranscriptItem preview", () => {
+  it("shows the preview under the row, outside the panel, open or collapsed", () => {
+    setReducedMotion(true);
+    render(
+      <TranscriptItem
+        output="out"
+        preview={<button type="button">Chart</button>}
+        verb="Script"
+      />,
+    );
+    const row = screen.getByTestId("transcript-row");
+    const preview = screen.getByTestId("transcript-preview");
+    expect(within(preview).getByText("Chart")).toBeInTheDocument();
+    expect(screen.queryByTestId("transcript-panel")).toBeNull();
+    expect(
+      row.compareDocumentPosition(preview) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+
+    fireEvent.click(screen.getByText("Chart"));
+    expect(screen.getByTestId("transcript-toggle")).toHaveAttribute(
+      "aria-expanded",
+      "false",
+    );
+
+    fireEvent.click(row);
+    const panel = screen.getByTestId("transcript-panel");
+    expect(panel).not.toContainElement(preview);
+    expect(screen.getByTestId("transcript-preview")).toBe(preview);
+    expect(
+      preview.compareDocumentPosition(panel) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
+  it("renders no preview container without preview content", () => {
+    render(<TranscriptItem output="out" preview={null} verb="Read" />);
+    expect(screen.queryByTestId("transcript-preview")).toBeNull();
+  });
+});
+
 describe("TranscriptClamp", () => {
   it("toggles Show all and Show less when content overflows", () => {
     const scrollHeight = vi

@@ -9,7 +9,8 @@ import {
 } from "react";
 import classNames from "classnames";
 import {
-  ChevronDown,
+  ChevronsDownUp,
+  ChevronsUpDown,
   Copy,
   FileCode,
   FileOutput,
@@ -218,6 +219,10 @@ export function PythonTool({
   const sawLive = useRef(false);
   if (busy || receiptPending || waiting) sawLive.current = true;
 
+  const [open, , setOpen] = useStoredOpen(
+    toolCall.id ? `tc:${toolCall.id}` : undefined,
+    false,
+  );
   const [stopping, setStopping] = useState(false);
   const lock = useRef(false);
   const [stopError, setStopError] = useState<string>();
@@ -253,6 +258,7 @@ export function PythonTool({
           ? "This script is no longer running."
           : "Could not stop this script. Please try again.",
       );
+      setOpen(true);
       lock.current = false;
       setStopping(false);
     }
@@ -281,6 +287,16 @@ export function PythonTool({
   const callsTotal = extra?.calls_total ?? calls.length;
   const counts = callCounts(calls, callsTotal, extra?.llm?.calls);
   const displays = extra ? extra.displays ?? EMPTY_DISPLAYS : run?.displays;
+  const shownDisplays = displays ?? EMPTY_DISPLAYS;
+  const scriptDisplays =
+    shownDisplays.length > 0 || (extra?.displays_total ?? 0) > 0 ? (
+      <ScriptDisplays
+        displays={shownDisplays}
+        total={extra?.displays_total}
+        baseDir={extra?.workspace_dir ? extra.workspace_dir : undefined}
+        runKey={toolCallId || undefined}
+      />
+    ) : null;
   const started =
     extra?.started_at_ms ??
     (run && run.status !== "finished" ? run.started_at_ms : undefined);
@@ -379,33 +395,37 @@ export function PythonTool({
       statusLabel={transcriptStatus === "done" ? undefined : statusLabel}
       rowClassName={styles.scriptRow}
       quickAction={
-        <>
-          {busy && (
-            <Button
-              leftIcon={Square}
-              size="sm"
-              variant="ghost"
-              disabled={stopping}
-              onClick={() => void stop()}
-            >
-              {stopping ? "Stopping…" : "Stop"}
-            </Button>
-          )}
-          <IconButton
-            icon={ChevronDown}
-            size="sm"
-            variant="ghost"
-            className={styles.detailsToggle}
-            aria-expanded={expanded}
-            aria-controls={bodyId}
-            aria-label="Details"
-            onClick={toggleExpanded}
-          />
-        </>
+        busy || open ? (
+          <>
+            {busy && (
+              <Button
+                leftIcon={Square}
+                size="sm"
+                variant="ghost"
+                disabled={stopping}
+                onClick={() => void stop()}
+              >
+                {stopping ? "Stopping…" : "Stop"}
+              </Button>
+            )}
+            {open && (
+              <IconButton
+                icon={expanded ? ChevronsDownUp : ChevronsUpDown}
+                size="sm"
+                variant="ghost"
+                className={styles.detailsToggle}
+                aria-expanded={expanded}
+                aria-controls={bodyId}
+                aria-label="Details"
+                onClick={toggleExpanded}
+              />
+            )}
+          </>
+        ) : null
       }
-      expandable={false}
-      open
-      animate={false}
+      open={open}
+      onOpenChange={setOpen}
+      preview={open ? null : scriptDisplays}
       sectionLabels={HIDDEN_LABELS}
       output={
         <ScriptBody
@@ -431,8 +451,7 @@ export function PythonTool({
           expanded={expanded}
           onToggleExpanded={toggleExpanded}
           toolCallId={toolCallId}
-          displays={displays ?? EMPTY_DISPLAYS}
-          displaysTotal={extra?.displays_total}
+          displays={open ? scriptDisplays : null}
         />
       }
       actions={
@@ -579,8 +598,7 @@ type BodyProps = {
   expanded: boolean;
   onToggleExpanded: () => void;
   toolCallId: string;
-  displays: readonly PythonDisplay[];
-  displaysTotal: number | undefined;
+  displays: React.ReactNode;
 };
 
 function ScriptBody({
@@ -607,7 +625,6 @@ function ScriptBody({
   onToggleExpanded,
   toolCallId,
   displays,
-  displaysTotal,
 }: BodyProps) {
   const lineCount = useMemo(() => splitCodeLines(code).length, [code]);
   const unplaced = useMemo(
@@ -684,14 +701,7 @@ function ScriptBody({
             />
           </section>
         )}
-        {(displays.length > 0 || (displaysTotal ?? 0) > 0) && (
-          <ScriptDisplays
-            displays={displays}
-            total={displaysTotal}
-            baseDir={extra?.workspace_dir ? extra.workspace_dir : undefined}
-            runKey={toolCallId || undefined}
-          />
-        )}
+        {displays}
         {expanded && extra?.error?.traceback && !stopped && (
           <details className={styles.details}>
             <summary>Traceback</summary>
