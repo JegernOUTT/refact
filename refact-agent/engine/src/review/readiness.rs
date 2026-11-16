@@ -77,6 +77,33 @@ impl AdmissionIdentity {
                 })
             && frontier(session, self.messages_len).is_ok_and(|current| current == self.frontier)
     }
+
+    #[cfg(test)]
+    pub(crate) fn diagnostic_reason_bits(&self, session: &ChatSession) -> u8 {
+        let closed = session.closed;
+        let captured_abort = self.abort.load(Ordering::Acquire);
+        let scope_cancel = self
+            .scope_cancel
+            .as_ref()
+            .is_some_and(|cancel| cancel.load(Ordering::Acquire));
+        let abort_arc_changed = !Arc::ptr_eq(&self.abort, &session.abort_flag);
+        let messages_rejected = session.messages.len() != self.messages_len
+            && !(session.messages.len() == self.messages_len + 1
+                && crate::chat::goal_verifier::readiness_allowed_tool_result(session, &self.nonce)
+                    .is_some_and(|id| {
+                        session.messages.last().is_some_and(|message| {
+                            message.role == "tool" && message.tool_call_id == id
+                        })
+                    }));
+        let frontier_changed = session.messages.len() < self.messages_len
+            || !frontier(session, self.messages_len).is_ok_and(|current| current == self.frontier);
+        u8::from(closed)
+            | (u8::from(captured_abort) << 1)
+            | (u8::from(scope_cancel) << 2)
+            | (u8::from(abort_arc_changed) << 3)
+            | (u8::from(messages_rejected) << 4)
+            | (u8::from(frontier_changed) << 5)
+    }
 }
 fn frontier(session: &ChatSession, len: usize) -> Result<String, String> {
     serde_json::to_vec(&(
@@ -1176,6 +1203,7 @@ mod tests {
             let mut session = ChatSession::new("identity".into());
             let mut identity = AdmissionIdentity::capture(&session, "test").unwrap();
             assert!(identity.matches(&session));
+            assert_eq!(identity.diagnostic_reason_bits(&session), 0);
             match mutation {
                 "human" => session
                     .messages
@@ -1187,6 +1215,19 @@ mod tests {
                 _ => identity.scope_cancel = Some(Arc::new(AtomicBool::new(true))),
             }
             assert!(!identity.matches(&session), "{mutation}");
+            let expected = match mutation {
+                "human" => 1 << 4,
+                "scope" => 1 << 5,
+                "abort" => 1 << 1,
+                "replacement" => 1 << 3,
+                "closed" => 1,
+                _ => 1 << 2,
+            };
+            assert_eq!(
+                identity.diagnostic_reason_bits(&session),
+                expected,
+                "{mutation}"
+            );
         }
     }
 

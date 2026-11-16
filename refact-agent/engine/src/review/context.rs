@@ -345,6 +345,7 @@ pub(crate) async fn publish_binding_checked(
         .ok_or("Chat unavailable")?;
     let recovered = {
         let mut s = session.lock().await;
+        #[cfg(not(test))]
         if identity.is_some_and(|identity| !identity.matches(&s))
             || s.closed
             || s.abort_flag.load(Ordering::Acquire)
@@ -357,6 +358,33 @@ pub(crate) async fn publish_binding_checked(
                 != Some(binding.worktree.source_workspace_root.clone())
         {
             return Err("Review publication session identity changed".into());
+        }
+        #[cfg(test)]
+        {
+            let identity_changed = identity.is_some_and(|identity| !identity.matches(&s));
+            let closed = s.closed;
+            let live_abort = s.abort_flag.load(Ordering::Acquire);
+            let attachment_changed = s.thread.worktree != binding.previous;
+            let task_conflict = binding.previous.as_ref() != Some(&binding.worktree)
+                && s.thread.task_meta.is_some();
+            let root_canonical_matches = s
+                .work_project_root
+                .as_ref()
+                .and_then(|root| dunce::canonicalize(root).ok())
+                == Some(binding.worktree.source_workspace_root.clone());
+            if identity_changed
+                || closed
+                || live_abort
+                || attachment_changed
+                || task_conflict
+                || !root_canonical_matches
+            {
+                let identity_reason_bits =
+                    identity.map(|identity| identity.diagnostic_reason_bits(&s));
+                return Err(format!(
+                    "Review publication session identity changed [identity_changed={identity_changed} identity_reason_bits={identity_reason_bits:?} closed={closed} live_abort={live_abort} attachment_changed={attachment_changed} task_conflict={task_conflict} root_canonical_matches={root_canonical_matches}]"
+                ));
+            }
         }
         let derived = s.derived_privacy_zones.clone();
         // Obtain the only fallible publication lock before changing either labels or attachment.

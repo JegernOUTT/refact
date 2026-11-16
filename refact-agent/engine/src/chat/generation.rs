@@ -4552,6 +4552,14 @@ mod tests {
     async fn review_context_production_iteration_precedes_generated_assistant() {
         let (_temp, app, session, _ccx, _) =
             crate::review::context::tests::review_bound_test_session().await;
+        {
+            let chat_id = session.lock().await.chat_id.clone();
+            let sessions = app.chat.sessions.read().await;
+            assert!(Arc::ptr_eq(
+                sessions.get(&chat_id).expect("fixture session registered"),
+                &session,
+            ));
+        }
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener");
