@@ -1498,17 +1498,30 @@ mod tests {
             })
         }
 
+        fn from_contents(pid: u32, stat: &str) -> std::io::Result<Option<Self>> {
+            Self::parse(stat)
+                .filter(|stat| stat.pid == pid)
+                .map(Some)
+                .ok_or_else(|| {
+                    let parsed_pid = stat
+                        .split_once(" (")
+                        .and_then(|(value, _)| value.parse::<u32>().ok());
+                    let fields = stat
+                        .rsplit_once(") ")
+                        .map(|(_, fields)| fields.split_whitespace().count());
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!(
+                            "invalid owned PID stat: expected_pid={pid} bytes={} parsed_pid={parsed_pid:?} fields_after_comm={fields:?}",
+                            stat.len()
+                        ),
+                    )
+                })
+        }
+
         fn read(pid: u32) -> std::io::Result<Option<Self>> {
             match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
-                Ok(stat) => {
-                    let parsed = Self::parse(&stat).filter(|stat| stat.pid == pid);
-                    parsed.map(Some).ok_or_else(|| {
-                        std::io::Error::new(
-                            std::io::ErrorKind::InvalidData,
-                            "invalid owned PID stat",
-                        )
-                    })
-                }
+                Ok(stat) => Self::from_contents(pid, &stat),
                 Err(error)
                     if error.kind() == std::io::ErrorKind::NotFound
                         || error.raw_os_error() == Some(libc::ESRCH) =>
@@ -1526,6 +1539,29 @@ mod tests {
                     && !matches!(current.state, 'Z' | 'X')
             })
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn owned_process_stat_rejects_unknown_identity_without_exposing_contents() {
+        let valid = "42 (private process name) S 7 42 42 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1234 0";
+        assert_eq!(
+            OwnedProcessStat::from_contents(42, valid).unwrap(),
+            OwnedProcessStat::parse(valid)
+        );
+        for (pid, contents) in [(42, ""), (42, "42 (private process name) S"), (43, valid)] {
+            let error = OwnedProcessStat::from_contents(pid, contents).unwrap_err();
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+            let message = error.to_string();
+            assert!(message.contains(&format!("expected_pid={pid}")));
+            assert!(message.contains(&format!("bytes={}", contents.len())));
+            assert!(!message.contains("private process name"));
+        }
+        let mismatch = OwnedProcessStat::from_contents(43, valid)
+            .unwrap_err()
+            .to_string();
+        assert!(mismatch.contains("parsed_pid=Some(42)"));
+        assert!(mismatch.contains("fields_after_comm=Some(21)"));
     }
 
     #[cfg(target_os = "linux")]
