@@ -1781,6 +1781,25 @@ mod tests {
     #[cfg(windows)]
     #[tokio::test]
     async fn windows_shell_echo_discovery_and_formatting_phase_probe() {
+        windows_shell_discovery_and_formatting_phase_probe("$v = echo approved", "echo-assigned")
+            .await;
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_shell_qualified_output_discovery_and_formatting_phase_probe() {
+        windows_shell_discovery_and_formatting_phase_probe(
+            "$v = Microsoft.PowerShell.Utility\\Write-Output approved",
+            "qualified-assigned",
+        )
+        .await;
+    }
+
+    #[cfg(windows)]
+    async fn windows_shell_discovery_and_formatting_phase_probe(
+        assignment: &str,
+        assigned_phase: &'static str,
+    ) {
         use std::io::Read;
 
         const PHASES: [&str; 7] = [
@@ -1792,6 +1811,8 @@ mod tests {
             "formatted",
             "completed",
         ];
+        let mut expected_phases = PHASES;
+        expected_phases[3] = assigned_phase;
         let workspace = tempfile::Builder::new()
             .prefix("shell-phase-'")
             .tempdir()
@@ -1811,11 +1832,11 @@ mod tests {
             )
         };
         let command = format!(
-            "{}[IO.File]::AppendAllText({literal}, ('ps-version=' + $PSVersionTable.PSVersion.ToString() + \"`n\")); {}$resolved = $ExecutionContext.InvokeCommand.GetCommand('echo', [System.Management.Automation.CommandTypes]::All); {}$v = echo approved; {}{}$v | Out-Default; {}{}",
+            "{}[IO.File]::AppendAllText({literal}, ('ps-version=' + $PSVersionTable.PSVersion.ToString() + \"`n\")); {}$resolved = $ExecutionContext.InvokeCommand.GetCommand('echo', [System.Management.Automation.CommandTypes]::All); {}[IO.File]::AppendAllText({literal}, ('resolved-command-type=' + $resolved.CommandType.ToString() + \"`n\" + 'resolved-alias-write-output=' + (($resolved.CommandType -eq [System.Management.Automation.CommandTypes]::Alias) -and [string]::Equals($resolved.Definition, 'Write-Output', [StringComparison]::Ordinal)).ToString() + \"`n\")); {assignment}; {}{}$v | Out-Default; {}{}",
             mark("entered"),
             mark("before-resolve"),
             mark("resolved"),
-            mark("echo-assigned"),
+            mark(assigned_phase),
             mark("before-format"),
             mark("formatted"),
             mark("completed"),
@@ -1873,7 +1894,7 @@ mod tests {
             (snapshots.len(), metadata, capture_ok, removed)
         })
         .await;
-        let sidecar_metadata = (|| -> Result<(Vec<&'static str>, Option<String>), &'static str> {
+        let sidecar_metadata = (|| -> Result<_, &'static str> {
             let file = std::fs::File::open(&sidecar).map_err(|_| "sidecar-open-failed")?;
             let mut bytes = Vec::new();
             file.take(8193)
@@ -1885,8 +1906,10 @@ mod tests {
             let contents = std::str::from_utf8(&bytes).map_err(|_| "sidecar-invalid-utf8")?;
             let mut phases = Vec::new();
             let mut version = None;
+            let mut command_type = None;
+            let mut alias_write_output = None;
             for line in contents.lines() {
-                if let Some(phase) = PHASES.iter().find(|phase| **phase == line) {
+                if let Some(phase) = expected_phases.iter().find(|phase| **phase == line) {
                     phases.push(*phase);
                 } else if let Some(value) = line.strip_prefix("ps-version=") {
                     if version.is_some()
@@ -1899,15 +1922,45 @@ mod tests {
                         return Err("sidecar-invalid-version");
                     }
                     version = Some(value.to_string());
+                } else if let Some(value) = line.strip_prefix("resolved-command-type=") {
+                    if command_type.is_some() {
+                        return Err("sidecar-duplicate-command-type");
+                    }
+                    command_type = Some(match value {
+                        "Alias" => "Alias",
+                        "Function" => "Function",
+                        "Filter" => "Filter",
+                        "Cmdlet" => "Cmdlet",
+                        "ExternalScript" => "ExternalScript",
+                        "Application" => "Application",
+                        "Script" => "Script",
+                        "Workflow" => "Workflow",
+                        "Configuration" => "Configuration",
+                        _ => return Err("sidecar-invalid-command-type"),
+                    });
+                } else if let Some(value) = line.strip_prefix("resolved-alias-write-output=") {
+                    if alias_write_output.is_some() {
+                        return Err("sidecar-duplicate-alias-boolean");
+                    }
+                    alias_write_output = Some(match value {
+                        "True" => true,
+                        "False" => false,
+                        _ => return Err("sidecar-invalid-alias-boolean"),
+                    });
                 } else {
                     return Err("sidecar-unknown-record");
                 }
             }
-            Ok((phases, version))
+            Ok((phases, version, command_type, alias_write_output))
         })();
-        let phases_ok = sidecar_metadata
-            .as_ref()
-            .is_ok_and(|(phases, version)| phases == &PHASES && version.is_some());
+        let phases_ok = sidecar_metadata.as_ref().is_ok_and(
+            |(phases, version, command_type, alias_write_output)| {
+                phases == &expected_phases
+                    && version.is_some()
+                    && command_type.is_some()
+                    && alias_write_output.is_some()
+            },
+        );
         let cleanup_ok = cleanup
             .as_ref()
             .is_ok_and(|(count, _, capture_ok, removed)| *count == 1 && *capture_ok && *removed);
