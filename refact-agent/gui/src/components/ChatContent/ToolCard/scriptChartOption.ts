@@ -6,7 +6,7 @@ import {
   valueAxis,
   type ChartTheme,
 } from "../../../features/StatsDashboard/utils/chartTheme";
-import type { ChartData } from "./scriptDisplays";
+import type { ChartData } from "./scriptDisplayHelpers";
 
 function numericCategories(categories: readonly string[]) {
   return (

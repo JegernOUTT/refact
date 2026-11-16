@@ -74,7 +74,7 @@ import {
   compactCount,
   formatCount,
   isModelCall,
-} from "./scriptDisplays";
+} from "./scriptDisplayHelpers";
 import { EngineChangesContext, engineChangeCount } from "./engineChanges";
 import { EngineChangesSection } from "./EngineChangesSection";
 import { ShikiCodeBlock } from "../../Markdown";

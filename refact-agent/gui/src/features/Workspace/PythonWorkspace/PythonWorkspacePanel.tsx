@@ -50,7 +50,7 @@ import {
   displayKindView,
   displaySize,
   displayTitle,
-} from "../../../components/ChatContent/ToolCard/scriptDisplays";
+} from "../../../components/ChatContent/ToolCard/scriptDisplayHelpers";
 import { visibleText } from "../../../components/ChatContent/ToolCard/safeText";
 import styles from "./PythonWorkspacePanel.module.css";
 

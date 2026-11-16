@@ -41,7 +41,7 @@ import {
   relativeToRoot,
   type WorkspaceRoots,
 } from "./pythonDisplay";
-import { callsTokens } from "./scriptDisplays";
+import { callsTokens } from "./scriptDisplayHelpers";
 import styles from "./PythonTool.module.css";
 
 /**

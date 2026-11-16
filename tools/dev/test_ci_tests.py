@@ -408,6 +408,18 @@ class InventoryTests(unittest.TestCase):
                 self.assertIs(step['with']['include-hidden-files'], True)
                 self.assertEqual(step['with']['if-no-files-found'], 'error')
 
+    def test_distribution_toolchains_include_rustfmt(self):
+        workflow = (ci.ROOT / '.github/workflows/agent_engine_build.yml').read_text()
+        self.assertIn('RUSTUP_TOOLCHAIN: ${{ inputs.rust_toolchain }}', workflow)
+        self.assertIn('ref: ${{ inputs.source_sha }}', workflow)
+        host = workflow.split('- name: Disable local development defaults and install stable CI toolchain', 1)[1].split('\n      - name:', 1)[0]
+        arm = workflow.split('- name: Build native linux ARM artifact', 1)[1].split('\n      - name:', 1)[0]
+        self.assertIn('rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component rust-src,rustfmt --target ${{ matrix.target }} --no-self-update', host)
+        self.assertIn('-e RUSTUP_TOOLCHAIN', arm)
+        self.assertIn('rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component rust-src,rustfmt --target aarch64-unknown-linux-gnu --no-self-update', arm)
+        self.assertIn('cross +${RUSTUP_TOOLCHAIN} build', workflow)
+        self.assertIn("if: matrix.target == 'aarch64-unknown-linux-gnu'", arm)
+
     def test_workflow_dependencies_and_sha(self):
         workflow = (ci.ROOT / '.github/workflows/tests.yml').read_text()
         for lane in ci.load_inventory()['required_jobs']:

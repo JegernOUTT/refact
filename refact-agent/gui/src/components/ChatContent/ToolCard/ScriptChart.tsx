@@ -9,7 +9,7 @@ import {
 import { CanvasRenderer } from "echarts/renderers";
 import { useReducedMotion } from "../../../hooks/useReducedMotion";
 import { useChartTheme } from "../../../features/StatsDashboard/utils/chartTheme";
-import type { ChartData } from "./scriptDisplays";
+import type { ChartData } from "./scriptDisplayHelpers";
 import { chartOption } from "./scriptChartOption";
 import styles from "./ScriptDisplays.module.css";
 

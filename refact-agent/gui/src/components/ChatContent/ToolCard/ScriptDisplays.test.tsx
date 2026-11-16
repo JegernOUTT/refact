@@ -24,7 +24,7 @@ import {
   displaySize,
   displayTsv,
   rowsNote,
-} from "./scriptDisplays";
+} from "./scriptDisplayHelpers";
 
 const chart = vi.hoisted(() => ({ fail: false, options: [] as unknown[] }));
 vi.mock("echarts-for-react/lib/core", () => ({
@@ -90,6 +90,14 @@ beforeEach(() => {
 });
 
 describe("display helpers", () => {
+  it("keeps ToolCard module basenames distinct on case-insensitive filesystems", () => {
+    const paths = Object.keys(import.meta.glob("./*.{ts,tsx}"));
+    expect(paths).toContain("./ScriptDisplays.tsx");
+    const basenames = paths.map((path) =>
+      path.replace(/\.tsx?$/, "").toLowerCase(),
+    );
+    expect(new Set(basenames).size).toBe(basenames.length);
+  });
   it("sizes, notes and copies tables", () => {
     expect(displaySize(table)).toBe("12,000 rows × 3 columns");
     expect(rowsNote(table)).toBe("Showing 2 of 12,000 rows");

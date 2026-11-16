@@ -32,7 +32,7 @@ import {
   numericColumns,
   rowsNote,
   type ChartData,
-} from "./scriptDisplays";
+} from "./scriptDisplayHelpers";
 import { visibleText } from "./safeText";
 import { useRememberedState } from "./useRememberedState";
 import styles from "./ScriptDisplays.module.css";
