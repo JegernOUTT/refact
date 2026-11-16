@@ -1787,6 +1787,16 @@ mod tests {
 
     #[cfg(windows)]
     #[tokio::test]
+    async fn windows_shell_unqualified_output_discovery_and_formatting_phase_probe() {
+        windows_shell_discovery_and_formatting_phase_probe(
+            "$v = Write-Output approved",
+            "unqualified-assigned",
+        )
+        .await;
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
     async fn windows_shell_qualified_output_discovery_and_formatting_phase_probe() {
         windows_shell_discovery_and_formatting_phase_probe(
             "$v = Microsoft.PowerShell.Utility\\Write-Output approved",
