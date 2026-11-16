@@ -351,6 +351,208 @@ fn protected_descendants_do_not_block_mkdir_or_root_files() {
 }
 
 #[test]
+fn protected_file_hardlinks_cannot_be_read_even_under_allow_prefix() {
+    let t = Temp::new();
+    let workspace = t.0.join("config/workspace");
+    std::fs::create_dir_all(workspace.join("artifacts")).unwrap();
+    for name in ["secret.key", "secrets.yaml"] {
+        let protected = t.0.join("config").join(name);
+        std::fs::write(&protected, "protected contents").unwrap();
+        std::fs::hard_link(&protected, t.0.join(name)).unwrap();
+        std::fs::hard_link(&protected, workspace.join("artifacts").join(name)).unwrap();
+    }
+    let mut f = HostFs::new(HostFsConfig {
+        project_root: t.0.clone(),
+        deny_read: PathDenyRules {
+            prefixes: vec![t.0.join("config")],
+            files: vec!["config/secret.key".into(), "config/secrets.yaml".into()],
+            allow_prefixes: vec![workspace],
+        },
+        ..Default::default()
+    });
+    for path in [
+        "secret.key",
+        "secrets.yaml",
+        "config/workspace/artifacts/secret.key",
+        "config/workspace/artifacts/secrets.yaml",
+    ] {
+        for call in [
+            OsFunctionCall::ReadText(path.into()),
+            OsFunctionCall::ReadBytes(path.into()),
+        ] {
+            let err = f.handle(call).unwrap_err();
+            assert_eq!(err.0, "PermissionError", "{path}");
+            assert!(!err.1.contains("protected contents"), "{}", err.1);
+        }
+    }
+    assert!(f.take_events().is_empty());
+}
+
+#[test]
+fn protected_file_hardlinks_cannot_be_written_even_under_allow_prefix() {
+    let t = Temp::new();
+    let artifacts = t.0.join("config/workspace/artifacts");
+    std::fs::create_dir_all(&artifacts).unwrap();
+    let protected = t.0.join("config/settings.yaml");
+    std::fs::write(&protected, "trusted configuration").unwrap();
+    std::fs::hard_link(&protected, t.0.join("alias")).unwrap();
+    std::fs::hard_link(&protected, artifacts.join("alias")).unwrap();
+    let mut f = HostFs::new(HostFsConfig {
+        project_root: t.0.clone(),
+        deny_write: PathDenyRules {
+            prefixes: vec![t.0.join("config")],
+            files: vec![protected.clone()],
+            allow_prefixes: vec![artifacts],
+        },
+        ..Default::default()
+    });
+    for path in ["alias", "config/workspace/artifacts/alias"] {
+        for call in [
+            OsFunctionCall::WriteText(PathStringDataArgs {
+                path: path.into(),
+                data: "bad".into(),
+            }),
+            OsFunctionCall::AppendText(PathStringDataArgs {
+                path: path.into(),
+                data: "bad".into(),
+            }),
+            OsFunctionCall::Open(OpenCallArgs {
+                path: path.into(),
+                mode: "w".parse().unwrap(),
+            }),
+        ] {
+            assert_eq!(f.handle(call).unwrap_err().0, "PermissionError", "{path}");
+            assert_eq!(std::fs::read(&protected).unwrap(), b"trusted configuration");
+            assert_eq!(
+                std::fs::read(t.0.join(path)).unwrap(),
+                b"trusted configuration"
+            );
+        }
+    }
+    assert!(f.take_events().is_empty());
+}
+
+#[test]
+fn ordinary_hardlinks_and_new_files_remain_allowed_with_explicit_denies() {
+    let t = Temp::new();
+    std::fs::write(t.0.join("protected"), "secret").unwrap();
+    std::fs::write(t.0.join("ordinary"), "public").unwrap();
+    std::fs::hard_link(t.0.join("ordinary"), t.0.join("alias")).unwrap();
+    let rules = PathDenyRules {
+        files: vec!["missing-protected".into(), "protected".into()],
+        ..Default::default()
+    };
+    let mut f = HostFs::new(HostFsConfig {
+        project_root: t.0.clone(),
+        deny_write: rules.clone(),
+        deny_read: rules,
+        ..Default::default()
+    });
+    assert_eq!(
+        f.handle(OsFunctionCall::ReadText("alias".into()))
+            .unwrap()
+            .as_ref()
+            .as_str(),
+        Some("public")
+    );
+    write(&mut f, "alias", "changed");
+    f.handle(OsFunctionCall::AppendText(PathStringDataArgs {
+        path: "alias".into(),
+        data: " again".into(),
+    }))
+    .unwrap();
+    assert_eq!(
+        std::fs::read(t.0.join("ordinary")).unwrap(),
+        b"changed again"
+    );
+    write(&mut f, "new", "created");
+    assert_eq!(std::fs::read(t.0.join("new")).unwrap(), b"created");
+    assert_eq!(std::fs::read(t.0.join("protected")).unwrap(), b"secret");
+}
+
+#[cfg(unix)]
+#[test]
+fn explicit_denies_need_no_read_access_to_unrelated_files() {
+    use std::os::unix::fs::PermissionsExt;
+    let t = Temp::new();
+    std::fs::write(t.0.join("protected"), "secret").unwrap();
+    std::fs::write(t.0.join("write-only"), "old").unwrap();
+    let set_mode = |mode| {
+        std::fs::set_permissions(
+            t.0.join("write-only"),
+            std::fs::Permissions::from_mode(mode),
+        )
+        .unwrap()
+    };
+    set_mode(0o200);
+    let rules = PathDenyRules {
+        files: vec!["protected".into()],
+        ..Default::default()
+    };
+    let mut f = HostFs::new(HostFsConfig {
+        project_root: t.0.clone(),
+        deny_write: rules.clone(),
+        deny_read: rules,
+        ..Default::default()
+    });
+    f.handle(OsFunctionCall::Stat("write-only".into())).unwrap();
+    let listing = f
+        .handle(OsFunctionCall::Scan(scan::ScanArgs::listing(
+            ".".into(),
+            Some(1),
+            false,
+        )))
+        .unwrap()
+        .py_repr();
+    assert!(listing.contains("write-only"), "{listing}");
+    assert!(!listing.contains("protected"), "{listing}");
+    write(&mut f, "write-only", "new");
+    set_mode(0o600);
+    assert_eq!(std::fs::read(t.0.join("write-only")).unwrap(), b"new");
+}
+
+#[test]
+fn denied_files_spelled_with_a_trailing_separator_or_under_a_file_match_only_themselves() {
+    let t = Temp::new();
+    std::fs::write(t.0.join("protected"), "secret").unwrap();
+    std::fs::write(t.0.join("ordinary"), "public").unwrap();
+    std::fs::hard_link(t.0.join("protected"), t.0.join("alias")).unwrap();
+    let rules = PathDenyRules {
+        files: vec![
+            t.0.join("ordinary").join("missing"),
+            t.0.join("protected").join(""),
+        ],
+        ..Default::default()
+    };
+    let mut f = HostFs::new(HostFsConfig {
+        project_root: t.0.clone(),
+        deny_write: rules.clone(),
+        deny_read: rules,
+        ..Default::default()
+    });
+    assert_eq!(
+        f.handle(OsFunctionCall::ReadText("ordinary".into()))
+            .unwrap()
+            .as_ref()
+            .as_str(),
+        Some("public")
+    );
+    write(&mut f, "ordinary", "changed");
+    f.handle(OsFunctionCall::Stat("ordinary".into())).unwrap();
+    for call in [
+        OsFunctionCall::ReadText("alias".into()),
+        OsFunctionCall::WriteText(PathStringDataArgs {
+            path: "alias".into(),
+            data: "bad".into(),
+        }),
+    ] {
+        assert_eq!(f.handle(call).unwrap_err().0, "PermissionError");
+    }
+    assert_eq!(std::fs::read(t.0.join("protected")).unwrap(), b"secret");
+    assert_eq!(std::fs::read(t.0.join("ordinary")).unwrap(), b"changed");
+}
+
+#[test]
 fn artifacts_allow_prefix_uses_resolved_paths() {
     let t = Temp::new();
     std::fs::create_dir_all(t.0.join("state/artifacts")).unwrap();

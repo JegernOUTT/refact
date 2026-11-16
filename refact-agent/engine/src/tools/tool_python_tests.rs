@@ -455,8 +455,57 @@ async fn child_chat_gets_parent_artifacts_dir() {
             "parent".into(),
         ))),
     );
-    let m = run(ccx, "PARENT_ARTIFACTS_DIR", false).await;
+    let m = run(ccx.clone(), "PARENT_ARTIFACTS_DIR", false).await;
     assert!(m.content.content_text_only().contains("parent/artifacts"));
+    let parent = PythonWorkspace::for_chat(&app, "parent").await.unwrap();
+    parent.ensure_dirs().await.unwrap();
+    let artifact = parent.artifacts_dir().join("derived.txt");
+    std::fs::write(&artifact, "parent secret").unwrap();
+    let mut policy = (*app.gcx.privacy_policy_load.read().unwrap().policy).clone();
+    policy.zones.insert(
+        0,
+        refact_privacy::Zone {
+            name: "parent-restricted".into(),
+            patterns: vec!["source-only.txt".into()],
+            send_to: vec!["trusted".into()],
+            ..Default::default()
+        },
+    );
+    crate::privacy::save_privacy_policy(app.gcx.clone(), policy)
+        .await
+        .unwrap();
+    std::fs::write(
+        parent.dir().join("privacy_ledger.json"),
+        serde_json::to_vec(&vec![(
+            artifact.clone(),
+            crate::privacy::records::DerivedZone {
+                zone: "parent-restricted".into(),
+                origin: Some("source-only.txt".into()),
+            },
+        )])
+        .unwrap(),
+    )
+    .unwrap();
+    ccx.lock().await.derived_privacy_zones = crate::privacy::records::new_derived_privacy_zones();
+    let message = run(
+        ccx.clone(),
+        "open(PARENT_ARTIFACTS_DIR + '/derived.txt').read()",
+        false,
+    )
+    .await;
+    assert_eq!(message.tool_failed, Some(false), "{message:?}");
+    assert!(message.extra["privacy"]["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|record| record["zone"] == "parent-restricted"));
+    let derived = ccx.lock().await.derived_privacy_zones.clone();
+    assert_eq!(
+        crate::privacy::records::derived_zone_for_path(&app.gcx, &artifact, &derived)
+            .unwrap()
+            .zone,
+        "parent-restricted"
+    );
 }
 
 #[tokio::test]
@@ -798,6 +847,38 @@ async fn direct_writes_register_derived_privacy_zones() {
         .await
         .unwrap();
     assert!(workspace.dir().join("privacy_ledger.json").exists());
+    let message = run(ccx, "Path('derived.txt').write_text(x * 50000)", false).await;
+    assert_eq!(message.tool_failed, Some(false), "{message:?}");
+    let run_dir = workspace.run_dir(message.extra["python"]["run_id"].as_str().unwrap());
+    let files = crate::python_tool::run_output::run_data_files(&run_dir)
+        .await
+        .unwrap();
+    assert!(files
+        .iter()
+        .any(|path| path.parent() == Some(run_dir.join("captures").as_path())));
+    assert!(files.iter().any(|path| path
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .starts_with("diff-")));
+    let ledger: Vec<(std::path::PathBuf, crate::privacy::records::DerivedZone)> =
+        serde_json::from_slice(
+            &std::fs::read(workspace.dir().join("privacy_ledger.json")).unwrap(),
+        )
+        .unwrap();
+    for path in files {
+        assert_eq!(
+            ledger
+                .iter()
+                .find(|(entry, _)| entry == &path)
+                .unwrap()
+                .1
+                .zone,
+            "blocked",
+            "{}",
+            path.display()
+        );
+    }
 }
 
 #[tokio::test]
@@ -1043,21 +1124,80 @@ async fn engine_secret_reads_denied_but_runs_readable() {
 }
 
 #[tokio::test]
-async fn corrupt_privacy_ledger_resets_state_and_next_runs_work() {
+async fn late_privacy_enumeration_failure_leaves_failed_metadata_without_summary() {
+    let temp = tempfile::tempdir().unwrap();
+    let run = temp.path().join("runs/late-privacy-failure");
+    std::fs::create_dir_all(&run).unwrap();
+    let guard = crate::python_tool::workspace::FailedRunGuard::new(
+        run.clone(),
+        "late-privacy-failure".into(),
+        1,
+        false,
+    );
+    crate::python_tool::workspace::write_running_run_json(
+        &run,
+        "late-privacy-failure",
+        1,
+        false,
+        &Value::Null,
+    )
+    .await
+    .unwrap();
+    let metadata = || -> Value {
+        serde_json::from_slice(&std::fs::read(run.join("run.json")).unwrap()).unwrap()
+    };
+    assert_eq!(metadata()["status"], "running");
+    std::fs::create_dir_all(run.join("too/deep/for/a/scan")).unwrap();
+    let gcx = crate::global_context::tests::make_test_gcx().await;
+    let error = crate::python_tool::run_output::persist_run_privacy(
+        &gcx,
+        temp.path(),
+        &run,
+        &[],
+        vec![],
+        &crate::privacy::records::new_derived_privacy_zones(),
+    )
+    .await
+    .unwrap_err();
+    assert!(error.contains("enumeration limit exceeded"), "{error}");
+    assert_eq!(metadata()["status"], "running");
+    drop(guard);
+    assert_eq!(metadata()["status"], "failed");
+    assert_eq!(metadata()["error"]["type"], "RunAbandoned");
+    assert!(!run
+        .join(crate::python_tool::workspace::RUN_SUMMARY_FILE)
+        .exists());
+    assert!(!temp.path().join("privacy_ledger.json").exists());
+}
+
+#[tokio::test]
+async fn corrupt_privacy_ledger_fails_closed_without_erasing_provenance() {
     let (_dir, app, ccx) = fixture().await;
     run(ccx.clone(), "x = 42", false).await;
     let ws = PythonWorkspace::for_chat(&app, "python-test")
         .await
         .unwrap();
     std::fs::write(ws.dir().join("privacy_ledger.json"), "not json").unwrap();
-    let m = run(ccx.clone(), "'recovered'", false).await;
-    assert_eq!(m.tool_failed, Some(false));
-    assert!(m.extra["python"]["state"]["reset_reason"]
-        .as_str()
-        .unwrap()
-        .contains("ledger"));
-    let m = run(ccx, "x", false).await;
-    assert_eq!(m.extra["python"]["error"]["type"], "NameError");
+    let before = std::fs::read(ws.state_path()).unwrap();
+    let artifact = ws.artifacts_dir().join("not-created");
+    let error = ToolPython::default()
+        .tool_execute(
+            ccx,
+            &"corrupt-ledger".into(),
+            &HashMap::from([(
+                "code".into(),
+                json!(format!("open({}, 'w').write('bad')", json!(artifact))),
+            )]),
+        )
+        .await
+        .unwrap_err();
+    assert!(error.contains("privacy ledger"), "{error}");
+    assert_eq!(
+        std::fs::read(ws.dir().join("privacy_ledger.json")).unwrap(),
+        b"not json"
+    );
+    assert_eq!(std::fs::read(ws.state_path()).unwrap(), before);
+    assert!(!artifact.exists());
 }
 
 #[tokio::test]
@@ -1833,18 +1973,12 @@ async fn queued_python_turn_observes_cancellation_promptly() {
 }
 
 #[tokio::test]
-async fn restart_and_ledger_reset_reasons_clear_on_normal_runs() {
+async fn restart_reasons_clear_on_normal_runs() {
     tokio::time::timeout(Duration::from_secs(30), async {
-        for ledger_reset in [false, true] {
+        for _ in 0..2 {
             let (_dir, app, ccx) = fixture().await;
             run(ccx.clone(), "old = 1", false).await;
-            if ledger_reset {
-                let workspace = PythonWorkspace::for_chat(&app, "python-test")
-                    .await
-                    .unwrap();
-                std::fs::write(workspace.dir().join("privacy_ledger.json"), "bad").unwrap();
-            }
-            let reset = run(ccx.clone(), "x = 41", !ledger_reset).await;
+            let reset = run(ccx.clone(), "x = 41", true).await;
             assert!(reset.extra["python"]["state"]["reset_reason"].is_string());
             assert!(
                 crate::python_tool::workspace_view::workspace_view(&app, "python-test")

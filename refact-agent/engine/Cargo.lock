@@ -5917,6 +5917,7 @@ dependencies = [
  "monty-type-checking",
  "monty-types",
  "rand 0.8.5",
+ "same-file",
  "serde",
  "serde_json",
  "sha2 0.11.1",

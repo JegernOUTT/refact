@@ -24,3 +24,6 @@ rand = "0.8.5"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+same-file = "1.0.6"

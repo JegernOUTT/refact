@@ -114,6 +114,22 @@ fn error(e: io::Error) -> (String, String) {
     };
     (kind.into(), e.to_string())
 }
+fn denied_path(p: &Path, write: bool) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        if write {
+            format!(
+                "engine configuration or state: {}; use the file-edit tools to change it",
+                p.display()
+            )
+        } else {
+            format!(
+                "reading {} is not allowed (engine configuration)",
+                p.display()
+            )
+        },
+    )
+}
 impl HostFs {
     pub fn new(mut config: HostFsConfig) -> Self {
         if !config.project_root.is_absolute() {
@@ -154,6 +170,9 @@ impl HostFs {
         } else {
             &self.config.deny_read
         };
+        if self.matches_denied_file(p, rules)? {
+            return Err(denied_path(p, write));
+        }
         let resolved = resolved_path(p)?;
         let comparable = |p: PathBuf| {
             if cfg!(windows) || cfg!(target_os = "macos") {
@@ -202,23 +221,46 @@ impl HostFs {
                 || (prefix && resolved.starts_with(&denied))
                 || (destructive && denied.starts_with(&resolved))
             {
-                return Err(io::Error::new(
-                    io::ErrorKind::PermissionDenied,
-                    if write {
-                        format!(
-                            "engine configuration or state: {}; use the file-edit tools to change it",
-                            p.display()
-                        )
-                    } else {
-                        format!(
-                            "reading {} is not allowed (engine configuration)",
-                            p.display()
-                        )
-                    },
-                ));
+                return Err(denied_path(p, write));
             }
         }
         Ok(())
+    }
+    fn matches_denied_file(&self, p: &Path, rules: &PathDenyRules) -> io::Result<bool> {
+        if rules.files.is_empty() {
+            return Ok(false);
+        }
+        let target = match fs::metadata(p) {
+            Ok(m) if m.is_file() => file_identity(p, &m)?,
+            Ok(_) => return Ok(false),
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                ) =>
+            {
+                return Ok(false)
+            }
+            Err(e) => return Err(e),
+        };
+        for path in &rules.files {
+            let denied: PathBuf = self.resolve(&path.to_string_lossy()).components().collect();
+            match fs::metadata(&denied) {
+                Ok(meta) if meta.is_file() => {
+                    if file_identity(&denied, &meta)? == target {
+                        return Ok(true);
+                    }
+                }
+                Ok(_) => {}
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                    ) => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(false)
     }
     fn record(&mut self, op: &str, p: &Path, bytes: u64) {
         self.events.push(KernelEvent::Fs {
@@ -605,6 +647,19 @@ impl OsBackend for HostFs {
     fn take_events(&mut self) -> Vec<KernelEvent> {
         std::mem::take(&mut self.events)
     }
+}
+#[cfg(unix)]
+fn file_identity(_: &Path, meta: &fs::Metadata) -> io::Result<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    Ok((meta.dev(), meta.ino()))
+}
+#[cfg(windows)]
+fn file_identity(path: &Path, _: &fs::Metadata) -> io::Result<same_file::Handle> {
+    use std::os::windows::fs::OpenOptionsExt;
+    fs::OpenOptions::new()
+        .access_mode(0)
+        .open(path)
+        .and_then(same_file::Handle::from_file)
 }
 fn stat(m: &fs::Metadata) -> MontyObject {
     #[cfg(unix)]

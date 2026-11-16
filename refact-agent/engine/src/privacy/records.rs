@@ -79,6 +79,38 @@ pub fn new_derived_privacy_zones() -> DerivedPrivacyZones {
     Arc::new(RwLock::new(HashMap::new()))
 }
 
+pub(crate) fn merge_derived_zones(
+    gcx: &Arc<GlobalContext>,
+    zones: &DerivedPrivacyZones,
+    entries: impl IntoIterator<Item = (PathBuf, DerivedZone)>,
+) -> Result<(), String> {
+    let load = gcx.privacy_policy_load.read().map_err(|e| e.to_string())?;
+    if let Some(error) = &load.error {
+        return Err(format!("Privacy policy unavailable: {error}"));
+    }
+    let compiled = load.policy.compile().map_err(|e| e.to_string())?;
+    let mut zones = zones.write().map_err(|e| e.to_string())?;
+    for (path, mut incoming) in entries {
+        if compiled.zone_named(&incoming.zone).is_none() {
+            incoming.zone = "blocked".into();
+        }
+        if let Some(current) = zones.get_mut(&path) {
+            if compiled.zone_named(&current.zone).is_none() {
+                current.zone = "blocked".into();
+            }
+            if current.zone == "blocked"
+                || (incoming.zone != "blocked"
+                    && compare_named_zones(&compiled, &incoming.zone, &current.zone)
+                        != Ordering::Less)
+            {
+                continue;
+            }
+        }
+        zones.insert(path, incoming);
+    }
+    Ok(())
+}
+
 pub fn provider_destination(model_id: &str) -> Destination {
     Destination {
         id: DestinationId(

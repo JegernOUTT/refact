@@ -229,6 +229,19 @@ impl Tool for ToolPython {
                 }
             } => return Err("Python turn cancelled while queued".into()),
         };
+        let workspace = PythonWorkspace::for_chat(&app, &chat).await?;
+        workspace.ensure_dirs().await?;
+        let derived = ccx.lock().await.derived_privacy_zones.clone();
+        crate::python_tool::run_output::restore_ledger(workspace.dir(), &app.gcx, &derived)
+            .await
+            .map_err(|reason| format!("Cannot restore Python privacy ledger: {reason}"))?;
+        let parent_artifacts =
+            crate::python_tool::workspace::parent_artifacts_dir(&app, &chat).await;
+        if let Some(parent) = &parent_artifacts {
+            crate::python_tool::run_output::import_parent_ledger(parent, &app.gcx, &derived)
+                .await
+                .map_err(|reason| format!("Cannot verify parent Python artifacts: {reason}"))?;
+        }
         let run = format!("{:08x}", rand::random::<u32>());
         let guard = app.python_tool.register_run(&chat, id, &run);
         let cancel = guard.cancellation_token();
@@ -242,8 +255,6 @@ impl Tool for ToolPython {
         if args.get("restart") == Some(&Value::Bool(true)) {
             start.reset_reason = Some("requested restart".into());
         }
-        let workspace = PythonWorkspace::for_chat(&app, &chat).await?;
-        workspace.ensure_dirs().await?;
         let run_dir = workspace.run_dir(&run);
         let _active_path = crate::python_tool::workspace::ActiveRunPath::new(run_dir.clone());
         tokio::fs::create_dir_all(&run_dir)
@@ -433,11 +444,9 @@ impl Tool for ToolPython {
             ("RUN_DIR", json!(python_path(&run_dir, native_platform()))),
             (
                 "PARENT_ARTIFACTS_DIR",
-                json!(
-                    crate::python_tool::workspace::parent_artifacts_dir(&app, &chat)
-                        .await
-                        .map(|path| python_path(&path, native_platform()))
-                ),
+                json!(parent_artifacts
+                    .as_ref()
+                    .map(|path| python_path(path, native_platform()))),
             ),
         ] {
             globals.push(GlobalBinding {
@@ -460,29 +469,12 @@ impl Tool for ToolPython {
         )
         .into_iter()
         .collect();
-        let (deny_write, deny_read) = protected_paths(&app, &root, &workspace).await;
+        let (deny_write, mut deny_read) = protected_paths(&app, &root, &workspace).await;
+        deny_read.allow_prefixes = vec![workspace.dir().to_path_buf()];
+        deny_read
+            .allow_prefixes
+            .extend(parent_artifacts.iter().cloned());
         let mut privacy = ChatMessage::default();
-        let derived = ccx.lock().await.derived_privacy_zones.clone();
-        if let Err(reason) =
-            crate::python_tool::run_output::restore_ledger(workspace.dir(), &derived).await
-        {
-            let ledger = workspace.dir().join("privacy_ledger.json");
-            if tokio::fs::symlink_metadata(&ledger)
-                .await
-                .is_ok_and(|m| m.is_dir())
-            {
-                tokio::fs::remove_dir_all(&ledger)
-                    .await
-                    .map_err(|e| e.to_string())?;
-            } else {
-                let _ = tokio::fs::remove_file(&ledger).await;
-            }
-            tokio::fs::write(&ledger, b"[]")
-                .await
-                .map_err(|e| e.to_string())?;
-            start = lease.ensure_ready_at(&app, true, root.clone()).await?;
-            start.reset_reason = Some(format!("privacy ledger reset: {reason}"));
-        }
         lease.remember_reset_reason(start.reset_reason.clone());
         lease.remember_restored(start.restored);
         let session_taint: Vec<Value> = lease
@@ -962,28 +954,6 @@ impl Tool for ToolPython {
                 .await
                 .map_err(|e| e.to_string())?;
         }
-        // Run files the engine wrote carry run data too (code, output, displays, call logs).
-        let engine_written = crate::python_tool::run_output::run_data_files(&run_dir).await;
-        let zoned_writes: Vec<std::path::PathBuf> = writes
-            .keys()
-            .map(std::path::PathBuf::from)
-            .chain(engine_written)
-            .collect();
-        let policy = app.gcx.privacy_policy_load.read().unwrap().policy.clone();
-        crate::privacy::records::inherit_observed_write_zones(
-            &app.gcx,
-            &policy,
-            &carried.files,
-            zoned_writes.iter().cloned(),
-            &derived,
-        )?;
-        crate::python_tool::run_output::save_ledger(
-            workspace.dir(),
-            zoned_writes.into_iter(),
-            &app.gcx,
-            &derived,
-        )
-        .await?;
         // Observation markers belong to this run's message only, never to the session.
         let taint: Vec<Value> = privacy.extra.get("privacy").cloned().into_iter().collect();
         let persisted = if usable {
@@ -1019,7 +989,7 @@ impl Tool for ToolPython {
                     .sum(),
             ),
         )
-        .await;
+        .await?;
         let mut artifacts = vec![];
         for (path, _) in &writes {
             if std::path::Path::new(path).starts_with(workspace.artifacts_dir()) {
@@ -1095,20 +1065,29 @@ impl Tool for ToolPython {
             meta.remove("displays_truncated");
             meta.remove("engine_changes");
         }
+        crate::python_tool::run_output::persist_run_privacy(
+            &app.gcx,
+            workspace.dir(),
+            &run_dir,
+            &carried.files,
+            writes.keys().map(std::path::PathBuf::from).collect(),
+            &derived,
+        )
+        .await?;
         crate::python_tool::workspace::atomic_write(
             &run_dir.join("run.json"),
             &serde_json::to_vec_pretty(&run_meta).unwrap(),
         )
         .await?;
+        failed_run.disarm();
         if let Err(error) = crate::python_tool::workspace::atomic_write(
             &run_dir.join(crate::python_tool::workspace::RUN_SUMMARY_FILE),
             &serde_json::to_vec(&crate::python_tool::workspace::run_summary(&run_meta)).unwrap(),
         )
         .await
         {
-            tracing::warn!(%error, run_id = %run, "cannot write the python run summary; readers use run.json");
+            tracing::warn!(%error, run_id = %run, "cannot write Python run summary cache");
         }
-        failed_run.disarm();
         if !stdout_update.is_empty() {
             progress
                 .update(PythonRunUpdate::Stdout {

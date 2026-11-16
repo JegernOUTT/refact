@@ -4642,10 +4642,17 @@ mod tests {
     async fn review_context_real_binding_gathers_and_prepare_preserves_positions() {
         let (_temp, app, session, ccx, receipt) =
             crate::review::context::tests::review_bound_test_session().await;
-        session.lock().await.messages.insert(
-            0,
-            ChatMessage::new("user".into(), "Review the change".into()),
-        );
+        let user_index = {
+            let mut live = session.lock().await;
+            live.messages.insert(
+                0,
+                ChatMessage::new("system".into(), "Review preamble".into()),
+            );
+            let index = live.messages.len();
+            live.messages
+                .push(ChatMessage::new("user".into(), "Review the change".into()));
+            index
+        };
         let chat_id = session.lock().await.chat_id.clone();
         let initial_len = session.lock().await.messages.len();
         prepare_review_context_at_boundary(&app, &session, &chat_id)
@@ -4813,7 +4820,7 @@ mod tests {
         assert!(ccx.lock().await.at_commands.contains_key("@file"));
         let persisted = serde_json::to_value(&session.lock().await.messages).unwrap();
         let mut with_file = messages.clone();
-        with_file[0].content = crate::call_validation::ChatContent::SimpleText(
+        with_file[user_index].content = crate::call_validation::ChatContent::SimpleText(
             "Review the change @file tracked".into(),
         );
         let expected_events = serde_json::to_value(&with_file[initial_len..]).unwrap();
@@ -4896,12 +4903,17 @@ mod tests {
             persisted
         );
         let mut saved = session.lock().await;
-        let original_user = serde_json::to_value(&saved.messages[0]).unwrap();
+        let original_prefix = serde_json::to_value(&saved.messages[..user_index]).unwrap();
+        let original_user = serde_json::to_value(&saved.messages[user_index]).unwrap();
         save_rag_results_to_session(&mut saved, &prepared.rag_results);
         assert_eq!(saved.messages.len(), initial_len + 3);
-        assert_eq!(saved.messages[0].role, "context_file");
         assert_eq!(
-            serde_json::to_value(&saved.messages[0].content).unwrap(),
+            serde_json::to_value(&saved.messages[..user_index]).unwrap(),
+            original_prefix
+        );
+        assert_eq!(saved.messages[user_index].role, "context_file");
+        assert_eq!(
+            serde_json::to_value(&saved.messages[user_index].content).unwrap(),
             serde_json::to_value(
                 &sent
                     .iter()
@@ -4912,11 +4924,11 @@ mod tests {
             .unwrap()
         );
         assert_eq!(
-            serde_json::to_value(&saved.messages[1]).unwrap(),
+            serde_json::to_value(&saved.messages[user_index + 1]).unwrap(),
             original_user
         );
         assert_eq!(
-            serde_json::to_value(&saved.messages[2..]).unwrap(),
+            serde_json::to_value(&saved.messages[initial_len + 1..]).unwrap(),
             expected_events
         );
     }
