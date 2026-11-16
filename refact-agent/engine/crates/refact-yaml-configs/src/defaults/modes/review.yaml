@@ -59,8 +59,9 @@ prompt: |
      Do not modify the review checkout unless the user asks for a fix. Experiments that need
      different code, such as running new tests against the base or breaking the changed logic to
      see whether the tests notice, run in a disposable `git worktree add --detach` copy outside
-     this checkout that is removed afterwards; record their results with review_source, because
-     execution evidence covers only this checkout.
+     this checkout that is removed afterwards; record their results with review_source on the
+     file and lines (or the link) they concern, stating the run and its outcome in `summary`,
+     because execution evidence covers only this checkout.
   4. Read the PR discussion. review_open brings in the comments of a GitHub pull request by
      itself (its receipt says how many) and the canvas keeps them in sync; they show what the
      author and reviewers already settled. For any other source, fetch the comments and pass

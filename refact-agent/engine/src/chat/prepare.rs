@@ -383,7 +383,6 @@ pub async fn prepare_chat_passthrough(
     let app = AppState::from_gcx(gcx.clone()).await;
     crate::review::runs::verify_child_binding(&app, &meta.chat_id).await?;
     let has_project_scope = app.chat.sessions.read().await.get(&meta.chat_id).cloned();
-    let mut review_context = None;
     if let Some(session) = has_project_scope {
         let project_owned = {
             let session = session.lock().await;
@@ -412,8 +411,6 @@ pub async fn prepare_chat_passthrough(
                     crate::worktrees::scope::ExecutionScope::from_thread(&session.thread)
                 };
                 ccx.lock().await.execution_scope = scope;
-                review_context =
-                    crate::review::chat_bridge::context_for_chat(&app, &meta.chat_id).await?;
             }
         }
     }
@@ -433,17 +430,6 @@ pub async fn prepare_chat_passthrough(
     } else {
         messages
     };
-    let mut messages = messages;
-    if let Some(context) = review_context {
-        let boundary = messages
-            .iter()
-            .take_while(|message| {
-                matches!(message.role.as_str(), "system" | "event" | "goal" | "plan")
-            })
-            .count();
-        messages.insert(boundary, context);
-    }
-
     // 4. Run @-commands
     let (mut messages, _) = if options.allow_at_commands {
         run_at_commands_locally(

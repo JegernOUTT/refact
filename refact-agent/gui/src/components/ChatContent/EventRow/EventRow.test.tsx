@@ -63,6 +63,21 @@ describe("EventRow", () => {
     );
   });
 
+  it("labels review context notices", () => {
+    render(
+      <EventRow
+        event={event(
+          "system_notice",
+          { id: "review-1", current_candidate_id: "candidate-1" },
+          { source: "review.context", content: "Review context updated" },
+        )}
+      />,
+    );
+    expect(screen.getByTestId("transcript-verb").textContent).toBe(
+      "Review context",
+    );
+  });
+
   it("separates unmatched subagent finished events from spawn briefs", () => {
     const { unmount } = render(
       <EventRow

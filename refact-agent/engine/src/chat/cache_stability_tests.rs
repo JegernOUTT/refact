@@ -669,3 +669,59 @@ async fn completed_prefix_fork_keeps_parent_wire_bytes_and_thinking_signatures_p
         sanitize_body_for_cache_guard(&openai_body(&request(child_system), "cache-openai"));
     assert!(is_append_only_prefix(&first_turn, &second_turn));
 }
+
+#[test]
+fn cache_stability_review_context_appends_preserve_wire_prefix() {
+    let context = |path: &str| {
+        crate::chat::internal_roles::event(
+            crate::chat::internal_roles::EventSubkind::SystemNotice,
+            "review.context",
+            json!({"id": "review", "current_candidate_id": "candidate", "selection": {"path": path}}),
+            "Review context; active selection.",
+        )
+    };
+    let before = vec![
+        system("stable system"),
+        user("review the change"),
+        context("a.rs"),
+    ];
+    let mut call = assistant("");
+    call.tool_calls = Some(vec![crate::call_validation::ChatToolCall {
+        id: "call_1".into(),
+        function: crate::call_validation::ChatToolFunction {
+            name: "cache_probe".into(),
+            arguments: "{}".into(),
+        },
+        index: None,
+        tool_type: "function".into(),
+        extra_content: None,
+        started_at_ms: None,
+        completed_at_ms: None,
+    }]);
+    let mut after = before.clone();
+    after.extend([call.clone(), tool("probe result"), context("b.rs")]);
+    let mut old_before = before.clone();
+    old_before.remove(2);
+    old_before.insert(1, context("a.rs"));
+    let mut old_after = old_before.clone();
+    old_after[1] = context("b.rs");
+    old_after.extend([call, tool("probe result")]);
+    let body = |messages| {
+        let request =
+            LlmRequest::new("test/cache-anthropic".into(), messages).with_params(CommonParams {
+                max_tokens: 1024,
+                ..Default::default()
+            });
+        sanitize_body_for_cache_guard(&normalize_claude_code_cache_body(claude_body(
+            &request,
+            "claude-opus-4",
+        )))
+    };
+    let first = body(before);
+    let next = body(after);
+    assert!(first["messages"]
+        .as_array()
+        .is_some_and(|messages| !messages.is_empty()));
+    assert!(is_append_only_prefix(&first, &next));
+    assert!(!is_append_only_prefix(&body(old_before), &body(old_after)));
+}

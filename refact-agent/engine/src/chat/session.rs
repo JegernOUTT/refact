@@ -2856,6 +2856,21 @@ impl ChatSession {
         self.add_message_at_boundary(message);
     }
 
+    pub(crate) fn try_add_event_at_boundary(
+        &mut self,
+        message: ChatMessage,
+    ) -> Option<ChatMessage> {
+        if message.role != "event"
+            || self.draft_message.is_some()
+            || self.has_pending_tool_result_window()
+            || crate::chat::context_rebuild::compression_attempt_active(self)
+        {
+            return None;
+        }
+        self.add_message_at_boundary(message);
+        self.messages.last().cloned()
+    }
+
     fn add_message_at_boundary(&mut self, mut message: ChatMessage) {
         super::tools::redact_tool_message_urls(&mut message);
         if message.message_id.is_empty() {

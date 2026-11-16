@@ -266,6 +266,46 @@ pub async fn activity(
     selections.insert(review.id.clone(), request);
     Ok(())
 }
+fn context_payload(
+    id: &str,
+    current_candidate_id: Option<&str>,
+    selection: Option<&ActivityRequest>,
+) -> serde_json::Value {
+    let selection = selection.map(|selection| {
+        json!({
+            "candidate_id": selection.candidate_id,
+            "action": selection.action,
+            "path": selection.path,
+            "side": selection.side,
+            "start_line": selection.start_line,
+            "end_line": selection.end_line,
+            "object_id": selection.object_id,
+        })
+    });
+    json!({"id": id, "current_candidate_id": current_candidate_id, "selection": selection})
+}
+
+fn context_summary(payload: &serde_json::Value) -> String {
+    let selection = &payload["selection"];
+    if selection.is_null() {
+        return "No canvas selection".into();
+    }
+    if let Some(path) = selection["path"].as_str() {
+        if let (Some(start), Some(end), Some(side)) = (
+            selection["start_line"].as_u64(),
+            selection["end_line"].as_u64(),
+            selection["side"].as_str(),
+        ) {
+            return format!("Selected {path} lines {start}-{end} ({side})");
+        }
+        return format!("Viewing {path}");
+    }
+    if let Some(object) = selection["object_id"].as_str() {
+        return format!("Viewing {object}");
+    }
+    "Canvas selection active".into()
+}
+
 pub async fn context_for_chat(
     app: &AppState,
     chat_id: &str,
@@ -283,12 +323,17 @@ pub async fn context_for_chat(
         .get(&review.id)
         .cloned()
         .filter(|s| review.candidates.iter().any(|c| c.id == s.candidate_id));
-    let payload = json!({"id":review.id,"revision":review.revision,"current_candidate_id":review.current_candidate_id,"selection":selection});
+    let payload = context_payload(
+        &review.id,
+        review.current_candidate_id.as_deref(),
+        selection.as_ref(),
+    );
+    let summary = context_summary(&payload);
     let mut message = crate::chat::internal_roles::event(
         crate::chat::internal_roles::EventSubkind::SystemNotice,
         "review.context",
-        payload.clone(),
-        format!("Current review context: {payload}"),
+        payload,
+        summary,
     );
     let mut paths = Vec::new();
     if let Some(selection) = &selection {
@@ -309,4 +354,82 @@ pub async fn context_for_chat(
     );
     crate::privacy::records::merge_records(&mut message, super::service::guarded_records(&review));
     Ok(Some(message))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn review_context_payload_ignores_volatile_fields_and_tracks_selection() {
+        let mut selection = ActivityRequest {
+            candidate_id: "candidate".into(),
+            action: "select".into(),
+            path: Some("a.rs".into()),
+            side: Some(Side::Head),
+            start_line: Some(2),
+            end_line: Some(4),
+            object_id: Some("object".into()),
+            request_key: "first".into(),
+        };
+        let payload = context_payload("review", Some("candidate"), Some(&selection));
+        assert_eq!(
+            payload,
+            json!({
+                "id": "review", "current_candidate_id": "candidate", "selection": {
+                    "candidate_id": "candidate", "action": "select", "path": "a.rs",
+                    "side": "head", "start_line": 2, "end_line": 4, "object_id": "object",
+                }
+            })
+        );
+        assert_eq!(context_summary(&payload), "Selected a.rs lines 2-4 (head)");
+        assert_eq!(
+            context_summary(&context_payload("review", None, None)),
+            "No canvas selection"
+        );
+        let mut viewing = selection.clone();
+        viewing.start_line = None;
+        viewing.end_line = None;
+        assert_eq!(
+            context_summary(&context_payload(
+                "review",
+                Some("candidate"),
+                Some(&viewing)
+            )),
+            "Viewing a.rs"
+        );
+        viewing.path = None;
+        assert_eq!(
+            context_summary(&context_payload(
+                "review",
+                Some("candidate"),
+                Some(&viewing)
+            )),
+            "Viewing object"
+        );
+        assert!(payload.get("revision").is_none());
+        assert!(payload["selection"].get("request_key").is_none());
+        selection.request_key = "second".into();
+        assert_eq!(
+            payload,
+            context_payload("review", Some("candidate"), Some(&selection))
+        );
+        selection.path = Some("b.rs".into());
+        assert_ne!(
+            payload,
+            context_payload("review", Some("candidate"), Some(&selection))
+        );
+        selection.path = Some("a.rs".into());
+        selection.start_line = Some(3);
+        assert_ne!(
+            payload,
+            context_payload("review", Some("candidate"), Some(&selection))
+        );
+        selection.start_line = Some(2);
+        selection.end_line = Some(5);
+        assert_ne!(
+            payload,
+            context_payload("review", Some("candidate"), Some(&selection))
+        );
+    }
 }

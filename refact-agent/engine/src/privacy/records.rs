@@ -970,7 +970,7 @@ impl BatchDeclaredRecords {
     }
 
     pub(crate) fn classify_declared_paths(
-        &mut self,
+        &self,
         gcx: &Arc<GlobalContext>,
         paths: impl IntoIterator<Item = PathBuf>,
     ) -> Vec<FileRecord> {
@@ -1005,10 +1005,74 @@ pub fn declared_file_records(
     paths: impl IntoIterator<Item = PathBuf>,
 ) -> Result<Vec<FileRecord>, String> {
     with_stable_paths(paths, |paths| {
-        let mut batch = BatchDeclaredRecords::new(gcx)?;
+        let batch = BatchDeclaredRecords::new(gcx)?;
         let records = batch.classify_declared_paths(gcx, paths);
         batch.finish(gcx)?;
         Ok(records)
+    })
+}
+
+pub(crate) fn parallel_declared_file_records(
+    gcx: &Arc<GlobalContext>,
+    paths: Vec<PathBuf>,
+    workers: usize,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<Vec<FileRecord>, String> {
+    parallel_declared_file_records_checked(gcx, paths, workers, cancel, || {})
+}
+
+fn parallel_declared_file_records_checked(
+    gcx: &Arc<GlobalContext>,
+    paths: Vec<PathBuf>,
+    workers: usize,
+    cancel: &tokio_util::sync::CancellationToken,
+    mut chunk_finished: impl FnMut(),
+) -> Result<Vec<FileRecord>, String> {
+    let chunk_size = paths.len().div_ceil(workers.clamp(1, 8)).max(1);
+    with_stable_paths(paths, |paths| {
+        let paths = paths.collect::<Vec<_>>();
+        let batch = BatchDeclaredRecords::new(gcx)?;
+        let records = std::thread::scope(|scope| -> Result<Vec<FileRecord>, String> {
+            let mut jobs = Vec::new();
+            for chunk in paths.chunks(chunk_size) {
+                let batch = &batch;
+                jobs.push(
+                    std::thread::Builder::new()
+                        .stack_size(crate::runtime_config::tokio_worker_stack_bytes())
+                        .spawn_scoped(scope, move || {
+                            batch.classify_declared_paths(
+                                gcx,
+                                chunk.iter().take_while(|_| !cancel.is_cancelled()).cloned(),
+                            )
+                        })
+                        .map_err(|error| {
+                            format!("Review privacy worker could not start: {error}")
+                        })?,
+                );
+            }
+            let mut records = Vec::new();
+            let mut failed = false;
+            for job in jobs {
+                match job.join() {
+                    Ok(chunk) => records.extend(chunk),
+                    Err(_) => failed = true,
+                }
+                chunk_finished();
+            }
+            if failed {
+                return Err("Review privacy classification worker panicked".into());
+            }
+            if cancel.is_cancelled() {
+                return Err("Review privacy preparation cancelled".into());
+            }
+            Ok(records)
+        })?;
+        batch.finish(gcx)?;
+        let mut seen = HashSet::new();
+        Ok(records
+            .into_iter()
+            .filter(|record| seen.insert(record.clone()))
+            .collect())
     })
 }
 
@@ -1385,7 +1449,7 @@ mod tests {
             zones,
             ..Default::default()
         });
-        let mut batch = BatchDeclaredRecords::new(&gcx).unwrap();
+        let batch = BatchDeclaredRecords::new(&gcx).unwrap();
         let expected = declared_file_records(&gcx, paths.clone()).unwrap();
         assert_eq!(batch.classify_declared_paths(&gcx, paths.clone()), expected);
         assert_eq!(batch.classify_declared_paths(&gcx, paths.clone()), expected);
@@ -1490,6 +1554,56 @@ mod tests {
             ..Default::default()
         });
         gcx
+    }
+
+    #[tokio::test]
+    async fn parallel_records_retry_entire_snapshot_and_preserve_errors() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let paths = (0..16)
+            .map(|i| gcx.cache_dir.join(format!("file-{i}.rs")))
+            .collect::<Vec<_>>();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let mut chunks = 0;
+        let original = gcx.privacy_policy_load.read().unwrap().policy.clone();
+        let actual =
+            parallel_declared_file_records_checked(&gcx, paths.clone(), 4, &cancel, || {
+                chunks += 1;
+                if chunks == 1 {
+                    let mut changed = (*original).clone();
+                    changed.blocked = vec!["file-*.rs".into()];
+                    gcx.privacy_policy_load.write().unwrap().policy = Arc::new(changed);
+                }
+            })
+            .unwrap();
+        assert_eq!(chunks, 8);
+        assert_eq!(actual, declared_file_records(&gcx, paths.clone()).unwrap());
+        assert!(actual.iter().all(|record| record.zone == "blocked"));
+        let retained = gcx.privacy_policy_load.read().unwrap().policy.clone();
+        let mut aba_chunks = 0;
+        let aba = parallel_declared_file_records_checked(&gcx, paths.clone(), 4, &cancel, || {
+            aba_chunks += 1;
+            if aba_chunks == 1 {
+                gcx.privacy_policy_load.write().unwrap().policy = original.clone();
+                super::super::classification_cache::invalidate(&gcx);
+                gcx.privacy_policy_load.write().unwrap().policy = retained.clone();
+            }
+        })
+        .unwrap();
+        assert_eq!(aba_chunks, 8);
+        assert_eq!(aba, actual);
+        let mut chunks = 0;
+        let error = parallel_declared_file_records_checked(&gcx, paths.clone(), 4, &cancel, || {
+            chunks += 1;
+            super::super::classification_cache::invalidate(&gcx);
+        })
+        .unwrap_err();
+        assert_eq!(error, PRIVACY_CONTEXT_CHANGED);
+        assert_eq!(chunks, 4 * STABLE_CONTEXT_ATTEMPTS);
+        gcx.privacy_policy_load.write().unwrap().error = Some("fixture unavailable".into());
+        assert_eq!(
+            parallel_declared_file_records(&gcx, paths.clone(), 4, &cancel).unwrap_err(),
+            declared_file_records(&gcx, paths.clone()).unwrap_err()
+        );
     }
 
     #[tokio::test]

@@ -466,6 +466,25 @@ async fn unknown_finding_evidence_leaves_creates_and_updates_unwritten() {
 }
 
 #[tokio::test]
+async fn source_without_exactly_one_location_explains_how_to_cite_runs() {
+    let f = Fixture::new().await;
+    f.open().await;
+    let before = serde_json::to_value(f.active()).unwrap();
+    for args in [
+        json!({"id":"run","summary":"The suite passes on the head."}),
+        json!({"id":"run","summary":"The suite passes on the head.","url":"https://example.com/run","path":"tracked.py"}),
+    ] {
+        let error = f.call(ReviewToolKind::Source, args).await.unwrap_err();
+        assert!(error.starts_with("Pass exactly one of `url`"), "{error}");
+        assert!(
+            error.contains("state the run and its outcome in `summary`"),
+            "{error}"
+        );
+        assert_eq!(serde_json::to_value(f.active()).unwrap(), before);
+    }
+}
+
+#[tokio::test]
 async fn source_needing_revalidation_is_rejected_without_writing() {
     use refact_review_core::{Actor, AnchorStatus, Applicability, EvidenceSource, Mutation, Operation};
 

@@ -64,6 +64,7 @@ const SOURCE_VERBS: Partial<Record<string, string>> = {
   "chat.goal_monitor": "Goal",
   "tool.set_goal": "Goal",
   "goal.plan_install": "Plan",
+  "review.context": "Review context",
   "scheduler.cron": "Scheduler",
 };
 

@@ -11,6 +11,7 @@ use super::{
 };
 
 const MAX_PAGE_BYTES: usize = 1024 * 1024;
+const SOURCE_LOCATION_ERROR: &str = "Pass exactly one of `url` (an external document) or `path` (a file of the snapshot, with optional `lines`). To record a run or experiment, cite the file or link it concerns and state the run and its outcome in `summary`.";
 
 pub struct PageInput {
     pub id: String,
@@ -381,7 +382,7 @@ pub async fn source(
         return Err("`summary` must say what this source establishes".into());
     }
     if input.url.is_some() == input.path.is_some() {
-        return Err("Pass exactly one of `url` or `path`".into());
+        return Err(SOURCE_LOCATION_ERROR.into());
     }
     if let Some(id) = input.id.as_ref().filter(|id| !valid_id(id)) {
         return Err(format!(
@@ -425,7 +426,7 @@ pub async fn source(
                         anchor,
                     }
                 }
-                (None, None) => return Err("Pass exactly one of `url` or `path`".into()),
+                (None, None) => return Err(SOURCE_LOCATION_ERROR.into()),
             };
             Ok(Operation::AddEvidence {
                 evidence: Evidence {

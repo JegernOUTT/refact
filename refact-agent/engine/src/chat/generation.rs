@@ -1845,6 +1845,19 @@ async fn start_generation_iteration(
     // Rebuilds and handoffs replace the conversation but not the preamble.
     ensure_session_preamble(app.clone(), session_arc.clone()).await;
 
+    if let Err(error) = prepare_review_context_at_boundary(app, session_arc, &chat_id).await {
+        let abort_flag = session_arc.lock().await.abort_flag.clone();
+        return GenerationAttemptStart::Generated {
+            context: GenerationAttemptContext {
+                thread,
+                chat_id,
+                chat_label,
+                abort_flag,
+            },
+            result: Err(error.into()),
+        };
+    }
+
     if user_stop_requested(&session_arc).await {
         return GenerationAttemptStart::Stop;
     }
@@ -2722,6 +2735,90 @@ async fn resolve_session_compression_cap(
         )
         .await;
     }
+}
+
+async fn gather_review_context(
+    app: &AppState,
+    session_arc: &Arc<AMutex<ChatSession>>,
+    chat_id: &str,
+) -> Result<Option<ChatMessage>, String> {
+    let source_root = {
+        let session = session_arc.lock().await;
+        crate::coordination::scope::session_source_root(&session)
+    };
+    if let Some(root) = source_root {
+        if crate::review::service::get_for_chat(root, chat_id.to_owned())
+            .await
+            .map_err(|error| error.to_string())?
+            .is_some_and(|review| review.current_candidate_id.is_some())
+        {
+            return crate::review::chat_bridge::context_for_chat(app, chat_id).await;
+        }
+    }
+    Ok(None)
+}
+
+fn deliver_review_context_at_boundary(
+    session: &mut ChatSession,
+    context: ChatMessage,
+) -> Result<bool, String> {
+    if session.review_readiness_resume_nonce.is_some() {
+        return Ok(false);
+    }
+    let messages = refact_core::active_context::active_context(&session.messages)
+        .map_err(|error| error.to_string())?
+        .messages;
+    if !should_deliver_review_context(&messages, &context) {
+        return Ok(false);
+    }
+    Ok(session.try_add_event_at_boundary(context).is_some())
+}
+
+async fn prepare_review_context_at_boundary(
+    app: &AppState,
+    session_arc: &Arc<AMutex<ChatSession>>,
+    chat_id: &str,
+) -> Result<(), String> {
+    if session_arc
+        .lock()
+        .await
+        .review_readiness_resume_nonce
+        .is_some()
+    {
+        return Ok(());
+    }
+    let Some(context) = gather_review_context(app, session_arc, chat_id).await? else {
+        return Ok(());
+    };
+    let appended = {
+        let mut session = session_arc.lock().await;
+        deliver_review_context_at_boundary(&mut session, context)?
+    };
+    if appended {
+        maybe_save_trajectory_background_with_intent(
+            app.clone(),
+            session_arc.clone(),
+            TrajectoryCommitIntent::Checkpoint,
+        );
+    }
+    Ok(())
+}
+
+fn should_deliver_review_context(messages: &[ChatMessage], context: &ChatMessage) -> bool {
+    let last = messages.iter().rev().find(|message| {
+        message.role == "event"
+            && message.extra.get("event").is_some_and(|event| {
+                event.get("source").and_then(serde_json::Value::as_str) == Some("review.context")
+            })
+    });
+    let previous_payload = last
+        .and_then(|message| message.extra.get("event"))
+        .and_then(|event| event.get("payload"));
+    let current_payload = context
+        .extra
+        .get("event")
+        .and_then(|event| event.get("payload"));
+    last.is_none() || previous_payload != current_payload
 }
 
 pub async fn run_llm_generation(
@@ -4266,6 +4363,453 @@ fn maybe_downgrade_bogus_tool_calls_finish_reason(result: &mut ChoiceFinal, stag
 mod tests {
     use super::*;
     use crate::call_validation::{ChatToolCall, ChatToolFunction};
+
+    #[test]
+    fn review_context_delivery_compares_only_the_latest_payload() {
+        let context = |path: &str| {
+            crate::chat::internal_roles::event(
+                crate::chat::internal_roles::EventSubkind::SystemNotice,
+                "review.context",
+                serde_json::json!({"id": "review", "selection": {"path": path}}),
+                "Review context",
+            )
+        };
+        let a = context("a.rs");
+        let b = context("b.rs");
+        let unrelated = ChatMessage::new("user".into(), "continue".into());
+        assert!(should_deliver_review_context(&[], &a));
+        assert!(!should_deliver_review_context(
+            &[a.clone(), unrelated.clone()],
+            &context("a.rs")
+        ));
+        assert!(should_deliver_review_context(&[a.clone()], &b));
+        assert!(should_deliver_review_context(
+            &[a, unrelated, b],
+            &context("a.rs")
+        ));
+    }
+
+    #[test]
+    fn review_context_boundary_append_never_defers_and_preserves_identity() {
+        let context = crate::chat::internal_roles::event(
+            crate::chat::internal_roles::EventSubkind::SystemNotice,
+            "review.context",
+            serde_json::json!({"id": "review"}),
+            "Review context",
+        );
+        for blocked in 0..3 {
+            let mut session = ChatSession::new("review-boundary".into());
+            match blocked {
+                0 => {
+                    session.draft_message =
+                        Some(ChatMessage::new("assistant".into(), "draft".into()))
+                }
+                1 => {
+                    let mut call = ChatMessage::new("assistant".into(), String::new());
+                    call.tool_calls = Some(vec![ChatToolCall {
+                        id: "call_1".into(),
+                        function: ChatToolFunction {
+                            name: "cat".into(),
+                            arguments: "{}".into(),
+                        },
+                        index: None,
+                        tool_type: "function".into(),
+                        extra_content: None,
+                        started_at_ms: None,
+                        completed_at_ms: None,
+                    }]);
+                    session.messages.push(call);
+                }
+                _ => {
+                    session.active_compression_attempt = Some(1);
+                }
+            }
+            let before = session.messages.len();
+            assert!(session.try_add_event_at_boundary(context.clone()).is_none());
+            assert_eq!(session.messages.len(), before);
+            assert!(session.pending_deliveries.is_empty());
+        }
+        let mut session = ChatSession::new("review-boundary".into());
+        let appended = session
+            .try_add_event_at_boundary(context.clone())
+            .expect("free boundary");
+        assert_eq!(appended.message_id, context.message_id);
+        assert_eq!(
+            session.messages.last().expect("persisted event").message_id,
+            appended.message_id
+        );
+    }
+    #[test]
+    fn review_context_pre_draft_delivery_survives_stream_snapshot() {
+        let context = crate::chat::internal_roles::event(
+            crate::chat::internal_roles::EventSubkind::SystemNotice,
+            "review.context",
+            json!({"id": "review", "selection": {"path": "a.rs"}}),
+            "Viewing a.rs",
+        );
+        let mut session = ChatSession::new("review-lifecycle".into());
+        session.add_message(ChatMessage::new("user".into(), "review".into()));
+        assert!(
+            deliver_review_context_at_boundary(&mut session, context.clone()).expect("boundary")
+        );
+        assert!(session.start_stream().is_some());
+        let snapshot = refact_core::active_context::active_context(&session.messages)
+            .expect("active context")
+            .messages;
+        assert_eq!(
+            snapshot.last().expect("context").message_id,
+            context.message_id
+        );
+        assert_eq!(
+            session
+                .messages
+                .last()
+                .expect("persisted context")
+                .message_id,
+            context.message_id
+        );
+        let draft = session.draft_message.as_ref().expect("separate draft");
+        assert_eq!(draft.role, "assistant");
+        assert!(!snapshot
+            .iter()
+            .any(|message| message.message_id == draft.message_id));
+
+        let mut late = ChatSession::new("review-too-late".into());
+        assert!(late.start_stream().is_some());
+        let before = serde_json::to_value(&late.messages).expect("frontier");
+        assert!(!deliver_review_context_at_boundary(&mut late, context).expect("late boundary"));
+        assert_eq!(
+            serde_json::to_value(&late.messages).expect("frontier"),
+            before
+        );
+        assert!(late.pending_deliveries.is_empty());
+    }
+
+    #[test]
+    fn review_context_readiness_resume_preserves_message_frontier() {
+        let context = |path: &str| {
+            crate::chat::internal_roles::event(
+                crate::chat::internal_roles::EventSubkind::SystemNotice,
+                "review.context",
+                json!({"id": "review", "selection": {"path": path}}),
+                format!("Viewing {path}"),
+            )
+        };
+        let mut session = ChatSession::new("review-resumed".into());
+        assert!(
+            deliver_review_context_at_boundary(&mut session, context("a.rs")).expect("initial")
+        );
+        session.review_readiness_resume_nonce = Some("parked-attempt".into());
+        let before = serde_json::to_value(&session.messages).expect("frontier");
+        let version = session.trajectory_version;
+        assert!(
+            !deliver_review_context_at_boundary(&mut session, context("b.rs")).expect("resume")
+        );
+        assert_eq!(
+            serde_json::to_value(&session.messages).expect("frontier"),
+            before
+        );
+        assert_eq!(session.trajectory_version, version);
+        assert!(session.pending_deliveries.is_empty());
+        session.review_readiness_resume_nonce = None;
+        assert!(
+            deliver_review_context_at_boundary(&mut session, context("b.rs")).expect("next turn")
+        );
+    }
+
+    #[tokio::test]
+    async fn review_context_resume_skips_failing_lookup() {
+        let (_temp, app, session, _ccx, _) =
+            crate::review::context::tests::review_bound_test_session().await;
+        let chat_id = {
+            let mut live = session.lock().await;
+            let root = live.work_project_root.as_ref().expect("source root");
+            std::fs::write(
+                root.join(".refact/reviews/reviews.sqlite"),
+                b"invalid sqlite fixture",
+            )
+            .expect("invalidate lookup fixture");
+            live.review_readiness_resume_nonce = Some("resume".into());
+            live.chat_id.clone()
+        };
+        assert!(gather_review_context(&app, &session, &chat_id)
+            .await
+            .is_err());
+        let before = serde_json::to_value(&session.lock().await.messages).expect("frontier");
+        prepare_review_context_at_boundary(&app, &session, &chat_id)
+            .await
+            .expect("resume must not perform failing lookup");
+        assert_eq!(
+            serde_json::to_value(&session.lock().await.messages).expect("frontier"),
+            before
+        );
+    }
+
+    #[tokio::test]
+    async fn review_context_production_iteration_precedes_generated_assistant() {
+        let (_temp, app, session, _ccx, _) =
+            crate::review::context::tests::review_bound_test_session().await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener");
+        let address = listener.local_addr().expect("address");
+        let (_calls, server) = super::super::generation_pressure_retry_tests::serve_statuses(
+            listener, vec![(200, None,
+                "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"done\"},\"finish_reason\":null}]}\n\ndata: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")],
+        ).await;
+        let mut caps = crate::caps::CodeAssistantCaps::default();
+        caps.chat_models.insert(
+            "test/review-iteration".into(),
+            Arc::new(crate::caps::ChatModelRecord {
+                base: crate::caps::BaseModelRecord {
+                    id: "test/review-iteration".into(),
+                    name: "review-iteration".into(),
+                    endpoint: format!("http://{address}/v1/chat/completions"),
+                    tokenizer: "fake".into(),
+                    n_ctx: 32768,
+                    ..Default::default()
+                },
+                supports_tools: true,
+                supports_agent: true,
+                ..Default::default()
+            }),
+        );
+        {
+            let mut state = app.model.caps.write().await;
+            state.caps = Some(Arc::new(caps));
+            state.loaded_project_root = Some(session.lock().await.work_project_root.clone());
+            state.last_attempted_ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_secs();
+        }
+        {
+            let mut live = session.lock().await;
+            live.messages.insert(0, make_user_msg("Review the change"));
+            live.thread.model = "test/review-iteration".into();
+            live.thread.mode = "agent".into();
+            live.thread.auto_compact_enabled = Some(false);
+            live.set_runtime_state(SessionState::Idle, None);
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            loop {
+                match start_generation_iteration(&app, &session, &app.gcx).await {
+                    GenerationAttemptStart::Generated {
+                        result: Ok(GenerationResult::PendingReadiness),
+                        ..
+                    } => loop {
+                        if take_ready_review_continuation(&session).await {
+                            break;
+                        }
+                        tokio::task::yield_now().await;
+                    },
+                    GenerationAttemptStart::Generated {
+                        result: Ok(_), ..
+                    } => break,
+                    GenerationAttemptStart::Generated {
+                        result: Err(error),
+                        ..
+                    } => panic!("generation failed: {}", error.message),
+                    _ => panic!("iteration stopped before generation"),
+                }
+            }
+        })
+        .await
+        .expect("bounded generation");
+        server.abort();
+        let live = session.lock().await;
+        let context_index = live
+            .messages
+            .iter()
+            .position(|message| {
+                message
+                    .extra
+                    .get("event")
+                    .is_some_and(|event| event["source"] == "review.context")
+            })
+            .expect("context delivered by caller");
+        let assistant_index = live
+            .messages
+            .iter()
+            .position(|message| {
+                message.role == "assistant" && message.content.content_text_only() == "done"
+            })
+            .expect("generated assistant");
+        assert!(context_index < assistant_index);
+    }
+
+    #[tokio::test]
+    async fn review_context_real_binding_gathers_and_prepare_preserves_positions() {
+        let (_temp, app, session, ccx, receipt) =
+            crate::review::context::tests::review_bound_test_session().await;
+        session.lock().await.messages.insert(
+            0,
+            ChatMessage::new("user".into(), "Review the change".into()),
+        );
+        let chat_id = session.lock().await.chat_id.clone();
+        let initial_len = session.lock().await.messages.len();
+        prepare_review_context_at_boundary(&app, &session, &chat_id)
+            .await
+            .expect("first context");
+        let first_id = {
+            let locked = session.lock().await;
+            assert_eq!(locked.messages.len(), initial_len + 1);
+            let context = locked.messages.last().expect("tail context");
+            assert_eq!(context.extra["event"]["source"], "review.context");
+            context.message_id.clone()
+        };
+        prepare_review_context_at_boundary(&app, &session, &chat_id)
+            .await
+            .expect("unchanged context");
+        assert_eq!(session.lock().await.messages.len(), initial_len + 1);
+        let root = session
+            .lock()
+            .await
+            .work_project_root
+            .clone()
+            .expect("source root");
+        crate::review::chat_bridge::activity(
+            root,
+            &receipt.review,
+            crate::review::chat_bridge::ActivityRequest {
+                candidate_id: receipt.candidate_id,
+                action: "select".into(),
+                path: Some("tracked".into()),
+                side: Some(refact_review_core::Side::Head),
+                start_line: Some(1),
+                end_line: Some(1),
+                object_id: None,
+                request_key: "selection".into(),
+            },
+        )
+        .await
+        .expect("selection");
+        prepare_review_context_at_boundary(&app, &session, &chat_id)
+            .await
+            .expect("changed context");
+        {
+            let locked = session.lock().await;
+            assert_eq!(locked.messages.len(), initial_len + 2);
+            assert_eq!(locked.messages[initial_len].message_id, first_id);
+            assert_eq!(
+                locked.messages.last().expect("selection context").extra["event"]["payload"]
+                    ["selection"]["path"],
+                "tracked"
+            );
+        }
+        let model_id = "test/review-context";
+        let model = Arc::new(crate::caps::ChatModelRecord {
+            base: crate::caps::BaseModelRecord {
+                id: model_id.into(),
+                name: model_id.into(),
+                tokenizer: "fake".into(),
+                n_ctx: 8192,
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        let mut caps = crate::caps::CodeAssistantCaps::default();
+        caps.chat_models.insert(model_id.into(), model.clone());
+        {
+            let mut state = app.model.caps.write().await;
+            state.caps = Some(Arc::new(caps));
+            state.last_attempted_ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_secs();
+        }
+        let tokenizer = crate::tokens::cached_tokenizer(app.gcx.clone(), &model.base)
+            .await
+            .expect("tokenizer");
+        let t = HasTokenizerAndEot::new(tokenizer);
+        let (messages, thread) = {
+            let locked = session.lock().await;
+            (
+                refact_core::active_context::active_context(&locked.messages)
+                    .expect("context")
+                    .messages,
+                locked.thread.clone(),
+            )
+        };
+        let context_positions = |messages: &[ChatMessage]| {
+            messages
+                .iter()
+                .enumerate()
+                .filter(|(_, message)| {
+                    message
+                        .extra
+                        .get("event")
+                        .is_some_and(|event| event["source"] == "review.context")
+                })
+                .map(|(index, message)| (index, message.message_id.clone()))
+                .collect::<Vec<_>>()
+        };
+        let expected = context_positions(&messages);
+        assert_eq!(expected.len(), 2);
+        let meta = ChatMeta {
+            chat_id: chat_id.clone(),
+            chat_mode: "agent".into(),
+            chat_remote: false,
+            current_config_file: String::new(),
+            context_tokens_cap: Some(8192),
+            include_project_info: false,
+            request_attempt_id: "prepare-context".into(),
+            worktree: thread.worktree.clone(),
+        };
+        let options = ChatPrepareOptions {
+            prepend_system_prompt: false,
+            allow_at_commands: false,
+            allow_tool_prerun: false,
+            ..Default::default()
+        };
+        let mut parameters = SamplingParameters {
+            max_new_tokens: 1024,
+            ..Default::default()
+        };
+        let mut prepared = prepare_chat_passthrough(
+            app.gcx.clone(),
+            ccx.clone(),
+            &t,
+            messages.clone(),
+            &thread,
+            model_id,
+            "agent",
+            vec![],
+            &meta,
+            &mut parameters,
+            &options,
+        )
+        .await
+        .expect("preparation");
+        if let PrepareOutcome::Pending {
+            receipt,
+            turn_nonce,
+        } = prepared
+        {
+            crate::review::readiness::wait_for_readiness(&app, &chat_id, &receipt, &turn_nonce)
+                .await
+                .expect("readiness");
+            prepared = prepare_chat_passthrough(
+                app.gcx.clone(),
+                ccx,
+                &t,
+                messages,
+                &thread,
+                model_id,
+                "agent",
+                vec![],
+                &meta,
+                &mut parameters,
+                &options,
+            )
+            .await
+            .expect("admitted preparation");
+        }
+        let PrepareOutcome::Ready(prepared) = prepared else {
+            panic!("readiness must admit once");
+        };
+        assert_eq!(context_positions(&prepared.llm_request.messages), expected);
+    }
 
     fn ready_continuation(session: &ChatSession, nonce: &str) -> ReviewReadinessContinuation {
         ReviewReadinessContinuation {

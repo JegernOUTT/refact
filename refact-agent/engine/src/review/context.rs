@@ -91,7 +91,45 @@ pub(crate) async fn derive_origin_labels(
         .iter()
         .map(|f| PathBuf::from(&candidate.repository).join(&f.path))
         .collect::<Vec<_>>();
-    let read_context = crate::files_in_workspace::prepare_file_read_context(app.gcx.clone()).await;
+    let workers = std::thread::available_parallelism()
+        .map(|workers| workers.get())
+        .unwrap_or(1)
+        .min(8);
+    derive_origin_labels_with_workers(app, candidate, worktree, origins, workers, started).await
+}
+
+async fn finish_origin_checks(
+    jobs: Vec<tokio::task::JoinHandle<std::result::Result<(), String>>>,
+) -> std::result::Result<(), String> {
+    let mut failure = None;
+    for job in jobs {
+        if let Err(error) = job
+            .await
+            .map_err(|error| format!("Review privacy preparation task failed: {error}"))
+            .and_then(|result| result)
+        {
+            if failure.is_none() {
+                failure = Some(error);
+            }
+        }
+    }
+    match failure {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
+async fn derive_origin_labels_with_workers(
+    app: &crate::app_state::AppState,
+    candidate: &Candidate,
+    worktree: &WorktreeMeta,
+    origins: Vec<PathBuf>,
+    workers: usize,
+    started: std::time::Instant,
+) -> std::result::Result<Vec<(PathBuf, crate::privacy::records::DerivedZone)>, String> {
+    let chunk_size = origins.len().div_ceil(workers.clamp(1, 8)).max(1);
+    let inputs =
+        Arc::new(crate::files_in_workspace::prepare_file_read_context(app.gcx.clone()).await);
     tracing::debug!(
         phase = "read_context",
         files = origins.len(),
@@ -99,12 +137,26 @@ pub(crate) async fn derive_origin_labels(
         "Review origin preparation"
     );
     let checked = std::time::Instant::now();
-    for path in &origins {
-        crate::files_in_workspace::check_file_privacy_for_read_preparation_with_context(
-            &read_context,
-            path,
-        )?;
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let _cancel_on_drop = cancel.clone().drop_guard();
+    let mut jobs = Vec::new();
+    for chunk in origins.chunks(chunk_size) {
+        let paths = chunk.to_vec();
+        let inputs = inputs.clone();
+        let cancel = cancel.clone();
+        jobs.push(tokio::task::spawn_blocking(move || {
+            for path in &paths {
+                if cancel.is_cancelled() {
+                    return Err("Review privacy preparation cancelled".into());
+                }
+                crate::files_in_workspace::check_file_privacy_for_read_preparation_with_context(
+                    &inputs, path,
+                )?;
+            }
+            Ok::<_, String>(())
+        }));
     }
+    finish_origin_checks(jobs).await?;
     tracing::debug!(
         phase = "origin_checks",
         files = origins.len(),
@@ -112,7 +164,12 @@ pub(crate) async fn derive_origin_labels(
         "Review origin preparation"
     );
     let recorded = std::time::Instant::now();
-    let records = crate::privacy::records::declared_file_records(&app.gcx, origins)?;
+    let gcx = app.gcx.clone();
+    let records = tokio::task::spawn_blocking(move || {
+        crate::privacy::records::parallel_declared_file_records(&gcx, origins, workers, &cancel)
+    })
+    .await
+    .map_err(|error| format!("Review privacy preparation task failed: {error}"))??;
     tracing::debug!(
         phase = "origin_records",
         files = records.len(),
@@ -839,8 +896,231 @@ pub async fn set_context(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+    #[tokio::test]
+    async fn origin_check_errors_follow_candidate_order_not_completion_order() {
+        let (release, wait) = tokio::sync::oneshot::channel();
+        let first = tokio::spawn(async move {
+            wait.await.unwrap();
+            Err("first blocked path".into())
+        });
+        let later = tokio::spawn(async move {
+            release.send(()).unwrap();
+            Err("later blocked path".into())
+        });
+        assert_eq!(
+            finish_origin_checks(vec![first, later]).await.unwrap_err(),
+            "first blocked path"
+        );
+    }
+
+    #[tokio::test]
+    async fn parallel_origin_labels_match_sequential_restrictive_records() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("repo");
+        std::fs::create_dir(&source).unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
+            temp.path().join("cache"),
+            temp.path().join("config"),
+        )
+        .await;
+        let policy = crate::privacy::PrivacyPolicy {
+            blocked: vec!["secrets.yaml".into()],
+            zones: vec![refact_privacy::Zone {
+                name: "guarded".into(),
+                patterns: vec!["file-1*.rs".into()],
+                send_to: vec!["trusted".into()],
+                on_shell_read: refact_privacy::ShellBehavior::Ask,
+            }],
+            ..Default::default()
+        };
+        crate::privacy::save_privacy_policy(gcx.clone(), policy)
+            .await
+            .unwrap();
+        let candidate = Candidate {
+            id: "parallel".into(),
+            base_oid: String::new(),
+            head_oid: String::new(),
+            content_digest: String::new(),
+            snapshot_scope: String::new(),
+            created_at_ms: 0,
+            repository: source.to_string_lossy().into_owned(),
+            origin: Origin::Imported,
+            policy: CapturePolicy::default(),
+            files: (0..257)
+                .map(|i| CandidateFile {
+                    path: format!("file-{i}.rs"),
+                    base: None,
+                    head: None,
+                    base_mode: None,
+                    head_mode: None,
+                })
+                .collect(),
+        };
+        let worktree: WorktreeMeta = serde_json::from_value(serde_json::json!({
+            "id":"parallel", "kind":"review", "root":temp.path().join("checkout"), "source_workspace_root":source, "repo_root":source,
+            "branch":"review", "base_branch":null, "base_commit":"", "enforce":true
+        })).unwrap();
+        let app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
+        let expected = crate::privacy::records::declared_file_records(
+            &gcx,
+            candidate.files.iter().map(|f| source.join(&f.path)),
+        )
+        .unwrap();
+        let actual = derive_origin_labels_with_workers(
+            &app,
+            &candidate,
+            &worktree,
+            candidate
+                .files
+                .iter()
+                .map(|file| source.join(&file.path))
+                .collect(),
+            4,
+            std::time::Instant::now(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(actual.len(), expected.len());
+        for ((path, label), record) in actual.iter().zip(&expected) {
+            assert_eq!(
+                path,
+                &worktree.root.join(
+                    std::path::Path::new(&record.path)
+                        .strip_prefix(&source)
+                        .unwrap()
+                )
+            );
+            assert!(matches!(label.zone.as_str(), "guarded" | "normal"));
+            assert_eq!(label.zone, record.zone);
+            assert_eq!(label.origin.as_deref(), Some(record.path.as_str()));
+        }
+        assert!(actual.iter().any(|(_, label)| label.zone == "normal"));
+        assert!(actual.iter().any(|(_, label)| label.zone == "guarded"));
+        let mut denied = candidate.clone();
+        denied.files[0].path = "secrets.yaml".into();
+        denied.files.last_mut().unwrap().path = "secrets.yaml".into();
+        gcx.privacy_policy_load.write().unwrap().error = Some("modern unavailable".into());
+        let error = derive_origin_labels_with_workers(
+            &app,
+            &denied,
+            &worktree,
+            denied
+                .files
+                .iter()
+                .map(|file| source.join(&file.path))
+                .collect(),
+            4,
+            std::time::Instant::now(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error, "privacy level Blocked");
+        let error = derive_origin_labels_with_workers(
+            &app,
+            &candidate,
+            &worktree,
+            candidate
+                .files
+                .iter()
+                .map(|file| source.join(&file.path))
+                .collect(),
+            4,
+            std::time::Instant::now(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error, "privacy policy unavailable");
+    }
+
+    pub(crate) async fn review_bound_test_session() -> (
+        tempfile::TempDir,
+        crate::app_state::AppState,
+        Arc<Mutex<ChatSession>>,
+        Arc<Mutex<AtCommandsContext>>,
+        ContextReceipt,
+    ) {
+        let temp = tempfile::tempdir().expect("fixture directory");
+        let source = temp.path().join("repo");
+        std::fs::create_dir(&source).expect("repository directory");
+        let source = dunce::canonicalize(source).expect("canonical repository");
+        let oid = {
+            let repo = git2::Repository::init(&source).expect("repository");
+            let blob = repo.blob(b"original\n").expect("blob");
+            let mut tree = repo.treebuilder(None).expect("tree builder");
+            tree.insert("tracked", blob, 0o100644).expect("tree entry");
+            let tree_oid = tree.write().expect("tree");
+            let signature = git2::Signature::now("Test", "test@localhost").expect("signature");
+            let oid = repo
+                .commit(
+                    Some("HEAD"),
+                    &signature,
+                    &signature,
+                    "initial",
+                    &repo.find_tree(tree_oid).expect("commit tree"),
+                    &[],
+                )
+                .expect("commit");
+            repo.checkout_head(None).expect("checkout");
+            oid
+        };
+        let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
+            temp.path().join("cache"),
+            temp.path().join("config"),
+        )
+        .await;
+        crate::privacy::save_privacy_policy(gcx.clone(), crate::privacy::PrivacyPolicy::default())
+            .await
+            .expect("privacy policy");
+        *gcx.documents_state
+            .workspace_folders
+            .lock()
+            .expect("workspace folders") = vec![source.clone()];
+        let app = crate::app_state::AppState::from_gcx(gcx).await;
+        let mut live = ChatSession::new("review-context-root".into());
+        live.work_project_root = Some(source.clone());
+        live.set_runtime_state(SessionState::ExecutingTools, None);
+        let abort = live.abort_flag.clone();
+        let session = Arc::new(Mutex::new(live));
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert("review-context-root".into(), session.clone());
+        let context = AtCommandsContext::new_with_abort(
+            app.clone(),
+            4096,
+            10,
+            false,
+            vec![],
+            "review-context-root".into(),
+            None,
+            String::new(),
+            None,
+            None,
+            Some(abort),
+        )
+        .await;
+        let ccx = Arc::new(Mutex::new(context));
+        let receipt = set_context(
+            ccx.clone(),
+            SetContextRequest {
+                repository: source.to_string_lossy().into(),
+                base_ref: oid.to_string(),
+                candidate_ref: oid.to_string(),
+                policy: CapturePolicy::default(),
+                title: "Review".into(),
+                target_reference: "local".into(),
+                review_id: None,
+                expected_revision: None,
+                request_key: "first".into(),
+            },
+        )
+        .await
+        .expect("bound review");
+        (temp, app, session, ccx, receipt)
+    }
 
     #[tokio::test]
     async fn origin_labels_match_records_and_recheck_changed_policy_and_aliases() {
