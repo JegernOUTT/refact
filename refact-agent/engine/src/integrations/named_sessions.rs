@@ -1133,10 +1133,6 @@ mod tests {
     async fn live_named_children_are_isolated_and_generation_fenced() {
         use std::io::{Read, Write};
         let (_gcx, owner, cache) = owner().await;
-        eprintln!(
-            "live_named_children_are_isolated_and_generation_fenced cache: {}",
-            cache.path().display()
-        );
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         listener.set_nonblocking(true).unwrap();
@@ -1188,6 +1184,11 @@ mod tests {
         cleanup_guard
             .children
             .push(ra.runtime.lock().await.browser.owned_process().unwrap());
+        eprintln!(
+            "named live generation=a-original profile={:?} original_root_pid={:?}",
+            ra.ownership.profile_dir().file_name(),
+            ra.ownership.process_id()
+        );
         let b = create_named_session(owner.clone(), "b", options.clone(), deadline)
             .await
             .unwrap();
@@ -1195,6 +1196,11 @@ mod tests {
         cleanup_guard
             .children
             .push(rb.runtime.lock().await.browser.owned_process().unwrap());
+        eprintln!(
+            "named live generation=b profile={:?} original_root_pid={:?}",
+            rb.ownership.profile_dir().file_name(),
+            rb.ownership.process_id()
+        );
         assert_ne!(ra.runtime_id, rb.runtime_id);
         assert_ne!(ra.ownership.process_id(), rb.ownership.process_id());
         assert!(
@@ -1238,6 +1244,10 @@ mod tests {
         let closed = close_named_session(&owner, "a", &a.session_id, deadline)
             .await
             .unwrap();
+        eprintln!(
+            "named live close generation=a-original process_exited={} targets_complete={} closed_targets={} profile_disposition={:.512}",
+            closed.process_exited, closed.targets_complete, closed.closed_target_ids.len(), closed.profile_disposition
+        );
         assert!(closed.process_exited);
         assert_eq!(closed.profile_disposition, "removed");
         assert!(!pid_is_alive(old_pid));
@@ -1255,6 +1265,11 @@ mod tests {
                 .owned_process()
                 .unwrap(),
         );
+        eprintln!(
+            "named live generation=a-recreated profile={:?} original_root_pid={:?}",
+            recreated_runtime.ownership.profile_dir().file_name(),
+            recreated_runtime.ownership.process_id()
+        );
         assert_ne!(a.session_id, recreated.session_id);
         assert!(close_named_session(&owner, "a", &a.session_id, deadline)
             .await
@@ -1262,11 +1277,19 @@ mod tests {
         let closed = close_named_session(&owner, "a", &recreated.session_id, deadline)
             .await
             .unwrap();
+        eprintln!(
+            "named live close generation=a-recreated process_exited={} targets_complete={} closed_targets={} profile_disposition={:.512}",
+            closed.process_exited, closed.targets_complete, closed.closed_target_ids.len(), closed.profile_disposition
+        );
         assert!(closed.process_exited);
         assert_eq!(closed.profile_disposition, "removed");
         let closed = close_named_session(&owner, "b", &b.session_id, deadline)
             .await
             .unwrap();
+        eprintln!(
+            "named live close generation=b process_exited={} targets_complete={} closed_targets={} profile_disposition={:.512}",
+            closed.process_exited, closed.targets_complete, closed.closed_target_ids.len(), closed.profile_disposition
+        );
         assert!(closed.process_exited);
         assert_eq!(closed.profile_disposition, "removed");
         drop(ra);

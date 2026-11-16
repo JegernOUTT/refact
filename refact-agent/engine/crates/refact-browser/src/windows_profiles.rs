@@ -328,7 +328,7 @@ impl WindowsOwnedProfile {
         directory(file)?;
         let sd = descriptor(&current_sid()?)?;
         private_acl(file, &sd)?;
-        if !singleton_absent(file)? {
+        if !singleton_absent(file).map_err(|e| format!("profile singleton lookup: {e}"))? {
             return Err("profile SingletonLock is present or unreadable".into());
         }
         let mut budget = Budget {
@@ -336,7 +336,7 @@ impl WindowsOwnedProfile {
             deadline: Instant::now() + Duration::from_secs(10),
         };
         remove_contents(&self.path, file, &mut budget, 0)?;
-        disposition(file)?;
+        disposition(file).map_err(|e| format!("profile root disposition: {e}"))?;
         drop(root.take()); // Commit delete-on-close while every ancestor remains pinned.
         drop(shield);
         Ok(())
@@ -533,7 +533,7 @@ fn enumerate(
             if error.raw_os_error() == Some(18) {
                 return Ok(());
             } // ERROR_NO_MORE_FILES
-            return Err(io(error));
+            return Err(format!("profile enumeration: {}", io(error)));
         }
         class = FileIdBothDirectoryInfo;
         let mut offset = 0usize;
@@ -582,13 +582,14 @@ fn remove_contents(
     directory(dir)?;
     enumerate(dir, |name| {
         budget.consume()?;
-        let child = relative(dir, name, true).map_err(nt_error)?;
+        let child = relative(dir, name, true)
+            .map_err(|status| format!("profile relative child open: {}", nt_error(status)))?;
         let attr = info(&child)?.dwFileAttributes;
         if attr & FILE_ATTRIBUTE_DIRECTORY != 0 && attr & FILE_ATTRIBUTE_REPARSE_POINT == 0 {
             remove_contents(Path::new(""), &child, budget, depth + 1)?;
         }
         // No attribute clearing/content writes: a hard link can refer outside.
-        disposition(&child)?;
+        disposition(&child).map_err(|e| format!("profile child disposition: {e}"))?;
         drop(child);
         Ok(())
     })
@@ -696,7 +697,11 @@ mod tests {
         let mut permissions = std::fs::metadata(&readonly).unwrap().permissions();
         permissions.set_readonly(true);
         std::fs::set_permissions(&readonly, permissions).unwrap();
-        assert!(profile.cleanup(true, true).is_err());
+        let result = profile.cleanup(true, true);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .starts_with("profile child disposition: named profile filesystem:"));
         assert!(profile.root.lock().unwrap().is_some());
         let root = profile.root.lock().unwrap();
         let mut budget = Budget {
