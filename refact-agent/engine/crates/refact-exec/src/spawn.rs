@@ -1475,8 +1475,8 @@ mod tests {
         pid: u32,
         state: char,
         parent: u32,
-        group: u32,
-        session: u32,
+        group: i32,
+        session: i32,
         start_time: u64,
     }
 
@@ -1562,6 +1562,53 @@ mod tests {
             .to_string();
         assert!(mismatch.contains("parsed_pid=Some(42)"));
         assert!(mismatch.contains("fields_after_comm=Some(21)"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn owned_process_stat_preserves_signed_teardown_context_without_hiding_liveness() {
+        let original = OwnedProcessStat {
+            pid: 42,
+            state: 'S',
+            parent: 7,
+            group: 42,
+            session: 42,
+            start_time: 1234,
+        };
+        for state in ['X', 'Z', 'R'] {
+            let mut fields = vec!["0".to_string(); 50];
+            fields[0] = state.to_string();
+            fields[2] = "-1".into();
+            fields[3] = "-1".into();
+            fields[19] = "1234".into();
+            let contents = format!("42 (exiting process) {}", fields.join(" "));
+            let parsed = OwnedProcessStat::from_contents(42, &contents)
+                .unwrap()
+                .expect("valid signed proc-stat context");
+            assert_eq!(
+                parsed,
+                OwnedProcessStat {
+                    pid: 42,
+                    state,
+                    parent: 0,
+                    group: -1,
+                    session: -1,
+                    start_time: 1234,
+                }
+            );
+            assert_eq!(original.is_same_live_process(Some(&parsed)), state == 'R');
+            for index in [2, 3] {
+                let mut invalid = fields.clone();
+                invalid[index] = "not-a-number".into();
+                let contents = format!("42 (exiting process) {}", invalid.join(" "));
+                assert_eq!(
+                    OwnedProcessStat::from_contents(42, &contents)
+                        .unwrap_err()
+                        .kind(),
+                    std::io::ErrorKind::InvalidData
+                );
+            }
+        }
     }
 
     #[cfg(target_os = "linux")]
@@ -1888,7 +1935,9 @@ mod tests {
                     loop {
                         if OwnedProcessStat::read(captured[1].pid)
                             .unwrap()
-                            .is_some_and(|stat| stat.group == stat.pid)
+                            .is_some_and(|stat| {
+                                stat.group == i32::try_from(stat.pid).expect("Linux PID fits pid_t")
+                            })
                         {
                             break;
                         }
@@ -2085,11 +2134,14 @@ mod tests {
             .expect("owned PID handshake timed out");
             let shell = OwnedProcessStat::read(pids[0]).unwrap().expect("live bash");
             assert_eq!(shell.group, shell.session, "PTY group/session leader");
-            let leader = OwnedProcessStat::read(shell.group)
-                .unwrap()
-                .expect("live PTY leader");
-            assert_eq!(leader.pid, leader.group);
-            assert_eq!(leader.pid, leader.session);
+            let leader = OwnedProcessStat::read(
+                u32::try_from(shell.group).expect("live PTY group must be nonnegative"),
+            )
+            .unwrap()
+            .expect("live PTY leader");
+            let leader_pid = i32::try_from(leader.pid).expect("Linux PID fits pid_t");
+            assert_eq!(leader_pid, leader.group);
+            assert_eq!(leader_pid, leader.session);
             if leader.pid != shell.pid {
                 assert_eq!(shell.parent, leader.pid, "bash must belong to PTY leader");
             }
