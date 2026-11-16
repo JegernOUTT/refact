@@ -500,13 +500,9 @@ fn logs<'a>(
             br::resolve_log_source(source, gcx.cmdline.logs_to_file.clone(), &gcx.cache_dir)
                 .await
                 .map_err(|e| EngineError::Type(e.message))?;
-        let (exists, lines, read_error) = br::read_redacted_lines(&resolved, tail).await;
-        let total = lines.len();
-        let lines: Vec<String> = lines
-            .into_iter()
-            .filter(|l| filter.allows_text(l))
-            .collect();
-        let dropped = total - lines.len();
+        let (exists, lines, read_error, dropped) =
+            br::read_filtered_redacted_lines(&resolved, tail, |text| filter.allows_text(text))
+                .await;
         let mut data = json!({"source":source,"path":resolved.path.to_string_lossy(),"exists":exists,"lines":lines,"dropped_lines":dropped});
         if let Some(error) = read_error {
             data["read_error"] = json!(error);
@@ -529,23 +525,18 @@ fn errors<'a>(
         let filter = PathFilter::new(ctx).await?;
         let engine = br::resolve_engine_log(gcx.cmdline.logs_to_file.clone(), &gcx.cache_dir).await;
         let daemon = br::resolve_daemon_log().await;
-        let rows = to_value(br::scan_recent_errors(&[engine, daemon], 50).await)?;
+        let (rows, dropped) =
+            br::scan_filtered_recent_errors(&[engine, daemon], 50, |text| filter.allows_text(text))
+                .await;
+        let rows = to_value(rows)?;
         let mut kept = Vec::new();
-        let mut dropped = 0;
         for mut row in rows.as_array().cloned().unwrap_or_default() {
             for key in ["message", "location"] {
                 if let Some(text) = row[key].as_str() {
                     row[key] = json!(redact(text));
                 }
             }
-            let visible = [&row["message"], &row["location"]]
-                .iter()
-                .all(|v| v.as_str().is_none_or(|t| filter.allows_text(t)));
-            if visible {
-                kept.push(row);
-            } else {
-                dropped += 1;
-            }
+            kept.push(row);
         }
         let text = format!("{} distinct recent errors", kept.len());
         Ok(EngineOutput::new(

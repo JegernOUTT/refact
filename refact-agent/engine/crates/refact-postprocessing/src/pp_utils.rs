@@ -127,7 +127,7 @@ pub async fn pp_resolve_ctx_file_paths(
             Some(c) => ctx.canonical_path(c),
             None => ctx.canonical_path(&path_as_presented),
         };
-        context_file.file_name = cpath.to_string_lossy().to_string();
+        context_file.set_file_name(cpath.to_string_lossy().to_string());
         if candidates.len() != 1 {
             tracing::warn!(
                 "{:?} -> snap {:?} -> {:?}",
@@ -360,5 +360,60 @@ pub fn downgrade_lines_if_subsymbol(
             "        {}..{} ({} affected) <= subsymbol {:?} downgrade {}",
             line1_base0, line2_base0, changes_cnt, subsymbol, downgrade_coef
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+    use refact_core::ast_types::AstDefinition;
+
+    struct WindowsPaths;
+
+    #[async_trait]
+    impl PPContextTrait for WindowsPaths {
+        async fn read_file(&self, path: &PathBuf) -> Result<String, String> {
+            assert_eq!(path, &PathBuf::from("C:/project/file.rs"));
+            Ok("content".to_string())
+        }
+
+        async fn correct_to_nearest_filename(&self, _path: &str, _limit: usize) -> Vec<String> {
+            vec!["candidate".to_string()]
+        }
+
+        async fn shortify_paths(&self, paths: &[String]) -> Vec<String> {
+            assert_eq!(paths, &["C:/project/file.rs"]);
+            vec!["file.rs".to_string()]
+        }
+
+        async fn doc_defs_for_path(&self, _path: &str) -> Vec<Arc<AstDefinition>> {
+            vec![]
+        }
+
+        fn canonical_path(&self, _path: &str) -> PathBuf {
+            PathBuf::from(r"C:\project\file.rs")
+        }
+    }
+
+    #[tokio::test]
+    async fn resolved_context_paths_and_file_keys_use_forward_slashes() {
+        let mut files = vec![
+            ContextFile {
+                file_name: "first".into(),
+                ..Default::default()
+            },
+            ContextFile {
+                file_name: "second".into(),
+                ..Default::default()
+            },
+        ];
+        let loaded = pp_load_files_without_ast(Arc::new(WindowsPaths), &mut files).await;
+        assert_eq!(files[0].file_name, "C:/project/file.rs");
+        assert_eq!(files[1].file_name, "C:/project/file.rs");
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].cpath, files[0].file_name);
+        assert_eq!(loaded[0].shorter_path, "file.rs");
+        assert_eq!(loaded[0].file_content, "content");
     }
 }

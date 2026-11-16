@@ -675,10 +675,16 @@ async fn protected_path_rules_cover_engine_configuration() {
         .unwrap();
     let (write, read) = protected_paths(&app, &root, &ws).await;
     assert!(write.files.contains(&root.join(".refact/hooks.yaml")));
-    assert!(write.files.contains(&root.join(".refact/privacy.yaml")));
-    assert!(write
-        .prefixes
-        .contains(&root.join(".refact/integrations.d")));
+    assert!(write.files.contains(
+        &dunce::canonicalize(root.join(".refact"))
+            .unwrap()
+            .join("privacy.yaml")
+    ));
+    assert!(write.prefixes.contains(
+        &dunce::canonicalize(root.join(".refact"))
+            .unwrap()
+            .join("integrations.d")
+    ));
     assert!(write.prefixes.contains(&app.paths.config_dir));
     assert!(read
         .files
@@ -789,9 +795,10 @@ async fn outer_message_merges_nested_and_direct_read_provenance() {
     .await;
     let files = message.extra["privacy"]["files"].as_array().unwrap();
     assert!(files.iter().any(|f| f["path"] == "nested.txt"));
-    let expected =
-        refact_core::chat_types::normalize_file_name(file.to_string_lossy().into_owned());
-    assert!(files.iter().any(|f| f["path"] == expected.as_str()));
+    let expected = dunce::canonicalize(&file).unwrap();
+    assert!(files.iter().any(|f| f["path"]
+        .as_str()
+        .is_some_and(|p| dunce::canonicalize(p).ok().as_ref() == Some(&expected))));
 }
 
 #[tokio::test]
@@ -1072,7 +1079,15 @@ async fn engine_state_protected_but_artifacts_and_project_writes_open() {
         ws.runs_dir().join("old/run.json"),
     ];
     for path in paths {
-        let m = run(ccx.clone(), &format!("open({}, 'w')", json!(path)), false).await;
+        let m = run(
+            ccx.clone(),
+            &format!(
+                "open({}, 'w')",
+                json!(python_path(&path, native_platform()))
+            ),
+            false,
+        )
+        .await;
         assert_eq!(
             m.extra["python"]["error"]["type"], "PermissionError",
             "{path:?}"
@@ -1106,10 +1121,13 @@ async fn engine_secret_reads_denied_but_runs_readable() {
         dir.path().join("project/.refact/integrations.d/x.yaml"),
     ] {
         for code in [
-            format!("open({}).read()", json!(path)),
+            format!(
+                "open({}).read()",
+                json!(python_path(&path, native_platform()))
+            ),
             format!(
                 "from pathlib import Path\nPath({}).read_text()",
-                json!(path)
+                json!(python_path(&path, native_platform()))
             ),
         ] {
             let m = run(ccx.clone(), &code, false).await;
@@ -2370,14 +2388,17 @@ async fn module_imports_go_through_the_read_guard_and_are_recorded() {
     std::fs::write(guarded.join("zone_b.py"), "VALUE = 8\n").unwrap();
     let open = run(
         ccx.clone(),
-        &format!("open({}).read()", json!(guarded.join("zone_b.py"))),
+        &format!(
+            "open({}).read()",
+            json!(python_path(&guarded.join("zone_b.py"), native_platform()))
+        ),
         false,
     )
     .await;
     assert_eq!(open.extra["python"]["error"]["type"], "PermissionError");
     let code = format!(
         "import os\nos.chdir({})\nimport zone_b\nzone_b.VALUE",
-        json!(guarded)
+        json!(python_path(&guarded, native_platform()))
     );
     let m = run(ccx, &code, false).await;
     assert_eq!(
@@ -2426,7 +2447,7 @@ async fn show_reaches_live_updates_extra_run_json_and_model_text() {
     assert_eq!(displays[1]["y"], json!(["failures", "flaky"]));
     assert_eq!(displays[2]["kind"], "markdown");
     let run_dir = std::path::PathBuf::from(python["run_dir"].as_str().unwrap());
-    let file_path = run_dir.join("displays/1.json");
+    let file_path = run_dir.join("displays").join("1.json");
     assert_eq!(displays[0]["path"], json!(file_path.to_string_lossy()));
     let file: Value = serde_json::from_slice(&std::fs::read(&file_path).unwrap()).unwrap();
     assert_eq!(

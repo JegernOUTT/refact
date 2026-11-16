@@ -761,11 +761,11 @@ async fn script_model_calls_write_no_internal_trace() {
             )
             .await;
         assert_eq!(result(&python), json!(["one", "two"]), "{python}");
-        let workspace = std::path::PathBuf::from(python["workspace_dir"].as_str().unwrap());
+        let workspace = std::fs::canonicalize(python["workspace_dir"].as_str().unwrap()).unwrap();
         let added: Vec<_> = settled_files(llm.dir.path())
             .await
             .difference(&before)
-            .filter(|p| !p.starts_with(&workspace))
+            .filter(|p| !std::fs::canonicalize(p).unwrap().starts_with(&workspace))
             .cloned()
             .collect();
         let index = std::fs::read_to_string(
@@ -861,7 +861,11 @@ async fn engine_written_run_files_inherit_the_run_zone_across_restart() {
         )
         .await;
         assert_eq!(first["status"], "completed", "{first}");
-        let run_dir = first["run_dir"].as_str().unwrap().to_string();
+        let native_run_dir = std::path::Path::new(first["run_dir"].as_str().unwrap());
+        let run_dir = refact_python_kernel::hostfs::virtual_path(
+            native_run_dir,
+            if cfg!(windows) { refact_python_kernel::hostfs::Platform::Windows } else { refact_python_kernel::hostfs::Platform::Unix },
+        );
         let restart = serde_json::from_value::<crate::call_validation::ChatToolCall>(json!({"id":"zone-reader","type":"function","function":{"name":"python","arguments":json!({"code":format!(
             "out = []\nfor name in ['displays/1.json', 'calls/1_llm.json', 'stdout.txt', 'result.json']:\n    out.append(len(open({run_dir:?} + '/' + name).read()))\nout"
         ),"restart":true}).to_string()}})).unwrap();
@@ -871,7 +875,7 @@ async fn engine_written_run_files_inherit_the_run_zone_across_restart() {
         let files = second.extra["privacy"]["files"].as_array().cloned().unwrap_or_default();
         for name in ["displays/1.json", "calls/1_llm.json", "stdout.txt", "result.json"] {
             assert!(
-                files.iter().any(|f| f["path"].as_str().is_some_and(|p| p.ends_with(name)) && f["zone"] != "normal"),
+                files.iter().any(|f| f["path"].as_str().is_some_and(|p| dunce::canonicalize(p).ok() == Some(dunce::canonicalize(native_run_dir.join(name)).unwrap())) && f["zone"] != "normal"),
                 "{name} read without the run zone: {files:?}"
             );
         }

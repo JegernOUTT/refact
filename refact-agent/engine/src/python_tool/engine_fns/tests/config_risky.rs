@@ -1431,14 +1431,21 @@ async fn a2_mo_3_pinned_model_passes_the_egress_check() {
     let guarded = project(&dir).join("zone_guarded");
     std::fs::create_dir_all(&guarded).unwrap();
     std::fs::write(guarded.join("a.txt"), "zone").unwrap();
-    let path = guarded.join("a.txt").to_string_lossy().into_owned();
-    let task = spawn(&app, &format!("open('{path}').read()\nawait engine('modes.save', kind='modes', id='zone_mode', config={{'title': 'Zone two'}})"));
+    let path = json!(refact_python_kernel::hostfs::virtual_path(
+        &guarded.join("a.txt"),
+        if cfg!(windows) {
+            refact_python_kernel::hostfs::Platform::Windows
+        } else {
+            refact_python_kernel::hostfs::Platform::Unix
+        },
+    ));
+    let task = spawn(&app, &format!("open({path}).read()\nawait engine('modes.save', kind='modes', id='zone_mode', config={{'title': 'Zone two'}})"));
     let request = next_request(&app, &task).await;
     decide(&app, &request.request_id, Decision::Deny)
         .await
         .unwrap();
     finish(task).await;
-    let m = run(&app, &format!("open('{path}').read()\nawait engine('modes.save', kind='modes', id='zone_mode', config={{'model_defaults': {{'default': {{'model': 'zoneother/m'}}}}}})")).await;
+    let m = run(&app, &format!("open({path}).read()\nawait engine('modes.save', kind='modes', id='zone_mode', config={{'model_defaults': {{'default': {{'model': 'zoneother/m'}}}}}})")).await;
     assert_eq!(error_type(&m), "PermissionError", "{:?}", m.extra);
 }
 

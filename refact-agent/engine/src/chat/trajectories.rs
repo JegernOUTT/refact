@@ -40,10 +40,20 @@ pub async fn atomic_write_file(tmp_path: &Path, dest_path: &Path) -> Result<(), 
 async fn atomic_write_file_coordinated(tmp_path: &Path, dest_path: &Path) -> Result<(), String> {
     #[cfg(windows)]
     {
-        if fs::try_exists(dest_path)
-            .await
-            .map_err(|e| format!("Failed to inspect destination file: {}", e))?
-        {
+        let destination_exists = match fs::symlink_metadata(dest_path).await {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() || !metadata.is_file() {
+                    return Err(format!(
+                        "Destination is not a regular file: {}",
+                        dest_path.display()
+                    ));
+                }
+                true
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+            Err(e) => return Err(format!("Failed to inspect destination file: {}", e)),
+        };
+        if destination_exists {
             let backup_extension = format!(
                 "{}.replace.{}",
                 dest_path
@@ -22852,6 +22862,98 @@ mod tests {
             .and_then(|name| name.to_str())
             .unwrap()
             .starts_with("chat.json.tmp."));
+    }
+
+    #[tokio::test]
+    async fn atomic_write_file_preserves_nonempty_destination_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest_path = dir.path().join("summary.json");
+        let child_path = dest_path.join("retained.txt");
+        fs::create_dir(&dest_path).await.unwrap();
+        fs::write(&child_path, "retained directory contents")
+            .await
+            .unwrap();
+        let tmp_path = unique_trajectory_tmp_path(&dest_path);
+        fs::write(&tmp_path, "replacement").await.unwrap();
+
+        let error = atomic_write_file(&tmp_path, &dest_path).await.unwrap_err();
+
+        #[cfg(windows)]
+        assert_eq!(
+            error,
+            format!("Destination is not a regular file: {}", dest_path.display())
+        );
+        #[cfg(not(windows))]
+        assert!(error.starts_with("Failed to rename:"));
+        assert!(dest_path.is_dir());
+        assert_eq!(
+            fs::read_to_string(&child_path).await.unwrap(),
+            "retained directory contents"
+        );
+        assert_eq!(fs::read_to_string(&tmp_path).await.unwrap(), "replacement");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
+
+        atomic_write_json_with_tmp_path(
+            &dest_path,
+            &tmp_path,
+            Ok("replacement json".to_string()),
+            None,
+            None,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(dest_path.is_dir());
+        assert_eq!(
+            fs::read_to_string(&child_path).await.unwrap(),
+            "retained directory contents"
+        );
+        assert!(!tmp_path.exists());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[tokio::test]
+    async fn atomic_write_file_replaces_regular_destination() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest_path = dir.path().join("summary.json");
+        let tmp_path = unique_trajectory_tmp_path(&dest_path);
+        fs::write(&dest_path, "previous").await.unwrap();
+        fs::write(&tmp_path, "replacement").await.unwrap();
+
+        atomic_write_file(&tmp_path, &dest_path).await.unwrap();
+
+        assert_eq!(fs::read_to_string(&dest_path).await.unwrap(), "replacement");
+        assert!(!tmp_path.exists());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[tokio::test]
+    async fn atomic_write_file_creates_missing_destination() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest_path = dir.path().join("summary.json");
+        let tmp_path = unique_trajectory_tmp_path(&dest_path);
+        fs::write(&tmp_path, "new file").await.unwrap();
+
+        atomic_write_file(&tmp_path, &dest_path).await.unwrap();
+
+        assert_eq!(fs::read_to_string(&dest_path).await.unwrap(), "new file");
+        assert!(!tmp_path.exists());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[tokio::test]
+    async fn atomic_write_file_preserves_destination_when_source_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest_path = dir.path().join("summary.json");
+        let tmp_path = unique_trajectory_tmp_path(&dest_path);
+        fs::write(&dest_path, "previous").await.unwrap();
+
+        let error = atomic_write_file(&tmp_path, &dest_path).await.unwrap_err();
+
+        assert!(error.starts_with("Failed to rename:"));
+        assert_eq!(fs::read_to_string(&dest_path).await.unwrap(), "previous");
+        assert!(!tmp_path.exists());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 
     #[tokio::test]

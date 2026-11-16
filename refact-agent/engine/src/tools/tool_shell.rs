@@ -1725,6 +1725,7 @@ mod tests {
                 } else {
                     "sleep 0.4; echo done"
                 };
+                let started = std::time::Instant::now();
                 let (_, messages) = detach_quickly(ToolShell::default().tool_execute(
                     ccx,
                     &"nested".into(),
@@ -1736,9 +1737,35 @@ mod tests {
                 ))
                 .await
                 .unwrap();
+                let duration = started.elapsed();
                 let message = only_chat_message(messages);
                 if nested {
-                    assert_eq!(exec(&message)["status"], "exited");
+                    assert_eq!(exec(&message)["status"], "exited", "{}", {
+                        let mut diagnostics = Vec::new();
+                        let inspection = tokio::time::timeout(Duration::from_secs(1), async {
+                            let id = process_id(&message);
+                            let snapshot = gcx.exec_registry.get(&id).await;
+                            diagnostics.push(format!(
+                                "process={id} status={:?} exit={:?}",
+                                snapshot.as_ref().map(|s| s.status.kind()),
+                                snapshot.as_ref().and_then(|s| exec_exit_code(&s.status))
+                            ));
+                            let raw = gcx.exec_registry.read_raw_capture(&id).await;
+                            diagnostics.push(format!(
+                                "raw_bytes={:?} eof=unavailable",
+                                raw.map(|raw| (
+                                    raw.stdout_captured_bytes,
+                                    raw.stderr_captured_bytes
+                                ))
+                            ));
+                        })
+                        .await;
+                        format!(
+                            "nested_duration_ms={} diagnostics_complete={} {diagnostics:?}",
+                            duration.as_millis(),
+                            inspection.is_ok()
+                        )
+                    });
                     assert!(text(&message).contains("done"));
                     assert_ne!(exec(&message)["detached"], true);
                 } else {

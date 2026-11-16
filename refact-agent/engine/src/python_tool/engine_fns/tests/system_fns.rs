@@ -95,6 +95,48 @@ async fn logs_and_errors_are_redacted_and_drop_privacy_blocked_paths() {
 }
 
 #[tokio::test]
+async fn logs_and_errors_classify_paths_before_secret_redaction() {
+    let (dir, app, _) = fixture().await;
+    let blocked = dir.path().join("project/zone_a.txt");
+    block(&app, &blocked).await;
+    engine_log(
+        &dir,
+        &format!(
+            "000001.000 ERROR src/a.rs:1: blocked token={}\n000002.000 ERROR src/b.rs:2: allowed api_key=sk-abcdefghijklmnopqrstuvwxyz0123\n000003.000 INFO src/c.rs:3: ready\n",
+            blocked.display()
+        ),
+    );
+    let m = run(
+        &app,
+        "l = await engine('system.logs', tail=2)\na = await engine('system.logs', tail=50)\ne = await engine('system.errors')\n[l['data'], a['data'], e['data']]",
+    )
+    .await;
+    let out = result(&m);
+    assert_eq!(out[0]["lines"].as_array().unwrap().len(), 2, "{out}");
+    assert_eq!(out[0]["dropped_lines"], 0, "{out}");
+    assert_eq!(out[1]["lines"].as_array().unwrap().len(), 2, "{out}");
+    assert_eq!(out[1]["dropped_lines"], 1, "{out}");
+    let errors: Vec<_> = out[2]["errors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["source"] == "engine")
+        .collect();
+    assert_eq!(errors.len(), 1, "{out}");
+    assert!(errors[0]["message"]
+        .as_str()
+        .unwrap()
+        .starts_with("allowed"));
+    assert!(out[2]["dropped"].as_u64().unwrap() >= 1, "{out}");
+    assert!(!out.to_string().contains("zone_a.txt"), "{out}");
+    assert!(
+        !out.to_string()
+            .contains("sk-abcdefghijklmnopqrstuvwxyz0123"),
+        "{out}"
+    );
+}
+
+#[tokio::test]
 async fn logs_refuse_when_the_privacy_policy_cannot_be_loaded() {
     let (dir, app, ccx) = fixture().await;
     engine_log(&dir, "000001.000 INFO src/a.rs:1: hello\n");
@@ -282,7 +324,9 @@ async fn bug_bundle_writes_a_redacted_zip_under_the_cache_dir() {
         .unwrap();
     let out = result(&finish(task).await);
     let path = std::path::PathBuf::from(out["path"].as_str().unwrap());
-    assert!(path.starts_with(dunce::canonicalize(dir.path().join("cache/bug-reports")).unwrap()));
+    assert!(dunce::canonicalize(&path)
+        .unwrap()
+        .starts_with(dunce::canonicalize(dir.path().join("cache/bug-reports")).unwrap()));
     let mut zip = zip::ZipArchive::new(std::fs::File::open(&path).unwrap()).unwrap();
     let mut log = String::new();
     std::io::Read::read_to_string(&mut zip.by_name("engine.log").unwrap(), &mut log).unwrap();

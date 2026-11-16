@@ -618,6 +618,84 @@ async fn wire_preview_is_bounded_but_broker_retains_full_arguments() {
         .unwrap();
 }
 
+async fn approved_child_diagnostics(app: &AppState) -> String {
+    let mut diagnostics = Vec::new();
+    let inspection = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        let session = app
+            .chat
+            .sessions
+            .read()
+            .await
+            .get("subchat-approval-test")
+            .cloned();
+        if let Some(session) = session {
+            let session = session.lock().await;
+            diagnostics.push(format!(
+                "session={:?} pending_python_approvals={} python_runs={}",
+                session.runtime.state,
+                session.runtime.python_approvals.len(),
+                session.runtime.python_runs.len()
+            ));
+            for run in session.runtime.python_runs.iter().take(4) {
+                diagnostics.push(format!(
+                    "run={} status={:?} calls={}",
+                    run.run_id,
+                    run.status,
+                    run.calls.len()
+                ));
+                for call in run.calls.iter().take(4) {
+                    diagnostics.push(format!(
+                        "call={} status={:?} approval={:?} duration_ms={:?}",
+                        call.call_id, call.status, call.approval, call.duration_ms
+                    ));
+                }
+            }
+        } else {
+            diagnostics.push("session=missing".into());
+        }
+        diagnostics.push(format!(
+            "pending_parent_approvals={}",
+            app.agent_approvals
+                .list_for_parent("parent", crate::agents::approval::now_ms())
+                .len()
+        ));
+        let registry = &app.runtime.exec_registry;
+        let snapshots = registry
+            .list(crate::exec::ExecProcessFilter {
+                chat_id: Some("subchat-approval-test".into()),
+                ..Default::default()
+            })
+            .await;
+        diagnostics.push(format!("owned_processes={}", snapshots.len()));
+        for snapshot in snapshots.iter().take(4) {
+            let id = &snapshot.meta.process_id;
+            let exit = match &snapshot.status {
+                crate::exec::ExecStatus::Exited {
+                    exit_code,
+                } => *exit_code,
+                crate::exec::ExecStatus::SandboxLauncherFailed {
+                    exit_code,
+                } => Some(*exit_code),
+                _ => None,
+            };
+            diagnostics.push(format!(
+                "process={id} status={:?} exit={exit:?}",
+                snapshot.status.kind()
+            ));
+            let raw = registry.read_raw_capture(id).await;
+            diagnostics.push(format!(
+                "raw_bytes={:?} eof=unavailable",
+                raw.map(|raw| (raw.stdout_captured_bytes, raw.stderr_captured_bytes))
+            ));
+        }
+    })
+    .await;
+    format!(
+        "diagnostics_complete={} {diagnostics:?}",
+        inspection.is_ok()
+    )
+}
+
 #[tokio::test]
 async fn foreground_child_script_with_nested_approval_completes() {
     use crate::tools::tools_description::Tool;
@@ -627,6 +705,7 @@ async fn foreground_child_script_with_nested_approval_completes() {
         ..Default::default()
     });
     fixture.ccx.lock().await.app = fixture.app.clone();
+    let diagnostic_app = fixture.app.clone();
     let code="await shell(command='echo approved', description='Nested child approval', needs_confirmation=True)";
     let mut future = Box::pin(async {
         let result = crate::tools::tool_python::ToolPython::default()
@@ -655,12 +734,14 @@ async fn foreground_child_script_with_nested_approval_completes() {
             crate::agents::approval::now_ms(),
         )
         .unwrap();
-    assert!(
-        tokio::time::timeout(std::time::Duration::from_secs(20), future)
-            .await
-            .unwrap()
-            .unwrap()
-    );
+    let result = match tokio::time::timeout(std::time::Duration::from_secs(20), future).await {
+        Ok(result) => result,
+        Err(error) => {
+            let diagnostics = approved_child_diagnostics(&diagnostic_app).await;
+            panic!("approved nested call timed out: {error}; {diagnostics}");
+        }
+    };
+    assert!(result.unwrap());
 }
 
 #[tokio::test]
@@ -771,11 +852,17 @@ async fn running_child_python_call_proceeds_after_parent_approval() {
             crate::agents::approval::now_ms(),
         )
         .unwrap();
-    let messages = tokio::time::timeout(std::time::Duration::from_secs(20), task)
-        .await
-        .expect("approved nested call never ran")
-        .unwrap()
-        .unwrap();
+    let mut task = task;
+    let messages = match tokio::time::timeout(std::time::Duration::from_secs(20), &mut task).await {
+        Ok(result) => result.unwrap().unwrap(),
+        Err(error) => {
+            let diagnostics = approved_child_diagnostics(&fixture.app).await;
+            fixture.execution.cancel();
+            task.abort();
+            let _ = task.await;
+            panic!("approved nested call never ran: {error}; {diagnostics}");
+        }
+    };
     drop(operation);
     let extra = python_extra(&messages);
     assert_eq!(extra["status"], "completed", "{extra}");

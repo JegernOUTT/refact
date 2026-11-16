@@ -147,10 +147,11 @@ async fn plan_kill(ctx: &EngineCtx, args: &Value) -> Result<KillPlan, EngineErro
         )));
     }
     let filter = PathFilter::new(ctx).await?;
-    let mut preview = redact(&super::mask::scrub_text(&snapshot.meta.short_description));
-    if !filter.allows_text(&preview) {
-        preview = HIDDEN.to_string();
-    }
+    let preview = if filter.allows_text(&snapshot.meta.short_description) {
+        redact(&super::mask::scrub_text(&snapshot.meta.short_description))
+    } else {
+        HIDDEN.to_string()
+    };
     Ok(KillPlan {
         snapshot,
         preview,
@@ -287,13 +288,14 @@ fn list<'a>(
             if rows.len() >= limit {
                 continue;
             }
-            let mut preview = redact(&crate::integrations::mcp::redaction::scrub_text(
-                &s.meta.short_description,
-                &[],
-            ));
-            if !own && !filter.allows_text(&preview) {
-                preview = HIDDEN.to_string();
-            }
+            let preview = if !own && !filter.allows_text(&s.meta.short_description) {
+                HIDDEN.to_string()
+            } else {
+                redact(&crate::integrations::mcp::redaction::scrub_text(
+                    &s.meta.short_description,
+                    &[],
+                ))
+            };
             let mut row = json!({
                 "process_id": s.meta.process_id.as_str(),
                 "status": status_label(&s.status),

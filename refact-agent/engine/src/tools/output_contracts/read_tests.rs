@@ -92,7 +92,11 @@ async fn cat_output_contract() {
     assert_eq!(out["files"][0]["line2"], 2);
     assert_eq!(out["files"][0]["total_lines"], 3);
     assert_eq!(out["files"][0]["content"], "needle here\n");
-    assert_eq!(tool_text(&messages), format!("Paths found:\n{path}\n\n"));
+    let display_path = refact_core::chat_types::normalize_file_name(path);
+    assert_eq!(
+        tool_text(&messages),
+        format!("Paths found:\n{display_path}\n\n")
+    );
 }
 
 #[tokio::test]
@@ -108,24 +112,18 @@ async fn glob_output_contract() {
     )
     .await;
     assert_eq!(out["paths"].as_array().unwrap().len(), 1);
-    assert_eq!(
-        out["paths"][0],
+    let path = refact_core::chat_types::normalize_file_name(
         dunce::canonicalize(dir.path())
             .unwrap()
             .join("fixture.rs")
             .to_string_lossy()
-            .as_ref()
+            .into_owned(),
     );
+    assert_eq!(out["paths"][0], path);
     assert_eq!(out["truncated"], false);
     assert_eq!(
         tool_text(&messages),
-        format!(
-            "Glob matches for pattern '*.rs':\n  {}\n",
-            dunce::canonicalize(dir.path())
-                .unwrap()
-                .join("fixture.rs")
-                .display()
-        )
+        format!("Glob matches for pattern '*.rs':\n  {}\n", path)
     );
 }
 

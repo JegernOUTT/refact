@@ -285,9 +285,19 @@ pub(crate) async fn read_redacted_lines(
     source: &ResolvedLogSource,
     tail: usize,
 ) -> (bool, Vec<String>, Option<String>) {
+    let (exists, lines, error, _) = read_filtered_redacted_lines(source, tail, |_| true).await;
+    (exists, lines, error)
+}
+
+pub(crate) async fn read_filtered_redacted_lines(
+    source: &ResolvedLogSource,
+    tail: usize,
+    allows: impl Fn(&str) -> bool,
+) -> (bool, Vec<String>, Option<String>, usize) {
     if !source.exists || !source.path.is_file() {
-        return (false, Vec::new(), None);
+        return (false, Vec::new(), None, 0);
     }
+    let mut dropped = 0;
     match read_bounded_log_tail(&source.path).await {
         Ok(text) => (
             true,
@@ -297,11 +307,17 @@ pub(crate) async fn read_redacted_lines(
                 .collect::<Vec<_>>()
                 .into_iter()
                 .rev()
+                .filter(|line| {
+                    let visible = allows(line);
+                    dropped += usize::from(!visible);
+                    visible
+                })
                 .map(redact_sensitive)
                 .collect(),
             None,
+            dropped,
         ),
-        Err(e) => (true, Vec::new(), Some(redact_sensitive(&e))),
+        Err(e) => (true, Vec::new(), Some(redact_sensitive(&e)), 0),
     }
 }
 
@@ -485,6 +501,14 @@ pub(crate) async fn scan_recent_errors(
     sources: &[ResolvedLogSource],
     cap: usize,
 ) -> Vec<RecentErrorLine> {
+    scan_filtered_recent_errors(sources, cap, |_| true).await.0
+}
+
+pub(crate) async fn scan_filtered_recent_errors(
+    sources: &[ResolvedLogSource],
+    cap: usize,
+    allows: impl Fn(&str) -> bool,
+) -> (Vec<RecentErrorLine>, usize) {
     let mut deduped = HashMap::new();
     let mut global_position = 0;
     for source in sources {
@@ -546,9 +570,15 @@ pub(crate) async fn scan_recent_errors(
             .cmp(&b_level_rank)
             .then_with(|| b.last_position.cmp(&a.last_position))
     });
-    entries
+    let mut dropped = 0;
+    let rows = entries
         .into_iter()
         .take(cap)
+        .filter(|entry| {
+            let visible = allows(&entry.message) && entry.location.as_deref().is_none_or(&allows);
+            dropped += usize::from(!visible);
+            visible
+        })
         .map(|entry| RecentErrorLine {
             source: entry.source,
             level: entry.level,
@@ -556,7 +586,8 @@ pub(crate) async fn scan_recent_errors(
             count: entry.count,
             location: entry.location,
         })
-        .collect()
+        .collect();
+    (rows, dropped)
 }
 
 async fn read_tail_bytes(path: &Path, max_bytes: u64) -> Result<String, String> {
@@ -874,6 +905,51 @@ mod tests {
         assert_eq!(clamp_tail_lines(Some(0)), 1);
         assert_eq!(clamp_tail_lines(Some(99_999)), 2000);
         assert_eq!(clamp_tail_lines(None), 200);
+    }
+
+    #[tokio::test]
+    async fn filtered_readers_classify_windows_paths_before_redaction() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("engine.log");
+        let blocked = r"C:\Users\private\zone_a.txt";
+        tokio::fs::write(
+            &path,
+            format!("000001.000 ERROR src/a.rs:1: blocked {blocked}\n000002.000 ERROR src/b.rs:2: allowed api_key=sk-abcdefghijklmnopqrstuvwxyz0123\n"),
+        )
+        .await
+        .unwrap();
+        let source = ResolvedLogSource {
+            source: "engine",
+            path,
+            exists: true,
+        };
+        let (exists, lines, error, dropped) =
+            read_filtered_redacted_lines(&source, 50, |text| !text.contains(blocked)).await;
+        assert!(exists);
+        assert!(error.is_none());
+        assert_eq!(dropped, 1);
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("allowed"));
+        assert!(!lines[0].contains("sk-abcdefghijklmnopqrstuvwxyz0123"));
+        let (errors, dropped) =
+            scan_filtered_recent_errors(&[source.clone()], 50, |text| !text.contains(blocked))
+                .await;
+        assert_eq!(dropped, 1);
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].message.starts_with("allowed"));
+        assert!(!errors[0]
+            .message
+            .contains("sk-abcdefghijklmnopqrstuvwxyz0123"));
+        let (_, lines, _) = read_redacted_lines(&source, 50).await;
+        assert_eq!(lines.len(), 2);
+        assert!(!lines.join("\n").contains(blocked));
+        assert!(!lines
+            .join("\n")
+            .contains("sk-abcdefghijklmnopqrstuvwxyz0123"));
+        let errors = scan_recent_errors(&[source], 50).await;
+        assert_eq!(errors.len(), 2);
+        assert!(errors.iter().all(|entry| !entry.message.contains(blocked)
+            && !entry.message.contains("sk-abcdefghijklmnopqrstuvwxyz0123")));
     }
 
     #[test]

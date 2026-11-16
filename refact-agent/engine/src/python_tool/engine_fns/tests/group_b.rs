@@ -955,10 +955,14 @@ async fn scripts_cannot_read_the_bug_bundle_directory() {
     let reports = app.gcx.cache_dir.join("bug-reports");
     std::fs::create_dir_all(&reports).unwrap();
     std::fs::write(reports.join("refact-bug-zone.zip"), "zone log tail").unwrap();
-    let path = reports
-        .join("refact-bug-zone.zip")
-        .to_string_lossy()
-        .into_owned();
+    let path = refact_python_kernel::hostfs::virtual_path(
+        &reports.join("refact-bug-zone.zip"),
+        if cfg!(windows) {
+            refact_python_kernel::hostfs::Platform::Windows
+        } else {
+            refact_python_kernel::hostfs::Platform::Unix
+        },
+    );
     let m = run(
         &app,
         &format!("try:\n    r = open({path:?}).read()\nexcept PermissionError as e:\n    r = 'denied'\nr"),

@@ -364,6 +364,79 @@ async fn processes_list_marks_ownership_masks_and_hides_foreign_paths() {
     assert_eq!(out[1]["truncated"], true);
 }
 
+#[tokio::test]
+async fn processes_classify_raw_previews_and_preserve_own_identity() {
+    let (dir, app, _) = fixture().await;
+    let blocked = project(&dir).join("zone_a.txt");
+    let mut policy = (*app.gcx.privacy_policy_load.read().unwrap().policy).clone();
+    policy.blocked = vec![blocked.to_string_lossy().into_owned()];
+    crate::privacy::save_privacy_policy(app.gcx.clone(), policy)
+        .await
+        .unwrap();
+    let registry = &app.runtime.exec_registry;
+    let mut running = Vec::new();
+    for mut meta in [
+        exec_meta("other-chat", &format!("cat token={}", blocked.display())),
+        exec_meta(
+            "other-chat",
+            "sleep 100 api_key=sk-abcdefghijklmnopqrstuvwxyz0123",
+        ),
+        exec_meta("python-test", &format!("own token={}", blocked.display())),
+    ] {
+        meta.owner.workspace = Some(project(&dir));
+        running.push(registry.register_test_process(meta).await);
+    }
+    let m = run(&app, "(await engine('processes.list'))['data']").await;
+    let out = result(&m);
+    let rows = out["processes"].as_array().unwrap();
+    assert_eq!(rows.len(), 3, "{out}");
+    let hidden = rows
+        .iter()
+        .find(|row| row["command_preview"] == "<hidden: other chat>")
+        .unwrap();
+    assert_eq!(hidden["own"], false);
+    assert_eq!(hidden["process_id"], running[0].process_id().as_str());
+    assert!(
+        rows.iter().any(|row| row["command_preview"]
+            .as_str()
+            .unwrap()
+            .starts_with("sleep 100")),
+        "{out}"
+    );
+    let own = rows.iter().find(|row| row["own"] == true).unwrap();
+    assert_eq!(own["process_id"], running[2].process_id().as_str());
+    assert!(
+        own["command_preview"].as_str().unwrap().starts_with("own "),
+        "{out}"
+    );
+    assert!(!out.to_string().contains("zone_a.txt"), "{out}");
+    assert!(
+        !out.to_string()
+            .contains("sk-abcdefghijklmnopqrstuvwxyz0123"),
+        "{out}"
+    );
+    let task = spawn(
+        &app,
+        &format!(
+            "await engine('processes.kill', process_id={:?})",
+            running[0].process_id().as_str()
+        ),
+    );
+    let request = next_request(&app, &task).await;
+    let engine = request.engine.clone().unwrap();
+    assert!(engine.items[0]
+        .old
+        .as_ref()
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .starts_with("<hidden: other chat>"));
+    decide(&app, &request.request_id, Decision::Deny)
+        .await
+        .unwrap();
+    finish(task).await;
+}
+
 fn job_binding(chat: &str, tool: &str) -> crate::tool_jobs::JobBinding {
     crate::tool_jobs::JobBinding {
         scope_keys: vec![],
