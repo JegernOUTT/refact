@@ -1199,6 +1199,8 @@ mod tests {
             "replacement",
             "closed",
             "scope_cancel",
+            "title",
+            "title_generated",
         ] {
             let mut session = ChatSession::new("identity".into());
             let mut identity = AdmissionIdentity::capture(&session, "test").unwrap();
@@ -1212,12 +1214,16 @@ mod tests {
                 "abort" => session.abort_flag.store(true, Ordering::Release),
                 "replacement" => session.abort_flag = Arc::new(AtomicBool::new(false)),
                 "closed" => session.closed = true,
+                "title" => session.thread.title = "Different title".into(),
+                "title_generated" => {
+                    session.thread.is_title_generated = !session.thread.is_title_generated
+                }
                 _ => identity.scope_cancel = Some(Arc::new(AtomicBool::new(true))),
             }
             assert!(!identity.matches(&session), "{mutation}");
             let expected = match mutation {
                 "human" => 1 << 4,
-                "scope" => 1 << 5,
+                "scope" | "title" | "title_generated" => 1 << 5,
                 "abort" => 1 << 1,
                 "replacement" => 1 << 3,
                 "closed" => 1,

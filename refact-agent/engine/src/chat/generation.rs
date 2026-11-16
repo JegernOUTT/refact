@@ -4599,6 +4599,8 @@ mod tests {
             live.messages.insert(0, make_user_msg("Review the change"));
             live.thread.model = "test/review-iteration".into();
             live.thread.mode = "agent".into();
+            live.thread.title = "Review iteration".into();
+            live.thread.is_title_generated = true;
             live.thread.auto_compact_enabled = Some(false);
             live.set_runtime_state(SessionState::Idle, None);
         }
