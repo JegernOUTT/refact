@@ -1177,6 +1177,7 @@ pub(crate) fn mark_card_agent_started(
     });
 }
 
+#[cfg(test)]
 pub(crate) fn restore_original_card_if_current_agent(
     board: &mut crate::tasks::types::TaskBoard,
     original_card: &BoardCard,

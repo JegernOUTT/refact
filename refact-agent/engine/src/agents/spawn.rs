@@ -109,24 +109,6 @@ pub(crate) async fn drain_spawn_owners(close_admission: bool) {
     }
 }
 
-async fn handoff_startup_result<T: Clone, F: std::future::Future<Output = ()>>(
-    result: Result<T, String>,
-    tx: oneshot::Sender<Result<T, String>>,
-    accepted: oneshot::Receiver<()>,
-    cleanup: impl FnOnce(T) -> F,
-) {
-    match result {
-        Ok(created) => {
-            if tx.send(Ok(created.clone())).is_err() || accepted.await.is_err() {
-                cleanup(created).await;
-            }
-        }
-        Err(error) => {
-            let _ = tx.send(Err(error));
-        }
-    }
-}
-
 #[cfg(test)]
 type TestRunner = Arc<
     dyn Fn(

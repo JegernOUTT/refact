@@ -191,7 +191,7 @@ fn static_host_image(bytes: &[u8], arch: &str) -> Result<(), OperatorStoreError>
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(test, target_os = "linux"))]
 fn preflight(
     store: &OperatorStore,
     spec: &ActionSpec,
@@ -358,7 +358,7 @@ fn preflight_with_inventory(
     Ok(original)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(test, target_os = "linux"))]
 pub(crate) fn consume(
     store: &mut OperatorStore,
     request: &NativeRequest,

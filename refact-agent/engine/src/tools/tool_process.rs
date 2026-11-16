@@ -167,6 +167,7 @@ pub(crate) struct ProcessKillOutput {
 
 #[derive(serde::Serialize, schemars::JsonSchema)]
 #[serde(untagged)]
+#[allow(dead_code)]
 enum ShellServiceOutput {
     Start(ProcessStartOutput),
     Read(ProcessReadOutput),

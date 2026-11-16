@@ -3311,8 +3311,6 @@ struct LocalGitEvidence {
     /// same-path, same-line-count edits from folding into one source signal without retaining
     /// source content in the observation.
     observation_digest: String,
-    /// Every changed path git reported, before `changed_paths` was capped.
-    total_changed_paths: usize,
     /// Parts of the stated scope that were not read: caps hit, unreadable files, missing
     /// diff stats. Empty means the whole scope was read.
     uncovered: Vec<String>,
@@ -4115,7 +4113,6 @@ fn observe_local_git(project_root: &Path, scan_security: bool) -> LocalGitObserv
         security_findings,
         head,
         observation_digest: hex::encode(observed_content.finalize()),
-        total_changed_paths,
         uncovered,
     })
 }

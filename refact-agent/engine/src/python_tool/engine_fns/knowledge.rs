@@ -149,7 +149,7 @@ fn enrichment_preview<'a>(
         .await?;
         budget
             .started
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |n| {
                 (n < budget.max_calls).then_some(n + 1)
             })
             .map_err(|_| {

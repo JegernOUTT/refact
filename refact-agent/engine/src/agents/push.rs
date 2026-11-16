@@ -3,6 +3,7 @@ pub(crate) const NOTICE_PROGRESS: &str = "agents.progress";
 pub(crate) const NOTICE_NOTICE: &str = "agents.notice";
 pub(crate) const NOTICE_SPAWN: &str = "agents.spawn";
 pub(crate) const NOTICE_SIBLING: &str = "agents.sibling";
+#[cfg(test)]
 pub(crate) const NOTICE_ERROR: &str = "agents.error";
 pub(crate) const NOTICE_APPROVAL: &str = "agents.approval";
 pub(crate) const NOTICE_AUTHORITY_MIGRATED: &str = "agents.authority_migrated";

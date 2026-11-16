@@ -1058,24 +1058,6 @@ impl OutcomeRuntime {
             .await
     }
 
-    /// Terminal path for a workflow classified as `Housekeeping`.
-    ///
-    /// The run's `RunOutcome` is always recorded, so accountability is intact
-    /// and every run stays queryable by `run_id`. No work item and no artifact
-    /// revision are created while the loop is merely working or merely
-    /// unlucky. Only once it is durably blocked does exactly one work item
-    /// appear, and it is refreshed rather than duplicated on every repeat.
-    pub(crate) async fn publish_housekeeping_result(
-        &self,
-        start: WorkflowOutcomeStart,
-        terminal: WorkflowTerminal,
-        failure: Option<WorkflowFailureCategory>,
-    ) -> Result<(), String> {
-        let blocked = self.record_housekeeping_terminal(&start.workflow, &terminal);
-        self.publish_housekeeping_result_recorded(start, terminal, failure, blocked)
-            .await
-    }
-
     async fn publish_housekeeping_result_recorded(
         &self,
         mut start: WorkflowOutcomeStart,

@@ -416,6 +416,7 @@ impl JobRuntime {
         *self.test_inline_budget.lock().unwrap() = Some(budget);
     }
 
+    #[cfg(test)]
     pub(crate) async fn submit<F, Make>(
         self: &Arc<Self>,
         binding: JobBinding,
@@ -477,6 +478,7 @@ impl JobRuntime {
             .await
     }
 
+    #[cfg(test)]
     pub(crate) async fn submit_background<F, Make>(
         self: &Arc<Self>,
         binding: JobBinding,

@@ -509,6 +509,7 @@ pub(crate) async fn resolve(
     .map_err(Error::storage)?
 }
 
+#[cfg(any(test, not(unix)))]
 pub(crate) fn fingerprint_matches(root: &Path, source: &Source, expected: &str) -> bool {
     read_source(root, source).is_ok_and(|(_, fingerprint)| fingerprint == expected)
 }

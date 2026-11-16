@@ -958,7 +958,7 @@ impl Supervisor {
     }
 
     async fn reusable_info(&self, slot: &Arc<WorkerSlot>) -> Option<WorkerInfo> {
-        let mut record = slot.record.lock().await;
+        let record = slot.record.lock().await;
         // Demand polling must not skip monitor backoff or reopen an exhausted crash budget.
         if !record.crash_history.is_empty()
             && (now_ms() < record.restart_not_before_ms

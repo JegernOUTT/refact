@@ -108,7 +108,7 @@ impl NestedDispatcher {
     /// Charges one call against `python_max_nested_calls`; false when exhausted.
     pub(crate) fn charge_nested_call(&self) -> bool {
         self.charged
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
                 (n < self.config.max_nested_calls).then(|| n + 1)
             })
             .is_ok()
@@ -191,7 +191,7 @@ impl NestedDispatcher {
                 let bytes = serde_json::to_vec(&built.diffs).map_or(usize::MAX, |b| b.len());
                 if self
                     .diff_bytes
-                    .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
+                    .try_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
                         used.checked_add(bytes).filter(|n| *n <= 256 * 1024)
                     })
                     .is_ok()

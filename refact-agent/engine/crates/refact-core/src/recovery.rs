@@ -192,7 +192,7 @@ impl RecoveryBudget {
     pub fn reserve_send(&self) -> Result<u32, String> {
         self.check()?;
         self.sends
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
                 (n <= self.policy.max_retries).then(|| n + 1)
             })
             .map_err(|_| "Recovery retries exhausted".into())

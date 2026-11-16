@@ -318,6 +318,7 @@ impl WorkViews {
         self.beginning_cursor_with_settings(&id, seq, settings, now_ms)
     }
 
+    #[cfg(test)]
     pub(super) fn frozen_page(
         &self,
         binding: ViewBinding,

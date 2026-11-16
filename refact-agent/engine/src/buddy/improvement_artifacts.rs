@@ -446,19 +446,6 @@ pub(crate) fn gui_owner_binding(
     })
 }
 
-/// Native daemon serving identity. Reads compiled-in assets from this process,
-/// not package declarations or a caller-provided GUI build string. The caller
-/// must additionally bind a fresh daemon generation and kernel engine image.
-pub(crate) fn running_gui_files() -> Result<BTreeMap<String, String>, ResourceError> {
-    let mut files = BTreeMap::new();
-    for path in ["chat/index.umd.cjs", "chat/style.css"] {
-        let asset = crate::http::routers::gui::ChatGuiAsset::get(&format!("dist/{path}"))
-            .ok_or_else(|| err("native embedded GUI asset missing"))?;
-        files.insert(path.to_string(), hash(asset.data.as_ref()));
-    }
-    Ok(files)
-}
-
 /// Native daemon observation. In debug builds RustEmbed reads disk, so it is
 /// explicitly not a running embedded build identity. The browser's loaded asset
 /// identity is never inferred from this server-side observation.

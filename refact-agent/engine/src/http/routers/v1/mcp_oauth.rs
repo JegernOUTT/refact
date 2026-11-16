@@ -371,8 +371,6 @@ pub struct McpOAuthCallbackQuery {
     pub state: Option<String>,
     #[serde(default)]
     pub error: Option<String>,
-    #[serde(default)]
-    pub error_description: Option<String>,
 }
 
 pub async fn handle_v1_mcp_oauth_callback(

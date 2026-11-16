@@ -366,6 +366,7 @@ fn snapshot_existing(documents_dir: &Path, slug: &str) -> Result<(), String> {
     cap_history(documents_dir, slug)
 }
 
+#[cfg(test)]
 pub(crate) async fn create_document_at(
     documents_dir: &Path,
     slug: &str,
@@ -992,6 +993,7 @@ pub async fn create_task_document_for_api(
     Ok(document_to_detail(document))
 }
 
+#[cfg(test)]
 pub async fn update_task_document_for_api(
     gcx: Arc<GlobalContext>,
     task_id: &str,

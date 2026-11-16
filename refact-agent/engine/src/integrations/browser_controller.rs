@@ -3002,6 +3002,7 @@ fn step_hit_dead_transport(step: &StepResult) -> bool {
         .is_some_and(refact_browser::is_transport_dead_error)
 }
 
+#[cfg(test)]
 fn report_hit_dead_transport(outcome: &Result<ExecutionReport, String>) -> bool {
     match outcome {
         Err(error) => refact_browser::is_transport_dead_error(error),

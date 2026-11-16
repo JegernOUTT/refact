@@ -174,6 +174,7 @@ struct Worker {
     task: tokio::task::JoinHandle<()>,
 }
 static WORKERS: OnceLock<StdMutex<Vec<Worker>>> = OnceLock::new();
+#[cfg(test)]
 fn spawn_owned(owner: Weak<GlobalContext>, id: String, work: impl FnOnce() + Send + 'static) {
     // Register while holding the same lock used by shutdown's pending inspection.
     let mut workers = WORKERS

@@ -16,26 +16,8 @@ pub(crate) struct CapacityWatch {
     waiting: std::sync::Mutex<Option<(tokio::time::Instant, String)>>,
 }
 
-impl CapacityWatch {
-    pub(crate) fn waiting(&self) -> Option<(Duration, String)> {
-        self.waiting
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .as_ref()
-            .map(|(started, provider)| (started.elapsed(), provider.clone()))
-    }
-}
-
 tokio::task_local! {
     static CAPACITY_WATCH: (std::sync::Arc<CapacityWatch>, std::sync::Arc<std::sync::atomic::AtomicU64>);
-}
-
-pub(crate) async fn watch_capacity<F: std::future::Future>(
-    watch: std::sync::Arc<CapacityWatch>,
-    activity: std::sync::Arc<std::sync::atomic::AtomicU64>,
-    work: F,
-) -> F::Output {
-    CAPACITY_WATCH.scope((watch, activity), work).await
 }
 
 struct CapacityWait;

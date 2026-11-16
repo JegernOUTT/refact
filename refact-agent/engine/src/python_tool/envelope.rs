@@ -69,7 +69,7 @@ pub fn build_envelope(
                     images_dropped += 1;
                     continue;
                 }
-                match image_index.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| (n < 16).then_some(n + 1)) {
+                match image_index.try_update(Ordering::Relaxed, Ordering::Relaxed, |n| (n < 16).then_some(n + 1)) {
                     Ok(index) => {
                         refs.push(json!({"image":part.m_type,"index":index}));
                         images.push(part.clone());

@@ -59,7 +59,6 @@ monty-types = { version = "=1.6.0", features = ["tzdb"] }
 monty-type-checking = "=1.6.0"
 hmac = "0.13"
 thiserror = "2"
-similar = "2.3.0"
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = { version = "1", features = ["preserve_order", "raw_value"] }
 tokio = { version = "1.43.0", features = ["fs", "io-std", "io-util", "macros", "net", "process", "rt", "rt-multi-thread", "signal", "sync", "test-util", "time"] }

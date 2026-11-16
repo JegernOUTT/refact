@@ -55,6 +55,7 @@ use refact_core::provider_types::{ModelTypeDefaults, ProviderDefaults};
 
 const MCP_LAZY_INDEX_MARKER: &str = "mcp_lazy_index";
 const LENGTH_STOP_NEAR_EMPTY_VISIBLE_CHARS: usize = 32;
+#[cfg(test)]
 const PARTIAL_OUTPUT_STREAM_ERROR: &str =
     "Stream interrupted after partial output and all retry attempts failed.";
 const RESPONSES_INCOMPLETE_STREAM_ERROR: &str =
@@ -326,6 +327,7 @@ fn synthesize_responses_context_cutoff_error_if_needed(
     error
 }
 
+#[cfg(test)]
 fn context_limit_final_error_message(error: &str) -> String {
     format!(
         "Context too large and context reconstruction failed or the rebuilt context is still too large. Explicitly rebuild the context or start a new chat. Original error: {}",
@@ -333,6 +335,7 @@ fn context_limit_final_error_message(error: &str) -> String {
     )
 }
 
+#[cfg(test)]
 fn partial_output_stream_error_message(original: &str) -> String {
     format!(
         "{} Original error: {}",

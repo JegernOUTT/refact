@@ -106,16 +106,6 @@ impl NativeSpawnGuard {
         })
     }
 
-    pub(crate) fn is_engineering(&self) -> bool {
-        self.engineering
-    }
-
-    /// The exact repository-relative files the mandate authorized. Native edit
-    /// scope enforcement consumes this; it is not prompt text.
-    pub(crate) fn target_files(&self) -> &[String] {
-        &self.target_files
-    }
-
     pub(crate) fn validate_request(
         &self,
         req: &crate::agents::spawn::SpawnRequest,
@@ -783,6 +773,7 @@ impl NativeSteeringCapability {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn note_id(&self) -> &str {
         &self.note_id
     }

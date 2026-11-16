@@ -1150,6 +1150,7 @@ impl ReviewPrivacyInputs {
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn records(
         &self,
         gcx: &Arc<GlobalContext>,

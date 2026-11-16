@@ -97,17 +97,6 @@ impl EvidenceCacheKey {
     pub fn as_str(&self) -> &str {
         &self.0
     }
-
-    /// A key over any canonical description of what was proven. One digest scheme
-    /// serves the whole evidence subsystem, so a second keyed store never grows a
-    /// second one.
-    pub fn of(canonical: &str) -> Self {
-        Self(digest_bytes(canonical.as_bytes()))
-    }
-}
-
-pub(crate) fn digest_text(text: &str) -> String {
-    digest_bytes(text.as_bytes())
 }
 
 /// Every input the key is computed from, kept apart so each one can be mutated on
@@ -471,6 +460,7 @@ pub fn now_ms() -> i64 {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CacheMode {
     /// Replay when every keyed input matches.
+    #[cfg_attr(not(test), allow(dead_code))]
     Replay,
     /// Neither read nor write: the tree under test is not the tree the cache
     /// describes.

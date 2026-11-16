@@ -1153,23 +1153,6 @@ pub(crate) enum SourceCompletion {
     Partial { uncovered: String },
 }
 
-impl SourceCompletion {
-    pub(crate) fn failure_detail(&self) -> Option<&str> {
-        match self {
-            SourceCompletion::Failed {
-                error,
-            } => Some(error.as_str()),
-            SourceCompletion::NotApplicable {
-                reason,
-            } => Some(reason.as_str()),
-            SourceCompletion::Partial {
-                uncovered,
-            } => Some(uncovered.as_str()),
-            SourceCompletion::Complete => None,
-        }
-    }
-}
-
 /// A grounded observation of one native source, before any model has seen it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SourceCheck {

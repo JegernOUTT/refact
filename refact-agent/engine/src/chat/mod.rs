@@ -20,11 +20,10 @@ pub mod delivery;
 pub mod diagnostics;
 mod generation;
 #[cfg(test)]
-pub(crate) use generation::take_ready_review_continuation;
+pub(crate) use generation::{take_ready_review_continuation, tool_catalog_intent_for_thread};
 pub mod live_diagnostics;
 pub(crate) use generation::{
-    length_stop_continue_instruction, normalize_stop_reason, tool_catalog_intent_for_thread,
-    LengthStopKind, NormalizedStopReason,
+    length_stop_continue_instruction, normalize_stop_reason, LengthStopKind, NormalizedStopReason,
 };
 #[cfg(test)]
 mod generation_pressure_retry_tests;

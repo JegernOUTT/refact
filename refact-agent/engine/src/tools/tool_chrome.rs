@@ -2479,6 +2479,7 @@ fn browser_report_text(
         .map_err(|e| format!("Failed to encode browser report: {}", e))
 }
 
+#[cfg(test)]
 fn execution_report_to_multimodal(
     report: &ExecutionReport,
     image_policy: &ImagePolicy,

@@ -330,6 +330,7 @@ fn trajectory_memos_enabled_from_env(value: Option<&str>) -> bool {
     })
 }
 
+#[cfg(test)]
 async fn collect_trajectory_candidates(
     project_dirs: Vec<PathBuf>,
     threshold: &DateTime<Utc>,
@@ -864,6 +865,7 @@ async fn wait_for_shutdown(shutdown_flag: Arc<std::sync::atomic::AtomicBool>) {
     }
 }
 
+#[cfg(test)]
 async fn process_single_trajectory(
     gcx: Arc<GlobalContext>,
     path: PathBuf,

@@ -1876,6 +1876,7 @@ fn verifier_model_unavailable(error: Option<&str>) -> bool {
     })
 }
 
+#[cfg(test)]
 pub(crate) fn unavailable_verifier_report(error: String) -> VerifierReport {
     let model_unavailable = verifier_model_unavailable(Some(&error));
     VerifierReport {

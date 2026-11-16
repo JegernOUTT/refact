@@ -1323,6 +1323,7 @@ pub fn internal_trace_link_type(feature: &str) -> String {
     format!("{INTERNAL_TRACE_LINK_PREFIX}{feature}")
 }
 
+#[cfg(test)]
 pub(crate) async fn prune_internal_traces_in_folder(
     dir: &Path,
     keep: usize,

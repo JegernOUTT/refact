@@ -492,7 +492,7 @@ impl super::dispatcher::NestedDispatcher {
         let (model, carrier) = self.llm_model_and_clearance(args.model.as_deref()).await?;
         if budget
             .started
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |n| {
                 (n < budget.max_calls).then_some(n + 1)
             })
             .is_err()

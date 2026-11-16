@@ -22,7 +22,6 @@ autoexamples = false
 autotests = false
 autobenches = false
 description = "Control Chrome programmatically"
-homepage = "https://github.com/rust-headless-chrome/rust-headless-chrome"
 readme = "README.md"
 license = "MIT"
 repository = "https://github.com/rust-headless-chrome/rust-headless-chrome"

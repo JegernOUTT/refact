@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 use std::io::Write;
 use std::env;
 use std::panic;
@@ -366,7 +368,9 @@ pub async fn run_with_cmdline(cmdline: global_context::CommandLine) {
     }
 
     gcx.tool_jobs.scopes.begin_shutdown();
-    gcx.review_readiness.shutdown().await;
+    if let Err(error) = gcx.review_readiness.shutdown().await {
+        tracing::warn!("review readiness shutdown failed: {error}");
+    }
     gcx.tool_jobs.shutdown().await;
     chat::verifier::shutdown_card_verifiers(gcx.clone()).await;
     if let Err(error) =

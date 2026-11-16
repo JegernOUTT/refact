@@ -753,7 +753,7 @@ impl Drop for MergeCheckout {
     fn drop(&mut self) {
         if let Some(temporary) = self.temporary.take() {
             if self.root.exists() {
-                temporary.keep();
+                let _ = temporary.keep();
             }
         }
     }
