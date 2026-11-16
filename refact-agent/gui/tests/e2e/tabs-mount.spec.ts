@@ -27,25 +27,25 @@ const rows = Array.from({ length: 7 }, (_, index) => ({
   change_seq: 1,
 }));
 
-test("shared Tabs does not scroll Buddy or the document on mount", async ({
-  page,
-}) => {
-  await page.route("**/*", async (route) => {
-    const url = new URL(route.request().url());
-    if (url.pathname === "/v1/buddy/work")
-      return route.fulfill({
-        json: { schema_version: 1, project, data: rows, next_cursor: null },
-      });
-    if (url.pathname.startsWith("/v1/"))
-      return route.fulfill({ status: 503, json: { detail: "fixture only" } });
-    return route.continue();
-  });
+for (const [width, height] of [
+  [360, 640],
+  [768, 900],
+  [1280, 900],
+]) {
+  test(`shared Tabs does not scroll Buddy or the document on mount at ${width}×${height}`, async ({
+    page,
+  }) => {
+    await page.route("**/*", async (route) => {
+      const url = new URL(route.request().url());
+      if (url.pathname === "/v1/buddy/work")
+        return route.fulfill({
+          json: { schema_version: 1, project, data: rows, next_cursor: null },
+        });
+      if (url.pathname.startsWith("/v1/"))
+        return route.fulfill({ status: 503, json: { detail: "fixture only" } });
+      return route.continue();
+    });
 
-  for (const [width, height] of [
-    [360, 640],
-    [768, 900],
-    [1280, 900],
-  ]) {
     await page.setViewportSize({ width, height });
     await page.goto(ROUTE);
     await page.getByRole("tab", { name: "Reports", exact: true }).click();
@@ -64,5 +64,5 @@ test("shared Tabs does not scroll Buddy or the document on mount", async ({
       content: 0,
       document: 0,
     });
-  }
-});
+  });
+}
