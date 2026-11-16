@@ -107,16 +107,25 @@ pub async fn handle_v1_mcp_export(
     let gcx = app.gcx.clone();
     let req = serde_json::from_slice::<ExportRequest>(&body_bytes)
         .map_err(|e| ScratchError::new(StatusCode::UNPROCESSABLE_ENTITY, format!("JSON: {}", e)))?;
+    let bundle = export_bundle(&gcx, &req.config_paths, req.include_secrets).await;
+    Ok(Json(serde_json::to_value(&bundle).unwrap()))
+}
 
+/// Global MCP configs (`config_dir/integrations.d`), filtered by name when `names` is not empty.
+pub(crate) async fn export_bundle(
+    gcx: &crate::global_context::GlobalContext,
+    names: &[String],
+    include_secrets: bool,
+) -> ExportBundle {
     let config_dir = gcx.config_dir.clone();
     let integrations_dir = config_dir.join("integrations.d");
 
     let all_files = collect_mcp_yaml_files(&integrations_dir).await;
 
-    let filter: Option<std::collections::HashSet<String>> = if req.config_paths.is_empty() {
+    let filter: Option<std::collections::HashSet<String>> = if names.is_empty() {
         None
     } else {
-        Some(req.config_paths.iter().cloned().collect())
+        Some(names.iter().cloned().collect())
     };
 
     let mut servers = Vec::new();
@@ -131,7 +140,7 @@ pub async fn handle_v1_mcp_export(
         let mut parsed = parse_yaml_config(content);
         let transport = mcp_naming::detect_transport(config_name);
 
-        if !req.include_secrets {
+        if !include_secrets {
             redact_exported_config(&mut parsed);
         }
 
@@ -156,13 +165,11 @@ pub async fn handle_v1_mcp_export(
         });
     }
 
-    let bundle = ExportBundle {
+    ExportBundle {
         version: EXPORT_VERSION,
         exported_at: chrono::Utc::now().to_rfc3339(),
         servers,
-    };
-
-    Ok(Json(serde_json::to_value(&bundle).unwrap()))
+    }
 }
 
 #[derive(Deserialize)]

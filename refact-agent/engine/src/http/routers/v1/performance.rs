@@ -34,7 +34,7 @@ pub struct PerformanceTelemetryResponse {
 }
 
 #[derive(Debug, Serialize)]
-struct RolloutSwitches {
+pub(crate) struct RolloutSwitches {
     trajectory_writer_enabled: bool,
     trajectory_index_coordinator_enabled: bool,
     trajectory_watcher_self_write_enabled: bool,
@@ -42,7 +42,7 @@ struct RolloutSwitches {
     vecdb_path_coalescing_enabled: bool,
 }
 
-fn rollout_switches() -> RolloutSwitches {
+pub(crate) fn rollout_switches() -> RolloutSwitches {
     RolloutSwitches {
         trajectory_writer_enabled: crate::chat::trajectories::trajectory_writer_rollout_enabled(),
         trajectory_index_coordinator_enabled:

@@ -1,3 +1,4 @@
+import { pythonWorkspaceApi } from "../services/refact/pythonWorkspace";
 import { appWorkspacePersistenceMiddleware } from "../features/Apps/appWorkspacePersistence";
 import { appsSlice } from "../features/Apps/appsSlice";
 import { appsApi } from "../services/refact/apps";
@@ -224,6 +225,7 @@ const rootReducer = combineSlices(
     [performanceApi.reducerPath]: performanceApi.reducer,
     [skillsSettingsApi.reducerPath]: skillsSettingsApi.reducer,
     [backgroundAgentsApi.reducerPath]: backgroundAgentsApi.reducer,
+    [pythonWorkspaceApi.reducerPath]: pythonWorkspaceApi.reducer,
   },
   appsSlice,
   historySlice,
@@ -381,6 +383,7 @@ export function setUpStore(preloadedState?: Partial<RootState>) {
           performanceApi.middleware,
           skillsSettingsApi.middleware,
           backgroundAgentsApi.middleware,
+          pythonWorkspaceApi.middleware,
         )
         .prepend(historyMiddleware.middleware)
         .prepend(

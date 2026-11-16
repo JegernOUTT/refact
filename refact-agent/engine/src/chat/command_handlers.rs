@@ -326,6 +326,12 @@ pub(super) async fn handle_queue_command(
         }
         ChatCommand::RecoveryRetryNow {
             ..
+        }
+        | ChatCommand::PythonApprovalDecision {
+            ..
+        }
+        | ChatCommand::PythonRunControl {
+            ..
         } => QueueCommandOutcome::Continue,
         ChatCommand::SetGoal {
             content,
@@ -924,6 +930,12 @@ async fn handle_set_params(
     }
     if mode_changed || session.thread.model != old_model {
         session.release_turn_only_state();
+    }
+    if mode_changed {
+        // The frozen prefix pins the old mode's prompt and tool schemas; the new mode needs fresh ones.
+        session.thread.frozen_request_prefix = None;
+        session.thread.previous_response_id = None;
+        session.reset_cache_guard_snapshot();
     }
     if let Some(message) = worktree_message {
         session.add_message(message);
@@ -1750,6 +1762,12 @@ async fn handle_branch_from_chat(
         TrajectoryCommitIntent::Required,
     )
     .await;
+    if let Err(error) =
+        crate::python_tool::workspace::PythonWorkspace::fork(&app, &source_chat_id, &before.id)
+            .await
+    {
+        warn!("Python workspace branch failed: {error}");
+    }
     QueueCommandOutcome::Finished
 }
 

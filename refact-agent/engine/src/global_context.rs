@@ -384,6 +384,7 @@ pub struct GlobalContext {
     pub lsp_tcp_client_count: Arc<AtomicUsize>,
     pub exec_registry: Arc<ExecRegistry>,
     pub tool_jobs: Arc<crate::tool_jobs::JobRuntime>,
+    pub python_tool: Arc<crate::python_tool::PythonToolRuntime>,
     pub(crate) review_readiness: Arc<crate::review::readiness::ReadinessRegistry>,
     pub card_verifier_tasks: Arc<AMutex<tokio::task::JoinSet<()>>>,
     pub card_verifiers_shutting_down: AtomicBool,
@@ -482,6 +483,7 @@ impl GlobalContext {
         ));
         let tool_registry = Arc::new(AppToolRegistry::new(gcx.clone()));
         AppState {
+            python_tool: self.python_tool.clone(),
             gcx: gcx.clone(),
             runtime: RuntimeServices {
                 shutdown_flag: self.shutdown_flag.clone(),
@@ -982,6 +984,7 @@ pub async fn create_global_context(
             256,
             crate::tool_jobs::RESULT_RETENTION_BYTES,
         ),
+        python_tool: Arc::new(Default::default()),
         review_readiness: Arc::new(Default::default()),
         card_verifier_tasks: Arc::new(AMutex::new(tokio::task::JoinSet::new())),
         card_verifiers_shutting_down: AtomicBool::new(false),
@@ -1389,6 +1392,7 @@ pub mod tests {
             lsp_tcp_client_count: Arc::new(AtomicUsize::new(0)),
             exec_registry: Arc::new(ExecRegistry::new()),
         tool_jobs: crate::tool_jobs::JobRuntime::with_namespace(cache_dir.clone(), 256, crate::tool_jobs::RESULT_RETENTION_BYTES),
+        python_tool: Arc::new(Default::default()),
         review_readiness: Arc::new(Default::default()),
             card_verifier_tasks: Arc::new(AMutex::new(tokio::task::JoinSet::new())),
             card_verifiers_shutting_down: AtomicBool::new(false),

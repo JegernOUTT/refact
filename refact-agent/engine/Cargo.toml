@@ -21,6 +21,8 @@ members = [
     "crates/refact-scratchpads",
     "crates/refact-providers",
     "crates/refact-tool-api",
+    "crates/refact-python-catalog",
+    "crates/refact-python-kernel",
     "crates/refact-chat-history",
     "crates/refact-integrations",
     "crates/refact-browser",
@@ -50,6 +52,14 @@ members = [
 resolver = "2"
 
 [workspace.dependencies]
+sysinfo = { version = "0.35.2", default-features = false, features = ["system"] }
+schemars = { version = "1.2", features = ["derive"] }
+monty = "=1.6.0"
+monty-types = { version = "=1.6.0", features = ["tzdb"] }
+monty-type-checking = "=1.6.0"
+hmac = "0.13"
+thiserror = "2"
+similar = "2.3.0"
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = { version = "1", features = ["preserve_order", "raw_value"] }
 tokio = { version = "1.43.0", features = ["fs", "io-std", "io-util", "macros", "net", "process", "rt", "rt-multi-thread", "signal", "sync", "test-util", "time"] }
@@ -348,6 +358,8 @@ refact-stats = { path = "crates/refact-stats" }
 refact-scratchpads = { path = "crates/refact-scratchpads" }
 refact-providers = { path = "crates/refact-providers" }
 refact-tool-api = { path = "crates/refact-tool-api" }
+refact-python-catalog = { path = "crates/refact-python-catalog" }
+refact-python-kernel = { path = "crates/refact-python-kernel" }
 refact-chat-history = { path = "crates/refact-chat-history" }
 refact-integrations = { path = "crates/refact-integrations" }
 refact-browser = { path = "crates/refact-browser" }
@@ -420,6 +432,7 @@ ropey.workspace = true
 rusqlite.workspace = true
 rust-embed.workspace = true
 percent-encoding.workspace = true
+schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true

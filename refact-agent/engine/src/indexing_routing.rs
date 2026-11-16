@@ -18,6 +18,9 @@ pub fn partition_paths(paths: &[String], roots: &MemoryPlaneRoots) -> (Vec<Strin
     let mut memory_paths = Vec::new();
     let mut code_paths = Vec::new();
     for path in paths {
+        if crate::python_tool::workspace::is_python_workspace_path(Path::new(path)) {
+            continue;
+        }
         if roots.classify_file(Path::new(path)).is_some() {
             memory_paths.push(path.clone());
         } else {

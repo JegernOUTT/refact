@@ -1,3 +1,4 @@
+import { PythonWorkspacePanel } from "../PythonWorkspace/PythonWorkspacePanel";
 import classNames from "classnames";
 import { X } from "lucide-react";
 import {
@@ -64,7 +65,7 @@ export function Dock({ enteringNarrow = false }: { enteringNarrow?: boolean }) {
     const result: WorkspaceDockSection[] = [];
     if (capabilities.filesPanel || panelsForced) result.push("files");
     if (capabilities.gitPanel || panelsForced) result.push("git");
-    result.push("agents", "activity", "apps");
+    result.push("agents", "activity", "apps", "python");
     return result;
   }, [capabilities.filesPanel, capabilities.gitPanel, panelsForced]);
   const activeSection = availableSections.includes(dock.section)
@@ -174,6 +175,9 @@ export function Dock({ enteringNarrow = false }: { enteringNarrow?: boolean }) {
           <div role="status">Opening linked target...</div>
         )}
         {navigation.error && <div role="alert">{navigation.error}</div>}
+        {activeSection === "python" ? (
+          <PythonWorkspacePanel chatId={focusedChatId} />
+        ) : null}
         {activeSection === "apps" ? <AppsDockPanel /> : null}
         {activeSection === "files" ? <FilesPanel /> : null}
         {activeSection === "git" ? <GitDock /> : null}

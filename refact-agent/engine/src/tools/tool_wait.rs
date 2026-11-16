@@ -7,6 +7,47 @@ use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::ContextEnum;
 use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
 
+#[derive(serde::Serialize, schemars::JsonSchema)]
+pub(crate) struct WaitOutput {
+    pub kind: String,
+    pub outcome: String,
+    pub detail: Value,
+}
+
+pub(crate) fn attach_wait_output(kind: &str, messages: &mut [ContextEnum]) {
+    for context in messages {
+        let ContextEnum::ChatMessage(message) = context else {
+            continue;
+        };
+        if message.role != "tool" {
+            continue;
+        }
+        let text = message.content.content_text_only();
+        let detail = serde_json::from_str::<Value>(&text).unwrap_or_else(|_| {
+            message
+                .extra
+                .get("exec")
+                .cloned()
+                .unwrap_or_else(|| json!({"evidence":text}))
+        });
+        let outcome = detail
+            .get("outcome")
+            .and_then(Value::as_str)
+            .or_else(|| text.lines().find_map(|line| line.strip_prefix("outcome: ")))
+            .unwrap_or("unknown")
+            .to_string();
+        let output = WaitOutput {
+            kind: kind.into(),
+            outcome,
+            detail,
+        };
+        message.extra.insert(
+            refact_tool_api::tool_output::TOOL_OUTPUT_EXTRA_KEY.into(),
+            serde_json::to_value(output).expect("wait output is serializable"),
+        );
+    }
+}
+
 pub struct ToolWait {
     pub config_path: String,
 }
@@ -36,7 +77,7 @@ impl Tool for ToolWait {
                 ]},
                 "timeout_ms":{"type":"integer","minimum":0,"description":"Optional timeout for non-duration targets only. Task agents require at least 30000 ms in whole seconds."},
                 "push":push_schema
-            },"required":["target"]}), output_schema:None,annotations:None,
+            },"required":["target"]}), output_schema:Some(refact_tool_api::tool_output::output_schema_for::<WaitOutput>()),annotations:None,
         }
     }
     async fn tool_execute(
@@ -46,7 +87,7 @@ impl Tool for ToolWait {
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
         let (kind, mut operation) = parse_wait_request(args)?;
-        match kind {
+        let (changed, mut messages) = match kind {
             "duration" => {
                 super::tool_sleep::execute_duration_wait(ccx, tool_call_id, &operation).await
             }
@@ -76,7 +117,9 @@ impl Tool for ToolWait {
                 .await
             }
             _ => unreachable!(),
-        }
+        }?;
+        attach_wait_output(kind, &mut messages);
+        Ok((changed, messages))
     }
     fn has_config_path(&self) -> Option<String> {
         Some(self.config_path.clone())

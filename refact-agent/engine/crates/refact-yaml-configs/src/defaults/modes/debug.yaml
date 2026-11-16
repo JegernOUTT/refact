@@ -1,4 +1,4 @@
-schema_version: 30
+schema_version: 31
 id: debug
 title: Debug
 description: Systematic bug diagnosis and root cause analysis
@@ -103,6 +103,7 @@ prompt: |
 
   %SYSTEM_INFO%
 
+  %CODE_MODE%
   %MODELS_INFO%
 
   %WORKSPACE_INFO%
@@ -117,6 +118,7 @@ allow_mcp: true
 allow_subagents: true
 
 tools:
+  - python
   - app
   - app_build
   - app_state

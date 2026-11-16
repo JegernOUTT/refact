@@ -10,6 +10,8 @@ import {
 } from "../utils/test-utils";
 import {
   sendChatCommand,
+  sendPythonApprovalDecision,
+  sendPythonRunControl,
   sendUserMessage,
   updateChatParams,
   abortGeneration,
@@ -706,5 +708,31 @@ describe("chatCommands", () => {
       expect(calledBody.type).toBe("remove_message");
       expect(calledBody.regenerate).toBe(true);
     });
+  });
+});
+
+describe("Python commands", () => {
+  afterEach(() => vi.unstubAllGlobals());
+  it("sends approval decisions and stop controls", async () => {
+    const fetch = vi.fn().mockResolvedValue({ ok: true });
+    vi.stubGlobal("fetch", fetch);
+    await sendPythonApprovalDecision("chat", "q", "allow_once", 8001, "key");
+    await sendPythonRunControl("chat", "t", "stop", 8001, "key");
+    const bodies = fetch.mock.calls.map((call: unknown[]) => {
+      const init = call[1] as RequestInit;
+      return JSON.parse(String(init.body)) as unknown;
+    });
+    expect(bodies).toEqual([
+      expect.objectContaining({
+        type: "python_approval_decision",
+        request_id: "q",
+        decision: "allow_once",
+      }),
+      expect.objectContaining({
+        type: "python_run_control",
+        tool_call_id: "t",
+        action: "stop",
+      }),
+    ]);
   });
 });

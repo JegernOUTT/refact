@@ -1,3 +1,10 @@
+#[derive(serde::Serialize, schemars::JsonSchema)]
+pub(crate) struct MvOutput {
+    pub source: String,
+    pub destination: String,
+    pub overwritten: bool,
+}
+
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
@@ -283,6 +290,7 @@ impl Tool for ToolMv {
             }
         }
 
+        let overwritten = dst_true_path.exists();
         let (src_file_content, dst_file_content) = if src_is_dir {
             let actor = ccx.lock().await.chat_id.clone();
             let mut guards = crate::file_activity::begin_writes(
@@ -442,6 +450,15 @@ impl Tool for ToolMv {
             &[],
         );
         crate::tools::file_edit::edit_output::finish_edit_output(&mut messages, content);
+        crate::tools::file_edit::output::attach(
+            &mut messages,
+            tool_call_id,
+            &MvOutput {
+                source: src_corrected_path,
+                destination: dst_corrected_path,
+                overwritten,
+            },
+        );
         Ok((corrections, messages))
     }
 
@@ -502,7 +519,7 @@ impl Tool for ToolMv {
             allow_parallel: false,
             description: "Moves or renames files and directories. If a simple rename fails due to a cross-device error and the source is a file, it falls back to copying and deleting. Use overwrite=true to replace an existing target.".to_string(),
             input_schema: json_schema_from_params(&[("source", "string", "Path of the file or directory to move."), ("destination", "string", "Target path where the file or directory should be placed."), ("overwrite", "boolean", "If true and target exists, replace it. Defaults to false.")], &["source", "destination"]),
-            output_schema: None,
+            output_schema: Some(refact_tool_api::tool_output::output_schema_for::<MvOutput>()),
             annotations: None,
         }
     }

@@ -434,7 +434,8 @@ impl JobRuntime {
             .unwrap_or(Some(budget));
         #[cfg(not(test))]
         let budget = Some(budget);
-        self.submit_owned(binding, budget, false, None, make).await
+        self.submit_owned(binding, budget, false, false, None, make)
+            .await
     }
 
     pub(crate) async fn submit_with_abort<F, Make>(
@@ -457,7 +458,22 @@ impl JobRuntime {
             .unwrap_or(Some(budget));
         #[cfg(not(test))]
         let budget = Some(budget);
-        self.submit_owned(binding, budget, false, Some((abort, shutdown)), make)
+        self.submit_owned(binding, budget, false, false, Some((abort, shutdown)), make)
+            .await
+    }
+
+    pub(crate) async fn submit_unbounded_with_abort<F, Make>(
+        self: &Arc<Self>,
+        binding: JobBinding,
+        abort: Arc<AtomicBool>,
+        shutdown: Arc<AtomicBool>,
+        make: Make,
+    ) -> Result<Submission, String>
+    where
+        F: Future<Output = (JobStatus, JobResult)> + Send + 'static,
+        Make: FnOnce(Arc<AtomicBool>) -> F,
+    {
+        self.submit_owned(binding, None, false, true, Some((abort, shutdown)), make)
             .await
     }
 
@@ -470,7 +486,10 @@ impl JobRuntime {
         F: Future<Output = (JobStatus, JobResult)> + Send + 'static,
         Make: FnOnce(Arc<AtomicBool>) -> F,
     {
-        match self.submit_owned(binding, None, false, None, make).await? {
+        match self
+            .submit_owned(binding, None, false, false, None, make)
+            .await?
+        {
             Submission::Accepted(receipt) => Ok(receipt),
             Submission::Inline(_) => unreachable!("background submission never claims inline"),
         }
@@ -485,7 +504,10 @@ impl JobRuntime {
         F: Future<Output = (JobStatus, JobResult)> + Send + 'static,
         Make: FnOnce(Arc<AtomicBool>) -> F,
     {
-        match self.submit_owned(binding, None, true, None, make).await? {
+        match self
+            .submit_owned(binding, None, true, false, None, make)
+            .await?
+        {
             Submission::Accepted(receipt) => Ok(receipt),
             Submission::Inline(_) => unreachable!(),
         }
@@ -541,6 +563,7 @@ impl JobRuntime {
         binding: JobBinding,
         budget: Option<Duration>,
         internal_readiness: bool,
+        wait_until_terminal: bool,
         abort: Option<(Arc<AtomicBool>, Arc<AtomicBool>)>,
         make: Make,
     ) -> Result<Submission, String>
@@ -550,7 +573,9 @@ impl JobRuntime {
     {
         let mut binding = binding;
         let chat_key = self.chat_scope_key(&binding.chat_id);
-        if !binding.scope_keys.contains(&chat_key) {
+        let python_scope = matches!(binding.scope_keys.as_slice(), [super::ScopeKey::PythonRun {chat_id, ..}] if chat_id == &binding.chat_id)
+            && binding.tool_name != "python";
+        if !python_scope && !binding.scope_keys.contains(&chat_key) {
             binding.scope_keys.push(chat_key);
         }
         let invocation_id = serde_json::to_string(&binding).map_err(|error| error.to_string())?;
@@ -632,7 +657,8 @@ impl JobRuntime {
             let id = job_id.clone();
             // Construction itself may perform effects and panic. Keep that
             // failure inside the same owned terminal path as a polling panic.
-            let future = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| make(cancel)));
+            let future =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| make(cancel.clone())));
             let task = tokio::spawn(async move {
                 use futures::FutureExt;
                 let completed = match future {
@@ -691,6 +717,19 @@ impl JobRuntime {
         };
         let completed_inline = match budget {
             Some(budget) => tokio::time::timeout(budget, &mut rx).await.is_ok(),
+            None if wait_until_terminal => {
+                loop {
+                    tokio::select! {
+                        _ = &mut rx => break,
+                        _ = tokio::time::sleep(Duration::from_millis(20)) => {
+                            if self.check_admission_abort(abort.as_ref()).is_err() {
+                                cancel.store(true, Ordering::Release);
+                            }
+                        }
+                    }
+                }
+                true
+            }
             None => false,
         };
         let _transition = self.transition.lock().await;
@@ -764,6 +803,29 @@ impl JobRuntime {
             result_unavailable_reason: record.unavailable.clone(),
             result_released: record.released,
         })
+    }
+
+    /// Jobs of one chat, or of every chat, without result payloads; the flag says whether a result is kept.
+    pub fn list(&self, chat_id: Option<&str>) -> Vec<(JobSnapshot, bool)> {
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state
+            .records
+            .values()
+            .filter(|record| chat_id.is_none_or(|id| record.receipt.binding.chat_id == id))
+            .map(|record| {
+                (
+                    JobSnapshot {
+                        receipt: record.receipt.clone(),
+                        status: record.status,
+                        revision: record.revision,
+                        result: None,
+                        result_unavailable_reason: record.unavailable.clone(),
+                        result_released: record.released,
+                    },
+                    record.result.is_some(),
+                )
+            })
+            .collect()
     }
 
     /// Race-free completion wait; ownership is checked on every read. Waiting
@@ -1681,5 +1743,49 @@ mod tests {
         assert!(!runtime.knows("other-chat", &done.receipt.job_id));
         assert!(!runtime.knows("chat", "missing"));
         runtime.shutdown().await;
+    }
+}
+
+#[cfg(test)]
+mod python_scope_tests {
+    use super::*;
+    #[tokio::test]
+    async fn python_scope_is_augmented_with_chat_scope() {
+        let runtime = JobRuntime::new(16, 1024 * 1024);
+        let receipt = runtime
+            .submit_background(
+                JobBinding {
+                    chat_id: "python-chat".into(),
+                    tool_call_id: "python-call".into(),
+                    tool_name: "python".into(),
+                    model: "model".into(),
+                    turn_id: "turn".into(),
+                    scope_keys: vec![super::super::ScopeKey::PythonRun {
+                        chat_id: "python-chat".into(),
+                        tool_call_id: "python-call".into(),
+                    }],
+                },
+                |_| async {
+                    (
+                        JobStatus::Succeeded,
+                        JobResult {
+                            had_corrections: false,
+                            messages: vec![],
+                            context_files: vec![],
+                        },
+                    )
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(receipt.binding.scope_keys.len(), 2);
+        assert!(matches!(
+            receipt.binding.scope_keys[0],
+            super::super::ScopeKey::PythonRun { .. }
+        ));
+        runtime
+            .wait_terminal("python-chat", &receipt.job_id)
+            .await
+            .unwrap();
     }
 }

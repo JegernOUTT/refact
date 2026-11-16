@@ -11,3 +11,4 @@ glob.workspace = true
 md5.workspace = true
 shell-words.workspace = true
 regex.workspace = true
+schemars.workspace = true

@@ -969,6 +969,8 @@ async fn finalize_handoff_inner(
 
     persist_transition(gcx.clone(), &mut source, &snapshot, &transferred_goal).await?;
     drop(source);
+    let app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
+    crate::python_tool::workspace::PythonWorkspace::fork(&app, &chat_id, &new_chat_id).await?;
     let task_error: Option<String> = None;
     let result = json!({
         "type": "handoff_to_mode",

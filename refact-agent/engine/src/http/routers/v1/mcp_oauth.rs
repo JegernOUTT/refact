@@ -469,6 +469,34 @@ pub struct McpOAuthLogoutRequest {
     pub config_path: String,
 }
 
+/// Removes stored OAuth tokens of an MCP session (or signs a managed gateway out) and reconnects.
+pub(crate) async fn mcp_oauth_logout(
+    gcx: Arc<GlobalContext>,
+    config_path: &str,
+) -> Result<(), ScratchError> {
+    validate_mcp_config_path(&gcx, config_path).await?;
+
+    let managed = crate::providers::litellm_mcp::logout_gateway(config_path)
+        .await
+        .map_err(|_| {
+            ScratchError::new(
+                StatusCode::CONFLICT,
+                "Cannot sign out managed MCP session".to_string(),
+            )
+        })?;
+    if !managed {
+        clear_tokens_from_config(config_path).await.map_err(|e| {
+            ScratchError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Clear tokens: {}", e),
+            )
+        })?;
+    }
+
+    reload_mcp_integration(gcx, config_path).await;
+    Ok(())
+}
+
 pub async fn handle_v1_mcp_oauth_logout(
     State(app): State<AppState>,
     body_bytes: hyper::body::Bytes,
@@ -481,28 +509,7 @@ pub async fn handle_v1_mcp_oauth_logout(
         )
     })?;
 
-    validate_mcp_config_path(&gcx, &req.config_path).await?;
-
-    let managed = crate::providers::litellm_mcp::logout_gateway(&req.config_path)
-        .await
-        .map_err(|_| {
-            ScratchError::new(
-                StatusCode::CONFLICT,
-                "Cannot sign out managed MCP session".to_string(),
-            )
-        })?;
-    if !managed {
-        clear_tokens_from_config(&req.config_path)
-            .await
-            .map_err(|e| {
-                ScratchError::new(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("Clear tokens: {}", e),
-                )
-            })?;
-    }
-
-    reload_mcp_integration(gcx, &req.config_path).await;
+    mcp_oauth_logout(gcx, &req.config_path).await?;
 
     json_response(StatusCode::OK, &serde_json::json!({"success": true}))
 }
@@ -532,7 +539,7 @@ pub struct McpOAuthStatusQuery {
 }
 
 #[derive(Serialize)]
-struct McpOAuthStatusResponse {
+pub(crate) struct McpOAuthStatusResponse {
     auth_type: String,
     authenticated: bool,
     expires_at: i64,
@@ -546,17 +553,22 @@ pub async fn handle_v1_mcp_oauth_status(
     State(app): State<AppState>,
     Query(query): Query<McpOAuthStatusQuery>,
 ) -> Result<Response<Body>, ScratchError> {
-    let gcx = app.gcx.clone();
-    validate_mcp_config_path(&gcx, &query.config_path).await?;
+    let response = mcp_oauth_status(&app.gcx, &query.config_path).await?;
+    json_response(StatusCode::OK, &response)
+}
 
-    let config_content = tokio::fs::read_to_string(&query.config_path)
-        .await
-        .map_err(|e| {
-            ScratchError::new(
-                StatusCode::NOT_FOUND,
-                format!("Read config {}: {}", query.config_path, e),
-            )
-        })?;
+pub(crate) async fn mcp_oauth_status(
+    gcx: &Arc<GlobalContext>,
+    config_path: &str,
+) -> Result<McpOAuthStatusResponse, ScratchError> {
+    validate_mcp_config_path(gcx, config_path).await?;
+
+    let config_content = tokio::fs::read_to_string(config_path).await.map_err(|e| {
+        ScratchError::new(
+            StatusCode::NOT_FOUND,
+            format!("Read config {}: {}", config_path, e),
+        )
+    })?;
     let config_yaml: serde_yaml::Value = serde_yaml::from_str(&config_content).map_err(|e| {
         ScratchError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -573,7 +585,7 @@ pub async fn handle_v1_mcp_oauth_status(
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
-    let tokens = load_tokens_from_config(&query.config_path).await;
+    let tokens = load_tokens_from_config(config_path).await;
     let (authenticated, expires_at, scopes) = match &tokens {
         Some(t) => {
             let now_ms = SystemTime::now()
@@ -595,7 +607,7 @@ pub async fn handle_v1_mcp_oauth_status(
     let (session_needs_login, probe_oauth_available, probe_scopes) = {
         let session_opt = {
             let sessions = gcx.integration_sessions.lock().await;
-            sessions.get(&query.config_path).cloned()
+            sessions.get(config_path).cloned()
         };
         match session_opt {
             Some(session_arc) => {
@@ -631,18 +643,15 @@ pub async fn handle_v1_mcp_oauth_status(
         probe_scopes
     };
 
-    json_response(
-        StatusCode::OK,
-        &McpOAuthStatusResponse {
-            auth_type,
-            authenticated,
-            expires_at,
-            scopes,
-            needs_login,
-            oauth_available,
-            suggested_scopes,
-        },
-    )
+    Ok(McpOAuthStatusResponse {
+        auth_type,
+        authenticated,
+        expires_at,
+        scopes,
+        needs_login,
+        oauth_available,
+        suggested_scopes,
+    })
 }
 
 #[cfg(test)]

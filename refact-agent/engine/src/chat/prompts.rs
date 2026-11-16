@@ -417,6 +417,17 @@ pub async fn system_prompt_add_extra_instructions(
         }
     }
 
+    let python_instructions = if tool_names.contains("python") {
+        let options =
+            crate::python_tool::catalog_binding::BindOptions::for_project(app.gcx.clone()).await;
+        let engine = options.engine
+            && !crate::tools::tools_list::python_engine_hidden(&app, &chat_meta.chat_id).await;
+        crate::chat::prompt_snippets::python_tool_instructions(&tool_names, options.llm, engine)
+    } else {
+        String::new()
+    };
+    system_prompt = system_prompt.replace("%CODE_MODE%", &python_instructions);
+
     if system_prompt.contains("%MODELS_INFO%") {
         if include_project_info && config.sections.models_info.enabled {
             let mut models_info = models_info_snapshot(&app).await;
@@ -1210,6 +1221,36 @@ mod tests {
         assert!(audit.contains("supervisor_override"));
         assert!(audit.contains("task_context_injection"));
         assert!(audit.contains("agent:A-1"));
+    }
+
+    #[tokio::test]
+    async fn code_mode_placeholder_expands_only_when_python_tool_present() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let app = AppState::from_gcx(gcx).await;
+        for present in [false, true] {
+            let tools = if present {
+                HashSet::from(["python".to_string()])
+            } else {
+                HashSet::new()
+            };
+            let rendered = system_prompt_add_extra_instructions(
+                app.clone(),
+                "%CODE_MODE%".to_string(),
+                tools.clone(),
+                &ChatMeta::default(),
+                &None,
+                "agent",
+            )
+            .await;
+            assert_eq!(
+                rendered,
+                if present {
+                    crate::chat::prompt_snippets::python_tool_instructions(&tools, true, true)
+                } else {
+                    String::new()
+                }
+            );
+        }
     }
 
     #[tokio::test]
@@ -2338,4 +2379,13 @@ pub async fn inject_task_memories(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod python_foreground_prompt_tests {
+    #[test]
+    fn python_instructions_explain_task_agent_foreground_wait() {
+        assert!(crate::chat::prompt_snippets::PYTHON_TOOL_INSTRUCTIONS
+            .contains("in chats whose tools always run in the foreground (task agents, supervised subagents) the call waits for the run to finish instead"));
+    }
 }

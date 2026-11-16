@@ -147,13 +147,15 @@ const FLATTENED_WIRE_EXTRA_KEYS = [
   "privacy_shell",
 ] as const;
 
+/** Only called for verified `tool_job_result` deliveries, which may carry `python`. */
 function flattenedWireExtra(
   message: ChatMessages[number],
 ): Record<string, unknown> | undefined {
   const lifted = Object.fromEntries(
     Object.entries(message).filter(
       ([key, value]) =>
-        (FLATTENED_WIRE_EXTRA_KEYS as readonly string[]).includes(key) &&
+        ((FLATTENED_WIRE_EXTRA_KEYS as readonly string[]).includes(key) ||
+          key === "python") &&
         value !== undefined,
     ),
   );

@@ -313,6 +313,43 @@ pub struct CoordinationSettings {
     /// for longer than this.
     pub provider_max_retry_after_ms: u64,
     pub provider_pressure_max_buckets: usize,
+    /// Switches the `python` tool on.
+    pub python_tool_enabled: bool,
+    /// Wall-clock limit of one Python run, including waits.
+    pub python_max_run_ms: u64,
+    /// Maximum uninterrupted stretch of interpreter execution.
+    pub python_max_compute_ms: u64,
+    /// Resident-memory ceiling of one Python worker process.
+    pub python_max_memory_bytes: u64,
+    /// Maximum nested tool calls per Python run.
+    pub python_max_nested_calls: usize,
+    /// Maximum concurrent nested tool calls.
+    pub python_max_parallel_calls: usize,
+    /// Maximum live Python worker processes.
+    pub python_max_live_sessions: usize,
+    /// Per-project size limit of Python workspaces.
+    pub python_disk_quota_bytes: u64,
+    /// Maximum size of one persisted Python session snapshot.
+    pub python_max_state_bytes: u64,
+    /// Maximum characters of Python result text returned to the model.
+    pub python_max_result_chars: usize,
+    /// Maximum characters in the generated Python tool catalog.
+    pub python_max_catalog_chars: usize,
+    /// Maximum size of one nested tool result handed to the script.
+    pub python_max_nested_result_bytes: usize,
+    /// Maximum `llm()` model calls per Python run; 0 removes the helper.
+    pub python_max_llm_calls: usize,
+    /// Input plus output tokens of finished `llm()` calls per Python run.
+    pub python_max_llm_tokens: u64,
+    /// Binds `engine()` in scripts and allows its read functions.
+    pub python_engine_read_enabled: bool,
+    /// Allows engine functions of class `change`.
+    pub python_engine_change_enabled: bool,
+    /// Allows engine functions of class `risky` and `destructive`.
+    pub python_engine_risky_enabled: bool,
+    /// Allows engine changes in chats that run commands without asking
+    /// (`auto_approve_dangerous_commands`); such a chat could approve the change itself.
+    pub python_engine_change_with_auto_commands: bool,
     /// Automatically retry eligible transient thread failures.
     pub recovery_auto_retry_enabled: bool,
     pub recovery_max_retries: u32,
@@ -336,15 +373,6 @@ pub struct CoordinationSettings {
     pub metrics_max_explanations: usize,
     /// Characters retained per exported label or explanation value.
     pub metrics_max_label_chars: usize,
-    /// Whether model-authored orchestration code may run at all. Off by
-    /// default, and inert everywhere no OS sandbox can confine the worker.
-    pub code_mode_enabled: bool,
-    /// Wall clock a single confined orchestration worker may occupy.
-    pub code_mode_timeout_ms: u64,
-    /// Host calls one orchestration run may emit.
-    pub code_mode_max_host_calls: usize,
-    /// Bytes of data that may travel through those host calls.
-    pub code_mode_max_intermediate_bytes: usize,
 }
 
 impl Default for CoordinationSettings {
@@ -498,6 +526,24 @@ impl Default for CoordinationSettings {
             provider_breaker_cooldown_ms: 30_000,
             provider_max_retry_after_ms: 300_000,
             provider_pressure_max_buckets: 4_096,
+            python_tool_enabled: true,
+            python_max_run_ms: 7_200_000,
+            python_max_compute_ms: 300_000,
+            python_max_memory_bytes: 1_073_741_824,
+            python_max_nested_calls: 1_000,
+            python_max_parallel_calls: 8,
+            python_max_live_sessions: 8,
+            python_disk_quota_bytes: 5_368_709_120,
+            python_max_state_bytes: 1_073_741_824,
+            python_max_result_chars: 20_000,
+            python_max_catalog_chars: 60_000,
+            python_max_nested_result_bytes: 16_777_216,
+            python_max_llm_calls: 200,
+            python_max_llm_tokens: 2_000_000,
+            python_engine_read_enabled: true,
+            python_engine_change_enabled: true,
+            python_engine_risky_enabled: true,
+            python_engine_change_with_auto_commands: false,
             recovery_auto_retry_enabled: true,
             recovery_max_retries: 2,
             recovery_delay_ms: 10_000,
@@ -509,10 +555,6 @@ impl Default for CoordinationSettings {
             metrics_max_series: 4_096,
             metrics_max_explanations: 2_048,
             metrics_max_label_chars: 160,
-            code_mode_enabled: false,
-            code_mode_timeout_ms: 30_000,
-            code_mode_max_host_calls: 64,
-            code_mode_max_intermediate_bytes: 262_144,
         }
     }
 }
@@ -575,6 +617,90 @@ fn not_greater(
 impl CoordinationSettings {
     pub fn validate(&self) -> Result<(), SettingsError> {
         let mut v = Vec::new();
+        for (field, value, minimum, maximum) in [
+            (
+                "python_max_run_ms",
+                self.python_max_run_ms,
+                1_000,
+                86_400_000,
+            ),
+            (
+                "python_max_compute_ms",
+                self.python_max_compute_ms,
+                100,
+                7_200_000,
+            ),
+            (
+                "python_max_memory_bytes",
+                self.python_max_memory_bytes,
+                16_777_216,
+                17_179_869_184,
+            ),
+            (
+                "python_max_nested_calls",
+                self.python_max_nested_calls as u64,
+                1,
+                100_000,
+            ),
+            (
+                "python_max_parallel_calls",
+                self.python_max_parallel_calls as u64,
+                1,
+                64,
+            ),
+            (
+                "python_max_live_sessions",
+                self.python_max_live_sessions as u64,
+                1,
+                128,
+            ),
+            (
+                "python_disk_quota_bytes",
+                self.python_disk_quota_bytes,
+                104_857_600,
+                1_099_511_627_776,
+            ),
+            (
+                "python_max_state_bytes",
+                self.python_max_state_bytes,
+                1_048_576,
+                17_179_869_184,
+            ),
+            (
+                "python_max_result_chars",
+                self.python_max_result_chars as u64,
+                1_000,
+                1_000_000,
+            ),
+            (
+                "python_max_catalog_chars",
+                self.python_max_catalog_chars as u64,
+                10_000,
+                2_000_000,
+            ),
+            (
+                "python_max_nested_result_bytes",
+                self.python_max_nested_result_bytes as u64,
+                65_536,
+                268_435_456,
+            ),
+            (
+                "python_max_llm_calls",
+                self.python_max_llm_calls as u64,
+                0,
+                100_000,
+            ),
+            (
+                "python_max_llm_tokens",
+                self.python_max_llm_tokens,
+                1_000,
+                1_000_000_000,
+            ),
+        ] {
+            at_least(&mut v, field, value, minimum);
+            not_greater(&mut v, field, value, "Python setting limit", maximum);
+        }
+
         not_greater(
             &mut v,
             "recovery_max_retries",
@@ -993,24 +1119,6 @@ impl CoordinationSettings {
             "no_progress_window_turns",
             self.no_progress_window_turns as u64,
         );
-        at_least(
-            &mut v,
-            "code_mode_timeout_ms",
-            self.code_mode_timeout_ms,
-            1_000,
-        );
-        at_least(
-            &mut v,
-            "code_mode_max_host_calls",
-            self.code_mode_max_host_calls as u64,
-            1,
-        );
-        at_least(
-            &mut v,
-            "code_mode_max_intermediate_bytes",
-            self.code_mode_max_intermediate_bytes as u64,
-            1_024,
-        );
         at_least(&mut v, "lease_ttl_ms", self.lease_ttl_ms, 1);
         at_least(
             &mut v,
@@ -1337,6 +1445,114 @@ impl CoordinationSettings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn python_settings_defaults_match_contract() {
+        let defaults = CoordinationSettings::default();
+        let legacy: CoordinationSettings = serde_json::from_str("{}").unwrap();
+        assert_eq!(legacy, defaults);
+        defaults.validate().unwrap();
+        let rendered = serde_json::to_value(defaults).unwrap();
+        assert_eq!(rendered["python_tool_enabled"], true);
+        assert_eq!(
+            rendered["python_max_run_ms"],
+            serde_json::json!(7_200_000u64)
+        );
+        assert_eq!(
+            rendered["python_max_compute_ms"],
+            serde_json::json!(300_000u64)
+        );
+        assert_eq!(
+            rendered["python_max_memory_bytes"],
+            serde_json::json!(1_073_741_824u64)
+        );
+        assert_eq!(
+            rendered["python_max_nested_calls"],
+            serde_json::json!(1_000u64)
+        );
+        assert_eq!(
+            rendered["python_max_parallel_calls"],
+            serde_json::json!(8u64)
+        );
+        assert_eq!(
+            rendered["python_max_live_sessions"],
+            serde_json::json!(8u64)
+        );
+        assert_eq!(
+            rendered["python_disk_quota_bytes"],
+            serde_json::json!(5_368_709_120u64)
+        );
+        assert_eq!(
+            rendered["python_max_state_bytes"],
+            serde_json::json!(1_073_741_824u64)
+        );
+        assert_eq!(
+            rendered["python_max_result_chars"],
+            serde_json::json!(20_000u64)
+        );
+        assert_eq!(
+            rendered["python_max_catalog_chars"],
+            serde_json::json!(60_000u64)
+        );
+        assert_eq!(
+            rendered["python_max_nested_result_bytes"],
+            serde_json::json!(16_777_216u64)
+        );
+        assert_eq!(rendered["python_max_llm_calls"], serde_json::json!(200u64));
+        assert_eq!(
+            rendered["python_max_llm_tokens"],
+            serde_json::json!(2_000_000u64)
+        );
+        for name in [
+            "python_engine_read_enabled",
+            "python_engine_change_enabled",
+            "python_engine_risky_enabled",
+        ] {
+            assert_eq!(rendered[name], true, "{name}");
+            let mut off = rendered.clone();
+            off[name] = false.into();
+            let settings: CoordinationSettings = serde_json::from_value(off).unwrap();
+            settings.validate().unwrap();
+        }
+    }
+
+    #[test]
+    fn python_settings_bounds_reject_out_of_range() {
+        for (name, minimum, maximum) in [
+            ("python_max_run_ms", 1_000u64, 86_400_000u64),
+            ("python_max_compute_ms", 100u64, 7_200_000u64),
+            ("python_max_memory_bytes", 16_777_216u64, 17_179_869_184u64),
+            ("python_max_nested_calls", 1u64, 100_000u64),
+            ("python_max_parallel_calls", 1u64, 64u64),
+            ("python_max_live_sessions", 1u64, 128u64),
+            (
+                "python_disk_quota_bytes",
+                104_857_600u64,
+                1_099_511_627_776u64,
+            ),
+            ("python_max_state_bytes", 1_048_576u64, 17_179_869_184u64),
+            ("python_max_result_chars", 1_000u64, 1_000_000u64),
+            ("python_max_catalog_chars", 10_000u64, 2_000_000u64),
+            ("python_max_nested_result_bytes", 65_536u64, 268_435_456u64),
+            ("python_max_llm_calls", 0u64, 100_000u64),
+            ("python_max_llm_tokens", 1_000u64, 1_000_000_000u64),
+        ] {
+            for value in [minimum, maximum, minimum.saturating_sub(1), maximum + 1] {
+                let mut rendered = serde_json::to_value(CoordinationSettings::default()).unwrap();
+                rendered[name] = serde_json::json!(value);
+                let settings: CoordinationSettings = serde_json::from_value(rendered).unwrap();
+                if (minimum..=maximum).contains(&value) {
+                    settings.validate().unwrap();
+                } else {
+                    let error = settings.validate().unwrap_err();
+                    assert!(error
+                        .violations
+                        .iter()
+                        .any(|violation| violation.field == name));
+                }
+            }
+        }
+    }
 
     #[test]
     fn retired_admission_caps_load_as_unlimited_and_are_not_saved() {

@@ -97,6 +97,23 @@ async fn progress_report_hidden_for_top_level_chat_and_visible_for_child() {
             .collect::<Vec<_>>()
     );
 
+    let tells_engine = |catalog: &refact_runtime_api::ToolCatalogSnapshot| {
+        catalog
+            .index
+            .tools
+            .iter()
+            .find(|tool| tool.name == "python")
+            .map(|tool| tool.description.contains("async def engine("))
+    };
+    assert_eq!(tells_engine(&shared), Some(true));
+    let unconfigured = filter_tool_catalog_for_chat(&app, "child-chat", shared.clone()).await;
+    assert!(names(&unconfigured).contains(&"progress_report".into()));
+    assert_eq!(tells_engine(&unconfigured), Some(false));
+
+    let mut config = crate::subchat::test_support::minimal_config("child-chat", "parent-chat");
+    config.tools = crate::subchat::ToolsPolicy::All;
+    app.agent_executions
+        .remember_config(&child_agent_id, config);
     let child = filter_tool_catalog_for_chat(&app, "child-chat", shared.clone()).await;
     assert!(names(&child).contains(&"progress_report".into()));
     assert!(Arc::ptr_eq(&shared, &child));

@@ -7,6 +7,10 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ScopeKey {
+    PythonRun {
+        chat_id: String,
+        tool_call_id: String,
+    },
     Chat {
         project: std::path::PathBuf,
         chat_id: String,
@@ -74,6 +78,10 @@ impl ScopeCoordinator {
     fn keys(keys: &[ScopeKey]) -> Result<Vec<ScopeKey>, ScopeChangeError> {
         if keys.is_empty()
             || keys.iter().any(|key| match key {
+                ScopeKey::PythonRun {
+                    chat_id,
+                    tool_call_id,
+                } => chat_id.is_empty() || tool_call_id.is_empty(),
                 ScopeKey::Chat {
                     project,
                     chat_id,
@@ -583,5 +591,45 @@ mod tests {
             coordinator.acquire(&[key()], cancel),
             Err(ScopeChangeError::Closed)
         ));
+    }
+}
+
+#[cfg(test)]
+mod python_fence_tests {
+    use super::*;
+    #[tokio::test]
+    async fn python_outer_fences_worktree_but_nested_key_stays_open() {
+        let coordinator = Arc::new(ScopeCoordinator::default());
+        let worktree = ScopeKey::Worktree {
+            project: "/p".into(),
+            root: "/w".into(),
+        };
+        let python = ScopeKey::PythonRun {
+            chat_id: "chat".into(),
+            tool_call_id: "call".into(),
+        };
+        let owner = coordinator
+            .acquire(
+                &[worktree.clone(), python.clone()],
+                Arc::new(AtomicBool::new(false)),
+            )
+            .unwrap();
+        let keys = [worktree];
+        let mut fence = Box::pin(coordinator.begin_scope_change(&keys));
+        assert!(futures::poll!(&mut fence).is_pending());
+        let nested = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            coordinator.acquire_wait(&[python], Arc::new(AtomicBool::new(false))),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        drop(nested);
+        assert!(futures::poll!(&mut fence).is_pending());
+        drop(owner);
+        tokio::time::timeout(std::time::Duration::from_secs(1), fence)
+            .await
+            .unwrap()
+            .unwrap();
     }
 }

@@ -318,7 +318,19 @@ pub async fn handle_v1_privacy_records_clear(
     }
     let request: PrivacyRecordsClearRequest = serde_json::from_slice(&body_bytes)
         .map_err(|_| ScratchError::new(StatusCode::BAD_REQUEST, "Invalid JSON request".into()))?;
-    if request.paths.is_empty() {
+    clear_privacy_records(&app, &request.chat_id, &request.paths)
+        .await
+        .map(Json)
+}
+
+/// Forgets the privacy records of `paths` in an idle loaded chat; records and derived zones in
+/// blocked zones are always kept.
+pub(crate) async fn clear_privacy_records(
+    app: &AppState,
+    chat_id: &str,
+    paths: &[String],
+) -> Result<PrivacyRecordsClearResponse, ScratchError> {
+    if paths.is_empty() {
         return Err(ScratchError::new(
             StatusCode::BAD_REQUEST,
             "paths must not be empty".to_string(),
@@ -326,16 +338,12 @@ pub async fn handle_v1_privacy_records_clear(
     }
     let session_arc = {
         let sessions = app.gcx.chat_sessions.read().await;
-        sessions.get(&request.chat_id).cloned()
+        sessions.get(chat_id).cloned()
     }
     .ok_or_else(|| {
         ScratchError::new(StatusCode::NOT_FOUND, "Chat session not found".to_string())
     })?;
-    let paths = request
-        .paths
-        .iter()
-        .map(String::as_str)
-        .collect::<HashSet<_>>();
+    let paths = paths.iter().map(String::as_str).collect::<HashSet<_>>();
     crate::privacy::load_privacy_if_needed(app.gcx.clone()).await;
     let mut response = {
         let mut session = session_arc.lock().await;
@@ -429,13 +437,13 @@ pub async fn handle_v1_privacy_records_clear(
     }
     tracing::info!(
         "privacy records cleared: chat_id={} cleared={}",
-        request.chat_id,
+        chat_id,
         response.cleared
     );
-    Ok(Json(response))
+    Ok(response)
 }
 
-fn blocked_zone(zone: &str) -> bool {
+pub(crate) fn blocked_zone(zone: &str) -> bool {
     zone == "blocked"
         || zone
             .strip_prefix("effective:")
@@ -550,7 +558,10 @@ fn policy_response(
     }
 }
 
-async fn collect_destinations(app: &AppState, policy: &PrivacyPolicy) -> Vec<Destination> {
+pub(crate) async fn collect_destinations(
+    app: &AppState,
+    policy: &PrivacyPolicy,
+) -> Vec<Destination> {
     let mut destinations = Vec::new();
     let caps = crate::global_context::try_load_caps_quickly_if_not_present(app.gcx.clone(), 0)
         .await
@@ -633,7 +644,7 @@ fn policy_fingerprint(policy: &PrivacyPolicy) -> u64 {
     hasher.finish()
 }
 
-fn live_match_counts(
+pub(crate) fn live_match_counts(
     app: &AppState,
     policy: &PrivacyPolicy,
 ) -> Result<BTreeMap<String, usize>, ScratchError> {
@@ -745,7 +756,7 @@ fn destination_key(destination: &Destination) -> (u8, &str) {
     (kind, destination.id.0.as_str())
 }
 
-fn observation_capability(
+pub(crate) fn observation_capability(
     runtime: crate::privacy::PrivacyObservationRuntimeState,
 ) -> PrivacyObservationCapability {
     PrivacyObservationCapability {

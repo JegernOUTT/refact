@@ -109,11 +109,13 @@ export function useWorkspaceShortcuts() {
       else if (key === "2") section = "git";
       else if (key === "3") section = "agents";
       else if (key === "4") section = "activity";
+      else if (key === "5") section = "python";
       else return;
       const sectionAvailable =
         (section === "files" && filesAvailable) ||
         (section === "git" && gitAvailable) ||
         section === "agents" ||
+        section === "python" ||
         (section === "activity" && activityAvailable);
       if (!sectionAvailable) return;
       event.preventDefault();

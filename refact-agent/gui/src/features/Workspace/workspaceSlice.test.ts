@@ -1743,3 +1743,7 @@ describe("independent pane capability pruning", () => {
     },
   );
 });
+
+test("normalizes the Python dock section", () => {
+  expect(normalizeWorkspaceDock({ section: "python" }).section).toBe("python");
+});

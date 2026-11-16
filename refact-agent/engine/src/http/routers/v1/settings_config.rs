@@ -21,9 +21,9 @@ pub struct SettingsScopeQuery {
 #[serde(deny_unknown_fields)]
 pub struct IndexingSettingsConfig {
     #[serde(default)]
-    blocklist: Vec<String>,
+    pub(crate) blocklist: Vec<String>,
     #[serde(default)]
-    additional_indexing_dirs: Vec<String>,
+    pub(crate) additional_indexing_dirs: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -235,7 +235,7 @@ fn validate_additional_dirs(scope: &str, entries: &[String]) -> Result<(), Scrat
     Ok(())
 }
 
-fn normalize_config(
+pub(crate) fn normalize_config(
     scope: &str,
     mut config: IndexingSettingsConfig,
 ) -> Result<IndexingSettingsConfig, ScratchError> {
@@ -308,28 +308,30 @@ pub async fn handle_v1_indexing_settings_get(
     Query(query): Query<SettingsScopeQuery>,
 ) -> Result<Json<IndexingSettingsResponse>, ScratchError> {
     let scope = requested_scope(&query)?;
-    let (path, _, project_available) = indexing_path(&app, scope).await?;
+    indexing_settings_load(&app, scope).await
+}
+
+/// `scope` is `global` or `project` (the first workspace folder).
+pub(crate) async fn indexing_settings_load(
+    app: &AppState,
+    scope: &str,
+) -> Result<Json<IndexingSettingsResponse>, ScratchError> {
+    let (path, _, project_available) = indexing_path(app, scope).await?;
     if scope == "global" {
-        ensure_default_global(&path, &app).await?;
+        ensure_default_global(&path, app).await?;
     }
     let config = load_indexing_config(&path, scope == "project").await?;
     Ok(indexing_response(scope, &path, config, project_available))
 }
 
-pub async fn handle_v1_indexing_settings_post(
-    State(app): State<AppState>,
-    Query(query): Query<SettingsScopeQuery>,
-    body: hyper::body::Bytes,
+/// Validates and writes the indexing settings of `scope`, reloads the blocklist and re-indexes.
+pub(crate) async fn indexing_settings_save(
+    app: &AppState,
+    scope: &str,
+    config: IndexingSettingsConfig,
 ) -> Result<Json<IndexingSettingsResponse>, ScratchError> {
-    let scope = requested_scope(&query)?;
-    let post = serde_json::from_slice::<IndexingSettingsPost>(&body).map_err(|e| {
-        ScratchError::new(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            format!("invalid indexing settings payload: {}", e),
-        )
-    })?;
-    let (path, _, project_available) = indexing_path(&app, scope).await?;
-    let config = normalize_config(scope, post.into_config())?;
+    let (path, _, project_available) = indexing_path(app, scope).await?;
+    let config = normalize_config(scope, config)?;
     let persisted = PersistedIndexingSettings {
         blocklist: config.blocklist.clone(),
         additional_indexing_dirs: config.additional_indexing_dirs.clone(),
@@ -346,6 +348,48 @@ pub async fn handle_v1_indexing_settings_post(
     )
     .await;
     Ok(indexing_response(scope, &path, config, project_available))
+}
+
+pub async fn handle_v1_indexing_settings_post(
+    State(app): State<AppState>,
+    Query(query): Query<SettingsScopeQuery>,
+    body: hyper::body::Bytes,
+) -> Result<Json<IndexingSettingsResponse>, ScratchError> {
+    let scope = requested_scope(&query)?;
+    let post = serde_json::from_slice::<IndexingSettingsPost>(&body).map_err(|e| {
+        ScratchError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("invalid indexing settings payload: {}", e),
+        )
+    })?;
+    indexing_settings_save(&app, scope, post.into_config()).await
+}
+
+/// `skills.auto_trigger` of the first project; `index_only` when no project or file exists.
+pub(crate) async fn skills_auto_trigger(
+    app: &AppState,
+) -> Result<SkillsAutoTriggerSetting, String> {
+    let Some(root) = crate::files_correction::get_project_dirs(app.gcx.clone())
+        .await
+        .into_iter()
+        .next()
+    else {
+        return Ok(SkillsAutoTriggerSetting::default());
+    };
+    load_skills(&root.join(".refact").join("skills.yaml"))
+        .await
+        .map(|settings| settings.auto_trigger)
+        .map_err(|e| e.message)
+}
+
+/// Writes `skills.auto_trigger` of the first project, as the skills settings route does.
+pub(crate) async fn save_skills_auto_trigger(app: &AppState, value: &str) -> Result<(), String> {
+    let settings: SkillsSettings =
+        serde_json::from_value(serde_json::json!({ "auto_trigger": value }))
+            .map_err(|e| e.to_string())?;
+    let path = skills_path(app).await.map_err(|e| e.message)?;
+    let yaml = serde_yaml::to_string(&settings).map_err(|e| e.to_string())?;
+    atomic_write(&path, &yaml).await.map_err(|e| e.message)
 }
 
 async fn skills_path(app: &AppState) -> Result<PathBuf, ScratchError> {
@@ -423,17 +467,17 @@ pub struct TrajectorySettingsResponse {
 }
 
 #[derive(Debug, Serialize)]
-struct TrajectorySettingField {
-    name: String,
-    value_type: &'static str,
-    minimum: Option<u64>,
-    maximum: Option<u64>,
+pub(crate) struct TrajectorySettingField {
+    pub(crate) name: String,
+    pub(crate) value_type: &'static str,
+    pub(crate) minimum: Option<u64>,
+    pub(crate) maximum: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    allowed: Option<&'static [&'static str]>,
-    apply_mode: &'static str,
+    pub(crate) allowed: Option<&'static [&'static str]>,
+    pub(crate) apply_mode: &'static str,
 }
 
-fn trajectory_settings_fields() -> Vec<TrajectorySettingField> {
+pub(crate) fn trajectory_settings_fields() -> Vec<TrajectorySettingField> {
     let live_usize = |name: &str, minimum, maximum| TrajectorySettingField {
         name: name.to_string(),
         value_type: "integer",
@@ -582,6 +626,18 @@ pub async fn handle_v1_trajectory_settings_post(
         })?
         .into_config();
     crate::runtime_settings::validate(&settings).map_err(bad_request)?;
+    let _engine_changes = crate::python_tool::engine_fns::ENGINE_CHANGE_LOCK
+        .lock()
+        .await;
+    let path = persist_trajectory_settings(&app, &settings).await?;
+    Ok(trajectory_settings_response(path, settings))
+}
+
+/// Merges validated settings into the persisted file and installs them live.
+pub(crate) async fn persist_trajectory_settings(
+    app: &AppState,
+    settings: &crate::runtime_settings::TrajectoryRuntimeSettings,
+) -> Result<PathBuf, ScratchError> {
     let _guard = BUDDY_TRAJECTORY_WRITE_LOCK.lock().await;
     let path = crate::runtime_settings::settings_path(&app.paths.config_dir);
     let mut persisted = match buddy_trajectory_snapshot(&app)
@@ -595,7 +651,7 @@ pub async fn handle_v1_trajectory_settings_post(
     let map = persisted
         .as_mapping_mut()
         .ok_or_else(|| bad_request("invalid persisted trajectory settings"))?;
-    let known = serde_yaml::to_value(&settings)
+    let known = serde_yaml::to_value(settings)
         .map_err(|_| server_error("cannot serialize trajectory settings"))?;
     for (key, value) in known
         .as_mapping()
@@ -610,8 +666,8 @@ pub async fn handle_v1_trajectory_settings_post(
         .map_err(|_| server_error("cannot serialize trajectory settings"))?;
     buddy_trajectory_parse(yaml.as_bytes()).map_err(bad_request)?;
     atomic_write(&path, &yaml).await?;
-    crate::runtime_settings::install_live(&settings);
-    Ok(trajectory_settings_response(path, settings))
+    crate::runtime_settings::install_live(settings);
+    Ok(path)
 }
 
 #[derive(Debug, Serialize)]
@@ -695,6 +751,9 @@ pub async fn handle_v1_coordination_settings_post(
     let scope = requested_scope(&query)?;
     let body: serde_json::Value = serde_json::from_slice(&body)
         .map_err(|error| bad_request(format!("invalid coordination settings: {error}")))?;
+    let _engine_changes = crate::python_tool::engine_fns::ENGINE_CHANGE_LOCK
+        .lock()
+        .await;
     let config = body.get("config").unwrap_or(&body).clone();
     let global_path = crate::runtime_settings::settings_path(&app.paths.config_dir);
     let mut global_settings = crate::runtime_settings::load_from_path(&global_path)
@@ -708,10 +767,7 @@ pub async fn handle_v1_coordination_settings_post(
         crate::runtime_settings::resolve_coordination(&global_settings.coordination, &overrides)
             .map_err(bad_request)?;
         let root = first_project_root(&app).await?;
-        let path = crate::runtime_settings::project_coordination_path(&root);
-        let yaml =
-            serde_yaml::to_string(&overrides).map_err(|error| server_error(error.to_string()))?;
-        atomic_write(&path, &yaml).await?;
+        persist_project_coordination(&root, &overrides).await?;
     } else {
         let coordination = serde_json::from_value(config)
             .map_err(|error| bad_request(format!("invalid coordination settings: {error}")))?;
@@ -731,6 +787,16 @@ pub async fn handle_v1_coordination_settings_post(
         crate::runtime_settings::install_live(&global_settings);
     }
     coordination_response(&app, scope).await
+}
+
+/// Writes an already validated sparse project override.
+pub(crate) async fn persist_project_coordination(
+    root: &Path,
+    overrides: &crate::runtime_settings::CoordinationOverride,
+) -> Result<(), ScratchError> {
+    let path = crate::runtime_settings::project_coordination_path(root);
+    let yaml = serde_yaml::to_string(overrides).map_err(|error| server_error(error.to_string()))?;
+    atomic_write(&path, &yaml).await
 }
 
 pub fn buddy_trajectory_parse(

@@ -36,7 +36,7 @@ fn json_response(
         })
 }
 
-async fn invalidate_caps(gcx: Arc<GlobalContext>) {
+pub(crate) async fn invalidate_caps(gcx: Arc<GlobalContext>) {
     let caps_state = gcx.caps_state.clone();
     let mut caps_state = caps_state.write().await;
     caps_state.caps = None;
@@ -78,9 +78,9 @@ fn html_escape(s: &str) -> String {
 }
 
 #[derive(Clone)]
-struct HttpProviderIdentity {
-    instance_id: String,
-    base_provider: String,
+pub(crate) struct HttpProviderIdentity {
+    pub(crate) instance_id: String,
+    pub(crate) base_provider: String,
     display_name: String,
 }
 
@@ -204,7 +204,7 @@ async fn resolve_config_identity(
     })
 }
 
-async fn resolve_provider_identity(
+pub(crate) async fn resolve_provider_identity(
     gcx: &Arc<GlobalContext>,
     instance_id: &str,
 ) -> Result<HttpProviderIdentity, ScratchError> {
@@ -311,7 +311,7 @@ async fn identity_for_model_management(
     })
 }
 
-async fn ensure_provider_for_model_management(
+pub(crate) async fn ensure_provider_for_model_management(
     gcx: Arc<GlobalContext>,
     provider_name: &str,
 ) -> Result<(), ScratchError> {
@@ -633,7 +633,7 @@ fn provider_from_yaml(
 }
 
 #[derive(Serialize)]
-struct ProviderListItem {
+pub(crate) struct ProviderListItem {
     name: String,
     base_provider: String,
     display_name: String,
@@ -652,7 +652,13 @@ struct ProviderListResponse {
 pub async fn handle_v1_providers_list(
     State(app): State<AppState>,
 ) -> Result<Response<Body>, ScratchError> {
-    let gcx = app.gcx.clone();
+    let response = ProviderListResponse {
+        providers: providers_list(app.gcx.clone()).await,
+    };
+    json_response(StatusCode::OK, &response)
+}
+
+pub(crate) async fn providers_list(gcx: Arc<GlobalContext>) -> Vec<ProviderListItem> {
     let registry = gcx.providers.read().await;
 
     let mut providers = Vec::new();
@@ -674,11 +680,7 @@ pub async fn handle_v1_providers_list(
         }
     }
     providers.sort_by(|a, b| a.name.cmp(&b.name));
-
-    let response = ProviderListResponse {
-        providers,
-    };
-    json_response(StatusCode::OK, &response)
+    providers
 }
 
 #[derive(Deserialize)]
@@ -716,7 +718,7 @@ pub struct OpenRouterModelEndpointsResponse {
 }
 
 #[derive(Serialize)]
-struct ProviderDetailResponse {
+pub(crate) struct ProviderDetailResponse {
     name: String,
     base_provider: String,
     display_name: String,
@@ -755,27 +757,33 @@ pub async fn handle_v1_provider_get(
             tracing::warn!("Claude Code provider refresh before settings load failed: {error}");
         }
     }
+    let response = provider_detail(gcx, &params.name).await?;
+    json_response(StatusCode::OK, &response)
+}
+
+/// Provider settings with each provider's own secret masking; no token refresh.
+pub(crate) async fn provider_detail(
+    gcx: Arc<GlobalContext>,
+    name: &str,
+) -> Result<ProviderDetailResponse, ScratchError> {
+    validate_instance_id_for_http(name)?;
     let (registry_provider, config_dir) = {
         let registry = gcx.providers.read().await;
         (
-            registry
-                .get(&params.name)
-                .map(|provider| provider.clone_box()),
+            registry.get(name).map(|provider| provider.clone_box()),
             gcx.config_dir.clone(),
         )
     };
     let provider: Box<dyn ProviderTrait> = if let Some(provider) = registry_provider {
         provider
-    } else if let Some(settings) =
-        read_existing_provider_settings(&config_dir, &params.name).await?
-    {
-        provider_from_yaml(&params.name, settings)?
-    } else if let Some(provider) = create_provider(&params.name) {
+    } else if let Some(settings) = read_existing_provider_settings(&config_dir, name).await? {
+        provider_from_yaml(name, settings)?
+    } else if let Some(provider) = create_provider(name) {
         provider
     } else {
         return Err(ScratchError::new(
             StatusCode::NOT_FOUND,
-            format!("Provider '{}' not found", params.name),
+            format!("Provider '{}' not found", name),
         ));
     };
 
@@ -802,8 +810,7 @@ pub async fn handle_v1_provider_get(
         settings: settings_with_identity(provider.as_ref()),
         runtime: runtime.map(|r| r.redacted()),
     };
-
-    json_response(StatusCode::OK, &response)
+    Ok(response)
 }
 
 #[derive(Serialize)]
@@ -867,15 +874,25 @@ pub async fn handle_v1_provider_update(
                 )
             })?
         };
+    update_provider_settings(gcx, &params.name, settings).await?;
+    json_response(StatusCode::OK, &json!({"success": true}))
+}
 
+/// The update path of `POST /v1/providers/:name`: merge, validate, write, reload and invalidate.
+pub(crate) async fn update_provider_settings(
+    gcx: Arc<GlobalContext>,
+    name: &str,
+    settings: serde_yaml::Value,
+) -> Result<(), ScratchError> {
+    validate_instance_id_for_http(name)?;
     let (config_dir, registry_identity, registry_model_config) = {
         let registry = gcx.providers.read().await;
-        let registry_provider = registry.get(&params.name);
+        let registry_provider = registry.get(name);
         let registry_identity = if let Some(provider) = registry_provider {
             if provider.is_readonly() {
                 return Err(ScratchError::new(
                     StatusCode::FORBIDDEN,
-                    format!("Provider '{}' is readonly", params.name),
+                    format!("Provider '{}' is readonly", name),
                 ));
             }
             Some(HttpProviderIdentity {
@@ -900,10 +917,10 @@ pub async fn handle_v1_provider_update(
     let identity_cell = std::sync::Arc::new(std::sync::Mutex::new(None));
     let identity_out = identity_cell.clone();
     let config_dir_for_update = config_dir.clone();
-    let params_name = params.name.clone();
+    let params_name = name.to_string();
     config_store::update_provider_config_with(
         &config_dir_for_update,
-        &params.name,
+        name,
         provider_config_store_error,
         move |existing_settings| {
             let identity = resolve_provider_update_identity_from_existing(
@@ -1015,8 +1032,7 @@ pub async fn handle_v1_provider_update(
     }
 
     invalidate_caps(gcx).await;
-
-    json_response(StatusCode::OK, &json!({"success": true}))
+    Ok(())
 }
 
 pub async fn handle_v1_provider_delete(
@@ -1456,10 +1472,10 @@ pub async fn handle_v1_models(
 
 #[derive(Serialize)]
 pub struct AvailableModelsResponse {
-    models: Vec<AvailableModel>,
-    source: String,
+    pub(crate) models: Vec<AvailableModel>,
+    pub(crate) source: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<String>,
+    pub(crate) error: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -1484,21 +1500,28 @@ pub async fn handle_v1_provider_available_models(
     State(app): State<AppState>,
     Path(params): Path<ProviderPathParams>,
 ) -> Result<Response<Body>, ScratchError> {
-    let gcx = app.gcx.clone();
-    validate_instance_id_for_http(&params.name)?;
+    let response = provider_available_models(app.gcx.clone(), &params.name).await?;
+    json_response(StatusCode::OK, &response)
+}
+
+pub(crate) async fn provider_available_models(
+    gcx: Arc<GlobalContext>,
+    name: &str,
+) -> Result<AvailableModelsResponse, ScratchError> {
+    validate_instance_id_for_http(name)?;
     let (provider, http_client) = {
         let registry = gcx.providers.read().await;
         let http_client = gcx.http_client.clone();
 
         let provider: Box<dyn crate::providers::traits::ProviderTrait> =
-            if let Some(p) = registry.get(&params.name) {
+            if let Some(p) = registry.get(name) {
                 p.clone_box()
-            } else if let Some(p) = create_provider(&params.name) {
+            } else if let Some(p) = create_provider(name) {
                 p
             } else {
                 return Err(ScratchError::new(
                     StatusCode::NOT_FOUND,
-                    format!("Provider '{}' not found", params.name),
+                    format!("Provider '{}' not found", name),
                 ));
             };
 
@@ -1509,11 +1532,7 @@ pub async fn handle_v1_provider_available_models(
     let (model_caps, caps_error) = match get_model_caps(gcx.clone(), false).await {
         Ok(caps) => (caps, None),
         Err(e) => {
-            tracing::warn!(
-                "Failed to fetch model_caps for provider '{}': {}",
-                params.name,
-                e
-            );
+            tracing::warn!("Failed to fetch model_caps for provider '{}': {}", name, e);
             (
                 HashMap::new(),
                 Some(format!(
@@ -1533,7 +1552,7 @@ pub async fn handle_v1_provider_available_models(
         Err(_) => {
             tracing::warn!(
                 "Timed out fetching available models for provider '{}'; using model_caps fallback",
-                params.name
+                name
             );
             provider.get_available_models_from_caps(&model_caps)
         }
@@ -1547,13 +1566,11 @@ pub async fn handle_v1_provider_available_models(
         ModelSource::Manual => "manual",
     };
 
-    let response = AvailableModelsResponse {
+    Ok(AvailableModelsResponse {
         models,
         source: source_str.to_string(),
         error,
-    };
-
-    json_response(StatusCode::OK, &response)
+    })
 }
 
 #[derive(Deserialize)]
@@ -1713,56 +1730,80 @@ async fn openrouter_health_response(
     gcx: Arc<GlobalContext>,
     provider_name: &str,
 ) -> Result<Response<Body>, ScratchError> {
+    json_response(
+        StatusCode::OK,
+        &openrouter_health(gcx, provider_name).await?,
+    )
+}
+
+async fn openrouter_health(
+    gcx: Arc<GlobalContext>,
+    provider_name: &str,
+) -> Result<OpenRouterHealthResponse, ScratchError> {
     let (provider, http_client) =
         resolve_provider_for_base(&gcx, provider_name, "openrouter").await?;
     let openrouter = downcast_provider::<OpenRouterProvider>(provider.as_ref(), "OpenRouter")?;
 
-    match openrouter.check_api_key_health(&http_client).await {
-        Ok(info) => json_response(
-            StatusCode::OK,
-            &OpenRouterHealthResponse {
-                ok: true,
-                message: None,
-                data: Some(info),
-            },
-        ),
-        Err(e) => json_response(
-            StatusCode::OK,
-            &OpenRouterHealthResponse {
-                ok: false,
-                message: Some(e),
-                data: None,
-            },
-        ),
-    }
+    Ok(match openrouter.check_api_key_health(&http_client).await {
+        Ok(info) => OpenRouterHealthResponse {
+            ok: true,
+            message: None,
+            data: Some(info),
+        },
+        Err(e) => OpenRouterHealthResponse {
+            ok: false,
+            message: Some(e),
+            data: None,
+        },
+    })
 }
 
 async fn google_gemini_health_response(
     gcx: Arc<GlobalContext>,
     provider_name: &str,
 ) -> Result<Response<Body>, ScratchError> {
+    json_response(
+        StatusCode::OK,
+        &google_gemini_health(gcx, provider_name).await?,
+    )
+}
+
+async fn google_gemini_health(
+    gcx: Arc<GlobalContext>,
+    provider_name: &str,
+) -> Result<GoogleGeminiHealthResponse, ScratchError> {
     let (provider, http_client) =
         resolve_provider_for_base(&gcx, provider_name, "google_gemini").await?;
     let gemini = downcast_provider::<GoogleGeminiProvider>(provider.as_ref(), "Google Gemini")?;
 
-    match gemini.check_api_key_health(&http_client).await {
-        Ok(info) => json_response(
-            StatusCode::OK,
-            &GoogleGeminiHealthResponse {
-                ok: true,
-                message: None,
-                data: Some(info),
-            },
-        ),
-        Err(e) => json_response(
-            StatusCode::OK,
-            &GoogleGeminiHealthResponse {
-                ok: false,
-                message: Some(e),
-                data: None,
-            },
-        ),
-    }
+    Ok(match gemini.check_api_key_health(&http_client).await {
+        Ok(info) => GoogleGeminiHealthResponse {
+            ok: true,
+            message: None,
+            data: Some(info),
+        },
+        Err(e) => GoogleGeminiHealthResponse {
+            ok: false,
+            message: Some(e),
+            data: None,
+        },
+    })
+}
+
+/// Health of a provider whose base supports it (OpenRouter, Google Gemini); `None` otherwise.
+pub(crate) async fn provider_health(
+    gcx: Arc<GlobalContext>,
+    name: &str,
+) -> Result<Option<Value>, ScratchError> {
+    let identity = resolve_provider_identity(&gcx, name).await?;
+    let value = match identity.base_provider.as_str() {
+        "openrouter" => serde_json::to_value(openrouter_health(gcx, name).await?),
+        "google_gemini" => serde_json::to_value(google_gemini_health(gcx, name).await?),
+        _ => return Ok(None),
+    };
+    value
+        .map(Some)
+        .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
 }
 
 /// GET /v1/openrouter/health
@@ -1810,6 +1851,21 @@ async fn update_model_enabled_state(
     model_id: &str,
     enabled: bool,
 ) -> Result<Response<Body>, ScratchError> {
+    set_provider_model_enabled(gcx, provider_name, model_id, enabled).await?;
+    json_response(
+        StatusCode::OK,
+        &json!({"success": true, "model_id": model_id, "enabled": enabled}),
+    )
+}
+
+/// Enables or disables one model of a provider, persists it (rolling back in memory on failure),
+/// reloads the provider and invalidates caps.
+pub(crate) async fn set_provider_model_enabled(
+    gcx: Arc<GlobalContext>,
+    provider_name: &str,
+    model_id: &str,
+    enabled: bool,
+) -> Result<(), ScratchError> {
     ensure_provider_for_model_management(gcx.clone(), provider_name).await?;
     // Capture previous state for rollback
     let (config_dir, previous_enabled_models, previous_disabled_models) = {
@@ -1861,11 +1917,7 @@ async fn update_model_enabled_state(
     reload_provider_from_disk(gcx.clone(), provider_name, &config_dir).await?;
 
     invalidate_caps(gcx).await;
-
-    json_response(
-        StatusCode::OK,
-        &json!({"success": true, "model_id": model_id, "enabled": enabled}),
-    )
+    Ok(())
 }
 
 async fn update_model_selected_provider_state(
@@ -1950,49 +2002,60 @@ pub async fn handle_v1_provider_add_custom_model(
         ));
     }
 
-    ensure_provider_for_model_management(gcx.clone(), &params.name).await?;
+    add_provider_custom_model(gcx, &params.name, &request.id, request.config).await?;
+    json_response(
+        StatusCode::OK,
+        &json!({"success": true, "model_id": request.id}),
+    )
+}
+
+/// Adds or replaces a custom model of a provider with rollback on persistence failure;
+/// returns the previous config when one was replaced.
+pub(crate) async fn add_provider_custom_model(
+    gcx: Arc<GlobalContext>,
+    provider_name: &str,
+    model_id: &str,
+    config: CustomModelConfig,
+) -> Result<Option<CustomModelConfig>, ScratchError> {
+    ensure_provider_for_model_management(gcx.clone(), provider_name).await?;
     let (config_dir, previous_config) = {
         let mut registry = gcx.providers.write().await;
 
-        let provider = registry.get_mut(&params.name).ok_or_else(|| {
+        let provider = registry.get_mut(provider_name).ok_or_else(|| {
             ScratchError::new(
                 StatusCode::NOT_FOUND,
-                format!("Provider '{}' not found or not configured", params.name),
+                format!("Provider '{}' not found or not configured", provider_name),
             )
         })?;
 
         if provider.is_readonly() {
             return Err(ScratchError::new(
                 StatusCode::FORBIDDEN,
-                format!("Provider '{}' is readonly", params.name),
+                format!("Provider '{}' is readonly", provider_name),
             ));
         }
 
-        let previous_config = provider.custom_models().get(&request.id).cloned();
-        provider.add_custom_model(request.id.clone(), request.config.clone());
+        let previous_config = provider.custom_models().get(model_id).cloned();
+        provider.add_custom_model(model_id.to_string(), config.clone());
         (gcx.config_dir.clone(), previous_config)
     };
 
-    if let Err(e) = patch_provider_model_config(gcx.clone(), &config_dir, &params.name).await {
+    if let Err(e) = patch_provider_model_config(gcx.clone(), &config_dir, provider_name).await {
         let mut registry = gcx.providers.write().await;
-        if let Some(provider) = registry.get_mut(&params.name) {
-            if let Some(previous) = previous_config {
-                provider.add_custom_model(request.id.clone(), previous);
+        if let Some(provider) = registry.get_mut(provider_name) {
+            if let Some(previous) = previous_config.clone() {
+                provider.add_custom_model(model_id.to_string(), previous);
             } else {
-                provider.remove_custom_model(&request.id);
+                provider.remove_custom_model(model_id);
             }
         }
         return Err(e);
     }
 
-    reload_provider_from_disk(gcx.clone(), &params.name, &config_dir).await?;
+    reload_provider_from_disk(gcx.clone(), provider_name, &config_dir).await?;
 
     invalidate_caps(gcx).await;
-
-    json_response(
-        StatusCode::OK,
-        &json!({"success": true, "model_id": request.id}),
-    )
+    Ok(previous_config)
 }
 
 #[derive(Deserialize)]
@@ -2044,7 +2107,19 @@ async fn handle_v1_provider_remove_custom_model_impl(
             "Model ID cannot be empty".to_string(),
         ));
     }
+    remove_provider_custom_model(gcx, provider_name, &request.model_id).await?;
+    json_response(
+        StatusCode::OK,
+        &json!({"success": true, "model_id": request.model_id}),
+    )
+}
 
+/// Removes a custom model of a provider with rollback on persistence failure.
+pub(crate) async fn remove_provider_custom_model(
+    gcx: Arc<GlobalContext>,
+    provider_name: &str,
+    model_id: &str,
+) -> Result<(), ScratchError> {
     let (config_dir, previous_custom_models, previous_enabled_models, previous_disabled_models) = {
         let mut registry = gcx.providers.write().await;
 
@@ -2066,13 +2141,13 @@ async fn handle_v1_provider_remove_custom_model_impl(
         let previous_enabled = provider.enabled_models().to_vec();
         let previous_disabled = provider.disabled_models().to_vec();
 
-        if !provider.remove_custom_model(&request.model_id) {
+        if !provider.remove_custom_model(model_id) {
             return Err(ScratchError::new(
                 StatusCode::NOT_FOUND,
-                format!("Custom model '{}' not found", request.model_id),
+                format!("Custom model '{}' not found", model_id),
             ));
         }
-        provider.set_model_enabled(&request.model_id, false);
+        provider.set_model_enabled(model_id, false);
 
         (
             gcx.config_dir.clone(),
@@ -2087,8 +2162,8 @@ async fn handle_v1_provider_remove_custom_model_impl(
         // Rollback in-memory state
         let mut registry = gcx.providers.write().await;
         if let Some(provider) = registry.get_mut(provider_name) {
-            if let Some(config) = previous_custom_models.get(&request.model_id) {
-                provider.add_custom_model(request.model_id.clone(), config.clone());
+            if let Some(config) = previous_custom_models.get(model_id) {
+                provider.add_custom_model(model_id.to_string(), config.clone());
             }
             for model in provider.enabled_models().to_vec() {
                 provider.set_model_enabled(&model, false);
@@ -2109,11 +2184,7 @@ async fn handle_v1_provider_remove_custom_model_impl(
     reload_provider_from_disk(gcx.clone(), provider_name, &config_dir).await?;
 
     invalidate_caps(gcx).await;
-
-    json_response(
-        StatusCode::OK,
-        &json!({"success": true, "model_id": request.model_id}),
-    )
+    Ok(())
 }
 
 /// Merge new settings with existing config, preserving secret fields when value is "***"
@@ -2558,7 +2629,7 @@ struct GitHubCopilotOAuthStartRequest {
     deployment_type: Option<String>,
 }
 
-async fn oauth_base_provider_for_instance(
+pub(crate) async fn oauth_base_provider_for_instance(
     gcx: &Arc<GlobalContext>,
     provider_name: &str,
 ) -> Result<String, ScratchError> {
@@ -3113,12 +3184,42 @@ pub async fn handle_v1_provider_oauth_logout(
             .map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, e))?;
         return json_response(StatusCode::OK, &json!({"success":true}));
     }
+    if !provider_sign_out(&gcx, &params.name, &base_provider).await? {
+        return json_response(StatusCode::OK, &json!({"success":true}));
+    }
+    json_response(
+        StatusCode::OK,
+        &json!({
+            "success": true,
+            "auth_status": "No credentials found",
+        }),
+    )
+}
+
+/// Whether the provider as saved on disk holds credentials; `None` when it has no file.
+pub(crate) async fn provider_file_has_credentials(
+    gcx: &Arc<GlobalContext>,
+    name: &str,
+) -> Result<Option<bool>, ScratchError> {
+    validate_instance_id_for_http(name)?;
+    match read_existing_provider_settings(&gcx.config_dir, name).await? {
+        Some(settings) => Ok(Some(provider_from_yaml(name, settings)?.has_credentials())),
+        None => Ok(None),
+    }
+}
+
+/// Signs a provider out by clearing its stored OAuth tokens (no pending GUI sign-in involved).
+/// False when a Claude cloud backend had no tokens to clear and only its sign-in was cancelled.
+pub(crate) async fn provider_sign_out(
+    gcx: &Arc<GlobalContext>,
+    name: &str,
+    base_provider: &str,
+) -> Result<bool, ScratchError> {
     let config_dir = gcx.config_dir.clone();
 
-    match base_provider.as_str() {
+    match base_provider {
         "claude_code" => {
-            let (provider, _) =
-                resolve_provider_for_base(&gcx, &params.name, "claude_code").await?;
+            let (provider, _) = resolve_provider_for_base(gcx, name, "claude_code").await?;
             let claude = downcast_provider::<ClaudeCodeProvider>(provider.as_ref(), "Claude Code")?;
             let Some(mode) = claude.oauth_mode() else {
                 if !matches!(
@@ -3132,18 +3233,17 @@ pub async fn handle_v1_provider_oauth_logout(
                         "Sign-in unsupported for selected Claude backend".into(),
                     ));
                 }
-                super::native_auth::cancel(&params.name, None)
+                super::native_auth::cancel(name, None)
                     .await
                     .map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, e))?;
-                return json_response(StatusCode::OK, &json!({"success":true}));
+                return Ok(false);
             };
             let empty = serde_yaml::to_value(crate::providers::claude_code_oauth::OAuthTokens {
                 oauth_mode: Some(mode),
                 ..Default::default()
             })
             .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-            save_provider_oauth_tokens(&gcx, &config_dir, &params.name, "claude_code", &empty)
-                .await?;
+            save_provider_oauth_tokens(gcx, &config_dir, name, "claude_code", &empty).await?;
         }
         "openai_codex" => {
             let empty =
@@ -3154,8 +3254,7 @@ pub async fn handle_v1_provider_oauth_logout(
                             format!("Failed to serialize: {}", e),
                         )
                     })?;
-            save_provider_oauth_tokens(&gcx, &config_dir, &params.name, "openai_codex", &empty)
-                .await?;
+            save_provider_oauth_tokens(gcx, &config_dir, name, "openai_codex", &empty).await?;
         }
         "xai_oauth" => {
             let empty =
@@ -3166,8 +3265,7 @@ pub async fn handle_v1_provider_oauth_logout(
                             format!("Failed to serialize: {}", e),
                         )
                     })?;
-            save_provider_oauth_tokens(&gcx, &config_dir, &params.name, "xai_oauth", &empty)
-                .await?;
+            save_provider_oauth_tokens(gcx, &config_dir, name, "xai_oauth", &empty).await?;
         }
         "google_antigravity" => {
             let empty = serde_yaml::to_value(
@@ -3179,14 +3277,8 @@ pub async fn handle_v1_provider_oauth_logout(
                     format!("Failed to serialize: {}", e),
                 )
             })?;
-            save_provider_oauth_tokens(
-                &gcx,
-                &config_dir,
-                &params.name,
-                "google_antigravity",
-                &empty,
-            )
-            .await?;
+            save_provider_oauth_tokens(gcx, &config_dir, name, "google_antigravity", &empty)
+                .await?;
         }
         "github_copilot" => {
             let empty = serde_yaml::to_value(
@@ -3198,24 +3290,16 @@ pub async fn handle_v1_provider_oauth_logout(
                     format!("Failed to serialize: {}", e),
                 )
             })?;
-            save_provider_oauth_tokens(&gcx, &config_dir, &params.name, "github_copilot", &empty)
-                .await?;
+            save_provider_oauth_tokens(gcx, &config_dir, name, "github_copilot", &empty).await?;
         }
         _ => {
             return Err(ScratchError::new(
                 StatusCode::BAD_REQUEST,
-                format!("OAuth not supported for provider '{}'", params.name),
+                format!("OAuth not supported for provider '{}'", name),
             ));
         }
     }
-
-    json_response(
-        StatusCode::OK,
-        &json!({
-            "success": true,
-            "auth_status": "No credentials found",
-        }),
-    )
+    Ok(true)
 }
 
 #[derive(Deserialize)]
@@ -3406,15 +3490,15 @@ pub async fn handle_openai_codex_auth_callback(
     handle_openai_codex_oauth_callback_impl(gcx, query, None).await
 }
 
-async fn claude_code_usage_response(
+async fn claude_code_usage_value(
     gcx: Arc<GlobalContext>,
     provider_name: &str,
-) -> Result<Response<Body>, ScratchError> {
+) -> Result<Value, ScratchError> {
     let result = fetch_claude_code_usage_with_refresh(gcx, provider_name).await;
 
     match result {
-        Ok(usage) => json_response(StatusCode::OK, &json!({"data": usage})),
-        Err(e) => json_response(StatusCode::OK, &json!({"error": e})),
+        Ok(usage) => Ok(json!({"data": usage})),
+        Err(e) => Ok(json!({"error": e})),
     }
 }
 
@@ -3625,44 +3709,44 @@ pub async fn handle_v1_provider_usage_resets(
     claude_code_reset_status_response(gcx, &params.name).await
 }
 
-async fn openai_codex_usage_response(
+async fn openai_codex_usage_value(
     gcx: Arc<GlobalContext>,
     provider_name: &str,
-) -> Result<Response<Body>, ScratchError> {
+) -> Result<Value, ScratchError> {
     let result = fetch_openai_codex_usage_with_refresh(gcx, provider_name).await;
 
     match result {
-        Ok(usage) => json_response(StatusCode::OK, &json!({"data": usage})),
-        Err(e) => json_response(StatusCode::OK, &json!({"error": e})),
+        Ok(usage) => Ok(json!({"data": usage})),
+        Err(e) => Ok(json!({"error": e})),
     }
 }
 
-async fn opencode_usage_response(
+async fn opencode_usage_value(
     gcx: Arc<GlobalContext>,
     provider_name: &str,
-) -> Result<Response<Body>, ScratchError> {
+) -> Result<Value, ScratchError> {
     let (provider, http_client) =
         resolve_provider_for_base(&gcx, provider_name, "opencode").await?;
     let opencode = downcast_provider::<OpenCodeProvider>(provider.as_ref(), "OpenCode")?;
 
     if opencode.usage_endpoint.trim().is_empty() {
-        return json_response(StatusCode::OK, &json!({"data": null}));
+        return Ok(json!({"data": null}));
     }
 
     match opencode.fetch_usage(&http_client).await {
-        Ok(usage) => json_response(StatusCode::OK, &json!({"data": usage})),
-        Err(e) => json_response(StatusCode::OK, &json!({"error": e})),
+        Ok(usage) => Ok(json!({"data": usage})),
+        Err(e) => Ok(json!({"error": e})),
     }
 }
 
-async fn google_antigravity_usage_response(
+async fn google_antigravity_usage_value(
     gcx: Arc<GlobalContext>,
     provider_name: &str,
-) -> Result<Response<Body>, ScratchError> {
+) -> Result<Value, ScratchError> {
     let result = fetch_google_antigravity_usage_with_refresh(gcx, provider_name).await;
     match result {
-        Ok(usage) => json_response(StatusCode::OK, &json!({"data": usage})),
-        Err(error) => json_response(StatusCode::OK, &json!({"error": error})),
+        Ok(usage) => Ok(json!({"data": usage})),
+        Err(error) => Ok(json!({"error": error})),
     }
 }
 
@@ -3744,15 +3828,15 @@ async fn fetch_google_antigravity_usage_with_refresh(
     }
 }
 
-async fn xai_oauth_usage_response(
+async fn xai_oauth_usage_value(
     gcx: Arc<GlobalContext>,
     provider_name: &str,
-) -> Result<Response<Body>, ScratchError> {
+) -> Result<Value, ScratchError> {
     let (provider, _) = resolve_provider_for_base(&gcx, provider_name, "xai_oauth").await?;
     let xai = downcast_provider::<XAIOAuthProvider>(provider.as_ref(), "xAI OAuth")?;
     match xai.fetch_usage().await {
-        Ok(usage) => json_response(StatusCode::OK, &json!({"data": usage})),
-        Err(error) => json_response(StatusCode::OK, &json!({"error": error})),
+        Ok(usage) => Ok(json!({"data": usage})),
+        Err(error) => Ok(json!({"error": error})),
     }
 }
 
@@ -4157,7 +4241,7 @@ async fn fetch_provider_quota(
     }
 }
 
-async fn provider_quota_cached(
+pub(crate) async fn provider_quota_cached(
     gcx: Arc<GlobalContext>,
     provider_name: &str,
     base_provider: &str,
@@ -4254,8 +4338,23 @@ pub async fn handle_v1_provider_quotas(
     State(app): State<AppState>,
     Query(query): Query<ProviderQuotaQuery>,
 ) -> Result<Response<Body>, ScratchError> {
+    let snapshots = provider_quotas(app.gcx.clone(), query.refresh).await?;
+    json_response(
+        StatusCode::OK,
+        &ProviderQuotasResponse {
+            quotas: snapshots,
+            truncated: false,
+        },
+    )
+}
+
+/// Quota snapshots of every listed provider, eight at a time.
+pub(crate) async fn provider_quotas(
+    gcx: Arc<GlobalContext>,
+    refresh: bool,
+) -> Result<Vec<ProviderQuotaSnapshot>, ScratchError> {
     let providers = {
-        let registry = app.gcx.providers.read().await;
+        let registry = gcx.providers.read().await;
         let mut providers = registry
             .iter()
             .filter(|(_, provider)| !provider.is_hidden_from_list())
@@ -4270,8 +4369,7 @@ pub async fn handle_v1_provider_quotas(
     while next < providers.len() || !tasks.is_empty() {
         while next < providers.len() && tasks.len() < 8 {
             let (name, base_provider) = providers[next].clone();
-            let gcx = app.gcx.clone();
-            let refresh = query.refresh;
+            let gcx = gcx.clone();
             let index = next;
             tasks.spawn(async move {
                 (
@@ -4291,14 +4389,7 @@ pub async fn handle_v1_provider_quotas(
             snapshots[index] = Some(snapshot);
         }
     }
-    let snapshots = snapshots.into_iter().flatten().collect();
-    json_response(
-        StatusCode::OK,
-        &ProviderQuotasResponse {
-            quotas: snapshots,
-            truncated: false,
-        },
-    )
+    Ok(snapshots.into_iter().flatten().collect())
 }
 
 async fn openai_codex_redeem_response(
@@ -4320,28 +4411,37 @@ pub async fn handle_v1_provider_usage(
     Path(params): Path<ProviderPathParams>,
     Query(query): Query<super::litellm_http::UsageQuery>,
 ) -> Result<Response<Body>, ScratchError> {
-    let gcx = app.gcx.clone();
-    validate_instance_id_for_http(&params.name)?;
-    let identity = resolve_provider_identity(&gcx, &params.name).await?;
+    let value = provider_usage(app.gcx.clone(), &params.name, query).await?;
+    json_response(StatusCode::OK, &value)
+}
+
+/// `{"data": ...}` or `{"error": ...}` of a provider's subscription usage.
+pub(crate) async fn provider_usage(
+    gcx: Arc<GlobalContext>,
+    name: &str,
+    query: super::litellm_http::UsageQuery,
+) -> Result<Value, ScratchError> {
+    validate_instance_id_for_http(name)?;
+    let identity = resolve_provider_identity(&gcx, name).await?;
     if identity.base_provider == "litellm" {
-        let data = super::litellm_http::usage(&gcx, &params.name, query).await?;
-        return json_response(StatusCode::OK, &json!({"data": data}));
+        let data = super::litellm_http::usage(&gcx, name, query).await?;
+        return Ok(json!({"data": data}));
     }
     if !usage_base_provider_supported(&identity.base_provider) {
         return Err(ScratchError::new(
             StatusCode::BAD_REQUEST,
-            format!("Provider '{}' does not support usage", params.name),
+            format!("Provider '{}' does not support usage", name),
         ));
     }
     match identity.base_provider.as_str() {
-        "claude_code" => claude_code_usage_response(gcx, &params.name).await,
-        "openai_codex" => openai_codex_usage_response(gcx, &params.name).await,
-        "opencode" => opencode_usage_response(gcx, &params.name).await,
-        "google_antigravity" => google_antigravity_usage_response(gcx, &params.name).await,
-        "xai_oauth" => xai_oauth_usage_response(gcx, &params.name).await,
+        "claude_code" => claude_code_usage_value(gcx, name).await,
+        "openai_codex" => openai_codex_usage_value(gcx, name).await,
+        "opencode" => opencode_usage_value(gcx, name).await,
+        "google_antigravity" => google_antigravity_usage_value(gcx, name).await,
+        "xai_oauth" => xai_oauth_usage_value(gcx, name).await,
         _ => Err(ScratchError::new(
             StatusCode::BAD_REQUEST,
-            format!("Provider '{}' does not support usage", params.name),
+            format!("Provider '{}' does not support usage", name),
         )),
     }
 }

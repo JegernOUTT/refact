@@ -52,9 +52,6 @@ pub mod tool_chrome;
 mod tool_clean_background_processes;
 #[cfg(test)]
 pub mod tool_cmdline;
-mod tool_code_mode;
-#[cfg(test)]
-mod tool_code_mode_tests;
 pub(crate) mod tool_codegraph;
 pub mod tool_config_subagent;
 mod tool_contrast_audit;
@@ -71,7 +68,7 @@ pub mod tool_goal_pursuit_controls;
 pub(crate) mod tool_handoff_to_mode;
 mod tool_image_region;
 mod tool_knowledge;
-mod tool_manage_mcp;
+pub(crate) mod tool_manage_mcp;
 mod tool_mark_elements;
 mod tool_mcp_search;
 pub mod tool_metrics;
@@ -162,3 +159,8 @@ mod tool_task_wait_for_agents;
 mod tool_tasks;
 mod tool_worktree_create;
 mod tool_worktree_merge;
+
+#[cfg(test)]
+mod output_contracts;
+
+pub mod tool_python;

@@ -212,7 +212,7 @@ impl BrowserSettings {
         }
     }
 
-    fn validate(&self) -> Result<(), String> {
+    pub(crate) fn validate(&self) -> Result<(), String> {
         if self.lifecycle.idle_timeout_secs == 0 {
             return Err("lifecycle.idle_timeout_secs must be at least 1".to_string());
         }
@@ -412,14 +412,22 @@ pub async fn handle_v1_browser_settings_post(
             format!("invalid browser settings payload: {}", e),
         )
     })?;
+    save_browser_settings(&app.gcx.config_dir, &settings).await?;
+    Ok(Json(settings))
+}
+
+/// Validates, writes and publishes browser settings for the next browser launch.
+pub(crate) async fn save_browser_settings(
+    config_dir: &Path,
+    settings: &BrowserSettings,
+) -> Result<(), ScratchError> {
     settings.validate().map_err(bad_request)?;
-    let config_dir = app.gcx.config_dir.clone();
-    let path = settings_path(&config_dir);
-    let yaml = serde_yaml::to_string(&settings)
+    let path = settings_path(config_dir);
+    let yaml = serde_yaml::to_string(settings)
         .map_err(|e| server_error(format!("cannot serialize browser settings: {}", e)))?;
     atomic_write(&path, &yaml).await?;
     publish(settings.clone());
-    Ok(Json(settings))
+    Ok(())
 }
 
 #[cfg(test)]

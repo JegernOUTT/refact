@@ -1043,7 +1043,7 @@ fn tool_confirm_changed(from: &ModeConfig, to: &ModeConfig) -> bool {
             .any(|(from, to)| from.match_pattern != to.match_pattern || from.action != to.action)
 }
 
-fn mode_switch_diff(from: &ModeConfig, to: &ModeConfig) -> serde_json::Value {
+pub(crate) fn mode_switch_diff(from: &ModeConfig, to: &ModeConfig) -> serde_json::Value {
     let from_tools: BTreeSet<_> = from.tools.iter().cloned().collect();
     let to_tools: BTreeSet<_> = to.tools.iter().cloned().collect();
     let tool_confirm_changed = tool_confirm_changed(from, to);
@@ -1423,7 +1423,7 @@ fn handle_update_goal_command(
     Ok(update_goal_result(seq, truncation))
 }
 
-pub(super) fn validate_goal_control(session: &ChatSession, action: &str) -> Result<(), String> {
+pub(crate) fn validate_goal_control(session: &ChatSession, action: &str) -> Result<(), String> {
     let Some(goal) = session.goal.as_ref() else {
         return Err("no goal to control; call set_goal first".into());
     };
@@ -2189,7 +2189,7 @@ fn sanitize_message_for_branch(msg: &ChatMessage) -> ChatMessage {
     }
 }
 
-fn is_allowed_for_branch(msg: &ChatMessage) -> bool {
+pub(crate) fn is_allowed_for_branch(msg: &ChatMessage) -> bool {
     matches!(
         msg.role.as_str(),
         "user"

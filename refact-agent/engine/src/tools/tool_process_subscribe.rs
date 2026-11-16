@@ -40,6 +40,16 @@ const RATE_LIMIT_WINDOW: Duration = Duration::from_secs(1);
 /// and are delivered by the next flush.
 const MAX_EVENTS_PER_DELIVERY: usize = 20;
 
+#[derive(serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+struct ProcessSubscribeOutput {
+    subscribed: bool,
+    max_duration_ms: u64,
+    max_events: usize,
+    max_line_bytes: usize,
+    process_id: String,
+    push: String,
+}
+
 pub struct ToolProcessSubscribe {
     pub config_path: String,
 }
@@ -139,7 +149,7 @@ impl Tool for ToolProcessSubscribe {
             allow_parallel: true,
             description: "Subscribe to a running process's stdout for a bounded window. Each output line that matches the optional regex_filter is injected as a notification event in the chat. Auto-cancels when the process exits or after max_duration_ms. Useful for waiting for 'ready' markers, watching for failures, etc.".to_string(),
             input_schema: process_subscribe_input_schema(),
-            output_schema: None,
+            output_schema: Some(refact_tool_api::tool_output::output_schema_for::<ProcessSubscribeOutput>()),
             annotations: None,
         }
     }
@@ -638,11 +648,16 @@ fn process_subscribe_input_schema() -> Value {
 }
 
 fn tool_result(tool_call_id: &String, content: String) -> (bool, Vec<ContextEnum>) {
+    let output: ProcessSubscribeOutput =
+        serde_json::from_str(&content).expect("subscription receipt");
+    let mut extra = serde_json::Map::new();
+    crate::tools::tool_process::attach_output(&mut extra, output);
     (
         false,
         vec![ContextEnum::ChatMessage(ChatMessage {
             role: "tool".to_string(),
             content: ChatContent::SimpleText(content),
+            extra,
             tool_call_id: tool_call_id.clone(),
             output_filter: Some(OutputFilter::no_limits()),
             ..Default::default()

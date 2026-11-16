@@ -17,6 +17,12 @@ use crate::integrations::integr_abstract::IntegrationConfirmation;
 use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
 use crate::worktrees::scope::ExecutionScope;
 
+#[derive(serde::Serialize, schemars::JsonSchema)]
+struct CleanBackgroundProcessesOutput {
+    killed_count: usize,
+    killed: Vec<crate::tools::tool_process::ProcessListEntry>,
+}
+
 pub struct ToolCleanBackgroundProcesses {
     pub config_path: String,
 }
@@ -71,6 +77,16 @@ impl Tool for ToolCleanBackgroundProcesses {
         });
         let mut extra = serde_json::Map::new();
         extra.insert("clean_background_processes".to_string(), body.clone());
+        crate::tools::tool_process::attach_output(
+            &mut extra,
+            CleanBackgroundProcessesOutput {
+                killed_count: killed.len(),
+                killed: killed
+                    .iter()
+                    .map(crate::tools::tool_process::output_process)
+                    .collect(),
+            },
+        );
 
         Ok((
             false,
@@ -114,7 +130,7 @@ impl Tool for ToolCleanBackgroundProcesses {
                     }
                 }
             }),
-            output_schema: None,
+            output_schema: Some(refact_tool_api::tool_output::output_schema_for::<CleanBackgroundProcessesOutput>()),
             annotations: None,
         }
     }

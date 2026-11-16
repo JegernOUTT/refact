@@ -1,3 +1,4 @@
+import { workspaceExample } from "../../../services/refact/pythonWorkspace.fixture";
 import { readFileSync } from "node:fs";
 
 import { http, HttpResponse } from "msw";
@@ -56,6 +57,29 @@ function stubFileTree() {
 }
 
 describe("Dock", () => {
+  it("routes Python workspace to the focused chat", async () => {
+    mockNarrow(false);
+    let requestedChatId: string | null = null;
+    server.use(
+      http.get("*/v1/python/workspace", ({ request }) => {
+        requestedChatId = new URL(request.url).searchParams.get("chat_id");
+        return HttpResponse.json({
+          ...workspaceExample,
+          chat_id: requestedChatId,
+        });
+      }),
+    );
+    const chat = createDefaultChatState();
+    const view = render(<Dock />, { preloadedState: { chat } });
+    view.store.dispatch(openTab(`chat:${chat.current_thread_id}`));
+    view.store.dispatch(setDockSection("python"));
+    await screen.findByText("Session");
+    expect(requestedChatId).toBe(chat.current_thread_id);
+    expect(screen.getByTestId("workspace-dock-section")).toHaveAttribute(
+      "data-section",
+      "python",
+    );
+  });
   it("opens a discovered unloaded child through the actual dock handler and keeps denied links in place", async () => {
     mockNarrow(false);
     const chat = createDefaultChatState();

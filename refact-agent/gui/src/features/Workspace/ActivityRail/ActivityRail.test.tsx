@@ -1,3 +1,6 @@
+import { workspaceExample } from "../../../services/refact/pythonWorkspace.fixture";
+import { applyChatEvent } from "../../Chat/Thread/actions";
+import { pythonWorkspaceApi } from "../../../services/refact/pythonWorkspace";
 import { http, HttpResponse } from "msw";
 import { beforeEach, describe, expect, it } from "vitest";
 
@@ -87,6 +90,90 @@ function renderRail(store: AppStore) {
 }
 
 describe("ActivityRail", () => {
+  it("does not query Python workspace for a chat with no Python activity", async () => {
+    const store = createRailStore();
+    renderRail(store);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(
+      Object.keys(store.getState()[pythonWorkspaceApi.reducerPath].queries),
+    ).toHaveLength(0);
+  });
+  it("queries for a finished Python result after transient state is pruned", async () => {
+    const store = createRailStore();
+    store.dispatch(
+      applyChatEvent({
+        type: "message_added",
+        chat_id: chatId,
+        seq: "1",
+        index: 0,
+        message: {
+          role: "tool",
+          tool_call_id: "t",
+          content: "",
+          extra: {
+            python: {
+              schema: 1,
+              run_id: "r",
+              status: "completed",
+              background: false,
+              started_at_ms: 0,
+              finished_at_ms: 1,
+              workspace_dir: "",
+              run_dir: "",
+              calls: [],
+              calls_total: 0,
+              calls_truncated: false,
+              stdout_preview: "",
+              stdout_bytes: 0,
+              result_preview: "",
+              result_bytes: 0,
+              error: null,
+              files_read: [],
+              files_written: [],
+              artifacts: [],
+              state: {
+                restored: false,
+                reset_reason: null,
+                persisted: false,
+                bytes: 0,
+              },
+            },
+          },
+        },
+      }),
+    );
+    renderRail(store);
+    await waitFor(() =>
+      expect(
+        Object.keys(store.getState()[pythonWorkspaceApi.reducerPath].queries),
+      ).toHaveLength(1),
+    );
+  });
+  it.each(["started", "finished"] as const)(
+    "queries after a %s Python run in this session",
+    async (kind) => {
+      const store = createRailStore();
+      store.dispatch(
+        applyChatEvent({
+          type: "python_run_update",
+          chat_id: chatId,
+          seq: "1",
+          tool_call_id: "t",
+          run_id: "r",
+          update:
+            kind === "started"
+              ? { kind, background: false }
+              : { kind, status: "completed" },
+        }),
+      );
+      renderRail(store);
+      await waitFor(() =>
+        expect(
+          Object.keys(store.getState()[pythonWorkspaceApi.reducerPath].queries),
+        ).toHaveLength(1),
+      );
+    },
+  );
   it("resolves only an engine-served web project's owning daemon without credentials", () => {
     const url = "https://work.local:8488/p/project/?daemon_token=secret#chat";
     expect(daemonConsoleUrl({ host: "web", engineServed: true }, url)).toBe(
@@ -126,6 +213,11 @@ describe("ActivityRail", () => {
   });
 
   beforeEach(() => {
+    server.use(
+      http.get("*/v1/python/workspace", () =>
+        HttpResponse.json({ ...workspaceExample, artifacts: [] }),
+      ),
+    );
     server.use(
       http.get("*/v1/git/status", () => HttpResponse.json({ roots: [] })),
     );
@@ -251,7 +343,13 @@ describe("ActivityRail", () => {
     store.dispatch(setDockOpen(false));
     renderRail(store);
 
-    for (const label of ["Files", "Git", "Agents", "Active chats"]) {
+    for (const label of [
+      "Files",
+      "Git",
+      "Agents",
+      "Active chats",
+      "Python workspace",
+    ]) {
       expect(screen.getByRole("button", { name: label })).toHaveAttribute(
         "aria-pressed",
         "false",
@@ -646,4 +744,22 @@ describe("ActivityRail", () => {
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(calls).toBe(0);
   });
+});
+
+it("selects, toggles and badges Python for the focused chat", async () => {
+  server.use(
+    http.get("*/v1/git/status", () => HttpResponse.json({ roots: [] })),
+    http.get("*/v1/python/workspace", () =>
+      HttpResponse.json(workspaceExample),
+    ),
+  );
+  const store = createRailStore();
+  const view = renderRail(store);
+  const button = screen.getByRole("button", { name: "Python workspace" });
+  await view.user.click(button);
+  await waitFor(() => expect(button).toHaveAccessibleDescription("1 artifact"));
+  expect(store.getState().workspace.dock?.section).toBe("python");
+  expect(button).toHaveAttribute("aria-pressed", "true");
+  await view.user.click(button);
+  expect(button).toHaveAttribute("aria-pressed", "false");
 });

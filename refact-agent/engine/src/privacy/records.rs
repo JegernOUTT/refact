@@ -31,7 +31,7 @@ pub enum ShellReadDecision {
     Ask,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DerivedZone {
     pub zone: String,
     pub origin: Option<String>,
@@ -1192,7 +1192,7 @@ pub fn observed_file_records(
     observed_file_records_with_derived(gcx, paths, &new_derived_privacy_zones())
 }
 
-fn observed_file_records_with_derived(
+pub(crate) fn observed_file_records_with_derived(
     gcx: &Arc<GlobalContext>,
     paths: impl IntoIterator<Item = PathBuf>,
     derived_zones: &DerivedPrivacyZones,
@@ -1249,7 +1249,7 @@ fn is_vcs_metadata_churn(path: &Path) -> bool {
         })
 }
 
-fn inherit_observed_write_zones(
+pub(crate) fn inherit_observed_write_zones(
     gcx: &Arc<GlobalContext>,
     _policy: &refact_privacy::PrivacyPolicy,
     reads: &[FileRecord],

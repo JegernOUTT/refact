@@ -1,4 +1,4 @@
-schema_version: 18
+schema_version: 19
 id: ask
 title: Ask
 description: Quick Q&A with web research capability
@@ -62,6 +62,7 @@ prompt: |
 
   %SYSTEM_INFO%
 
+  %CODE_MODE%
   %MODELS_INFO%
 
 allow_integrations: false
@@ -69,6 +70,7 @@ allow_mcp: true
 allow_subagents: false
 
 tools:
+  - python
   - app
   - app_build
   - app_state

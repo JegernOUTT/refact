@@ -37,6 +37,15 @@ const MODEL_TYPES: &[&str] = &[
     "task_planner",
 ];
 
+#[derive(serde::Serialize, schemars::JsonSchema)]
+pub(crate) struct SubagentOutput {
+    pub agent_id: Option<String>,
+    pub child_chat_id: Option<String>,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+}
+
 #[derive(Clone)]
 pub struct ToolSubagent {
     pub config_path: String,
@@ -182,7 +191,7 @@ impl Tool for ToolSubagent {
                 },
                 "required": ["task", "expected_result"]
             }),
-            output_schema: None,
+            output_schema: Some(refact_tool_api::tool_output::output_schema_for::<SubagentOutput>()),
             annotations: None,
         }
     }
@@ -583,6 +592,9 @@ impl Tool for ToolSubagent {
                         "source_bytes": scope.limits.launch_source_bytes,
                     }),
                 );
+            }
+            if let ContextEnum::ChatMessage(message) = &mut preview {
+                attach_subagent_output(&mut message.extra);
             }
             return Ok((false, vec![preview]));
         }
@@ -1115,7 +1127,7 @@ fn build_subagent_prompt(
     prompt
 }
 
-fn build_background_start_tool_result(
+pub(crate) fn build_background_start_tool_result(
     handle: &crate::agents::spawn::SpawnHandle,
     task: &str,
     parent_chat_id: &str,
@@ -1413,7 +1425,39 @@ fn preview_names(values: &[String]) -> String {
     format!("{} ({})", names, values.len())
 }
 
-fn tool_message(content: String, tool_call_id: &str, extra: Map<String, Value>) -> ContextEnum {
+fn attach_subagent_output(extra: &mut Map<String, Value>) {
+    let output = SubagentOutput {
+        agent_id: extra
+            .get("background_agent_id")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        child_chat_id: extra
+            .get("child_chat_id")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        status: extra
+            .get("background_agent_status")
+            .and_then(Value::as_str)
+            .unwrap_or(if extra.contains_key("launch_blocked") {
+                "blocked"
+            } else {
+                "preview"
+            })
+            .into(),
+        model: extra
+            .get("model")
+            .or_else(|| extra.get("effective_model"))
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+    };
+    extra.insert(
+        refact_tool_api::tool_output::TOOL_OUTPUT_EXTRA_KEY.into(),
+        serde_json::to_value(output).expect("subagent output is serializable"),
+    );
+}
+
+fn tool_message(content: String, tool_call_id: &str, mut extra: Map<String, Value>) -> ContextEnum {
+    attach_subagent_output(&mut extra);
     ContextEnum::ChatMessage(ChatMessage {
         role: "tool".to_string(),
         content: ChatContent::SimpleText(content),

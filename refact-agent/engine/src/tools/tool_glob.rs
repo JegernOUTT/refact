@@ -1,3 +1,9 @@
+#[derive(serde::Serialize, schemars::JsonSchema)]
+pub(crate) struct GlobOutput {
+    pub paths: Vec<String>,
+    pub truncated: bool,
+}
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -156,7 +162,7 @@ impl Tool for ToolGlob {
                 ],
                 &["pattern"],
             ),
-            output_schema: None,
+            output_schema: Some(refact_tool_api::tool_output::output_schema_for::<GlobOutput>()),
             annotations: None,
         }
     }
@@ -254,6 +260,14 @@ impl Tool for ToolGlob {
             output_filter: Some(OutputFilter::no_limits()),
             ..Default::default()
         };
+        tool_message.extra.insert(
+            refact_tool_api::tool_output::TOOL_OUTPUT_EXTRA_KEY.into(),
+            serde_json::to_value(GlobOutput {
+                paths: outcome.matches.clone(),
+                truncated: outcome.truncated || !scoped_files.notices.is_empty(),
+            })
+            .unwrap(),
+        );
         crate::privacy::load_privacy_if_needed(gcx.clone()).await;
         let records = crate::privacy::records::declared_file_records(
             &gcx,

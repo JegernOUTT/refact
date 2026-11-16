@@ -684,6 +684,69 @@ pub async fn handle_v1_chat_app_workspace(
     handle_v1_chat_command(State(app), Path(chat_id), body_bytes).await
 }
 
+/// A pause or stop of the goal also cancels a waiting or attempting recovery, which could revive it.
+pub(crate) fn cancel_recovery_for_goal_stop(session: &mut ChatSession) {
+    if !(session.runtime.recovery.as_ref().is_some_and(|r| {
+        matches!(
+            r.state,
+            refact_core::recovery::RecoveryState::Waiting
+                | refact_core::recovery::RecoveryState::Attempting
+        )
+    }) && session.goal.is_some())
+    {
+        return;
+    }
+    if let Some(budget) = &session.recovery_budget {
+        budget.cancel();
+    }
+    session.preserve_interrupted_recovery_output();
+    if let Some(mut record) = session.runtime.recovery.clone() {
+        record.state = refact_core::recovery::RecoveryState::Cancelled;
+        record.revision = record.revision.saturating_add(1);
+        record.next_retry_at_ms = None;
+        record.terminal_reason = Some("goal_control".into());
+        session.update_recovery(Some(record));
+    }
+    session.abort_stream();
+}
+
+/// Stops the current generation of a locked chat, as the Abort command of the command route does;
+/// true when the trajectory must be saved after the lock is released.
+pub(crate) fn abort_chat_locked(session: &mut ChatSession, request_id: &str) -> bool {
+    session.apply_priority_abort();
+    let should_save_trajectory = session.trajectory_dirty;
+    session.remember_accepted_request(request_id);
+    session.emit(ChatEvent::Ack {
+        client_request_id: request_id.to_string(),
+        accepted: true,
+        result: Some(serde_json::json!({"aborted": true})),
+    });
+    should_save_trajectory
+}
+
+/// Removes one queued command, as the cancel-queued route does; false when it was not queued.
+pub(crate) fn cancel_queued_locked(
+    session: &mut ChatSession,
+    chat_id: &str,
+    client_request_id: &str,
+) -> bool {
+    let initial_len = session.command_queue.len();
+    session
+        .command_queue
+        .retain(|r| r.client_request_id != client_request_id);
+    session.command_enqueued_at.remove(client_request_id);
+    session.queued_user_merge_targets.remove(client_request_id);
+    if session.command_queue.len() < initial_len {
+        super::app_context::release(chat_id, client_request_id);
+        session.touch();
+        session.emit_queue_update();
+        session.queue_notify.notify_one();
+        true
+    } else {
+        false
+    }
+}
+
 pub async fn handle_v1_chat_command(
     State(app): State<AppState>,
     Path(chat_id): Path<String>,
@@ -958,38 +1021,57 @@ pub async fn handle_v1_chat_command(
     }
 
     if matches!(&request.command, ChatCommand::GoalControl { action } if matches!(action.trim().to_ascii_lowercase().as_str(), "pause" | "stop"))
-        && session.runtime.recovery.as_ref().is_some_and(|r| {
-            matches!(
-                r.state,
-                refact_core::recovery::RecoveryState::Waiting
-                    | refact_core::recovery::RecoveryState::Attempting
-            )
-        })
-        && session.goal.is_some()
     {
-        if let Some(budget) = &session.recovery_budget {
-            budget.cancel();
+        cancel_recovery_for_goal_stop(&mut session);
+    }
+
+    if matches!(
+        request.command,
+        ChatCommand::PythonApprovalDecision { .. } | ChatCommand::PythonRunControl { .. }
+    ) {
+        drop(session);
+        let result = match &request.command {
+            ChatCommand::PythonApprovalDecision {
+                request_id,
+                decision,
+            } => {
+                app.python_tool
+                    .approvals
+                    .decide(&app, &chat_id, request_id, *decision)
+                    .await
+            }
+            ChatCommand::PythonRunControl {
+                tool_call_id, ..
+            } => app.python_tool.stop_run(&chat_id, tool_call_id),
+            _ => unreachable!(),
+        };
+        let mut session = session_arc.lock().await;
+        let accepted = result.is_ok();
+        let payload = match result {
+            Ok(()) => serde_json::json!({"status":"ok"}),
+            Err(error) => serde_json::json!({"error":error}),
+        };
+        if accepted {
+            session.remember_accepted_request(&request.client_request_id);
         }
-        session.preserve_interrupted_recovery_output();
-        if let Some(mut record) = session.runtime.recovery.clone() {
-            record.state = refact_core::recovery::RecoveryState::Cancelled;
-            record.revision = record.revision.saturating_add(1);
-            record.next_retry_at_ms = None;
-            record.terminal_reason = Some("goal_control".into());
-            session.update_recovery(Some(record));
-        }
-        session.abort_stream();
+        session.emit(ChatEvent::Ack {
+            client_request_id: request.client_request_id,
+            accepted,
+            result: Some(payload.clone()),
+        });
+        return Ok(Response::builder()
+            .status(if accepted {
+                StatusCode::OK
+            } else {
+                StatusCode::BAD_REQUEST
+            })
+            .header("Content-Type", "application/json")
+            .body(Body::from(payload.to_string()))
+            .unwrap());
     }
 
     if matches!(request.command, ChatCommand::Abort {}) {
-        session.apply_priority_abort();
-        let should_save_trajectory = session.trajectory_dirty;
-        session.remember_accepted_request(&request.client_request_id);
-        session.emit(ChatEvent::Ack {
-            client_request_id: request.client_request_id,
-            accepted: true,
-            result: Some(serde_json::json!({"aborted": true})),
-        });
+        let should_save_trajectory = abort_chat_locked(&mut session, &request.client_request_id);
         drop(session);
         if should_save_trajectory {
             super::trajectories::maybe_save_trajectory_with_intent(
@@ -1437,21 +1519,10 @@ pub async fn handle_v1_chat_cancel_queued(
         get_or_create_session_with_trajectory(app.clone(), &sessions, &chat_id).await?;
     let mut session = session_arc.lock().await;
 
-    let initial_len = session.command_queue.len();
     let _native_mutation =
         super::session::NativeMutationGuard::enter_locked(&session_arc, &mut session)
             .map_err(|error| ScratchError::new(StatusCode::CONFLICT, error))?;
-    session
-        .command_queue
-        .retain(|r| r.client_request_id != client_request_id);
-    session.command_enqueued_at.remove(&client_request_id);
-    session.queued_user_merge_targets.remove(&client_request_id);
-
-    if session.command_queue.len() < initial_len {
-        super::app_context::release(&chat_id, &client_request_id);
-        session.touch();
-        session.emit_queue_update();
-        session.queue_notify.notify_one();
+    if cancel_queued_locked(&mut session, &chat_id, &client_request_id) {
         Ok(Response::builder()
             .status(StatusCode::OK)
             .header("Content-Type", "application/json")
@@ -2116,6 +2187,47 @@ mod tests {
         assert!(session.command_queue.is_empty());
         assert!(session.pending_deliveries.is_empty());
         assert!(session.draft_message.is_none());
+    }
+
+    #[tokio::test]
+    async fn python_commands_bypass_busy_processor_with_errors() {
+        let workspace = tempfile::tempdir().unwrap();
+        let app = test_app_with_workspace(workspace.path()).await;
+        let chat_id = "python-command-stub";
+        let session = insert_test_session(&app, chat_id).await;
+        for state in [SessionState::Generating, SessionState::ExecutingTools] {
+            session.lock().await.set_runtime_state(state, None);
+            for command in [
+                ChatCommand::PythonApprovalDecision {
+                    request_id: "approval".into(),
+                    decision: refact_chat_api::PythonApprovalDecisionKind::Deny,
+                },
+                ChatCommand::PythonRunControl {
+                    tool_call_id: "python".into(),
+                    action: refact_chat_api::PythonRunControlAction::Stop,
+                },
+            ] {
+                let request = CommandRequest {
+                    native_approval_guard: None,
+                    supervision_guard: None,
+                    client_request_id: uuid::Uuid::new_v4().to_string(),
+                    priority: false,
+                    command,
+                };
+                let response = handle_v1_chat_command(
+                    State(app.clone()),
+                    Path(chat_id.into()),
+                    serde_json::to_vec(&request).unwrap().into(),
+                )
+                .await
+                .unwrap();
+                assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+                let session = session.lock().await;
+                assert!(session.command_queue.is_empty());
+                assert_eq!(session.runtime.state, state);
+                assert!(session.messages.is_empty());
+            }
+        }
     }
 
     #[tokio::test]

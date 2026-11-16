@@ -1,0 +1,216 @@
+.displays {
+  display: grid;
+  gap: var(--rf-space-3);
+  min-width: 0;
+}
+.display {
+  display: grid;
+  gap: var(--rf-space-1);
+  min-width: 0;
+}
+
+/* Caption: the card's section-label row with an icon, title, size and actions. */
+/* Wraps at narrow widths so the title is never squeezed out by the size and actions. */
+.caption {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--rf-space-2);
+  min-width: 0;
+  min-height: var(--rf-control-h-icon-sm);
+}
+.title {
+  flex: 1 1 8ch;
+  min-width: 8ch;
+  overflow: hidden;
+  color: var(--rf-color-fg);
+  font-size: var(--rf-transcript-body-size);
+  font-weight: var(--rf-weight-medium);
+  line-height: var(--rf-line-2);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.size {
+  flex: 0 0 auto;
+  color: var(--rf-color-muted);
+  font-size: var(--rf-transcript-meta-size);
+  line-height: var(--rf-line-1);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.actions {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: var(--rf-space-2xs);
+  margin-inline-start: auto;
+}
+.note {
+  margin: 0;
+  color: var(--rf-color-muted);
+  font-size: var(--rf-transcript-meta-size);
+  line-height: var(--rf-line-1);
+}
+.linkButton {
+  justify-self: start;
+  padding: 0;
+  color: var(--rf-color-accent);
+  background: transparent;
+  border: 0;
+  border-radius: var(--rf-radius-chip);
+  cursor: pointer;
+  font: inherit;
+  font-size: var(--rf-text-1);
+  line-height: var(--rf-line-1);
+}
+.linkButton:hover {
+  text-decoration: underline;
+}
+.linkButton:focus-visible {
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
+  outline-offset: var(--rf-hairline);
+}
+
+/* Table: the chat's markdown table (tokens, borders, header weight) in a bounded scroller. */
+.tableScroll {
+  composes: scrollbarThin from "../../shared/scrollbar.module.css";
+  --script-table-rows: 12;
+
+  min-width: 0;
+  max-width: 100%;
+  max-height: calc(
+    (
+        var(--rf-text-2) * var(--rf-line) + var(--rf-space-1) * 2 +
+          var(--rf-hairline)
+      ) * (var(--script-table-rows) + 1)
+  );
+  overflow: auto;
+  overscroll-behavior: contain;
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-ctl);
+}
+.tableScrollRail {
+  --script-table-rows: 8;
+}
+.tableScrollRail .table :where(th, td) {
+  max-width: 24ch;
+}
+.tableScroll:focus-visible {
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
+  outline-offset: var(--rf-hairline);
+}
+.table {
+  width: max-content;
+  min-width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  overflow-wrap: normal;
+  word-break: normal;
+  font: var(--rf-weight-regular) var(--rf-text-2) / var(--rf-line)
+    var(--rf-font-ui);
+}
+.table :where(th, td) {
+  min-width: 8ch;
+  max-width: 60ch;
+  padding: var(--rf-space-1) var(--rf-space-2);
+  border-right: var(--rf-hairline) solid var(--rf-border);
+  border-bottom: var(--rf-hairline) solid var(--rf-border);
+  overflow-wrap: break-word;
+  text-align: start;
+  vertical-align: top;
+}
+.table :where(th, td):last-child {
+  border-right: 0;
+}
+.table tbody tr:last-child td {
+  border-bottom: 0;
+}
+.table th {
+  position: sticky;
+  z-index: 1;
+  top: 0;
+  color: var(--rf-color-fg);
+  background: var(--rf-bg);
+  background-image: linear-gradient(var(--rf-surface-1), var(--rf-surface-1));
+  font-weight: var(--rf-weight-semibold);
+  white-space: nowrap;
+}
+.table td {
+  color: var(--rf-color-fg);
+}
+.table .numeric {
+  font-variant-numeric: tabular-nums;
+  text-align: end;
+}
+.nullCell {
+  color: var(--rf-color-muted);
+}
+.cellButton {
+  display: -webkit-box;
+  max-width: 100%;
+  padding: 0;
+  overflow: hidden;
+  color: inherit;
+  background: transparent;
+  border: 0;
+  border-radius: var(--rf-radius-chip);
+  cursor: pointer;
+  font: inherit;
+  text-align: inherit;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+.cellButton:hover {
+  text-decoration: underline;
+  text-decoration-color: var(--rf-color-muted);
+}
+.cellButton:focus-visible {
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
+  outline-offset: var(--rf-hairline);
+}
+.cellOpen {
+  display: block;
+  -webkit-line-clamp: unset;
+}
+
+/* Charts follow the card's width at a fixed height, so loading never shifts the transcript. */
+.chartFrame {
+  --script-chart-h: 220px;
+
+  min-width: 0;
+  padding: var(--rf-space-2);
+  background: var(--rf-surface-1);
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-ctl);
+}
+.chartFrameRail {
+  --script-chart-h: 160px;
+}
+/* The chart wrapper sets an inline default height; the frame's fixed height wins. */
+.chartCanvas {
+  width: 100%;
+  height: var(--script-chart-h) !important;
+}
+
+.markdownFrame {
+  min-width: 0;
+  padding: var(--rf-space-2) var(--rf-space-3);
+  background: var(--rf-surface-1);
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-ctl);
+}
+.markdownRail {
+  --rf-transcript-clamp-h: 160px;
+}
+
+.srOnly {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}

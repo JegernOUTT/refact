@@ -92,6 +92,104 @@ async fn read_disk_log_tail(path: &std::path::Path) -> Result<(String, bool), St
     Ok((String::from_utf8_lossy(&buf).into_owned(), truncated))
 }
 
+#[derive(serde::Serialize, schemars::JsonSchema)]
+pub(crate) struct ProcessStartOutput {
+    pub process_id: String,
+    pub status: String,
+    pub next_seq: Option<u64>,
+}
+
+#[derive(serde::Serialize, schemars::JsonSchema)]
+pub(crate) struct ProcessChunkOutput {
+    pub stream: String,
+    pub text: String,
+    pub seq: u64,
+}
+
+pub(crate) fn output_chunks(chunks: &[ExecOutputChunk]) -> Vec<ProcessChunkOutput> {
+    chunks
+        .iter()
+        .map(|chunk| ProcessChunkOutput {
+            stream: match chunk.stream {
+                ExecOutputStream::Stdout => "stdout",
+                ExecOutputStream::Stderr => "stderr",
+                ExecOutputStream::Combined => "combined",
+            }
+            .into(),
+            text: chunk.text.clone(),
+            seq: chunk.seq,
+        })
+        .collect()
+}
+
+#[derive(serde::Serialize, schemars::JsonSchema)]
+pub(crate) struct ProcessReadOutput {
+    pub process_id: String,
+    pub status: String,
+    pub exit_code: Option<i32>,
+    pub chunks: Vec<ProcessChunkOutput>,
+    pub next_seq: u64,
+    pub latest_seq: Option<u64>,
+}
+
+#[derive(serde::Serialize, schemars::JsonSchema)]
+pub(crate) struct ProcessListEntry {
+    pub process_id: String,
+    pub status: String,
+    pub description: String,
+    pub command: String,
+    pub mode: String,
+    pub exit_code: Option<i32>,
+}
+
+pub(crate) fn output_process(snapshot: &ExecProcessSnapshot) -> ProcessListEntry {
+    ProcessListEntry {
+        process_id: snapshot.meta.process_id.as_str().into(),
+        status: status_label(&snapshot.status).into(),
+        description: snapshot.meta.short_description.clone(),
+        command: snapshot.meta.command.clone(),
+        mode: snapshot.meta.mode.to_string(),
+        exit_code: exit_code(&snapshot.status),
+    }
+}
+
+#[derive(serde::Serialize, schemars::JsonSchema)]
+pub(crate) struct ProcessListOutput {
+    pub processes: Vec<ProcessListEntry>,
+}
+
+#[derive(serde::Serialize, schemars::JsonSchema)]
+pub(crate) struct ProcessKillOutput {
+    pub process_id: String,
+    pub status: String,
+    pub exit_code: Option<i32>,
+}
+
+#[derive(serde::Serialize, schemars::JsonSchema)]
+#[serde(untagged)]
+enum ShellServiceOutput {
+    Start(ProcessStartOutput),
+    Read(ProcessReadOutput),
+    Kill(ProcessKillOutput),
+}
+
+pub(crate) fn attach_output(
+    extra: &mut serde_json::Map<String, Value>,
+    output: impl serde::Serialize,
+) {
+    extra.insert(
+        refact_tool_api::tool_output::TOOL_OUTPUT_EXTRA_KEY.into(),
+        serde_json::to_value(output).expect("serializable tool output"),
+    );
+}
+
+pub(crate) fn output_withheld(message: &ChatMessage) -> bool {
+    message
+        .extra
+        .get("privacy_shell")
+        .is_some_and(|v| v["withheld"] == true || v["ask_pending"] == true)
+}
+
 pub struct ToolProcessStart {
     pub config_path: String,
 }
@@ -444,6 +542,15 @@ impl Tool for ToolProcessStart {
             )
             .await?;
         }
+        let withheld = output_withheld(&result_message);
+        attach_output(
+            &mut result_message.extra,
+            ProcessStartOutput {
+                process_id: result.snapshot.meta.process_id.as_str().into(),
+                status: status_label(&result.snapshot.status).into(),
+                next_seq: (!withheld).then_some(read.next_seq),
+            },
+        );
         Ok((false, vec![ContextEnum::ChatMessage(result_message)]))
     }
 
@@ -456,7 +563,7 @@ impl Tool for ToolProcessStart {
             allow_parallel: false,
             description: "Start a runtime-owned background or service process and return its process ID, initial status, output cursor, and metadata. mode=service requires a nonblank service_name; omit mode for an unnamed background process. Processes use a pseudo-terminal (PTY) by default, enabling interactive stdin and combining stdout and stderr into a single stream. Set tty=false to use separate pipe streams.".to_string(),
             input_schema: process_start_input_schema(),
-            output_schema: None,
+            output_schema: Some(refact_tool_api::tool_output::output_schema_for::<ProcessStartOutput>()),
             annotations: None,
         }
     }
@@ -557,6 +664,12 @@ impl Tool for ToolProcessList {
                 "processes": snapshots.iter().map(process_value).collect::<Vec<_>>(),
             }),
         );
+        attach_output(
+            &mut extra,
+            ProcessListOutput {
+                processes: snapshots.iter().map(output_process).collect(),
+            },
+        );
         Ok(tool_result(tool_call_id, content, Some(extra), None))
     }
 
@@ -583,7 +696,9 @@ impl Tool for ToolProcessList {
                 ],
                 &[],
             ),
-            output_schema: None,
+            output_schema: Some(refact_tool_api::tool_output::output_schema_for::<
+                ProcessListOutput,
+            >()),
             annotations: None,
         }
     }
@@ -651,17 +766,30 @@ impl Tool for ToolProcessRead {
         ) {
             // Pending reads are not proof that later output is safe. Do not read disk,
             // enrich paths, expose transcript counters or advance the caller's cursor.
+            let mut pending_extra = serde_json::Map::from_iter([(
+                "exec".into(),
+                json!({
+                    "process_id": process_id.as_str(), "status": exec_status_label(&snapshot.status),
+                    "observation_pending": true, "since_seq": since_seq, "next_seq": since_seq,
+                }),
+            )]);
+            attach_output(
+                &mut pending_extra,
+                ProcessReadOutput {
+                    process_id: process_id.as_str().into(),
+                    status: status_label(&snapshot.status).into(),
+                    exit_code: exit_code(&snapshot.status),
+                    chunks: vec![],
+                    next_seq: since_seq,
+                    latest_seq: None,
+                },
+            );
             return Ok(tool_result(tool_call_id,
                 format!("Process observation pending; output withheld.\nprocess_id: {}\nstatus: {}\nRetry process_read with the same process ID; do not rerun the command.\n", process_id, exec_status_label(&snapshot.status)),
-                Some(serde_json::Map::from_iter([("exec".into(), json!({
-                    "process_id": process_id.as_str(),
-                    "status": exec_status_label(&snapshot.status),
-                    "observation_pending": true,
-                    "since_seq": since_seq,
-                    "next_seq": since_seq,
-                }))])), None));
+                Some(pending_extra), None));
         }
         let read = exec_registry.read(&process_id, since_seq, None).await;
+        let mut selected_chunks = selected_read_output(&read, stream, &output_filter);
         let mut diagnostic_output = collect_combined(&read.chunks);
         let mut content = format_process_snapshot("Process output", &snapshot);
         content.push_str(&format!(
@@ -671,6 +799,11 @@ impl Tool for ToolProcessRead {
         if from_disk {
             if let Some(path) = read.disk_log_path.as_ref() {
                 let (text, truncated) = read_disk_log_tail(path).await?;
+                selected_chunks = vec![ProcessChunkOutput {
+                    stream: "combined".into(),
+                    text: output_mini_postprocessing(&output_filter, &text),
+                    seq: read.latest_seq,
+                }];
                 diagnostic_output = text.clone();
                 content.push_str(&format!(
                     "from_disk: true\npersisted_output_path: {}\n",
@@ -713,6 +846,18 @@ impl Tool for ToolProcessRead {
             )
             .await?;
         }
+        let withheld = output_withheld(&result_message);
+        attach_output(
+            &mut result_message.extra,
+            ProcessReadOutput {
+                process_id: process_id.as_str().into(),
+                status: status_label(&snapshot.status).into(),
+                exit_code: exit_code(&snapshot.status),
+                chunks: if withheld { vec![] } else { selected_chunks },
+                next_seq: if withheld { since_seq } else { read.next_seq },
+                latest_seq: (!withheld).then_some(read.latest_seq),
+            },
+        );
         Ok((false, vec![ContextEnum::ChatMessage(result_message)]))
     }
 
@@ -735,7 +880,7 @@ impl Tool for ToolProcessRead {
                 ],
                 &["process_id"],
             ),
-            output_schema: None,
+            output_schema: Some(refact_tool_api::tool_output::output_schema_for::<ProcessReadOutput>()),
             annotations: None,
         }
     }
@@ -784,10 +929,19 @@ impl Tool for ToolProcessKill {
             "Process kill pending; termination not confirmed"
         };
         let content = format_process_snapshot(title, &snapshot);
+        let mut extra = exec_extra(&snapshot, None, None, None);
+        attach_output(
+            &mut extra,
+            ProcessKillOutput {
+                process_id: process_id.as_str().into(),
+                status: status_label(&snapshot.status).into(),
+                exit_code: exit_code(&snapshot.status),
+            },
+        );
         Ok(tool_result(
             tool_call_id,
             content,
-            Some(exec_extra(&snapshot, None, None, None)),
+            Some(extra),
             if snapshot.status == ExecStatus::Killed {
                 None
             } else {
@@ -808,7 +962,7 @@ impl Tool for ToolProcessKill {
                 &[("process_id", "string", "Runtime-owned process ID returned by process_start.")],
                 &["process_id"],
             ),
-            output_schema: None,
+            output_schema: Some(refact_tool_api::tool_output::output_schema_for::<ProcessKillOutput>()),
             annotations: None,
         }
     }
@@ -1107,7 +1261,7 @@ impl Tool for ToolShellServiceAlias {
                 ],
                 &["service_name", "action"],
             ),
-            output_schema: None,
+            output_schema: Some(refact_tool_api::tool_output::output_schema_for::<ShellServiceOutput>()),
             annotations: None,
         }
     }
@@ -1984,6 +2138,63 @@ fn format_process_snapshot(title: &str, snapshot: &ExecProcessSnapshot) -> Strin
         out.push_str(&format!("failure_reason: {}\n", message));
     }
     out
+}
+
+fn selected_read_output(
+    read: &ExecReadResult,
+    selection: ProcessStreamSelection,
+    output_filter: &OutputFilter,
+) -> Vec<ProcessChunkOutput> {
+    let streams = match selection {
+        ProcessStreamSelection::Stdout => vec![(
+            "stdout",
+            collect_stream(&read.chunks, ExecOutputStream::Stdout),
+        )],
+        ProcessStreamSelection::Stderr => vec![(
+            "stderr",
+            collect_stream(&read.chunks, ExecOutputStream::Stderr),
+        )],
+        ProcessStreamSelection::Combined => vec![("combined", collect_combined(&read.chunks))],
+        ProcessStreamSelection::All => vec![
+            (
+                "stdout",
+                collect_stream(&read.chunks, ExecOutputStream::Stdout),
+            ),
+            (
+                "stderr",
+                collect_stream(&read.chunks, ExecOutputStream::Stderr),
+            ),
+            (
+                "combined",
+                collect_stream(&read.chunks, ExecOutputStream::Combined),
+            ),
+        ],
+    };
+    streams
+        .into_iter()
+        .filter(|(_, text)| !text.is_empty())
+        .map(|(stream, text)| ProcessChunkOutput {
+            stream: stream.into(),
+            text: output_mini_postprocessing(output_filter, &text),
+            seq: read
+                .chunks
+                .iter()
+                .rev()
+                .find(|chunk| {
+                    selection == ProcessStreamSelection::Combined
+                        || stream == stream_label_for_output(&chunk.stream)
+                })
+                .map_or(read.latest_seq, |chunk| chunk.seq),
+        })
+        .collect()
+}
+
+fn stream_label_for_output(stream: &ExecOutputStream) -> &'static str {
+    match stream {
+        ExecOutputStream::Stdout => "stdout",
+        ExecOutputStream::Stderr => "stderr",
+        ExecOutputStream::Combined => "combined",
+    }
 }
 
 fn format_read_sections(

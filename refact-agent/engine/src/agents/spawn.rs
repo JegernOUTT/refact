@@ -1712,6 +1712,9 @@ async fn prepare_launch_for_parent_run(
         req.goal.as_ref(),
     )
     .await?;
+    let options =
+        crate::python_tool::catalog_binding::BindOptions::for_project(app.gcx.clone()).await;
+    append_python_instructions(&mut messages, &config.tools, options.llm, options.engine);
     let parent = app
         .chat
         .sessions
@@ -4146,6 +4149,39 @@ async fn run_background_subchat_inner(
     crate::subchat::run_subchat_with_lease(gcx, messages, config, runner_guard).await
 }
 
+/// Children with `python` get the same Code Mode section as top-level chats.
+pub(crate) fn append_python_instructions(
+    messages: &mut [ChatMessage],
+    tools: &crate::subchat::ToolsPolicy,
+    llm: bool,
+    engine: bool,
+) {
+    if !tools.allows_tool("python") {
+        return;
+    }
+    let engine = engine && matches!(tools, crate::subchat::ToolsPolicy::All);
+    let names: std::collections::HashSet<String> = match tools {
+        crate::subchat::ToolsPolicy::All => crate::chat::prompt_snippets::PYTHON_EXAMPLE_CALLS
+            .iter()
+            .map(|(name, _)| name.to_string())
+            .collect(),
+        crate::subchat::ToolsPolicy::Only(names)
+        | crate::subchat::ToolsPolicy::Supervised {
+            tools: names, ..
+        } => names.iter().cloned().collect(),
+        crate::subchat::ToolsPolicy::None => return,
+    };
+    let Some(system) = messages.iter_mut().find(|m| m.role == "system") else {
+        return;
+    };
+    let text = system.content.content_text_only();
+    if text.contains("## Python tool (Code Mode)") {
+        return;
+    }
+    let instructions = crate::chat::prompt_snippets::python_tool_instructions(&names, llm, engine);
+    system.content = ChatContent::SimpleText(format!("{}\n\n{}", text.trim_end(), instructions));
+}
+
 async fn build_messages(
     app: AppState,
     config_name: &str,
@@ -5696,5 +5732,69 @@ mod supervised_rollback_tests {
         })
         .await
         .unwrap();
+    }
+}
+
+#[cfg(test)]
+mod python_prompt_tests {
+    use super::*;
+    #[test]
+    fn subagent_prompt_gets_python_section_only_with_python_tool() {
+        let base = || {
+            vec![ChatMessage::new(
+                "system".into(),
+                "You are a focused subagent.".into(),
+            )]
+        };
+        let with = crate::subchat::ToolsPolicy::Only(vec!["python".into(), "cat".into()]);
+        let mut messages = base();
+        append_python_instructions(&mut messages, &with, false, false);
+        let text = messages[0].content.content_text_only();
+        assert!(text.starts_with("You are a focused subagent."));
+        assert!(text.contains("## Python tool (Code Mode)"));
+        assert!(text.contains("`r = await cat(paths=\"README.md\")`"));
+        assert!(!text.contains("%PYTHON_"));
+        append_python_instructions(&mut messages, &with, false, false);
+        assert_eq!(
+            messages[0]
+                .content
+                .content_text_only()
+                .matches("## Python tool (Code Mode)")
+                .count(),
+            1
+        );
+        let mut messages = base();
+        append_python_instructions(
+            &mut messages,
+            &crate::subchat::ToolsPolicy::Only(vec!["cat".into()]),
+            false,
+            false,
+        );
+        assert!(!messages[0]
+            .content
+            .content_text_only()
+            .contains("Code Mode"));
+    }
+    #[test]
+    fn a_restricted_subagent_is_not_told_about_engine() {
+        let system = || vec![ChatMessage::new("system".into(), "Subagent.".into())];
+        let mut restricted = system();
+        append_python_instructions(
+            &mut restricted,
+            &crate::subchat::ToolsPolicy::Only(vec!["python".into()]),
+            false,
+            true,
+        );
+        let text = restricted[0].content.content_text_only();
+        assert!(
+            text.contains("Code Mode") && !text.contains("engine("),
+            "{text}"
+        );
+        let mut open = system();
+        append_python_instructions(&mut open, &crate::subchat::ToolsPolicy::All, false, true);
+        assert!(open[0]
+            .content
+            .content_text_only()
+            .contains("await engine("));
     }
 }

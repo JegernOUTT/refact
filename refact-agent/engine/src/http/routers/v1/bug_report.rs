@@ -119,24 +119,24 @@ pub struct BugReportBundleFile {
 }
 
 #[derive(Debug, Clone)]
-struct ResolvedLogSource {
-    source: &'static str,
-    path: PathBuf,
-    exists: bool,
+pub(crate) struct ResolvedLogSource {
+    pub(crate) source: &'static str,
+    pub(crate) path: PathBuf,
+    pub(crate) exists: bool,
 }
 
 #[derive(Debug, Clone)]
-struct BugReportBundleInput {
-    dest_dir: PathBuf,
-    context: BugReportContextResponse,
-    engine_log: ResolvedLogSource,
-    daemon_log: ResolvedLogSource,
-    redact: bool,
-    webui_lines: Option<Vec<String>>,
-    ide_lines: Option<Vec<String>>,
+pub(crate) struct BugReportBundleInput {
+    pub(crate) dest_dir: PathBuf,
+    pub(crate) context: BugReportContextResponse,
+    pub(crate) engine_log: ResolvedLogSource,
+    pub(crate) daemon_log: ResolvedLogSource,
+    pub(crate) redact: bool,
+    pub(crate) webui_lines: Option<Vec<String>>,
+    pub(crate) ide_lines: Option<Vec<String>>,
 }
 
-fn clamp_tail_lines(tail: Option<usize>) -> usize {
+pub(crate) fn clamp_tail_lines(tail: Option<usize>) -> usize {
     tail.unwrap_or(DEFAULT_TAIL_LINES).clamp(1, MAX_TAIL_LINES)
 }
 
@@ -163,7 +163,10 @@ async fn newest_log_candidate_in_dir(dir: &Path) -> Option<PathBuf> {
     files.into_iter().next().map(|(path, _, _)| path)
 }
 
-async fn resolve_engine_log(logs_to_file: String, cache_dir: &Path) -> ResolvedLogSource {
+pub(crate) async fn resolve_engine_log(
+    logs_to_file: String,
+    cache_dir: &Path,
+) -> ResolvedLogSource {
     if !logs_to_file.is_empty() {
         let path = PathBuf::from(logs_to_file);
         let exists = tokio::fs::metadata(&path)
@@ -192,7 +195,7 @@ async fn resolve_engine_log(logs_to_file: String, cache_dir: &Path) -> ResolvedL
     }
 }
 
-async fn resolve_daemon_log() -> ResolvedLogSource {
+pub(crate) async fn resolve_daemon_log() -> ResolvedLogSource {
     let path = crate::daemon::paths::daemon_log_path();
     let exists = tokio::fs::metadata(&path)
         .await
@@ -205,7 +208,7 @@ async fn resolve_daemon_log() -> ResolvedLogSource {
     }
 }
 
-async fn resolve_log_source(
+pub(crate) async fn resolve_log_source(
     source: &str,
     logs_to_file: String,
     cache_dir: &Path,
@@ -220,7 +223,7 @@ async fn resolve_log_source(
     }
 }
 
-async fn build_context_response(app: &AppState) -> BugReportContextResponse {
+pub(crate) async fn build_context_response(app: &AppState) -> BugReportContextResponse {
     let gcx = app.gcx.clone();
     let logs_to_file = gcx.cmdline.logs_to_file.clone();
     let http_port = gcx.cmdline.http_port;
@@ -278,7 +281,7 @@ fn build_context_response_from_parts(
     }
 }
 
-async fn read_redacted_lines(
+pub(crate) async fn read_redacted_lines(
     source: &ResolvedLogSource,
     tail: usize,
 ) -> (bool, Vec<String>, Option<String>) {
@@ -478,7 +481,10 @@ fn collect_current_entry(
     entry.count += 1;
 }
 
-async fn scan_recent_errors(sources: &[ResolvedLogSource], cap: usize) -> Vec<RecentErrorLine> {
+pub(crate) async fn scan_recent_errors(
+    sources: &[ResolvedLogSource],
+    cap: usize,
+) -> Vec<RecentErrorLine> {
     let mut deduped = HashMap::new();
     let mut global_position = 0;
     for source in sources {
@@ -626,7 +632,7 @@ fn maybe_redact(text: String, redact: bool) -> String {
     }
 }
 
-async fn build_bug_report_bundle(
+pub(crate) async fn build_bug_report_bundle(
     input: BugReportBundleInput,
 ) -> Result<BugReportBundleResponse, ScratchError> {
     tokio::fs::create_dir_all(&input.dest_dir)

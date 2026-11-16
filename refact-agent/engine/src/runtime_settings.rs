@@ -252,6 +252,24 @@ static COORDINATION_FIELD_BOUNDS: &[CoordinationFieldBound] = &[
     coordination_integer("provider_breaker_cooldown_ms", 1, 86_400_000),
     coordination_integer("provider_max_retry_after_ms", 1, 86_400_000),
     coordination_integer("provider_pressure_max_buckets", 1, 1_000_000),
+    coordination_bool("python_tool_enabled"),
+    coordination_integer("python_max_run_ms", 1_000, 86_400_000),
+    coordination_integer("python_max_compute_ms", 100, 7_200_000),
+    coordination_integer("python_max_memory_bytes", 16_777_216, 17_179_869_184),
+    coordination_integer("python_max_nested_calls", 1, 100_000),
+    coordination_integer("python_max_parallel_calls", 1, 64),
+    coordination_integer("python_max_live_sessions", 1, 128),
+    coordination_integer("python_disk_quota_bytes", 104_857_600, 1_099_511_627_776),
+    coordination_integer("python_max_state_bytes", 1_048_576, 17_179_869_184),
+    coordination_integer("python_max_result_chars", 1_000, 1_000_000),
+    coordination_integer("python_max_catalog_chars", 10_000, 2_000_000),
+    coordination_integer("python_max_nested_result_bytes", 65_536, 268_435_456),
+    coordination_integer("python_max_llm_calls", 0, 100_000),
+    coordination_integer("python_max_llm_tokens", 1_000, 1_000_000_000),
+    coordination_bool("python_engine_read_enabled"),
+    coordination_bool("python_engine_change_enabled"),
+    coordination_bool("python_engine_risky_enabled"),
+    coordination_bool("python_engine_change_with_auto_commands"),
     coordination_bool("recovery_auto_retry_enabled"),
     coordination_integer("recovery_max_retries", 0, 100),
     coordination_integer("recovery_delay_ms", 0, 3_600_000),
@@ -263,10 +281,6 @@ static COORDINATION_FIELD_BOUNDS: &[CoordinationFieldBound] = &[
     coordination_integer("metrics_max_series", 1, 1_000_000),
     coordination_integer("metrics_max_explanations", 1, 1_000_000),
     coordination_integer("metrics_max_label_chars", 8, 4_096),
-    coordination_bool("code_mode_enabled"),
-    coordination_integer("code_mode_timeout_ms", 1_000, 3_600_000),
-    coordination_integer("code_mode_max_host_calls", 1, 10_000),
-    coordination_integer("code_mode_max_intermediate_bytes", 1_024, 67_108_864),
 ];
 
 pub fn coordination_field_bounds() -> &'static [CoordinationFieldBound] {
@@ -278,6 +292,10 @@ pub fn coordination_field_bounds() -> &'static [CoordinationFieldBound] {
 pub const COORDINATION_SETTINGS_KEY: &str = "coordination";
 
 const RETIRED_COORDINATION_SETTINGS: &[&str] = &[
+    "code_mode_enabled",
+    "code_mode_timeout_ms",
+    "code_mode_max_host_calls",
+    "code_mode_max_intermediate_bytes",
     "work_stream_max_bytes",
     "max_active_engine",
     "max_active_project",
@@ -1177,6 +1195,15 @@ pub fn normalize_coordination_override(
     Ok(normalized)
 }
 
+/// Switches a project file can only turn off: the effective value is global AND project.
+pub const NARROW_ONLY_COORDINATION_SETTINGS: &[&str] = &[
+    "python_tool_enabled",
+    "python_engine_read_enabled",
+    "python_engine_change_enabled",
+    "python_engine_risky_enabled",
+    "python_engine_change_with_auto_commands",
+];
+
 /// Merge a sparse project override onto the global coordination settings.
 pub fn resolve_coordination(
     global: &CoordinationSettings,
@@ -1189,6 +1216,12 @@ pub fn resolve_coordination(
         .as_object_mut()
         .ok_or_else(|| "coordination settings must serialize as an object".to_string())?;
     for (name, value) in overrides {
+        if NARROW_ONLY_COORDINATION_SETTINGS.contains(&name.as_str()) {
+            let narrowed = object.get(&name).and_then(serde_json::Value::as_bool) == Some(true)
+                && value.as_bool() == Some(true);
+            object.insert(name, serde_json::Value::Bool(narrowed));
+            continue;
+        }
         object.insert(name, value);
     }
     let resolved: CoordinationSettings = serde_json::from_value(rendered)
@@ -1255,6 +1288,114 @@ fn validate_u64(name: &str, value: u64, minimum: u64, maximum: u64) -> Result<()
 mod tests {
     use super::*;
     use serial_test::serial;
+
+    #[test]
+    fn coordination_field_bounds_include_python_fields() {
+        let flag = coordination_field_bounds()
+            .iter()
+            .find(|bound| bound.name == "python_tool_enabled")
+            .unwrap();
+        assert_eq!(flag.value_type, "boolean");
+        assert_eq!((flag.minimum, flag.maximum), (None, None));
+        for name in [
+            "python_engine_read_enabled",
+            "python_engine_change_enabled",
+            "python_engine_risky_enabled",
+        ] {
+            let bound = coordination_field_bounds()
+                .iter()
+                .find(|bound| bound.name == name)
+                .unwrap_or_else(|| panic!("{name} has no bounds entry"));
+            assert_eq!(bound.value_type, "boolean");
+            let overrides: CoordinationOverride =
+                serde_yaml::from_str(&format!("{name}: false\n")).unwrap();
+            let resolved = serde_json::to_value(
+                resolve_coordination(&CoordinationSettings::default(), &overrides).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(resolved[name], false);
+            let bad: CoordinationOverride = serde_yaml::from_str(&format!("{name}: 1\n")).unwrap();
+            assert!(normalize_coordination_override(bad).is_err());
+        }
+        let global = CoordinationSettings::default();
+        let overrides: CoordinationOverride =
+            serde_yaml::from_str("python_tool_enabled: false\n").unwrap();
+        let resolved = resolve_coordination(&global, &overrides).unwrap();
+        let mut expected = serde_json::to_value(&global).unwrap();
+        expected["python_tool_enabled"] = serde_json::json!(false);
+        assert_eq!(serde_json::to_value(resolved).unwrap(), expected);
+        for (name, minimum, maximum) in [
+            ("python_max_run_ms", 1_000u64, 86_400_000u64),
+            ("python_max_compute_ms", 100u64, 7_200_000u64),
+            ("python_max_memory_bytes", 16_777_216u64, 17_179_869_184u64),
+            ("python_max_nested_calls", 1u64, 100_000u64),
+            ("python_max_parallel_calls", 1u64, 64u64),
+            ("python_max_live_sessions", 1u64, 128u64),
+            (
+                "python_disk_quota_bytes",
+                104_857_600u64,
+                1_099_511_627_776u64,
+            ),
+            ("python_max_state_bytes", 1_048_576u64, 17_179_869_184u64),
+            ("python_max_result_chars", 1_000u64, 1_000_000u64),
+            ("python_max_catalog_chars", 10_000u64, 2_000_000u64),
+            ("python_max_nested_result_bytes", 65_536u64, 268_435_456u64),
+            ("python_max_llm_calls", 0u64, 100_000u64),
+            ("python_max_llm_tokens", 1_000u64, 1_000_000_000u64),
+        ] {
+            let bound = coordination_field_bounds()
+                .iter()
+                .find(|bound| bound.name == name)
+                .unwrap();
+            assert_eq!(bound.value_type, "integer");
+            assert_eq!(
+                (bound.minimum, bound.maximum),
+                (Some(minimum), Some(maximum))
+            );
+            for value in [minimum, maximum, minimum.saturating_sub(1), maximum + 1] {
+                let overrides =
+                    CoordinationOverride::from([(name.into(), serde_json::json!(value))]);
+                let result = resolve_coordination(&global, &overrides);
+                if (minimum..=maximum).contains(&value) {
+                    result.unwrap();
+                } else {
+                    assert!(result.unwrap_err().contains(name));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn persisted_settings_with_retired_code_mode_keys_load_and_drop_them() {
+        let loaded = parse_persisted(
+            b"coordination: {code_mode_enabled: true, code_mode_timeout_ms: 5, code_mode_max_host_calls: 1, code_mode_max_intermediate_bytes: 1}\n",
+        )
+        .unwrap();
+        let serialized = serde_json::to_value(&loaded).unwrap();
+        assert!(serialized["coordination"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .all(|key| !key.starts_with("code_mode")));
+    }
+
+    #[tokio::test]
+    async fn project_override_with_retired_code_mode_keys_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = project_coordination_path(dir.path());
+        tokio::fs::create_dir_all(path.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(
+            &path,
+            "code_mode_enabled: true\ncode_mode_timeout_ms: 5\ncode_mode_max_host_calls: 1\ncode_mode_max_intermediate_bytes: 1\n",
+        )
+        .await
+        .unwrap();
+        let loaded = load_project_coordination_override(&path).await.unwrap();
+        assert!(loaded.is_empty());
+        assert!(resolve_coordination(&CoordinationSettings::default(), &loaded).is_ok());
+    }
 
     #[tokio::test]
     #[serial(runtime_settings)]

@@ -1,4 +1,4 @@
-schema_version: 39
+schema_version: 40
 id: agent
 title: Agent
 description: Full multi-step workflow with tools and editing capabilities
@@ -242,6 +242,7 @@ prompt: |
 
   %SYSTEM_INFO%
 
+  %CODE_MODE%
   %MODELS_INFO%
 
   %ENVIRONMENT_INFO%
@@ -261,6 +262,7 @@ allow_mcp: true
 allow_subagents: true
 
 tools:
+  - python
   - manage_mcp
   - app
   - app_build
@@ -316,7 +318,6 @@ tools:
   - agents_overview
   - agent_message
   - agent_mailbox
-  - code_mode
   - agent_peer_grant
   - team_seat
   - team_role_grant
@@ -414,8 +415,6 @@ tool_confirm:
     - match: "team_seat"
       action: auto
     - match: "team_role_grant"
-      action: ask
-    - match: "code_mode"
       action: ask
     - match: "progress_report"
       action: auto

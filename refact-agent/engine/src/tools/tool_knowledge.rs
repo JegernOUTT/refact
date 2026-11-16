@@ -1,3 +1,32 @@
+#[derive(serde::Serialize, schemars::JsonSchema)]
+pub(crate) struct KnowledgeOutput {
+    pub entries: Vec<KnowledgeEntry>,
+}
+#[derive(serde::Serialize, schemars::JsonSchema)]
+pub(crate) struct KnowledgeEntry {
+    pub path: Option<String>,
+    pub title: Option<String>,
+    pub content: String,
+    pub score: Option<f32>,
+}
+pub(crate) fn knowledge_output(memories: &[crate::memories::MemoRecord]) -> KnowledgeOutput {
+    KnowledgeOutput {
+        entries: memories
+            .iter()
+            .take(8)
+            .map(|m| KnowledgeEntry {
+                path: m
+                    .file_path
+                    .as_ref()
+                    .map(|p| p.to_string_lossy().into_owned()),
+                title: m.title.clone(),
+                content: m.content.clone(),
+                score: m.score,
+            })
+            .collect(),
+    }
+}
+
 use std::sync::Arc;
 use std::collections::HashSet;
 use serde_json::Value;
@@ -69,7 +98,7 @@ impl Tool for ToolGetKnowledge {
             allow_parallel: true,
             description: "Searches project knowledge base for relevant information. Uses semantic search and knowledge graph expansion.".to_string(),
             input_schema: json_schema_from_params(&[("search_key", "string", "Search query for the knowledge database.")], &["search_key"]),
-            output_schema: None,
+            output_schema: Some(refact_tool_api::tool_output::output_schema_for::<KnowledgeOutput>()),
             annotations: None,
         }
     }
@@ -242,6 +271,10 @@ impl Tool for ToolGetKnowledge {
                         .filter_map(|memory| memory.file_path.clone()),
                 )?;
                 crate::privacy::records::merge_records(&mut message, records);
+                message.extra.insert(
+                    refact_tool_api::tool_output::TOOL_OUTPUT_EXTRA_KEY.into(),
+                    serde_json::to_value(knowledge_output(&unique_memories)).unwrap(),
+                );
                 references.attach(&mut message);
                 message
             })],

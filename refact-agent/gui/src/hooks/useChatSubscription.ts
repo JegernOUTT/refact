@@ -4,6 +4,7 @@ import { useAppDispatch } from "./useAppDispatch";
 import { useAppSelector } from "./useAppSelector";
 import {
   applyChatEvent,
+  clearPythonLiveState,
   clearSseRefreshRequest,
   markThreadSseError,
 } from "../features/Chat/Thread/actions";
@@ -379,7 +380,10 @@ export function useChatSubscription(
   const cleanup = useCallback(() => {
     const attempt = attemptRef.current;
     attemptRef.current = null;
-    if (attempt) dispatch(removeSseConnection({ chatId: attempt.chatId }));
+    if (attempt) {
+      dispatch(clearPythonLiveState({ id: attempt.chatId }));
+      dispatch(removeSseConnection({ chatId: attempt.chatId }));
+    }
     if (reconnectTimeoutRef.current) {
       clearTimeout(reconnectTimeoutRef.current);
       reconnectTimeoutRef.current = null;
@@ -433,6 +437,7 @@ export function useChatSubscription(
 
     const connection = dispatch(captureAgentRosterConnection());
     cleanup();
+    dispatch(clearPythonLiveState({ id: chatId }));
     const token = Symbol(chatId);
     attemptRef.current = { chatId, token };
     const isCurrentAttempt = () => attemptRef.current?.token === token;
@@ -625,12 +630,14 @@ export function useChatSubscription(
   const reconnect = useCallback(() => {
     if (DEBUG)
       console.log("[SSE] Manual reconnect triggered for chat:", chatId); // eslint-disable-line no-console
-    if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
+    cleanup();
+    setStatus("disconnected");
+    if (chatId) dispatch(clearPythonLiveState({ id: chatId }));
     reconnectTimeoutRef.current = setTimeout(() => {
       reconnectTimeoutRef.current = null;
       connect();
     }, 50);
-  }, [connect, chatId]);
+  }, [connect, chatId, cleanup, dispatch]);
 
   useEffect(() => {
     if (chatId && enabled) {

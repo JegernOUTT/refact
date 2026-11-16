@@ -26,6 +26,24 @@ use super::session_mcp::{
     redact_sensitive_json,
 };
 
+/// MCP structuredContent is already the server's output contract payload.
+pub(crate) fn attach_structured_content(
+    message: &mut ChatMessage,
+    content: Option<serde_json::Value>,
+) {
+    if let Some(content) = content {
+        let size = serde_json::to_vec(&content).map(|bytes| bytes.len());
+        if !matches!(size, Ok(size) if size <= MAX_TOOL_OUTPUT_BYTES) {
+            tracing::debug!(?size, "Omitting oversized MCP structuredContent");
+            return;
+        }
+        message.extra.insert(
+            refact_tool_api::tool_output::TOOL_OUTPUT_EXTRA_KEY.into(),
+            content,
+        );
+    }
+}
+
 const STARTUP_WAIT_MARGIN_SECS: u64 = 5;
 
 fn not_connected_reason(config_path: &str, status: &MCPConnectionStatus) -> Option<String> {
@@ -459,6 +477,7 @@ impl Tool for ToolMCP {
                     return Err(error_msg);
                 }
 
+                let structured_content = result.structured_content.clone();
                 let mut elements = Vec::new();
                 let mut total_text_bytes: usize = 0;
                 for content in result.content {
@@ -572,6 +591,7 @@ impl Tool for ToolMCP {
                     tool_call_id: tool_call_id.clone(),
                     ..Default::default()
                 };
+                attach_structured_content(&mut message, structured_content);
                 if let Some(metadata) = mcp_metadata(self, &message.content) {
                     message.extra.insert("mcp".to_string(), metadata);
                 }
@@ -646,7 +666,11 @@ impl Tool for ToolMCP {
                 .unwrap_or_default()
                 .to_string(),
             input_schema,
-            output_schema: None,
+            output_schema: self
+                .mcp_tool
+                .output_schema
+                .as_ref()
+                .map(|schema| serde_json::Value::Object(schema.as_ref().clone())),
             annotations,
         }
     }

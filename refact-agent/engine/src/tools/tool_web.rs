@@ -1,3 +1,17 @@
+#[derive(serde::Serialize, schemars::JsonSchema)]
+pub(crate) struct WebOutput {
+    pub url: String,
+    pub content: String,
+    pub truncated: bool,
+}
+pub(crate) fn web_output(url: &str, content: &str) -> WebOutput {
+    WebOutput {
+        url: url.into(),
+        content: content.into(),
+        truncated: false,
+    }
+}
+
 use std::sync::Arc;
 use std::collections::HashMap;
 use async_trait::async_trait;
@@ -130,7 +144,7 @@ impl Tool for ToolWeb {
                 },
                 "required": ["url"]
             }),
-            output_schema: None,
+            output_schema: Some(refact_tool_api::tool_output::output_schema_for::<WebOutput>()),
             annotations: None,
         }
     }
@@ -174,6 +188,10 @@ impl Tool for ToolWeb {
             }),
         );
 
+        extra.insert(
+            refact_tool_api::tool_output::TOOL_OUTPUT_EXTRA_KEY.into(),
+            serde_json::to_value(web_output(&url, &text)).unwrap(),
+        );
         let result = vec![ContextEnum::ChatMessage(ChatMessage {
             role: "tool".to_string(),
             content: ChatContent::SimpleText(text),

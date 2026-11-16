@@ -682,6 +682,7 @@ struct SubchatProgressCollector {
     sender: Option<mpsc::UnboundedSender<Value>>,
     tool_call_id: Option<String>,
     activity_stamp: Option<Arc<AtomicU64>>,
+    usage_sink: Option<Arc<StdMutex<ChatUsage>>>,
     thinking_tail: String,
     reasoning_tail: String,
     content_tail: String,
@@ -699,6 +700,7 @@ impl SubchatProgressCollector {
             sender,
             tool_call_id,
             activity_stamp,
+            usage_sink: STREAM_USAGE.try_with(Arc::clone).ok(),
             thinking_tail: String::new(),
             reasoning_tail: String::new(),
             content_tail: String::new(),
@@ -836,9 +838,26 @@ impl StreamCollector for SubchatProgressCollector {
         self.maybe_send_update();
     }
 
-    fn on_usage(&mut self, _usage: &ChatUsage) {}
+    fn on_usage(&mut self, usage: &ChatUsage) {
+        if let Some(sink) = &self.usage_sink {
+            *sink.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = usage.clone();
+        }
+    }
 
     fn on_finish(&mut self, _choice_idx: usize, _finish_reason: Option<String>) {}
+}
+
+tokio::task_local! {
+    static STREAM_USAGE: Arc<StdMutex<ChatUsage>>;
+}
+
+/// Runs `fut` so that usage reported while `subchat_stream` streams lands in `sink`,
+/// also when the stream is aborted before it completes.
+pub(crate) async fn with_stream_usage<F: std::future::Future>(
+    sink: Arc<StdMutex<ChatUsage>>,
+    fut: F,
+) -> F::Output {
+    STREAM_USAGE.scope(sink, fut).await
 }
 
 pub struct SubchatResult {
@@ -4124,8 +4143,111 @@ pub(crate) fn stable_stream_chat_id(
 #[cfg(test)]
 #[derive(Default)]
 struct SubchatModelFixture {
-    responses: std::collections::VecDeque<ChoiceFinal>,
+    responses: std::collections::VecDeque<Result<ChoiceFinal, String>>,
     requests: Vec<crate::llm::LlmRequest>,
+    delay: Option<std::time::Duration>,
+    gate: Option<Arc<tokio::sync::Semaphore>>,
+    aborted_at: Vec<std::time::Instant>,
+    completed: usize,
+    in_flight: usize,
+    max_in_flight: usize,
+}
+
+#[cfg(test)]
+fn model_fixtures(
+) -> std::sync::MutexGuard<'static, std::collections::HashMap<String, SubchatModelFixture>> {
+    SUBCHAT_MODEL_FIXTURES
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+#[cfg(test)]
+fn insert_model_fixture(chat_id: &str, fixture: SubchatModelFixture) {
+    model_fixtures().insert(chat_id.to_string(), fixture);
+}
+
+#[cfg(test)]
+fn take_model_fixture(chat_id: &str) -> Option<SubchatModelFixture> {
+    model_fixtures().remove(chat_id)
+}
+
+/// What the fake provider observed: when it saw aborts, and how many responses it finished.
+#[cfg(test)]
+pub(crate) fn model_fixture_outcomes(chat_id: &str) -> (Vec<std::time::Instant>, usize) {
+    model_fixtures()
+        .get(chat_id)
+        .map(|fixture| (fixture.aborted_at.clone(), fixture.completed))
+        .unwrap_or_default()
+}
+
+/// Requests the fake provider holds right now, and the most it held at once.
+#[cfg(test)]
+pub(crate) fn model_fixture_concurrency(chat_id: &str) -> (usize, usize) {
+    model_fixtures()
+        .get(chat_id)
+        .map(|fixture| (fixture.in_flight, fixture.max_in_flight))
+        .unwrap_or_default()
+}
+
+#[cfg(test)]
+pub(crate) fn remove_model_fixture(chat_id: &str) {
+    take_model_fixture(chat_id);
+}
+
+/// A delayed or gated fixture response behaves like a provider stream that runs on its own
+/// (like the WebSocket thread): it reports the input usage first, then finishes after
+/// `delay` or once the gate grants a permit, unless the request's abort flag is set first;
+/// dropping the caller does not stop it.
+#[cfg(test)]
+async fn fixture_stream<C: StreamCollector>(
+    key: String,
+    choices: Vec<ChoiceFinal>,
+    delay: Option<std::time::Duration>,
+    gate: Option<Arc<tokio::sync::Semaphore>>,
+    abort_flag: Arc<AtomicBool>,
+    collector: &mut C,
+) -> Result<Vec<ChoiceFinal>, LlmStreamError> {
+    if let Some(usage) = choices.first().and_then(|c| c.usage.as_ref()) {
+        collector.on_usage(&ChatUsage {
+            prompt_tokens: usage.prompt_tokens,
+            ..Default::default()
+        });
+    }
+    if let Some(fixture) = model_fixtures().get_mut(&key) {
+        fixture.in_flight += 1;
+        fixture.max_in_flight = fixture.max_in_flight.max(fixture.in_flight);
+    }
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        let deadline = delay.map(|delay| tokio::time::Instant::now() + delay);
+        let aborted = loop {
+            if abort_flag.load(Ordering::Acquire) {
+                break true;
+            }
+            if deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
+                break false;
+            }
+            if let Some(Ok(permit)) = gate.as_ref().map(|gate| gate.try_acquire()) {
+                permit.forget();
+                break false;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        };
+        if let Some(fixture) = model_fixtures().get_mut(&key) {
+            fixture.in_flight -= 1;
+            if aborted {
+                fixture.aborted_at.push(std::time::Instant::now());
+            } else {
+                fixture.completed += 1;
+            }
+        }
+        let _ = tx.send(aborted);
+    });
+    match rx.await {
+        Ok(false) => Ok(choices),
+        _ => Err(LlmStreamError::from("aborted".to_string())),
+    }
 }
 
 #[cfg(test)]
@@ -4133,21 +4255,79 @@ static SUBCHAT_MODEL_FIXTURES: OnceLock<
     StdMutex<std::collections::HashMap<String, SubchatModelFixture>>,
 > = OnceLock::new();
 
+/// Test backend for `subchat_stream`: answers requests made under `chat_id` from `responses`.
+#[cfg(test)]
+pub(crate) fn install_model_fixture(
+    chat_id: &str,
+    responses: Vec<ChoiceFinal>,
+    delay: Option<std::time::Duration>,
+) {
+    install_model_fixture_replies(
+        chat_id,
+        responses.into_iter().map(Ok).collect(),
+        delay,
+        None,
+    );
+}
+
+/// Like `install_model_fixture`; an `Err` reply is a provider error with that text, and a
+/// `gate` holds every reply until the test adds a permit for it.
+#[cfg(test)]
+pub(crate) fn install_model_fixture_replies(
+    chat_id: &str,
+    replies: Vec<Result<ChoiceFinal, String>>,
+    delay: Option<std::time::Duration>,
+    gate: Option<Arc<tokio::sync::Semaphore>>,
+) {
+    insert_model_fixture(
+        chat_id,
+        SubchatModelFixture {
+            responses: replies.into(),
+            delay,
+            gate,
+            ..Default::default()
+        },
+    );
+}
+
+#[cfg(test)]
+pub(crate) fn model_fixture_requests(chat_id: &str) -> Vec<crate::llm::LlmRequest> {
+    model_fixtures()
+        .get(chat_id)
+        .map(|fixture| fixture.requests.clone())
+        .unwrap_or_default()
+}
+
+type FixtureReply = (
+    String,
+    Result<ChoiceFinal, String>,
+    Option<std::time::Duration>,
+    Option<Arc<tokio::sync::Semaphore>>,
+);
+
+/// An unexpected request gets a provider error instead of a panic, so the shared map is
+/// never poisoned for other tests.
 #[cfg(test)]
 fn fixture_subchat_response(
     chat_id: &str,
     request: &crate::llm::LlmRequest,
-) -> Option<Vec<ChoiceFinal>> {
-    let mut fixtures = SUBCHAT_MODEL_FIXTURES
-        .get_or_init(Default::default)
-        .lock()
-        .unwrap();
-    let fixture = fixtures.get_mut(chat_id)?;
+) -> Option<FixtureReply> {
+    let mut fixtures = model_fixtures();
+    let key = if fixtures.contains_key(chat_id) {
+        chat_id.to_string()
+    } else {
+        fixtures
+            .keys()
+            .find(|key| key.ends_with("-pyllm") && chat_id.starts_with(key.as_str()))?
+            .clone()
+    };
+    let fixture = fixtures.get_mut(&key)?;
     fixture.requests.push(request.clone());
-    Some(vec![fixture
+    let reply = fixture
         .responses
         .pop_front()
-        .expect("unexpected model request")])
+        .unwrap_or_else(|| Err(format!("model fixture {key} has no response left")));
+    Some((key, reply, fixture.delay, fixture.gate.clone()))
 }
 
 fn recover_subchat_output_limit(
@@ -4537,11 +4717,28 @@ pub(crate) async fn subchat_stream(
         #[cfg(test)]
         let fixture_result = fixture_subchat_response(&stats_chat_id, &llm_request);
         #[cfg(not(test))]
-        let fixture_result: Option<Vec<ChoiceFinal>> = None;
-        let mut attempt_result = if let Some(choices) = fixture_result {
-            Ok(choices)
-        } else {
-            stream_result.await
+        let fixture_result: Option<FixtureReply> = None;
+        let mut attempt_result = match fixture_result {
+            #[cfg(test)]
+            Some((key, Ok(choice), delay, gate)) if delay.is_some() || gate.is_some() => {
+                drop(stream_result);
+                fixture_stream(
+                    key,
+                    vec![choice],
+                    delay,
+                    gate,
+                    abort_flag.clone(),
+                    &mut collector,
+                )
+                .await
+            }
+            Some((_, reply, _, _)) => {
+                drop(stream_result);
+                reply
+                    .map(|choice| vec![choice])
+                    .map_err(LlmStreamError::from)
+            }
+            None => stream_result.await,
         };
         let duration_ms = call_start.elapsed().as_millis() as u64;
         let call_ts_end = chrono::Utc::now().to_rfc3339();
@@ -5744,19 +5941,15 @@ mod subchat_tests {
             .insert(chat_id.into(), Arc::new(tokio::sync::Mutex::new(session)));
         let mut fixture = super::SubchatModelFixture::default();
         for turn in 0..3 {
-            fixture.responses.push_back(super::ChoiceFinal {
+            fixture.responses.push_back(Ok(super::ChoiceFinal {
                 content: if turn == 2 { "done".into() } else { String::new() },
                 tool_calls_raw: if turn == 2 { vec![] } else { vec![serde_json::json!({"id":format!("call-{turn}"),"type":"function","function":{"name":"cat","arguments":"{}"}})] },
                 finish_reason: Some("stop".into()),
                 usage: Some(crate::call_validation::ChatUsage { total_tokens: 1, completion_tokens: 1, ..Default::default() }),
                 ..Default::default()
-            });
+            }));
         }
-        super::SUBCHAT_MODEL_FIXTURES
-            .get_or_init(Default::default)
-            .lock()
-            .unwrap()
-            .insert(chat_id.into(), fixture);
+        super::insert_model_fixture(chat_id, fixture);
         let mut usage = crate::call_validation::ChatUsage::default();
         let progress = Arc::new(StdMutex::new(Vec::new()));
         let result = super::run_subchat_loop(
@@ -5768,13 +5961,7 @@ mod subchat_tests {
             &progress,
         )
         .await;
-        let fixture = super::SUBCHAT_MODEL_FIXTURES
-            .get()
-            .unwrap()
-            .lock()
-            .unwrap()
-            .remove(chat_id)
-            .unwrap();
+        let fixture = super::take_model_fixture(&chat_id).expect("fixture installed");
         let (messages, aborted) = result.unwrap();
         assert!(!aborted);
         assert_eq!(fixture.requests.len(), 3);
@@ -5836,7 +6023,7 @@ mod subchat_tests {
         let mut fixture = super::SubchatModelFixture::default();
         for turn in 0..3 {
             for _ in 0..2 {
-                fixture.responses.push_back(super::ChoiceFinal {
+                fixture.responses.push_back(Ok(super::ChoiceFinal {
                     finish_reason: Some("max_tokens".into()),
                     usage: Some(crate::call_validation::ChatUsage {
                         total_tokens: 10,
@@ -5844,21 +6031,17 @@ mod subchat_tests {
                         ..Default::default()
                     }),
                     ..Default::default()
-                });
+                }));
             }
-            fixture.responses.push_back(super::ChoiceFinal {
+            fixture.responses.push_back(Ok(super::ChoiceFinal {
                 content: if turn == 2 { "done".into() } else { String::new() },
                 tool_calls_raw: if turn == 2 { vec![] } else { vec![serde_json::json!({"id":format!("call-{turn}"),"type":"function","function":{"name":"cat","arguments":"{}"}})] },
                 finish_reason: Some("stop".into()),
                 usage: Some(crate::call_validation::ChatUsage { total_tokens: 1, completion_tokens: 1, ..Default::default() }),
                 ..Default::default()
-            });
+            }));
         }
-        super::SUBCHAT_MODEL_FIXTURES
-            .get_or_init(Default::default)
-            .lock()
-            .unwrap()
-            .insert(chat_id.clone(), fixture);
+        super::insert_model_fixture(&chat_id, fixture);
         let mut usage = crate::call_validation::ChatUsage::default();
         let progress = Arc::new(StdMutex::new(Vec::new()));
         let result = super::run_subchat_loop(
@@ -5870,13 +6053,7 @@ mod subchat_tests {
             &progress,
         )
         .await;
-        let fixture = super::SUBCHAT_MODEL_FIXTURES
-            .get()
-            .unwrap()
-            .lock()
-            .unwrap()
-            .remove(&chat_id)
-            .unwrap();
+        let fixture = super::take_model_fixture(&chat_id).expect("fixture installed");
         let (messages, aborted) = result.unwrap();
         assert!(!aborted);
         assert_eq!(messages.last().unwrap().content.content_text_only(), "done");

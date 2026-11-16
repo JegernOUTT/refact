@@ -220,7 +220,17 @@ impl Tool for ToolUpdateTextDocAnchored {
             Some(after.as_str()),
             &chunks,
         );
+        let output = super::output::EditOutput {
+            files: vec![super::output::EditFileOutput::from_chunks(
+                path.to_string(),
+                "edit",
+                &chunks,
+                &before,
+                &after,
+            )],
+        };
         super::edit_output::finish_edit_output(&mut out, model_content);
+        super::output::attach(&mut out, tool_call_id, &output);
         Ok((false, out))
     }
 
@@ -281,7 +291,7 @@ impl Tool for ToolUpdateTextDocAnchored {
             allow_parallel: false,
             description: "Edit file by finding anchor text. More reliable than exact string match. Use 'replace_between' to replace content between two anchors, or 'insert_after'/'insert_before' to insert at anchor.".to_string(),
             input_schema: json_schema_from_params(&[("path", "string", "Absolute path to the file."), ("mode", "string", "'replace_between' (needs anchor_before + anchor_after), 'insert_after', or 'insert_before' (need anchor)."), ("anchor_before", "string", "For replace_between: text marking start of region to replace."), ("anchor_after", "string", "For replace_between: text marking end of region to replace."), ("anchor", "string", "For insert_after/insert_before: text to locate insert position."), ("content", "string", "The new content to insert or replace with."), ("multiple", "boolean", "If true, apply to all matching anchors. Default false.")], &["path", "mode", "content"]),
-            output_schema: None,
+            output_schema: Some(refact_tool_api::tool_output::output_schema_for::<super::output::EditOutput>()),
             annotations: None,
         }
     }

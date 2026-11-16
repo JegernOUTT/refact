@@ -169,7 +169,7 @@ pub mod buddy_supervision;
 pub mod bug_report;
 pub mod caps;
 mod causal;
-mod chat_activity;
+pub(crate) mod chat_activity;
 pub mod chat_based_handlers;
 mod chat_modes;
 pub mod code_completion;
@@ -186,7 +186,7 @@ mod ext_marketplace_sources;
 mod file_edit_tools;
 mod files;
 mod files_search;
-mod git;
+pub(crate) mod git;
 mod git_branches;
 mod git_read;
 mod git_write;
@@ -194,45 +194,46 @@ pub mod graceful_shutdown;
 mod gui_help_handlers;
 mod hooks;
 pub mod knowledge_enrichment;
-mod knowledge_graph;
+pub(crate) mod knowledge_graph;
 pub mod knowledge_ops;
 pub mod links;
 pub mod lsp_like_handlers;
-mod mcp_config_sharing;
+pub(crate) mod mcp_config_sharing;
 mod mcp_interactions;
 mod mcp_marketplace;
 mod mcp_marketplace_sources;
-mod mcp_oauth;
-mod mcp_server_info;
+pub(crate) mod mcp_oauth;
+pub(crate) mod mcp_server_info;
 mod metrics;
 mod organization;
-mod performance;
+pub(crate) mod performance;
 mod plugins;
-mod privacy;
+pub(crate) mod privacy;
 mod project_configs;
 pub mod project_information;
+pub mod python_workspace;
 pub mod scheduler;
 pub(crate) mod settings_config;
-mod setup_status;
-mod shell_policy;
+pub(crate) mod setup_status;
+pub(crate) mod shell_policy;
 pub mod sidebar;
 mod skills_marketplace;
 mod skills_status;
-mod stats;
+pub(crate) mod stats;
 pub mod status;
 mod subagents_marketplace;
 pub mod sync_files;
 pub mod system_prompt;
 pub mod tasks;
-mod trajectory_ops;
+pub(crate) mod trajectory_ops;
 pub mod v1_browser;
 mod v1_integrations;
 pub mod vecdb;
 pub mod voice;
 mod web_search_settings;
-mod work;
+pub(crate) mod work;
 mod workspace;
-mod worktrees;
+pub(crate) mod worktrees;
 
 use crate::http::routers::v1::ext_management::{
     handle_v1_ext_registry, handle_v1_ext_skill_get, handle_v1_ext_skill_put,
@@ -1039,6 +1040,10 @@ fn exec_routes() -> Router<AppState> {
     Router::new()
         .route("/exec/spawn", post(exec::handle_v1_exec_spawn))
         .route("/exec/list", get(exec::handle_v1_exec_list))
+        .route(
+            "/python/workspace",
+            get(python_workspace::handle_v1_python_workspace),
+        )
         .route("/exec/:process_id/read", get(exec::handle_v1_exec_read))
         .route("/exec/:process_id/kill", post(exec::handle_v1_exec_kill))
         .route(

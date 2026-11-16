@@ -49,7 +49,7 @@ struct McpPromptInfo {
 }
 
 #[derive(Serialize)]
-struct McpServerInfoResponse {
+pub(crate) struct McpServerInfoResponse {
     config_path: String,
     status: serde_json::Value,
     auth_status: serde_json::Value,
@@ -72,8 +72,50 @@ pub async fn handle_v1_mcp_server_info(
     State(app): State<AppState>,
     Query(params): Query<McpServerInfoQuery>,
 ) -> axum::response::Result<Response<Body>, ScratchError> {
+    let response = mcp_server_info(app.gcx.clone(), params.config_path.clone()).await?;
+
+    let payload = serde_json::to_string_pretty(&response).map_err(|e| {
+        ScratchError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to serialize: {}", e),
+        )
+    })?;
+
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Type", "application/json")
+        .body(Body::from(payload))
+        .unwrap())
+}
+
+pub async fn handle_v1_mcp_server_reconnect(
+    State(app): State<AppState>,
+    body_bytes: hyper::body::Bytes,
+) -> axum::response::Result<Response<Body>, ScratchError> {
     let gcx = app.gcx.clone();
-    let session_key = params.config_path.clone();
+    let post = serde_json::from_slice::<McpServerReconnectRequest>(&body_bytes).map_err(|e| {
+        ScratchError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("JSON problem: {}", e),
+        )
+    })?;
+
+    reconnect_mcp_server(gcx, &post.config_path).await?;
+
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Type", "application/json")
+        .body(Body::from(
+            serde_json::json!({"reconnect_triggered": true}).to_string(),
+        ))
+        .unwrap())
+}
+
+pub(crate) async fn mcp_server_info(
+    gcx: std::sync::Arc<crate::global_context::GlobalContext>,
+    config_path: String,
+) -> Result<McpServerInfoResponse, ScratchError> {
+    let session_key = config_path;
 
     let session = {
         let integration_sessions = gcx.integration_sessions.clone();
@@ -234,7 +276,7 @@ pub async fn handle_v1_mcp_server_info(
         crate::integrations::mcp::mcp_metrics::MCPServerMetrics::default()
     };
 
-    let response = McpServerInfoResponse {
+    Ok(McpServerInfoResponse {
         config_path: session_key,
         status,
         auth_status: auth_status_json,
@@ -248,41 +290,5 @@ pub async fn handle_v1_mcp_server_info(
         logs_tail,
         metrics,
         active_progress,
-    };
-
-    let payload = serde_json::to_string_pretty(&response).map_err(|e| {
-        ScratchError::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("failed to serialize: {}", e),
-        )
-    })?;
-
-    Ok(Response::builder()
-        .status(StatusCode::OK)
-        .header("Content-Type", "application/json")
-        .body(Body::from(payload))
-        .unwrap())
-}
-
-pub async fn handle_v1_mcp_server_reconnect(
-    State(app): State<AppState>,
-    body_bytes: hyper::body::Bytes,
-) -> axum::response::Result<Response<Body>, ScratchError> {
-    let gcx = app.gcx.clone();
-    let post = serde_json::from_slice::<McpServerReconnectRequest>(&body_bytes).map_err(|e| {
-        ScratchError::new(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            format!("JSON problem: {}", e),
-        )
-    })?;
-
-    reconnect_mcp_server(gcx, &post.config_path).await?;
-
-    Ok(Response::builder()
-        .status(StatusCode::OK)
-        .header("Content-Type", "application/json")
-        .body(Body::from(
-            serde_json::json!({"reconnect_triggered": true}).to_string(),
-        ))
-        .unwrap())
+    })
 }

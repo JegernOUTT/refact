@@ -66,6 +66,8 @@ fn make_runtime_event(
 
 #[derive(Default)]
 pub struct ExecuteToolsOptions {
+    pub(crate) structured_output: bool,
+    pub(crate) wait_until_terminal: bool,
     pub subchat_tool_parameters: Option<IndexMap<String, SubchatParameters>>,
     pub postprocess_settings: Option<PostprocessSettings>,
     pub allowed_tools: Vec<String>,
@@ -78,6 +80,9 @@ pub struct ExecuteToolsOptions {
     pub native_pause: Option<Arc<refact_agents_core::registry::PauseGate>>,
     /// The runtime-owned abort flag paired with `native_pause`.
     pub native_abort: Option<Arc<AtomicBool>>,
+    /// Tool results go to a script, not to the model: skip the model-context truncation of
+    /// tool text. Set only by the python dispatcher, whose envelope cap bounds the size.
+    pub(crate) results_for_script: bool,
 }
 
 fn tool_execution_messages(
@@ -138,9 +143,41 @@ pub(crate) fn workspace_scope_keys(
 pub(crate) const SHELL_PRIVACY_APPROVAL_RULE: &str =
     "Privacy approval required: command read guarded files";
 
+/// Every rule that forces a person's answer: no auto-approve flag, mode rule or permit covers it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ForcedAsk {
+    ProtectedConfig,
+    HumanAutomation,
+}
+
+impl ForcedAsk {
+    pub(crate) const ALL: &'static [ForcedAsk] =
+        &[ForcedAsk::ProtectedConfig, ForcedAsk::HumanAutomation];
+
+    pub(crate) fn rule(self) -> &'static str {
+        match self {
+            ForcedAsk::ProtectedConfig => PROTECTED_CONFIG_APPROVAL,
+            ForcedAsk::HumanAutomation => {
+                crate::scheduler::automation_approval::HUMAN_AUTOMATION_APPROVAL
+            }
+        }
+    }
+
+    /// The forced ask of a confirmation check, in priority order.
+    fn of(protected_edit: bool, forced_automation: bool) -> Option<ForcedAsk> {
+        if protected_edit {
+            Some(ForcedAsk::ProtectedConfig)
+        } else if forced_automation {
+            Some(ForcedAsk::HumanAutomation)
+        } else {
+            None
+        }
+    }
+}
+
+/// "Needs a person": one predicate over every forced-ask rule.
 pub(crate) fn requires_actual_human_approval(reason: &str) -> bool {
-    reason == crate::scheduler::automation_approval::HUMAN_AUTOMATION_APPROVAL
-        || reason == PROTECTED_CONFIG_APPROVAL
+    ForcedAsk::ALL.iter().any(|forced| forced.rule() == reason)
 }
 
 pub(crate) fn is_shell_privacy_approval(reason: &PauseReason) -> bool {
@@ -428,7 +465,7 @@ const EDITING_TOOLS: &[&str] = &[
     "mv",
 ];
 
-fn is_editing_tool(tool_name: &str) -> bool {
+pub(crate) fn is_editing_tool(tool_name: &str) -> bool {
     EDITING_TOOLS.contains(&tool_name)
 }
 
@@ -436,13 +473,14 @@ fn is_editing_tool(tool_name: &str) -> bool {
 // ToolBudget so running many of them at once does not chop each report to a
 // fair-share fragment; overall context pressure is handled later by chat
 // compression instead.
-const TOOL_RESULT_TRUNCATION_EXEMPT_TOOLS: &[&str] = &["subagent", "wait", "agent_result"];
+const TOOL_RESULT_TRUNCATION_EXEMPT_TOOLS: &[&str] =
+    &["subagent", "wait", "agent_result", "python"];
 
 fn is_tool_result_truncation_exempt(tool_name: &str) -> bool {
     TOOL_RESULT_TRUNCATION_EXEMPT_TOOLS.contains(&tool_name)
 }
 
-fn should_auto_approve_confirmation(thread: &ThreadParams, tool_name: &str) -> bool {
+pub(crate) fn should_auto_approve_confirmation(thread: &ThreadParams, tool_name: &str) -> bool {
     if tool_name == "manage_mcp" {
         return false;
     }
@@ -461,14 +499,17 @@ fn should_auto_approve_confirmation(thread: &ThreadParams, tool_name: &str) -> b
     thread.auto_approve_editing_tools && is_editing_tool(tool_name)
 }
 
-const PROTECTED_CONFIG_APPROVAL: &str = "Protected configuration changes require confirmation";
+pub(crate) const PROTECTED_CONFIG_APPROVAL: &str =
+    "Protected configuration changes require confirmation";
 
 #[cfg(test)]
 fn protected_config_path(path: &str) -> bool {
     let normalized = path.trim().replace('\\', "/");
     let protected = |path: &std::path::Path| {
-        path.file_name()
-            .is_some_and(|name| name.to_string_lossy().eq_ignore_ascii_case("privacy.yaml"))
+        crate::tools::file_edit::auxiliary::is_project_policy_file(path)
+            || path
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy().eq_ignore_ascii_case("privacy.yaml"))
             || path.components().any(|part| {
                 part.as_os_str()
                     .to_string_lossy()
@@ -812,7 +853,9 @@ mod tests {
             if self.runtime_failure {
                 return Err("deterministic runtime failure".to_string());
             }
-            let delay = if self.name == "wait" {
+            let delay = if self.name == "output_fixture" {
+                std::time::Duration::from_millis(300)
+            } else if self.name == "wait" {
                 std::time::Duration::from_secs(8)
             } else {
                 std::time::Duration::from_millis(20)
@@ -821,6 +864,11 @@ mod tests {
             let mut message =
                 ChatMessage::new("tool".to_string(), "deterministic result".to_string());
             message.tool_call_id = tool_call_id.clone();
+            if self.name == "output_fixture" || self.name == "get_goal" {
+                message
+                    .extra
+                    .insert("tool_output".into(), serde_json::json!({"ok": true}));
+            }
             Ok((
                 false,
                 vec![crate::call_validation::ContextEnum::ChatMessage(message)],
@@ -1038,6 +1086,129 @@ mod tests {
             started_at_ms: None,
             completed_at_ms: None,
         }
+    }
+
+    async fn output_fixture_app() -> AppState {
+        let base = AppState::from_gcx(crate::global_context::tests::make_test_gcx().await).await;
+        AppState {
+            tool_registry: Arc::new(
+                crate::app_state::AppToolRegistry::with_fixture_tool_factory(
+                    base.gcx.clone(),
+                    Arc::new(|| {
+                        ["output_fixture", "get_goal"]
+                            .into_iter()
+                            .map(|name| {
+                                Box::new(DeterministicTool {
+                                    name: name.into(),
+                                    confirmation_result: MatchConfirmDenyResult::PASS,
+                                    runtime_failure: false,
+                                })
+                                    as Box<dyn crate::tools::tools_description::Tool + Send>
+                            })
+                            .collect()
+                    }),
+                ),
+            ),
+            ..base
+        }
+    }
+
+    async fn run_output_fixture(
+        app: AppState,
+        name: &str,
+        options: ExecuteToolsOptions,
+    ) -> Vec<ChatMessage> {
+        execute_tools(
+            app,
+            &[deterministic_tool_call(
+                &uuid::Uuid::new_v4().to_string(),
+                name,
+            )],
+            &[],
+            &ThreadParams {
+                id: "output-fixture".into(),
+                model: "model".into(),
+                ..Default::default()
+            },
+            "agent",
+            None,
+            options,
+        )
+        .await
+        .0
+    }
+
+    #[test]
+    fn tool_results_are_truncated_for_the_model_by_default() {
+        assert!(!ExecuteToolsOptions::default().results_for_script);
+    }
+
+    #[tokio::test]
+    async fn execute_tools_strips_tool_output_by_default() {
+        let app = output_fixture_app().await;
+        for name in ["output_fixture", "get_goal"] {
+            let messages =
+                run_output_fixture(app.clone(), name, ExecuteToolsOptions::default()).await;
+            assert_eq!(
+                messages[0].content.content_text_only(),
+                "deterministic result"
+            );
+            assert!(messages
+                .iter()
+                .all(|m| !m.extra.contains_key("tool_output")));
+        }
+        app.runtime.tool_jobs.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn execute_tools_keeps_tool_output_when_structured_output_requested() {
+        let app = output_fixture_app().await;
+        for name in ["output_fixture", "get_goal"] {
+            let messages = run_output_fixture(
+                app.clone(),
+                name,
+                ExecuteToolsOptions {
+                    structured_output: true,
+                    ..Default::default()
+                },
+            )
+            .await;
+            assert_eq!(
+                messages[0].extra["tool_output"],
+                serde_json::json!({"ok": true})
+            );
+        }
+        app.runtime.tool_jobs.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn wait_until_terminal_does_not_detach_after_inline_budget() {
+        let app = output_fixture_app().await;
+        app.runtime
+            .tool_jobs
+            .set_test_inline_budget(Some(std::time::Duration::from_millis(50)));
+        let messages = run_output_fixture(
+            app.clone(),
+            "output_fixture",
+            ExecuteToolsOptions::default(),
+        )
+        .await;
+        assert!(messages[0].extra.contains_key("tool_job"));
+        let messages = run_output_fixture(
+            app.clone(),
+            "output_fixture",
+            ExecuteToolsOptions {
+                wait_until_terminal: true,
+                ..Default::default()
+            },
+        )
+        .await;
+        assert_eq!(
+            messages[0].content.content_text_only(),
+            "deterministic result"
+        );
+        assert!(!messages[0].extra.contains_key("tool_job"));
+        app.runtime.tool_jobs.shutdown().await;
     }
 
     async fn process_deterministic_tool_turn(
@@ -2020,6 +2191,135 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn python_rejected_batch_releases_ticket_before_other_work_finishes() {
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            let app = output_fixture_app().await;
+            let chat = "ticket-rejected-batch";
+            let first = app.python_tool.registry.reserve_turn(chat, "rejected");
+            app.python_tool
+                .tickets
+                .lock()
+                .unwrap()
+                .insert((chat.into(), "rejected".into()), first);
+            let next = app.python_tool.registry.reserve_turn(chat, "next");
+            {
+                let _cleanup =
+                    PythonTicketCleanup::new(app.clone(), chat.into(), vec!["rejected".into()]);
+                // A failed pool preparation returns before the surrounding turn ends.
+            }
+            let lease = tokio::time::timeout(std::time::Duration::from_secs(1), next.acquire())
+                .await
+                .expect("rejected call must not strand the next Python ticket")
+                .unwrap();
+            assert!(app.python_tool.tickets.lock().unwrap().is_empty());
+            drop(lease);
+            app.runtime.tool_jobs.shutdown().await;
+        })
+        .await
+        .expect("Python ticket regression timed out");
+    }
+
+    #[tokio::test]
+    async fn python_revoked_parallel_batch_releases_reservation_before_turn_exit() {
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            let app = output_fixture_app().await;
+            let thread = ThreadParams {
+                id: "python-revoked-batch".into(),
+                model: "model".into(),
+                ..Default::default()
+            };
+            let ccx = build_tool_execution_context(app.clone(), 4096, &[], &thread, None)
+                .await
+                .unwrap();
+            ccx.lock().await.task_meta = Some(TaskMeta {
+                role: "agents".into(),
+                task_id: "missing-task".into(),
+                agent_id: None,
+                card_id: None,
+                planner_chat_id: None,
+            });
+            let ticket = app
+                .python_tool
+                .registry
+                .reserve_turn(&thread.id, "rejected");
+            app.python_tool
+                .tickets
+                .lock()
+                .unwrap()
+                .insert((thread.id.clone(), "rejected".into()), ticket);
+            let next = app.python_tool.registry.reserve_turn(&thread.id, "next");
+            let catalog = app
+                .tool_registry
+                .acquire_tool_catalog("agent", None, None)
+                .await;
+            let results = execute_parallel_batch(
+                app.clone(),
+                ccx,
+                &[(0, deterministic_tool_call("rejected", "python"))],
+                catalog,
+                None,
+                &mut std::collections::HashMap::new(),
+                Arc::new(SerialToolRegistry::new()),
+                "agent",
+                None,
+                None,
+                None,
+                false,
+                false,
+                false,
+            )
+            .await;
+            assert!(
+                results.is_empty(),
+                "missing runner must reject before dispatch"
+            );
+            assert!(
+                app.python_tool.tickets.lock().unwrap().is_empty(),
+                "early batch return must release tickets before outer turn cleanup"
+            );
+            let lease = tokio::time::timeout(std::time::Duration::from_secs(1), next.acquire())
+                .await
+                .expect("next invocation is not blocked by rejected batch")
+                .unwrap();
+            drop(lease);
+            app.runtime.tool_jobs.shutdown().await;
+        })
+        .await
+        .expect("Python ticket regression timed out");
+    }
+
+    #[tokio::test]
+    async fn python_completion_before_detach_publication_cannot_leave_stale_entry() {
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            let app = output_fixture_app().await;
+            let state = PythonJobCompletion::new(app.clone(), "detach-race".into(), "call".into());
+            let completed = state.completed.clone();
+            // Reproduce terminal cleanup winning immediately before Accepted is handled.
+            drop(state);
+            publish_python_detach(&app, "detach-race", "call", "job", &completed);
+            assert!(app.python_tool.detached.lock().unwrap().is_empty());
+            app.runtime.tool_jobs.shutdown().await;
+        })
+        .await
+        .expect("Python ticket regression timed out");
+    }
+
+    #[tokio::test]
+    async fn python_completion_after_detach_publication_removes_entry() {
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            let app = output_fixture_app().await;
+            let state = PythonJobCompletion::new(app.clone(), "detach-race".into(), "call".into());
+            publish_python_detach(&app, "detach-race", "call", "job", &state.completed);
+            assert_eq!(app.python_tool.detached.lock().unwrap().len(), 1);
+            drop(state);
+            assert!(app.python_tool.detached.lock().unwrap().is_empty());
+            app.runtime.tool_jobs.shutdown().await;
+        })
+        .await
+        .expect("Python ticket regression timed out");
+    }
+
     #[test]
     fn shipping_inline_budget_is_one_minute() {
         assert_eq!(TOOL_JOB_INLINE_BUDGET, std::time::Duration::from_secs(60));
@@ -2656,7 +2956,14 @@ mod tests {
             autonomous_no_confirm: true,
             ..Default::default()
         };
-        for (path, expected) in [(".refact/privacy.yaml", 1), ("src/ordinary.rs", 0)] {
+        for (path, expected) in [
+            (".refact/privacy.yaml", 1),
+            (".refact/coordination.yaml", 1),
+            (".refact/shell_policy.yaml", 1),
+            ("/somewhere/project/.refact/Coordination.YAML", 1),
+            ("src/ordinary.rs", 0),
+            ("src/coordination.yaml", 0),
+        ] {
             let call: ChatToolCall = serde_json::from_value(serde_json::json!({
                 "id": "edit", "type": "function", "function": {
                     "name": "create_textdoc", "arguments": serde_json::json!({
@@ -2683,6 +2990,32 @@ mod tests {
                 assert_eq!(confirmations[0].rule, PROTECTED_CONFIG_APPROVAL);
             }
         }
+    }
+
+    #[test]
+    fn every_forced_ask_rule_needs_a_person() {
+        for forced in ForcedAsk::ALL {
+            assert!(requires_actual_human_approval(forced.rule()), "{forced:?}");
+        }
+        for (protected, automation) in [(true, false), (false, true), (true, true)] {
+            let forced = ForcedAsk::of(protected, automation).unwrap();
+            assert!(ForcedAsk::ALL.contains(&forced), "{forced:?}");
+            assert!(requires_actual_human_approval(forced.rule()));
+        }
+        assert_eq!(ForcedAsk::of(false, false), None);
+        assert!(!requires_actual_human_approval("mode policy: ask"));
+        let source = include_str!("tools.rs");
+        let forced_rules = source.matches(concat!("forced.rule()", ".into()")).count();
+        let raw_rule_uses = source.matches(concat!("_APPROVAL", ".into()")).count()
+            + source.matches(concat!("_APPROVAL", ".to_string()")).count();
+        assert_eq!(
+            forced_rules, 1,
+            "the rule text of a forced ask comes from ForcedAsk only"
+        );
+        assert_eq!(
+            raw_rule_uses, 0,
+            "a forced-ask rule string is set outside ForcedAsk"
+        );
     }
 
     #[tokio::test]
@@ -3306,7 +3639,6 @@ pub async fn process_tool_calls_once(
         let (auto_approved, remaining): (Vec<_>, Vec<_>) =
             confirmations.into_iter().partition(|confirmation| {
                 !requires_actual_human_approval(&confirmation.rule)
-                    && confirmation.rule != PROTECTED_CONFIG_APPROVAL
                     && should_auto_approve_confirmation(&current_thread, &confirmation.tool_name)
             });
 
@@ -3792,7 +4124,7 @@ fn format_openai_server_tool_result(tc: &ChatToolCall) -> String {
     out
 }
 
-fn compute_final_action(
+pub(crate) fn compute_final_action(
     tool_result: &MatchConfirmDenyResult,
     mode_action: Option<&str>,
     is_auto_approved: bool,
@@ -3857,7 +4189,7 @@ pub async fn check_tools_confirmation(
     .await
 }
 
-async fn check_tools_confirmation_with_pool(
+pub(crate) async fn check_tools_confirmation_with_pool(
     app: AppState,
     tool_calls: &[crate::call_validation::ChatToolCall],
     messages: &[ChatMessage],
@@ -3869,6 +4201,37 @@ async fn check_tools_confirmation_with_pool(
     _source_command: &str,
     turn_tool_pool: Option<&TurnToolPool>,
 ) -> (Vec<PauseReason>, Vec<PauseReason>) {
+    let (confirmations, denials, _) = check_tools_confirmation_reporting_auto(
+        app,
+        tool_calls,
+        messages,
+        thread,
+        catalog,
+        mode_id,
+        model_id,
+        allowed_tools,
+        _source_command,
+        turn_tool_pool,
+    )
+    .await;
+    (confirmations, denials)
+}
+
+/// Same check as `check_tools_confirmation_with_pool`, also returning the ids of calls
+/// that would have asked if the thread's auto-approve flags were off.
+pub(crate) async fn check_tools_confirmation_reporting_auto(
+    app: AppState,
+    tool_calls: &[crate::call_validation::ChatToolCall],
+    messages: &[ChatMessage],
+    thread: &ThreadParams,
+    catalog: Option<&ToolCatalogSnapshot>,
+    mode_id: &str,
+    model_id: Option<&str>,
+    allowed_tools: &[String],
+    _source_command: &str,
+    turn_tool_pool: Option<&TurnToolPool>,
+) -> (Vec<PauseReason>, Vec<PauseReason>, Vec<String>) {
+    let mut auto_suppressed = Vec::new();
     let mut effective_thread = thread.clone();
     effective_thread.auto_approve_dangerous_commands &=
         crate::agents::approval::dangerous_confirmation_enabled(&app, &thread.id).await;
@@ -4058,14 +4421,15 @@ async fn check_tools_confirmation_with_pool(
                     continue;
                 }
 
+                let allowed_by_list = !matches!(
+                    resolved_tool_name.as_str(),
+                    "agent_approval" | "agent_lifecycle" | "pause" | "resume"
+                ) && !allowed_tools.is_empty()
+                    && (allowed_tools.contains(&tool_call.function.name)
+                        || allowed_tools.contains(&resolved_tool_name));
                 let is_auto_approved =
                     should_auto_approve_confirmation(thread, &resolved_tool_name)
-                        || (!matches!(
-                            resolved_tool_name.as_str(),
-                            "agent_approval" | "agent_lifecycle" | "pause" | "resume"
-                        ) && !allowed_tools.is_empty()
-                            && (allowed_tools.contains(&tool_call.function.name)
-                                || allowed_tools.contains(&resolved_tool_name)));
+                        || allowed_by_list;
                 let forced_automation_confirmation =
                     match crate::scheduler::automation_approval::inspect_automation_approval(
                         &ccx,
@@ -4087,12 +4451,20 @@ async fn check_tools_confirmation_with_pool(
                             continue;
                         }
                     };
-                let mut final_action = compute_final_action(
-                    &result.result.result,
-                    mode_action.as_deref(),
-                    is_auto_approved,
-                    &resolved_tool_name,
-                );
+                let base_action = |auto: bool| {
+                    compute_final_action(
+                        &result.result.result,
+                        mode_action.as_deref(),
+                        auto,
+                        &resolved_tool_name,
+                    )
+                };
+                let mut final_action = base_action(is_auto_approved);
+                let mut manual_action = if is_auto_approved && !allowed_by_list {
+                    Some(base_action(false))
+                } else {
+                    None
+                };
                 let context = ccx.lock().await;
                 let root = crate::tools::file_edit::auxiliary::protected_config_root(
                     &context.app.gcx,
@@ -4121,33 +4493,41 @@ async fn check_tools_confirmation_with_pool(
                     },
                 );
                 drop(context);
-                if protected_edit && final_action != "deny" {
-                    final_action = "ask";
-                }
-                if crate::tools::tool_app::family_for_tool(&resolved_tool_name).is_some()
-                    && final_action == "ask"
-                {
-                    final_action = "allow";
-                }
-                if forced_automation_confirmation && final_action != "deny" {
-                    final_action = "ask";
-                }
-                if final_action != "deny"
-                    && !is_auto_approved
-                    && result.result.result == MatchConfirmDenyResult::CONFIRMATION
-                    && matches!(resolved_tool_name.as_str(), "shell" | "process_start")
-                    && thread
-                        .task_meta
-                        .as_ref()
-                        .is_some_and(|meta| matches!(meta.role.as_str(), "agent" | "agents"))
-                {
-                    final_action = "ask";
+                let adjust = |mut action: &'static str, auto: bool| {
+                    if protected_edit && action != "deny" {
+                        action = "ask";
+                    }
+                    if crate::tools::tool_app::family_for_tool(&resolved_tool_name).is_some()
+                        && action == "ask"
+                    {
+                        action = "allow";
+                    }
+                    if forced_automation_confirmation && action != "deny" {
+                        action = "ask";
+                    }
+                    if action != "deny"
+                        && !auto
+                        && result.result.result == MatchConfirmDenyResult::CONFIRMATION
+                        && matches!(resolved_tool_name.as_str(), "shell" | "process_start")
+                        && thread
+                            .task_meta
+                            .as_ref()
+                            .is_some_and(|meta| matches!(meta.role.as_str(), "agent" | "agents"))
+                    {
+                        action = "ask";
+                    }
+                    action
+                };
+                final_action = adjust(final_action, is_auto_approved);
+                manual_action = manual_action.map(|action| adjust(action, false));
+                if final_action != "ask" && final_action != "deny" && manual_action == Some("ask") {
+                    auto_suppressed.push(tool_call.id.clone());
                 }
 
-                let rule_text = if protected_edit {
-                    PROTECTED_CONFIG_APPROVAL.into()
-                } else if forced_automation_confirmation {
-                    crate::scheduler::automation_approval::HUMAN_AUTOMATION_APPROVAL.into()
+                let rule_text = if let Some(forced) =
+                    ForcedAsk::of(protected_edit, forced_automation_confirmation)
+                {
+                    forced.rule().into()
                 } else {
                     match mode_action.as_deref() {
                         Some(action) => format!("mode policy: {}", action),
@@ -4193,7 +4573,7 @@ async fn check_tools_confirmation_with_pool(
     }
 
     preflight_span.finish_tool(PerfOutcome::Success, item_count, item_count, None);
-    (confirmations, denials)
+    (confirmations, denials, auto_suppressed)
 }
 
 pub async fn execute_tools_with_session(
@@ -4555,6 +4935,9 @@ async fn execute_single_tool(
         native_abort,
         expected_execution,
         Vec::new(),
+        false,
+        false,
+        false,
     )
     .await
 }
@@ -4588,6 +4971,90 @@ impl Drop for ShellOperationGuards {
     }
 }
 
+fn strip_tool_output(messages: &mut [ChatMessage], structured_output: bool) {
+    if !structured_output {
+        for message in messages {
+            message
+                .extra
+                .remove(refact_tool_api::tool_output::TOOL_OUTPUT_EXTRA_KEY);
+        }
+    }
+}
+
+/// Releases unconsumed FIFO reservations on every local rejection/cancellation path.
+/// Detached invocations keep their reservation until the owned future consumes it.
+struct PythonTicketCleanup {
+    app: AppState,
+    chat: String,
+    calls: Vec<String>,
+}
+impl PythonTicketCleanup {
+    fn new(app: AppState, chat: String, calls: Vec<String>) -> Self {
+        Self {
+            app,
+            chat,
+            calls,
+        }
+    }
+    fn release(&self) {
+        // Keep lock ordering identical to completion/publication (detached first).
+        let detached = self.app.python_tool.detached.lock().unwrap();
+        let mut tickets = self.app.python_tool.tickets.lock().unwrap();
+        for call in &self.calls {
+            let key = (self.chat.clone(), call.clone());
+            if !detached.contains_key(&key) {
+                tickets.remove(&key);
+            }
+        }
+    }
+}
+impl Drop for PythonTicketCleanup {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
+/// Owned by the submitted future, including when it is dropped before first poll.
+/// Publication and completion synchronize on the detached-map mutex, so terminal
+/// cleanup cannot be followed by a stale late Accepted insertion.
+struct PythonJobCompletion {
+    app: AppState,
+    chat: String,
+    call: String,
+    completed: Arc<AtomicBool>,
+}
+impl PythonJobCompletion {
+    fn new(app: AppState, chat: String, call: String) -> Self {
+        Self {
+            app,
+            chat,
+            call,
+            completed: Arc::new(AtomicBool::new(false)),
+        }
+    }
+}
+impl Drop for PythonJobCompletion {
+    fn drop(&mut self) {
+        let mut detached = self.app.python_tool.detached.lock().unwrap();
+        self.completed.store(true, Ordering::Release);
+        let key = (self.chat.clone(), self.call.clone());
+        detached.remove(&key);
+        self.app.python_tool.tickets.lock().unwrap().remove(&key);
+    }
+}
+fn publish_python_detach(
+    app: &AppState,
+    chat: &str,
+    call: &str,
+    job: &str,
+    completed: &AtomicBool,
+) {
+    let mut detached = app.python_tool.detached.lock().unwrap();
+    if !completed.load(Ordering::Acquire) {
+        detached.insert((chat.into(), call.into()), job.into());
+    }
+}
+
 async fn execute_admitted_tool(
     app: AppState,
     ccx: Arc<AMutex<AtCommandsContext>>,
@@ -4604,7 +5071,16 @@ async fn execute_admitted_tool(
     native_abort: Option<Arc<AtomicBool>>,
     expected_execution: Option<Arc<crate::agents::execution::RunExecution>>,
     operation_guards: Vec<Option<crate::agents::execution::OperationGuard>>,
+    structured_output: bool,
+    wait_until_terminal: bool,
+    results_for_script: bool,
 ) -> (usize, bool, Vec<ChatMessage>, Vec<ContextFile>) {
+    // Per-call fallback covers admission errors before runtime ownership.
+    let _ticket_cleanup = PythonTicketCleanup::new(
+        app.clone(),
+        ccx.lock().await.chat_id.clone(),
+        vec![tool_call.id.clone()],
+    );
     let unsupported_scope = {
         let context = ccx.lock().await;
         context.tool_access_bypass
@@ -4663,6 +5139,7 @@ async fn execute_admitted_tool(
                 std::mem::forget(guards);
             }
         }
+        strip_tool_output(&mut result.2, structured_output);
         for message in &mut result.2 {
             message.extra.insert(
                 "tool_execution_policy".into(),
@@ -4693,6 +5170,24 @@ async fn execute_admitted_tool(
                 Ok(workspace_keys) => keys.extend(workspace_keys),
                 Err(error) => return runner_capacity_error(idx, &tool_call, &error),
             }
+        }
+        if tool_call.function.name == "python" {
+            keys.push(crate::tool_jobs::ScopeKey::PythonRun {
+                chat_id: context.chat_id.clone(),
+                tool_call_id: tool_call.id.clone(),
+            });
+        } else if let Some(parent) = app
+            .python_tool
+            .nested_parents
+            .lock()
+            .unwrap()
+            .get(&(context.chat_id.clone(), tool_call.id.clone()))
+            .cloned()
+        {
+            keys = vec![crate::tool_jobs::ScopeKey::PythonRun {
+                chat_id: context.chat_id.clone(),
+                tool_call_id: parent,
+            }];
         }
         let turn_id = context
             .messages
@@ -4752,146 +5247,173 @@ async fn execute_admitted_tool(
     let runtime = app.runtime.tool_jobs.clone();
     let admission_abort = ccx.lock().await.abort_flag.clone();
     let admission_shutdown = app.runtime.shutdown_flag.clone();
-    let result = runtime
-        .submit_with_abort(
-            binding,
-            TOOL_JOB_INLINE_BUDGET,
-            admission_abort,
-            admission_shutdown,
-            move |cancel| async move {
-                // submit acquires the lifecycle lease before this future is created/polled.
-                let _guards = operation_guards;
-                let frozen = ccx
-                    .lock()
-                    .await
-                    .freeze_tool_job(&tool_call.id, cancel.clone());
-                let frozen = match frozen {
-                    Ok(context) => Arc::new(AMutex::new(context)),
-                    Err(error) => {
-                        let (_, _, messages, context_files) =
-                            runner_capacity_error(idx, &tool_call, &error);
-                        return (
-                            crate::tool_jobs::JobStatus::Failed,
-                            crate::tool_jobs::JobResult {
-                                had_corrections: false,
-                                messages,
-                                context_files,
-                            },
-                        );
-                    }
-                };
-                let (_parallel_guard, _serial_guard) = if allow_parallel {
-                    (Some(dispatch_gate.read_owned().await), None)
-                } else {
-                    (None, Some(dispatch_gate.write_owned().await))
-                };
-                let (n_ctx, pp, history) = {
-                    let context = frozen.lock().await;
-                    (
-                        context.n_ctx,
-                        context.postprocess_parameters.clone(),
-                        context.messages.clone(),
-                    )
-                };
-                let session = app.chat.sessions.read().await.get(&chat_id).cloned();
-                let bridge = session.map(|session| spawn_subchat_bridge(frozen.clone(), session));
-                let native_fence = frozen.lock().await.native_job_fence.clone();
-                let owner_abort = native_abort.clone().unwrap_or_else(|| cancel.clone());
-                let invocation = execute_single_tool_owned(
-                    app.clone(),
-                    frozen,
-                    idx,
-                    tool_call.clone(),
-                    catalog,
-                    turn_tool_pool,
-                    serial_registry,
-                    allow_parallel,
-                    batch_size,
-                    &mode_id,
-                    model_id.as_deref(),
-                    native_pause,
-                    native_abort,
-                    expected_execution,
+    let python_app = app.clone();
+    let python_chat = chat_id.clone();
+    let python_completion = (tool_call.function.name == "python")
+        .then(|| PythonJobCompletion::new(app.clone(), chat_id.clone(), tool_call.id.clone()));
+    let python_completed = python_completion
+        .as_ref()
+        .map(|state| state.completed.clone());
+    let make = move |cancel: Arc<AtomicBool>| async move {
+        let _python_completion = python_completion;
+        // submit acquires the lifecycle lease before this future is created/polled.
+        let _guards = operation_guards;
+        let frozen = ccx
+            .lock()
+            .await
+            .freeze_tool_job(&tool_call.id, cancel.clone());
+        let frozen = match frozen {
+            Ok(context) => Arc::new(AMutex::new(context)),
+            Err(error) => {
+                let (_, _, messages, context_files) =
+                    runner_capacity_error(idx, &tool_call, &error);
+                return (
+                    crate::tool_jobs::JobStatus::Failed,
+                    crate::tool_jobs::JobResult {
+                        had_corrections: false,
+                        messages,
+                        context_files,
+                    },
                 );
-                let invocation_result = match native_fence {
-                    Some(fence) => {
-                        fence
-                            .run(&cancel, &owner_abort, async { Ok(invocation.await) })
-                            .await
-                    }
-                    None => Ok(invocation.await),
-                };
-                let (_, corrections, messages, files) = match invocation_result {
-                    Ok(result) => result,
-                    Err(error) => {
-                        if let Some(bridge) = bridge {
-                            bridge.shutdown().await;
-                        }
-                        let (_, _, messages, context_files) = runner_capacity_error(
-                            idx,
-                            &tool_call,
-                            &format!("{error}; effects unknown, never replay"),
-                        );
-                        return (
-                            crate::tool_jobs::JobStatus::Unknown,
-                            crate::tool_jobs::JobResult {
-                                had_corrections: false,
-                                messages,
-                                context_files,
-                            },
-                        );
-                    }
-                };
+            }
+        };
+        let (_parallel_guard, _serial_guard) = if tool_call.function.name == "python" {
+            (None, None)
+        } else if allow_parallel {
+            (Some(dispatch_gate.read_owned().await), None)
+        } else {
+            (None, Some(dispatch_gate.write_owned().await))
+        };
+        let (n_ctx, pp, history) = {
+            let context = frozen.lock().await;
+            (
+                context.n_ctx,
+                context.postprocess_parameters.clone(),
+                context.messages.clone(),
+            )
+        };
+        let session = app.chat.sessions.read().await.get(&chat_id).cloned();
+        let bridge = session.map(|session| spawn_subchat_bridge(frozen.clone(), session));
+        let native_fence = frozen.lock().await.native_job_fence.clone();
+        let owner_abort = native_abort.clone().unwrap_or_else(|| cancel.clone());
+        let invocation = execute_single_tool_owned(
+            app.clone(),
+            frozen,
+            idx,
+            tool_call.clone(),
+            catalog,
+            turn_tool_pool,
+            serial_registry,
+            allow_parallel,
+            batch_size,
+            &mode_id,
+            model_id.as_deref(),
+            native_pause,
+            native_abort,
+            expected_execution,
+        );
+        let invocation_result = match native_fence {
+            Some(fence) => {
+                fence
+                    .run(&cancel, &owner_abort, async { Ok(invocation.await) })
+                    .await
+            }
+            None => Ok(invocation.await),
+        };
+        let (_, corrections, messages, files) = match invocation_result {
+            Ok(result) => result,
+            Err(error) => {
                 if let Some(bridge) = bridge {
                     bridge.shutdown().await;
                 }
-                let mut exempt = std::collections::HashSet::new();
-                if is_tool_result_truncation_exempt(&tool_call.function.name) {
-                    exempt.insert(tool_call.id.clone());
-                }
-                let mut messages = match ToolBudget::try_from_n_ctx(n_ctx) {
-                    Ok(budget) => {
-                        crate::file_activity::TOOL_ACTOR
-                            .scope(
-                                chat_id,
-                                postprocess_tool_results(
-                                    app.gcx.clone(),
-                                    None,
-                                    messages,
-                                    files,
-                                    budget,
-                                    pp,
-                                    &history,
-                                    &exempt,
-                                ),
-                            )
-                            .await
-                    }
-                    Err(error) => runner_capacity_error(idx, &tool_call, &error).2,
-                };
-                for message in &mut messages {
-                    message
-                        .extra
-                        .insert("tool_job_postprocessed".into(), true.into());
-                }
-                let status = if messages.is_empty() || cancel.load(Ordering::Acquire) {
-                    crate::tool_jobs::JobStatus::Unknown
-                } else if messages.iter().any(|m| m.tool_failed == Some(true)) {
-                    crate::tool_jobs::JobStatus::Failed
-                } else {
-                    crate::tool_jobs::JobStatus::Succeeded
-                };
-                (
-                    status,
+                let (_, _, messages, context_files) = runner_capacity_error(
+                    idx,
+                    &tool_call,
+                    &format!("{error}; effects unknown, never replay"),
+                );
+                return (
+                    crate::tool_jobs::JobStatus::Unknown,
                     crate::tool_jobs::JobResult {
-                        had_corrections: corrections,
+                        had_corrections: false,
                         messages,
-                        context_files: Vec::new(),
+                        context_files,
                     },
-                )
+                );
+            }
+        };
+        if let Some(bridge) = bridge {
+            bridge.shutdown().await;
+        }
+        let mut messages = messages;
+        strip_tool_output(&mut messages, structured_output);
+        let mut exempt = std::collections::HashSet::new();
+        if results_for_script || is_tool_result_truncation_exempt(&tool_call.function.name) {
+            exempt.insert(tool_call.id.clone());
+        }
+        let mut messages = match ToolBudget::try_from_n_ctx(n_ctx) {
+            Ok(budget) => {
+                crate::file_activity::TOOL_ACTOR
+                    .scope(
+                        chat_id,
+                        postprocess_tool_results(
+                            app.gcx.clone(),
+                            None,
+                            messages,
+                            files,
+                            budget,
+                            pp,
+                            &history,
+                            &exempt,
+                        ),
+                    )
+                    .await
+            }
+            Err(error) => runner_capacity_error(idx, &tool_call, &error).2,
+        };
+        for message in &mut messages {
+            message
+                .extra
+                .insert("tool_job_postprocessed".into(), true.into());
+        }
+        let status = if messages.is_empty() || cancel.load(Ordering::Acquire) {
+            crate::tool_jobs::JobStatus::Unknown
+        } else if messages.iter().any(|m| m.tool_failed == Some(true)) {
+            crate::tool_jobs::JobStatus::Failed
+        } else {
+            crate::tool_jobs::JobStatus::Succeeded
+        };
+        (
+            status,
+            crate::tool_jobs::JobResult {
+                had_corrections: corrections,
+                messages,
+                context_files: Vec::new(),
             },
         )
-        .await;
+    };
+    let force_background = call_for_error.function.name == "python"
+        && serde_json::from_str::<serde_json::Value>(&call_for_error.function.arguments)
+            .ok()
+            .is_some_and(|a| a["run_in_background"] == true);
+    let result = if wait_until_terminal && !force_background {
+        runtime
+            .submit_unbounded_with_abort(binding, admission_abort, admission_shutdown, make)
+            .await
+    } else {
+        runtime
+            .submit_with_abort(
+                binding,
+                if force_background {
+                    std::time::Duration::ZERO
+                } else {
+                    TOOL_JOB_INLINE_BUDGET
+                },
+                admission_abort,
+                admission_shutdown,
+                make,
+            )
+            .await
+    };
     match result {
         Ok(crate::tool_jobs::Submission::Inline(result)) => (
             idx,
@@ -4899,12 +5421,23 @@ async fn execute_admitted_tool(
             result.messages,
             result.context_files,
         ),
-        Ok(crate::tool_jobs::Submission::Accepted(receipt)) => (
-            idx,
-            false,
-            vec![super::tool_job_delivery::receipt_message(&receipt)],
-            Vec::new(),
-        ),
+        Ok(crate::tool_jobs::Submission::Accepted(receipt)) => {
+            if let Some(completed) = python_completed {
+                publish_python_detach(
+                    &python_app,
+                    &python_chat,
+                    &call_for_error.id,
+                    &receipt.job_id,
+                    &completed,
+                );
+            }
+            (
+                idx,
+                false,
+                vec![super::tool_job_delivery::receipt_message(&receipt)],
+                Vec::new(),
+            )
+        }
         Err(error) => runner_capacity_error(idx, &call_for_error, &error),
     }
 }
@@ -4925,6 +5458,26 @@ async fn execute_single_tool_owned(
     native_abort: Option<Arc<AtomicBool>>,
     expected_execution: Option<Arc<crate::agents::execution::RunExecution>>,
 ) -> (usize, bool, Vec<ChatMessage>, Vec<ContextFile>) {
+    struct PythonTicketReturn {
+        app: AppState,
+        chat: String,
+        call: String,
+    }
+    impl Drop for PythonTicketReturn {
+        fn drop(&mut self) {
+            self.app
+                .python_tool
+                .tickets
+                .lock()
+                .unwrap()
+                .remove(&(self.chat.clone(), self.call.clone()));
+        }
+    }
+    let _python_ticket_return = PythonTicketReturn {
+        app: app.clone(),
+        chat: ccx.lock().await.chat_id.clone(),
+        call: tool_call.id.clone(),
+    };
     let context_abort_flag = {
         let cgcx = ccx.lock().await;
         cgcx.abort_flag.clone()
@@ -4933,7 +5486,7 @@ async fn execute_single_tool_owned(
     if abort_flag.load(Ordering::Relaxed) {
         return (idx, false, Vec::new(), Vec::new());
     }
-    if let Some(gate) = native_pause {
+    if let Some(ref gate) = native_pause {
         if gate.hold(Some(abort_flag.as_ref())).await || abort_flag.load(Ordering::Relaxed) {
             return (idx, false, Vec::new(), Vec::new());
         }
@@ -5081,6 +5634,21 @@ async fn execute_single_tool_owned(
             serde_json::Map::from_iter(args.into_iter()),
         ),
     );
+    let invocation = crate::tools::tool_python::Invocation {
+        app: app.clone(),
+        catalog: catalog.clone(),
+        pool: turn_tool_pool.clone(),
+        mode: mode_id.to_owned(),
+        foreground: {
+            let context = ccx.lock().await;
+            context.native_job_fence.is_none()
+                && (context.task_meta.is_some()
+                    || context.chat_id.starts_with("subchat-supervised-")
+                    || native_pause.is_some())
+        },
+    };
+    let execution_future =
+        crate::tools::tool_python::INVOCATION.scope(invocation, execution_future);
     let execution = if interruptible && tool_call.function.name != "wait" {
         let interrupt = crate::tools::tools_description::WaitInterrupt::from_context(&ccx).await;
         tokio::select! {
@@ -5414,12 +5982,29 @@ async fn execute_tools_inner(
     let mut prepared_parallel_slots: std::collections::HashMap<String, usize> =
         std::collections::HashMap::new();
 
+    let python_chat = ccx.lock().await.chat_id.clone();
+    let mut python_reservations =
+        PythonTicketCleanup::new(app.clone(), python_chat.clone(), Vec::new());
+    for call in tool_calls.iter().filter(|c| c.function.name == "python") {
+        let ticket = app
+            .python_tool
+            .registry
+            .reserve_turn(&python_chat, &call.id);
+        app.python_tool
+            .tickets
+            .lock()
+            .unwrap()
+            .insert((python_chat.clone(), call.id.clone()), ticket);
+        python_reservations.calls.push(call.id.clone());
+    }
     for (idx, tool_call) in tool_calls.iter().enumerate() {
         let is_aborted = {
             let cgcx = ccx.lock().await;
             cgcx.abort_flag.load(Ordering::Relaxed)
         };
         if is_aborted {
+            current_parallel_batch.clear();
+            python_reservations.release();
             break;
         }
 
@@ -5432,6 +6017,11 @@ async fn execute_tools_inner(
                 .iter()
                 .any(|t| t == &tool_call.function.name || t == &resolved);
             if !in_allowlist {
+                app.python_tool
+                    .tickets
+                    .lock()
+                    .unwrap()
+                    .remove(&(python_chat.clone(), tool_call.id.clone()));
                 all_results.push((
                     idx,
                     false,
@@ -5465,6 +6055,11 @@ async fn execute_tools_inner(
         if allow_parallel {
             current_parallel_batch.push((idx, tool_call.clone()));
         } else {
+            let _serial_ticket_cleanup = PythonTicketCleanup::new(
+                app.clone(),
+                python_chat.clone(),
+                vec![tool_call.id.clone()],
+            );
             if !current_parallel_batch.is_empty() {
                 let batch_results = execute_parallel_batch(
                     app.clone(),
@@ -5478,6 +6073,9 @@ async fn execute_tools_inner(
                     model_id,
                     options.native_pause.clone(),
                     options.native_abort.clone(),
+                    options.structured_output,
+                    options.wait_until_terminal,
+                    options.results_for_script,
                 )
                 .await;
                 all_results.extend(batch_results);
@@ -5486,7 +6084,10 @@ async fn execute_tools_inner(
 
             let execution = match current_runner_execution(&app, &ccx).await {
                 Ok(execution) => execution,
-                Err(_) => break,
+                Err(_) => {
+                    python_reservations.release();
+                    break;
+                }
             };
             let is_wait = recognized_runner_wait(&catalog, tool_call);
             let operation_guards = if let Some(execution) = execution.as_ref() {
@@ -5534,6 +6135,9 @@ async fn execute_tools_inner(
                 options.native_abort.clone(),
                 execution.clone(),
                 operation_guards,
+                options.structured_output,
+                options.wait_until_terminal,
+                options.results_for_script,
             )
             .await;
             all_results.push(result);
@@ -5553,6 +6157,9 @@ async fn execute_tools_inner(
             model_id,
             options.native_pause.clone(),
             options.native_abort.clone(),
+            options.structured_output,
+            options.wait_until_terminal,
+            options.results_for_script,
         )
         .await;
         all_results.extend(batch_results);
@@ -5593,6 +6200,9 @@ async fn execute_tools_inner(
     let truncation_exempt_ids: std::collections::HashSet<String> = tool_calls
         .iter()
         .filter(|tc| {
+            if options.results_for_script {
+                return true;
+            }
             let resolved =
                 crate::llm::adapters::claude_code_compat::cc_resolve_tool_name(&tc.function.name);
             is_tool_result_truncation_exempt(&tc.function.name)
@@ -5648,7 +6258,15 @@ async fn execute_parallel_batch(
     model_id: Option<&str>,
     native_pause: Option<Arc<refact_agents_core::registry::PauseGate>>,
     native_abort: Option<Arc<AtomicBool>>,
+    structured_output: bool,
+    wait_until_terminal: bool,
+    results_for_script: bool,
 ) -> Vec<(usize, bool, Vec<ChatMessage>, Vec<ContextFile>)> {
+    let _batch_ticket_cleanup = PythonTicketCleanup::new(
+        app.clone(),
+        ccx.lock().await.chat_id.clone(),
+        batch.iter().map(|(_, call)| call.id.clone()).collect(),
+    );
     if current_runner_execution(&app, &ccx).await.is_err() {
         return Vec::new();
     }
@@ -5761,8 +6379,14 @@ async fn execute_parallel_batch(
             let model_id = model_id.map(|s| s.to_string());
             let native_pause = native_pause.clone();
             let native_abort = native_abort.clone();
+            let ticket_cleanup = PythonTicketCleanup::new(
+                app.clone(),
+                _batch_ticket_cleanup.chat.clone(),
+                vec![tool_call.id.clone()],
+            );
 
             async move {
+                let _ticket_cleanup = ticket_cleanup;
                 if is_wait {
                     if let Some(execution) = execution.as_ref() {
                         if let Err(error) = runner_capacity_wait(
@@ -5793,6 +6417,9 @@ async fn execute_parallel_batch(
                     native_abort,
                     execution.clone(),
                     vec![operation_guard],
+                    structured_output,
+                    wait_until_terminal,
+                    results_for_script,
                 )
                 .await
             }

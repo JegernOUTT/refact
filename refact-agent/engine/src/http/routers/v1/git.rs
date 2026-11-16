@@ -73,7 +73,7 @@ fn serialize_datetime_utc<S: serde::Serializer>(
     serializer.serialize_str(&dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
 }
 
-async fn checkpoint_worktree_for_meta(
+pub(crate) async fn checkpoint_worktree_for_meta(
     gcx: Arc<GlobalContext>,
     meta: &ChatMeta,
 ) -> Option<WorktreeMeta> {

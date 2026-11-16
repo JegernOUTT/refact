@@ -105,6 +105,10 @@ impl Tool for ToolCreateTextDoc {
                 ),
             )
         };
+        let created = !parse_args(gcx.clone(), args, execution_scope.as_ref())
+            .await?
+            .0
+            .exists();
         let (before, after, chunks, summary) = tool_create_text_doc_exec(
             gcx.clone(),
             args,
@@ -178,7 +182,17 @@ impl Tool for ToolCreateTextDoc {
             Some(after.as_str()),
             &chunks,
         );
+        let output = super::output::EditOutput {
+            files: vec![super::output::EditFileOutput::from_chunks(
+                path.to_string(),
+                if created { "add" } else { "edit" },
+                &chunks,
+                &before,
+                &after,
+            )],
+        };
         super::edit_output::finish_edit_output(&mut out, model_content);
+        super::output::attach(&mut out, tool_call_id, &output);
         Ok((false, out))
     }
 
@@ -239,7 +253,7 @@ impl Tool for ToolCreateTextDoc {
             allow_parallel: false,
             description: "Creates a new text document or code or completely replaces the content of an existing document. Avoid trailing spaces and tabs.".to_string(),
             input_schema: json_schema_from_params(&[("path", "string", "Absolute path to new file."), ("content", "string", "The initial text or code.")], &["path", "content"]),
-            output_schema: None,
+            output_schema: Some(refact_tool_api::tool_output::output_schema_for::<super::output::EditOutput>()),
             annotations: None,
         }
     }

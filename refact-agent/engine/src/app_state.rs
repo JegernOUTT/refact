@@ -500,6 +500,7 @@ impl ChatSessionFacade for EngineChatSessionFacade {
 
 #[derive(Clone)]
 pub struct AppState {
+    pub python_tool: Arc<crate::python_tool::PythonToolRuntime>,
     pub gcx: SharedGlobalContext,
     pub runtime: RuntimeServices,
     pub paths: PathServices,
@@ -725,7 +726,14 @@ impl AppToolRegistry {
             tokio::task::yield_now().await;
             return fixture_tool_factory();
         }
-        crate::tools::tools_list::get_tools_for_mode_with_intent(
+        let root = crate::files_correction::get_active_project_path(gcx.clone()).await;
+        let settings = match root {
+            Some(ref root) => crate::runtime_settings::coordination_for_project(root)
+                .await
+                .ok(),
+            None => None,
+        };
+        let mut tools = crate::tools::tools_list::get_tools_for_mode_with_intent(
             gcx,
             mode,
             model_id,
@@ -738,7 +746,11 @@ impl AppToolRegistry {
                 }
             },
         )
-        .await
+        .await;
+        if settings.as_ref().is_some_and(|s| !s.python_tool_enabled) {
+            tools.retain(|t| t.tool_description().name != "python");
+        }
+        tools
     }
 
     fn snapshot_cache_enabled() -> bool {
@@ -781,9 +793,13 @@ impl AppToolRegistry {
         model_id: Option<&str>,
         intent: refact_runtime_api::ToolCatalogIntent,
     ) -> ToolCatalogSnapshot {
-        let tools = crate::tools::tools_list::apply_mcp_lazy_filter(
-            self.tools_for_mode(gcx, mode, model_id, intent).await,
+        let mut tools = crate::tools::tools_list::apply_mcp_lazy_filter(
+            self.tools_for_mode(gcx.clone(), mode, model_id, intent)
+                .await,
         );
+        let options =
+            crate::python_tool::catalog_binding::BindOptions::for_project(gcx.clone()).await;
+        crate::python_tool::catalog_binding::bind(&mut tools.tools, tools.mcp_lazy_mode, options);
         let policy = crate::tools::tools_list::catalog_policy_for_tools(&tools.tools);
         let descriptions = tools
             .tools
@@ -842,11 +858,18 @@ impl AppToolRegistry {
         component: PerfComponent,
     ) -> Vec<Box<dyn crate::tools::tools_description::Tool + Send>> {
         let span = perf_diagnostics::span(component, None, None);
-        let tools = crate::tools::tools_list::apply_mcp_lazy_filter(
+        let options =
+            crate::python_tool::catalog_binding::BindOptions::for_project(gcx.clone()).await;
+        let mut filtered = crate::tools::tools_list::apply_mcp_lazy_filter(
             self.tools_for_mode(gcx, mode, model_id, catalog.intent)
                 .await,
-        )
-        .tools;
+        );
+        crate::python_tool::catalog_binding::bind(
+            &mut filtered.tools,
+            filtered.mcp_lazy_mode,
+            options,
+        );
+        let tools = filtered.tools;
         span.finish_tool(
             PerfOutcome::Success,
             1,

@@ -2100,3 +2100,73 @@ describe("multiplex per-chat isolation", () => {
     expect(signals[0].aborted).toBe(true);
   });
 });
+
+describe("Python events", () => {
+  afterEach(() => vi.unstubAllGlobals());
+  it("parses Python events and rejects malformed payloads", async () => {
+    const { pythonApproval, pythonCall } = await import("./pythonFixtures");
+    const valid = [
+      {
+        type: "python_run_update",
+        tool_call_id: "t",
+        run_id: "r",
+        update: { kind: "started", background: false },
+      },
+      {
+        type: "python_run_update",
+        tool_call_id: "t",
+        run_id: "r",
+        update: { kind: "call_finished", record: pythonCall },
+      },
+      { type: "python_approval_requested", request: pythonApproval },
+      {
+        type: "python_approval_resolved",
+        request_id: "q",
+        decision: "allow_for_chat",
+      },
+    ];
+    const invalid = [
+      { ...valid[0], update: { kind: "started", background: "false" } },
+      { ...valid[0], update: { kind: "unknown" } },
+      {
+        ...valid[1],
+        update: {
+          kind: "call_finished",
+          record: { ...pythonCall, status: 123 },
+        },
+      },
+      { ...valid[2], request: { ...pythonApproval, created_at_ms: "1" } },
+      { ...valid[3], decision: "yes" },
+    ];
+    const events = [...valid, ...invalid].map((event, index) => ({
+      ...event,
+      chat_id: "test",
+      seq: String(index + 1),
+    }));
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(
+          new TextEncoder().encode(
+            events
+              .map((event) => `data: ${JSON.stringify(event)}\n\n`)
+              .join(""),
+          ),
+        );
+        controller.close();
+      },
+    });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(stream)));
+    const onEvent = vi.fn();
+    const onDisconnected = vi.fn();
+    const stop = subscribeToChatEvents(
+      "test",
+      { host: "vscode", lspPort: 8001 },
+      { onEvent, onError: vi.fn(), onDisconnected },
+    );
+    await vi.waitFor(() => expect(onDisconnected).toHaveBeenCalled());
+    expect(onEvent.mock.calls.map((call) => call[0] as unknown)).toEqual(
+      events.slice(0, valid.length),
+    );
+    stop();
+  });
+});

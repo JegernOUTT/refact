@@ -220,7 +220,7 @@ fn event_matches(event: &LlmCallEvent, params: &StatsEventsQuery) -> bool {
         .is_some_and(|success| event.success != success)
 }
 
-fn scan_events_newest_first<F>(
+pub(crate) fn scan_events_newest_first<F>(
     stats_dirs: &[PathBuf],
     params: &StatsEventsQuery,
     target: usize,
@@ -266,8 +266,15 @@ pub async fn handle_v1_stats_llm_summary(
     State(app): State<AppState>,
     Query(params): Query<StatsQuery>,
 ) -> Result<Response<Body>, ScratchError> {
-    let stats_dirs = crate::stats::get_stats_dirs_for_read(app.gcx.clone()).await;
-    let body = tokio::task::spawn_blocking(move || {
+    json_response(llm_summary_body(app.gcx.clone(), params).await?)
+}
+
+pub(crate) async fn llm_summary_body(
+    gcx: std::sync::Arc<crate::global_context::GlobalContext>,
+    params: StatsQuery,
+) -> Result<String, ScratchError> {
+    let stats_dirs = crate::stats::get_stats_dirs_for_read(gcx).await;
+    tokio::task::spawn_blocking(move || {
         let key = SummaryCacheKey {
             stats_dirs: stats_dirs.clone(),
             fingerprint: stats_fingerprint(&stats_dirs),
@@ -289,8 +296,7 @@ pub async fn handle_v1_stats_llm_summary(
         })
     })
     .await
-    .map_err(|e| scratch_internal(format!("stats summary task failed: {}", e)))??;
-    json_response(body)
+    .map_err(|e| scratch_internal(format!("stats summary task failed: {}", e)))?
 }
 
 pub async fn handle_v1_stats_llm_events(

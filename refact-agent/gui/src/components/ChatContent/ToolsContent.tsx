@@ -17,7 +17,10 @@ import { createChatWithId, switchToThread } from "../../features/Chat/Thread";
 import { selectFeatures } from "../../features/Config/configSlice";
 import { push } from "../../features/Pages/pagesSlice";
 import { isRawTextDocToolCall } from "../Tools/types";
-import { normalizeToolCall } from "../../utils/toolNameAliases";
+import {
+  normalizeToolCall,
+  normalizeToolName,
+} from "../../utils/toolNameAliases";
 import {
   ReadTool,
   ListTool,
@@ -51,6 +54,7 @@ import {
   CompressReportTool,
 } from "./ToolCard";
 import { MultiModalTool } from "./ToolCard/MultiModalTool";
+import { PythonTool } from "./ToolCard/PythonTool";
 import { ToolJobCard } from "./ToolCard/ToolJobCard";
 import { ToolJobResultsContext } from "./ToolCard/ToolJobResultsContext";
 import { ToolJobResult } from "./ToolCard/ToolJobResult";
@@ -443,6 +447,7 @@ const _ToolContent: React.FC<ToolContentProps> = ({
             extractPrivacyShellMetadata(result?.extra) === null &&
             !isPrivacyRefusalContent(result?.content);
           return (results ?? [])
+            .filter(() => normalizeToolName(call?.function.name) !== "python")
             .filter(
               (completion) => !attached || completion.jobId !== job.job_id,
             )
@@ -499,6 +504,27 @@ function processToolCalls(
       toolResults,
       features,
       [...processed, elem],
+      contextFilesByToolId,
+      diffsByToolId,
+      activeToolCallId,
+      onOpenTrajectory,
+      threadId,
+    );
+  }
+
+  if (headName === "python") {
+    return processToolCalls(
+      tail,
+      toolResults,
+      features,
+      [
+        ...processed,
+        <PythonTool
+          key={`python-${head.id}`}
+          toolCall={normalizedHead}
+          result={result}
+        />,
+      ],
       contextFilesByToolId,
       diffsByToolId,
       activeToolCallId,

@@ -1,0 +1,101 @@
+.section {
+  display: grid;
+  gap: var(--rf-space-1);
+  min-width: 0;
+}
+.label {
+  color: var(--rf-color-muted);
+  font-size: var(--rf-transcript-label-size);
+  font-weight: var(--rf-weight-medium);
+  line-height: var(--rf-line-1);
+  letter-spacing: var(--rf-transcript-label-tracking);
+  text-transform: uppercase;
+}
+/* Bounded like the card's other surfaces; the list scrolls inside. */
+.list {
+  composes: scrollbarThin from "../../shared/scrollbar.module.css";
+  display: grid;
+  gap: 0;
+  min-width: 0;
+  max-height: var(--rf-transcript-clamp-h);
+  margin: 0;
+  padding: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  list-style: none;
+  background: var(--rf-surface-1);
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-ctl);
+}
+.list:focus-visible {
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
+  outline-offset: var(--rf-hairline);
+}
+.change {
+  display: grid;
+  gap: var(--rf-space-1);
+  min-width: 0;
+  padding: var(--rf-space-2) var(--rf-space-3);
+}
+.change + .change {
+  border-top: var(--rf-hairline) solid var(--rf-border);
+}
+.head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--rf-space-1) var(--rf-space-2);
+  min-width: 0;
+}
+.title {
+  min-width: 0;
+  color: var(--rf-color-fg);
+  font-size: var(--rf-transcript-body-size);
+  font-weight: var(--rf-weight-medium);
+  line-height: var(--rf-line-2);
+  overflow-wrap: anywhere;
+}
+.function {
+  margin-inline-start: auto;
+  color: var(--rf-color-muted);
+  font-family: var(--rf-font-mono);
+  font-size: var(--rf-transcript-mono-size);
+  line-height: var(--rf-line-1);
+  overflow-wrap: anywhere;
+}
+.marker {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--rf-space-1);
+  padding: var(--rf-space-2xs) var(--rf-space-xs);
+  border-radius: var(--rf-radius-chip);
+  color: var(--rf-color-warning);
+  background: var(--rf-color-warning-soft);
+  font-size: var(--rf-transcript-meta-size);
+  font-weight: var(--rf-weight-semibold);
+  line-height: var(--rf-line-1);
+}
+.marker[data-class="destructive"] {
+  color: var(--rf-color-danger);
+  background: var(--rf-color-danger-soft);
+}
+/* Not a class marker: a dashed outline and its own icon and words set it apart. */
+.outcome {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--rf-space-1);
+  padding: var(--rf-space-2xs) var(--rf-space-xs);
+  border: var(--rf-hairline) dashed var(--rf-border);
+  border-radius: var(--rf-radius-chip);
+  color: var(--rf-color-fg);
+  font-size: var(--rf-transcript-meta-size);
+  font-weight: var(--rf-weight-semibold);
+  line-height: var(--rf-line-1);
+}
+.note {
+  margin: 0;
+  color: var(--rf-color-muted);
+  font-size: var(--rf-transcript-meta-size);
+  line-height: var(--rf-line-1);
+}

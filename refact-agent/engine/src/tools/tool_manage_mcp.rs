@@ -146,7 +146,7 @@ fn parse(args: &HashMap<String, Value>) -> Result<Request, String> {
     Ok(request)
 }
 
-fn identity(record: &IntegrationRecord) -> Option<(&str, &str)> {
+pub(crate) fn identity(record: &IntegrationRecord) -> Option<(&str, &str)> {
     let name = record.integr_name.strip_prefix("mcp_")?;
     Some(
         ["http", "sse", "stdio"]
@@ -156,7 +156,7 @@ fn identity(record: &IntegrationRecord) -> Option<(&str, &str)> {
     )
 }
 
-fn scope(record: &IntegrationRecord) -> &str {
+pub(crate) fn scope(record: &IntegrationRecord) -> &str {
     if record.project_path.is_empty() {
         "global"
     } else {
@@ -164,14 +164,14 @@ fn scope(record: &IntegrationRecord) -> &str {
     }
 }
 
-async fn read_raw(path: &str) -> Result<Value, String> {
+pub(crate) async fn read_raw(path: &str) -> Result<Value, String> {
     let text = tokio::fs::read_to_string(path)
         .await
         .map_err(|_| "Cannot read MCP config".to_string())?;
     serde_yaml::from_str(&text).map_err(|_| "Invalid MCP config YAML".into())
 }
 
-fn merge_settings(existing: &mut Value, patch: &Value, secret: bool) {
+pub(crate) fn merge_settings(existing: &mut Value, patch: &Value, secret: bool) {
     if let (Some(dst), Some(src)) = (existing.as_object_mut(), patch.as_object()) {
         for (key, value) in src {
             let secret = secret || redaction::is_tool_secret_field(key);
@@ -185,7 +185,7 @@ fn merge_settings(existing: &mut Value, patch: &Value, secret: bool) {
     }
 }
 
-fn collect_sensitive(value: &Value, secret: bool, values: &mut Vec<String>) {
+pub(crate) fn collect_sensitive(value: &Value, secret: bool, values: &mut Vec<String>) {
     match value {
         Value::Object(map) => {
             for (key, value) in map {
@@ -206,7 +206,7 @@ fn collect_sensitive(value: &Value, secret: bool, values: &mut Vec<String>) {
     }
 }
 
-fn substitutions(raw: &Value, substituted: &Value, values: &mut Vec<String>) {
+pub(crate) fn substitutions(raw: &Value, substituted: &Value, values: &mut Vec<String>) {
     match raw {
         Value::Object(map) => {
             for (k, v) in map {
@@ -227,7 +227,7 @@ fn substitutions(raw: &Value, substituted: &Value, values: &mut Vec<String>) {
     }
 }
 
-fn sanitize(value: &mut Value, sensitive: &[String]) {
+pub(crate) fn sanitize(value: &mut Value, sensitive: &[String]) {
     redaction::redact_tool_secrets(value);
     fn walk(value: &mut Value, sensitive: &[String]) {
         match value {
@@ -250,7 +250,7 @@ fn sanitize(value: &mut Value, sensitive: &[String]) {
     walk(value, sensitive);
 }
 
-async fn entry(
+pub(crate) async fn entry(
     gcx: Arc<GlobalContext>,
     record: &IntegrationRecord,
     details: bool,
@@ -368,7 +368,7 @@ async fn allowed(gcx: Arc<GlobalContext>, model: &str, path: &str) -> Result<(),
     }
 }
 
-fn resolve<'a>(
+pub(crate) fn resolve<'a>(
     records: &'a [IntegrationRecord],
     name: &str,
     requested_scope: Option<&str>,
@@ -394,16 +394,11 @@ fn resolve<'a>(
     }
 }
 
-async fn execute(ccx: Arc<Mutex<AtCommandsContext>>, request: Request) -> Result<Value, String> {
-    let (gcx, model, execution_scope, abort) = {
-        let c = ccx.lock().await;
-        (
-            c.app.gcx.clone(),
-            c.current_model.clone(),
-            c.execution_scope.clone(),
-            c.abort_flag.clone(),
-        )
-    };
+/// Installed MCP configs, deduplicated by path, that the model's provider may use.
+pub(crate) async fn mcp_records_for_model(
+    gcx: Arc<GlobalContext>,
+    model: &str,
+) -> Vec<IntegrationRecord> {
     let all = configs::integrations_all(gcx.clone(), false)
         .await
         .integrations;
@@ -416,13 +411,27 @@ async fn execute(ccx: Arc<Mutex<AtCommandsContext>>, request: Request) -> Result
         if !seen.insert(record.integr_config_path.clone()) {
             continue;
         }
-        if allowed(gcx.clone(), &model, &record.integr_config_path)
+        if allowed(gcx.clone(), model, &record.integr_config_path)
             .await
             .is_ok()
         {
             records.push(record);
         }
     }
+    records
+}
+
+async fn execute(ccx: Arc<Mutex<AtCommandsContext>>, request: Request) -> Result<Value, String> {
+    let (gcx, model, execution_scope, abort) = {
+        let c = ccx.lock().await;
+        (
+            c.app.gcx.clone(),
+            c.current_model.clone(),
+            c.execution_scope.clone(),
+            c.abort_flag.clone(),
+        )
+    };
+    let records = mcp_records_for_model(gcx.clone(), &model).await;
     match request {
         Request::List => {
             let mut entries = Vec::new();

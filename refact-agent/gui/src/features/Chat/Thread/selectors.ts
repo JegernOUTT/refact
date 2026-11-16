@@ -1,3 +1,4 @@
+import type { PythonApprovalRequest } from "../../../services/refact/types";
 import { createThreadMetadata } from "./metadata";
 import type { RootState } from "../../../app/store";
 import { createSelector } from "@reduxjs/toolkit";
@@ -1890,3 +1891,19 @@ export const selectChatActivityById = (
 
 export const selectAppWorkspaceById = (state: RootState, chatId: string) =>
   selectAllThreads(state)[chatId]?.thread.app_workspace ?? null;
+
+export const selectPythonRun = (
+  state: RootState,
+  chatId: string,
+  toolCallId: string,
+) => state.chat.threads[chatId]?.pythonRuns?.[toolCallId];
+
+const EMPTY_PYTHON_APPROVALS: Record<string, PythonApprovalRequest> = {};
+export const selectPythonApprovals = createSelector(
+  [
+    (state: RootState, chatId: string) =>
+      state.chat.threads[chatId]?.pythonApprovals ?? EMPTY_PYTHON_APPROVALS,
+  ],
+  (approvals): PythonApprovalRequest[] =>
+    Object.values(approvals).sort((a, b) => a.created_at_ms - b.created_at_ms),
+);

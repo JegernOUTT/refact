@@ -883,6 +883,32 @@ mod tests {
     }
 
     #[test]
+    fn analysis_prompt_never_carries_python_run_metadata() {
+        let mut python = text_message("tool", "Result:\n3");
+        python.extra.insert(
+            "python".into(),
+            serde_json::json!({"displays":[{"rows":[["DISPLAY_CELL_MARKER"]]}],"stdout_preview":"PREVIEW_MARKER","run_dir":"/RUN_DIR_MARKER"}),
+        );
+        let messages = vec![text_message("user", "go"), python];
+        let metadata = extract_conversation_metadata(&messages);
+        let rendered = render_annotated_messages(
+            &analysis_entries(&metadata),
+            AnalysisRenderStep {
+                preview_cap: ANALYSIS_PREVIEW_CAP,
+                keep_recent: usize::MAX,
+                control_cap: None,
+            },
+        );
+        assert!(rendered.contains("Result:\n3"), "{rendered}");
+        for marker in ["DISPLAY_CELL_MARKER", "PREVIEW_MARKER", "RUN_DIR_MARKER"] {
+            assert!(
+                !rendered.contains(marker),
+                "{marker} reached the analyzer prompt"
+            );
+        }
+    }
+
+    #[test]
     fn render_annotated_messages_omits_oldest_but_keeps_controls_and_latest_user() {
         let messages = sample_conversation();
         let metadata = extract_conversation_metadata(&messages);

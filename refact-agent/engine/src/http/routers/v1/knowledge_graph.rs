@@ -14,7 +14,7 @@ fn normalize_tag(tag: &str) -> String {
 }
 
 #[derive(Serialize)]
-struct KgNodeJson {
+pub(crate) struct KgNodeJson {
     id: String,
     node_type: String,
     label: String,
@@ -33,14 +33,14 @@ struct KgNodeJson {
 }
 
 #[derive(Serialize)]
-struct KgEdgeJson {
+pub(crate) struct KgEdgeJson {
     source: String,
     target: String,
     edge_type: String,
 }
 
 #[derive(Serialize)]
-struct KgStatsJson {
+pub(crate) struct KgStatsJson {
     doc_count: usize,
     tag_count: usize,
     file_count: usize,
@@ -52,7 +52,7 @@ struct KgStatsJson {
 }
 
 #[derive(Serialize)]
-struct KnowledgeGraphJson {
+pub(crate) struct KnowledgeGraphJson {
     nodes: Vec<KgNodeJson>,
     edges: Vec<KgEdgeJson>,
     stats: KgStatsJson,
@@ -69,6 +69,26 @@ pub async fn handle_v1_knowledge_graph(
         .map(|v| v != 0)
         .unwrap_or(false);
 
+    let response = knowledge_graph_json(gcx, include_content).await;
+
+    let json_string = serde_json::to_string_pretty(&response).map_err(|e| {
+        ScratchError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("JSON serialization error: {}", e),
+        )
+    })?;
+
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Type", "application/json")
+        .body(Body::from(json_string))
+        .unwrap())
+}
+
+pub(crate) async fn knowledge_graph_json(
+    gcx: std::sync::Arc<crate::global_context::GlobalContext>,
+    include_content: bool,
+) -> KnowledgeGraphJson {
     let kg = build_knowledge_graph(gcx).await;
 
     let mut nodes = Vec::new();
@@ -224,22 +244,9 @@ pub async fn handle_v1_knowledge_graph(
         trajectory_count,
     };
 
-    let response = KnowledgeGraphJson {
+    KnowledgeGraphJson {
         nodes,
         edges,
         stats,
-    };
-
-    let json_string = serde_json::to_string_pretty(&response).map_err(|e| {
-        ScratchError::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("JSON serialization error: {}", e),
-        )
-    })?;
-
-    Ok(Response::builder()
-        .status(StatusCode::OK)
-        .header("Content-Type", "application/json")
-        .body(Body::from(json_string))
-        .unwrap())
+    }
 }

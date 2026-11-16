@@ -123,16 +123,24 @@ pub async fn handle_v1_project_information_preview(
     State(app): State<AppState>,
     axum::Json(config): axum::Json<ProjectInformationConfig>,
 ) -> Result<axum::Json<ProjectInformationPreviewResponse>, ScratchError> {
+    Ok(axum::Json(project_information_preview(&app, &config).await))
+}
+
+/// The project information blocks new chats would get under `config`.
+pub(crate) async fn project_information_preview(
+    app: &AppState,
+    config: &ProjectInformationConfig,
+) -> ProjectInformationPreviewResponse {
     let gcx = app.gcx.clone();
     let mut blocks = Vec::new();
     let mut warnings = Vec::new();
 
     if !config.enabled {
         warnings.push("Project information is disabled".into());
-        return Ok(axum::Json(ProjectInformationPreviewResponse {
+        return ProjectInformationPreviewResponse {
             blocks,
             warnings,
-        }));
+        };
     }
 
     let project_dirs = get_project_dirs(gcx.clone()).await;
@@ -161,7 +169,7 @@ pub async fn handle_v1_project_information_preview(
     }
 
     if config.sections.models_info.enabled {
-        let raw_content = crate::chat::prompts::models_info_snapshot(&app).await;
+        let raw_content = crate::chat::prompts::models_info_snapshot(app).await;
         let max_chars = config.sections.models_info.max_chars.unwrap_or(6000);
         let tr = truncate_to_chars(&raw_content, max_chars);
         blocks.push(ProjectInfoBlock {
@@ -437,8 +445,8 @@ pub async fn handle_v1_project_information_preview(
         warnings.push("No sections enabled".into());
     }
 
-    Ok(axum::Json(ProjectInformationPreviewResponse {
+    ProjectInformationPreviewResponse {
         blocks,
         warnings,
-    }))
+    }
 }

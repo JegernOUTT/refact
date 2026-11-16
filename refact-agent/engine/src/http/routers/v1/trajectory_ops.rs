@@ -157,7 +157,7 @@ pub async fn handle_refresh_tools(
     }))
 }
 
-async fn refresh_session_tools(
+pub(crate) async fn refresh_session_tools(
     gcx: Arc<GlobalContext>,
     session_arc: Arc<tokio::sync::Mutex<crate::chat::types::ChatSession>>,
     expected_version: Option<u64>,
@@ -754,7 +754,11 @@ async fn commit_transition_snapshot(
     {
         return Err("Source trajectory changed during reconstruction".to_string());
     }
-    persist_transition(gcx, &mut session, &snapshot, transferred_goal).await
+    let source_id = session.chat_id.clone();
+    persist_transition(gcx.clone(), &mut session, &snapshot, transferred_goal).await?;
+    drop(session);
+    let app = AppState::from_gcx(gcx).await;
+    crate::python_tool::workspace::PythonWorkspace::fork(&app, &source_id, &snapshot.chat_id).await
 }
 
 #[cfg(test)]

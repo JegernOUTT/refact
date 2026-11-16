@@ -260,7 +260,17 @@ impl Tool for ToolUndoTextDoc {
             },
             &chunks,
         );
+        let output = super::output::EditOutput {
+            files: vec![super::output::EditFileOutput::from_chunks(
+                path.to_string(),
+                "edit",
+                &chunks,
+                &before,
+                &after,
+            )],
+        };
         super::edit_output::finish_edit_output(&mut out, model_content);
+        super::output::attach(&mut out, tool_call_id, &output);
         Ok((false, out))
     }
 
@@ -324,7 +334,9 @@ impl Tool for ToolUndoTextDoc {
                 ],
                 &["path"],
             ),
-            output_schema: None,
+            output_schema: Some(refact_tool_api::tool_output::output_schema_for::<
+                super::output::EditOutput,
+            >()),
             annotations: None,
         }
     }

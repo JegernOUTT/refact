@@ -28,6 +28,14 @@ function renderShortcuts() {
 }
 
 describe("useWorkspaceShortcuts", () => {
+  it("opens Python workspace with Ctrl+5", () => {
+    const { store } = renderShortcuts();
+    fireEvent.keyDown(window, { key: "5", ctrlKey: true });
+    expect(store.getState().workspace.dock).toMatchObject({
+      open: true,
+      section: "python",
+    });
+  });
   it("opens the dock and current chat terminal when the dock is closed", () => {
     const { store, rerender } = renderShortcuts();
     store.dispatch(setTerminalWorkbenchOpen({ chatId: "chat-a", open: true }));

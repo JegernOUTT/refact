@@ -84,7 +84,6 @@ pub mod files_in_workspace;
 pub mod indexing_routing;
 pub mod organization;
 
-pub mod code_mode;
 pub mod codegraph;
 pub mod postprocessing;
 pub mod review;
@@ -406,3 +405,5 @@ pub async fn run_with_cmdline(cmdline: global_context::CommandLine) {
     integrations::sessions::stop_sessions(gcx.clone()).await;
     info!("bb\n");
 }
+
+pub mod python_tool;

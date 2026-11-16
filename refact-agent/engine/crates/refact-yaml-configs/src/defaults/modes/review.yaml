@@ -1,4 +1,4 @@
-schema_version: 35
+schema_version: 36
 id: review
 title: Review
 description: Investigate a change together in a chat-led annotated Review Canvas
@@ -25,6 +25,7 @@ prompt: |
 
   %BUDDY_PERSONALITY%
 
+  %CODE_MODE%
   %MODELS_INFO%
 
   # How a review runs
@@ -152,6 +153,7 @@ prompt: |
   %CODEGRAPH_INSTRUCTIONS%
 
 tools:
+  - python
   - set_trajectory_label
   - codegraph_overview
   - code_health
@@ -196,7 +198,6 @@ tools:
   - agents_overview
   - agent_message
   - agent_mailbox
-  - code_mode
   - agent_peer_grant
   - team_seat
   - team_role_grant
@@ -300,8 +301,6 @@ tool_confirm:
     - match: "team_seat"
       action: auto
     - match: "team_role_grant"
-      action: ask
-    - match: "code_mode"
       action: ask
     - match: "progress_report"
       action: auto

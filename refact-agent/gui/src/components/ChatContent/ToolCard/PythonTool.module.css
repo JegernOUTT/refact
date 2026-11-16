@@ -1,0 +1,703 @@
+.alert {
+  margin: 0;
+  color: var(--rf-color-danger);
+  font-size: var(--rf-transcript-meta-size);
+}
+.waitingNote {
+  margin: 0;
+  color: var(--rf-color-warning);
+  font-size: var(--rf-transcript-meta-size);
+  line-height: var(--rf-transcript-mono-line);
+}
+.muted {
+  margin: 0;
+  color: var(--rf-color-muted);
+  font-size: var(--rf-transcript-meta-size);
+  line-height: var(--rf-transcript-mono-line);
+  overflow-wrap: anywhere;
+}
+.section {
+  display: grid;
+  gap: var(--rf-space-1);
+  min-width: 0;
+}
+.sectionLabel,
+.label {
+  color: var(--rf-color-muted);
+  font-size: var(--rf-transcript-label-size);
+  font-weight: var(--rf-weight-medium);
+  line-height: var(--rf-line-1);
+  letter-spacing: var(--rf-transcript-label-tracking);
+  text-transform: uppercase;
+}
+.dangerLabel.dangerLabel {
+  color: var(--rf-color-danger);
+}
+.codeBlock {
+  min-width: 0;
+  overflow-x: auto;
+}
+.clamped {
+  display: grid;
+  gap: var(--rf-space-1);
+  min-width: 0;
+}
+.pre {
+  margin: 0;
+  min-width: 0;
+  padding: var(--rf-space-2);
+  overflow-x: auto;
+  color: var(--rf-color-fg);
+  background: var(--rf-surface-1);
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-ctl);
+  font-family: var(--rf-font-mono);
+  font-size: var(--rf-transcript-mono-size);
+  line-height: var(--rf-transcript-mono-line);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.scrollPre {
+  /* Bounded by line count so the full text scrolls instead of clamping. */
+  --python-scroll-lines: 12;
+  max-height: calc(
+    var(--rf-transcript-mono-line) * var(--python-scroll-lines) +
+      var(--rf-space-2) * 2
+  );
+  overflow-y: auto;
+}
+.scrollNote {
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-1);
+  line-height: var(--rf-line-1);
+}
+.linkButton {
+  justify-self: start;
+  padding: 0;
+  color: var(--rf-color-accent);
+  background: transparent;
+  border: 0;
+  border-radius: var(--rf-radius-chip);
+  cursor: pointer;
+  font: inherit;
+  font-size: var(--rf-text-1);
+  line-height: var(--rf-line-1);
+}
+.linkButton:hover {
+  text-decoration: underline;
+}
+.linkButton:focus-visible,
+.callRow:focus-visible,
+.details summary:focus-visible {
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
+  outline-offset: var(--rf-hairline);
+}
+.errorLine {
+  margin: 0;
+  color: var(--rf-color-danger);
+  overflow-wrap: anywhere;
+}
+.errorType {
+  font-family: var(--rf-font-mono);
+  font-weight: var(--rf-weight-semibold);
+}
+.details {
+  display: grid;
+  gap: var(--rf-space-1);
+  min-width: 0;
+}
+.details summary {
+  justify-self: start;
+  color: var(--rf-color-muted);
+  font-size: var(--rf-transcript-meta-size);
+  cursor: pointer;
+}
+
+/* Nested calls */
+.calls {
+  display: grid;
+  gap: 0;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.call {
+  min-width: 0;
+}
+.callRow {
+  display: flex;
+  align-items: center;
+  gap: var(--rf-space-2);
+  width: 100%;
+  min-width: 0;
+  min-height: var(--rf-transcript-row-h);
+  padding: 0 var(--rf-space-1);
+  color: var(--rf-color-fg);
+  background: transparent;
+  border: 0;
+  border-radius: var(--rf-radius-ctl);
+  cursor: pointer;
+  font: inherit;
+  text-align: start;
+}
+.callRow:hover {
+  background: var(--rf-surface-1);
+}
+.chevron {
+  flex: 0 0 auto;
+  transition: transform var(--rf-dur-fast) var(--rf-ease-standard);
+}
+.chevronOpen {
+  transform: rotate(90deg);
+}
+.callIcon {
+  display: inline-flex;
+  flex: 0 0 auto;
+}
+.callName {
+  flex: 0 0 auto;
+  font-family: var(--rf-font-mono);
+  font-size: var(--rf-transcript-mono-size);
+  font-weight: var(--rf-weight-semibold);
+}
+.callSummary {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--rf-color-muted);
+  font-family: var(--rf-font-mono);
+  font-size: var(--rf-transcript-mono-size);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.callWaiting {
+  flex: 0 0 auto;
+  color: var(--rf-color-warning);
+  font-size: var(--rf-transcript-meta-size);
+  font-weight: var(--rf-weight-semibold);
+}
+.callMeta {
+  flex: 0 0 auto;
+  color: var(--rf-color-muted);
+  font-size: var(--rf-transcript-meta-size);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.callBody {
+  display: grid;
+  gap: var(--rf-space-2);
+  min-width: 0;
+  padding: var(--rf-space-1) 0 var(--rf-space-3) var(--rf-space-6);
+}
+.callResult {
+  display: grid;
+  gap: var(--rf-space-1);
+  min-width: 0;
+}
+.args {
+  display: grid;
+  gap: var(--rf-space-1);
+  min-width: 0;
+  margin: 0;
+}
+.arg {
+  display: grid;
+  grid-template-columns: minmax(0, max-content) minmax(0, 1fr);
+  gap: var(--rf-space-1) var(--rf-space-3);
+  align-items: baseline;
+  min-width: 0;
+}
+.argKey {
+  color: var(--rf-color-muted);
+  font-size: var(--rf-transcript-meta-size);
+}
+.argValue {
+  min-width: 0;
+  margin: 0;
+}
+.argInline {
+  font-family: var(--rf-font-mono);
+  font-size: var(--rf-transcript-mono-size);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.srOnly {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* Files and artifacts */
+.files {
+  display: grid;
+  gap: var(--rf-space-1);
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.file {
+  display: grid;
+  gap: var(--rf-space-1);
+  min-width: 0;
+}
+.fileRow {
+  display: flex;
+  align-items: center;
+  gap: var(--rf-space-2);
+  min-width: 0;
+  min-height: var(--rf-transcript-row-h);
+}
+.filePath {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  font-family: var(--rf-font-mono);
+  font-size: var(--rf-transcript-mono-size);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.fileMeta {
+  flex: 0 0 auto;
+  margin-inline-start: auto;
+  color: var(--rf-color-muted);
+  font-size: var(--rf-transcript-meta-size);
+}
+
+/* Script card */
+/* The details chevron sits where an expandable row draws its chevron. */
+.scriptRow.scriptRow[data-expandable] {
+  padding-inline-end: 0;
+}
+/* The meta keeps its width; the title gives way. */
+.scriptRow [data-testid="transcript-meta"] {
+  flex: 0 0 auto;
+}
+.scriptRow {
+  container-type: inline-size;
+}
+.metaNarrow {
+  display: none;
+}
+@container (max-width: 560px) {
+  .metaWide {
+    display: none;
+  }
+  .metaNarrow {
+    display: inline;
+  }
+}
+.detailsToggle svg {
+  color: var(--rf-color-muted);
+}
+.detailsToggle[aria-expanded="true"] svg {
+  transform: rotate(180deg);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .detailsToggle svg {
+    transition: transform var(--rf-dur-med) var(--rf-ease-standard);
+  }
+}
+/* Beats the transcript title reset, which makes every title child inherit. */
+.monoTitle.monoTitle.monoTitle.monoTitle {
+  font-family: var(--rf-font-mono);
+  font-size: var(--rf-transcript-mono-size);
+}
+.elapsed {
+  font-variant-numeric: tabular-nums;
+}
+.body {
+  display: grid;
+  gap: var(--rf-space-2);
+  min-width: 0;
+}
+.stateMuted,
+.stateWarning,
+.stateDanger {
+  display: -webkit-box;
+  margin: 0;
+  min-width: 0;
+  overflow: hidden;
+  font-size: var(--rf-transcript-body-size);
+  line-height: var(--rf-transcript-body-line);
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+.stateMuted {
+  color: var(--rf-color-muted);
+}
+.stateWarning {
+  color: var(--rf-color-warning);
+}
+.stateDanger {
+  color: var(--rf-color-danger);
+}
+.mono {
+  font-family: var(--rf-font-mono);
+  font-size: var(--rf-transcript-mono-size);
+}
+.block {
+  display: grid;
+  gap: var(--rf-space-1);
+  min-width: 0;
+}
+.labelRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--rf-space-2);
+  min-width: 0;
+}
+.labelNote {
+  color: var(--rf-color-muted);
+  font-size: var(--rf-transcript-meta-size);
+  line-height: var(--rf-line-1);
+}
+.totals {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--rf-space-1) var(--rf-space-2);
+  margin: 0;
+  min-width: 0;
+  color: var(--rf-color-fg);
+  font-size: var(--rf-transcript-meta-size);
+  line-height: var(--rf-line-1);
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+/* Code view: the surface of chat code blocks, the rows of diff blocks. */
+.codeView {
+  --script-gutter: 3ch;
+  --script-status: var(--rf-transcript-icon);
+
+  display: grid;
+  min-width: 0;
+  overflow: hidden;
+  background: var(--rf-surface-1);
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-card);
+}
+.codeView[data-digits="4"] {
+  --script-gutter: 4ch;
+}
+.codeView[data-digits="5"] {
+  --script-gutter: 5ch;
+}
+.lineCut {
+  color: var(--rf-color-muted);
+  font-family: var(--rf-font-ui);
+}
+.codeLine:focus-visible {
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
+  outline-offset: calc(-1 * var(--rf-focus-ring-w));
+}
+.codeView[data-calls="false"] {
+  --script-status: 0px;
+}
+.codeView[data-calls="false"] .lineStatus {
+  display: none;
+}
+.codeRows {
+  display: grid;
+  min-width: 0;
+  padding-block: var(--rf-space-2);
+}
+.codeLine {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--rf-space-2);
+  width: 100%;
+  min-width: 0;
+  margin: 0;
+  padding: 0 var(--rf-space-3) 0 var(--rf-space-2);
+  color: var(--rf-color-fg);
+  background: transparent;
+  border: 0;
+  font-family: var(--rf-font-mono);
+  font-size: var(--rf-transcript-mono-size);
+  line-height: var(--rf-transcript-mono-line);
+  text-align: start;
+}
+.callLineItem {
+  display: grid;
+  min-width: 0;
+}
+.callLine {
+  background: var(--rf-surface-2);
+  cursor: pointer;
+}
+.callLine:hover {
+  background: var(--rf-surface-3);
+}
+.callLine:focus-visible {
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
+  outline-offset: calc(-1 * var(--rf-focus-ring-w));
+}
+.callLine[data-status="waiting"] {
+  background: var(--rf-color-warning-soft);
+}
+.callLine[data-status="failed"],
+.codeLine[data-error="true"] {
+  background: var(--rf-color-danger-soft);
+}
+.codeLine[data-error="true"] .lineNumber {
+  color: var(--rf-color-fg);
+  font-weight: var(--rf-weight-semibold);
+}
+/* Light code themes have low-contrast tokens; keep call lines on the lightest tint. */
+:global([data-appearance="light"]) .callLine {
+  background: var(--rf-surface-1);
+}
+:global([data-appearance="light"]) .callLine:hover {
+  background: var(--rf-surface-2);
+}
+.lineNumber {
+  flex: 0 0 auto;
+  min-width: var(--script-gutter);
+  color: var(--rf-color-muted);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  user-select: none;
+}
+.lineStatus {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: var(--script-status);
+  height: var(--rf-transcript-mono-line);
+}
+.lineCode {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  font: inherit;
+  text-overflow: ellipsis;
+  white-space: pre;
+  background: transparent;
+}
+.codeExpanded .lineCode {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+/* Accent text on the line's own background keeps AA contrast; the underline marks the call. */
+.callee {
+  color: var(--rf-color-accent);
+  font-weight: var(--rf-weight-semibold);
+  text-decoration: underline;
+  text-decoration-color: var(--rf-color-accent);
+  text-decoration-thickness: var(--rf-hairline);
+  text-underline-offset: var(--rf-space-2xs);
+}
+/* The annotation never shrinks; the code gives way. */
+.lineNote {
+  flex: 0 0 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--rf-color-muted);
+  font-family: var(--rf-font-ui);
+  font-size: var(--rf-transcript-meta-size);
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.callLine[data-status="waiting"] .lineNote {
+  color: var(--rf-color-warning);
+}
+.lineDetail {
+  display: grid;
+  gap: var(--rf-space-2);
+  min-width: 0;
+  padding: var(--rf-space-2) var(--rf-space-3) var(--rf-space-2)
+    calc(var(--rf-space-2) * 3 + var(--script-gutter) + var(--script-status));
+  background: var(--rf-bg);
+  border-block: var(--rf-hairline) solid var(--rf-border);
+  font-family: var(--rf-font-ui);
+}
+.foldRow {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  margin: 0;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  font-family: var(--rf-font-ui);
+  text-align: start;
+  padding: 0 var(--rf-space-3) 0
+    calc(var(--rf-space-2) * 3 + var(--script-gutter) + var(--script-status));
+  color: var(--rf-color-muted);
+  font-size: var(--rf-transcript-meta-size);
+  line-height: var(--rf-transcript-mono-line);
+  user-select: none;
+}
+.foldRow:hover {
+  color: var(--rf-color-fg);
+  background: var(--rf-surface-2);
+}
+.foldRow:focus-visible {
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
+  outline-offset: calc(-1 * var(--rf-focus-ring-w));
+}
+.codeControl {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  min-height: var(--rf-control-h-sm);
+  padding: 0 var(--rf-space-3);
+  color: var(--rf-color-accent);
+  background: transparent;
+  border: 0;
+  border-top: var(--rf-hairline) solid var(--rf-border);
+  cursor: pointer;
+  font: inherit;
+  font-size: var(--rf-text-1);
+  line-height: var(--rf-line-1);
+}
+.codeControl:hover {
+  background: var(--rf-surface-2);
+}
+.codeControl:focus-visible {
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
+  outline-offset: calc(-1 * var(--rf-focus-ring-w));
+}
+
+/* Outcome preview, bounded by rendered height. */
+.previewFrame {
+  min-width: 0;
+  padding: var(--rf-space-2);
+  background: var(--rf-surface-1);
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-ctl);
+}
+.preview {
+  margin: 0;
+  min-width: 0;
+  color: var(--rf-color-fg);
+  font-family: var(--rf-font-mono);
+  font-size: var(--rf-transcript-mono-size);
+  line-height: var(--rf-transcript-mono-line);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.previewCompact {
+  --script-preview-lines: 4;
+
+  max-height: calc(
+    var(--rf-transcript-mono-line) * var(--script-preview-lines)
+  );
+  overflow: hidden;
+}
+.previewTall {
+  --script-preview-lines: 12;
+
+  max-height: calc(
+    var(--rf-transcript-mono-line) * var(--script-preview-lines)
+  );
+  overflow-y: auto;
+}
+.previewFull {
+  overflow: visible;
+}
+.previewCompact[data-clipped] {
+  mask-image: linear-gradient(
+    to bottom,
+    var(--rf-color-fg) calc(100% - var(--rf-transcript-mono-line)),
+    transparent
+  );
+}
+.hiddenOutput {
+  justify-self: start;
+  padding: 0;
+  color: var(--rf-color-muted);
+  background: transparent;
+  border: 0;
+  border-radius: var(--rf-radius-chip);
+  cursor: pointer;
+  font: inherit;
+  font-size: var(--rf-transcript-meta-size);
+  line-height: var(--rf-line-1);
+}
+.hiddenOutput:hover {
+  color: var(--rf-color-fg);
+  text-decoration: underline;
+}
+.hiddenOutput:focus-visible {
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
+  outline-offset: var(--rf-hairline);
+}
+.previewJson {
+  --rf-code-block-bg: transparent;
+  --rf-code-block-border-width: 0;
+  --rf-code-block-margin: 0;
+  --rf-code-block-padding: 0;
+  --rf-code-block-radius: 0;
+
+  white-space: normal;
+}
+.preview:focus-visible {
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
+  outline-offset: var(--rf-hairline);
+}
+.path {
+  display: inline-flex;
+  flex: 0 1 auto;
+  align-items: baseline;
+  gap: var(--rf-space-2);
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+.pathName {
+  flex: 0 0 auto;
+  max-width: 100%;
+  overflow: hidden;
+  font-family: var(--rf-font-mono);
+  font-size: var(--rf-transcript-mono-size);
+  text-overflow: ellipsis;
+}
+.pathDir {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--rf-color-muted);
+  font-size: var(--rf-transcript-meta-size);
+  text-overflow: ellipsis;
+  direction: rtl;
+  text-align: left;
+}
+.fileAction {
+  flex: 0 0 auto;
+}
+.diffScroll {
+  min-width: 0;
+  overflow-x: auto;
+}
+/* Nested transcript rows keep their own chevron state inside the open card. */
+.body [data-open="false"] [data-testid="transcript-chevron"] {
+  transform: none;
+}
+
+@media (max-width: 560px) {
+  .callMeta {
+    display: none;
+  }
+
+  .callBody {
+    padding-inline-start: var(--rf-space-2);
+  }
+  .arg {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

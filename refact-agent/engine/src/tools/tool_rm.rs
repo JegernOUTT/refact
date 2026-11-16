@@ -1,3 +1,9 @@
+#[derive(serde::Serialize, schemars::JsonSchema)]
+pub(crate) struct RmOutput {
+    pub removed: Vec<String>,
+    pub dry_run: bool,
+}
+
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
@@ -286,6 +292,14 @@ impl Tool for ToolRm {
                     tool_call_id: tool_call_id.clone(),
                     ..Default::default()
                 }));
+                crate::tools::file_edit::output::attach(
+                    &mut messages,
+                    tool_call_id,
+                    &RmOutput {
+                        removed: vec![],
+                        dry_run,
+                    },
+                );
                 return Ok((corrections, messages));
             }
             let actor = ccx.lock().await.chat_id.clone();
@@ -320,6 +334,14 @@ impl Tool for ToolRm {
                     tool_call_id: tool_call_id.clone(),
                     ..Default::default()
                 }));
+                crate::tools::file_edit::output::attach(
+                    &mut messages,
+                    tool_call_id,
+                    &RmOutput {
+                        removed: vec![],
+                        dry_run,
+                    },
+                );
                 return Ok((corrections, messages));
             }
             let actor = ccx.lock().await.chat_id.clone();
@@ -396,6 +418,14 @@ impl Tool for ToolRm {
             &[],
         );
         crate::tools::file_edit::edit_output::finish_edit_output(&mut messages, content);
+        crate::tools::file_edit::output::attach(
+            &mut messages,
+            tool_call_id,
+            &RmOutput {
+                removed: vec![corrected_path],
+                dry_run,
+            },
+        );
         Ok((corrections, messages))
     }
 
@@ -411,7 +441,7 @@ impl Tool for ToolRm {
             allow_parallel: false,
             description: "Deletes a file or directory. Use recursive=true for directories. Set dry_run=true to preview without deletion.".to_string(),
             input_schema: json_schema_from_params(&[("path", "string", "Absolute or relative path of the file or directory to delete."), ("recursive", "boolean", "If true and target is a directory, delete recursively. Defaults to false."), ("dry_run", "boolean", "If true, only report what would be done without deleting.")], &["path"]),
-            output_schema: None,
+            output_schema: Some(refact_tool_api::tool_output::output_schema_for::<RmOutput>()),
             annotations: None,
         }
     }

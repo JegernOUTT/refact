@@ -1,4 +1,4 @@
-schema_version: 7
+schema_version: 8
 id: solo
 title: Solo
 description: Full coding workflow in one chat, without subagents or orchestration tools
@@ -135,6 +135,7 @@ prompt: |
 
   %SYSTEM_INFO%
 
+  %CODE_MODE%
   %MODELS_INFO%
 
   %ENVIRONMENT_INFO%
@@ -159,6 +160,7 @@ allow_mcp: true
 allow_subagents: false
 
 tools:
+  - python
   - app
   - app_build
   - app_state

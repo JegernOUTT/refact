@@ -74,6 +74,7 @@ import {
   getInformationMessage,
 } from "../../features/Errors/informationSlice";
 import { ErrorCallout, InformationCallout } from "../Callout";
+import { PythonApprovalBar } from "./PythonApprovalBar";
 import { ToolConfirmation } from "./ToolConfirmation";
 import { selectThreadConfirmationById } from "../../features/Chat/Thread";
 import { AttachImagesButton } from "../Dropzone";
@@ -757,6 +758,7 @@ export const ChatForm: React.FC<ChatFormProps> = ({
 
   return (
     <div ref={setComposerNode} className={styles.composerRoot}>
+      <PythonApprovalBar chatId={chatId} />
       <InterruptionBanner chatId={chatId} />
       <ReviewReadinessBanner chatId={chatId} />
       {visibleError && (

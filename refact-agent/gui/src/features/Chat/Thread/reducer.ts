@@ -24,6 +24,8 @@ import { parseToolJobReceipt } from "../../../services/refact/toolJobs";
 import type { ReviewReadiness } from "../../../services/refact/chatSubscription";
 import {
   setToolUse,
+  clearPythonLiveState,
+  removePythonApproval,
   setThreadMode,
   setThreadWorktree,
   enableSend,
@@ -116,6 +118,7 @@ import {
   ToolMessage,
   validateToolCall,
   DiffChunk,
+  isPythonRunExtra,
 } from "../../../services/refact";
 import { capsApi } from "../../../services/refact";
 
@@ -169,6 +172,8 @@ const createThreadRuntime = (
     attached_images: [],
     attached_text_files: [],
     background_agents: {},
+    pythonRuns: {},
+    pythonApprovals: {},
     confirmation: {
       pause: false,
       pause_reasons: [],
@@ -232,6 +237,15 @@ const FLATTENED_EXTRA_KEYS = [
   "privacy_shell",
 ] as const;
 
+/**
+ * Python run metadata (`extra.python`) arrives flattened, but only tool
+ * results and `tool_job_result` deliveries may carry it. A stray top-level
+ * `python` key on any other message is dropped, never lifted into state.
+ */
+function carriesFlattenedPython(msg: ChatMessages[number]): boolean {
+  return "python" in msg && (msg.role === "tool" || "tool_job_result" in msg);
+}
+
 const normalizeMessage = (msg: ChatMessages[number]): ChatMessages[number] => {
   if ("tool_job" in msg) {
     const { tool_job, ...rest } = msg;
@@ -243,7 +257,12 @@ const normalizeMessage = (msg: ChatMessages[number]): ChatMessages[number] => {
       extra: { ...msg.extra, ...(receipt ? { tool_job: receipt } : {}) },
     } as ChatMessages[number];
   }
-  const flatExtra = FLATTENED_EXTRA_KEYS.filter((key) => key in msg);
+  if ("python" in msg && !carriesFlattenedPython(msg)) {
+    const { python: _dropped, ...rest } = msg;
+    msg = rest as ChatMessages[number];
+  }
+  const flatExtra: string[] = FLATTENED_EXTRA_KEYS.filter((key) => key in msg);
+  if ("python" in msg) flatExtra.push("python");
   if (flatExtra.length > 0) {
     const keys = new Set<string>(flatExtra);
     const entries = Object.entries(msg);
@@ -763,7 +782,45 @@ const metadataActions = new Set<string>([
   clearSseRefreshRequest.type,
 ]);
 
+/** Live displays kept per run, like the engine's cap on stored displays. */
+const PYTHON_LIVE_DISPLAYS = 12;
+
+function pythonStdoutTail(stdout: string): string {
+  const bytes = new TextEncoder().encode(stdout);
+  if (bytes.length <= 16384) return stdout;
+  let start = bytes.length - 16384;
+  while ((bytes[start] & 0xc0) === 0x80) start++;
+  return new TextDecoder().decode(bytes.subarray(start));
+}
+
+/** Stored valid results replace transient state; truncation also drops orphaned finished runs. */
+function prunePythonRuns(rt: Draft<ChatThreadRuntime>, removeOrphans = false) {
+  for (const [toolCallId, run] of Object.entries(rt.pythonRuns ?? {})) {
+    const stored = rt.thread.messages.some((message) => {
+      if (!isToolMessage(message) || message.tool_call_id !== toolCallId)
+        return false;
+      const extra = message.extra?.python;
+      return isPythonRunExtra(extra) && extra.run_id === run.run_id;
+    });
+    if (run.status === "finished" && (stored || removeOrphans))
+      delete rt.pythonRuns?.[toolCallId];
+  }
+}
+
 export const chatReducer = createReducer(initialState, (builder) => {
+  builder.addCase(clearPythonLiveState, (state, action) => {
+    const rt = getRuntime(state, action.payload.id);
+    if (!rt) return;
+    rt.pythonRuns = {};
+    rt.pythonApprovals = {};
+  });
+  builder.addCase(removePythonApproval, (state, action) => {
+    const rt = getRuntime(state, action.payload.id);
+    if (rt?.pythonApprovals) {
+      const { [action.payload.requestId]: _, ...pending } = rt.pythonApprovals;
+      rt.pythonApprovals = pending;
+    }
+  });
   builder.addCase(hydratePersistedChatTabs, (state) => {
     const persistedTabs = loadPersistedChatTabs();
     const threads: Chat["threads"] = {};
@@ -1275,6 +1332,8 @@ export const chatReducer = createReducer(initialState, (builder) => {
       attached_images: [],
       attached_text_files: [],
       background_agents: {},
+      pythonRuns: {},
+      pythonApprovals: {},
       confirmation: {
         pause: false,
         pause_reasons: [],
@@ -1632,6 +1691,87 @@ export const chatReducer = createReducer(initialState, (builder) => {
     const rt = getRuntime(state, chat_id);
 
     switch (event.type) {
+      case "python_run_update": {
+        if (!rt) break;
+        const update = event.update;
+        rt.pythonRuns ??= {};
+        let run: Draft<import("./types").PythonRunState> | undefined =
+          Object.prototype.hasOwnProperty.call(
+            rt.pythonRuns,
+            event.tool_call_id,
+          )
+            ? rt.pythonRuns[event.tool_call_id]
+            : undefined;
+        if (!run || run.run_id !== event.run_id) {
+          run = {
+            run_id: event.run_id,
+            status: "running",
+            background: false,
+            started_at_ms: Date.now(),
+            calls: [],
+            stdout: "",
+          };
+          rt.pythonRuns[event.tool_call_id] = run;
+        }
+        switch (update.kind) {
+          case "started":
+            run.background = update.background;
+            run.status = update.background ? "background" : "running";
+            break;
+          case "call_started":
+          case "call_finished": {
+            const index = run.calls.findIndex(
+              (call) => call.call_id === update.record.call_id,
+            );
+            if (index < 0) run.calls.push(update.record);
+            else if (
+              update.kind === "call_finished" ||
+              run.calls[index].status === "running"
+            )
+              run.calls[index] = update.record;
+            run.calls = run.calls.slice(-200);
+            break;
+          }
+          case "stdout":
+            run.stdout = pythonStdoutTail(run.stdout + update.text);
+            break;
+          case "detached":
+            run.status = "background";
+            run.background = true;
+            break;
+          case "display": {
+            const displays = run.displays ?? [];
+            if (
+              !displays.some(
+                (display) => display.index === update.display.index,
+              )
+            ) {
+              displays.push(update.display);
+              displays.sort((a, b) => a.index - b.index);
+              run.displays = displays.slice(0, PYTHON_LIVE_DISPLAYS);
+            }
+            break;
+          }
+          case "finished":
+            run.status = "finished";
+            run.finalStatus = update.status;
+            prunePythonRuns(rt);
+            break;
+        }
+        break;
+      }
+      case "python_approval_requested":
+        if (rt) {
+          rt.pythonApprovals ??= {};
+          rt.pythonApprovals[event.request.request_id] = event.request;
+        }
+        break;
+      case "python_approval_resolved":
+        if (rt?.pythonApprovals) {
+          const { [event.request_id]: _, ...pending } = rt.pythonApprovals;
+          rt.pythonApprovals = pending;
+        }
+        break;
       case "snapshot": {
         const existingRuntime = rt;
         const existing = existingRuntime?.thread;
@@ -1813,6 +1953,28 @@ export const chatReducer = createReducer(initialState, (builder) => {
           attached_images: existingRuntime?.attached_images ?? [],
           attached_text_files: existingRuntime?.attached_text_files ?? [],
           background_agents: backgroundAgents,
+          pythonRuns: Object.fromEntries(
+            (event.runtime.python_runs ?? []).map((run) => [
+              run.tool_call_id,
+              {
+                run_id: run.run_id,
+                status: run.status,
+                background: run.status === "background",
+                started_at_ms: run.started_at_ms,
+                calls: run.calls.slice(-200),
+                stdout: pythonStdoutTail(run.stdout_tail),
+                ...(run.displays && run.displays.length > 0
+                  ? { displays: run.displays.slice(0, PYTHON_LIVE_DISPLAYS) }
+                  : {}),
+              },
+            ]),
+          ),
+          pythonApprovals: Object.fromEntries(
+            (event.runtime.python_approvals ?? []).map((request) => [
+              request.request_id,
+              request,
+            ]),
+          ),
           confirmation: {
             pause: event.runtime.paused,
             pause_reasons: event.runtime
@@ -2074,6 +2236,7 @@ export const chatReducer = createReducer(initialState, (builder) => {
           rt.thread.messages.splice(clampedIndex, 0, msg);
           rt.message_index_by_id = rebuildMessageIndexById(rt.thread.messages);
         }
+        prunePythonRuns(rt);
         rt.last_applied_seq = event.seq;
         break;
       }
@@ -2105,6 +2268,7 @@ export const chatReducer = createReducer(initialState, (builder) => {
         const idx = findMessageIndexById(rt, event.message_id);
         if (idx >= 0) {
           setIndexedMessage(rt, idx, normalizeMessage(event.message));
+          prunePythonRuns(rt);
         }
         rt.last_applied_seq = event.seq;
         break;
@@ -2142,7 +2306,17 @@ export const chatReducer = createReducer(initialState, (builder) => {
           0,
           Math.min(event.from_index, rt.thread.messages.length),
         );
+        for (const message of rt.thread.messages.slice(clampedIndex)) {
+          if (isToolCallMessage(message)) {
+            for (const call of message.tool_calls) {
+              if (call.id) delete rt.pythonRuns?.[call.id];
+            }
+          }
+          if (isToolMessage(message))
+            delete rt.pythonRuns?.[message.tool_call_id];
+        }
         rt.thread.messages = rt.thread.messages.slice(0, clampedIndex);
+        prunePythonRuns(rt, true);
         rt.message_index_by_id = rebuildMessageIndexById(rt.thread.messages);
         rt.last_applied_seq = event.seq;
         break;

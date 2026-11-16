@@ -129,3 +129,59 @@ pub fn assert_tool_result_immediately_follows_tool_call(body: &Value) {
         "prior message: {prior:?}"
     );
 }
+
+#[test]
+fn python_run_metadata_never_reaches_a_provider_body() {
+    use refact_llm::adapters::{
+        anthropic::AnthropicAdapter, openai_chat::OpenAiChatAdapter,
+        openai_responses::OpenAiResponsesAdapter,
+    };
+    let mut call = ChatMessage::new("assistant".to_string(), String::new());
+    call.tool_calls = Some(vec![ChatToolCall {
+        id: "py-1".into(),
+        index: Some(0),
+        function: ChatToolFunction {
+            name: "python".into(),
+            arguments: "{\"code\":\"1\"}".into(),
+        },
+        tool_type: "function".into(),
+        extra_content: None,
+        started_at_ms: None,
+        completed_at_ms: None,
+    }]);
+    let mut result = ChatMessage::new("tool".to_string(), "Result:\n1".to_string());
+    result.tool_call_id = "py-1".into();
+    result.extra.insert(
+        "python".into(),
+        json!({"displays":[{"rows":[["DISPLAY_CELL_MARKER"]]}],"stdout_preview":"PREVIEW_MARKER"}),
+    );
+    let messages = vec![
+        ChatMessage::new("user".to_string(), "go".to_string()),
+        call,
+        result,
+    ];
+    let adapters: [(&dyn LlmWireAdapter, &str); 3] = [
+        (
+            &OpenAiChatAdapter,
+            "https://api.openai.com/v1/chat/completions",
+        ),
+        (
+            &OpenAiResponsesAdapter,
+            "https://api.openai.com/v1/responses",
+        ),
+        (&AnthropicAdapter, "https://api.anthropic.com/v1/messages"),
+    ];
+    for (adapter, endpoint) in adapters {
+        let body = lower_body(
+            adapter,
+            messages.clone(),
+            default_settings(endpoint, "model"),
+        )
+        .to_string();
+        assert!(body.contains("Result:"), "{body}");
+        assert!(
+            !body.contains("DISPLAY_CELL_MARKER") && !body.contains("PREVIEW_MARKER"),
+            "{body}"
+        );
+    }
+}

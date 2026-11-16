@@ -1,3 +1,8 @@
+import type {
+  PythonCallRecord,
+  PythonApprovalRequest,
+  PythonDisplay,
+} from "../../../services/refact/types";
 import { ToolConfirmationPauseReason, Usage } from "../../../services/refact";
 import { SystemPrompts } from "../../../services/refact/prompts";
 import type {
@@ -15,6 +20,18 @@ import {
 import type { WorktreeMeta } from "../../../services/refact/worktrees";
 import { parseOrElse } from "../../../utils/parseOrElse";
 import { BuddyThreadMeta } from "../../Buddy/types";
+
+export type PythonRunState = {
+  run_id: string;
+  status: "running" | "background" | "finished";
+  finalStatus?: string;
+  background: boolean;
+  started_at_ms: number;
+  calls: PythonCallRecord[];
+  stdout: string;
+  /** Displays the script showed so far, in index order. */
+  displays?: PythonDisplay[];
+};
 
 export type ImageFile = {
   name: string;
@@ -230,6 +247,8 @@ export type ChatThreadRuntime = {
   attached_images: ImageFile[];
   attached_text_files: TextFile[];
   background_agents: Record<string, BackgroundAgentSummary>;
+  pythonRuns?: Record<string, PythonRunState>;
+  pythonApprovals?: Record<string, PythonApprovalRequest>;
   confirmation: ThreadConfirmation;
   /** Whether the initial snapshot has been received from the backend */
   snapshot_received: boolean;

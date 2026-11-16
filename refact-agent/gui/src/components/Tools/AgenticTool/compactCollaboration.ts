@@ -43,7 +43,6 @@ const INTENTS: Partial<Record<string, { headline: string; subject?: string }>> =
     disagreement_adjudicate: { headline: "Adjudication requested" },
     causal_trace: { headline: "Causal trace requested" },
     metrics: { headline: "Project metrics requested" },
-    code_mode: { headline: "Orchestration requested" },
   };
 
 const SEAT_INTENTS: Partial<Record<string, string>> = {
@@ -129,7 +128,6 @@ function recognizedError(result: RecordValue): string | null {
 function failureLabel(name: string, result: unknown): string {
   if (typeof result !== "string") return "Request failed";
   if (
-    (name === "code_mode" && result.startsWith("code mode is unavailable: ")) ||
     (name === "agent_mailbox" &&
       result === "mailbox privacy policy is unavailable") ||
     ((name === "claim_record" || name === "claim_list") &&
@@ -140,8 +138,6 @@ function failureLabel(name: string, result: unknown): string {
         "no coordination store is available, so disagreements cannot be filed or read")
   )
     return "Unavailable";
-  if (name === "code_mode" && result.startsWith("code mode refused: "))
-    return "Request denied";
   return "Request failed";
 }
 

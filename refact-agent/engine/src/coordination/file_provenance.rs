@@ -309,6 +309,22 @@ pub async fn forget(file_key: Option<&str>) -> Result<usize, StoreError> {
         .await
 }
 
+/// Recorded observations of one logical file, or of the whole project when `file_key` is
+/// `None`; `None` when no provenance store is configured.
+pub(crate) async fn count(file_key: Option<&str>) -> Result<Option<usize>, StoreError> {
+    let Some(sink) = sink() else {
+        return Ok(None);
+    };
+    flush().await;
+    let records = sink.store.list_activity_observations(&sink.access).await?;
+    Ok(Some(
+        records
+            .iter()
+            .filter(|record| file_key.is_none_or(|key| record.file_key == key))
+            .count(),
+    ))
+}
+
 /// Who last wrote this file, other than `actor`, at or after `since_ms`.
 ///
 /// The pending queue is flushed first, so this never misses a record this

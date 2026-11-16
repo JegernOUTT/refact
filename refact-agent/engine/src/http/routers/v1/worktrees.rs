@@ -172,7 +172,7 @@ async fn resolve_source_root(
     }
 }
 
-async fn service_for_request(
+pub(crate) async fn service_for_request(
     app: &AppState,
     requested: Option<String>,
 ) -> Result<WorktreeService, (StatusCode, Json<Value>)> {

@@ -1,3 +1,55 @@
+#[derive(serde::Serialize, schemars::JsonSchema)]
+pub(crate) struct TreeOutput {
+    pub root: Option<String>,
+    pub entries: Vec<TreeEntry>,
+    pub truncated: bool,
+}
+#[derive(serde::Serialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum TreeEntryKind {
+    File,
+    Dir,
+}
+#[derive(serde::Serialize, schemars::JsonSchema)]
+pub(crate) struct TreeEntry {
+    pub path: String,
+    pub kind: TreeEntryKind,
+    pub size_bytes: Option<u64>,
+    pub lines: Option<usize>,
+}
+fn tree_output(tree: &TreeNode, root: Option<String>, truncated: bool) -> TreeOutput {
+    fn collect(node: &TreeNode, path: std::path::PathBuf, entries: &mut Vec<TreeEntry>) {
+        let mut children = node.children.iter().collect::<Vec<_>>();
+        children.sort_by(|a, b| a.0.cmp(b.0));
+        for (name, child) in children {
+            let path = path.join(name);
+            entries.push(TreeEntry {
+                path: child
+                    .source_path
+                    .as_ref()
+                    .unwrap_or(&path)
+                    .to_string_lossy()
+                    .into_owned(),
+                kind: if child.is_dir() {
+                    TreeEntryKind::Dir
+                } else {
+                    TreeEntryKind::File
+                },
+                size_bytes: child.file_size,
+                lines: child.line_count,
+            });
+            collect(child, path, entries);
+        }
+    }
+    let mut entries = Vec::new();
+    collect(tree, std::path::PathBuf::new(), &mut entries);
+    TreeOutput {
+        root,
+        entries,
+        truncated,
+    }
+}
+
 use std::sync::Arc;
 use std::collections::HashMap;
 use serde_json::Value;
@@ -50,7 +102,7 @@ impl Tool for ToolTree {
             allow_parallel: true,
             description: "Get a files tree for the project. Shows file sizes and line counts. Folders with many files are truncated (controlled by max_files). Hidden folders, __pycache__, node_modules, and binary files are excluded.".to_string(),
             input_schema: json_schema_from_params(&[("path", "string", "An absolute path to get files tree for. Do not pass it if you need a full project tree."), ("use_ast", "boolean", "If true, for each file an array of AST symbols will appear as well as its filename"), ("max_files", "integer", "Maximum files to show per folder before truncating (default: 10). Root folder is never truncated.")], &[]),
-            output_schema: None,
+            output_schema: Some(refact_tool_api::tool_output::output_schema_for::<TreeOutput>()),
             annotations: None,
         }
     }
@@ -299,6 +351,15 @@ impl Tool for ToolTree {
                     output_filter: Some(OutputFilter::no_limits()),
                     ..Default::default()
                 };
+                message.extra.insert(
+                    refact_tool_api::tool_output::TOOL_OUTPUT_EXTRA_KEY.into(),
+                    serde_json::to_value(tree_output(
+                        &tree,
+                        path_mb.clone(),
+                        build_budget.truncated || content.contains("...") || content.contains("…"),
+                    ))
+                    .unwrap(),
+                );
                 references.attach(&mut message);
                 message
             })],

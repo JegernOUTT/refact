@@ -40,12 +40,17 @@ async fn path_exists(path: PathBuf) -> bool {
 pub async fn handle_v1_setup_status(
     State(app): State<AppState>,
 ) -> Result<axum::Json<SetupStatusResponse>, ScratchError> {
-    let gcx = app.gcx.clone();
+    Ok(axum::Json(setup_status(app.gcx.clone()).await))
+}
+
+pub(crate) async fn setup_status(
+    gcx: std::sync::Arc<crate::global_context::GlobalContext>,
+) -> SetupStatusResponse {
     let project_dirs = get_project_dirs(gcx).await;
     let project_root = first_project_root(&project_dirs);
 
     if project_root.is_none() {
-        return Ok(axum::Json(SetupStatusResponse {
+        return SetupStatusResponse {
             configured: true,
             reasons: vec![],
             detail: SetupStatusDetail {
@@ -54,7 +59,7 @@ pub async fn handle_v1_setup_status(
                 has_knowledge: false,
                 has_trajectories: false,
             },
-        }));
+        };
     }
 
     let root = project_root.unwrap();
@@ -77,7 +82,7 @@ pub async fn handle_v1_setup_status(
 
     let configured = reasons.is_empty();
 
-    Ok(axum::Json(SetupStatusResponse {
+    SetupStatusResponse {
         configured,
         reasons,
         detail: SetupStatusDetail {
@@ -86,5 +91,5 @@ pub async fn handle_v1_setup_status(
             has_knowledge,
             has_trajectories,
         },
-    }))
+    }
 }

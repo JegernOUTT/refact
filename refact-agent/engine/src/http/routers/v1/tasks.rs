@@ -703,17 +703,57 @@ pub async fn handle_update_task_status(
     Path(task_id): Path<String>,
     Json(req): Json<UpdateTaskStatusRequest>,
 ) -> Result<Json<TaskMeta>, (StatusCode, String)> {
-    let gcx = app.gcx.clone();
-    let mut meta = storage::load_task_meta(gcx.clone(), &task_id)
+    update_task_meta(
+        app.gcx.clone(),
+        &task_id,
+        TaskMetaPatch {
+            status: Some(req.status),
+            ..Default::default()
+        },
+    )
+    .await
+    .map(Json)
+}
+
+#[derive(Default)]
+pub(crate) struct TaskMetaPatch {
+    pub status: Option<TaskStatus>,
+    pub name: Option<String>,
+    pub base_branch: Option<String>,
+    pub base_commit: Option<String>,
+    pub default_agent_model: Option<String>,
+}
+
+/// Applies a patch to a task's meta, saves it, emits the update and the Buddy events of a status change.
+pub(crate) async fn update_task_meta(
+    gcx: Arc<GlobalContext>,
+    task_id: &str,
+    patch: TaskMetaPatch,
+) -> Result<TaskMeta, (StatusCode, String)> {
+    let mut meta = storage::load_task_meta(gcx.clone(), task_id)
         .await
         .map_err(|e| (StatusCode::NOT_FOUND, e))?;
     let old_status = meta.status;
-    meta.status = req.status;
+    if let Some(status) = patch.status {
+        meta.status = status;
+    }
+    if let Some(name) = patch.name {
+        meta.name = name;
+    }
+    if let Some(branch) = patch.base_branch {
+        meta.base_branch = Some(branch);
+    }
+    if let Some(commit) = patch.base_commit {
+        meta.base_commit = Some(commit);
+    }
+    if let Some(model) = patch.default_agent_model {
+        meta.default_agent_model = Some(model);
+    }
     meta.updated_at = Utc::now().to_rfc3339();
-    storage::save_task_meta(gcx.clone(), &task_id, &meta)
+    storage::save_task_meta(gcx.clone(), task_id, &meta)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    crate::tasks::events::emit_task_updated(gcx.clone(), task_id.clone(), meta.clone()).await;
+    crate::tasks::events::emit_task_updated(gcx.clone(), task_id.to_string(), meta.clone()).await;
     if old_status != meta.status {
         match meta.status {
             TaskStatus::Completed => {
@@ -776,7 +816,7 @@ pub async fn handle_update_task_status(
         }
     }
     enrich_task_with_session_state(gcx.clone(), &mut meta).await;
-    Ok(Json(meta))
+    Ok(meta)
 }
 
 #[derive(Deserialize)]
@@ -801,29 +841,19 @@ pub async fn handle_update_task_meta(
     Path(task_id): Path<String>,
     Json(req): Json<UpdateTaskMetaRequest>,
 ) -> Result<Json<TaskMeta>, (StatusCode, String)> {
-    let gcx = app.gcx.clone();
-    let mut meta = storage::load_task_meta(gcx.clone(), &task_id)
-        .await
-        .map_err(|e| (StatusCode::NOT_FOUND, e))?;
-    if let Some(name) = req.name {
-        meta.name = name;
-    }
-    if let Some(branch) = req.base_branch {
-        meta.base_branch = Some(branch);
-    }
-    if let Some(commit) = req.base_commit {
-        meta.base_commit = Some(commit);
-    }
-    if let Some(model) = req.default_agent_model {
-        meta.default_agent_model = Some(model);
-    }
-    meta.updated_at = Utc::now().to_rfc3339();
-    storage::save_task_meta(gcx.clone(), &task_id, &meta)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    crate::tasks::events::emit_task_updated(gcx.clone(), task_id, meta.clone()).await;
-    enrich_task_with_session_state(gcx, &mut meta).await;
-    Ok(Json(meta))
+    update_task_meta(
+        app.gcx.clone(),
+        &task_id,
+        TaskMetaPatch {
+            status: None,
+            name: req.name,
+            base_branch: req.base_branch,
+            base_commit: req.base_commit,
+            default_agent_model: req.default_agent_model,
+        },
+    )
+    .await
+    .map(Json)
 }
 
 pub async fn handle_list_task_trajectories(

@@ -3,8 +3,10 @@ pub mod command_classify;
 pub mod command_risk;
 pub mod command_rules;
 pub mod integration_confirmation;
+pub mod schema_validate;
 pub mod tool_desc;
 pub mod tool_name_alias;
+pub mod tool_output;
 
 pub use arg_coerce::{
     coerce_args_to_schema, coerce_array, coerce_bool, coerce_hashmap_to_schema, coerce_integer,

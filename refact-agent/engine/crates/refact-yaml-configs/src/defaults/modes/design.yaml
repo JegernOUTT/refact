@@ -1,4 +1,4 @@
-schema_version: 33
+schema_version: 34
 id: design
 title: Design
 description: Evidence-driven UI implementation using the live design system and browser measurements
@@ -68,6 +68,7 @@ prompt: |
 
   %RICH_CONTENT_INSTRUCTIONS%
 
+  %CODE_MODE%
   %MODELS_INFO%
 
   %WORKSPACE_INFO%
@@ -84,6 +85,7 @@ allow_mcp: false
 allow_subagents: true
 
 tools:
+  - python
   - web_search
   - web
   - app

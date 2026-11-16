@@ -1,3 +1,28 @@
+#[derive(Default, serde::Serialize, schemars::JsonSchema)]
+pub(crate) struct CatOutput {
+    pub files: Vec<CatFileOutput>,
+    pub images: Vec<CatImageOutput>,
+    pub errors: Vec<CatErrorOutput>,
+}
+#[derive(serde::Serialize, schemars::JsonSchema)]
+pub(crate) struct CatFileOutput {
+    pub path: String,
+    pub line1: usize,
+    pub line2: usize,
+    pub content: String,
+    pub total_lines: Option<usize>,
+}
+#[derive(serde::Serialize, schemars::JsonSchema)]
+pub(crate) struct CatImageOutput {
+    pub path: String,
+    pub mime: String,
+}
+#[derive(serde::Serialize, schemars::JsonSchema)]
+pub(crate) struct CatErrorOutput {
+    pub path: Option<String>,
+    pub error: String,
+}
+
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -184,7 +209,7 @@ impl Tool for ToolCat {
             allow_parallel: true,
             description: "Like cat in console, but better: it can read multiple files and images. Prefer to open full files.".to_string(),
             input_schema: json_schema_from_params(&[("paths", "string", "Comma separated file names or directories: dir1/file1.ext,dir3/dir4.")], &["paths"]),
-            output_schema: None,
+            output_schema: Some(refact_tool_api::tool_output::output_schema_for::<CatOutput>()),
             annotations: None,
         }
     }
@@ -218,6 +243,7 @@ impl Tool for ToolCat {
             context_enums,
             multimodal,
             scope_notices,
+            mut output,
         ) = paths_and_symbols_to_cat_with_path_ranges(ccx.clone(), paths, symbols, &limits).await;
         input_notices.append(&mut not_found_messages);
         let not_found_messages = input_notices;
@@ -331,6 +357,16 @@ impl Tool for ToolCat {
             filenames_present.iter().map(PathBuf::from),
         )?;
         crate::privacy::records::merge_records(&mut tool_message, records);
+        output
+            .errors
+            .extend(not_found_messages.iter().map(|error| CatErrorOutput {
+                path: None,
+                error: error.clone(),
+            }));
+        tool_message.extra.insert(
+            refact_tool_api::tool_output::TOOL_OUTPUT_EXTRA_KEY.into(),
+            serde_json::to_value(output).unwrap(),
+        );
         references.attach(&mut tool_message);
         results.push(ContextEnum::ChatMessage(tool_message));
 
@@ -594,7 +630,9 @@ async fn paths_and_symbols_to_cat_with_path_ranges(
     Vec<ContextEnum>,
     Vec<MultimodalElement>,
     Vec<String>,
+    CatOutput,
 ) {
+    let mut output = CatOutput::default();
     let (gcx, top_n, execution_scope, abort_flag, current_model) = {
         let cgcx = ccx.lock().await;
         (
@@ -926,6 +964,10 @@ async fn paths_and_symbols_to_cat_with_path_ranges(
             }
             match load_image(p, &f_type, &image_policy).await {
                 Ok(mm) => {
+                    output.images.push(CatImageOutput {
+                        path: p.clone(),
+                        mime: mm.m_type.clone(),
+                    });
                     multimodal.push(mm);
                 }
                 Err(e) => {
@@ -968,6 +1010,17 @@ async fn paths_and_symbols_to_cat_with_path_ranges(
                         }
                     };
 
+                    output.files.push(CatFileOutput {
+                        path: refact_core::chat_types::normalize_file_name(p.clone()),
+                        line1: start_line,
+                        line2: end_line,
+                        content: text
+                            .split_inclusive('\n')
+                            .skip(start_line.saturating_sub(1))
+                            .take(end_line.saturating_sub(start_line).saturating_add(1))
+                            .collect(),
+                        total_lines: Some(total_lines),
+                    });
                     let cf = ContextFile {
                         file_name: refact_core::chat_types::normalize_file_name(p.clone()),
                         file_content: "".to_string(),
@@ -996,6 +1049,31 @@ async fn paths_and_symbols_to_cat_with_path_ranges(
             }
         }
     }
+    for cf in context_enums.iter().filter_map(|ctx| match ctx {
+        ContextEnum::ContextFile(cf) if !cf.symbols.is_empty() => Some(cf),
+        _ => None,
+    }) {
+        if let Ok(text) = get_file_text_from_memory_or_disk_for_model_context_with_context(
+            gcx.clone(),
+            &PathBuf::from(&cf.file_name),
+            &read_context,
+            Some(limits.max_file_bytes),
+        )
+        .await
+        {
+            output.files.push(CatFileOutput {
+                path: cf.file_name.clone(),
+                line1: cf.line1,
+                line2: cf.line2,
+                content: text
+                    .split_inclusive('\n')
+                    .skip(cf.line1.saturating_sub(1))
+                    .take(cf.line2.saturating_sub(cf.line1).saturating_add(1))
+                    .collect(),
+                total_lines: Some(text.lines().count()),
+            });
+        }
+    }
     for cf in context_enums.iter().filter_map(|x| {
         if let ContextEnum::ContextFile(cf) = x {
             Some(cf)
@@ -1012,6 +1090,7 @@ async fn paths_and_symbols_to_cat_with_path_ranges(
         context_enums,
         multimodal,
         scope_notices,
+        output,
     )
 }
 

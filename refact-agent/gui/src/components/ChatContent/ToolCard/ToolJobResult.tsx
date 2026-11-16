@@ -7,6 +7,7 @@ import { DialogImage } from "../../DialogImage";
 import { buildImageDataUrl } from "../../../utils/imageDataUrl";
 import { ResultView } from "./GenericTool";
 import { ToolCard } from "./ToolCard";
+import { PythonTool } from "./PythonTool";
 import { AppTool } from "./AppTool";
 import { isAppToolName } from "./appToolModel";
 import { normalizeToolName } from "../../../utils/toolNameAliases";
@@ -48,6 +49,9 @@ export function ToolJobResult({
         result={toolResult}
       />
     );
+  }
+  if (toolResult && toolCall && normalizeToolName(toolName) === "python") {
+    return <PythonTool toolCall={toolCall} result={toolResult} />;
   }
   if (toolResult && toolCall && isAppToolName(normalizeToolName(toolName))) {
     return (

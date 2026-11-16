@@ -596,6 +596,13 @@ pub fn hook_activity() -> &'static HookActivityLog {
     HOOK_ACTIVITY.get_or_init(|| HookActivityLog::new(HOOK_ACTIVITY_CAPACITY))
 }
 
+/// Drops the compiled hooks so the next tool call reads the hooks files again.
+pub async fn invalidate_hooks_cache() {
+    if let Some(cache) = HOOKS_CACHE.get() {
+        *cache.write().await = None;
+    }
+}
+
 #[cfg(test)]
 /// Every test that configures hooks or asserts hook activity must use `#[serial_test::serial(permission_decision_hooks)]` and call this first.
 pub(crate) fn clear_hook_cache_for_tests() {

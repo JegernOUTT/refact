@@ -807,19 +807,33 @@ pub async fn handle_v1_customization_delete(
     axum::extract::Query(query): axum::extract::Query<DeleteConfigQuery>,
 ) -> Result<Response<Body>, ScratchError> {
     let gcx = app.gcx.clone();
-    if let Err(e) = validate_kind(&kind) {
-        return json_error(StatusCode::BAD_REQUEST, &e);
+    let (file_path, scope, project_root) =
+        match customization_delete_target(gcx.clone(), &kind, &id, query.scope.as_deref()).await {
+            Ok(target) => target,
+            Err((status, message)) => return json_error(status, &message),
+        };
+    match delete_customization_file(gcx, &file_path, scope, project_root.as_deref()).await {
+        Ok(response) => json_response(StatusCode::OK, &response),
+        Err((status, message)) => json_error(status, &message),
     }
-    if let Err(e) = validate_id(&id) {
-        return json_error(StatusCode::BAD_REQUEST, &e);
-    }
+}
+
+/// The file `DELETE /v1/customization/:kind/:id?scope=` removes, its scope and the project root.
+pub(crate) async fn customization_delete_target(
+    gcx: Arc<GlobalContext>,
+    kind: &str,
+    id: &str,
+    scope: Option<&str>,
+) -> Result<(std::path::PathBuf, ConfigScope, Option<std::path::PathBuf>), (StatusCode, String)> {
+    validate_kind(kind).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    validate_id(id).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
 
     let config_dir = gcx.config_dir.clone();
-    let storage_kind = normalize_kind(&kind).to_string();
+    let storage_kind = normalize_kind(kind).to_string();
     let dirs = get_project_dirs(gcx.clone()).await;
     let project_root = dirs.first().cloned();
 
-    let (file_path, scope) = match query.scope.as_deref() {
+    let (file_path, scope) = match scope {
         Some("global") => (
             config_dir.join(&storage_kind).join(format!("{}.yaml", id)),
             ConfigScope::Global,
@@ -831,31 +845,46 @@ pub async fn handle_v1_customization_delete(
                     .join(format!("{}.yaml", id)),
                 ConfigScope::Local,
             ),
-            None => return json_error(StatusCode::BAD_REQUEST, "no project root for local scope"),
+            None => {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "no project root for local scope".to_string(),
+                ))
+            }
         },
         _ => {
-            return json_error(
+            return Err((
                 StatusCode::BAD_REQUEST,
-                "scope parameter required for delete",
-            )
+                "scope parameter required for delete".to_string(),
+            ))
         }
     };
+    Ok((file_path, scope, project_root))
+}
 
+/// Removes one customization file, invalidates the registry caches and reports registry errors.
+pub(crate) async fn delete_customization_file(
+    gcx: Arc<GlobalContext>,
+    file_path: &std::path::Path,
+    scope: ConfigScope,
+    project_root: Option<&std::path::Path>,
+) -> Result<DeleteConfigResponse, (StatusCode, String)> {
     if !file_path.exists() {
-        return json_error(StatusCode::NOT_FOUND, "config not found");
+        return Err((StatusCode::NOT_FOUND, "config not found".to_string()));
     }
 
-    if let Err(e) = tokio::fs::remove_file(&file_path).await {
-        return json_error(
+    if let Err(e) = tokio::fs::remove_file(file_path).await {
+        return Err((
             StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("delete error: {}", e),
-        );
+            format!("delete error: {}", e),
+        ));
     }
 
+    let config_dir = gcx.config_dir.clone();
     invalidate_registry_cache(gcx.clone(), scope).await;
-    let registry = load_merged_registry(&config_dir, project_root.as_deref()).await;
+    let registry = load_merged_registry(&config_dir, project_root).await;
 
-    let response = DeleteConfigResponse {
+    Ok(DeleteConfigResponse {
         ok: true,
         scope: match scope {
             ConfigScope::Global => "global",
@@ -870,9 +899,7 @@ pub async fn handle_v1_customization_delete(
                 error: e.error.clone(),
             })
             .collect(),
-    };
-
-    json_response(StatusCode::OK, &response)
+    })
 }
 
 pub(crate) use crate::yaml_configs::customization_service::{

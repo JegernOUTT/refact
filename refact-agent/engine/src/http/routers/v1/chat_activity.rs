@@ -166,7 +166,7 @@ async fn activity_directories(root: &Path) -> Result<Vec<std::path::PathBuf>, St
     Ok(directories)
 }
 
-async fn activity(app: AppState) -> Result<ChatActivityResponse, String> {
+pub(crate) async fn activity(app: AppState) -> Result<ChatActivityResponse, String> {
     let Some(root) = crate::files_correction::get_active_project_path(app.gcx.clone()).await else {
         return Ok(ChatActivityResponse {
             chats: Vec::new(),

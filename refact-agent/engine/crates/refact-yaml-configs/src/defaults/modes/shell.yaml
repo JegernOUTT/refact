@@ -1,4 +1,4 @@
-schema_version: 17
+schema_version: 18
 id: shell
 title: Shell
 description: Execute shell commands for system tasks
@@ -49,6 +49,7 @@ prompt: |
 
   %SYSTEM_INFO%
 
+  %CODE_MODE%
   %MODELS_INFO%
 
   %SHELL_INSTRUCTIONS%
@@ -63,6 +64,7 @@ allow_mcp: false
 allow_subagents: false
 
 tools:
+  - python
   - app
   - app_build
   - app_state

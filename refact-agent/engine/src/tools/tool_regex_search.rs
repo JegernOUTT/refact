@@ -1,3 +1,17 @@
+#[derive(serde::Serialize, schemars::JsonSchema)]
+pub(crate) struct RegexSearchOutput {
+    pub matches: Vec<RegexMatchOutput>,
+    pub files_matched: usize,
+    pub total_matches: usize,
+    pub truncated: bool,
+}
+#[derive(serde::Serialize, schemars::JsonSchema)]
+pub(crate) struct RegexMatchOutput {
+    pub path: String,
+    pub line: usize,
+    pub text: String,
+}
+
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -57,6 +71,7 @@ struct RegexMatch {
     context_start: usize, // 1-based
     context_end_inclusive: usize,
     preview: String,
+    text: String,
 }
 
 #[derive(Debug)]
@@ -132,6 +147,7 @@ async fn search_single_file(
                 context_start: context_start_idx + 1,
                 context_end_inclusive: context_end_excl,
                 preview,
+                text: (*line).to_string(),
             });
             if file_results.len() >= max_matches_per_file {
                 break;
@@ -367,7 +383,7 @@ impl Tool for ToolRegexSearch {
             allow_parallel: true,
             description: "Search for text matches inside files using a regular expression pattern.".to_string(),
             input_schema: json_schema_from_params(&[("pattern", "string", "The regular expression used to search file contents. Use (?i) at the start for case-insensitive search."), ("scope", "string", "'workspace' to search all files in workspace, 'dir/subdir/' to search in files within a directory, 'dir/file.ext' to search in a single file."), ("context_lines", "integer", "Lines of context before/after each match (default: 5)."), ("max_files", "integer", "Max files to attach as context (default: 50)."), ("max_matches_per_file", "integer", "Max matches collected per file (default: 25, hard cap 1000). Scanning of a file stops once this many matches are found."), ("max_total_matches", "integer", "Max total matches to attach as context (default: 200, hard cap 10000).")], &["pattern", "scope"]),
-            output_schema: None,
+            output_schema: Some(refact_tool_api::tool_output::output_schema_for::<RegexSearchOutput>()),
             annotations: None,
         }
     }
@@ -597,6 +613,34 @@ impl Tool for ToolRegexSearch {
         crate::privacy::load_privacy_if_needed(gcx.clone()).await;
         let records = crate::privacy::records::declared_file_records(&gcx, disclosed_paths)?;
         crate::privacy::records::merge_records(&mut tool_message, records);
+        tool_message.extra.insert(
+            refact_tool_api::tool_output::TOOL_OUTPUT_EXTRA_KEY.into(),
+            serde_json::to_value(RegexSearchOutput {
+                matches: search_results
+                    .iter()
+                    .map(|m| RegexMatchOutput {
+                        path: m.file_name.clone(),
+                        line: m.match_line,
+                        text: m.text.clone(),
+                    })
+                    .collect(),
+                files_matched: search_results
+                    .iter()
+                    .map(|m| &m.file_name)
+                    .collect::<HashSet<_>>()
+                    .len(),
+                total_matches: search_results.len(),
+                truncated: stopped_early
+                    || search_results.len() >= max_total_matches
+                    || search_results
+                        .iter()
+                        .counts_by(|m| &m.file_name)
+                        .values()
+                        .any(|n| *n >= max_matches_per_file)
+                    || !scoped_files.notices.is_empty(),
+            })
+            .unwrap(),
+        );
         references.attach(&mut tool_message);
         results.push(ContextEnum::ChatMessage(tool_message));
 

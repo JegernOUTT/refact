@@ -1,4 +1,4 @@
-schema_version: 25
+schema_version: 26
 id: explore
 title: Explore
 description: Read-only exploration for context gathering without editing
@@ -71,6 +71,7 @@ prompt: |
 
   %SYSTEM_INFO%
 
+  %CODE_MODE%
   %MODELS_INFO%
 
   %ENVIRONMENT_INFO%
@@ -93,6 +94,7 @@ allow_mcp: true
 allow_subagents: true
 
 tools:
+  - python
   - app
   - app_build
   - app_state

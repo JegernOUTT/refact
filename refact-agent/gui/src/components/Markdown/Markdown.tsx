@@ -51,6 +51,11 @@ export type MarkdownProps = Pick<
 > &
   Pick<ShikiCodeBlockProps, "showLineNumbers" | "color" | "isStreaming"> & {
     canHaveInteractiveElements?: boolean;
+    /**
+     * Untrusted text (script output): no puzzle links, images as plain
+     * "alt (url)" text, artifact and diagram fences as plain code.
+     */
+    inert?: boolean;
     wrap?: boolean;
     variant?: "chat" | "tool" | "terminal";
   } & Partial<MarkdownControls>;
@@ -166,6 +171,7 @@ const _Markdown: React.FC<MarkdownProps> = ({
   variant = "chat",
   onCopyClick,
   isStreaming,
+  inert = false,
 }) => {
   const [linkError, setLinkError] = useState<string | null>(null);
 
@@ -198,15 +204,20 @@ const _Markdown: React.FC<MarkdownProps> = ({
             onCopyClick={onCopyClick}
             isStreaming={isStreaming}
             {...props}
+            inert={inert}
           />
         );
       },
       img({ ref: _ref, node: _node, src, alt }) {
+        if (inert) {
+          const text = [alt, src && `(${src})`].filter(Boolean).join(" ");
+          return text ? <span>{text}</span> : null;
+        }
         if (!src) return alt ? <span>{alt}</span> : null;
         return <DialogImage src={src} alt={alt ?? ""} size="auto" />;
       },
       p({ color: _color, ref: _ref, node: _node, ...props }) {
-        if (canHaveInteractiveElements) {
+        if (canHaveInteractiveElements && !inert) {
           return <MaybeInteractiveElement {...props} />;
         }
         return <p {...props} />;
@@ -239,6 +250,12 @@ const _Markdown: React.FC<MarkdownProps> = ({
         return <kbd {...props} />;
       },
       a({ color: _color, ref: _ref, node: _node, ...props }) {
+        if (inert) {
+          const href = props.href ?? "";
+          const external =
+            /^(https?:|mailto:)/i.test(href) && !routeFromContentLink(href);
+          if (!external) return <span>{props.children}</span>;
+        }
         return <MarkdownLink {...props} onLinkError={setLinkError} />;
       },
       q({ color: _color, ref: _ref, node: _node, ...props }) {
@@ -291,6 +308,7 @@ const _Markdown: React.FC<MarkdownProps> = ({
     wrap,
     onCopyClick,
     isStreaming,
+    inert,
   ]);
   const normalizedChildren =
     typeof children === "string"

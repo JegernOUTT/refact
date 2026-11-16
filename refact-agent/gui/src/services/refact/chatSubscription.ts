@@ -1,3 +1,16 @@
+import {
+  isPythonRunUpdate,
+  normalizePythonCallRecord,
+  normalizePythonDisplay,
+  normalizePythonDisplays,
+  normalizePythonApprovalRequest,
+  isPythonApprovalDecisionKind,
+  isPythonRunSnapshot,
+  type PythonRunUpdate,
+  type PythonApprovalRequest,
+  type PythonApprovalDecisionKind,
+  type PythonRunSnapshot,
+} from "./types";
 import { buildApiUrl, type EngineApiConfig } from "./apiUrl";
 import { SseFramer } from "./sseFramer";
 import type {
@@ -252,6 +265,8 @@ export function isPushMode(value: unknown): value is PushMode {
 }
 
 export type RuntimeState = {
+  python_runs?: PythonRunSnapshot[];
+  python_approvals?: PythonApprovalRequest[];
   recovery?: RecoveryRecord | null;
   waiting_interruptible?: boolean;
   state: SessionState;
@@ -374,6 +389,27 @@ export type ExecProcessSpawn = {
 };
 
 export type EventEnvelope =
+  | {
+      chat_id: string;
+      seq: string;
+      type: "python_run_update";
+      tool_call_id: string;
+      run_id: string;
+      update: PythonRunUpdate;
+    }
+  | {
+      chat_id: string;
+      seq: string;
+      type: "python_approval_requested";
+      request: PythonApprovalRequest;
+    }
+  | {
+      chat_id: string;
+      seq: string;
+      type: "python_approval_resolved";
+      request_id: string;
+      decision: PythonApprovalDecisionKind;
+    }
   | {
       chat_id: string;
       seq: string;
@@ -1385,7 +1421,82 @@ function isValidChatEventBasic(data: unknown): data is EventEnvelope {
   if (typeof obj.chat_id !== "string") return false;
   if (typeof obj.seq !== "string" && typeof obj.seq !== "number") return false;
   if (typeof obj.type !== "string") return false;
-  return true;
+  switch (obj.type) {
+    case "python_run_update": {
+      const update = obj.update;
+      if (
+        update &&
+        typeof update === "object" &&
+        "kind" in update &&
+        (update.kind === "call_started" || update.kind === "call_finished") &&
+        "record" in update
+      ) {
+        update.record = normalizePythonCallRecord(update.record);
+      }
+      if (
+        update &&
+        typeof update === "object" &&
+        "kind" in update &&
+        update.kind === "display" &&
+        "display" in update
+      ) {
+        update.display = normalizePythonDisplay(update.display);
+      }
+      return (
+        typeof obj.tool_call_id === "string" &&
+        typeof obj.run_id === "string" &&
+        isPythonRunUpdate(obj.update)
+      );
+    }
+    case "python_approval_requested": {
+      const request = normalizePythonApprovalRequest(obj.request);
+      if (!request) return false;
+      obj.request = request;
+      return true;
+    }
+    case "python_approval_resolved":
+      return (
+        typeof obj.request_id === "string" &&
+        isPythonApprovalDecisionKind(obj.decision)
+      );
+    case "snapshot": {
+      const runtime = obj.runtime;
+      if (runtime === undefined) return true;
+      if (!runtime || typeof runtime !== "object" || Array.isArray(runtime))
+        return false;
+      const fields = runtime as Record<string, unknown>;
+      fields.python_runs = Array.isArray(fields.python_runs)
+        ? fields.python_runs.flatMap((value: unknown) => {
+            if (!value || typeof value !== "object" || Array.isArray(value))
+              return [];
+            const run = value as Record<string, unknown>;
+            const normalized = {
+              ...run,
+              calls: Array.isArray(run.calls)
+                ? run.calls.flatMap((call: unknown) => {
+                    const record = normalizePythonCallRecord(call);
+                    return record ? [record] : [];
+                  })
+                : run.calls,
+              displays:
+                run.displays === undefined
+                  ? undefined
+                  : normalizePythonDisplays(run.displays),
+            };
+            return isPythonRunSnapshot(normalized) ? [normalized] : [];
+          })
+        : [];
+      fields.python_approvals = Array.isArray(fields.python_approvals)
+        ? fields.python_approvals.flatMap((value: unknown) => {
+            const request = normalizePythonApprovalRequest(value);
+            return request ? [request] : [];
+          })
+        : [];
+      return true;
+    }
+    default:
+      return true;
+  }
 }
 
 function normalizeSeq(obj: EventEnvelope): void {

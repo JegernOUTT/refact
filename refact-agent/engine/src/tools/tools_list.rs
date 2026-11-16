@@ -396,6 +396,7 @@ impl ToolGroup {
 pub(crate) fn builtin_system_tools(config_path: String) -> Vec<Box<dyn Tool + Send>> {
     vec![
         Box::new(crate::tools::tool_manage_mcp::ToolManageMcp),
+        Box::new(crate::tools::tool_python::ToolPython::default()),
         Box::new(crate::tools::tool_shell::ToolShell {
             cfg: crate::tools::tool_shell::SettingsShell {
                 output_filter: crate::postprocessing::pp_command_output::OutputFilter::default(),
@@ -853,9 +854,6 @@ async fn get_builtin_tools(
             config_path: config_path.clone(),
         }),
         Box::new(crate::tools::tool_team::ToolTeamRoleGrant {
-            config_path: config_path.clone(),
-        }),
-        Box::new(crate::tools::tool_code_mode::ToolCodeMode {
             config_path: config_path.clone(),
         }),
         Box::new(crate::tools::tool_agent_interact::ToolProgressReport {
@@ -1676,6 +1674,13 @@ mod tests {
                 assert_eq!(names, ["worktree_create", "worktree_merge"], "{}", mode.id);
             }
         }
+    }
+
+    #[tokio::test]
+    async fn no_tool_named_code_mode_is_registered() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let tools = contract_described_tools(gcx, &contract_availability()).await;
+        assert!(tools.iter().all(|(_, desc, _)| desc.name != "code_mode"));
     }
 
     #[tokio::test]
@@ -2519,6 +2524,58 @@ mod tests {
         );
     }
 
+    const PYTHON_MODES: [&str; 11] = [
+        "agent",
+        "task_agent",
+        "debug",
+        "solo",
+        "explore",
+        "plan",
+        "review",
+        "ask",
+        "design",
+        "shell",
+        "buddy",
+    ];
+
+    #[test]
+    fn every_mode_listing_python_contains_code_mode_placeholder() {
+        for mode in embedded_contract_modes() {
+            if mode.tools.contains(&"python".to_string()) {
+                assert!(
+                    mode.prompt.contains("%CODE_MODE%\n  %MODELS_INFO%")
+                        || mode.prompt.contains("%CODE_MODE%\n%MODELS_INFO%"),
+                    "{}",
+                    mode.id
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn python_is_listed_in_the_eleven_chosen_modes_only() {
+        for mode in embedded_contract_modes() {
+            assert_eq!(
+                mode.tools.contains(&"python".to_string()),
+                PYTHON_MODES.contains(&mode.id.as_str()),
+                "{}",
+                mode.id
+            );
+        }
+    }
+
+    #[test]
+    fn python_confirmation_is_auto_in_the_eleven_chosen_modes() {
+        for id in PYTHON_MODES {
+            let mode = read_default_task_mode(id);
+            let action = crate::yaml_configs::customization_registry::match_tool_confirm_action(
+                &mode.tool_confirm.rules,
+                "python",
+            );
+            assert_eq!(action.as_deref().unwrap_or("auto"), "auto", "{id}");
+        }
+    }
+
     #[test]
     fn default_mode_prompts_include_models_info_and_no_delegate_tool_policy() {
         let modes_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -2728,6 +2785,17 @@ pub async fn get_available_tool_groups(gcx: Arc<GlobalContext>) -> Vec<ToolGroup
     get_available_tool_groups_with_availability(gcx, &availability, None).await
 }
 
+/// Registered tool groups and, for tools left out, why they are gated.
+pub(crate) async fn tool_groups_with_gating(
+    gcx: Arc<GlobalContext>,
+) -> (Vec<ToolGroup>, HashMap<String, ToolGating>) {
+    let availability = ToolAvailability::from_gcx(gcx.clone()).await;
+    let mut gated = HashMap::new();
+    let groups =
+        get_available_tool_groups_with_availability(gcx, &availability, Some(&mut gated)).await;
+    (groups, gated)
+}
+
 async fn get_available_tool_groups_with_availability(
     gcx: Arc<GlobalContext>,
     availability: &ToolAvailability,
@@ -2773,22 +2841,43 @@ pub(crate) fn filter_chat_tools(tools: &mut Vec<ToolDesc>, has_parent: bool) {
     tools.retain(|tool| has_parent || tool.name != "progress_report");
 }
 
+/// A chat whose tool list is restricted (a command's `allowed_tools`, or a background agent
+/// whose tools are not all tools) gets no engine functions: not bound, not described.
+pub(crate) async fn python_engine_hidden(app: &crate::app_state::AppState, chat_id: &str) -> bool {
+    let session = app.chat.sessions.read().await.get(chat_id).cloned();
+    if let Some(session) = session {
+        if !session.lock().await.active_command.allowed_tools.is_empty() {
+            return true;
+        }
+    }
+    match app.agents.find_agent_id_by_child_chat_id(chat_id).await {
+        Some(agent_id) => app
+            .agent_executions
+            .saved_config(&agent_id)
+            .is_none_or(|config| !matches!(config.tools, crate::subchat::ToolsPolicy::All)),
+        None => false,
+    }
+}
+
 pub(crate) async fn filter_tool_catalog_for_chat(
     app: &crate::app_state::AppState,
     chat_id: &str,
     catalog: Arc<refact_runtime_api::ToolCatalogSnapshot>,
 ) -> Arc<refact_runtime_api::ToolCatalogSnapshot> {
-    if chat_has_parent_agent(app, chat_id).await
-        || !catalog
+    let has_parent = chat_has_parent_agent(app, chat_id).await;
+    let hide_engine = python_engine_hidden(app, chat_id).await
+        && catalog.index.tools.iter().any(|tool| tool.name == "python");
+    let drop_progress = !has_parent
+        && catalog
             .index
             .tools
             .iter()
-            .any(|tool| tool.name == "progress_report")
-    {
+            .any(|tool| tool.name == "progress_report");
+    if !drop_progress && !hide_engine {
         return catalog;
     }
     let mut filtered = (*catalog).clone();
-    filter_chat_tools(&mut filtered.index.tools, false);
+    filter_chat_tools(&mut filtered.index.tools, has_parent);
     filtered
         .policy
         .retain(|tool| tool.name != "progress_report");
@@ -2799,6 +2888,24 @@ pub(crate) async fn filter_tool_catalog_for_chat(
         .map(|tool| tool.name.clone())
         .collect::<Vec<_>>();
     filtered.aliases = refact_tool_api::build_registry_from_names(&names);
+    let mut options =
+        crate::python_tool::catalog_binding::BindOptions::for_project(app.gcx.clone()).await;
+    options.engine &= !hide_engine;
+    let description = format!(
+        "{}{}",
+        crate::python_tool::catalog_binding::INTRO,
+        crate::python_tool::catalog_binding::catalog_with_options(
+            &filtered.index.tools,
+            filtered.index.mcp_lazy_mode,
+            options,
+        )
+        .description
+    );
+    for tool in &mut filtered.index.tools {
+        if tool.name == "python" {
+            tool.description = description.clone();
+        }
+    }
     Arc::new(filtered)
 }
 

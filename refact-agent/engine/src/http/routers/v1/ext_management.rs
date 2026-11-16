@@ -358,7 +358,7 @@ pub(crate) async fn write_file_atomic(
     crate::ext::operator_service::write_file_atomic(path, content).await
 }
 
-async fn resolve_scope_dir(
+pub(crate) async fn resolve_scope_dir(
     gcx: Arc<GlobalContext>,
     scope: Option<&str>,
     require_local: bool,
@@ -390,7 +390,7 @@ async fn resolve_scope_dir(
     }
 }
 
-fn make_scope_ext_dirs(base_dir: PathBuf, scope: &str) -> ExtDirs {
+pub(crate) fn make_scope_ext_dirs(base_dir: PathBuf, scope: &str) -> ExtDirs {
     if scope == "global" {
         ExtDirs {
             global_dirs: vec![base_dir],
@@ -431,7 +431,9 @@ impl From<&HookConfig> for HookConfigFlat {
     }
 }
 
-fn hooks_to_yaml_string(hooks: &[HookConfigFlat]) -> std::result::Result<String, String> {
+pub(crate) fn hooks_to_yaml_string(
+    hooks: &[HookConfigFlat],
+) -> std::result::Result<String, String> {
     use serde_yaml::Value;
 
     let mut by_event: std::collections::HashMap<String, Vec<&HookConfigFlat>> =
@@ -721,6 +723,11 @@ pub struct ExtRegistryResponse {
 pub async fn handle_v1_ext_registry(
     State(app): State<AppState>,
 ) -> Result<Response<Body>, ScratchError> {
+    json_response(StatusCode::OK, &ext_registry(app).await)
+}
+
+/// Skills, slash commands and hooks of every scope, Claude-sourced skills and commands left out.
+pub(crate) async fn ext_registry(app: AppState) -> ExtRegistryResponse {
     let config_dir = app.paths.config_dir.clone();
     let ext_dirs = get_ext_dirs(app.clone()).await;
 
@@ -781,15 +788,12 @@ pub async fn handle_v1_ext_registry(
         })
         .collect();
 
-    json_response(
-        StatusCode::OK,
-        &ExtRegistryResponse {
-            skills,
-            slash_commands,
-            hooks: hooks_entries,
-            has_project_root,
-        },
-    )
+    ExtRegistryResponse {
+        skills,
+        slash_commands,
+        hooks: hooks_entries,
+        has_project_root,
+    }
 }
 
 #[derive(Deserialize)]

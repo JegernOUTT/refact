@@ -1,7 +1,13 @@
+import {
+  isPythonRunExtra,
+  isToolMessage,
+} from "../../../services/refact/types";
+import { useGetPythonWorkspaceQuery } from "../../../services/refact/pythonWorkspace";
 import { AppRail } from "../../Apps/AppRail";
 import classNames from "classnames";
 import {
   Activity,
+  FlaskConical,
   Bot,
   Files,
   GitBranch,
@@ -90,12 +96,20 @@ const RAIL_ITEMS: RailItem[] = [
     label: "Active chats",
     shortcut: `${modifierLabel}4`,
   },
+  {
+    id: "python",
+    icon: FlaskConical,
+    label: "Python workspace",
+    shortcut: `${modifierLabel}5`,
+  },
 ];
 
 const countDescriptionFor = (
   section: WorkspaceDockSection,
   count: number,
 ): string => {
+  if (section === "python")
+    return `${count} ${count === 1 ? "artifact" : "artifacts"}`;
   if (section === "git") {
     return `${count} changed ${count === 1 ? "file" : "files"}`;
   }
@@ -125,6 +139,26 @@ export function ActivityRail() {
   const panelsForced = useAppSelector(selectPanelsForced);
   const dock = useAppSelector(selectWorkspaceDock);
   const focusedChatId = useAppSelector(selectFocusedWorkspaceChatId);
+  const hasPythonActivity = useAppSelector((state) => {
+    const runtime = focusedChatId
+      ? state.chat.threads[focusedChatId]
+      : undefined;
+    return Boolean(
+      runtime &&
+        (Object.keys(runtime.pythonRuns ?? {}).length > 0 ||
+          runtime.thread.messages.some(
+            (message) =>
+              isToolMessage(message) && isPythonRunExtra(message.extra?.python),
+          )),
+    );
+  });
+  const { currentData: pythonWorkspace } = useGetPythonWorkspaceQuery(
+    focusedChatId &&
+      (hasPythonActivity || (dock.open && dock.section === "python"))
+      ? { chatId: focusedChatId }
+      : skipToken,
+    { refetchOnMountOrArgChange: true, refetchOnFocus: true },
+  );
   const homeChatId = useAppSelector(selectWorkspaceFocusedChatId);
   const contextRoots = useAppSelector(selectFocusedChatWorkspaceRoots);
   const availability = resolveWorkspaceDockAvailability(
@@ -219,13 +253,15 @@ export function ActivityRail() {
       </div>
       {RAIL_ITEMS.map((item) => {
         const badgeCount =
-          item.id === "agents"
-            ? agentCount
-            : item.id === "git"
-              ? changedCount
-              : item.id === "activity"
-                ? activeChatCount
-                : 0;
+          item.id === "python"
+            ? pythonWorkspace?.artifacts.length ?? 0
+            : item.id === "agents"
+              ? agentCount
+              : item.id === "git"
+                ? changedCount
+                : item.id === "activity"
+                  ? activeChatCount
+                  : 0;
         const activitySuffix =
           item.id !== "activity"
             ? ""

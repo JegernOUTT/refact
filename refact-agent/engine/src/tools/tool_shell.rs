@@ -50,6 +50,68 @@ pub struct SettingsShell {
     pub output_filter: OutputFilter,
 }
 
+#[derive(serde::Serialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum ShellOutputStatus {
+    Exited,
+    TimedOut,
+    Detached,
+    Killed,
+    Failed,
+}
+
+#[derive(serde::Serialize, schemars::JsonSchema)]
+struct ShellOutput {
+    status: ShellOutputStatus,
+    exit_code: Option<i32>,
+    stdout: String,
+    stderr: String,
+    process_id: Option<String>,
+    duration_ms: u64,
+    output_withheld: bool,
+}
+
+fn attach_shell_output(
+    message: &mut ChatMessage,
+    stdout: &str,
+    stderr: &str,
+    duration: Duration,
+    detached: bool,
+) {
+    let exec = &message.extra["exec"];
+    let withheld = detached || crate::tools::tool_process::output_withheld(message);
+    let status = if detached || matches!(exec["status"].as_str(), Some("running" | "starting")) {
+        ShellOutputStatus::Detached
+    } else {
+        match exec["status"].as_str() {
+            Some("exited") => ShellOutputStatus::Exited,
+            Some("timed_out") => ShellOutputStatus::TimedOut,
+            Some("killed") => ShellOutputStatus::Killed,
+            _ => ShellOutputStatus::Failed,
+        }
+    };
+    let output = ShellOutput {
+        status,
+        exit_code: exec["exit_code"]
+            .as_i64()
+            .and_then(|v| i32::try_from(v).ok()),
+        stdout: if withheld {
+            String::new()
+        } else {
+            stdout.into()
+        },
+        stderr: if withheld {
+            String::new()
+        } else {
+            stderr.into()
+        },
+        process_id: exec["process_id"].as_str().map(str::to_owned),
+        duration_ms: duration.as_millis() as u64,
+        output_withheld: withheld,
+    };
+    crate::tools::tool_process::attach_output(&mut message.extra, output);
+}
+
 #[derive(Default)]
 pub struct ToolShell {
     pub cfg: SettingsShell,
@@ -71,6 +133,57 @@ const SHELL_OBSERVATION_GRACE_AFTER_EXIT: Duration = Duration::from_secs(3);
 #[cfg(test)]
 tokio::task_local! {
     pub(crate) static TEST_FOREGROUND_WINDOW: Duration;
+}
+
+/// Nested Python waits for observation without the foreground window, but never past Stop
+/// or the run deadline; then the observation is reported unavailable.
+async fn observation_until_stopped(
+    wait: impl std::future::Future<Output = refact_exec::ObservationStatus>,
+    abort: &std::sync::atomic::AtomicBool,
+    deadline: Option<tokio::time::Instant>,
+) -> refact_exec::ObservationStatus {
+    tokio::pin!(wait);
+    let deadline = async {
+        match deadline {
+            Some(deadline) => tokio::time::sleep_until(deadline).await,
+            None => std::future::pending().await,
+        }
+    };
+    tokio::pin!(deadline);
+    loop {
+        tokio::select! {
+            biased;
+            status = &mut wait => return status,
+            _ = &mut deadline => {
+                return refact_exec::ObservationStatus::Unavailable(
+                    "observation did not finish before the Python run deadline".into(),
+                )
+            }
+            _ = tokio::time::sleep(Duration::from_millis(25)) => {
+                if abort.load(std::sync::atomic::Ordering::Acquire) {
+                    return refact_exec::ObservationStatus::Unavailable(
+                        "stopped before observation finished".into(),
+                    );
+                }
+            }
+        }
+    }
+}
+
+async fn python_run_deadline(
+    ccx: &Arc<AMutex<AtCommandsContext>>,
+    chat_id: &str,
+    tool_call_id: &str,
+) -> Option<tokio::time::Instant> {
+    let app = ccx.lock().await.app.clone();
+    let outer = app
+        .python_tool
+        .nested_parents
+        .lock()
+        .unwrap()
+        .get(&(chat_id.to_string(), tool_call_id.to_string()))
+        .cloned()?;
+    app.python_tool.run_deadline(chat_id, &outer)
 }
 
 fn foreground_window() -> Duration {
@@ -484,6 +597,7 @@ impl Tool for ToolShell {
         ));
         let scope_guard = Arc::new(ShellScopeGuard(std::sync::Mutex::new(Some(lease))));
         request.execution_guard = Some(scope_guard.clone());
+        let abort_flag_for_observation = abort_flag.clone();
         request = request.with_abort_flag(abort_flag);
         request.return_after_monitor_attach = !parsed.run_in_background;
         let mut result = match exec_registry.spawn(request).await {
@@ -498,9 +612,33 @@ impl Tool for ToolShell {
         };
         if !parsed.run_in_background {
             let process_id = &result.snapshot.meta.process_id;
-            let completed = tokio::time::timeout(foreground_window(), async {
+            let nested_python = {
+                let context = ccx.lock().await;
+                let nested = context
+                    .app
+                    .python_tool
+                    .nested_parents
+                    .lock()
+                    .unwrap()
+                    .contains_key(&(chat_id.clone(), tool_call_id.clone()));
+                nested
+            };
+            let nested_deadline = if nested_python {
+                python_run_deadline(&ccx, &chat_id, &tool_call_id).await
+            } else {
+                None
+            };
+            let wait = async {
                 let snapshot = exec_registry.wait(process_id).await?;
                 let observation = match exec_registry.observation_reader(process_id).await {
+                    Some(reader) if nested_python => Some(
+                        observation_until_stopped(
+                            reader.wait_status(),
+                            &abort_flag_for_observation,
+                            nested_deadline,
+                        )
+                        .await,
+                    ),
                     Some(reader) => tokio::time::timeout(
                         SHELL_OBSERVATION_GRACE_AFTER_EXIT,
                         reader.wait_status(),
@@ -510,8 +648,12 @@ impl Tool for ToolShell {
                     None => Some(result.observation.clone()),
                 };
                 Ok::<_, String>((snapshot, observation))
-            })
-            .await;
+            };
+            let completed = if nested_python {
+                Ok(wait.await)
+            } else {
+                tokio::time::timeout(foreground_window(), wait).await
+            };
             match completed {
                 Ok(Ok((snapshot, Some(observation)))) => {
                     result.snapshot = snapshot;
@@ -542,7 +684,7 @@ impl Tool for ToolShell {
                         cache.attach_report(&mut extra);
                     }
                     spawn_span.finish_tool(PerfOutcome::Success, 1, 1, None);
-                    let message = ChatMessage {
+                    let mut message = ChatMessage {
                         role: "tool".into(),
                         tool_call_id: tool_call_id.clone(),
                         content: ChatContent::SimpleText(format!(
@@ -553,6 +695,7 @@ impl Tool for ToolShell {
                         extra,
                         ..Default::default()
                     };
+                    attach_shell_output(&mut message, "", "", started.elapsed(), true);
                     return Ok((false, vec![ContextEnum::ChatMessage(message)]));
                 }
             }
@@ -620,6 +763,7 @@ impl Tool for ToolShell {
                     return Err(error);
                 }
             }
+            attach_shell_output(&mut message, "", "", duration, true);
             postprocess_span.finish_tool(PerfOutcome::Success, 1, 1, None);
             return Ok((false, vec![ContextEnum::ChatMessage(message)]));
         }
@@ -705,6 +849,13 @@ impl Tool for ToolShell {
             }
         }
 
+        attach_shell_output(
+            &mut message,
+            &filtered_stdout,
+            &filtered_stderr,
+            duration,
+            false,
+        );
         postprocess_span.finish_tool(PerfOutcome::Success, 1, 1, None);
         Ok((false, vec![ContextEnum::ChatMessage(message)]))
     }
@@ -725,7 +876,7 @@ impl Tool for ToolShell {
             allow_parallel: false,
             description: "Execute a single command, using the \"sh\" on unix-like systems and \"powershell.exe\" on windows. Use it for one-time tasks like dependencies installation. Don't call this unless you have to. Not suitable for regular work because it requires a confirmation at each step. Output is compressed by default - use output_filter and output_limit parameters to see specific parts if needed. Set run_in_background=true for long-running commands you will inspect later with process_read or wait with a process target. Foreground commands default to pipe streams, while background commands default to a pseudo-terminal (PTY) with interactive stdin and a combined stdout/stderr stream, except on Windows, which uses pipes for both; explicit tty overrides either default. The timeout parameter only applies to foreground commands (run_in_background=false); supplying timeout with run_in_background=true is an error — use wait with a process target or process_kill instead. In worktree-scoped chats, the default cwd and explicit workdir are enforced to the active worktree or privacy-permitted outside paths; OS confinement follows the terminal security mode. Note: sudo commands cannot be run - if you need elevated privileges, ask the user to run them directly.".to_string(),
             input_schema: shell_input_schema(),
-            output_schema: None,
+            output_schema: Some(refact_tool_api::tool_output::output_schema_for::<ShellOutput>()),
             annotations: None,
         }
     }
@@ -1447,6 +1598,49 @@ mod tests {
 
     use super::*;
 
+    #[tokio::test]
+    async fn nested_observation_wait_stops_on_abort_and_deadline() {
+        let abort = Arc::new(AtomicBool::new(false));
+        let flag = abort.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            flag.store(true, Ordering::Release);
+        });
+        let status = tokio::time::timeout(
+            Duration::from_secs(5),
+            observation_until_stopped(
+                std::future::pending::<refact_exec::ObservationStatus>(),
+                &abort,
+                None,
+            ),
+        )
+        .await
+        .expect("abort did not end the observation wait");
+        assert!(matches!(
+            status,
+            refact_exec::ObservationStatus::Unavailable(_)
+        ));
+        let status = tokio::time::timeout(
+            Duration::from_secs(5),
+            observation_until_stopped(
+                std::future::pending::<refact_exec::ObservationStatus>(),
+                &AtomicBool::new(false),
+                Some(tokio::time::Instant::now() + Duration::from_millis(50)),
+            ),
+        )
+        .await
+        .expect("deadline did not end the observation wait");
+        assert!(matches!(
+            status,
+            refact_exec::ObservationStatus::Unavailable(_)
+        ));
+        let ready = refact_exec::ObservationStatus::Unavailable("ready".into());
+        assert_eq!(
+            observation_until_stopped(async { ready.clone() }, &AtomicBool::new(true), None).await,
+            ready
+        );
+    }
+
     #[test]
     fn closed_or_busy_scope_is_a_plain_sentence_for_the_model() {
         for error in [
@@ -1511,6 +1705,94 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(request.timeout, Some(Duration::from_secs(12)));
+    }
+
+    #[tokio::test]
+    async fn python_nested_shell_outlives_window_while_direct_shell_detaches() {
+        tokio::time::timeout(Duration::from_secs(30), async {
+            for nested in [true, false] {
+                let (gcx, ccx) = ccx_with_gcx_and_abort(None).await;
+                let app = ccx.lock().await.app.clone();
+                if nested {
+                    app.python_tool
+                        .nested_parents
+                        .lock()
+                        .unwrap()
+                        .insert(("chat".into(), "nested".into()), "outer".into());
+                }
+                let command = if cfg!(windows) {
+                    "Start-Sleep -Milliseconds 400; Write-Output done"
+                } else {
+                    "sleep 0.4; echo done"
+                };
+                let (_, messages) = detach_quickly(ToolShell::default().tool_execute(
+                    ccx,
+                    &"nested".into(),
+                    &args(vec![
+                        ("command", json!(command)),
+                        ("description", json!("Check nested shell")),
+                        ("timeout", json!(10)),
+                    ]),
+                ))
+                .await
+                .unwrap();
+                let message = only_chat_message(messages);
+                if nested {
+                    assert_eq!(exec(&message)["status"], "exited");
+                    assert!(text(&message).contains("done"));
+                    assert_ne!(exec(&message)["detached"], true);
+                } else {
+                    assert_eq!(exec(&message)["detached"], true);
+                    gcx.exec_registry.wait(&process_id(&message)).await.unwrap();
+                }
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn python_nested_shell_stop_cancels_waiting_command() {
+        tokio::time::timeout(Duration::from_secs(30), async {
+            let abort = Arc::new(AtomicBool::new(false));
+            let (gcx, ccx) = ccx_with_gcx_and_abort(Some(abort.clone())).await;
+            ccx.lock()
+                .await
+                .app
+                .python_tool
+                .nested_parents
+                .lock()
+                .unwrap()
+                .insert(("chat".into(), "nested".into()), "outer".into());
+            let task = tokio::spawn(async move {
+                detach_quickly(ToolShell::default().tool_execute(
+                    ccx,
+                    &"nested".into(),
+                    &args(vec![
+                        ("command", json!(slow_command())),
+                        ("description", json!("Stop nested shell")),
+                        ("timeout", json!(10)),
+                    ]),
+                ))
+                .await
+            });
+            loop {
+                if !gcx.exec_registry.list(Default::default()).await.is_empty() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            abort.store(true, Ordering::Release);
+            let (_, messages) = task.await.unwrap().unwrap();
+            let message = only_chat_message(messages);
+            assert_ne!(exec(&message)["detached"], true);
+            assert!(matches!(
+                exec(&message)["status"].as_str(),
+                Some("killed" | "cancelled")
+            ));
+        })
+        .await
+        .unwrap();
     }
 
     #[test]
@@ -2425,5 +2707,34 @@ mod tests {
             err,
             "description is required and must be a non-empty single concise sentence"
         );
+    }
+}
+
+#[cfg(test)]
+mod structured_output_tests {
+    use super::*;
+
+    #[test]
+    fn shell_output_withholds_guarded_streams_without_changing_text() {
+        let mut message = ChatMessage::new("tool".into(), "unchanged".into());
+        message.extra.insert(
+            "exec".into(),
+            json!({"status":"exited", "exit_code":0, "process_id":"exec_test"}),
+        );
+        message
+            .extra
+            .insert("privacy_shell".into(), json!({"withheld":true}));
+        attach_shell_output(
+            &mut message,
+            "private stdout",
+            "private stderr",
+            Duration::from_millis(3),
+            false,
+        );
+        let output = &message.extra[refact_tool_api::tool_output::TOOL_OUTPUT_EXTRA_KEY];
+        assert_eq!(output["stdout"], "");
+        assert_eq!(output["stderr"], "");
+        assert_eq!(output["output_withheld"], true);
+        assert_eq!(message.content.content_text_only(), "unchanged");
     }
 }

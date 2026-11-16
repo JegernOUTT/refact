@@ -2,10 +2,10 @@ mod actions;
 pub(crate) mod automation_channels;
 mod commands;
 pub mod context;
-mod details;
+pub(crate) mod details;
 mod document;
 mod icon;
-mod privacy;
+pub(crate) mod privacy;
 pub mod process_sources;
 pub mod protocol;
 #[cfg(test)]

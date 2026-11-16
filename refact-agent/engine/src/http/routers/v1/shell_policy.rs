@@ -134,7 +134,7 @@ fn effective_catalogue(policy: &ShellGatePolicy) -> Vec<CatalogueEntry> {
         .collect()
 }
 
-fn response_from_policy(policy: ShellGatePolicy) -> PolicyResponse {
+pub(crate) fn response_from_policy(policy: ShellGatePolicy) -> PolicyResponse {
     PolicyResponse {
         mode: policy.mode.clone(),
         deny: policy.deny.clone(),
@@ -151,29 +151,41 @@ pub async fn handle_v1_shell_policy_get(State(app): State<AppState>) -> axum::Js
     axum::Json(response_from_policy(load_policy(app.gcx.clone()).await))
 }
 
+pub(crate) fn parse_mode(value: &str) -> Result<ApprovalMode, String> {
+    match value {
+        "strict" => Ok(ApprovalMode::Strict),
+        "balanced" => Ok(ApprovalMode::Balanced),
+        "permissive" => Ok(ApprovalMode::Permissive),
+        "yolo" => Ok(ApprovalMode::Yolo),
+        value => Err(format!("unknown mode `{value}`")),
+    }
+}
+
+pub(crate) fn parse_authority(value: &str) -> Result<ShellLlmAuthority, String> {
+    match value {
+        "ask_only" => Ok(ShellLlmAuthority::AskOnly),
+        "ask_and_allow" => Ok(ShellLlmAuthority::AskAndAllow),
+        value => Err(format!("unknown authority `{value}`")),
+    }
+}
+
+pub(crate) fn parse_on_failure(value: &str) -> Result<ShellLlmOnFailure, String> {
+    match value {
+        "pass" => Ok(ShellLlmOnFailure::Pass),
+        "ask" => Ok(ShellLlmOnFailure::Ask),
+        value => Err(format!("unknown on_failure `{value}`")),
+    }
+}
+
 pub async fn handle_v1_shell_policy_post(
     State(app): State<AppState>,
     body: hyper::body::Bytes,
 ) -> Result<axum::Json<PolicyResponse>, ScratchError> {
     let request: PolicyRequest = serde_json::from_slice(&body)
         .map_err(|error| bad_request(format!("invalid shell policy: {error}")))?;
-    let mode = match request.mode.as_str() {
-        "strict" => ApprovalMode::Strict,
-        "balanced" => ApprovalMode::Balanced,
-        "permissive" => ApprovalMode::Permissive,
-        "yolo" => ApprovalMode::Yolo,
-        value => return Err(bad_request(format!("unknown mode `{value}`"))),
-    };
-    let authority = match request.llm_validation.authority.as_str() {
-        "ask_only" => ShellLlmAuthority::AskOnly,
-        "ask_and_allow" => ShellLlmAuthority::AskAndAllow,
-        value => return Err(bad_request(format!("unknown authority `{value}`"))),
-    };
-    let on_failure = match request.llm_validation.on_failure.as_str() {
-        "pass" => ShellLlmOnFailure::Pass,
-        "ask" => ShellLlmOnFailure::Ask,
-        value => return Err(bad_request(format!("unknown on_failure `{value}`"))),
-    };
+    let mode = parse_mode(&request.mode).map_err(bad_request)?;
+    let authority = parse_authority(&request.llm_validation.authority).map_err(bad_request)?;
+    let on_failure = parse_on_failure(&request.llm_validation.on_failure).map_err(bad_request)?;
     let defaults = default_catalogue();
     let mut overrides = Vec::new();
     for incoming in request.catalogue {
@@ -218,30 +230,35 @@ pub async fn handle_v1_shell_policy_test(
     State(app): State<AppState>,
     axum::Json(request): axum::Json<TestRequest>,
 ) -> axum::Json<serde_json::Value> {
+    axum::Json(shell_policy_test(&app, &request.command).await)
+}
+
+/// Dry run of a command against this project's shell policy (no LLM validation, no audit line).
+pub(crate) async fn shell_policy_test(app: &AppState, command: &str) -> serde_json::Value {
     let policy = load_policy(app.gcx.clone()).await;
     let workspace_roots = get_unscoped_project_dirs(app.gcx.clone()).await;
     let outcome = evaluate(
-        &request.command,
+        command,
         &policy,
         &GateContext {
             workspace_roots,
             needs_confirmation: false,
         },
     );
-    let parsed = extract_command_segments(&request.command);
+    let parsed = extract_command_segments(command);
     let segments: Vec<String> = parsed.segments.iter().map(segment_command).collect();
     let decision = match outcome.decision.result {
         refact_tool_api::MatchConfirmDenyResult::PASS => "pass",
         refact_tool_api::MatchConfirmDenyResult::CONFIRMATION => "confirmation",
         refact_tool_api::MatchConfirmDenyResult::DENY => "deny",
     };
-    axum::Json(json!({
+    json!({
         "decision": decision,
         "rule": outcome.decision.rule,
         "reason": outcome.reason,
         "risk_level": outcome.risk_level,
         "segments": segments,
-    }))
+    })
 }
 
 pub async fn handle_v1_shell_policy_audit(

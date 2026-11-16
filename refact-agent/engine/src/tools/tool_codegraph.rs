@@ -51,13 +51,13 @@ const HEALTH_GRAPH_SNAPSHOT_MAX_ATTEMPTS: usize = 2;
 
 type GitCacheKey = (PathBuf, Option<Oid>, usize);
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, schemars::JsonSchema)]
 pub struct SuggestedReviewer {
     pub author: String,
     pub score: f64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 pub struct PrBlastIndexState {
     pub queued: usize,
     pub cross_file_edges: i64,
@@ -91,11 +91,13 @@ pub(crate) struct GitRiskAssembly {
     pub(crate) recent_commit_risks: Vec<RecentCommitRiskSummary>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, schemars::JsonSchema)]
 pub struct HealthImpactContributor {
     pub biomarker: String,
     pub category: String,
+    #[schemars(with = "serde_json::Value")]
     pub dimension: refact_codehealth::biomarkers::Dimension,
+    #[schemars(with = "serde_json::Value")]
     pub severity: refact_codehealth::biomarkers::Severity,
     pub line: usize,
     pub detail: String,
@@ -103,7 +105,7 @@ pub struct HealthImpactContributor {
     pub capped: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, schemars::JsonSchema)]
 pub(crate) struct HealthFunctionSummary {
     pub(crate) name: String,
     pub(crate) line1: usize,
@@ -187,7 +189,7 @@ struct HealthCacheEntry {
     core: HealthFileCore,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, schemars::JsonSchema)]
 pub struct RecentCommitRiskSummary {
     pub sha: String,
     pub summary: String,
@@ -265,9 +267,13 @@ fn health_analysis_cache() -> &'static StdMutex<HealthAnalysisCache> {
 fn tool_message(tool_call_id: &String, text: String) -> Vec<ContextEnum> {
     vec![ContextEnum::ChatMessage(ChatMessage {
         role: "tool".to_string(),
-        content: ChatContent::SimpleText(text),
+        content: ChatContent::SimpleText(text.clone()),
         tool_calls: None,
         tool_call_id: tool_call_id.clone(),
+        extra: serde_json::Map::from_iter([(
+            refact_tool_api::tool_output::TOOL_OUTPUT_EXTRA_KEY.into(),
+            serde_json::from_str(&text).expect("CodeGraph JSON response"),
+        )]),
         output_filter: Some(OutputFilter::no_limits()),
         ..Default::default()
     })]
@@ -964,7 +970,7 @@ fn co_change_key(path: &str, project_root: Option<&Path>) -> String {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, schemars::JsonSchema)]
 pub struct DeadCodeIndexState {
     pub queued: usize,
     pub dirty_paths: i64,
@@ -973,7 +979,7 @@ pub struct DeadCodeIndexState {
     pub cross_file_ready: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, schemars::JsonSchema)]
 pub struct DeadCodeEntry {
     pub name: String,
     pub path: String,
@@ -984,7 +990,7 @@ pub struct DeadCodeEntry {
     pub incoming_edges: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, schemars::JsonSchema)]
 pub struct DeadCodeReport {
     pub entries: Vec<DeadCodeEntry>,
     #[serde(skip)]
@@ -2528,7 +2534,7 @@ pub struct ToolCodegraphOverview {
     pub config_path: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 struct OverviewToolResponse {
     #[serde(flatten)]
     overview: OverviewResponse,
@@ -2750,7 +2756,7 @@ impl Tool for ToolCodegraphOverview {
             allow_parallel: true,
             description: "Project-wide CodeGraph overview from the generation-keyed analytics cache: readiness warning, node/edge counts, SCCs, PageRank/betweenness symbols with paths, communities, entry points, API-contract files, and likely dead code.".to_string(),
             input_schema: json_schema_from_params(&[], &[]),
-            output_schema: None,
+            output_schema: Some(refact_tool_api::tool_output::output_schema_for::<ToolJson<OverviewToolResponse>>()),
             annotations: None,
         }
     }
@@ -2760,9 +2766,10 @@ impl Tool for ToolCodegraphOverview {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, schemars::JsonSchema)]
 pub struct HealthFinding {
     #[serde(flatten)]
+    #[schemars(with = "serde_json::Value")]
     pub finding: refact_codehealth::biomarkers::Finding,
     pub hot_path: bool,
 }
@@ -3161,7 +3168,7 @@ pub struct ToolDeadCode {
     pub config_path: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 struct DeadCodeToolResponse {
     #[serde(flatten)]
     report: DeadCodeReport,
@@ -3270,7 +3277,7 @@ impl Tool for ToolDeadCode {
                 ],
                 &[],
             ),
-            output_schema: None,
+            output_schema: Some(refact_tool_api::tool_output::output_schema_for::<ToolJson<DeadCodeToolResponse>>()),
             annotations: None,
         }
     }
@@ -3284,7 +3291,7 @@ pub struct ToolCodeHealth {
     pub config_path: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 struct HealthToolResponse {
     #[serde(flatten)]
     response: HealthResponse,
@@ -3583,7 +3590,7 @@ impl Tool for ToolCodeHealth {
                 ],
                 &["file_path"],
             ),
-            output_schema: None,
+            output_schema: Some(refact_tool_api::tool_output::output_schema_for::<ToolJson<HealthToolResponse>>()),
             annotations: None,
         }
     }
@@ -3667,7 +3674,7 @@ impl Tool for ToolGitRisk {
             allow_parallel: true,
             description: "Git intelligence for the project: mined history summary, churn/temporal hotspots, ownership and bus-factor risk, co-change/coupling pairs, reviewer ownership hints, recent commit risk factors, and git-biomarker findings with function-level facts for the top hotspot files.".to_string(),
             input_schema: json_schema_from_params(&[], &[]),
-            output_schema: None,
+            output_schema: Some(refact_tool_api::tool_output::output_schema_for::<ToolJson<GitRiskResponse>>()),
             annotations: None,
         }
     }
@@ -4171,7 +4178,7 @@ fn relation_label(relation: refact_codewiki::Relation) -> &'static str {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 struct CodeWhyResponse {
     query: String,
     source_count: usize,
@@ -4324,7 +4331,7 @@ impl Tool for ToolCodeWhy {
                 &[("query", "string", "Topic or keyword to find decisions about.")],
                 &["query"],
             ),
-            output_schema: None,
+            output_schema: Some(refact_tool_api::tool_output::output_schema_for::<ToolJson<CodeWhyResponse>>()),
             annotations: None,
         }
     }
@@ -4526,7 +4533,7 @@ impl Tool for ToolCodeDuplication {
             allow_parallel: true,
             description: "Project-wide cross-file duplication from a graph-generation cache: token clone pairs and duplication percentage, git co-change counts joined to clone paths, co-change-weighted DRY findings, and assertion/clone test smells.".to_string(),
             input_schema: json_schema_from_params(&[], &[]),
-            output_schema: None,
+            output_schema: Some(refact_tool_api::tool_output::output_schema_for::<ToolJson<DuplicationResponse>>()),
             annotations: None,
         }
     }
@@ -4645,7 +4652,7 @@ impl Tool for ToolSecurityScan {
                 )],
                 &["file_path"],
             ),
-            output_schema: None,
+            output_schema: Some(refact_tool_api::tool_output::output_schema_for::<ToolJson<SecurityScanResponse>>()),
             annotations: None,
         }
     }
@@ -4659,7 +4666,7 @@ pub struct ToolPrBlast {
     pub config_path: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 struct PrBlastToolResponse {
     #[serde(flatten)]
     response: PrBlastResponse,
@@ -4771,7 +4778,7 @@ impl Tool for ToolPrBlast {
                 },
                 "required": ["changed_files"]
             }),
-            output_schema: None,
+            output_schema: Some(refact_tool_api::tool_output::output_schema_for::<ToolJson<PrBlastToolResponse>>()),
             annotations: None,
         }
     }
@@ -4820,7 +4827,7 @@ struct CodeMapRenderedPage {
     content: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 struct CodeMapResponse {
     files_count: usize,
     page_count: usize,
@@ -5696,7 +5703,7 @@ impl Tool for ToolCodeMap {
                     }
                 }
             }),
-            output_schema: None,
+            output_schema: Some(refact_tool_api::tool_output::output_schema_for::<ToolJson<CodeMapResponse>>()),
             annotations: None,
         }
     }

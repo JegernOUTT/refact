@@ -742,7 +742,7 @@ mod tests {
             .await,
         ));
         let mut fixture = super::super::SubchatModelFixture::default();
-        fixture.responses.push_back(super::super::ChoiceFinal {
+        fixture.responses.push_back(Ok(super::super::ChoiceFinal {
             content: "done".into(),
             finish_reason: Some("stop".into()),
             usage: Some(ChatUsage {
@@ -752,12 +752,8 @@ mod tests {
                 ..Default::default()
             }),
             ..Default::default()
-        });
-        super::super::SUBCHAT_MODEL_FIXTURES
-            .get_or_init(Default::default)
-            .lock()
-            .unwrap()
-            .insert(chat_id.to_string(), fixture);
+        }));
+        super::super::insert_model_fixture(chat_id, fixture);
         let result = with_scope(
             scope,
             super::super::subchat_stream(
@@ -777,13 +773,8 @@ mod tests {
             ),
         )
         .await;
-        let calls = super::super::SUBCHAT_MODEL_FIXTURES
-            .get()
-            .unwrap()
-            .lock()
-            .unwrap()
-            .remove(chat_id)
-            .unwrap()
+        let calls = super::super::take_model_fixture(chat_id)
+            .expect("fixture installed")
             .requests
             .len();
         (result, calls)

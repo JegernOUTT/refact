@@ -158,6 +158,18 @@ pub async fn request(
     call: &ChatToolCall,
     reason: &str,
 ) -> Result<bool, String> {
+    request_with_parking(app, ccx, call, reason, true).await
+}
+
+/// `park=false` is for requests raised inside a running tool (a nested Python call):
+/// that tool holds an operation on the execution, so parking would wait on itself.
+pub async fn request_with_parking(
+    app: &AppState,
+    ccx: &Arc<Mutex<AtCommandsContext>>,
+    call: &ChatToolCall,
+    reason: &str,
+    park: bool,
+) -> Result<bool, String> {
     let target = super::approval_target::ApprovalTarget::from_context(app, ccx).await?;
     let (abort, child_worktree) = {
         let context = ccx.lock().await;
@@ -281,8 +293,16 @@ pub async fn request(
             )
             .map_err(|error| format!("approval question registration: {error}"))?;
     }
-    if let Some(execution) = &execution {
-        execution.park().await.map_err(|e| e.to_string())?;
+    let parked = match execution.as_ref().filter(|_| park) {
+        Some(execution) => {
+            execution.park().await.map_err(|e| e.to_string())?;
+            true
+        }
+        None => false,
+    };
+    if !parked {
+        pending_guard.execution = None;
+        pending_guard.abort = None;
     }
     target.set_waiting(app, true).await?;
     user::show_waiting(app, &target, escalate).await?;
@@ -309,7 +329,7 @@ pub async fn request(
         );
         return Err(error);
     }
-    let result = match crate::questions::park_and_wait(app, &child_chat_id, &abort, async {
+    let decision = async {
         if escalate {
             user::wait(app, &pending, &pending_guard.question_id).await?;
         }
@@ -317,9 +337,13 @@ pub async fn request(
             .wait(&request_id, now_ms())
             .await
             .map_err(|e| format!("approval wait: {e:?}"))
-    })
-    .await
-    {
+    };
+    let waited = if parked {
+        crate::questions::park_and_wait(app, &child_chat_id, &abort, decision).await
+    } else {
+        wait_unparked(app, execution.as_deref(), &abort, decision).await
+    };
+    let result = match waited {
         Ok(decision) => decision,
         Err(_) => {
             let _ = app.agent_approvals.cancel(
@@ -341,13 +365,14 @@ pub async fn request(
             .runtime
             .shutdown_flag
             .load(std::sync::atomic::Ordering::Relaxed)
+        || (!parked && execution.as_ref().is_some_and(|e| e.is_cancelled()))
     {
-        if let Some(execution) = &execution {
+        if let Some(execution) = execution.as_ref().filter(|_| parked) {
             execution.cancel();
         }
         return Err("approval cancelled".into());
     }
-    if let Some(execution) = &execution {
+    if let Some(execution) = execution.as_ref().filter(|_| parked) {
         let resume = execution.resume();
         tokio::pin!(resume);
         loop {
@@ -421,6 +446,29 @@ pub async fn request(
             Err(denial)
         } else {
             Ok(false)
+        }
+    }
+}
+
+async fn wait_unparked<T>(
+    app: &AppState,
+    execution: Option<&crate::agents::execution::RunExecution>,
+    abort: &std::sync::atomic::AtomicBool,
+    waiting: impl std::future::Future<Output = T>,
+) -> Result<T, String> {
+    use std::sync::atomic::Ordering;
+    let poll = refact_work_core::coordination_settings().lock_poll_interval();
+    tokio::pin!(waiting);
+    loop {
+        if abort.load(Ordering::Relaxed)
+            || app.runtime.shutdown_flag.load(Ordering::Relaxed)
+            || execution.is_some_and(|execution| execution.is_cancelled())
+        {
+            return Err("question wait cancelled".into());
+        }
+        tokio::select! {
+            value = &mut waiting => return Ok(value),
+            _ = tokio::time::sleep(poll) => {}
         }
     }
 }
@@ -667,7 +715,7 @@ pub(crate) mod tests {
         pub(crate) ccx: Arc<Mutex<AtCommandsContext>>,
         pub(crate) agent_id: String,
         pub(crate) generation: u64,
-        execution: Arc<crate::agents::execution::RunExecution>,
+        pub(crate) execution: Arc<crate::agents::execution::RunExecution>,
     }
 
     pub(crate) async fn fixture() -> Fixture {

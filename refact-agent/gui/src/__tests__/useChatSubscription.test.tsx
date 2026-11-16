@@ -1,3 +1,4 @@
+import { pythonApproval } from "./pythonFixtures";
 import * as chatSubscription from "../services/refact/chatSubscription";
 import { updateChatRuntimeFromSessionState } from "../features/Chat/Thread/actions";
 import { describe, it, expect, vi, afterEach } from "vitest";
@@ -49,6 +50,64 @@ describe("useChatSubscription", () => {
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
     vi.useRealTimers();
+  });
+
+  it.each([
+    "error",
+    "disconnected",
+    "manual disconnect",
+    "reconnect",
+    "sequence gap",
+  ])("clears live Python approvals on %s", (reason) => {
+    let handlers:
+      | Parameters<typeof chatSubscription.subscribeToChatEvents>[2]
+      | undefined;
+    vi.spyOn(chatSubscription, "subscribeToChatEvents").mockImplementation(
+      (_id, _config, callbacks) => {
+        handlers = callbacks;
+        return () => undefined;
+      },
+    );
+    const store = createTestStore();
+    store.dispatch(updateConfig({ host: "vscode", lspPort: 8123 }));
+    store.dispatch(createChatWithId({ id: "test-chat" }));
+    const { result } = renderHook(
+      () => useChatSubscription("test-chat", { autoReconnect: false }),
+      {
+        wrapper: ({ children }) => (
+          <Provider store={store}>{children}</Provider>
+        ),
+      },
+    );
+    syncAct(
+      () =>
+        handlers?.onEvent({
+          type: "python_approval_requested",
+          chat_id: "test-chat",
+          seq: "1",
+          request: pythonApproval,
+        }),
+    );
+    expect(
+      store.getState().chat.threads["test-chat"]?.pythonApprovals?.q,
+    ).toBeDefined();
+    syncAct(() => {
+      if (reason === "error") handlers?.onError(new Error("offline"));
+      else if (reason === "disconnected") handlers?.onDisconnected?.();
+      else if (reason === "manual disconnect") result.current.disconnect();
+      else if (reason === "reconnect") result.current.reconnect();
+      else
+        handlers?.onEvent({
+          type: "queue_updated",
+          chat_id: "test-chat",
+          seq: "3",
+          queue_size: 0,
+          queued_items: [],
+        });
+    });
+    expect(
+      store.getState().chat.threads["test-chat"]?.pythonApprovals ?? {},
+    ).toEqual({});
   });
 
   it("should return disconnected status when disabled", () => {

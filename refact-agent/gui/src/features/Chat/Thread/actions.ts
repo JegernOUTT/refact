@@ -572,6 +572,15 @@ export const restoreChatFromBackend = createAsyncThunk<
   return undefined;
 });
 
+export const clearPythonLiveState = createAction<{ id: string }>(
+  "chatThread/clearPythonLiveState",
+);
+
+export const removePythonApproval = createAction<{
+  id: string;
+  requestId: string;
+}>("chatThread/removePythonApproval");
+
 export const applyChatEvent = createAction<ChatEventEnvelope>(
   "chatThread/applyChatEvent",
 );

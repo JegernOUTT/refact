@@ -171,7 +171,17 @@ impl Tool for ToolUpdateTextDocByLines {
             Some(after.as_str()),
             &chunks,
         );
+        let output = super::output::EditOutput {
+            files: vec![super::output::EditFileOutput::from_chunks(
+                path.to_string(),
+                "edit",
+                &chunks,
+                &before,
+                &after,
+            )],
+        };
         super::edit_output::finish_edit_output(&mut out, model_content);
+        super::output::attach(&mut out, tool_call_id, &output);
         Ok((false, out))
     }
 
@@ -232,7 +242,7 @@ impl Tool for ToolUpdateTextDocByLines {
             allow_parallel: false,
             description: "Replaces line ranges in an existing file with new content. Line numbers are 1-based and inclusive. Supports multiple non-overlapping ranges.".to_string(),
             input_schema: json_schema_from_params(&[("path", "string", "Absolute path to the file to modify."), ("content", "string", "The new text content. For multiple ranges, separate content for each range with '---RANGE_SEPARATOR---'."), ("ranges", "string", "Line ranges to replace. Format: ':3' (lines 1-3), '40:50' (lines 40-50), '100:' (line 100 to end), '5' (just line 5). Combine multiple ranges with commas: ':3,40:50,100:'. Ranges must not overlap.")], &["path", "content", "ranges"]),
-            output_schema: None,
+            output_schema: Some(refact_tool_api::tool_output::output_schema_for::<super::output::EditOutput>()),
             annotations: None,
         }
     }

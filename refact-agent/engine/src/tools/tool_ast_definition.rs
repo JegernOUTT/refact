@@ -1,3 +1,18 @@
+#[derive(Default, serde::Serialize, schemars::JsonSchema)]
+pub(crate) struct SymbolDefinitionOutput {
+    pub definitions: Vec<SymbolDefinition>,
+    pub not_found: Vec<String>,
+    pub suggestions: Vec<String>,
+}
+#[derive(serde::Serialize, schemars::JsonSchema)]
+pub(crate) struct SymbolDefinition {
+    pub symbol: String,
+    pub path: String,
+    pub line1: usize,
+    pub line2: usize,
+    pub kind: Option<String>,
+}
+
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -293,6 +308,7 @@ async fn symbol_def_via_codegraph(
     execution_scope: Option<&ExecutionScope>,
     abort_flag: Arc<AtomicBool>,
 ) -> Result<(bool, Vec<ContextEnum>), String> {
+    let mut output = SymbolDefinitionOutput::default();
     let mut corrections = false;
     let mut all_messages = Vec::new();
     let mut all_context_files = Vec::new();
@@ -311,6 +327,7 @@ async fn symbol_def_via_codegraph(
             .await
             .map_err(definition_lookup_error)?;
         if defs.is_empty() {
+            output.not_found.push(symbol.clone());
             references.add_symbol(symbol, "not_found", "search_symbol_definition");
             corrections = true;
             let fuzzy = service
@@ -331,6 +348,7 @@ async fn symbol_def_via_codegraph(
                     "For symbol `{}`:\n⚠️ No exact match. 💡 Similar definitions found:\n",
                     symbol
                 );
+                output.suggestions.extend(fuzzy.iter().cloned());
                 for line in fuzzy {
                     msg.push_str(&format!("{}\n", line));
                 }
@@ -360,6 +378,13 @@ async fn symbol_def_via_codegraph(
                 )
                 .await?
             {
+                output.definitions.push(SymbolDefinition {
+                    symbol: symbol.clone(),
+                    path: context_file.file_name.clone(),
+                    line1: context_file.line1,
+                    line2: context_file.line2,
+                    kind: Some(format!("{:?}", res.symbol_type)),
+                });
                 context_files.push(context_file);
                 all_notices.extend(notices);
                 if context_files.len() >= DEFS_LIMIT {
@@ -469,6 +494,10 @@ async fn symbol_def_via_codegraph(
             },
         );
     }
+    tool_message.extra.insert(
+        refact_tool_api::tool_output::TOOL_OUTPUT_EXTRA_KEY.into(),
+        serde_json::to_value(output).unwrap(),
+    );
     references.attach(&mut tool_message);
     all_context_files.push(ContextEnum::ChatMessage(tool_message));
 
@@ -549,7 +578,7 @@ impl Tool for ToolAstDefinition {
             allow_parallel: true,
             description: "Find symbol definitions using CodeGraph. If the index/database is unhealthy, use scoped search_pattern/glob and inspect candidates instead; text/path search is not semantic definition resolution".to_string(),
             input_schema: json_schema_from_params(&[("symbols", "string", "Comma-separated list of symbols to search for (functions, methods, classes, type aliases). No spaces allowed in symbol names.")], &["symbols"]),
-            output_schema: None,
+            output_schema: Some(refact_tool_api::tool_output::output_schema_for::<SymbolDefinitionOutput>()),
             annotations: None,
         }
     }

@@ -149,6 +149,15 @@ impl BackgroundTasksHolder {
         // after producers have unwound, so shutdown cannot miss a late finalizer.
         if close_admission {
             if let Some(gcx) = &self.gcx {
+                if tokio::time::timeout(
+                    Duration::from_secs(5),
+                    gcx.python_tool.registry.shutdown_all(),
+                )
+                .await
+                .is_err()
+                {
+                    tracing::warn!("python worker shutdown exceeded five seconds");
+                }
                 gcx.apps.shutdown().await;
             }
         }

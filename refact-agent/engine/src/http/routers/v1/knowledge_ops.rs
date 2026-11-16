@@ -19,7 +19,8 @@ use crate::memories::{normalize_memory_tags, rewrite_memory_document};
 pub const AUTO_LINK_MAX_LINKS: usize = 5;
 pub const AUTO_LINK_MIN_SCORE: f64 = 3.0;
 pub const AUTO_LINK_MAX_TOTAL: usize = 10;
-const VALID_STATUSES: &[&str] = &["active", "proposed", "pinned", "archived", "deprecated"];
+pub(crate) const VALID_STATUSES: &[&str] =
+    &["active", "proposed", "pinned", "archived", "deprecated"];
 
 fn extract_entities(content: &str) -> Vec<String> {
     let backtick_re =
@@ -65,7 +66,7 @@ fn apply_lifecycle_status(frontmatter: &mut KnowledgeFrontmatter, status: &str) 
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone, Default)]
 pub struct UpdateMemoryPost {
     pub file_path: String,
     #[serde(default)]
@@ -240,7 +241,7 @@ pub async fn auto_link_all_memories(gcx: Arc<GlobalContext>) -> Result<RelinkSta
     Ok(stats)
 }
 
-async fn get_knowledge_root(gcx: &Arc<GlobalContext>) -> Result<PathBuf, ScratchError> {
+pub(crate) async fn get_knowledge_root(gcx: &Arc<GlobalContext>) -> Result<PathBuf, ScratchError> {
     let workspace_folders = gcx.documents_state.workspace_folders.clone();
     let folders = workspace_folders.lock().unwrap();
 
@@ -254,7 +255,7 @@ async fn get_knowledge_root(gcx: &Arc<GlobalContext>) -> Result<PathBuf, Scratch
     Ok(folders[0].join(KNOWLEDGE_FOLDER_NAME))
 }
 
-async fn validate_knowledge_path(
+pub(crate) async fn validate_knowledge_path(
     file_path: &Path,
     workspace_root: &Path,
 ) -> Result<PathBuf, ScratchError> {
@@ -326,29 +327,31 @@ async fn validate_knowledge_path(
     Ok(canonical)
 }
 
-pub async fn handle_v1_knowledge_update_memory(
-    State(app): State<AppState>,
-    body_bytes: hyper::body::Bytes,
-) -> Result<Response<Body>, ScratchError> {
-    let gcx = app.gcx.clone();
-    let post = serde_json::from_slice::<UpdateMemoryPost>(&body_bytes).map_err(|e| {
-        ScratchError::new(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            format!("JSON problem: {}", e),
-        )
-    })?;
+/// Applies an update to the memory whose current text is `existing_text`, writing it in place.
+pub(crate) async fn write_memory_update(
+    gcx: Arc<GlobalContext>,
+    file_path: &Path,
+    existing_text: &str,
+    post: UpdateMemoryPost,
+) -> Result<(), ScratchError> {
+    let (frontmatter, content_to_write) =
+        plan_memory_update(gcx.clone(), file_path, existing_text, post).await?;
+    rewrite_memory_document(gcx.clone(), file_path, &frontmatter, &content_to_write)
+        .await
+        .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
-    let knowledge_root = get_knowledge_root(&gcx).await?;
-    let file_path = validate_knowledge_path(Path::new(&post.file_path), &knowledge_root).await?;
+    Ok(())
+}
 
-    let existing_text = tokio::fs::read_to_string(&file_path).await.map_err(|e| {
-        ScratchError::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to read memory file: {}", e),
-        )
-    })?;
-
-    let (mut frontmatter, content_start) = KnowledgeFrontmatter::parse(&existing_text);
+/// The frontmatter and body an update of the memory whose current text is `existing_text` would
+/// write, with normalised tags and automatic links; writes nothing.
+pub(crate) async fn plan_memory_update(
+    gcx: Arc<GlobalContext>,
+    file_path: &Path,
+    existing_text: &str,
+    post: UpdateMemoryPost,
+) -> Result<(KnowledgeFrontmatter, String), ScratchError> {
+    let (mut frontmatter, content_start) = KnowledgeFrontmatter::parse(existing_text);
 
     if let Some(title) = post.title {
         frontmatter.title = Some(sanitize_string(&title));
@@ -391,15 +394,37 @@ pub async fn handle_v1_knowledge_update_memory(
     let auto_link_enabled = post.auto_link.unwrap_or(true);
     if auto_link_enabled && frontmatter.is_active() {
         if let Err(e) =
-            auto_link_memory(gcx.clone(), &mut frontmatter, &content_to_write, &file_path).await
+            auto_link_memory(gcx.clone(), &mut frontmatter, &content_to_write, file_path).await
         {
             tracing::warn!("Auto-linking failed: {}", e);
         }
     }
 
-    rewrite_memory_document(gcx.clone(), &file_path, &frontmatter, &content_to_write)
-        .await
-        .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok((frontmatter, content_to_write))
+}
+
+pub async fn handle_v1_knowledge_update_memory(
+    State(app): State<AppState>,
+    body_bytes: hyper::body::Bytes,
+) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
+    let post = serde_json::from_slice::<UpdateMemoryPost>(&body_bytes).map_err(|e| {
+        ScratchError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("JSON problem: {}", e),
+        )
+    })?;
+
+    let knowledge_root = get_knowledge_root(&gcx).await?;
+    let file_path = validate_knowledge_path(Path::new(&post.file_path), &knowledge_root).await?;
+
+    let existing_text = tokio::fs::read_to_string(&file_path).await.map_err(|e| {
+        ScratchError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to read memory file: {}", e),
+        )
+    })?;
+    write_memory_update(gcx.clone(), &file_path, &existing_text, post).await?;
 
     tracing::info!("Updated memory: {}", file_path.display());
 
@@ -823,25 +848,16 @@ mod tests {
     }
 }
 
-pub async fn handle_v1_knowledge_delete_memory(
-    State(app): State<AppState>,
-    body_bytes: hyper::body::Bytes,
-) -> Result<Response<Body>, ScratchError> {
-    let gcx = app.gcx.clone();
-    let post = serde_json::from_slice::<DeleteMemoryPost>(&body_bytes).map_err(|e| {
-        ScratchError::new(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            format!("JSON problem: {}", e),
-        )
-    })?;
-
-    let knowledge_root = get_knowledge_root(&gcx).await?;
-    let file_path = validate_knowledge_path(Path::new(&post.file_path), &knowledge_root).await?;
-
-    if post.archive {
-        crate::memories::update_memory_document_frontmatter(
+/// Archives the memory (false when it already was archived or deprecated) or deletes its file.
+pub(crate) async fn archive_or_delete_memory(
+    gcx: Arc<GlobalContext>,
+    file_path: &Path,
+    archive: bool,
+) -> Result<bool, ScratchError> {
+    if archive {
+        let changed = crate::memories::update_memory_document_frontmatter(
             gcx.clone(),
-            &file_path,
+            file_path,
             |frontmatter| {
                 if frontmatter.is_archived() || frontmatter.is_deprecated() {
                     return Ok(false);
@@ -859,12 +875,31 @@ pub async fn handle_v1_knowledge_delete_memory(
             )
         })?;
         tracing::info!("Archived memory: {}", file_path.display());
-    } else {
-        crate::memories::delete_document_from_disk(gcx.clone(), &file_path)
-            .await
-            .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-        tracing::info!("Deleted memory: {}", file_path.display());
+        return Ok(changed);
     }
+    crate::memories::delete_document_from_disk(gcx.clone(), &file_path.to_path_buf())
+        .await
+        .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    tracing::info!("Deleted memory: {}", file_path.display());
+    Ok(true)
+}
+
+pub async fn handle_v1_knowledge_delete_memory(
+    State(app): State<AppState>,
+    body_bytes: hyper::body::Bytes,
+) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
+    let post = serde_json::from_slice::<DeleteMemoryPost>(&body_bytes).map_err(|e| {
+        ScratchError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("JSON problem: {}", e),
+        )
+    })?;
+
+    let knowledge_root = get_knowledge_root(&gcx).await?;
+    let file_path = validate_knowledge_path(Path::new(&post.file_path), &knowledge_root).await?;
+
+    archive_or_delete_memory(gcx.clone(), &file_path, post.archive).await?;
 
     Ok(Response::builder()
         .status(StatusCode::OK)

@@ -4333,6 +4333,9 @@ fn scan_trajectory_dir_files_sync(
             let Ok(file_name) = entry.file_name().into_string() else {
                 continue;
             };
+            if crate::python_tool::workspace::is_python_workspace_path(&entry.path()) {
+                continue;
+            }
             if file_name == TRAJECTORY_INDEX_FILE
                 || file_name.starts_with('.')
                 || !file_name.ends_with(".json")
@@ -4482,6 +4485,9 @@ async fn scan_trajectory_dir_files(
                     Ok(name) => name,
                     Err(_) => continue,
                 };
+                if crate::python_tool::workspace::is_python_workspace_path(&entry.path()) {
+                    continue;
+                }
                 if file_name == TRAJECTORY_INDEX_FILE
                     || file_name.starts_with('.')
                     || !file_name.ends_with(".json")

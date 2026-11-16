@@ -1,32 +1,32 @@
 use serde::Serialize;
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct ScoreEntry {
     pub symbol: String,
     pub path: String,
     pub score: f64,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct FileScoreEntry {
     pub path: String,
     pub score: f64,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct FileCentralityResponse {
     pub top_pagerank: Vec<FileScoreEntry>,
     pub top_betweenness: Vec<FileScoreEntry>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct CodeIntelCounts {
     pub nodes: i64,
     pub edges: i64,
     pub files: i64,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct OverviewResponse {
     pub counts: CodeIntelCounts,
     pub index_state: crate::tools::tool_codegraph::PrBlastIndexState,
@@ -40,7 +40,7 @@ pub struct OverviewResponse {
     pub dead_code_count: usize,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct GraphNodeResponse {
     pub id: i64,
     pub name: String,
@@ -49,21 +49,21 @@ pub struct GraphNodeResponse {
     pub kind: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct GraphEdgeResponse {
     pub source: i64,
     pub target: i64,
     pub kind: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct GraphResponse {
     pub index_state: crate::tools::tool_codegraph::PrBlastIndexState,
     pub nodes: Vec<GraphNodeResponse>,
     pub edges: Vec<GraphEdgeResponse>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct CommunityResponse {
     pub id: usize,
     pub label: String,
@@ -72,10 +72,12 @@ pub struct CommunityResponse {
     pub index_state: crate::tools::tool_codegraph::PrBlastIndexState,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct PrBlastResponse {
     pub changed_files: Vec<String>,
+    #[schemars(with = "serde_json::Value")]
     pub directly_impacted: Vec<refact_codegraph::pr_blast::BlastImpact>,
+    #[schemars(with = "serde_json::Value")]
     pub transitively_impacted: Vec<refact_codegraph::pr_blast::BlastImpact>,
     pub impacted_file_count: usize,
     pub risk_score: f64,
@@ -86,7 +88,7 @@ pub struct PrBlastResponse {
     pub warning: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct HealthAggregateResponse {
     pub file_count: usize,
     pub function_count: usize,
@@ -101,7 +103,7 @@ pub struct HealthAggregateResponse {
     pub refactoring_count: usize,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct HealthFunctionResponse {
     pub name: String,
     pub line1: usize,
@@ -112,7 +114,7 @@ pub struct HealthFunctionResponse {
     pub maintainability_index: f64,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct HealthFileResponse {
     pub path: String,
     pub lang: String,
@@ -136,17 +138,18 @@ pub struct HealthFileResponse {
     pub findings: Vec<crate::tools::tool_codegraph::HealthFinding>,
     pub health_impact: Vec<crate::tools::tool_codegraph::HealthImpactContributor>,
     pub cache_hit: bool,
+    #[schemars(with = "serde_json::Value")]
     pub refactorings: Vec<refact_codehealth::refactoring::RefactoringSuggestion>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct HealthResponse {
     pub index_state: crate::tools::tool_codegraph::PrBlastIndexState,
     pub aggregate: HealthAggregateResponse,
     pub files: Vec<HealthFileResponse>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct GitHotspotResponse {
     pub path: String,
     pub churn: u32,
@@ -161,14 +164,14 @@ pub struct GitHotspotResponse {
     pub knowledge_loss: bool,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct GitOwnerResponse {
     pub author: String,
     pub commits: u32,
     pub share: f64,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct GitOwnershipResponse {
     pub path: String,
     pub top_owner: String,
@@ -180,45 +183,49 @@ pub struct GitOwnershipResponse {
     pub owners: Vec<GitOwnerResponse>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct GitCoChangeResponse {
     pub path_a: String,
     pub path_b: String,
     pub count: u32,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct GitReviewerResponse {
     pub author: String,
     pub score: f64,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct GitFindingResponse {
     pub path: String,
     pub biomarker: String,
     pub category: String,
+    #[schemars(with = "serde_json::Value")]
     pub dimension: refact_codehealth::biomarkers::Dimension,
+    #[schemars(with = "serde_json::Value")]
     pub severity: refact_codehealth::biomarkers::Severity,
     pub line: usize,
     pub detail: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct GitRiskResponse {
     pub commits_analyzed: u32,
     pub agent_authored_pct: f64,
+    #[schemars(with = "serde_json::Value")]
     pub history_truncation: refact_git_intel::HistoryTruncation,
     pub hotspots: Vec<GitHotspotResponse>,
     pub ownership: Vec<GitOwnershipResponse>,
     pub co_change: Vec<GitCoChangeResponse>,
+    #[schemars(with = "serde_json::Value")]
     pub coupling: Vec<refact_git_intel::coupling::CouplingEdge>,
     pub reviewers: Vec<GitReviewerResponse>,
     pub findings: Vec<GitFindingResponse>,
     pub recent_commit_risks: Vec<crate::tools::tool_codegraph::RecentCommitRiskSummary>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct DuplicationAggregateResponse {
     pub file_count: usize,
     pub clone_pair_count: usize,
@@ -226,7 +233,7 @@ pub struct DuplicationAggregateResponse {
     pub duplication_percent: f64,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct DuplicationCloneResponse {
     pub path_a: String,
     pub path_b: String,
@@ -241,18 +248,20 @@ pub struct DuplicationCloneResponse {
     pub co_change: u32,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct DuplicationFindingResponse {
     pub path: String,
     pub biomarker: String,
     pub category: String,
+    #[schemars(with = "serde_json::Value")]
     pub dimension: refact_codehealth::biomarkers::Dimension,
+    #[schemars(with = "serde_json::Value")]
     pub severity: refact_codehealth::biomarkers::Severity,
     pub line: usize,
     pub detail: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct DuplicationResponse {
     pub aggregate: DuplicationAggregateResponse,
     pub clones: Vec<DuplicationCloneResponse>,
@@ -260,24 +269,25 @@ pub struct DuplicationResponse {
     pub test_smells: Vec<DuplicationFindingResponse>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct SecurityScanResponse {
     pub path: String,
     pub lang: String,
     pub finding_count: usize,
     pub counts: std::collections::BTreeMap<String, usize>,
+    #[schemars(with = "serde_json::Value")]
     pub findings: Vec<refact_codegraph::security_scan::SecurityFinding>,
     pub omitted: usize,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct OverviewCommunity {
     pub label: String,
     pub member_count: usize,
     pub cohesion: f64,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct OverviewExecutionFlow {
     pub entry: String,
     pub reaches: usize,
@@ -286,7 +296,7 @@ pub struct OverviewExecutionFlow {
     pub node_cap: usize,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct OverviewDeadSymbol {
     pub name: String,
     pub path: String,
@@ -294,13 +304,13 @@ pub struct OverviewDeadSymbol {
     pub confidence: f64,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct CallGraphEdge {
     pub caller: String,
     pub callee: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct CoverageSummary {
     pub label: String,
     pub line_pct: f64,
@@ -308,14 +318,14 @@ pub struct CoverageSummary {
     pub files_below_50: usize,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct CodeMapPageLink {
     pub target_path: String,
     pub labels: Vec<String>,
     pub count: usize,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct CodeMapPage {
     pub title: String,
     pub kind: String,
@@ -328,19 +338,19 @@ pub struct CodeMapPage {
     pub content: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct CodeMapFileScore {
     pub path: String,
     pub score: f64,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct CodeMapBacklinkHub {
     pub path: String,
     pub count: usize,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct CodeWhyDecisionEntry {
     pub kind: String,
     pub confidence: f64,
@@ -351,14 +361,14 @@ pub struct CodeWhyDecisionEntry {
     pub provenance_tags: Vec<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct CodeWhyRelation {
     pub from: String,
     pub relation: String,
     pub to: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct ToolJson<T: Serialize> {
     pub tool: &'static str,
     pub summary: String,

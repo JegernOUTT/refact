@@ -51,6 +51,7 @@ export type WorkspaceState = {
 export type WorkspaceDockSection =
   | "files"
   | "git"
+  | "python"
   | "agents"
   | "activity"
   | "apps";
@@ -61,6 +62,7 @@ export const normalizeWorkspaceDockSection = (
   if (
     section === "files" ||
     section === "git" ||
+    section === "python" ||
     section === "agents" ||
     section === "activity" ||
     section === "apps"

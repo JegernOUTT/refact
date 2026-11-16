@@ -62,11 +62,6 @@ const LOCAL_COLLABORATION_FAMILIES: Record<string, AgenticFamilyDescriptor> = {
   },
   causal_trace: { family: "inspect", icon: "inspect", label: "Trace causes" },
   metrics: { family: "overview", icon: "overview", label: "Read metrics" },
-  code_mode: {
-    family: "control",
-    icon: "control",
-    label: "Run orchestration",
-  },
 };
 
 export const LOCAL_COLLABORATION_TOOL_NAMES: readonly string[] = Object.keys(

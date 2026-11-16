@@ -26,6 +26,8 @@ export type ShikiCodeBlockProps = React.JSX.IntrinsicElements["code"] & {
   color?: string;
   showLineNumbers?: boolean;
   isStreaming?: boolean;
+  /** Untrusted text: artifact and diagram languages render as plain code. */
+  inert?: boolean;
 } & Partial<MarkdownControls>;
 
 const MAX_HIGHLIGHT_CHARS = 50000;
@@ -39,6 +41,7 @@ const _ShikiCodeBlock: React.FC<ShikiCodeBlockProps> = ({
   color = undefined,
   showLineNumbers = false,
   isStreaming,
+  inert = false,
 }) => {
   const codeRef = React.useRef<HTMLElement | null>(null);
   const { highlight, isReady } = useShiki();
@@ -56,6 +59,7 @@ const _ShikiCodeBlock: React.FC<ShikiCodeBlockProps> = ({
 
   const isSpecialBlock =
     isBlock &&
+    !inert &&
     (DIAGRAM_LANGUAGES.has(language) || ARTIFACT_LANGUAGES.has(language));
 
   const shouldHighlight =
@@ -106,7 +110,7 @@ const _ShikiCodeBlock: React.FC<ShikiCodeBlockProps> = ({
     return {};
   }, [onCopyClick, textWithOutIndent]);
 
-  if (isBlock && DIAGRAM_LANGUAGES.has(language) && !isStreaming) {
+  if (isBlock && !inert && DIAGRAM_LANGUAGES.has(language) && !isStreaming) {
     const diagramCode = textWithOutIndent ?? String(children);
     if (language === "mermaid") {
       return <MermaidBlock code={diagramCode} onCopyClick={onCopyClick} />;
@@ -116,7 +120,7 @@ const _ShikiCodeBlock: React.FC<ShikiCodeBlockProps> = ({
     }
   }
 
-  if (isBlock && ARTIFACT_LANGUAGES.has(language) && !isStreaming) {
+  if (isBlock && !inert && ARTIFACT_LANGUAGES.has(language) && !isStreaming) {
     const artifactCode = textWithOutIndent ?? String(children);
     return <ArtifactBlock code={artifactCode} onCopyClick={onCopyClick} />;
   }

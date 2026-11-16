@@ -1,0 +1,9 @@
+[package]
+name = "refact-python-catalog"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+refact-tool-api = { path = "../refact-tool-api" }
+serde.workspace = true
+serde_json.workspace = true

@@ -404,6 +404,61 @@ pub async fn get_vars_for_replacements(
     variables
 }
 
+pub async fn get_public_vars_for_replacements(
+    gcx: Arc<GlobalContext>,
+    error_log: &mut Vec<YamlError>,
+) -> HashMap<String, String> {
+    let config_dir = gcx.config_dir.clone();
+    let variables_yaml = gcx.cmdline.variables_yaml.clone();
+    let variables_yaml_path = if variables_yaml.is_empty() {
+        config_dir.join("variables.yaml")
+    } else {
+        crate::files_correction::canonical_path(&variables_yaml)
+    };
+    let mut variables = HashMap::new();
+
+    // Helper function to read and parse a YAML file
+    async fn read_and_parse_yaml(
+        path: &PathBuf,
+        error_log: &mut Vec<YamlError>,
+    ) -> Result<HashMap<String, String>, ()> {
+        if !path.exists() {
+            return Ok(HashMap::new());
+        }
+
+        match fs::read_to_string(path) {
+            Ok(content) => match serde_yaml::from_str::<HashMap<String, String>>(&content) {
+                Ok(parsed_yaml) => Ok(parsed_yaml),
+                Err(e) => {
+                    tracing::warn!("Failed to parse {}: {}", path.display(), e);
+                    error_log.push(YamlError {
+                        path: path.to_string_lossy().to_string(),
+                        error_line: e.location().map(|loc| loc.line()).unwrap_or(0),
+                        error_msg: format!("Failed to parse {}: {}", path.display(), e),
+                    });
+                    Err(())
+                }
+            },
+            Err(e) => {
+                tracing::info!("Failed to read {}: {}", path.display(), e);
+                error_log.push(YamlError {
+                    path: path.to_string_lossy().to_string(),
+                    error_line: 0,
+                    error_msg: format!("Failed to read {}: {}", path.display(), e),
+                });
+                Err(())
+            }
+        }
+    }
+
+    // Read and parse variables.yaml
+    if let Ok(variables_yaml) = read_and_parse_yaml(&variables_yaml_path, error_log).await {
+        variables.extend(variables_yaml);
+    }
+
+    variables
+}
+
 pub fn join_config_path(config_dir: &PathBuf, integr_name: &str) -> String {
     config_dir
         .join("integrations.d")

@@ -9,6 +9,7 @@ import {
   LOCAL_COLLABORATION_TOOL_NAMES,
   agenticCardLabel,
   hasDedicatedToolCard,
+  isAgenticToolName,
   lookupAgenticFamily,
 } from "./agenticFamilies";
 import { compactBoardNotesPresentation } from "./compactBoardNotes";
@@ -38,7 +39,6 @@ const INVENTORY = [
   ["disagreement_adjudicate", "task", "Adjudication requested"],
   ["causal_trace", "inspect", "Causal trace requested"],
   ["metrics", "overview", "Project metrics requested"],
-  ["code_mode", "control", "Orchestration requested"],
 ] as const;
 
 const CLAIM = {
@@ -127,7 +127,8 @@ const OBSERVATIONS: CompactAgenticInput[] = [
 ];
 
 describe("local collaboration presentation inventory", () => {
-  test("exports exactly the fourteen current built-ins, not retired aliases", () => {
+  test("exports exactly the thirteen current built-ins, not retired aliases", () => {
+    expect(isAgenticToolName("code_mode")).toBe(false);
     expect(LOCAL_COLLABORATION_TOOL_NAMES).toEqual(
       INVENTORY.map(([name]) => name),
     );
@@ -315,7 +316,7 @@ describe("evidence-limited collaboration receipts", () => {
       expect(view?.tone).toBe("neutral");
       expect(view?.headline).not.toBe(input.toolName);
       expect(view?.headline).not.toMatch(
-        /agent_mailbox|board_claim|team_role_grant|code_mode/u,
+        /agent_mailbox|board_claim|team_role_grant/u,
       );
       for (const transportState of [
         "pending",
@@ -601,10 +602,6 @@ describe("evidence-limited collaboration receipts", () => {
     ["disagreement_file", "Disagreement filed."],
     ["disagreement_adjudicate", "Disagreement adjudicated."],
     ["causal_trace", "Replay reproduced: yes (0 mismatch(es))."],
-    [
-      "code_mode",
-      "code_mode authorized 1 host calls\n- claim (board_claim) — ok",
-    ],
   ])("%s prose never mints success", (toolName, result) => {
     expect(
       present({ toolName, result, transportState: "succeeded" }),
@@ -650,16 +647,6 @@ describe("collaboration failure and inert text", () => {
   );
 
   test.each([
-    [
-      "code_mode",
-      "code mode is unavailable: the `code_mode_enabled` setting is off",
-      "Unavailable",
-    ],
-    [
-      "code_mode",
-      "code mode refused: the assignment authority ceiling grants no host operation.",
-      "Request denied",
-    ],
     ["agent_mailbox", "mailbox privacy policy is unavailable", "Unavailable"],
     [
       "claim_list",
@@ -740,13 +727,6 @@ describe("collaboration failure and inert text", () => {
     ]);
     expect(input.result.debug).toBe("payload preserved");
     expect(input.arguments.card_id).toBe(args.card_id);
-    expect(
-      present({
-        toolName: "code_mode",
-        arguments: { script: hostile },
-        transportState: "pending",
-      })?.facts,
-    ).toEqual([]);
     expect(
       present({
         toolName: "causal_trace",

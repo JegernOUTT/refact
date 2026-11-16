@@ -1,3 +1,4 @@
+import { pythonWorkspaceApi } from "../services/refact/pythonWorkspace";
 // Buddy queue imports — keep at top to avoid circular deps
 import {
   enqueueRuntimeEvent,
@@ -3053,5 +3054,43 @@ startListening({
     ) {
       api.dispatch(popBackTo({ name: "history" }));
     }
+  },
+});
+
+// Keep throttling isolated to each store and discard expired chat entries.
+const pythonWorkspaceCallInvalidations = new WeakMap<
+  object,
+  Map<string, number>
+>();
+startListening({
+  actionCreator: applyChatEvent,
+  effect: (action, listenerApi) => {
+    const event = action.payload;
+    if (event.type !== "python_run_update") return;
+    if (event.update.kind === "call_finished") {
+      let lastCalls = pythonWorkspaceCallInvalidations.get(
+        listenerApi.dispatch,
+      );
+      if (!lastCalls) {
+        lastCalls = new Map();
+        pythonWorkspaceCallInvalidations.set(listenerApi.dispatch, lastCalls);
+      }
+      const now = Date.now();
+      for (const [chatId, timestamp] of lastCalls) {
+        if (now - timestamp >= 2000) lastCalls.delete(chatId);
+      }
+      if (lastCalls.has(event.chat_id)) return;
+      lastCalls.set(event.chat_id, now);
+    } else if (
+      event.update.kind !== "started" &&
+      event.update.kind !== "finished"
+    ) {
+      return;
+    }
+    listenerApi.dispatch(
+      pythonWorkspaceApi.util.invalidateTags([
+        { type: "PythonWorkspace", id: event.chat_id },
+      ]),
+    );
   },
 });

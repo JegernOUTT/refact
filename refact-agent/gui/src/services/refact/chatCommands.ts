@@ -1,3 +1,4 @@
+import type { PythonApprovalDecisionKind } from "./types";
 import { v4 as uuidv4 } from "uuid";
 import {
   buildApiUrl,
@@ -34,6 +35,12 @@ export type GoalBudgetCommand = {
 };
 
 export type ChatCommandBase =
+  | {
+      type: "python_approval_decision";
+      request_id: string;
+      decision: PythonApprovalDecisionKind;
+    }
+  | { type: "python_run_control"; tool_call_id: string; action: "stop" }
   | {
       type: "set_app_workspace";
       expected_revision: number;
@@ -274,6 +281,8 @@ export class ChatCommandHttpError extends Error {
   constructor(
     public readonly status: number,
     message: string,
+    /** The response body as sent by the engine. */
+    public readonly body = "",
   ) {
     super(message);
   }
@@ -314,6 +323,7 @@ async function sendRawChatCommand(
     throw new ChatCommandHttpError(
       response.status,
       `Failed to send command: ${response.status} ${response.statusText} - ${text}`,
+      text,
     );
   }
   return commandWithId.client_request_id;
@@ -720,4 +730,32 @@ export async function updateQueuedItemPriority(
     },
   );
   return response.ok;
+}
+
+export async function sendPythonApprovalDecision(
+  chatId: string,
+  requestId: string,
+  decision: PythonApprovalDecisionKind,
+  connection: PortOrConnection,
+  apiKey?: string,
+): Promise<void> {
+  await sendChatCommand(chatId, connection, apiKey, {
+    type: "python_approval_decision",
+    request_id: requestId,
+    decision,
+  });
+}
+
+export async function sendPythonRunControl(
+  chatId: string,
+  toolCallId: string,
+  action: "stop",
+  connection: PortOrConnection,
+  apiKey?: string,
+): Promise<void> {
+  await sendChatCommand(chatId, connection, apiKey, {
+    type: "python_run_control",
+    tool_call_id: toolCallId,
+    action,
+  });
 }

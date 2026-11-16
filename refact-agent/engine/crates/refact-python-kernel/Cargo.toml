@@ -1,0 +1,26 @@
+[package]
+name = "refact-python-kernel"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = []
+typecheck = ["dep:monty-type-checking"]
+
+[dependencies]
+monty.workspace = true
+monty-types.workspace = true
+hmac.workspace = true
+sha2 = "0.11"
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+monty-type-checking = { workspace = true, optional = true }
+tokio.workspace = true
+sysinfo.workspace = true
+
+chrono.workspace = true
+rand = "0.8.5"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

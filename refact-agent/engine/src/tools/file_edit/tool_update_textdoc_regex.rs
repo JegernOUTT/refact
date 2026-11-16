@@ -201,7 +201,17 @@ impl Tool for ToolUpdateTextDocRegex {
             Some(after.as_str()),
             &chunks,
         );
+        let output = super::output::EditOutput {
+            files: vec![super::output::EditFileOutput::from_chunks(
+                path.to_string(),
+                "edit",
+                &chunks,
+                &before,
+                &after,
+            )],
+        };
         super::edit_output::finish_edit_output(&mut out, model_content);
+        super::output::attach(&mut out, tool_call_id, &output);
         Ok((false, out))
     }
 
@@ -262,7 +272,7 @@ impl Tool for ToolUpdateTextDocRegex {
             allow_parallel: false,
             description: "Updates an existing document using pattern matching. By default treats pattern as literal text (literal:true). Set literal:false for regex.".to_string(),
             input_schema: json_schema_from_params(&[("path", "string", "Absolute path to the file to change."), ("pattern", "string", "Pattern to match. Treated as literal text by default, or regex if literal:false."), ("replacement", "string", "The new text that will replace the matched pattern."), ("literal", "boolean", "If true (default), pattern is treated as literal text. If false, pattern is a regex."), ("multiple", "boolean", "If true, replaces all occurrences; if false (default), only the first."), ("expected_matches", "integer", "If provided, fails if actual match count differs (safety check).")], &["path", "pattern", "replacement"]),
-            output_schema: None,
+            output_schema: Some(refact_tool_api::tool_output::output_schema_for::<super::output::EditOutput>()),
             annotations: None,
         }
     }

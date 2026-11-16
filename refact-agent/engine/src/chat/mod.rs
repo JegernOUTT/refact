@@ -12,7 +12,7 @@ mod compaction_hook_tests;
 #[cfg(test)]
 mod compression_vocabulary_tests;
 pub mod config;
-mod content;
+pub(crate) mod content;
 pub mod context_rebuild;
 #[cfg(test)]
 mod context_rebuild_recovery_tests;
@@ -81,6 +81,8 @@ pub(crate) mod retry_policy;
 mod session;
 pub(crate) mod worktree_lifecycle;
 pub(crate) use session::goal_snapshot_from_messages;
+pub(crate) use session::NativeMutationGuard;
+pub(crate) use handlers::{abort_chat_locked, cancel_queued_locked, cancel_recovery_for_goal_stop};
 pub mod session_runtime;
 pub mod stream_core;
 pub mod summarization;

@@ -14,7 +14,9 @@ pub mod handoff;
 pub mod internal_roles;
 pub mod notification_event;
 pub mod plan_role;
+pub mod python_tool;
 pub mod question;
+pub use python_tool::*;
 #[cfg(test)]
 mod role_checkpoint_tests;
 pub mod role_projection;
@@ -894,6 +896,10 @@ pub struct BoardInterruption {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimeState {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub python_runs: Vec<PythonRunSnapshot>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub python_approvals: Vec<PythonApprovalRequest>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interruption: Option<BoardInterruption>,
     #[serde(default)]
@@ -935,6 +941,8 @@ pub struct RuntimeState {
 impl Default for RuntimeState {
     fn default() -> Self {
         Self {
+            python_runs: Vec::new(),
+            python_approvals: Vec::new(),
             interruption: None,
             recovery: None,
             state: SessionState::Idle,
@@ -1045,6 +1053,18 @@ pub struct BackgroundAgentSummary {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ChatEvent {
+    PythonRunUpdate {
+        tool_call_id: String,
+        run_id: String,
+        update: PythonRunUpdate,
+    },
+    PythonApprovalRequested {
+        request: PythonApprovalRequest,
+    },
+    PythonApprovalResolved {
+        request_id: String,
+        decision: PythonApprovalDecisionKind,
+    },
     RecoveryUpdated {
         recovery: Option<RecoveryRecord>,
     },
@@ -1273,6 +1293,14 @@ where
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ChatCommand {
+    PythonApprovalDecision {
+        request_id: String,
+        decision: PythonApprovalDecisionKind,
+    },
+    PythonRunControl {
+        tool_call_id: String,
+        action: PythonRunControlAction,
+    },
     RecoveryRetry {
         run_id: String,
         expected_revision: u64,
@@ -1626,6 +1654,20 @@ pub struct CommandRequest {
 impl CommandRequest {
     pub fn to_queued_item(&self) -> QueuedItem {
         let (command_type, preview, content) = match &self.command {
+            ChatCommand::PythonApprovalDecision {
+                request_id, ..
+            } => (
+                "python_approval_decision".into(),
+                request_id.clone(),
+                String::new(),
+            ),
+            ChatCommand::PythonRunControl {
+                tool_call_id, ..
+            } => (
+                "python_run_control".into(),
+                tool_call_id.clone(),
+                String::new(),
+            ),
             ChatCommand::RecoveryRetry {
                 ..
             } => ("recovery_retry".into(), String::new(), String::new()),
@@ -1873,6 +1915,61 @@ pub struct ActiveCommandContext {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn python_events_serialize_with_snake_case_tags() {
+        for value in [
+            json!({"type":"python_run_update","tool_call_id":"t","run_id":"r","update":{"kind":"started","background":false}}),
+            json!({"type":"python_approval_requested","request":{"request_id":"q","tool_call_id":"t","run_id":"r","call_id":"c","tool_name":"shell","args_preview":"ls","command":null,"rule":"confirm","editing_tool":false,"created_at_ms":1}}),
+            json!({"type":"python_approval_resolved","request_id":"q","decision":"allow_for_chat"}),
+        ] {
+            let event: ChatEvent = serde_json::from_value(value.clone()).unwrap();
+            assert_eq!(serde_json::to_value(event).unwrap(), value);
+        }
+    }
+
+    #[test]
+    fn python_run_updates_and_snapshots_roundtrip() {
+        let record = json!({"seq":1,"call_id":"c","tool":"cat","args_preview":"README.md","status":"ok","summary":"read file","started_at_ms":1,"duration_ms":2,"approval":"not_needed","diffs":[]});
+        for update in [
+            json!({"kind":"started","background":true}),
+            json!({"kind":"call_started","record":record}),
+            json!({"kind":"call_finished","record":record}),
+            json!({"kind":"stdout","text":"hello"}),
+            json!({"kind":"detached"}),
+            json!({"kind":"finished","status":"ok"}),
+        ] {
+            let parsed: PythonRunUpdate = serde_json::from_value(update.clone()).unwrap();
+            assert_eq!(serde_json::to_value(parsed).unwrap(), update);
+        }
+        let snapshot = json!({"tool_call_id":"t","run_id":"r","status":"background","started_at_ms":1,"calls":[record],"stdout_tail":"hello"});
+        let parsed: PythonRunSnapshot = serde_json::from_value(snapshot.clone()).unwrap();
+        assert_eq!(serde_json::to_value(parsed).unwrap(), snapshot);
+    }
+
+    #[test]
+    fn runtime_state_omits_empty_python_fields() {
+        let value = serde_json::to_value(RuntimeState::default()).unwrap();
+        assert!(value.get("python_runs").is_none());
+        assert!(value.get("python_approvals").is_none());
+        let state: RuntimeState = serde_json::from_value(value).unwrap();
+        assert!(state.python_runs.is_empty());
+        assert!(state.python_approvals.is_empty());
+    }
+
+    #[test]
+    fn python_commands_deserialize_from_wire_json() {
+        for value in [
+            json!({"type":"python_approval_decision","request_id":"q","decision":"allow_once"}),
+            json!({"type":"python_approval_decision","request_id":"q","decision":"allow_for_chat"}),
+            json!({"type":"python_approval_decision","request_id":"q","decision":"deny"}),
+            json!({"type":"python_approval_decision","request_id":"q","decision":"stop"}),
+            json!({"type":"python_run_control","tool_call_id":"t","action":"stop"}),
+        ] {
+            let command: ChatCommand = serde_json::from_value(value.clone()).unwrap();
+            assert_eq!(serde_json::to_value(command).unwrap(), value);
+        }
+    }
 
     #[test]
     fn a_criterion_verdict_without_a_source_reads_as_judged() {

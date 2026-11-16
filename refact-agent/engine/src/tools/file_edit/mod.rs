@@ -2,6 +2,7 @@ pub mod auxiliary;
 pub mod edit_output;
 pub mod move_file;
 pub mod openai_apply_patch;
+pub mod output;
 mod patch_transaction;
 pub mod tool_apply_patch;
 pub mod tool_create_textdoc;

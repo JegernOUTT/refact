@@ -19,6 +19,14 @@ use crate::worktrees::scope::ExecutionScope;
 const DEFAULT_YIELD_TIME_MS: u64 = 250;
 const MAX_YIELD_TIME_MS: u64 = 10_000;
 
+#[derive(serde::Serialize, schemars::JsonSchema)]
+struct ProcessWriteStdinOutput {
+    process_id: String,
+    bytes_written: usize,
+    chunks: Vec<crate::tools::tool_process::ProcessChunkOutput>,
+    next_seq: u64,
+}
+
 pub struct ToolProcessWriteStdin {
     pub config_path: String,
 }
@@ -76,7 +84,7 @@ impl Tool for ToolProcessWriteStdin {
             allow_parallel: false,
             description: "Write input to a running PTY-backed process's stdin (process must be started with tty=true) and wait briefly for new output. Pass empty 'chars' to poll for new output without writing.".to_string(),
             input_schema: process_write_stdin_input_schema(),
-            output_schema: None,
+            output_schema: Some(refact_tool_api::tool_output::output_schema_for::<ProcessWriteStdinOutput>()),
             annotations: None,
         }
     }
@@ -243,5 +251,14 @@ fn exec_extra(
     value["chunks_returned"] = json!(result.chunks_returned);
     let mut extra = serde_json::Map::new();
     extra.insert("exec".to_string(), value);
+    crate::tools::tool_process::attach_output(
+        &mut extra,
+        ProcessWriteStdinOutput {
+            process_id: snapshot.meta.process_id.as_str().into(),
+            bytes_written: result.bytes_written,
+            chunks: crate::tools::tool_process::output_chunks(&result.read.chunks),
+            next_seq: result.read.next_seq,
+        },
+    );
     extra
 }

@@ -1323,7 +1323,18 @@ pub fn internal_trace_link_type(feature: &str) -> String {
     format!("{INTERNAL_TRACE_LINK_PREFIX}{feature}")
 }
 
-async fn prune_internal_traces_in_folder(dir: &Path, keep: usize) -> Result<usize, String> {
+pub(crate) async fn prune_internal_traces_in_folder(
+    dir: &Path,
+    keep: usize,
+) -> Result<usize, String> {
+    prune_internal_traces_with_registry(dir, keep, None).await
+}
+
+async fn prune_internal_traces_with_registry(
+    dir: &Path,
+    keep: usize,
+    registry: Option<&crate::python_tool::registry::KernelRegistry>,
+) -> Result<usize, String> {
     let mut entries = match fs::read_dir(dir).await {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
@@ -1390,13 +1401,22 @@ async fn prune_internal_traces_in_folder(dir: &Path, keep: usize) -> Result<usiz
             continue;
         }
         if fs::remove_file(&path).await.is_ok() {
+            if let Some(registry) = registry {
+                if let Some(id) = path.file_stem().and_then(|s| s.to_str()) {
+                    registry.drop_chat(id).await;
+                }
+            }
+            let _ = crate::python_tool::workspace::delete_for_trajectory(&path).await;
             removed += 1;
         }
     }
     Ok(removed)
 }
 
-async fn prune_internal_traces_throttled(dir: &Path) -> Result<usize, String> {
+async fn prune_internal_traces_throttled(
+    dir: &Path,
+    registry: &crate::python_tool::registry::KernelRegistry,
+) -> Result<usize, String> {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs())
@@ -1410,9 +1430,10 @@ async fn prune_internal_traces_throttled(dir: &Path) -> Result<usize, String> {
     )? {
         return Ok(0);
     }
-    let result = prune_internal_traces_in_folder(
+    let result = prune_internal_traces_with_registry(
         dir,
         crate::runtime_settings::current().internal_traces_keep_per_folder,
+        Some(registry),
     )
     .await;
     if result.is_err() {
@@ -1616,6 +1637,9 @@ fn task_trajectory_dirs_sync(roots: &[PathBuf]) -> Vec<PathBuf> {
             for role in ["planner", "linked", "agents", "subchats"] {
                 let mut pending = vec![trajectories.join(role)];
                 while let Some(dir) = pending.pop() {
+                    if crate::python_tool::workspace::is_python_workspace_path(&dir) {
+                        continue;
+                    }
                     if !is_real_dir_sync(&dir) {
                         continue;
                     }
@@ -2543,6 +2567,35 @@ async fn find_validated_trajectory_path_for_source(
             find_validated_trajectory_path_in_dirs(chat_id, dirs).await
         }
     }
+}
+
+pub(crate) async fn python_workspace_trajectory_path(
+    app: &AppState,
+    chat_id: &str,
+) -> Result<PathBuf, String> {
+    validate_trajectory_id(chat_id).map_err(|e| e.message)?;
+    if let Some(path) =
+        find_trajectory_path_for_active_chat(app.gcx.clone(), &app.chat.sessions, chat_id).await
+    {
+        return Ok(path);
+    }
+    let session = app.chat.sessions.read().await.get(chat_id).cloned();
+    if let Some(session) = session {
+        let thread = session.lock().await.thread.clone();
+        if let Some(meta) = thread.task_meta.as_ref() {
+            return safe_new_task_trajectory_file(app.gcx.clone(), meta, chat_id).await;
+        }
+        if thread.buddy_meta.is_some() {
+            return safe_new_buddy_trajectory_file(app.gcx.clone(), chat_id).await;
+        }
+        return safe_new_nested_trajectory_file(
+            app.gcx.clone(),
+            chat_id,
+            thread.root_chat_id.as_deref(),
+        )
+        .await;
+    }
+    safe_new_nested_trajectory_file(app.gcx.clone(), chat_id, None).await
 }
 
 pub async fn find_trajectory_path_for_active_chat(
@@ -5771,7 +5824,7 @@ async fn publish_trajectory_snapshot_updates(
             .await?;
         }
     } else if let Some(parent) = file_path.parent() {
-        match prune_internal_traces_throttled(parent).await {
+        match prune_internal_traces_throttled(parent, &app.python_tool.registry).await {
             Ok(0) => {}
             Ok(removed) => info!("pruned {removed} old internal traces from {:?}", parent),
             Err(error) => warn!("internal trace pruning failed: {error}"),
@@ -7681,6 +7734,9 @@ fn is_under_task_root(path: &Path, task_roots: &[PathBuf]) -> bool {
 }
 
 fn should_dispatch_trajectory_path(path: &Path, task_roots: &[PathBuf]) -> bool {
+    if crate::python_tool::workspace::is_python_workspace_path(path) {
+        return false;
+    }
     if path.extension().and_then(|e| e.to_str()) != Some("json") {
         return false;
     }
@@ -9511,7 +9567,7 @@ async fn allowed_real_dir_symlink_target(_path: &Path) -> Option<PathBuf> {
     None
 }
 
-async fn ensure_real_dir_tree(path: &Path) -> Result<(), String> {
+pub(crate) async fn ensure_real_dir_tree(path: &Path) -> Result<(), String> {
     let mut current = PathBuf::new();
     for component in path.components() {
         match component {
@@ -10136,6 +10192,18 @@ pub async fn handle_v1_trajectories_delete(
     State(app): State<AppState>,
     AxumPath(id): AxumPath<String>,
 ) -> Result<Response<Body>, ScratchError> {
+    delete_trajectory(&app, &id).await?;
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Type", "application/json")
+        .body(Body::from(r#"{"status":"ok"}"#))
+        .unwrap())
+}
+
+/// Deletes a saved trajectory, its Python workspace and its index entry; true when another
+/// copy of the trajectory (for example in a task directory) remains and was announced instead.
+pub(crate) async fn delete_trajectory(app: &AppState, id: &str) -> Result<bool, ScratchError> {
+    let id = id.to_string();
     let gcx = app.gcx.clone();
     validate_trajectory_id(&id)?;
     let candidate = find_trajectory_file(gcx.clone(), &id)
@@ -10144,9 +10212,16 @@ pub async fn handle_v1_trajectories_delete(
             ScratchError::new(StatusCode::NOT_FOUND, "Trajectory not found".to_string())
         })?;
     let file_path = candidate.path;
-    fs::remove_file(&file_path)
+    app.python_tool.registry.drop_chat(&id).await;
+    crate::python_tool::workspace::delete_for_trajectory(&file_path)
         .await
-        .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    fs::remove_file(&file_path).await.map_err(|e| {
+        ScratchError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("its Python workspace was deleted, but the trajectory file was not: {e}"),
+        )
+    })?;
     if let Some(dir) = index_dir_for_trajectory_file(gcx.clone(), &file_path).await {
         if let Err(e) = trajectory_index::remove_trajectory_index_entry_with_rollout(
             &app.chat.trajectory_index_coordinator,
@@ -10167,6 +10242,7 @@ pub async fn handle_v1_trajectories_delete(
         Some(candidate) => load_trajectory_candidate(gcx.clone(), &id, candidate).await,
         None => None,
     };
+    let remaining_copy = fallback.is_some();
     let event = if let Some(mut fallback) = fallback {
         if fallback.transition_identity_repaired {
             apply_mode_defaults_to_thread(
@@ -10200,11 +10276,7 @@ pub async fn handle_v1_trajectories_delete(
         deleted_trajectory_event(id.clone())
     };
     let _ = app.chat.trajectory_events_tx.send(event);
-    Ok(Response::builder()
-        .status(StatusCode::OK)
-        .header("Content-Type", "application/json")
-        .body(Body::from(r#"{"status":"ok"}"#))
-        .unwrap())
+    Ok(remaining_copy)
 }
 
 pub async fn handle_v1_trajectories_subscribe(

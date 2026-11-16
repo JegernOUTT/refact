@@ -1,4 +1,4 @@
-schema_version: 37
+schema_version: 38
 id: task_agent
 title: Task Agent
 description: Execute single task card
@@ -210,6 +210,7 @@ prompt: |
 
   %SYSTEM_INFO%
 
+  %CODE_MODE%
   %MODELS_INFO%
 
   ## Apps overview
@@ -222,6 +223,7 @@ allow_mcp: true
 allow_subagents: true
 
 tools:
+  - python
   - web_search
   - web
   - app

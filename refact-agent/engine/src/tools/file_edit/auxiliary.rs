@@ -63,7 +63,7 @@ fn normalized_config_path(path: PathBuf) -> PathBuf {
     absolute
 }
 
-fn protected_config_locations(gcx: &GlobalContext, root: &Path) -> Vec<PathBuf> {
+pub(crate) fn protected_config_locations(gcx: &GlobalContext, root: &Path) -> Vec<PathBuf> {
     let mut roots = vec![root.to_path_buf()];
     roots.extend(
         gcx.documents_state
@@ -79,6 +79,8 @@ fn protected_config_locations(gcx: &GlobalContext, root: &Path) -> Vec<PathBuf> 
             [
                 r.join(".refact").join("privacy.yaml"),
                 r.join(".refact").join("integrations.d"),
+                r.join(".refact").join("coordination.yaml"),
+                r.join(".refact").join("shell_policy.yaml"),
             ]
         })
         .collect();
@@ -92,10 +94,23 @@ fn protected_config_locations(gcx: &GlobalContext, root: &Path) -> Vec<PathBuf> 
     locations.into_iter().map(normalized_config_path).collect()
 }
 
+/// Coordination and shell policy files of a project: editing them changes what agents and
+/// commands may do, so a person confirms every edit like the privacy policy.
+pub(crate) fn is_project_policy_file(path: &Path) -> bool {
+    path.file_name().is_some_and(|name| {
+        let name = name.to_string_lossy().to_ascii_lowercase();
+        name == "coordination.yaml" || name == "shell_policy.yaml"
+    }) && path
+        .parent()
+        .and_then(|parent| parent.file_name())
+        .is_some_and(|dir| dir.to_string_lossy().eq_ignore_ascii_case(".refact"))
+}
+
 pub fn is_protected_config_path(gcx: &GlobalContext, root: &Path, path: &Path) -> bool {
     let named = |p: &Path| {
-        p.file_name()
-            .is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case("privacy.yaml"))
+        is_project_policy_file(p)
+            || p.file_name()
+                .is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case("privacy.yaml"))
             || p.components().any(|c| {
                 c.as_os_str()
                     .to_string_lossy()
@@ -217,6 +232,46 @@ mod protected_config_tests {
         );
         assert!(refuse_protected_path_repair(&gcx, None, ".refact", &root.join(".refact")).is_ok());
         assert!(refuse_protected_path_repair(&gcx, None, "sr", &root.join("src")).is_ok());
+    }
+
+    #[tokio::test]
+    async fn coordination_and_shell_policy_files_are_protected() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("ws");
+        std::fs::create_dir_all(root.join(".refact")).unwrap();
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![root.clone()];
+        for path in [
+            PathBuf::from(".refact/coordination.yaml"),
+            PathBuf::from(".refact/Shell_Policy.YAML"),
+            root.join(".refact/shell_policy.yaml"),
+        ] {
+            assert!(is_protected_config_path(&gcx, &root, &path), "{path:?}");
+        }
+        assert!(protected_config_locations(&gcx, &root)
+            .iter()
+            .any(|p| p.ends_with(".refact/coordination.yaml")));
+        std::fs::create_dir_all(root.join(".refact/trajectories")).unwrap();
+        for path in [
+            PathBuf::from(".refact/trajectories/../coordination.yaml"),
+            PathBuf::from("src/../.refact/./shell_policy.yaml"),
+            root.join("nowhere/../.refact/coordination.yaml"),
+        ] {
+            assert!(is_protected_config_path(&gcx, &root, &path), "{path:?}");
+        }
+        for path in [
+            PathBuf::from("src/coordination.yaml"),
+            PathBuf::from("shell_policy.yaml"),
+        ] {
+            assert!(!is_protected_config_path(&gcx, &root, &path), "{path:?}");
+        }
+        #[cfg(unix)]
+        {
+            std::fs::write(root.join(".refact/coordination.yaml"), "").unwrap();
+            std::os::unix::fs::symlink(root.join(".refact/coordination.yaml"), root.join("c.yaml"))
+                .unwrap();
+            assert!(is_protected_config_path(&gcx, &root, Path::new("c.yaml")));
+        }
     }
 
     #[tokio::test]

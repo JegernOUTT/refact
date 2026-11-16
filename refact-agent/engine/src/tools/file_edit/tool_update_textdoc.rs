@@ -175,7 +175,17 @@ impl Tool for ToolUpdateTextDoc {
             Some(after.as_str()),
             &chunks,
         );
+        let output = super::output::EditOutput {
+            files: vec![super::output::EditFileOutput::from_chunks(
+                path.to_string(),
+                "edit",
+                &chunks,
+                &before,
+                &after,
+            )],
+        };
         super::edit_output::finish_edit_output(&mut out, model_content);
+        super::output::attach(&mut out, tool_call_id, &output);
         Ok((false, out))
     }
 
@@ -236,7 +246,7 @@ impl Tool for ToolUpdateTextDoc {
             allow_parallel: false,
             description: "Updates an existing document by replacing specific text, use this if file already exists. Optimized for large files or small changes where simple string replacement is sufficient. Avoid trailing spaces and tabs.".to_string(),
             input_schema: json_schema_from_params(&[("path", "string", "Absolute path to the file to change."), ("old_str", "string", "The exact text that needs to be updated. Use update_textdoc_regex if you need pattern matching (is not preferred for common editing)."), ("replacement", "string", "The new text that will replace the old text."), ("multiple", "boolean", "If true, applies the replacement to all occurrences; if false, only the first occurrence is replaced.")], &["path", "old_str", "replacement"]),
-            output_schema: None,
+            output_schema: Some(refact_tool_api::tool_output::output_schema_for::<super::output::EditOutput>()),
             annotations: None,
         }
     }

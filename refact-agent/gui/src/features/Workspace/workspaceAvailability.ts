@@ -17,6 +17,7 @@ export type WorkspaceDockAvailability = {
 export type WorkspaceDockSectionId =
   | "files"
   | "git"
+  | "python"
   | "agents"
   | "activity"
   | "apps";
@@ -25,7 +26,7 @@ export function isDockSectionAvailable(
   section: WorkspaceDockSectionId,
   availability: WorkspaceDockAvailability,
 ): boolean {
-  return section === "agents" || availability[section];
+  return section === "python" || section === "agents" || availability[section];
 }
 
 export function resolveWorkspaceDockAvailability(

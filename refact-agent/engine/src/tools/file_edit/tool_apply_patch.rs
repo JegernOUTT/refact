@@ -558,7 +558,23 @@ impl Tool for ToolApplyPatch {
             }));
         }
 
+        let output = super::output::EditOutput {
+            files: result
+                .file_results
+                .iter()
+                .map(|file| {
+                    super::output::EditFileOutput::from_chunks(
+                        file.path.to_string_lossy().into_owned(),
+                        file.action,
+                        &file.chunks,
+                        &file.before,
+                        &file.after,
+                    )
+                })
+                .collect(),
+        };
         super::edit_output::finish_edit_output(&mut out, model_content);
+        super::output::attach(&mut out, tool_call_id, &output);
         Ok((false, out))
     }
 
@@ -615,7 +631,9 @@ impl Tool for ToolApplyPatch {
                 &[("patch", "string", APPLY_PATCH_PARAM_DESCRIPTION)],
                 &["patch"],
             ),
-            output_schema: None,
+            output_schema: Some(refact_tool_api::tool_output::output_schema_for::<
+                super::output::EditOutput,
+            >()),
             annotations: None,
         }
     }

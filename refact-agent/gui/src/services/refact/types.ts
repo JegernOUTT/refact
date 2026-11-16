@@ -2624,6 +2624,724 @@ export function isBuddyPulsePayload(
   );
 }
 
+export type PythonCallRecord = {
+  seq: number;
+  call_id: string;
+  tool: string;
+  args_preview: string;
+  status: "running" | "ok" | "failed" | "denied" | "cancelled" | "unknown";
+  summary: string;
+  started_at_ms: number;
+  duration_ms: number | null;
+  approval:
+    | "unknown"
+    | "not_needed"
+    | "auto"
+    | "allowed"
+    | "allowed_for_chat"
+    | "allowed_for_run"
+    | "denied"
+    | "cancelled";
+  diffs: unknown[];
+  /** Optional 1-based line of the call expression in this run's code. */
+  line?: number;
+  /** Optional count of Unicode characters before the callee name on that line. */
+  col?: number;
+  /** Model calls (`tool: "llm"`): the model that answered. */
+  model?: string;
+  /** Model calls: prompt tokens. */
+  tokens_in?: number;
+  /** Model calls: completion tokens. */
+  tokens_out?: number;
+};
+
+export type PythonDisplayCell = string | number | boolean | null;
+
+/** A table, chart or markdown block a script showed; any other kind is generic. */
+export type PythonDisplay = {
+  index: number;
+  kind: string;
+  title?: string;
+  columns?: string[];
+  rows?: PythonDisplayCell[][];
+  rows_total?: number;
+  truncated: boolean;
+  x?: string;
+  y?: string[];
+  text?: string;
+  path: string;
+};
+
+export type PythonLlmTotals = {
+  calls: number;
+  input_tokens: number;
+  output_tokens: number;
+  models: string[];
+};
+
+export type PythonRunUpdate =
+  | { kind: "started"; background: boolean }
+  | { kind: "call_started" | "call_finished"; record: PythonCallRecord }
+  | { kind: "stdout"; text: string }
+  | { kind: "detached" }
+  | { kind: "display"; display: PythonDisplay }
+  | { kind: "finished"; status: string };
+
+export type PythonApprovalDecisionKind =
+  | "allow_once"
+  | "allow_for_run"
+  | "allow_for_chat"
+  | "deny"
+  | "stop";
+
+export type PythonApprovalRequest = {
+  request_id: string;
+  tool_call_id: string;
+  run_id: string;
+  call_id: string;
+  tool_name: string;
+  args_preview: string;
+  command: string | null;
+  rule: string;
+  editing_tool: boolean;
+  /** True for a change that needs the user's own approval every time (no run or chat permits). */
+  needs_person?: boolean;
+  created_at_ms: number;
+  /** Present when a script asks to change the engine itself. */
+  engine?: PythonEngineRequest;
+};
+
+/** One value a script reads or changes in the engine; JSON values, each bounded. */
+export type PythonEngineItem = {
+  label: string;
+  /** Absent: was not set. */
+  old?: unknown;
+  /** Absent: removed. */
+  new?: unknown;
+  truncated?: boolean;
+};
+
+export type PythonEngineClass = "change" | "risky" | "destructive";
+
+export type PythonEngineRequest = {
+  function: string;
+  /** Unknown classes from a newer engine read as "risky". */
+  class: PythonEngineClass;
+  title: string;
+  items: PythonEngineItem[];
+  scope?: string;
+  warning?: string;
+  /** Entries the GUI could not read at all (`items` was not a list). */
+  items_dropped?: number;
+};
+
+export type PythonEngineChange = {
+  seq: number;
+  function: string;
+  class: PythonEngineClass;
+  title: string;
+  items: PythonEngineItem[];
+  scope?: string;
+  at_ms: number;
+  /** "unknown": the engine started the change but could not confirm it finished. Absent: applied. */
+  outcome?: "unknown";
+};
+
+export type PythonRunSnapshot = {
+  tool_call_id: string;
+  run_id: string;
+  status: "running" | "background";
+  started_at_ms: number;
+  calls: PythonCallRecord[];
+  stdout_tail: string;
+  displays?: PythonDisplay[];
+};
+
+export type PythonRunExtra = {
+  schema: 1;
+  run_id: string;
+  /** `unknown` stands for a status from a newer engine. */
+  status:
+    | "completed"
+    | "failed"
+    | "cancelled"
+    | "timed_out"
+    | "limit_exceeded"
+    | "unknown";
+  background: boolean;
+  started_at_ms: number;
+  finished_at_ms: number;
+  workspace_dir: string;
+  run_dir: string;
+  calls: PythonCallRecord[];
+  calls_total: number;
+  calls_truncated: boolean;
+  stdout_preview: string;
+  stdout_bytes: number;
+  result_preview: string;
+  result_bytes: number;
+  error: {
+    type: string;
+    message: string;
+    traceback: string;
+    /** Optional 1-based failing line in this run's code. */
+    line?: number;
+  } | null;
+  /** Optional one-sentence description of what the script does. */
+  description?: string;
+  /** Optional first non-empty line of the code. */
+  code_preview?: string;
+  files_read: string[];
+  files_written: { path: string; bytes: number; diffs: unknown[] }[];
+  artifacts: { path: string; bytes: number }[];
+  state: {
+    restored: boolean;
+    reset_reason: string | null;
+    persisted: boolean;
+    bytes: number;
+    /** Optional engine note on the session state after this run. */
+    note?: string;
+  };
+  /** Optional displays the script showed, at most 12. */
+  displays?: PythonDisplay[];
+  displays_total?: number;
+  displays_truncated?: boolean;
+  /** Optional totals of the run's model calls. */
+  llm?: PythonLlmTotals;
+  /** Optional engine changes the script applied (at most 50). */
+  engine_changes?: PythonEngineChange[];
+  engine_changes_total?: number;
+  /** Optional: the value of the script's last expression was cut by the engine. */
+  result_truncated?: boolean;
+};
+
+function isPythonNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+function optionalPythonNumber(value: unknown): boolean {
+  return value === undefined || isPythonNumber(value);
+}
+
+const PYTHON_OPTIONAL_NUMBERS = new Set([
+  "line",
+  "col",
+  "tokens_in",
+  "tokens_out",
+]);
+
+function isDisplayCell(value: unknown): value is PythonDisplayCell {
+  return (
+    value === null ||
+    typeof value === "string" ||
+    typeof value === "boolean" ||
+    (typeof value === "number" && Number.isFinite(value))
+  );
+}
+
+const isStringList = (value: unknown): value is string[] =>
+  Array.isArray(value) &&
+  value.every((item: unknown) => typeof item === "string");
+
+/**
+ * Tolerant reading of one display: the index, kind and path are required;
+ * optional fields with an unexpected value are dropped; a cell that is not a
+ * plain value becomes null.
+ */
+export function normalizePythonDisplay(
+  value: unknown,
+): PythonDisplay | undefined {
+  if (
+    !isRecord(value) ||
+    !isPythonNumber(value.index) ||
+    value.index < 1 ||
+    typeof value.kind !== "string" ||
+    typeof value.path !== "string"
+  )
+    return undefined;
+  const display: PythonDisplay = {
+    index: value.index,
+    kind: value.kind,
+    truncated: value.truncated === true,
+    path: value.path,
+  };
+  if (typeof value.title === "string") display.title = value.title;
+  if (isStringList(value.columns)) display.columns = value.columns;
+  if (Array.isArray(value.rows) && value.rows.every(Array.isArray))
+    display.rows = (value.rows as unknown[][]).map((row) =>
+      row.map((cell) => (isDisplayCell(cell) ? cell : null)),
+    );
+  if (isPythonNumber(value.rows_total)) display.rows_total = value.rows_total;
+  if (typeof value.x === "string") display.x = value.x;
+  if (isStringList(value.y)) display.y = value.y;
+  if (typeof value.text === "string") display.text = value.text;
+  return display;
+}
+
+/** Valid displays in index order, one per index. */
+export function normalizePythonDisplays(value: unknown): PythonDisplay[] {
+  if (!Array.isArray(value)) return [];
+  const byIndex = new Map<number, PythonDisplay>();
+  for (const item of value) {
+    const display = normalizePythonDisplay(item);
+    if (display && !byIndex.has(display.index))
+      byIndex.set(display.index, display);
+  }
+  return [...byIndex.values()].sort((a, b) => a.index - b.index);
+}
+
+function normalizeLlmTotals(value: unknown): PythonLlmTotals | undefined {
+  if (
+    !isRecord(value) ||
+    !isPythonNumber(value.calls) ||
+    !isPythonNumber(value.input_tokens) ||
+    !isPythonNumber(value.output_tokens)
+  )
+    return undefined;
+  return {
+    calls: value.calls,
+    input_tokens: value.input_tokens,
+    output_tokens: value.output_tokens,
+    models: isStringList(value.models) ? value.models : [],
+  };
+}
+
+/** Optional display and model-call fields of `extra.python`, invalid ones left out. */
+function pythonExtraAdditions(value: Record<string, unknown>) {
+  const additions: Partial<PythonRunExtra> = {};
+  if (value.displays !== undefined) {
+    const displays = normalizePythonDisplays(value.displays);
+    if (displays.length > 0) additions.displays = displays;
+  }
+  if (isPythonNumber(value.displays_total))
+    additions.displays_total = value.displays_total;
+  if (typeof value.displays_truncated === "boolean")
+    additions.displays_truncated = value.displays_truncated;
+  const llm = normalizeLlmTotals(value.llm);
+  if (llm) additions.llm = llm;
+  if (value.engine_changes !== undefined) {
+    const changes = normalizeEngineChanges(value.engine_changes);
+    if (changes.length > 0) additions.engine_changes = changes;
+  }
+  if (isPythonNumber(value.engine_changes_total))
+    additions.engine_changes_total = value.engine_changes_total;
+  if (value.result_truncated === true) additions.result_truncated = true;
+  return additions;
+}
+
+const PYTHON_EXTRA_ADDITIONS = [
+  "displays",
+  "displays_total",
+  "displays_truncated",
+  "llm",
+  "engine_changes",
+  "engine_changes_total",
+  "result_truncated",
+];
+
+/** Drops optional newer-engine fields whose value has an unexpected type. */
+function withoutInvalidOptionals(
+  value: Record<string, unknown>,
+  keys: readonly string[],
+): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(value).filter(([key, item]) => {
+      if (!keys.includes(key) || item === undefined) return true;
+      return PYTHON_OPTIONAL_NUMBERS.has(key)
+        ? isPythonNumber(item)
+        : typeof item === "string";
+    }),
+  );
+}
+
+export function isPythonCallRecord(value: unknown): value is PythonCallRecord {
+  if (!isRecord(value)) return false;
+  return (
+    isPythonNumber(value.seq) &&
+    ["call_id", "tool", "args_preview", "summary"].every(
+      (key) => typeof value[key] === "string",
+    ) &&
+    ["running", "ok", "failed", "denied", "cancelled", "unknown"].includes(
+      String(value.status),
+    ) &&
+    isPythonNumber(value.started_at_ms) &&
+    (value.duration_ms === null || isPythonNumber(value.duration_ms)) &&
+    [
+      "unknown",
+      "not_needed",
+      "auto",
+      "allowed",
+      "allowed_for_chat",
+      "allowed_for_run",
+      "denied",
+      "cancelled",
+    ].includes(String(value.approval)) &&
+    Array.isArray(value.diffs) &&
+    optionalPythonNumber(value.line) &&
+    optionalPythonNumber(value.col) &&
+    (value.model === undefined || typeof value.model === "string") &&
+    optionalPythonNumber(value.tokens_in) &&
+    optionalPythonNumber(value.tokens_out)
+  );
+}
+
+export function isPythonRunUpdate(value: unknown): value is PythonRunUpdate {
+  if (!isRecord(value)) return false;
+  switch (value.kind) {
+    case "started":
+      return typeof value.background === "boolean";
+    case "call_started":
+    case "call_finished":
+      return isPythonCallRecord(value.record);
+    case "stdout":
+      return typeof value.text === "string";
+    case "detached":
+      return true;
+    case "display":
+      return normalizePythonDisplay(value.display) !== undefined;
+    case "finished":
+      return typeof value.status === "string";
+    default:
+      return false;
+  }
+}
+
+export function isPythonApprovalDecisionKind(
+  value: unknown,
+): value is PythonApprovalDecisionKind {
+  return (
+    value === "allow_once" ||
+    value === "allow_for_run" ||
+    value === "allow_for_chat" ||
+    value === "deny" ||
+    value === "stop"
+  );
+}
+
+export function isPythonApprovalRequest(
+  value: unknown,
+): value is PythonApprovalRequest {
+  return (
+    isRecord(value) &&
+    [
+      "request_id",
+      "tool_call_id",
+      "run_id",
+      "call_id",
+      "tool_name",
+      "args_preview",
+      "rule",
+    ].every((key) => typeof value[key] === "string") &&
+    (value.command === null || typeof value.command === "string") &&
+    typeof value.editing_tool === "boolean" &&
+    (value.needs_person === undefined ||
+      typeof value.needs_person === "boolean") &&
+    isPythonNumber(value.created_at_ms) &&
+    (value.engine === undefined ||
+      normalizeEngineRequest(value.engine) !== undefined)
+  );
+}
+
+export const ENGINE_TOOL_PREFIX = "engine.";
+export const UNREADABLE_ENGINE_WARNING =
+  "The details of this engine change could not be read. Deny it unless you know what the script is changing.";
+
+/**
+ * An approval request read tolerantly. A request for an `engine.*` tool, or
+ * one whose `engine` part is unreadable, is never shown as an ordinary tool
+ * request: it becomes a risky engine request without items.
+ */
+export function normalizePythonApprovalRequest(
+  value: unknown,
+): PythonApprovalRequest | undefined {
+  if (!isRecord(value)) return undefined;
+  const { engine, needs_person, ...fields } = value;
+  const rest = needs_person === true ? { ...fields, needs_person } : fields;
+  const normalized =
+    engine === undefined ? undefined : normalizeEngineRequest(engine);
+  const toolName = typeof rest.tool_name === "string" ? rest.tool_name : "";
+  const engineLike =
+    engine !== undefined || toolName.startsWith(ENGINE_TOOL_PREFIX);
+  const fallback: PythonEngineRequest = {
+    function: toolName.startsWith(ENGINE_TOOL_PREFIX)
+      ? toolName.slice(ENGINE_TOOL_PREFIX.length)
+      : toolName,
+    class: "risky",
+    title: "change the engine",
+    items: [],
+    warning: UNREADABLE_ENGINE_WARNING,
+  };
+  const candidate = engineLike
+    ? { ...rest, engine: normalized ?? fallback }
+    : rest;
+  return isPythonApprovalRequest(candidate) ? candidate : undefined;
+}
+
+const ENGINE_CLASSES: readonly string[] = ["change", "risky", "destructive"];
+
+function engineClass(value: unknown): PythonEngineClass {
+  return typeof value === "string" && ENGINE_CLASSES.includes(value)
+    ? (value as PythonEngineClass)
+    : "risky";
+}
+
+export const UNNAMED_ENGINE_ITEM = "(unnamed)";
+
+/** Every entry the engine sent is kept; one without a usable label is "(unnamed)". */
+function normalizeEngineItems(value: unknown): PythonEngineItem[] {
+  if (!Array.isArray(value)) return [];
+  return value.map((item: unknown) => {
+    if (!isRecord(item)) return { label: UNNAMED_ENGINE_ITEM, new: item };
+    const label =
+      typeof item.label === "string" && item.label.trim()
+        ? item.label
+        : UNNAMED_ENGINE_ITEM;
+    const result: PythonEngineItem = { label };
+    if ("old" in item && item.old !== undefined) result.old = item.old;
+    if ("new" in item && item.new !== undefined) result.new = item.new;
+    if (item.truncated === true) result.truncated = true;
+    return result;
+  });
+}
+
+/** Tolerant reading: function and title are required; a missing class reads as risky. */
+export function normalizeEngineRequest(
+  value: unknown,
+): PythonEngineRequest | undefined {
+  if (
+    !isRecord(value) ||
+    typeof value.function !== "string" ||
+    typeof value.title !== "string"
+  )
+    return undefined;
+  const request: PythonEngineRequest = {
+    function: value.function,
+    class: engineClass(value.class),
+    title: value.title,
+    items: normalizeEngineItems(value.items),
+  };
+  if (value.items !== undefined && !Array.isArray(value.items))
+    request.items_dropped = 1;
+  if (typeof value.scope === "string" && value.scope.trim())
+    request.scope = value.scope;
+  if (typeof value.warning === "string" && value.warning.trim())
+    request.warning = value.warning;
+  return request;
+}
+
+function normalizeEngineChange(value: unknown): PythonEngineChange | undefined {
+  if (
+    !isRecord(value) ||
+    !isPythonNumber(value.seq) ||
+    !isPythonNumber(value.at_ms)
+  )
+    return undefined;
+  const request = normalizeEngineRequest(value);
+  if (!request) return undefined;
+  const change: PythonEngineChange = {
+    seq: value.seq,
+    function: request.function,
+    class: request.class,
+    title: request.title,
+    items: request.items,
+    at_ms: value.at_ms,
+  };
+  if (request.scope) change.scope = request.scope;
+  if (value.outcome === "unknown") change.outcome = "unknown";
+  return change;
+}
+
+export function normalizeEngineChanges(value: unknown): PythonEngineChange[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item: unknown) => {
+    const change = normalizeEngineChange(item);
+    return change ? [change] : [];
+  });
+}
+
+export function isPythonRunSnapshot(
+  value: unknown,
+): value is PythonRunSnapshot {
+  return (
+    isRecord(value) &&
+    typeof value.tool_call_id === "string" &&
+    typeof value.run_id === "string" &&
+    (value.status === "running" || value.status === "background") &&
+    isPythonNumber(value.started_at_ms) &&
+    Array.isArray(value.calls) &&
+    value.calls.every(isPythonCallRecord) &&
+    typeof value.stdout_tail === "string" &&
+    (value.displays === undefined ||
+      (Array.isArray(value.displays) &&
+        value.displays.every(
+          (item: unknown) => normalizePythonDisplay(item) !== undefined,
+        )))
+  );
+}
+
+const PYTHON_RUN_STATUSES = [
+  "completed",
+  "failed",
+  "cancelled",
+  "timed_out",
+  "limit_exceeded",
+];
+
+/**
+ * Forward-compatible reading of stored `extra.python`: unknown enum values
+ * (run status, call status, approval) become `unknown`; malformed structural
+ * fields still fail closed. Callers that render the value must use the
+ * returned copy, not the raw input.
+ */
+/**
+ * Results per input object. Store messages are immutable, so selectors that
+ * run on every store update (the activity rail, run pruning) normalise each
+ * stored metadata object once instead of rebuilding its calls, displays and
+ * engine changes each time.
+ */
+const normalizedRunExtras = new WeakMap<object, PythonRunExtra | null>();
+
+export function normalizePythonRunExtra(
+  value: unknown,
+): PythonRunExtra | undefined {
+  if (!isRecord(value)) return undefined;
+  const cached = normalizedRunExtras.get(value);
+  if (cached !== undefined) return cached ?? undefined;
+  const result = normalizeRunExtraUncached(value);
+  normalizedRunExtras.set(value, result ?? null);
+  return result;
+}
+
+function normalizeRunExtraUncached(
+  value: Record<string, unknown>,
+): PythonRunExtra | undefined {
+  if (!isRecord(value.state) || !Array.isArray(value.calls)) return undefined;
+  const calls: PythonCallRecord[] = [];
+  for (const item of value.calls) {
+    const call = normalizePythonCallRecord(item);
+    if (!call) return undefined;
+    calls.push(call);
+  }
+  const base = Object.fromEntries(
+    Object.entries(
+      withoutInvalidOptionals(value, ["description", "code_preview"]),
+    ).filter(([key]) => !PYTHON_EXTRA_ADDITIONS.includes(key)),
+  );
+  const candidate = {
+    ...base,
+    ...pythonExtraAdditions(value),
+    error: isRecord(value.error)
+      ? withoutInvalidOptionals(value.error, ["line"])
+      : value.error,
+    status:
+      typeof value.status === "string" &&
+      PYTHON_RUN_STATUSES.includes(value.status)
+        ? value.status
+        : "unknown",
+    calls,
+  };
+  if (typeof value.status !== "string") return undefined;
+  return isPythonRunExtraShape(candidate) ? candidate : undefined;
+}
+
+export function isPythonRunExtra(value: unknown): value is PythonRunExtra {
+  return normalizePythonRunExtra(value) !== undefined;
+}
+
+function isPythonRunExtraShape(value: unknown): value is PythonRunExtra {
+  if (!isRecord(value) || !isRecord(value.state)) return false;
+  const error = value.error;
+  const state = value.state;
+  const file = (item: unknown) =>
+    isRecord(item) &&
+    typeof item.path === "string" &&
+    isPythonNumber(item.bytes);
+  return (
+    value.schema === 1 &&
+    [
+      "run_id",
+      "workspace_dir",
+      "run_dir",
+      "stdout_preview",
+      "result_preview",
+    ].every((key) => typeof value[key] === "string") &&
+    [...PYTHON_RUN_STATUSES, "unknown"].includes(String(value.status)) &&
+    typeof value.background === "boolean" &&
+    typeof value.calls_truncated === "boolean" &&
+    [
+      "started_at_ms",
+      "finished_at_ms",
+      "calls_total",
+      "stdout_bytes",
+      "result_bytes",
+    ].every((key) => isPythonNumber(value[key])) &&
+    Array.isArray(value.calls) &&
+    value.calls.every(isPythonCallRecord) &&
+    (error === null ||
+      (isRecord(error) &&
+        ["type", "message", "traceback"].every(
+          (key) => typeof error[key] === "string",
+        ) &&
+        optionalPythonNumber(error.line))) &&
+    (value.description === undefined ||
+      typeof value.description === "string") &&
+    (value.code_preview === undefined ||
+      typeof value.code_preview === "string") &&
+    Array.isArray(value.files_read) &&
+    value.files_read.every((item: unknown) => typeof item === "string") &&
+    Array.isArray(value.files_written) &&
+    value.files_written.every(
+      (item: unknown) =>
+        file(item) && isRecord(item) && Array.isArray(item.diffs),
+    ) &&
+    Array.isArray(value.artifacts) &&
+    value.artifacts.every(file) &&
+    typeof state.restored === "boolean" &&
+    typeof state.persisted === "boolean" &&
+    (state.reset_reason === null || typeof state.reset_reason === "string") &&
+    (state.note === undefined || typeof state.note === "string") &&
+    isPythonNumber(state.bytes)
+  );
+}
+
+/** Forward-compatible event decoding; malformed structural fields still fail closed. */
+export function normalizePythonCallRecord(
+  value: unknown,
+): PythonCallRecord | undefined {
+  if (
+    !isRecord(value) ||
+    typeof value.status !== "string" ||
+    typeof value.approval !== "string"
+  )
+    return undefined;
+  const record = {
+    ...withoutInvalidOptionals(value, [
+      "line",
+      "col",
+      "model",
+      "tokens_in",
+      "tokens_out",
+    ]),
+    status: ["running", "ok", "failed", "denied", "cancelled"].includes(
+      value.status,
+    )
+      ? value.status
+      : "unknown",
+    approval: [
+      "not_needed",
+      "auto",
+      "allowed",
+      "allowed_for_chat",
+      "allowed_for_run",
+      "denied",
+      "cancelled",
+    ].includes(value.approval)
+      ? value.approval
+      : "unknown",
+  };
+  return isPythonCallRecord(record) ? record : undefined;
+}
+
 export type WebSearchResult = {
   title: string;
   url: string;

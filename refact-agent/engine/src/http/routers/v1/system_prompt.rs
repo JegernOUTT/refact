@@ -298,7 +298,14 @@ pub async fn handle_v1_prepend_system_prompt_and_maybe_more_initial_messages(
             )
         })?;
 
-    let mode_tools = apply_mcp_lazy_filter(get_tools_for_mode(gcx.clone(), &mode_id, None).await);
+    let mut mode_tools =
+        apply_mcp_lazy_filter(get_tools_for_mode(gcx.clone(), &mode_id, None).await);
+    let options = crate::python_tool::catalog_binding::BindOptions::for_project(gcx.clone()).await;
+    crate::python_tool::catalog_binding::bind(
+        &mut mode_tools.tools,
+        mode_tools.mcp_lazy_mode,
+        options,
+    );
     let tool_descs: Vec<_> = mode_tools
         .tools
         .into_iter()

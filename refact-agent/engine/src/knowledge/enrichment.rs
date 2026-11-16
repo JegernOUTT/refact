@@ -2036,6 +2036,29 @@ pub struct EnrichmentItem {
 
 const ENRICHMENT_SUBAGENT_ID: &str = "memory_enrichment_rewrite";
 
+/// The subchat configuration of the wand rewrite; its `model` is where the query is sent.
+pub(crate) async fn enrichment_config(
+    gcx: Arc<GlobalContext>,
+) -> Result<crate::subchat::SubchatConfig, String> {
+    resolve_subchat_config(
+        gcx.clone(),
+        ENRICHMENT_SUBAGENT_ID,
+        false,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(vec!["knowledge".to_string()]),
+        4,
+        false,
+        None,
+        "agent".to_string(),
+    )
+    .await
+    .map_err(|e| format!("config: {}", e))
+}
+
 pub async fn model_gather_and_rewrite(
     gcx: Arc<GlobalContext>,
     query: &str,
@@ -2062,23 +2085,7 @@ pub async fn model_gather_and_rewrite(
         },
     ];
 
-    let config = resolve_subchat_config(
-        gcx.clone(),
-        ENRICHMENT_SUBAGENT_ID,
-        false,
-        None,
-        None,
-        None,
-        None,
-        None,
-        Some(vec!["knowledge".to_string()]),
-        4,
-        false,
-        None,
-        "agent".to_string(),
-    )
-    .await
-    .map_err(|e| format!("config: {}", e))?;
+    let config = enrichment_config(gcx.clone()).await?;
 
     let result = run_subchat(gcx.clone(), messages, config)
         .await
