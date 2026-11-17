@@ -113,6 +113,28 @@ impl OwnedProcess {
         self.id
     }
 
+    pub fn wait_before(&self, deadline: Instant) -> std::io::Result<bool> {
+        loop {
+            if Instant::now() >= deadline {
+                return Ok(false);
+            }
+            match self.child.try_lock() {
+                Ok(mut child) => {
+                    if child.0.try_wait()?.is_some() {
+                        return Ok(true);
+                    }
+                }
+                Err(TryLockError::WouldBlock) => {}
+                Err(TryLockError::Poisoned(_)) => {
+                    return Err(std::io::Error::other("Owned Chrome process lock poisoned"));
+                }
+            }
+            std::thread::sleep(
+                Duration::from_millis(5).min(deadline.saturating_duration_since(Instant::now())),
+            );
+        }
+    }
+
     pub fn terminate_before(&self, deadline: Instant) -> std::io::Result<bool> {
         let mut kill_requested = false;
         loop {
@@ -903,6 +925,36 @@ mod tests {
         assert_eq!(ready.trim(), "ready");
         assert!(child.try_wait().unwrap().is_none());
         OwnedProcess::new(TemporaryProcess(child, None))
+    }
+
+    #[test]
+    #[cfg(any(unix, windows))]
+    fn owned_process_passive_wait_never_kills_and_observes_voluntary_exit() {
+        let owned = owned_fixture();
+        let other = owned_fixture();
+        let start = Instant::now();
+        assert!(
+            !owned
+                .wait_before(start + Duration::from_millis(30))
+                .unwrap()
+        );
+        assert!(start.elapsed() < Duration::from_secs(1));
+        let mut child = owned.child.lock().unwrap();
+        assert!(child.0.try_wait().unwrap().is_none());
+        assert!(
+            !owned
+                .wait_before(Instant::now() + Duration::from_millis(20))
+                .unwrap()
+        );
+        assert!(!owned.wait_before(Instant::now()).unwrap());
+        drop(child.0.stdin.take());
+        drop(child);
+        assert!(
+            owned
+                .wait_before(Instant::now() + Duration::from_secs(2))
+                .unwrap()
+        );
+        assert!(other.child.lock().unwrap().0.try_wait().unwrap().is_none());
     }
 
     #[test]

@@ -158,6 +158,7 @@ struct Entry {
     info: NamedSessionInfo,
     runtime: Option<NamedRuntime>,
     owned_process: Option<headless_chrome::browser::OwnedProcess>,
+    browser: Option<headless_chrome::Browser>,
     failed_processes: Vec<headless_chrome::browser::OwnedProcess>,
     touched: Instant,
     active_requests: usize,
@@ -284,7 +285,7 @@ fn schedule_cleanup(reg: Registry, key: Key, id: String) {
     if let Some(owner) = owner {
         let worker_id = id.clone();
         let task = tokio::task::spawn_blocking(move || {
-            cleanup(&reg, &key, &id);
+            cleanup(&reg, &key, &id, None);
         });
         workers.push(Worker {
             owner,
@@ -355,6 +356,7 @@ async fn create_named_session_with_launch(
                     },
                     runtime: None,
                     owned_process: None,
+                    browser: None,
                     failed_processes: Vec::new(),
                     touched: Instant::now(),
                     active_requests: 0,
@@ -424,6 +426,7 @@ async fn create_named_session_with_launch(
                     runtime.set_allowed_roots(owner.key.roots.clone());
                     runtime.reattach(&owner.key.chat);
                     let owned_process = runtime.browser.owned_process();
+                    let browser = runtime.browser.clone();
                     let rt = NamedRuntime {
                         runtime_id: runtime.runtime_id.clone(),
                         session_id: id.clone(),
@@ -434,6 +437,7 @@ async fn create_named_session_with_launch(
                     let e = map.get_mut(&key).expect("launch reservation retained");
                     e.quarantine = Some(profile);
                     e.owned_process = owned_process;
+                    e.browser = Some(browser);
                     e.info.runtime_id = Some(rt.runtime_id.clone());
                     e.runtime = Some(rt);
                     e.info.state = "ready".into();
@@ -445,14 +449,14 @@ async fn create_named_session_with_launch(
                         mark_closing(e);
                         e.cleaning = true;
                         drop(map);
-                        cleanup(&reg, &key, &id);
+                        cleanup(&reg, &key, &id, Some(deadline));
                     } else {
                         let info = e.info.clone();
                         if tx.send(Ok(info)).is_err() {
                             mark_closing(e);
                             e.cleaning = true;
                             drop(map);
-                            cleanup(&reg, &key, &id);
+                            cleanup(&reg, &key, &id, Some(deadline));
                         }
                     }
                 }
@@ -520,40 +524,48 @@ pub fn resolve_named_session(
     e.touched = Instant::now();
     Ok(rt)
 }
-fn cleanup(reg: &Registry, key: &Key, id: &str) -> Option<NamedSessionClose> {
-    let _deadline = headless_chrome::browser::transport::CommandDeadlineGuard::new(
-        Instant::now() + Duration::from_secs(5),
-    );
-    let (rt, owned_process, info, profile) = {
+fn cleanup(
+    reg: &Registry,
+    key: &Key,
+    id: &str,
+    caller_deadline: Option<Instant>,
+) -> Option<NamedSessionClose> {
+    let worker_deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = caller_deadline.map_or(worker_deadline, |caller| caller.min(worker_deadline));
+    let (browser, owned_process, info, profile) = {
         let mut map = locked(reg);
         let e = map.get_mut(key).filter(|e| e.info.session_id == id)?;
         mark_closing(e);
         (
-            e.runtime.clone()?,
+            e.browser.clone()?,
             e.owned_process.clone(),
             e.info.clone(),
             e.quarantine.clone(),
         )
     };
-    let inventory = rt.runtime.try_lock().ok().map(|r| {
-        r.list_tab_infos()
-            .into_iter()
-            .map(|t| t.id)
-            .collect::<Vec<_>>()
-    });
+    let inventory = if Instant::now() < deadline {
+        browser.get_tabs().try_lock().ok().map(|tabs| {
+            tabs.iter()
+                .map(|tab| tab.get_target_id().clone())
+                .collect::<Vec<_>>()
+        })
+    } else {
+        None
+    };
     let targets_complete = inventory.is_some();
     let targets = inventory.unwrap_or_default();
-    // Only the original owned Child handle can authorize termination and prove exit.
-    // Missing handles, errors and timeouts retain quota for later inspection/retry.
-    let exited = owned_process.as_ref().is_some_and(|child| {
-        match child.terminate_before(Instant::now() + Duration::from_secs(5)) {
+    if let Err(error) = browser.close_owned_before(deadline) {
+        warn!("Named browser graceful close failed: {error}");
+    }
+    let exited = owned_process
+        .as_ref()
+        .is_some_and(|child| match child.wait_before(deadline) {
             Ok(exited) => exited,
             Err(error) => {
-                warn!("Named browser child cleanup failed: {error}");
+                warn!("Named browser child wait failed: {error}");
                 false
             }
-        }
-    });
+        });
     let disposition = match profile {
         Some(profile) if exited => {
             let safe = matches!(
@@ -622,7 +634,7 @@ pub async fn close_named_session(
         let (tx, rx) = tokio::sync::oneshot::channel();
         let worker_id = id.clone();
         let task = tokio::task::spawn_blocking(move || {
-            let _ = tx.send(cleanup(&reg, &key, &id));
+            let _ = tx.send(cleanup(&reg, &key, &id, Some(deadline)));
         });
         workers.push(Worker {
             owner: owner.gcx.clone(),
@@ -786,6 +798,7 @@ mod tests {
                 },
                 runtime: None,
                 owned_process: None,
+                browser: None,
                 failed_processes: Vec::new(),
                 touched: Instant::now(),
                 active_requests: 0,
@@ -837,6 +850,7 @@ mod tests {
                 },
                 runtime: None,
                 owned_process: None,
+                browser: None,
                 failed_processes: Vec::new(),
                 touched: Instant::now(),
                 active_requests: 0,
@@ -869,6 +883,7 @@ mod tests {
             },
             runtime: None,
             owned_process: None,
+            browser: None,
             failed_processes: Vec::new(),
             touched: Instant::now(),
             active_requests: 0,
@@ -1125,6 +1140,118 @@ mod tests {
         assert_eq!(error.stage, NamedLifecycleStage::BeforeDispatch);
         assert!(!cache.path().join("named_browser_profiles").exists());
         assert!(list_named_sessions(&owner).unwrap().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn named_cleanup_closes_cached_owned_browser_before_child_exit() {
+        use futures::{SinkExt, StreamExt};
+        use std::os::unix::fs::PermissionsExt;
+        use serde_json::{json, Value};
+        let (_gcx, owner, cache) = owner().await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let control = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!(
+            "ws://{}/devtools/browser/fixture",
+            listener.local_addr().unwrap()
+        );
+        let marker = cache.path().join("voluntary");
+        let executable = cache.path().join("owned-fixture");
+        std::fs::write(&executable, format!(
+            "#!/usr/bin/env python3\nimport socket,sys\ns=socket.create_connection(('127.0.0.1',{}))\nprint('DevTools listening on {}',file=sys.stderr,flush=True)\ns.recv(1)\nopen({:?},'w').write('exited')\n",
+            control.local_addr().unwrap().port(), url, marker.to_str().unwrap()
+        )).unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let server = tokio::spawn(async move {
+            let mut handlers = Vec::new();
+            let control = Arc::new(control);
+            for _ in 0..3 {
+                let (stream, _) = listener.accept().await.unwrap();
+                let control = control.clone();
+                handlers.push(tokio::spawn(async move {
+                    let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+                    while let Some(Ok(message)) = ws.next().await {
+                        if !message.is_text() {
+                            break;
+                        }
+                        let call: Value = serde_json::from_str(message.to_text().unwrap()).unwrap();
+                        match call["method"].as_str().unwrap() {
+                            "Target.setDiscoverTargets" => {
+                                ws.send(tokio_tungstenite::tungstenite::Message::text(
+                                    json!({"id":call["id"],"result":{}}).to_string(),
+                                ))
+                                .await
+                                .unwrap();
+                            }
+                            "Browser.close" => {
+                                use tokio::io::AsyncWriteExt;
+                                let (mut child, _) = control.accept().await.unwrap();
+                                child.write_all(b"x").await.unwrap();
+                                ws.send(tokio_tungstenite::tungstenite::Message::text(
+                                    json!({"id":call["id"],"result":{}}).to_string(),
+                                ))
+                                .await
+                                .unwrap();
+                                break;
+                            }
+                            other => panic!("unexpected fixture CDP method {other}"),
+                        }
+                    }
+                }));
+            }
+            for handler in handlers {
+                handler.await.unwrap();
+            }
+        });
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let info = create_named_session_with_launch(
+            owner.clone(),
+            "ordered",
+            BrowserLaunchOptions::default(),
+            deadline,
+            move |_, options| {
+                let mut runtime = BrowserRuntime::connect(url, options)?;
+                runtime.browser = headless_chrome::Browser::new(headless_chrome::LaunchOptions {
+                    path: Some(executable),
+                    port: Some(1),
+                    ..Default::default()
+                })
+                .map_err(|error| error.to_string())?;
+                Ok(runtime)
+            },
+        )
+        .await
+        .unwrap();
+        let resolved = resolve_named_session(&owner, "ordered", &info.session_id).unwrap();
+        let runtime_lock = resolved.runtime.lock().await;
+        let browser = runtime_lock.browser.clone();
+        let child = browser.owned_process().unwrap();
+        let tabs_lock = browser.get_tabs().lock().unwrap();
+        let closed = close_named_session(&owner, "ordered", &info.session_id, deadline)
+            .await
+            .unwrap();
+        assert!(closed.process_exited);
+        assert!(
+            !closed.targets_complete,
+            "contended inventory is not complete"
+        );
+        assert!(
+            marker.exists(),
+            "immediate root kill bypassed voluntary exit"
+        );
+        assert!(!resolved.ownership.is_current_generation());
+        assert!(child.wait_before(deadline).unwrap());
+        assert_eq!(closed.profile_disposition, "removed");
+        assert!(list_named_sessions(&owner).unwrap().is_empty());
+        drop(tabs_lock);
+        drop(runtime_lock);
+        drop(resolved);
+        drop(browser);
+        tokio::time::timeout(Duration::from_secs(3), server)
+            .await
+            .unwrap()
+            .unwrap();
+        reap_workers(&owner.gcx, true).await;
     }
 
     /// Explicit opt-in: this test launches only its own two local Chrome children.

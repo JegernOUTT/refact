@@ -86,7 +86,7 @@ pub struct BrowserInner {
     transport: Arc<Transport>,
     tabs: Arc<Mutex<Vec<Arc<Tab>>>>,
     loop_shutdown_tx: mpsc::SyncSender<()>,
-    close_on_drop: bool,
+    close_on_drop: std::sync::atomic::AtomicBool,
 }
 
 impl Browser {
@@ -170,7 +170,7 @@ impl Browser {
                 tabs,
                 transport,
                 loop_shutdown_tx: shutdown_tx,
-                close_on_drop,
+                close_on_drop: std::sync::atomic::AtomicBool::new(close_on_drop),
             }),
             default_timeout: Arc::new(RwLock::new(Duration::from_secs(20))),
         };
@@ -217,6 +217,32 @@ impl Browser {
             .process
             .as_ref()
             .map(process::Process::owned_process)
+    }
+
+    pub fn close_owned_before(&self, deadline: std::time::Instant) -> Result<()> {
+        anyhow::ensure!(
+            self.inner.process.is_some(),
+            "Browser does not own its original child"
+        );
+        if std::time::Instant::now() >= deadline {
+            return Err(transport::CommandTimeout {
+                method: "Browser.close",
+                effect_unknown: false,
+            }
+            .into());
+        }
+        anyhow::ensure!(
+            self.inner
+                .close_on_drop
+                .swap(false, std::sync::atomic::Ordering::SeqCst),
+            "Owned browser close already attempted"
+        );
+        self.inner.transport.call_method_with_deadline(
+            cdp::Browser::Close(None),
+            transport::MethodDestination::Browser,
+            deadline,
+        )?;
+        Ok(())
     }
 
     pub fn get_ws_url(&self) -> String {
@@ -518,7 +544,7 @@ impl Browser {
 impl Drop for BrowserInner {
     fn drop(&mut self) {
         info!("Dropping browser");
-        if self.close_on_drop {
+        if self.close_on_drop.load(std::sync::atomic::Ordering::SeqCst) {
             self.transport
                 .call_method_on_browser(cdp::Browser::Close(None))
                 .ok();
@@ -606,6 +632,145 @@ pub fn default_executable() -> Result<std::path::PathBuf, String> {
 #[cfg(test)]
 mod test {
     use super::Browser;
+
+    #[cfg(unix)]
+    fn owned_close_fixture(ack: bool, exit: bool) {
+        use std::io::Write;
+        use std::net::TcpListener;
+        use std::os::unix::fs::PermissionsExt;
+        use std::time::{Duration, Instant};
+        use serde_json::{Value, json};
+        let directory = tempfile::tempdir().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let control = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!(
+            "ws://{}/devtools/browser/fixture",
+            listener.local_addr().unwrap()
+        );
+        let marker = directory.path().join("voluntary");
+        let executable = directory.path().join("owned-fixture");
+        std::fs::write(&executable, format!(
+            "#!/usr/bin/env python3\nimport socket,sys\ns=socket.create_connection(('127.0.0.1',{}))\nprint('DevTools listening on {}',file=sys.stderr,flush=True)\ns.recv(1)\nopen({:?},'w').write('exited')\n",
+            control.local_addr().unwrap().port(), url, marker.to_str().unwrap()
+        )).unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let (release, wait) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            let mut ws = tungstenite::accept(stream).unwrap();
+            let call: Value = serde_json::from_str(ws.read().unwrap().to_text().unwrap()).unwrap();
+            assert_eq!(call["method"], "Target.setDiscoverTargets");
+            ws.send(tungstenite::Message::text(
+                json!({"id":call["id"],"result":{}}).to_string(),
+            ))
+            .unwrap();
+            let call: Value = serde_json::from_str(ws.read().unwrap().to_text().unwrap()).unwrap();
+            assert_eq!(call["method"], "Browser.close");
+            if ack {
+                ws.send(tungstenite::Message::text(
+                    json!({"id":call["id"],"result":{}}).to_string(),
+                ))
+                .unwrap();
+            }
+            let (mut child_control, _) = control.accept().unwrap();
+            if exit {
+                child_control.write_all(b"x").unwrap();
+            }
+            if !ack {
+                drop(ws);
+                let _ = wait.recv_timeout(Duration::from_secs(3));
+            } else {
+                let _ = wait.recv_timeout(Duration::from_secs(3));
+                assert!(ws.read().is_err(), "owned close was replayed");
+            }
+        });
+        let browser = Browser::new(super::LaunchOptions {
+            path: Some(executable),
+            port: Some(1),
+            ..Default::default()
+        })
+        .unwrap();
+        let child = browser.owned_process().unwrap();
+        let expired = browser.close_owned_before(Instant::now()).unwrap_err();
+        assert!(
+            !expired
+                .downcast_ref::<super::transport::CommandTimeout>()
+                .unwrap()
+                .effect_unknown
+        );
+        let outcome = browser.close_owned_before(Instant::now() + Duration::from_millis(300));
+        assert_eq!(outcome.is_ok(), ack);
+        assert!(
+            browser
+                .clone()
+                .close_owned_before(Instant::now() + Duration::from_secs(1))
+                .is_err()
+        );
+        assert_eq!(
+            child
+                .wait_before(Instant::now() + Duration::from_millis(300))
+                .unwrap(),
+            exit
+        );
+        assert_eq!(marker.exists(), exit);
+        drop(browser);
+        release.send(()).ok();
+        server.join().unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn owned_close_precedes_voluntary_exit() {
+        owned_close_fixture(true, true);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn owned_close_ack_is_not_exit_proof() {
+        owned_close_fixture(true, false);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn owned_close_disconnect_is_not_exit_proof() {
+        owned_close_fixture(false, false);
+    }
+
+    #[test]
+    fn external_browser_refuses_owned_close_without_dispatch() {
+        use serde_json::{Value, json};
+        use std::time::{Duration, Instant};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!(
+            "ws://{}/devtools/browser/external",
+            listener.local_addr().unwrap()
+        );
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut ws = tungstenite::accept(stream).unwrap();
+            let call: Value = serde_json::from_str(ws.read().unwrap().to_text().unwrap()).unwrap();
+            assert_eq!(call["method"], "Target.setDiscoverTargets");
+            ws.send(tungstenite::Message::text(
+                json!({"id":call["id"],"result":{}}).to_string(),
+            ))
+            .unwrap();
+            assert!(ws.read().is_err(), "external browser received owned close");
+        });
+        let browser = Browser::connect(url).unwrap();
+        assert!(
+            browser
+                .close_owned_before(Instant::now() + Duration::from_secs(1))
+                .is_err()
+        );
+        drop(browser);
+        server.join().unwrap();
+    }
 
     fn is_sync<T>()
     where
