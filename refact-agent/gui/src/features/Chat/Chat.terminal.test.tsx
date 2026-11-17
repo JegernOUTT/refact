@@ -42,6 +42,7 @@ function setup(
   host: "web" | "vscode" = "web",
   terminalPanel = true,
   filesPanel = true,
+  dockOpen = true,
 ) {
   const defaults = setUpStore().getState();
   const store = setUpStore({
@@ -57,7 +58,7 @@ function setup(
       },
     },
   });
-  store.dispatch(setDockOpen(true));
+  store.dispatch(setDockOpen(dockOpen));
   const view = render(
     <Chat host={host} tabbed={false} backFromChat={() => undefined} />,
     { store },
@@ -66,23 +67,26 @@ function setup(
 }
 
 describe("Chat terminal sidebar independence", () => {
-  it("keeps the same terminal mounted when the narrow sidebar closes", () => {
-    const { store } = setup();
-    const terminal = screen.getByTestId("terminal-workbench");
-    act(() => {
-      store.dispatch(setDockOpen(false));
-    });
-    expect(screen.getByTestId("terminal-workbench")).toBe(terminal);
-  });
+  it.each([
+    ["narrow", true],
+    ["desktop", false],
+  ])(
+    "keeps the same terminal mounted when the %s sidebar closes",
+    (_viewport, narrow) => {
+      viewport.narrow = narrow;
+      const { store } = setup();
+      const terminal = screen.getByTestId("terminal-workbench");
+      act(() => {
+        store.dispatch(setDockOpen(false));
+      });
+      expect(screen.getByTestId("terminal-workbench")).toBe(terminal);
+    },
+  );
 
-  it("preserves desktop closed-dock terminal hiding", () => {
+  it("shows the desktop terminal when the sidebar starts closed", () => {
     viewport.narrow = false;
-    const { store } = setup();
+    setup("web", true, true, false);
     expect(screen.getByTestId("terminal-workbench")).toBeInTheDocument();
-    act(() => {
-      store.dispatch(setDockOpen(false));
-    });
-    expect(screen.queryByTestId("terminal-workbench")).not.toBeInTheDocument();
   });
 
   it("preserves desktop terminal-only availability with no sidebar", () => {

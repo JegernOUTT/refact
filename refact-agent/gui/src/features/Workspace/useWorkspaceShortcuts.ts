@@ -3,14 +3,10 @@ import { useEffect } from "react";
 import { useAppDispatch, useAppSelector } from "../../hooks";
 import { selectCapabilities, selectHost } from "../Config/configSlice";
 import { openGitLog } from "./GitPanel/gitPanelSlice";
-import {
-  setTerminalWorkbenchOpen,
-  toggleTerminalWorkbench,
-} from "./TerminalPanel/terminalSlice";
+import { toggleTerminalWorkbench } from "./TerminalPanel/terminalSlice";
 import {
   selectFocusedWorkspaceChatId,
   selectPanelsForced,
-  selectWorkspaceDock,
   setDockOpen,
   setDockSection,
   toggleDock,
@@ -49,14 +45,12 @@ export function useWorkspaceShortcuts() {
   const host = useAppSelector(selectHost);
   const capabilities = useAppSelector(selectCapabilities);
   const panelsForced = useAppSelector(selectPanelsForced);
-  const dock = useAppSelector(selectWorkspaceDock);
   const focusedChatId = useAppSelector(selectFocusedWorkspaceChatId);
 
   useEffect(() => {
     if (host !== "web") return;
 
     const {
-      dock: dockAvailable,
       files: filesAvailable,
       git: gitAvailable,
       activity: activityAvailable,
@@ -93,14 +87,7 @@ export function useWorkspaceShortcuts() {
       }
       if (key === "j" && terminalAvailable && focusedChatId) {
         event.preventDefault();
-        if (dockAvailable && !dock.open) {
-          dispatch(setDockOpen(true));
-          dispatch(
-            setTerminalWorkbenchOpen({ chatId: focusedChatId, open: true }),
-          );
-        } else {
-          dispatch(toggleTerminalWorkbench({ chatId: focusedChatId }));
-        }
+        dispatch(toggleTerminalWorkbench({ chatId: focusedChatId }));
         return;
       }
 
@@ -125,7 +112,7 @@ export function useWorkspaceShortcuts() {
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [capabilities, dispatch, dock.open, focusedChatId, host, panelsForced]);
+  }, [capabilities, dispatch, focusedChatId, host, panelsForced]);
 }
 
 /** Alt+9 (JetBrains "Git" tool window). Uses `code` so macOS Option works. */

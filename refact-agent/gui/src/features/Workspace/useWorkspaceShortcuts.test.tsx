@@ -36,16 +36,19 @@ describe("useWorkspaceShortcuts", () => {
       section: "python",
     });
   });
-  it("opens the dock and current chat terminal when the dock is closed", () => {
+  it("toggles the current chat terminal without opening a closed dock", () => {
     const { store, rerender } = renderShortcuts();
     store.dispatch(setTerminalWorkbenchOpen({ chatId: "chat-a", open: true }));
     store.dispatch(setDockOpen(false));
     rerender();
 
     fireEvent.keyDown(window, { key: "j", ctrlKey: true });
+    expect(store.getState().terminal.workbenchOpenByChat["chat-a"]).toBe(false);
+    expect(store.getState().workspace.dock?.open).toBe(false);
 
-    expect(store.getState().workspace.dock?.open).toBe(true);
+    fireEvent.keyDown(window, { key: "j", metaKey: true });
     expect(store.getState().terminal.workbenchOpenByChat["chat-a"]).toBe(true);
+    expect(store.getState().workspace.dock?.open).toBe(false);
   });
 
   it("toggles the current chat terminal when the dock is already open", () => {

@@ -34,14 +34,9 @@ import {
 } from "../../features/Config/configSlice";
 import { TerminalPanel } from "../../features/Workspace/TerminalPanel";
 import { resolveWorkspaceDockAvailability } from "../../features/Workspace/workspaceAvailability";
-import {
-  selectPanelsForced,
-  selectWorkspaceDock,
-} from "../../features/Workspace/workspaceSlice";
+import { selectPanelsForced } from "../../features/Workspace/workspaceSlice";
 import { useBottomDockClearance } from "./useBottomDockClearance";
 import { useComposerActivity } from "../ChatForm/useComposerActivity";
-import { useMediaQuery } from "../ui";
-import { WORKSPACE_NARROW_QUERY } from "../../features/Workspace/workspaceBreakpoints";
 
 export type ChatProps = {
   host: Config["host"];
@@ -83,17 +78,12 @@ export const Chat: React.FC<ChatProps> = ({
   const host = useAppSelector(selectHost);
   const capabilities = useAppSelector(selectCapabilities);
   const panelsForced = useAppSelector(selectPanelsForced);
-  const workspaceDock = useAppSelector(selectWorkspaceDock);
-  const isNarrow = useMediaQuery(WORKSPACE_NARROW_QUERY);
   const workspaceAvailability = resolveWorkspaceDockAvailability(
     host,
     capabilities,
     panelsForced,
   );
-  const showTerminalWorkbench =
-    !isBuddyChat &&
-    workspaceAvailability.terminal &&
-    (!workspaceAvailability.dock || workspaceDock.open || isNarrow);
+  const showTerminalWorkbench = !isBuddyChat && workspaceAvailability.terminal;
 
   const { submit, abort, retryFromIndex, regenerate } = useChatActions(chatId);
 
