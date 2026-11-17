@@ -90,8 +90,9 @@ provides a map of text files for tests.
 `worker::run_worker(reader, writer, os)` sends `Ready` first and uses stdout only for
 protocol traffic. The standalone `refact-python-worker` binary calls
 `run_worker_stdio`. Production engine integration self-execs its executable
-with `--python-worker`; `src/main.rs` detects that argument before initializing
-engine services and dispatches to `run_worker_stdio` with HostFs.
+with `--python-worker`; both engine binaries (`refact-lsp` and `refact`) detect
+that argument in `self_exec::run_if_requested` before initializing engine
+services and dispatch to `run_worker_stdio` with HostFs.
 
 Every frame is a little-endian u32 JSON byte length followed by exactly that many
 UTF-8 JSON bytes, capped at 64 MiB before allocation. Serde's externally tagged enum

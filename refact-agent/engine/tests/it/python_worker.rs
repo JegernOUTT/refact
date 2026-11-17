@@ -47,12 +47,11 @@ async fn evaluate(client: &mut KernelClient, run_id: &str, code: &str) -> Value 
     }
 }
 
-#[tokio::test]
-async fn python_worker_self_exec_runs_code_and_host_filesystem_and_is_killed() {
+async fn assert_self_exec_worker_runs_code_and_host_filesystem_and_is_killed(program: &str) {
     let dir = tempfile::tempdir().unwrap();
     let mut client = KernelClient::spawn(
         WorkerCommand {
-            program: env!("CARGO_BIN_EXE_refact-lsp").into(),
+            program: program.into(),
             args: vec!["--python-worker".into()],
             env: HashMap::new(),
             cwd: Some(dir.path().to_path_buf()),
@@ -64,10 +63,12 @@ async fn python_worker_self_exec_runs_code_and_host_filesystem_and_is_killed() {
     )
     .unwrap();
     assert!(client.pid().is_some());
-    assert!(matches!(
-        next_event(&mut client).await,
-        ClientEvent::Kernel(KernelEvent::Ready { .. })
-    ));
+    match next_event(&mut client).await {
+        ClientEvent::Kernel(KernelEvent::Ready {
+            ..
+        }) => {}
+        event => panic!("{program} --python-worker did not start the worker: {event:?}"),
+    }
     client
         .send(KernelCommand::Configure {
             project_root: dir.path().to_path_buf(),
@@ -99,4 +100,20 @@ async fn python_worker_self_exec_runs_code_and_host_filesystem_and_is_killed() {
         next_event(&mut client).await,
         ClientEvent::Exited { .. }
     ));
+}
+
+#[tokio::test]
+async fn python_worker_self_exec_runs_code_and_host_filesystem_and_is_killed() {
+    assert_self_exec_worker_runs_code_and_host_filesystem_and_is_killed(env!(
+        "CARGO_BIN_EXE_refact-lsp"
+    ))
+    .await;
+}
+
+#[tokio::test]
+async fn python_worker_self_exec_through_refact_cli_runs_code_and_is_killed() {
+    assert_self_exec_worker_runs_code_and_host_filesystem_and_is_killed(env!(
+        "CARGO_BIN_EXE_refact"
+    ))
+    .await;
 }

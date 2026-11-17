@@ -435,7 +435,7 @@ impl SessionLease {
                 WorkerBackend::Process => KernelClient::spawn(
                     WorkerCommand {
                         program: std::env::current_exe().map_err(|e| e.to_string())?,
-                        args: vec!["--python-worker".into()],
+                        args: vec![crate::self_exec::PYTHON_WORKER_ARG.into()],
                         env: worker_env(),
                         cwd: Some(root),
                     },

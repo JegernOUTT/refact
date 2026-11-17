@@ -93,6 +93,7 @@ pub mod runtime_config;
 pub mod scheduler;
 pub mod scratchpad_abstract;
 pub mod scratchpads;
+pub mod self_exec;
 pub mod self_update;
 pub mod subchat;
 #[cfg(test)]
