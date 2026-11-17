@@ -1323,6 +1323,430 @@ mod tests {
     use crate::types::{ExecProcessFilter, ExecSandboxMode, ExecSandboxSpec, ExecStatusKind};
     use refact_sandbox::Enforcement;
 
+    fn powershell_experiment_encode(script: &str) -> String {
+        const ALPHABET: &[u8; 64] =
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let bytes = script
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>();
+        let mut encoded = String::new();
+        for chunk in bytes.chunks(3) {
+            let first = chunk[0];
+            let second = chunk.get(1).copied().unwrap_or(0);
+            let third = chunk.get(2).copied().unwrap_or(0);
+            encoded.push(ALPHABET[(first >> 2) as usize] as char);
+            encoded.push(ALPHABET[(((first & 3) << 4) | (second >> 4)) as usize] as char);
+            encoded.push(if chunk.len() > 1 {
+                ALPHABET[(((second & 15) << 2) | (third >> 6)) as usize] as char
+            } else {
+                '='
+            });
+            encoded.push(if chunk.len() > 2 {
+                ALPHABET[(third & 63) as usize] as char
+            } else {
+                '='
+            });
+        }
+        encoded
+    }
+
+    fn powershell_experiment_command(script: &str, manifest: &str) -> String {
+        let encoded = powershell_experiment_encode(script);
+        format!(
+            "try {{ Microsoft.PowerShell.Core\\Import-Module {manifest} -ErrorAction Stop }} catch {{ [Console]::Error.WriteLine($_.ToString()); exit 1 }}\n. ([scriptblock]::Create([Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('{encoded}'))))"
+        )
+    }
+
+    const POWERSHELL_EXPERIMENT_MANIFEST: &str = "([IO.Path]::Combine($PSHOME,'Modules','Microsoft.PowerShell.Utility','Microsoft.PowerShell.Utility.psd1'))";
+
+    fn powershell_experiment_request(script: String, tty: bool) -> ExecSpawnRequest {
+        let mut request = ExecSpawnRequest::foreground(script)
+            .with_tty(tty)
+            .with_timeout(Duration::from_secs(10));
+        request.return_after_monitor_attach = true;
+        request
+    }
+
+    #[test]
+    fn powershell_experiment_codec_and_initializer_shape() {
+        for (script, expected) in [
+            ("", ""),
+            ("A", "QQA="),
+            ("AB", "QQBCAA=="),
+            ("ABC", "QQBCAEMA"),
+            ("β", "sgM="),
+            ("😀", "PdgA3g=="),
+            ("'\n", "JwAKAA=="),
+        ] {
+            assert_eq!(powershell_experiment_encode(script), expected);
+        }
+        let script = "param($x='β')\n$x # trailing comment";
+        let wrapped = powershell_experiment_command(script, POWERSHELL_EXPERIMENT_MANIFEST);
+        assert!(wrapped.starts_with(&format!(
+            "try {{ Microsoft.PowerShell.Core\\Import-Module {POWERSHELL_EXPERIMENT_MANIFEST} -ErrorAction Stop }} catch {{ [Console]::Error.WriteLine($_.ToString()); exit 1 }}\n. ([scriptblock]::Create("
+        )));
+        assert_eq!(wrapped.matches("FromBase64String(").count(), 1);
+        assert!(wrapped.contains(&powershell_experiment_encode(script)));
+        assert!(!wrapped.contains(script));
+        assert!(!wrapped.contains("-PassThru"));
+        assert!(!wrapped.contains("-NoProfile"));
+        assert!(!wrapped.contains("-NonInteractive"));
+    }
+
+    #[test]
+    fn powershell_experiment_does_not_change_production_launch() {
+        let script = "param($x='β')\n$x # trailing comment";
+        let request = ExecSpawnRequest::foreground(script);
+        let (program, args) = launch_parts(&request, None).unwrap();
+        let (shell, shell_arg) = shell_parts();
+        assert_eq!(program, shell);
+        assert_eq!(args, [shell_arg, script]);
+        let argv = vec!["selected-program".into(), "space ' quote β".into()];
+        let request = request.with_argv(argv.clone());
+        assert_eq!(
+            launch_parts(&request, None).unwrap(),
+            (argv[0].clone(), argv[1..].to_vec())
+        );
+        for tty in [false, true] {
+            let request = powershell_experiment_request(script.into(), tty);
+            assert_eq!(request.mode, ExecMode::Foreground);
+            assert_eq!(request.timeout, Some(Duration::from_secs(10)));
+            assert_eq!(request.tty, tty);
+            assert!(request.return_after_monitor_attach);
+            assert_eq!(launch_parts(&request, None).unwrap().1, [shell_arg, script]);
+        }
+    }
+
+    #[cfg(windows)]
+    async fn powershell_experiment_run(
+        script: String,
+        tty: bool,
+    ) -> Result<(ExecStatus, String, String), String> {
+        let registry = ExecRegistry::new();
+        let launched = registry
+            .spawn(powershell_experiment_request(script, tty))
+            .await;
+        let process_id = launched
+            .as_ref()
+            .ok()
+            .map(|result| result.snapshot.meta.process_id.clone());
+        let captured = match launched {
+            Ok(result) => {
+                tokio::time::timeout(Duration::from_secs(30), async {
+                    let snapshot = registry.wait(&result.snapshot.meta.process_id).await?;
+                    let read = registry.read(&snapshot.meta.process_id, 0, None).await;
+                    Ok::<_, String>((snapshot, read))
+                })
+                .await
+            }
+            Err(error) => Ok(Err(error)),
+        };
+        let joined = if matches!(&captured, Ok(Ok(_))) {
+            Some(
+                tokio::time::timeout(Duration::from_secs(10), registry.join_monitors_for_test())
+                    .await,
+            )
+        } else {
+            None
+        };
+        let cleanup = tokio::time::timeout(
+            Duration::from_secs(30),
+            registry.cleanup_shutdown(Duration::from_secs(10)),
+        )
+        .await;
+        let joined = match joined {
+            Some(joined) => joined,
+            None => {
+                tokio::time::timeout(Duration::from_secs(10), registry.join_monitors_for_test())
+                    .await
+            }
+        };
+        let removed = if let Some(process_id) = &process_id {
+            Some(tokio::time::timeout(Duration::from_secs(10), registry.remove(process_id)).await)
+        } else {
+            None
+        };
+        let cleanup = cleanup.map_err(|error| format!("cleanup timed out: {error}"))?;
+        joined.map_err(|error| format!("monitor join timed out: {error}"))?;
+        if let Some(removed) = removed {
+            removed.map_err(|error| format!("record removal timed out: {error}"))??;
+        }
+        if cleanup.runtime_failed_count != 0
+            || cleanup.runtime_timed_out_count != 0
+            || cleanup.child_failed_count != 0
+            || cleanup.child_timed_out_count != 0
+            || cleanup.monitor_aborted_count != 0
+        {
+            return Err(format!("cleanup incomplete: {cleanup:?}"));
+        }
+        let (snapshot, read) =
+            captured.map_err(|error| format!("capture timed out: {error}"))??;
+        if !read.found
+            || read.is_truncated
+            || read.dropped_chunks != 0
+            || read.dropped_bytes != 0
+            || read.truncated_chunks != 0
+            || read.next_seq != read.latest_seq
+        {
+            return Err(format!("incomplete transcript: {read:?}"));
+        }
+        let mut output = String::new();
+        let mut error = String::new();
+        for chunk in read.chunks {
+            if chunk.stream == ExecOutputStream::Stderr {
+                error.push_str(&chunk.text);
+            } else {
+                output.push_str(&chunk.text);
+            }
+        }
+        Ok((snapshot.status, output, error))
+    }
+
+    #[cfg(windows)]
+    async fn powershell_experiment_native_case(case: usize, tty: bool) {
+        let cases = [
+            (
+                "param([string]$value='parameter')\n[Console]::Out.Write($value)",
+                "parameter",
+                "",
+                0,
+            ),
+            (
+                "using namespace System.Text\n[Console]::Out.Write([StringBuilder]::new('using').ToString())",
+                "using",
+                "",
+                0,
+            ),
+            (
+                "data value { 'data' }; [Console]::Out.Write($value)",
+                "data",
+                "",
+                0,
+            ),
+            (
+                "[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false)\n[Console]::Out.Write(\"single' double`\" β 😀`nnext\") # trailing comment",
+                "single' double\" β 😀\nnext",
+                "",
+                0,
+            ),
+            (
+                "[Console]::Out.Write('out'); [Console]::Error.Write('err'); exit 17",
+                "out",
+                "err",
+                17,
+            ),
+            (
+                "[Console]::Out.Write(('args={0};path={1};root={2};success={3};last={4}' -f $args.Count,$PSCommandPath,$PSScriptRoot,$?,$LASTEXITCODE))",
+                "args=0;path=;root=;success=True;last=",
+                "",
+                0,
+            ),
+            (
+                "$value='scope'; function Read-ExperimentScope { $value }; [Console]::Out.Write((Read-ExperimentScope))",
+                "scope",
+                "",
+                0,
+            ),
+            ("[Console]::Out.Write(('invocation={0}' -f $MyInvocation.InvocationName))", "invocation=", "", 0),
+        ];
+        let (script, stdout, stderr, exit) = cases[case];
+        let expected = (
+            ExecStatus::Exited {
+                exit_code: Some(exit),
+            },
+            if tty {
+                format!("{stdout}{stderr}")
+            } else {
+                stdout.into()
+            },
+            if tty { String::new() } else { stderr.into() },
+        );
+        let direct = powershell_experiment_run(script.into(), tty).await;
+        let wrapped = powershell_experiment_run(
+            powershell_experiment_command(script, POWERSHELL_EXPERIMENT_MANIFEST),
+            tty,
+        )
+        .await;
+        assert_eq!(
+            direct.as_ref().unwrap(),
+            &expected,
+            "direct tty={tty} script={script}; wrapped={wrapped:?}"
+        );
+        assert_eq!(
+            wrapped.unwrap(),
+            expected,
+            "wrapped tty={tty} script={script}"
+        );
+    }
+
+    #[cfg(windows)]
+    macro_rules! powershell_experiment_cases {
+        ($(($pipe:ident, $pty:ident, $case:expr)),* $(,)?) => {
+            $(
+                #[tokio::test]
+                async fn $pipe() { powershell_experiment_native_case($case, false).await; }
+                #[tokio::test]
+                async fn $pty() { powershell_experiment_native_case($case, true).await; }
+            )*
+        };
+    }
+
+    #[cfg(windows)]
+    powershell_experiment_cases!(
+        (
+            powershell_experiment_param_pipe,
+            powershell_experiment_param_pty,
+            0
+        ),
+        (
+            powershell_experiment_using_pipe,
+            powershell_experiment_using_pty,
+            1
+        ),
+        (
+            powershell_experiment_data_pipe,
+            powershell_experiment_data_pty,
+            2
+        ),
+        (
+            powershell_experiment_unicode_pipe,
+            powershell_experiment_unicode_pty,
+            3
+        ),
+        (
+            powershell_experiment_exit_pipe,
+            powershell_experiment_exit_pty,
+            4
+        ),
+        (
+            powershell_experiment_args_pipe,
+            powershell_experiment_args_pty,
+            5
+        ),
+        (
+            powershell_experiment_scope_pipe,
+            powershell_experiment_scope_pty,
+            6
+        ),
+        (
+            powershell_experiment_myinvocation_pipe,
+            powershell_experiment_myinvocation_pty,
+            7
+        ),
+    );
+
+    #[cfg(windows)]
+    async fn powershell_experiment_native_effect(tty: bool, mode: usize) {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp
+            .path()
+            .join("once.txt")
+            .to_string_lossy()
+            .replace('\'', "''");
+        let script =
+            format!("[IO.File]::AppendAllText('{path}','once'); [Console]::Out.Write('once')");
+        if mode < 2 {
+            let command = if mode == 1 {
+                powershell_experiment_command(&script, POWERSHELL_EXPERIMENT_MANIFEST)
+            } else {
+                script
+            };
+            let result = powershell_experiment_run(command, tty).await.unwrap();
+            assert_eq!(
+                result,
+                (
+                    ExecStatus::Exited {
+                        exit_code: Some(0)
+                    },
+                    "once".into(),
+                    String::new()
+                )
+            );
+            assert_eq!(
+                std::fs::read_to_string(temp.path().join("once.txt")).unwrap(),
+                "once"
+            );
+        } else {
+            let invalid_manifest = temp
+                .path()
+                .join("missing.psd1")
+                .to_string_lossy()
+                .replace('\'', "''");
+            let failed = powershell_experiment_run(
+                powershell_experiment_command(&script, &format!("'{invalid_manifest}'")),
+                tty,
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                failed.0,
+                ExecStatus::Exited {
+                    exit_code: Some(1)
+                }
+            );
+            assert!(format!("{}{}", failed.1, failed.2).contains("missing.psd1"));
+            assert!(!temp.path().join("once.txt").exists());
+        }
+    }
+
+    #[cfg(windows)]
+    async fn powershell_experiment_native_throw(tty: bool) {
+        let script = "[Console]::Out.Write('before'); throw 'experiment-user-failure'";
+        let direct = powershell_experiment_run(script.into(), tty).await;
+        let wrapped = powershell_experiment_run(
+            powershell_experiment_command(script, POWERSHELL_EXPERIMENT_MANIFEST),
+            tty,
+        )
+        .await;
+        let direct = direct.unwrap();
+        let wrapped = wrapped.unwrap();
+        for result in [&direct, &wrapped] {
+            assert_eq!(
+                result.0,
+                ExecStatus::Exited {
+                    exit_code: Some(1)
+                }
+            );
+            assert!(result.1.contains("before"));
+            assert!(format!("{}{}", result.1, result.2).contains("experiment-user-failure"));
+        }
+        assert_eq!(
+            wrapped, direct,
+            "full user diagnostic must remain unchanged tty={tty}"
+        );
+    }
+
+    #[cfg(windows)]
+    macro_rules! powershell_experiment_effects {
+        ($(($name:ident, $tty:expr, $mode:expr)),* $(,)?) => {
+            $(#[tokio::test]
+            async fn $name() { powershell_experiment_native_effect($tty, $mode).await; })*
+        };
+    }
+
+    #[cfg(windows)]
+    powershell_experiment_effects!(
+        (powershell_experiment_once_direct_pipe, false, 0),
+        (powershell_experiment_once_direct_pty, true, 0),
+        (powershell_experiment_once_wrapped_pipe, false, 1),
+        (powershell_experiment_once_wrapped_pty, true, 1),
+        (powershell_experiment_fail_stop_pipe, false, 2),
+        (powershell_experiment_fail_stop_pty, true, 2),
+    );
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn powershell_experiment_throw_pipe() {
+        powershell_experiment_native_throw(false).await;
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn powershell_experiment_throw_pty() {
+        powershell_experiment_native_throw(true).await;
+    }
+
     struct UnusableSandboxProvider;
 
     impl refact_sandbox::SandboxProvider for UnusableSandboxProvider {
