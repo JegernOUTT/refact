@@ -135,6 +135,11 @@ impl CronClock {
     }
 
     async fn tick_project(&mut self, entry: ProjectEntry, now: u64) {
+        if matches!(tokio::fs::try_exists(&entry.root).await, Ok(false)) {
+            self.cache.remove(&entry.id);
+            self.state.set_cron_pending(&entry.id, None).await;
+            return;
+        }
         let cache = self.cache.entry(entry.id.clone()).or_default();
         if now < cache.observer_retry_ms {
             return;
@@ -926,6 +931,48 @@ mod tests {
             2
         );
         assert_eq!(state.cron_pending(&entry.id).await, None);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn vanished_project_root_skips_observation_until_restored() {
+        let dir = crate::test_paths::tempdir();
+        let root = dir.path().join("project");
+        tokio::fs::create_dir(&root).await.unwrap();
+        let mut config = DaemonConfig::default();
+        config.scheduler.enabled = false;
+        let state = DaemonState::new_with_daemon_dir(
+            config,
+            EventBus::new(dir.path().join("events.jsonl")),
+            None,
+            dir.path().join("daemon"),
+            0,
+        );
+        let entry = state.projects.write().await.open(root).await.unwrap();
+        let mut due = task("due", "0 0 1 1 *", 0);
+        due.recurring = false;
+        due.auto_expire_after_ms = 0;
+        write_tasks(&entry.root, &[due.clone()]).await;
+        let start = utc_ms(2026, 1, 1, 0, 0);
+        let mut clock = CronClock::new(state.clone());
+        clock.tick_at(start).await;
+        assert_eq!(state.cron_pending(&entry.id).await, Some(start));
+
+        tokio::fs::remove_dir_all(&entry.root).await.unwrap();
+        clock.tick_at(start + 1).await;
+        assert_eq!(state.cron_pending(&entry.id).await, None);
+        clock.tick_at(start + 1 + OBSERVER_RETRY_MS).await;
+        assert!(!state
+            .events
+            .snapshot()
+            .await
+            .iter()
+            .any(|event| event.kind == "automation_observer_error"));
+
+        write_tasks(&entry.root, &[due]).await;
+        let restored = start + 2 + OBSERVER_RETRY_MS;
+        clock.tick_at(restored).await;
+        assert_eq!(state.cron_pending(&entry.id).await, Some(restored));
     }
 
     #[cfg(unix)]
