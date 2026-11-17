@@ -5,6 +5,7 @@ import {
   hasUsableEngineEndpoint,
   type EngineApiConfig,
 } from "./apiUrl";
+import { isObjectLike } from "../../utils/isObjectLike";
 
 type BugReportApiState = {
   config: EngineApiConfig & { apiKey?: string | null };
@@ -76,25 +77,21 @@ export type BugReportBundleResponse = {
   files: BugReportBundleFile[];
 };
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}
-
 export function isBugReportContext(value: unknown): value is BugReportContext {
-  if (!isRecord(value)) return false;
+  if (!isObjectLike(value)) return false;
   return (
     typeof value.engine_version === "string" &&
     typeof value.os === "string" &&
     typeof value.bundle_default_dir === "string" &&
     Array.isArray(value.workspace_roots) &&
-    isRecord(value.log_paths)
+    isObjectLike(value.log_paths)
   );
 }
 
 export function isBugReportLogsResponse(
   value: unknown,
 ): value is BugReportLogsResponse {
-  if (!isRecord(value)) return false;
+  if (!isObjectLike(value)) return false;
   return (
     typeof value.source === "string" &&
     typeof value.path === "string" &&
@@ -108,12 +105,12 @@ export function isBugReportLogsResponse(
 export function isBugReportErrorsResponse(
   value: unknown,
 ): value is BugReportErrorsResponse {
-  if (!isRecord(value)) return false;
+  if (!isObjectLike(value)) return false;
   return (
     Array.isArray(value.errors) &&
     value.errors.every(
       (entry) =>
-        isRecord(entry) &&
+        isObjectLike(entry) &&
         typeof entry.source === "string" &&
         typeof entry.level === "string" &&
         typeof entry.message === "string" &&
@@ -126,14 +123,14 @@ export function isBugReportErrorsResponse(
 export function isBugReportBundleResponse(
   value: unknown,
 ): value is BugReportBundleResponse {
-  if (!isRecord(value)) return false;
+  if (!isObjectLike(value)) return false;
   return (
     typeof value.path === "string" &&
     typeof value.size_bytes === "number" &&
     Array.isArray(value.files) &&
     value.files.every(
       (file) =>
-        isRecord(file) &&
+        isObjectLike(file) &&
         typeof file.name === "string" &&
         typeof file.size_bytes === "number",
     )

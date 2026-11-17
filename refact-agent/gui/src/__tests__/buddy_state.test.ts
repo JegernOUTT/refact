@@ -13,11 +13,11 @@ import {
 } from "../features/Buddy/buddySlice";
 import { buddyApi } from "../services/refact/buddy";
 import type {
-  BuddyOpportunity,
   BuddyPulse,
   BuddyRuntimeEvent,
   BuddySnapshot,
 } from "../features/Buddy/types";
+import { makeSliceOpportunity as makeOpportunity } from "../features/Buddy/__tests__/buddyHomeFixtures";
 
 function makeSnapshot(overrides?: Partial<BuddySnapshot>): BuddySnapshot {
   return {
@@ -108,30 +108,6 @@ function makeSnapshot(overrides?: Partial<BuddySnapshot>): BuddySnapshot {
       },
     },
     enabled: true,
-    ...overrides,
-  };
-}
-
-function makeOpportunity(
-  overrides?: Partial<BuddyOpportunity>,
-): BuddyOpportunity {
-  return {
-    id: "opp-1",
-    kind: "diagnostic_investigation",
-    summary: "Investigate errors",
-    priority: "high",
-    confidence: 0.9,
-    fact_keys: [],
-    cooldown_key: "diagnostic:opp-1",
-    cooldown_secs: 1800,
-    status: "new",
-    proposed_actions: [],
-    humor: null,
-    humor_allowed: false,
-    related: { chat_ids: [], task_ids: [], memory_ids: [], config_paths: [] },
-    created_at: "2024-01-01T00:00:00Z",
-    expires_at: "2099-01-01T00:00:00Z",
-    resolved_at: null,
     ...overrides,
   };
 }

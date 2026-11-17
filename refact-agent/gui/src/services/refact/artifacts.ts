@@ -1,4 +1,5 @@
 import type { RootState } from "../../app/store";
+import { isRecord } from "../../utils/isRecord";
 import { buildApiUrlFromState } from "./apiUrl";
 import { filesApi } from "./files";
 
@@ -16,9 +17,6 @@ export type ArtifactResolveResponse = {
   bytes: number | null;
   modified_at_ms: number | null;
 };
-
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === "object" && value !== null && !Array.isArray(value);
 
 const isNullableCount = (value: unknown): value is number | null =>
   value === null ||

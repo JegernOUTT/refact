@@ -16,10 +16,7 @@ import {
   type McpImportResponse,
 } from "../../../services/refact/mcpMarketplace";
 import styles from "./MCPImportDialog.module.css";
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
+import { isRecord } from "../../../utils/isRecord";
 
 function isBareMcpServersMap(value: unknown): value is Record<string, unknown> {
   if (!isRecord(value) || "mcpServers" in value || "bundle" in value) {

@@ -12,6 +12,7 @@ import { DialogImage } from "../../DialogImage";
 import { Badge, Icon } from "../../ui";
 import { buildImageDataUrl } from "../../../utils/imageDataUrl";
 import styles from "./ArtifactsPanel.module.css";
+import { isRecord } from "../../../utils/isRecord";
 
 type DisplayDownload = Omit<BrowserDownloadInfo, "state"> & {
   state: BrowserDownloadInfo["state"] | "failed";
@@ -21,10 +22,6 @@ type DisplayPdf = BrowserPdfArtifact & { pageCount?: number };
 interface ArtifactsPanelProps {
   artifacts?: unknown;
   downloads?: unknown;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function isNonNegativeNumber(value: unknown): value is number {

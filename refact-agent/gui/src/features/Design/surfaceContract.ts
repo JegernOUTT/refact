@@ -1,3 +1,4 @@
+import { isRecord } from "../../utils/isRecord";
 export type DesignTheme = "light" | "dark";
 
 export type DesignElementSelection = {
@@ -53,9 +54,6 @@ export interface SurfaceRenderer<TState> {
   callTool(name: string, args: Record<string, unknown>): void;
   setState(state: TState): void;
 }
-
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === "object" && value !== null && !Array.isArray(value);
 
 const isFiniteNumber = (value: unknown): value is number =>
   typeof value === "number" && Number.isFinite(value);

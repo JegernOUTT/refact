@@ -280,11 +280,7 @@ export function BuddyPopover({
       startY: event.clientY,
       origin: geometryRef.current,
     };
-    try {
-      event.currentTarget.setPointerCapture(event.pointerId);
-    } catch {
-      drag.current = { ...drag.current };
-    }
+    event.currentTarget.setPointerCapture(event.pointerId);
     event.preventDefault();
   };
 
@@ -307,10 +303,8 @@ export function BuddyPopover({
     drag.current = null;
     intendedRef.current = geometryRef.current;
     writeStoredGeometry(storageKey, geometryRef.current);
-    try {
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
       event.currentTarget.releasePointerCapture(event.pointerId);
-    } catch {
-      return;
     }
   };
 

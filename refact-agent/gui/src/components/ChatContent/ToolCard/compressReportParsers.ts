@@ -1,3 +1,4 @@
+import { isRecord } from "../../../utils/isRecord";
 export interface CompressReportData {
   summary: string;
   meta: string;
@@ -33,10 +34,6 @@ interface ApplyResult {
   tool_outputs_dropped: number;
   project_info_dropped: number;
   dedup_context_files: number;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function isNumberRecord(value: unknown): value is Record<string, number> {

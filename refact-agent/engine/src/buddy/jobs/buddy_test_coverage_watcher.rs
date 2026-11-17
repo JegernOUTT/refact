@@ -410,7 +410,6 @@ impl BuddyJob for BuddyTestCoverageWatcherJob {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
 
     fn context() -> BuddyJobContext {
         BuddyJobContext {

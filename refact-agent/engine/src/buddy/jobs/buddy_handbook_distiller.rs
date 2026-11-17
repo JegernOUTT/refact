@@ -195,30 +195,3 @@ impl BuddyJob for BuddyHandbookDistillerJob {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::app_state::AppState;
-    use crate::buddy::actor::BuddyService;
-    use std::path::PathBuf;
-
-    fn card(title: &str, path: &str, tag: &str) -> KnowledgeCard {
-        KnowledgeCard {
-            id: title.to_string(),
-            title: title.to_string(),
-            summary: Some(format!("{} summary", title)),
-            description: None,
-            tags: vec![tag.to_string()],
-            filenames: vec![],
-            entities: vec![],
-            related_files: vec![],
-            related_entities: vec![],
-            kind: Some("insight".to_string()),
-            created: Some("2026-07-01".to_string()),
-            created_at: None,
-            updated: None,
-            file_path: PathBuf::from(path),
-        }
-    }
-}

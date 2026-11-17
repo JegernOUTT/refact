@@ -1,3 +1,4 @@
+import { isRecord } from "../../utils/isRecord";
 export const APP_MESSAGE_TYPE = "refact-app";
 export const APP_PROTOCOL_VERSION = 1;
 export const APP_SDK_VERSION = "1.0.0";
@@ -79,10 +80,6 @@ const NAME_RE = /^[A-Za-z0-9_.:-]{1,128}$/;
 const ID_RE = /^[ch][0-9]{1,15}$/;
 const MAX_TEXT = 200_000;
 const MAX_LABEL = 200;
-
-export function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 function isAppError(value: unknown): value is AppErrorPayload {
   return (

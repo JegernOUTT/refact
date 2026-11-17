@@ -763,7 +763,3 @@ export function parseOperatorContractFixture(
     improvement_candidate: parseImprovementCandidate(v.improvement_candidate),
   });
 }
-
-export function validateOperatorContractV1(value: unknown): void {
-  parseOperatorContractFixture(value);
-}

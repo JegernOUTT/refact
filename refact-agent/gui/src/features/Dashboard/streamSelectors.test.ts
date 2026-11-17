@@ -3,11 +3,8 @@ import type { RootState } from "../../app/store";
 import type { ChatHistoryItem } from "../History/historySlice";
 import type { TaskMeta } from "../../services/refact/tasks";
 import {
-  selectAttentionItems,
-  selectContinueItems,
   selectFamilyChildren,
   selectStreamGroups,
-  selectTodayAggregate,
   type StreamFilter,
   type StreamGroup,
   type StreamItem,
@@ -236,109 +233,6 @@ describe("selectStreamGroups — Active now", () => {
     const labels = groups.map((group) => group.label);
     expect(labels).toEqual(["Active now", "Today", "Yesterday"]);
     expect(groups[1].items.map((item) => item.id)).toEqual(["idle"]);
-  });
-});
-
-describe("selectContinueItems", () => {
-  it("returns streaming/working items first, padded with recent ones", () => {
-    const state = makeState(
-      [
-        makeChat({
-          id: "streaming",
-          session_state: "generating",
-          updatedAt: EARLIER,
-        }),
-        makeChat({ id: "recent", updatedAt: laterToday(60) }),
-        makeChat({ id: "older", updatedAt: laterToday(10) }),
-        makeChat({ id: "oldest", updatedAt: YESTERDAY }),
-      ],
-      [],
-    );
-
-    const items = selectContinueItems(state);
-    expect(items).toHaveLength(3);
-    expect(items[0].id).toBe("streaming");
-    expect(items.map((item) => item.id)).toEqual([
-      "streaming",
-      "recent",
-      "older",
-    ]);
-  });
-
-  it("is empty for an empty store", () => {
-    expect(selectContinueItems(makeState([]))).toEqual([]);
-  });
-});
-
-describe("selectAttentionItems", () => {
-  it("picks tasks with failed cards plus failed/paused streams", () => {
-    const state = makeState(
-      [
-        makeChat({
-          id: "failed-chat",
-          session_state: "error",
-          updatedAt: laterToday(20),
-        }),
-        makeChat({
-          id: "paused-chat",
-          session_state: "paused",
-          updatedAt: laterToday(10),
-        }),
-        makeChat({ id: "fine-chat", session_state: "idle" }),
-      ],
-      [
-        makeTask({
-          id: "failing-task",
-          cards_failed: 2,
-          cards_total: 5,
-          cards_done: 1,
-          updated_at: laterToday(30),
-        }),
-        makeTask({ id: "healthy-task" }),
-      ],
-    );
-
-    const items = selectAttentionItems(state);
-    expect(items.map((item) => item.id)).toEqual([
-      "failing-task",
-      "failed-chat",
-      "paused-chat",
-    ]);
-    expect(items[0].cardsFailed).toBe(2);
-    expect(items[0].cardsTotal).toBe(5);
-    expect(items[0].cardsDone).toBe(1);
-  });
-});
-
-describe("selectTodayAggregate", () => {
-  it("sums chats updated today only", () => {
-    const state = makeState([
-      makeChat({
-        id: "a",
-        updatedAt: TODAY,
-        total_cost_usd: 0.5,
-        total_tokens: 100,
-      }),
-      makeChat({
-        id: "b",
-        updatedAt: laterToday(90),
-        total_cost_usd: 0.25,
-        total_tokens: 50,
-      }),
-      makeChat({
-        id: "c",
-        updatedAt: YESTERDAY,
-        total_cost_usd: 10,
-        total_tokens: 9999,
-      }),
-      makeChat({ id: "d", updatedAt: TODAY }),
-    ]);
-
-    expect(selectTodayAggregate(state)).toEqual({
-      chats: 3,
-      costUsd: 0.75,
-      tokens: 150,
-    });
   });
 });
 

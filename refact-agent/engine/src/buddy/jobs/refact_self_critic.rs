@@ -123,9 +123,3 @@ impl BuddyJob for RefactSelfCriticJob {
         .await
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::path::Path;
-}

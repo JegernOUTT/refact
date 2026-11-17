@@ -68,7 +68,7 @@ export function activityIcon(entry: {
   return Activity;
 }
 
-const SKILL_ICONS: Record<string, LucideIcon> = {
+const SKILL_ICONS: Partial<Record<string, LucideIcon>> = {
   edit: SquarePen,
   search: Search,
   debug: Bug,

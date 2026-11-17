@@ -1,3 +1,5 @@
+import { finiteOr, seededUnit } from "./buddyWorldDrawHelpers";
+
 export type BuddyDreamKind =
   | "sky_flight"
   | "giant_acorn"
@@ -14,24 +16,8 @@ export const BUDDY_DREAM_KINDS: readonly BuddyDreamKind[] = [
 export const BUDDY_DREAM_WIDTH = 132;
 export const BUDDY_DREAM_HEIGHT = 76;
 
-const UINT_MAX = 4_294_967_295;
-
-function finiteOr(value: number | null | undefined, fallback: number): number {
-  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
-}
-
-function dreamSeededUnit(seed: number, salt: number): number {
-  let value = (finiteOr(seed, 0) + Math.imul(salt + 1, 0x9e3779b9)) >>> 0;
-  value ^= value >>> 16;
-  value = Math.imul(value, 0x85ebca6b) >>> 0;
-  value ^= value >>> 13;
-  value = Math.imul(value, 0xc2b2ae35) >>> 0;
-  value ^= value >>> 16;
-  return (value >>> 0) / UINT_MAX;
-}
-
 export function pickBuddyDream(seed: number): BuddyDreamKind {
-  const index = Math.floor(dreamSeededUnit(seed, 5) * BUDDY_DREAM_KINDS.length);
+  const index = Math.floor(seededUnit(seed, 5) * BUDDY_DREAM_KINDS.length);
   return BUDDY_DREAM_KINDS[Math.min(index, BUDDY_DREAM_KINDS.length - 1)];
 }
 

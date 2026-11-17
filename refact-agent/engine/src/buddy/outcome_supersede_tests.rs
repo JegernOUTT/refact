@@ -56,43 +56,6 @@ fn start_at(
     start
 }
 
-async fn publish(
-    runtime: &OutcomeRuntime,
-    run_id: &str,
-    workflow: &str,
-    coverage: &str,
-    terminal: WorkflowTerminal,
-) -> WorkItem {
-    publish_at(
-        runtime,
-        run_id,
-        workflow,
-        coverage,
-        "2026-09-01T00:00:00Z",
-        terminal,
-    )
-    .await
-}
-
-async fn publish_at(
-    runtime: &OutcomeRuntime,
-    run_id: &str,
-    workflow: &str,
-    coverage: &str,
-    started_at: &str,
-    terminal: WorkflowTerminal,
-) -> WorkItem {
-    runtime
-        .publish_workflow_result(
-            start_at(runtime, run_id, workflow, coverage, started_at),
-            format!("Readable report for {run_id}."),
-            terminal,
-        )
-        .await
-        .unwrap()
-        .value
-}
-
 fn open_state(state: &WorkItemState) -> bool {
     matches!(
         state,

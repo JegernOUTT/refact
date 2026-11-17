@@ -235,40 +235,6 @@ mod tests {
             .unwrap();
     }
 
-    struct FakeExecutor;
-    #[async_trait::async_trait]
-    impl Executor for FakeExecutor {
-        async fn execute(
-            &self,
-            command: &FixedCommand,
-            root: &Path,
-            scratch: &Path,
-            limit: usize,
-            cancel: Arc<AtomicBool>,
-        ) -> Result<CommandResult, String> {
-            assert!(root != scratch);
-            let request = native_request(command, root, scratch, limit, cancel.clone());
-            assert!(!request.sandbox.as_ref().unwrap().allow_network);
-            assert!(request
-                .argv
-                .as_ref()
-                .unwrap()
-                .iter()
-                .any(|arg| arg == "--clearenv"));
-            std::fs::write(scratch.join("observed"), b"fixed check").unwrap();
-            Ok(CommandResult {
-                result: if cancel.load(Ordering::Acquire) {
-                    CheckResult::Unavailable
-                } else {
-                    CheckResult::Passed
-                },
-                status: "fake scratch executor".into(),
-                output_digest: "a".repeat(64),
-                output_bytes: 11,
-            })
-        }
-    }
-
     #[test]
     fn scratch_snapshot_detects_content_drift_and_rejects_symlink() {
         let root = tempfile::tempdir().unwrap();

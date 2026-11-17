@@ -10,6 +10,7 @@ import type {
   BrowserPageSnapshot,
   BrowserSnapshotArtifact,
 } from "../../../services/refact/browser";
+import { isRecord } from "../../../utils/isRecord";
 
 export interface ChromeArgs {
   commands?: string;
@@ -83,10 +84,6 @@ export function parseCommandStats(commands: string): CommandStats {
 
 export function formatUrl(url: string): string {
   return url.replace(/^file:\/\//, "");
-}
-
-export function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 export function parseChromeArgs(value: string): ChromeArgs {
   try {

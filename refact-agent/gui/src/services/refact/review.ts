@@ -3,6 +3,7 @@ import { createApi, fetchBaseQuery } from "@reduxjs/toolkit/query/react";
 import type { FetchBaseQueryError } from "@reduxjs/toolkit/query";
 import type { RootState } from "../../app/store";
 import { buildApiUrlFromState } from "./apiUrl";
+import { isObjectLike } from "../../utils/isObjectLike";
 
 /*
  * Wire types mirror `refact-review-core/src/types.rs` exactly (serde
@@ -521,12 +522,8 @@ export function decodeFileSide(bytes: number[] | null): ReviewFileSide {
   }
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}
-
 export function isReview(value: unknown): value is Review {
-  if (!isRecord(value)) return false;
+  if (!isObjectLike(value)) return false;
   return (
     typeof value.id === "string" &&
     typeof value.owner_chat_id === "string" &&
@@ -545,7 +542,7 @@ export function isReview(value: unknown): value is Review {
 
 function isSyncReport(value: unknown): value is ReviewSyncReport {
   return (
-    isRecord(value) &&
+    isObjectLike(value) &&
     typeof value.available === "boolean" &&
     typeof value.imported === "number" &&
     typeof value.published === "number"
@@ -565,7 +562,7 @@ function isByteArray(value: unknown): value is number[] | null {
 
 export function isFileViewWire(value: unknown): value is ReviewFileViewWire {
   return (
-    isRecord(value) &&
+    isObjectLike(value) &&
     typeof value.path === "string" &&
     typeof value.diff === "string" &&
     isByteArray(value.base) &&
@@ -575,8 +572,8 @@ export function isFileViewWire(value: unknown): value is ReviewFileViewWire {
 
 export function isAnchor(value: unknown): value is Anchor {
   return (
-    isRecord(value) &&
-    isRecord(value.position) &&
+    isObjectLike(value) &&
+    isObjectLike(value.position) &&
     (value.status === "current" || value.status === "stalled") &&
     Array.isArray(value.history)
   );
@@ -584,16 +581,16 @@ export function isAnchor(value: unknown): value is Anchor {
 
 /** Extract a human-readable message from an engine `{detail}` error. */
 export function reviewErrorMessage(error: unknown): string {
-  if (!isRecord(error)) return "Request failed";
+  if (!isObjectLike(error)) return "Request failed";
   const data = error.data;
-  if (isRecord(data) && typeof data.detail === "string") return data.detail;
+  if (isObjectLike(data) && typeof data.detail === "string") return data.detail;
   if (typeof error.error === "string") return error.error;
   if (typeof error.message === "string") return error.message;
   return "Request failed";
 }
 
 export function isReviewConflict(error: unknown): boolean {
-  return isRecord(error) && error.status === 409;
+  return isObjectLike(error) && error.status === 409;
 }
 
 function shapeError(what: string, _raw: unknown): FetchBaseQueryError {
@@ -1087,7 +1084,9 @@ export const reviewApi = createApi({
         const raw: unknown = result.data;
         if (
           !Array.isArray(raw) ||
-          !raw.every((file) => isRecord(file) && typeof file.path === "string")
+          !raw.every(
+            (file) => isObjectLike(file) && typeof file.path === "string",
+          )
         )
           return { error: shapeError("files", raw) };
         return { data: raw as CandidateFile[] };

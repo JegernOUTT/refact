@@ -1,7 +1,5 @@
-// Wire boundary for the project Automation facade. Unknown variants stay read-only.
-export function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
+import { isRecord } from "../../utils/isRecord";
+
 export const isRevision = (value: unknown): value is number =>
   typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 

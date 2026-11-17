@@ -41,7 +41,6 @@ import {
   fillDiagnostics,
   isAttachableImageStep,
   isBrowserActionResponse,
-  isRecord,
   parseActionabilityDiagnostics,
   parseAssertionResult,
   parseChromeArgs,
@@ -67,6 +66,7 @@ import {
   WarningList,
 } from "./ChromeToolSections";
 import { reportTextBlocks } from "./chromeReportText";
+import { isRecord } from "../../../utils/isRecord";
 
 interface ChromeToolProps {
   toolCall: ToolCall;

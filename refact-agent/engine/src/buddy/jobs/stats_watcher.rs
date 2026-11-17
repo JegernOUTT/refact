@@ -193,12 +193,3 @@ fn stats_watcher_has_visible_output(ctx: &BuddyJobContext) -> bool {
         .iter()
         .any(|&m| prev_runs < m && ctx.total_workflow_runs >= m)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    use crate::buddy::types::{
-        BuddyJobState, BuddyOnboarding, BuddyPetState, BuddyPulse, BuddySuggestion,
-    };
-}

@@ -22,7 +22,6 @@ import {
 import {
   compressionMeta,
   finiteNumber,
-  isRecord,
   isSourcePreservingReport,
   parseReactiveStats,
   reconstructionTriggerLabel,
@@ -32,6 +31,7 @@ import {
   type StatCell,
 } from "./SummarizationMessage.stats";
 import styles from "./SummarizationMessage.module.css";
+import { isRecord } from "../../utils/isRecord";
 
 interface SummarizationMessageProps {
   message: SummarizationMessageType;

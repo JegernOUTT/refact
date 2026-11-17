@@ -3,6 +3,7 @@ import type {
   ChatCompressionReportMetadata,
   SummarizationMessage as SummarizationMessageType,
 } from "../../services/refact/types";
+import { isRecord } from "../../utils/isRecord";
 
 export type StatCell = { label: string; value: string };
 
@@ -107,10 +108,6 @@ export function parseReactiveStats(content: string): StatCell[] | null {
     }
   }
   return stats.length > 0 ? stats : null;
-}
-
-export function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 export function statsFromReconstructionMetrics(

@@ -1,12 +1,10 @@
+import { isObjectLike } from "../../utils/isObjectLike";
 const fallbackInstallError = "Failed to install MCP server";
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}
 
 function stringifyErrorData(value: unknown): string | null {
   if (typeof value === "string") return value;
-  if (isRecord(value) && typeof value.detail === "string") return value.detail;
+  if (isObjectLike(value) && typeof value.detail === "string")
+    return value.detail;
   return null;
 }
 
@@ -16,7 +14,7 @@ function stringifyErrorData(value: unknown): string | null {
  * required env vars explanation).
  */
 export function installErrorMessage(error: unknown): string {
-  if (!isRecord(error)) return fallbackInstallError;
+  if (!isObjectLike(error)) return fallbackInstallError;
   if ("data" in error) {
     return stringifyErrorData(error.data) ?? fallbackInstallError;
   }

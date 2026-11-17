@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { http, HttpResponse } from "msw";
-import { act, fireEvent } from "@testing-library/react";
+import { act } from "react-dom/test-utils";
+import { fireEvent } from "@testing-library/react";
 import {
   render,
   screen,
@@ -12,7 +13,8 @@ import type {
   AttentionRow,
   AttentionSnapshot,
 } from "../../../services/refact/buddyCompanion";
-import { BuddyCompanion, buddyNamespace } from "./BuddyCompanion";
+import { BuddyCompanion } from "./BuddyCompanion";
+import { buddyNamespace } from "./buddyNamespace";
 import { BuddyRailButton } from "./BuddyRailButton";
 import {
   resetBuddyCompanion,
@@ -100,7 +102,17 @@ function renderBuddy(rows: AttentionRow[] = []) {
   );
 }
 
+const setPointerCapture = vi.fn();
+const releasePointerCapture = vi.fn();
+const hasPointerCapture = vi.fn(() => true);
+
 beforeEach(() => {
+  setPointerCapture.mockClear();
+  releasePointerCapture.mockClear();
+  hasPointerCapture.mockClear();
+  HTMLElement.prototype.setPointerCapture = setPointerCapture;
+  HTMLElement.prototype.releasePointerCapture = releasePointerCapture;
+  HTMLElement.prototype.hasPointerCapture = hasPointerCapture;
   resetBuddyCompanion();
   localStorage.clear();
   navigate.mockClear();
@@ -140,7 +152,9 @@ describe("Buddy rail button", () => {
   it("shows an unread reply dot next to the attention badge", async () => {
     renderBuddy([row(1)]);
     await screen.findByTestId("buddy-attention-badge");
-    act(() => updateBuddyCompanion({ unread: true }));
+    act(() => {
+      updateBuddyCompanion({ unread: true });
+    });
     expect(
       screen.getByRole("button", { name: "Buddy, 1 needs you, new reply" }),
     ).toBeInTheDocument();
@@ -236,6 +250,7 @@ describe("Buddy popover", () => {
       clientX: 100,
       clientY: 100,
     });
+    expect(setPointerCapture).toHaveBeenCalledWith(1);
     fireEvent.pointerMove(header, { pointerId: 1, clientX: 50, clientY: 80 });
     expect(parseFloat(dialog.style.left)).toBe(startLeft - 50);
     expect(parseFloat(dialog.style.top)).toBe(startTop - 20);
@@ -248,13 +263,35 @@ describe("Buddy popover", () => {
     const height = parseFloat(dialog.style.height);
     expect(parseFloat(dialog.style.left)).toBe(1100 - width - 8);
     expect(parseFloat(dialog.style.top)).toBe(860 - height - 8);
+    expect(releasePointerCapture).not.toHaveBeenCalled();
     fireEvent.pointerUp(header, { pointerId: 1 });
+    expect(hasPointerCapture).toHaveBeenCalledWith(1);
+    expect(releasePointerCapture).toHaveBeenCalledWith(1);
     expect(JSON.parse(localStorage.getItem(key) ?? "null")).toEqual({
       x: 1100 - width - 8,
       y: 860 - height - 8,
       width,
       height,
     });
+  });
+
+  it("persists geometry without releasing a capture the browser already dropped", async () => {
+    const { user } = renderBuddy();
+    const key = popoverStorageKey(buddyNamespace(config));
+    await user.click(screen.getByRole("button", { name: "Buddy" }));
+    const header = screen.getByTestId("buddy-popover-header");
+    hasPointerCapture.mockReturnValueOnce(false);
+    fireEvent.pointerDown(header, {
+      pointerId: 2,
+      button: 0,
+      clientX: 100,
+      clientY: 100,
+    });
+    fireEvent.pointerMove(header, { pointerId: 2, clientX: 90, clientY: 90 });
+    fireEvent.pointerUp(header, { pointerId: 2 });
+    expect(hasPointerCapture).toHaveBeenCalledWith(2);
+    expect(releasePointerCapture).not.toHaveBeenCalled();
+    expect(localStorage.getItem(key)).not.toBeNull();
   });
 
   it("moves and resizes with arrow keys and saves the result", async () => {

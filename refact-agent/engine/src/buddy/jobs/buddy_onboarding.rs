@@ -195,9 +195,3 @@ impl BuddyJob for BuddyOnboardingJob {
         result
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::path::Path;
-}

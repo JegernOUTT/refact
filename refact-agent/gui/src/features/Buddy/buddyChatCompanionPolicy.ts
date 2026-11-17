@@ -146,8 +146,8 @@ function normalizedContentText(value: string): string {
 function contentScopeToken(
   scope: ChatCompanionContentScope | null | undefined,
 ): string | null {
-  const workspaceScope =
-    scope?.workspaceId?.trim() || scope?.projectRoot?.trim();
+  const workspaceId = scope?.workspaceId?.trim();
+  const workspaceScope = workspaceId ? workspaceId : scope?.projectRoot?.trim();
   const parts = [workspaceScope, scope?.chatId?.trim()]
     .map((part) => (part ? normalizedContentText(part) : ""))
     .filter((part) => part.length > 0);

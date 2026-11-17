@@ -122,9 +122,3 @@ impl BuddyJob for GreetingJob {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::buddy::scheduler::BuddyJobContext;
-}

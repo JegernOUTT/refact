@@ -2,7 +2,7 @@ import { StrictMode } from "react";
 import { type Config, updateConfig } from "../../features/Config/configSlice";
 import { App } from "../../features/App";
 import { reportBuddyFrontendError } from "../../features/Buddy/reportBuddyFrontendError";
-import { withBuddyErrorReport } from "../../features/Buddy/BuddyErrorBoundary";
+import { withBuddyErrorReport } from "../../features/Buddy/withBuddyErrorReport";
 import ReactDOM from "react-dom/client";
 import { store } from "../../app/store";
 import "./web.css";

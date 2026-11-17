@@ -4,6 +4,7 @@ import type {
   BrowserExecutionStep,
   BrowserSnapshotBox,
 } from "../../../services/refact/browser";
+import { isRecord } from "../../../utils/isRecord";
 
 export interface NetworkSummaryRow {
   method: string;
@@ -134,10 +135,6 @@ export interface BrowserFamilies {
   webSocketCloses: WebSocketCloseRow[];
   cdp: CdpEntry[];
   resets: ResetEntry[];
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function finiteNumber(value: unknown): number | null {

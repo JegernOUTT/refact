@@ -16,9 +16,9 @@ import {
   runtimeEventContentKey,
   speechContentKey,
   suggestionContentKey,
-  type ChatCompanionGateInput,
 } from "../buddyChatCompanionPolicy";
 import type { BuddyRuntimeEvent } from "../types";
+import { makeGateInput } from "./buddyHomeFixtures";
 
 function makeEvent(overrides?: Partial<BuddyRuntimeEvent>): BuddyRuntimeEvent {
   return {
@@ -29,21 +29,6 @@ function makeEvent(overrides?: Partial<BuddyRuntimeEvent>): BuddyRuntimeEvent {
     status: "info",
     priority: "normal",
     created_at: "2024-01-01T00:00:00Z",
-    ...overrides,
-  };
-}
-
-function makeGateInput(
-  overrides?: Partial<ChatCompanionGateInput>,
-): ChatCompanionGateInput {
-  return {
-    nowMs: 1_000_000,
-    quietUntilMs: null,
-    queuedMessageCount: 0,
-    lastAmbientImpressionAtMs: null,
-    candidateIsAmbient: true,
-    candidateAlreadyImpressed: false,
-    bypassGates: false,
     ...overrides,
   };
 }

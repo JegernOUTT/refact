@@ -1514,7 +1514,7 @@ function drawSpinTopAccent(
   }
 }
 
-const ACCENTS: Record<string, AccentDrawer> = {
+const ACCENTS: Partial<Record<string, AccentDrawer>> = {
   gather_acorns: drawAcornAccent,
   leaf_umbrella_rain: drawLeafUmbrellaAccent,
   play_ocarina: drawOcarinaAccent,

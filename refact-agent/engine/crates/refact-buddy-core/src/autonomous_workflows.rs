@@ -276,19 +276,6 @@ impl WorkflowActionFamily {
             } => None,
         }
     }
-
-    pub fn from_action_id(action_id: &str) -> Option<Self> {
-        [
-            WorkflowActionFamily::MemoryLifecycle,
-            WorkflowActionFamily::DefaultModelSelect,
-            WorkflowActionFamily::BuddySettingsPatch,
-            WorkflowActionFamily::MarkdownProjectApply,
-            WorkflowActionFamily::CustomizationFileApply,
-            WorkflowActionFamily::IsolatedCandidateCheckpoint,
-        ]
-        .into_iter()
-        .find(|family| family.action_id() == Some(action_id))
-    }
 }
 
 pub fn workflow_action_family(id: &str) -> WorkflowActionFamily {

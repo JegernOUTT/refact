@@ -128,11 +128,7 @@ function makeConfig(library: "browser" | "node") {
       CONFIG.plugins?.push([
         // eslint-disable-next-line @typescript-eslint/no-unsafe-call
         eslint({
-          exclude: [
-            "**/node_modules/**",
-            "**/virtual:/**",
-            "**/src/features/Buddy/**",
-          ],
+          exclude: ["**/node_modules/**", "**/virtual:/**"],
         }) as PluginOption,
       ]);
 

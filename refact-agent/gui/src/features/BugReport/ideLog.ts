@@ -1,4 +1,5 @@
 import { createAction } from "@reduxjs/toolkit";
+import { isObjectLike } from "../../utils/isObjectLike";
 
 export type IdeLogEntry = {
   at?: number;
@@ -31,17 +32,13 @@ function normalizeLevel(value: unknown): IdeLogEntry["level"] {
   return "info";
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}
-
 export function normalizeIdeLogLines(payload: unknown): IdeLogEntry[] {
   if (!Array.isArray(payload)) return [];
   return payload.flatMap((item): IdeLogEntry[] => {
     if (typeof item === "string") {
       return [{ level: "info", message: item }];
     }
-    if (!isRecord(item) || typeof item.message !== "string") return [];
+    if (!isObjectLike(item) || typeof item.message !== "string") return [];
     const entry: IdeLogEntry = {
       level: normalizeLevel(item.level),
       message: item.message,

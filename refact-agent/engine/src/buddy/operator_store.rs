@@ -2597,10 +2597,6 @@ impl OperatorStore {
     pub(crate) fn retire_superseded_backlog(&mut self) -> Result<usize, OperatorStoreError> {
         use refact_buddy_core::operator_types::{RunStatus, WorkItemState};
         use std::collections::BTreeMap;
-        #[cfg(test)]
-        if !super::supersede::open_pass_enabled() {
-            return Ok(0);
-        }
 
         let rows = {
             let mut statement = self.connection.prepare(
@@ -2694,8 +2690,6 @@ impl OperatorStore {
         }
 
         let mut retired = 0;
-        #[cfg(test)]
-        let mut processed_groups = 0;
         for (_, group) in groups {
             let candidates: Vec<_> = group
                 .iter()
@@ -2733,15 +2727,6 @@ impl OperatorStore {
             }
             tx.commit()?;
             retired += group_retired;
-            #[cfg(test)]
-            {
-                processed_groups += 1;
-                if super::supersede::should_interrupt_after_group(processed_groups) {
-                    return Err(OperatorStoreError::Conflict(
-                        "interrupted superseded backlog pass",
-                    ));
-                }
-            }
         }
         Ok(retired)
     }

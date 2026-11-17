@@ -530,8 +530,3 @@ fn payload_is_empty(payload: &BuddyPulsePayload) -> bool {
 fn redact(text: impl AsRef<str>) -> String {
     redact_sensitive(text.as_ref())
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-}

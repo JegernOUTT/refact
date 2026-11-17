@@ -2,6 +2,7 @@ import { createApi, fetchBaseQuery } from "@reduxjs/toolkit/query/react";
 
 import type { RootState } from "../../app/store";
 import { buildApiUrlFromState } from "./apiUrl";
+import { isRecord } from "../../utils/isRecord";
 
 export type ShellApprovalMode = "strict" | "balanced" | "permissive" | "yolo";
 export type ShellLlmAuthority = "ask_only" | "ask_and_allow";
@@ -58,10 +59,6 @@ export type ShellPolicy = {
   execution: ShellExecutionDefaults;
   catalogue: ShellRiskEntryView[];
 };
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 function isStringArray(value: unknown): value is string[] {
   return (

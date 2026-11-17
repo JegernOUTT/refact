@@ -28,6 +28,7 @@ import type {
 import { normalizeEventMessageMetadata } from "../../../services/refact/types";
 import { compactText } from "../../Tools/AgenticTool/compactPresentation";
 import styles from "./SleepToolCard.module.css";
+import { isRecord } from "../../../utils/isRecord";
 
 type SleepArgs = {
   durationMs: number;
@@ -96,10 +97,6 @@ function parseJsonRecord(value: unknown): Record<string, unknown> | null {
 
 function numberField(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value) ? value : 0;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function eventMatchesSleepTick(message: EventMessage): boolean {

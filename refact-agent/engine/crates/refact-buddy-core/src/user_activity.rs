@@ -77,15 +77,6 @@ impl UserActivityRing {
         self.buf.iter().cloned().collect()
     }
 
-    #[allow(dead_code)]
-    pub fn last_n(&self, n: usize) -> Vec<UserAction> {
-        self.buf
-            .iter()
-            .skip(self.buf.len().saturating_sub(n))
-            .cloned()
-            .collect()
-    }
-
     pub fn last_hours(&self, hours: u32) -> Vec<UserAction> {
         let cutoff = Utc::now() - Duration::hours(hours as i64);
         self.buf

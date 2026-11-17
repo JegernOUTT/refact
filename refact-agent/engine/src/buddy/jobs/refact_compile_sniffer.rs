@@ -161,8 +161,3 @@ impl BuddyJob for RefactCompileSnifferJob {
         .await
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-}

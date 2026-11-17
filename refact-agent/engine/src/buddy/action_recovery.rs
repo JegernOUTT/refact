@@ -504,7 +504,7 @@ mod tests {
         ActionAvailability, ActionCapabilities, AuthorityClass, ConfirmationClass,
         NativeSourceKind, ProjectIdentity, ResourceRef, OPERATOR_SCHEMA_VERSION_V1,
     };
-    use std::fs;
+
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tempfile::TempDir;
 

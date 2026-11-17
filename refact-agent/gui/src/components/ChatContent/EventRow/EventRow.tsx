@@ -22,13 +22,13 @@ import { eventDetailFields } from "./eventDetails";
 import {
   collapseWhitespace,
   eventPayloadRecord,
-  isRecord,
   payloadNumber,
   payloadString,
 } from "./eventPayload";
 import { eventSummary } from "./eventSummary";
 import { eventTimestamp } from "./eventTimestamp";
 import styles from "./EventRow.module.css";
+import { isRecord } from "../../../utils/isRecord";
 
 export type EventRowProps = {
   event: EventMessage;

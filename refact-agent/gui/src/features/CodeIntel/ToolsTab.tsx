@@ -39,6 +39,7 @@ import type {
 import { StatCard } from "../StatsDashboard/components/StatCard";
 import { formatNumber } from "../StatsDashboard/utils/formatters";
 import styles from "./ToolsTab.module.css";
+import { isObjectLike } from "../../utils/isObjectLike";
 
 type RunStatus = "idle" | "loading" | "success" | "error";
 
@@ -151,24 +152,20 @@ const findingColumns: DataTableColumn<SecurityFinding>[] = [
   },
 ];
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}
-
 function isCodeIntelDetail<T>(
   response: CodeIntelResponse<T>,
 ): response is CodeIntelDetail {
-  return isRecord(response) && typeof response.detail === "string";
+  return isObjectLike(response) && typeof response.detail === "string";
 }
 
 function describeMutationError(error: unknown): string {
   if (error instanceof Error) return error.message;
   if (typeof error === "string") return error;
 
-  if (isRecord(error)) {
+  if (isObjectLike(error)) {
     const data = error.data;
     if (typeof data === "string") return data;
-    if (isRecord(data) && typeof data.detail === "string") {
+    if (isObjectLike(data) && typeof data.detail === "string") {
       return data.detail;
     }
     if (typeof error.error === "string") return error.error;

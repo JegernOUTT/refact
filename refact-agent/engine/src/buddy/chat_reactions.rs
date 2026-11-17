@@ -6,6 +6,7 @@ use crate::app_state::AppState;
 use crate::call_validation::ChatContent;
 use crate::chat::types::ThreadParams;
 
+use super::actor::contains_redaction_marker;
 use super::settings::{BuddySettings, HumorLevel};
 use super::types::{BuddyBubblePolicy, BuddyChatPhraseBank, BuddyPersonalityProfile, BuddyRuntimeEvent};
 use super::voice_service::{voice_service, ChatReactionSpeechIntent, VoiceCtx};
@@ -561,11 +562,6 @@ fn generated_contains_echo_phrase(
             .zip(phrase_tokens)
             .all(|(left, right)| left == &right.text)
     })
-}
-
-fn contains_redaction_marker(text: &str) -> bool {
-    let lower = text.to_lowercase();
-    lower.contains("[redacted") || lower.contains("<redacted") || lower.contains("&lt;redacted")
 }
 
 fn contains_analysis_echo(generated: &str, analysis_text: &str) -> bool {

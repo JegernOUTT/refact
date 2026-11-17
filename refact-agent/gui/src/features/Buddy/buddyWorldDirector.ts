@@ -1,5 +1,9 @@
 import type { BuddyScenePose } from "./types";
-import type { BuddyWorldObject, BuddyWorldState } from "./buddyWorldModel";
+import {
+  clampRange,
+  type BuddyWorldObject,
+  type BuddyWorldState,
+} from "./buddyWorldModel";
 
 export type BuddyWorldIntentKind =
   | "morning_stretch"
@@ -97,16 +101,6 @@ const SAFE_TARGETS = {
   meadow: { targetX: 47, targetY: 80, depthScale: 1.02 },
   greatTree: { targetX: 34, targetY: 78, depthScale: 0.98 },
 } as const satisfies Record<string, IntentTarget>;
-
-function clampRange(
-  value: number,
-  min: number,
-  max: number,
-  fallback: number,
-): number {
-  const finiteValue = Number.isFinite(value) ? value : fallback;
-  return Math.max(min, Math.min(max, finiteValue));
-}
 
 function clampTarget(target: IntentTarget): IntentTarget {
   const base = {

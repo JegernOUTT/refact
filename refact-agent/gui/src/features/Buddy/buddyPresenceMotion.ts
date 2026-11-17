@@ -168,17 +168,6 @@ const MOTION_GRAMMAR: Record<BuddyWorkState, BuddyPresenceMotion> = {
   },
 };
 
-export const BUDDY_WORK_STATES: readonly BuddyWorkState[] = [
-  "unavailable",
-  "resting",
-  "idle",
-  "observing",
-  "working",
-  "delivering",
-  "blocked",
-  "awaiting_decision",
-];
-
 export function buddyPresenceMotion(
   state: BuddyWorkState,
 ): BuddyPresenceMotion {
@@ -281,19 +270,6 @@ export function resolveBuddyMotionTransition(
   };
 }
 
-/**
- * Ambient/idle motion and ambient speech must yield whenever an attention-owning
- * state or an open speech/control layer is present.
- */
-export function shouldSuppressAmbientMotion(args: {
-  state: BuddyWorkState;
-  speechVisible?: boolean;
-  controlsVisible?: boolean;
-}): boolean {
-  if (buddyPresenceMotion(args.state).ownsAttention) return true;
-  return args.speechVisible === true || args.controlsVisible === true;
-}
-
 /* ------------------------------------------------------------------ */
 /* Animation loop policy (B37: hidden loops paused, reduced motion,    */
 /* low power). One shared policy so every surface behaves the same.    */
@@ -385,11 +361,6 @@ export function resolveBuddyPresenceLoop(
         : ambientFrameIntervalMs,
     stopReason: null,
   };
-}
-
-/** Convenience wrapper for the existing canvas loops. */
-export function shouldRunPresenceLoop(input: BuddyPresenceLoopInput): boolean {
-  return resolveBuddyPresenceLoop(input).running;
 }
 
 /**

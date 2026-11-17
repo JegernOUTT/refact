@@ -72,13 +72,6 @@ impl FactStore {
         self.ring.push_back(fact);
     }
 
-    /// Ingest multiple facts.
-    pub fn ingest_many(&mut self, facts: Vec<BuddyFact>) {
-        for fact in facts {
-            self.ingest(fact);
-        }
-    }
-
     pub fn ingest_with_refresh_ttl(&mut self, fact: BuddyFact, refresh_ttl: Duration) -> bool {
         if refresh_ttl > Duration::zero() {
             if let Some(existing) = self.ring.iter_mut().find(|f| f.key == fact.key) {
@@ -123,11 +116,6 @@ impl FactStore {
             .iter()
             .filter(|f| f.kind == kind && f.seen_at >= cutoff)
             .collect()
-    }
-
-    /// Count facts of `kind` seen within `within` of now.
-    pub fn count_within(&self, kind: BuddyFactKind, within: Duration) -> usize {
-        self.recent(kind, within).len()
     }
 
     /// Iterate over all facts in insertion order.

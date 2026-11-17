@@ -1,4 +1,4 @@
-use std::path::Path;
+use super::{recent_activity_evidence, trusted_git_output};
 
 use chrono::{DateTime, Local, Timelike, Utc};
 
@@ -12,7 +12,6 @@ pub struct BuddyDailyDigestJob;
 
 const COOLDOWN_SECONDS: u64 = 0;
 const PRIORITY: u32 = 30;
-const TRUSTED_COMMAND_PATH: &str = "/usr/local/bin:/usr/bin:/bin";
 
 fn digest_hour(settings: &BuddySettings) -> u32 {
     settings.daily_digest_hour.unwrap_or(18).min(23) as u32
@@ -38,51 +37,6 @@ fn should_run_at(ctx: &BuddyJobContext, now: DateTime<Local>) -> bool {
     !date_key_recorded(ctx, &key) && now.hour() >= digest_hour(&ctx.settings)
 }
 
-async fn trusted_git_output(project_root: &Path, args: &[&str]) -> Option<String> {
-    let mut command = tokio::process::Command::new("git");
-    command
-        .arg("-C")
-        .arg(project_root)
-        .args(args)
-        .env("PATH", TRUSTED_COMMAND_PATH)
-        .stdin(std::process::Stdio::null())
-        .kill_on_drop(true);
-    // Bound the git invocation so a hung repo/filesystem cannot stall the Tokio worker.
-    let output = tokio::time::timeout(std::time::Duration::from_secs(10), command.output())
-        .await
-        .ok()?
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if text.is_empty() {
-        None
-    } else {
-        Some(text)
-    }
-}
-
-fn recent_activity_evidence(ctx: &BuddyJobContext) -> String {
-    let activities = ctx
-        .recent_activities
-        .iter()
-        .rev()
-        .take(10)
-        .map(|activity| {
-            format!(
-                "- {} [{}] {} — {}",
-                activity.timestamp, activity.activity_type, activity.title, activity.description
-            )
-        })
-        .collect::<Vec<_>>();
-    if activities.is_empty() {
-        "none".to_string()
-    } else {
-        activities.join("\n")
-    }
-}
-
 async fn daily_git_evidence(ctx: &BuddyJobContext, now: DateTime<Utc>) -> String {
     let since = format!("{} 00:00", now.date_naive());
     trusted_git_output(
@@ -105,7 +59,7 @@ async fn build_daily_digest_spec(
         project_root,
         digest_hour(&ctx.settings),
         daily_git_evidence(ctx, now).await,
-        recent_activity_evidence(ctx)
+        recent_activity_evidence(ctx, 10)
     );
     AutonomousBuddyChatSpec::new(
         meta.id,
@@ -149,10 +103,4 @@ impl BuddyJob for BuddyDailyDigestJob {
         }
         result
     }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::path::Path;
 }

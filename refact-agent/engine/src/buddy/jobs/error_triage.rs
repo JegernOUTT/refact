@@ -71,25 +71,3 @@ pub(crate) fn triage_signature(error_type: &str, count: usize) -> String {
     };
     format!("triage:{}:{}", error_type, bucket)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::buddy::diagnostics::{DiagnosticContext, DiagnosticSeverity};
-
-    fn diagnostics(error_type: &str, count: usize) -> Vec<DiagnosticContext> {
-        (0..count)
-            .map(|idx| DiagnosticContext {
-                error_type: error_type.to_string(),
-                error_message: format!("boom {idx}"),
-                source_file: None,
-                tool_name: Some("chat".to_string()),
-                chat_id: None,
-                model_id: None,
-                collected_at: chrono::Utc::now().to_rfc3339(),
-                severity: DiagnosticSeverity::High,
-                occurrences: None,
-            })
-            .collect()
-    }
-}

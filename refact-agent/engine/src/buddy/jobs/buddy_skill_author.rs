@@ -279,9 +279,3 @@ impl BuddyJob for BuddySkillAuthorJob {
         result
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::path::Path;
-}

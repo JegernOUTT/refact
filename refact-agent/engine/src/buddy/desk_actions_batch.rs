@@ -34,7 +34,3 @@ pub fn parse_work_ids(raw: Option<&str>) -> Result<Vec<String>, &'static str> {
         .map(str::to_owned)
         .collect())
 }
-
-#[cfg(test)]
-#[path = "desk_actions_batch_tests.rs"]
-mod tests;

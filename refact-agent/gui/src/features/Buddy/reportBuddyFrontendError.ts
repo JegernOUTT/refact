@@ -1,6 +1,7 @@
 import { hasUsableEngineEndpoint } from "../../services/refact/apiUrl";
 import { postBuddyErrorRequest } from "../../services/refact/buddy";
 import type { EngineApiConnection } from "../../services/refact/chatCommands";
+import { isObjectLike } from "../../utils/isObjectLike";
 
 const REPORT_DEDUPE_MS = 10000;
 const REPORT_TRIM_LEN = 4000;
@@ -128,10 +129,6 @@ function storage(): Storage | null {
   }
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}
-
 function finiteNumber(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value)
     ? value
@@ -163,7 +160,7 @@ function optionalBoolean(value: unknown): boolean | undefined {
 }
 
 function parseCrashBreadcrumb(value: unknown): BuddyCrashBreadcrumb | null {
-  if (!isRecord(value)) return null;
+  if (!isObjectLike(value)) return null;
   const ts = validCrashTimestamp(value.ts);
   const label = optionalString(value.label);
   const detail = optionalString(value.detail);
@@ -176,7 +173,7 @@ function parseCrashBreadcrumb(value: unknown): BuddyCrashBreadcrumb | null {
 function parseCrashHotSlots(
   value: unknown,
 ): Partial<Record<BuddyCrashHotSlot, string>> {
-  if (!isRecord(value)) return {};
+  if (!isObjectLike(value)) return {};
   return Object.fromEntries(
     Object.entries(value).filter(
       (entry): entry is [BuddyCrashHotSlot, string] => {
@@ -199,7 +196,7 @@ function readCrashSession(): BuddyCrashSession | null {
     const raw = handle.getItem(CRASH_STORAGE_KEY);
     if (!raw) return null;
     const parsed: unknown = JSON.parse(raw);
-    if (!isRecord(parsed)) return null;
+    if (!isObjectLike(parsed)) return null;
     const startedAt = validCrashTimestamp(parsed.startedAt);
     const updatedAt = validCrashTimestamp(parsed.updatedAt);
     const sessionId = optionalString(parsed.sessionId);
@@ -431,7 +428,7 @@ export function buildBuddyCrashRecoveryError(
     updatedAt === undefined
       ? null
       : Math.max(0, Math.round((Date.now() - updatedAt) / 1000));
-  const hot = isRecord(session.hot) ? session.hot : {};
+  const hot = isObjectLike(session.hot) ? session.hot : {};
   const hotLines = Object.entries(hot)
     .filter((entry): entry is [string, string] => {
       const value = entry[1];
@@ -442,7 +439,7 @@ export function buildBuddyCrashRecoveryError(
     ? session.breadcrumbs
     : [];
   const breadcrumbLines = breadcrumbs.flatMap((entry) => {
-    if (!isRecord(entry)) return [];
+    if (!isObjectLike(entry)) return [];
     const ts = formatCrashTimestamp(entry.ts);
     const label = optionalString(entry.label);
     const detail = optionalString(entry.detail);
@@ -579,29 +576,6 @@ const defaultDeps = {
   post: postBuddyErrorRequest,
   now: () => Date.now(),
 };
-
-export function installBuddyErrorReporter(): () => void {
-  const onError = (e: ErrorEvent) => {
-    void reportBuddyFrontendError({
-      source: "window_error",
-      error: e.error ?? e.message,
-      sourceFile: e.filename || "frontend/window_error",
-    });
-  };
-  const onRejection = (e: PromiseRejectionEvent) => {
-    void reportBuddyFrontendError({
-      source: "unhandledrejection",
-      error: e.reason,
-      sourceFile: "frontend/unhandledrejection",
-    });
-  };
-  window.addEventListener("error", onError);
-  window.addEventListener("unhandledrejection", onRejection);
-  return () => {
-    window.removeEventListener("error", onError);
-    window.removeEventListener("unhandledrejection", onRejection);
-  };
-}
 
 export async function reportBuddyFrontendError(
   args: {

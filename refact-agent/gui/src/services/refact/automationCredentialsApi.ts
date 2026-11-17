@@ -1,3 +1,4 @@
+import { isObjectLike } from "../../utils/isObjectLike";
 // Deliberately NOT an RTK API: secret values must never become Redux action args.
 export type CredentialIdentity = {
   id: string;
@@ -57,12 +58,9 @@ function headers(token: string | null | undefined): Headers {
   if (token) result.set("Authorization", `Bearer ${token}`);
   return result;
 }
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object";
-}
 function metadata(value: unknown): value is CredentialMetadata {
   return (
-    isRecord(value) &&
+    isObjectLike(value) &&
     [
       "id",
       "origin",
@@ -100,7 +98,7 @@ export async function listCredentials(
   checked(response);
   const value: unknown = await response.json();
   if (
-    !isRecord(value) ||
+    !isObjectLike(value) ||
     typeof value.supported !== "boolean" ||
     typeof value.project_root !== "string" ||
     !Array.isArray(value.credentials) ||

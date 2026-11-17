@@ -528,7 +528,7 @@ fn normalize_generated_buddy_text(raw: &str) -> String {
         .to_string()
 }
 
-fn contains_redaction_marker(text: &str) -> bool {
+pub(super) fn contains_redaction_marker(text: &str) -> bool {
     let lower = text.to_lowercase();
     lower.contains("[redacted") || lower.contains("<redacted") || lower.contains("&lt;redacted")
 }
@@ -3062,14 +3062,6 @@ pub async fn buddy_record_workflow_telemetry(
             tokens_out,
             produced_output,
         );
-    }
-}
-
-pub async fn buddy_update_speech(gcx: AppState, speech: BuddySpeechItem) {
-    let buddy_arc = gcx.buddy.buddy.clone();
-    let mut lock = buddy_arc.lock().await;
-    if let Some(svc) = lock.as_mut() {
-        svc.update_speech(speech);
     }
 }
 

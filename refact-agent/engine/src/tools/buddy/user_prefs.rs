@@ -11,10 +11,12 @@ use tokio::sync::OwnedMutexGuard;
 
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::buddy::jobs::autonomous_chats::redact_and_cap_text;
-use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
+use crate::call_validation::ContextEnum;
 use crate::files_correction::get_project_dirs;
 use crate::global_context::GlobalContext;
-use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
+use crate::tools::tools_description::{Tool, ToolDesc};
+
+use super::{desc, result, string_arg};
 
 #[derive(Clone, Debug, PartialEq)]
 struct UserPreference {
@@ -38,63 +40,12 @@ pub struct ToolBuddyUserPrefRemove {
     pub config_path: String,
 }
 
-fn source(config_path: &str) -> ToolSource {
-    ToolSource {
-        source_type: ToolSourceType::Builtin,
-        config_path: config_path.to_string(),
-    }
-}
-
-fn desc(
-    config_path: &str,
-    name: &str,
-    display_name: &str,
-    description: &str,
-    input_schema: Value,
-) -> ToolDesc {
-    ToolDesc {
-        name: name.to_string(),
-        display_name: display_name.to_string(),
-        source: source(config_path),
-        experimental: false,
-        allow_parallel: false,
-        description: description.to_string(),
-        input_schema,
-        output_schema: None,
-        annotations: None,
-    }
-}
-
-fn result(tool_call_id: &String, text: impl Into<String>) -> (bool, Vec<ContextEnum>) {
-    (
-        false,
-        vec![ContextEnum::ChatMessage(ChatMessage {
-            role: "tool".to_string(),
-            content: ChatContent::SimpleText(text.into()),
-            tool_calls: None,
-            tool_call_id: tool_call_id.clone(),
-            ..Default::default()
-        })],
-    )
-}
-
-fn required_string_arg<'a>(
-    args: &'a HashMap<String, Value>,
-    name: &str,
-) -> Result<&'a str, String> {
-    args.get(name)
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| format!("argument `{name}` is missing or not a non-empty string"))
-}
-
 fn limited_text_arg(
     args: &HashMap<String, Value>,
     name: &str,
     max_chars: usize,
 ) -> Result<String, String> {
-    let value = required_string_arg(args, name)?;
+    let value = string_arg(args, name)?;
     if value.chars().count() > max_chars {
         return Err(format!(
             "argument `{name}` must be at most {max_chars} chars"
@@ -520,7 +471,7 @@ impl Tool for ToolBuddyUserPrefRemove {
         tool_call_id: &String,
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
-        let substring = required_string_arg(args, "substring_match")?;
+        let substring = string_arg(args, "substring_match")?;
         let gcx = ccx.lock().await.app.gcx.clone();
         let removed = remove_user_prefs(&profile_path(gcx).await?, substring).await?;
         Ok(result(

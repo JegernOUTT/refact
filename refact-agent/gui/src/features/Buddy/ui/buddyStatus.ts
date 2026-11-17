@@ -102,18 +102,6 @@ const SEVERITY_ALIASES: Partial<Record<string, BuddySeverity>> = {
   low: "low",
 };
 
-const HEALTH_ALIASES: Partial<Record<string, BuddyHealth>> = {
-  ok: "ok",
-  healthy: "ok",
-  enabled: "ok",
-  loading: "checking",
-  checking: "checking",
-  degraded: "degraded",
-  failed: "failed",
-  error: "failed",
-  unavailable: "failed",
-};
-
 export function toBuddyWorkState(
   value: string | null | undefined,
 ): BuddyWorkState | null {
@@ -124,12 +112,6 @@ export function toBuddySeverity(
   value: string | null | undefined,
 ): BuddySeverity | null {
   return value ? SEVERITY_ALIASES[value] ?? null : null;
-}
-
-export function toBuddyHealth(
-  value: string | null | undefined,
-): BuddyHealth | null {
-  return value ? HEALTH_ALIASES[value] ?? null : null;
 }
 
 export type BuddyOperatorMode =

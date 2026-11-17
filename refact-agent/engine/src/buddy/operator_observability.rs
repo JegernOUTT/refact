@@ -61,10 +61,6 @@ fn env_threshold(name: &str, default: u64) -> u64 {
 fn parse_threshold_value(value: &str) -> Option<u64> {
     value.trim().parse::<u64>().ok().filter(|value| *value > 0)
 }
-
-#[cfg(test)]
-mod growth_threshold_tests {}
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct StoreFileMetric {
     pub file: &'static str,

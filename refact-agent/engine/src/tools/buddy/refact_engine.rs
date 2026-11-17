@@ -14,8 +14,10 @@ use uuid::Uuid;
 use walkdir::WalkDir;
 
 use crate::at_commands::at_commands::AtCommandsContext;
-use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
-use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
+use crate::call_validation::ContextEnum;
+use crate::tools::tools_description::{Tool, ToolDesc};
+
+use super::{desc, result, string_arg};
 
 const REFACT_ENGINE_URL: &str = "https://github.com/JegernOUTT/refact.git";
 const MIRROR_TTL: Duration = Duration::from_secs(24 * 60 * 60);
@@ -42,54 +44,6 @@ pub struct ToolRefactEngineSearch {
 
 pub struct ToolRefactEngineCat {
     pub config_path: String,
-}
-
-fn source(config_path: &str) -> ToolSource {
-    ToolSource {
-        source_type: ToolSourceType::Builtin,
-        config_path: config_path.to_string(),
-    }
-}
-
-fn desc(
-    config_path: &str,
-    name: &str,
-    display_name: &str,
-    description: &str,
-    input_schema: Value,
-) -> ToolDesc {
-    ToolDesc {
-        name: name.to_string(),
-        display_name: display_name.to_string(),
-        source: source(config_path),
-        experimental: false,
-        allow_parallel: false,
-        description: description.to_string(),
-        input_schema,
-        output_schema: None,
-        annotations: None,
-    }
-}
-
-fn result(tool_call_id: &String, text: impl Into<String>) -> (bool, Vec<ContextEnum>) {
-    (
-        false,
-        vec![ContextEnum::ChatMessage(ChatMessage {
-            role: "tool".to_string(),
-            content: ChatContent::SimpleText(text.into()),
-            tool_calls: None,
-            tool_call_id: tool_call_id.clone(),
-            ..Default::default()
-        })],
-    )
-}
-
-fn string_arg<'a>(args: &'a HashMap<String, Value>, name: &str) -> Result<&'a str, String> {
-    args.get(name)
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| format!("argument `{name}` is missing or not a non-empty string"))
 }
 
 fn optional_string_arg(args: &HashMap<String, Value>, name: &str) -> Option<String> {

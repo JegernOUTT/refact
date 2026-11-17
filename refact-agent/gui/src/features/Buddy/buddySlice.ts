@@ -1174,15 +1174,5 @@ export const {
   selectChatBubbleImpressions,
 } = buddySlice.selectors;
 
-export const selectOpportunityById = (
-  state: { buddy: BuddySliceState },
-  id: string,
-) => state.buddy.opportunities.find((o) => o.id === id);
-
-export const selectDraftById = (
-  state: { buddy: BuddySliceState },
-  id: string,
-) => state.buddy.activeDrafts.find((d) => d.id === id);
-
 export const selectChatReactionDebug = (state: { buddy: BuddySliceState }) =>
   state.buddy.snapshot?.chat_reaction_debug ?? null;

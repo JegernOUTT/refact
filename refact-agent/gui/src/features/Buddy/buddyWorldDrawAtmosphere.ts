@@ -36,7 +36,7 @@ import {
 
 const GHIBLI_SKY_STOPS: Record<
   BuddyWorldState["atmosphere"]["paletteHint"],
-  Array<{ offset: number; color: string }>
+  { offset: number; color: string }[]
 > = {
   dawn: [
     { offset: 0, color: "#7FA8D4" },

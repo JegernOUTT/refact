@@ -843,10 +843,6 @@ pub fn normalize_kind(kind: &str) -> String {
     }
 }
 
-pub fn normalize_idempotency_input(input: &MemoryOpIdempotencyInput) -> MemoryOpIdempotencyInput {
-    input.normalized()
-}
-
 pub fn compute_content_hash(content: &str) -> String {
     let mut h = Sha256::new();
     h.update(normalize_hash_text(content).as_bytes());

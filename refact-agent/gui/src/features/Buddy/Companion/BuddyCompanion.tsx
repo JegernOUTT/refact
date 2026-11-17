@@ -1,13 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useAppDispatch, useAppSelector } from "../../../hooks";
 import { useInternalNavigation } from "../../../hooks/useInternalNavigation";
-import { getEngineEndpointIdentity } from "../../../services/refact/apiUrl";
 import {
   ensureCompanion,
   type AttentionRow,
 } from "../../../services/refact/buddyCompanion";
-import { getProjectStorageNamespace } from "../../../utils/chatUiPersistence";
-import { selectConfig, type Config } from "../../Config/configSlice";
+import { selectConfig } from "../../Config/configSlice";
 import {
   createChatWithId,
   selectCurrentThreadId,
@@ -23,13 +21,14 @@ import {
 } from "./buddyCompanionStore";
 import { BuddyPopover, type CompanionStatus } from "./BuddyPopover";
 import { CompanionReplyWatch } from "./CompanionReplyWatch";
+import { buddyNamespace } from "./buddyNamespace";
 import { popoverStorageKey } from "./popoverGeometry";
 import { useBuddyAttention } from "./useBuddyAttention";
 
 const SOURCE_PAGES = new Set(["chat", "task workspace", "task agent"]);
 const MAX_WATCHED_COMPANIONS = 8;
 
-export function useBuddySource(): string | null {
+function useBuddySource(): string | null {
   const workspaceFocused = useAppSelector(selectFocusedWorkspaceChatId);
   const current = useAppSelector(selectCurrentThreadId);
   const page = useAppSelector((state) => state.pages.at(-1)?.name);
@@ -42,12 +41,6 @@ export function useBuddySource(): string | null {
     focused ? selectIsBuddyChat(state, focused) : false,
   );
   return focused && visible && !buddy ? focused : null;
-}
-
-export function buddyNamespace(config: Config) {
-  return `${getEngineEndpointIdentity(config)}:${config.host}:${
-    getProjectStorageNamespace() ?? "unscoped"
-  }`;
 }
 
 function errorMessage(error: unknown) {
@@ -83,7 +76,9 @@ export function BuddyCompanion() {
   >({});
   const [attempt, setAttempt] = useState(0);
   const cacheKey = sourceId ? `${session}:${sourceId}` : null;
-  const companion: CompanionStatus = (cacheKey && companions[cacheKey]) || {
+  const companion: CompanionStatus = (cacheKey
+    ? companions[cacheKey]
+    : undefined) ?? {
     kind: "idle",
   };
 

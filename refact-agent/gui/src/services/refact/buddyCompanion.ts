@@ -1,5 +1,6 @@
 import { buildApiUrl, type EngineApiConfig } from "./apiUrl";
 import type { PendingQuestionSet } from "./types";
+import { isRecord } from "../../utils/isRecord";
 
 export type CompanionMeta = {
   chat_id: string;
@@ -90,9 +91,6 @@ export async function getAttention(
   if (!isAttentionSnapshot(value))
     throw new Error("Invalid Buddy attention response");
   return value;
-}
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 function strings(value: Record<string, unknown>, keys: string[]) {
   return keys.every((key) => typeof value[key] === "string");

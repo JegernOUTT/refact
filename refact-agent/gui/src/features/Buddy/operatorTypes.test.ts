@@ -26,7 +26,7 @@ const fixture: unknown = JSON.parse(
     "utf8",
   ),
 );
-const triagedFixture: Record<string, unknown> = JSON.parse(
+const triagedFixture = JSON.parse(
   readFileSync(
     join(
       process.cwd(),
@@ -34,7 +34,7 @@ const triagedFixture: Record<string, unknown> = JSON.parse(
     ),
     "utf8",
   ),
-);
+) as Record<string, unknown>;
 
 const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
 

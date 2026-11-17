@@ -17,6 +17,7 @@ use tokio::sync::Mutex as AMutex;
 use tracing::debug;
 use uuid::Uuid;
 
+use crate::buddy::actor::contains_redaction_marker;
 use crate::buddy::types::{BuddyChatPhrase, BuddyPersonalityProfile, BuddySpeechItem};
 use crate::call_validation::{ChatContent, ChatMessage, ChatModelType, SubchatParameters};
 use crate::app_state::AppState;
@@ -396,11 +397,6 @@ impl VoiceService {
         (title, description)
     }
 
-    pub async fn render_chat_title(&self, gcx: AppState, ctx: VoiceCtx<'_>) -> String {
-        self.render_line(gcx, &ctx, VoiceIntent::ChatTitle.as_str())
-            .await
-    }
-
     pub(crate) async fn render_chat_reaction(
         &self,
         gcx: AppState,
@@ -714,11 +710,7 @@ fn parse_chat_phrase_bank_line(raw: &str) -> Option<BuddyChatPhrase> {
     };
     let text = normalize_chat_reaction_voice_line(phrase);
     let redacted = refact_core::string_utils::redact_sensitive(&text);
-    if text.is_empty()
-        || redacted != text
-        || text.to_lowercase().contains("[redacted")
-        || text.to_lowercase().contains("<redacted")
-    {
+    if text.is_empty() || redacted != text || contains_redaction_marker(&text) {
         return None;
     }
     Some(BuddyChatPhrase {
@@ -972,6 +964,12 @@ mod tests {
             workflow_id: Some("test_workflow"),
             workflow_summary: Some("checking voice service"),
         }
+    }
+
+    #[test]
+    fn chat_phrase_bank_rejects_escaped_redaction_markers() {
+        assert!(parse_chat_phrase_bank_line("humor: A clean little lint parade").is_some());
+        assert!(parse_chat_phrase_bank_line("humor: &lt;ReDaCtEd&gt; parade").is_none());
     }
 
     #[test]

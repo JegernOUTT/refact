@@ -1,5 +1,5 @@
 import type { OrganizationItem } from "../../services/refact/organization";
-import { createSelector, type OutputSelector } from "@reduxjs/toolkit";
+import { createSelector } from "@reduxjs/toolkit";
 import type { RootState } from "../../app/store";
 import {
   buildHistoryTree,
@@ -159,7 +159,7 @@ export function taskToStatus(task: TaskMeta): StreamStatus {
   return "idle";
 }
 
-export function isActiveStatus(status: StreamStatus): boolean {
+function isActiveStatus(status: StreamStatus): boolean {
   return status === "streaming" || status === "working";
 }
 
@@ -411,34 +411,6 @@ export const selectStreamGroups = createSelector(
   },
 );
 
-export const selectContinueItems: OutputSelector<
-  [(state: RootState) => StreamItem[]],
-  StreamItem[]
-> = createSelector([selectStreamItems], (items): StreamItem[] => {
-  if (items.length === 0) return EMPTY_ITEMS;
-  const active = items
-    .filter((item) => isActiveItem(item))
-    .sort((a, b) => b.updatedAtMs - a.updatedAtMs);
-  const rest = items
-    .filter((item) => !isActiveItem(item))
-    .sort((a, b) => b.updatedAtMs - a.updatedAtMs);
-  return [...active, ...rest].slice(0, 3);
-});
-
-export const selectAttentionItems: OutputSelector<
-  [(state: RootState) => StreamItem[]],
-  StreamItem[]
-> = createSelector([selectStreamItems], (items): StreamItem[] => {
-  const picked = items.filter(
-    (item) =>
-      (item.kind === "task" && (item.cardsFailed ?? 0) > 0) ||
-      item.status === "failed" ||
-      item.status === "paused",
-  );
-  if (picked.length === 0) return EMPTY_ITEMS;
-  return [...picked].sort((a, b) => b.updatedAtMs - a.updatedAtMs);
-});
-
 const selectRootId = (_state: RootState, rootId: string) => rootId;
 
 export const selectFamilyChildren = createSelector(
@@ -476,28 +448,5 @@ export const selectFamilyChildren = createSelector(
     walk(root, 1);
 
     return out.length === 0 ? EMPTY_FAMILY_CHILDREN : out;
-  },
-);
-
-export type TodayAggregate = {
-  chats: number;
-  costUsd: number;
-  tokens: number;
-};
-
-export const selectTodayAggregate = createSelector(
-  [selectHistoryChats],
-  (chats): TodayAggregate => {
-    let count = 0;
-    let costUsd = 0;
-    let tokens = 0;
-    for (const chat of Object.values(chats)) {
-      if (chat.updatedAt.length === 0) continue;
-      if (getDateGroup(chat.updatedAt) !== "Today") continue;
-      count += 1;
-      costUsd += chat.total_cost_usd ?? 0;
-      tokens += chat.total_tokens ?? 0;
-    }
-    return { chats: count, costUsd, tokens };
   },
 );

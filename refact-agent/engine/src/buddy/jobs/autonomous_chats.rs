@@ -5412,7 +5412,6 @@ mod tests {
     use crate::buddy::scheduler::BuddyJobContext;
     use crate::buddy::settings::{save_settings, BuddySettings};
     use crate::buddy::types::{BuddyFact, BuddyJobState, BuddyOnboarding, BuddyPetState, BuddyPulse};
-    use crate::stats::event::LlmCallEvent;
 
     #[test]
     fn report_attempt_failed_unknown_and_notification_only_are_not_reports() {

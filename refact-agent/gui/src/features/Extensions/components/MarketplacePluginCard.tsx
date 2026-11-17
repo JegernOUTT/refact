@@ -15,10 +15,7 @@ import {
 import type { PluginEntry } from "../../../services/refact/plugins";
 
 import styles from "./MarketplacePluginCard.module.css";
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}
+import { isObjectLike } from "../../../utils/isObjectLike";
 
 function stringifyMutationValue(value: unknown, fallback: string): string {
   if (typeof value === "string") {
@@ -36,7 +33,7 @@ function stringifyMutationValue(value: unknown, fallback: string): string {
 }
 
 function getMutationErrorMessage(error: unknown, fallback: string): string {
-  if (!isRecord(error)) return fallback;
+  if (!isObjectLike(error)) return fallback;
   if ("data" in error) return stringifyMutationValue(error.data, fallback);
   if ("message" in error)
     return stringifyMutationValue(error.message, fallback);

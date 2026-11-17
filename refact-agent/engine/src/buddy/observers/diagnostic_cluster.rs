@@ -196,8 +196,3 @@ impl BuddyObserver for DiagnosticClusterObserver {
         detect_diagnostic_cluster_facts(&diagnostics, ctx.now)
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-}

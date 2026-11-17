@@ -30,7 +30,7 @@ interface TotoroSpec {
   earSpread: number;
   earH: number;
   earW: number;
-  chevronRows: Array<[number, number]>;
+  chevronRows: [number, number][];
   face: FaceLayout;
   whiskerY: number;
   armY: number;
@@ -94,7 +94,7 @@ function traceTotoroBelly(
   h: number,
 ): void {
   const cx = ox + (w - 1) / 2;
-  const samples: Array<[number, number]> = [];
+  const samples: [number, number][] = [];
   for (let r = 0; r <= h - 1; r += 0.5) {
     const span = totoroBellySpan(w, h, r);
     if (span > 0.3) samples.push([r, span]);
@@ -837,7 +837,7 @@ export function drawEgg(
   if (crack > 0.1) {
     const d = Math.floor(crack * 8);
     const cx = x + 10;
-    const segments: Array<[number, number, number, number]> = [
+    const segments: [number, number, number, number][] = [
       [cx, oy + 6, cx - 1, oy + 7.2],
       [cx - 1, oy + 7.2, cx, oy + 8.4],
       [cx, oy + 8.4, cx + 1, oy + 9.6],

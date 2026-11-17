@@ -44,47 +44,21 @@ import {
   buddyOperatorIdentity,
 } from "../services/refact/buddyOperator";
 import type {
-  BuddyOpportunity,
-  BuddySuggestion,
-  BuddyPulse,
   BuddyRuntimeEvent,
   BuddySemanticState,
-  BuddySnapshot,
   BuddyConversationEntry,
   BuddySpeechItem,
 } from "../features/Buddy/types";
 import type React from "react";
 import { act } from "react-dom/test-utils";
-
-const operatorStatus = (
-  mode: "disabled" | "enabled" | "unavailable",
-  unavailableReason?: {
-    kind: string;
-    detail: string;
-    retry_in_seconds?: number;
-  },
-) => ({
-  schema_version: 1,
-  mode,
-  features: {
-    storage: mode !== "disabled",
-    actions: false,
-    supervision: false,
-    improvement: false,
-    editorial: false,
-  },
-  project:
-    mode === "enabled"
-      ? { project_id: "fixture", canonical_root: "/fixture" }
-      : null,
-  worker:
-    mode === "enabled"
-      ? { worker_id: "worker", engine_instance_id: "engine", epoch: 1 }
-      : null,
-  ...(mode === "unavailable" && unavailableReason
-    ? { unavailable_reason: unavailableReason }
-    : {}),
-});
+import {
+  CONFIG_STATE,
+  operatorStatus,
+  makePulse,
+  makeOpportunity,
+  makeSnapshot,
+  makeSuggestion,
+} from "../features/Buddy/__tests__/buddyHomeFixtures";
 
 // Existing legacy tests explicitly exercise the disabled compatibility contract.
 beforeEach(() => {
@@ -96,90 +70,11 @@ beforeEach(() => {
 });
 
 vi.mock("../features/Buddy/BuddyCharacter", async () => {
-  const ReactModule = await vi.importActual<typeof import("react")>("react");
-
-  return {
-    BuddyCharacter: ({
-      bubblePosition,
-      randomizeBubblePosition,
-      compactBubble,
-      scenePose = "idle",
-      sceneXPercent,
-      sceneYPercent,
-      sceneDepthScale,
-      speechText,
-      speechControls,
-      onSpeechControl,
-    }: {
-      bubblePosition?: string;
-      randomizeBubblePosition?: boolean;
-      compactBubble?: boolean;
-      scenePose?: string;
-      sceneXPercent?: number;
-      sceneYPercent?: number;
-      sceneDepthScale?: number;
-      speechText?: string | null;
-      speechControls?: {
-        id: string;
-        label: string;
-        action: string;
-        action_param?: string;
-        style: string;
-      }[];
-      onSpeechControl?: (control: {
-        id: string;
-        label: string;
-        action: string;
-        action_param?: string;
-        style: string;
-      }) => void;
-    }) =>
-      ReactModule.createElement(
-        "div",
-        {
-          "data-bubble-position": bubblePosition,
-          "data-depth-scale": sceneDepthScale,
-          "data-compact-bubble": String(compactBubble),
-          "data-pose": scenePose,
-          "data-randomize-bubble-position": String(randomizeBubblePosition),
-          "data-testid": "buddy-world-character",
-          style:
-            typeof sceneXPercent === "number" ||
-            typeof sceneYPercent === "number"
-              ? {
-                  ...(typeof sceneXPercent === "number"
-                    ? { left: `${sceneXPercent}%` }
-                    : undefined),
-                  ...(typeof sceneYPercent === "number"
-                    ? { bottom: `${100 - sceneYPercent}%` }
-                    : undefined),
-                }
-              : undefined,
-        },
-        speechText,
-        ...(speechControls?.map((control) =>
-          ReactModule.createElement(
-            "button",
-            {
-              key: control.id,
-              type: "button",
-              onClick: () => onSpeechControl?.(control),
-            },
-            control.label,
-          ),
-        ) ?? []),
-      ),
-  };
+  const { mockBuddyCharacterModule } = await import(
+    "../features/Buddy/__tests__/buddyHomeFixtures"
+  );
+  return mockBuddyCharacterModule();
 });
-
-const CONFIG_STATE = {
-  config: {
-    apiKey: "test",
-    lspPort: 8001,
-    themeProps: {},
-    host: "vscode" as const,
-  },
-};
 
 function readGuiSource(path: string): Promise<string> {
   return readFile(resolve(process.cwd(), "src", path), "utf8");
@@ -233,75 +128,6 @@ function makeSpeech(overrides?: Partial<BuddySpeechItem>): BuddySpeechItem {
   };
 }
 
-function makePulse(overrides?: Partial<BuddyPulse>): BuddyPulse {
-  return {
-    generated_at: "2024-01-01T00:00:00Z",
-    tasks: { total: 3, stuck: 1, abandoned: 2, by_status: {} },
-    trajectories: { total: 10, untitled: 2, oldest_age_days: 14 },
-    memory: { total: 50, orphan: 5, stale_conflicts: 1 },
-    providers: { defaults_ok: true, broken_refs: 0, quota_warnings: 0 },
-    mcp: { total: 4, failing: 1, auth_expiring: 0 },
-    customization: { modes: 3, skills: 2, commands: 1, subagents: 0, hooks: 0 },
-    diagnostics: { last_hour: 7, top_error_types: ["model_not_found"] },
-    git: { uncommitted_files: 5, diff_lines_4h: 120, branches: 3 },
-    worktrees: {
-      total_registered: 3,
-      total_discovered: 1,
-      total: 4,
-      clean: 2,
-      dirty: 1,
-      unknown: 0,
-      stale: 1,
-      conflicted: 0,
-      shared: 1,
-      abandoned_clean: 2,
-      changed_files: 3,
-      additions: 10,
-      deletions: 2,
-      missing_registry_paths: 1,
-      unregistered_cache_dirs: 1,
-      merged_branches: 2,
-    },
-    ...overrides,
-  };
-}
-
-function makeOpportunity(
-  overrides?: Partial<BuddyOpportunity>,
-): BuddyOpportunity {
-  return {
-    id: "opp-1",
-    kind: "diagnostic_investigation",
-    summary: "Model config is broken",
-    priority: "high",
-    confidence: 0.9,
-    fact_keys: [],
-    cooldown_key: "opp-1",
-    cooldown_secs: 1800,
-    status: "new",
-    proposed_actions: [],
-    humor_allowed: false,
-    related: { chat_ids: [], task_ids: [], memory_ids: [], config_paths: [] },
-    created_at: "2024-01-01T00:00:00Z",
-    expires_at: "2099-12-31T00:00:00Z",
-    ...overrides,
-  };
-}
-
-function makeSuggestion(overrides?: Partial<BuddySuggestion>): BuddySuggestion {
-  return {
-    id: "suggestion-1",
-    suggestion_type: "quest_start_setup",
-    title: "Warm up this workspace",
-    description: "Kick off setup so Buddy can help proactively.",
-    created_at: "2024-01-01T00:00:00Z",
-    dismissed: false,
-    controls: [],
-    quest: null,
-    ...overrides,
-  };
-}
-
 function makeSemanticState(
   overrides?: Partial<BuddySemanticState>,
 ): BuddySemanticState {
@@ -335,103 +161,6 @@ function makeSemanticState(
     },
     skills: [],
     log: [],
-    ...overrides,
-  };
-}
-
-function makeSnapshot(
-  pulse?: BuddyPulse,
-  overrides?: Partial<BuddySnapshot>,
-): BuddySnapshot {
-  return {
-    state: {
-      identity: { name: "Buddy", created_at: "", palette_index: 0 },
-      progression: {
-        stage: 0,
-        stage_name: "Egg",
-        level: 1,
-        xp: 0,
-        xp_next: 20,
-      },
-      skills: { unlocked: [], locked: [] },
-      workflow_summaries: [],
-      semantic: {
-        mood: "idle",
-        focus: "helping",
-        headline: "",
-        last_active: "",
-      },
-      recent_activities: [],
-      suggestion_state: [],
-      pet: {
-        needs: {
-          hunger: 80,
-          energy: 85,
-          hygiene: 80,
-          boredom: 15,
-          affection: 75,
-        },
-        condition: {
-          sleeping: false,
-          hungry: false,
-          sleepy: false,
-          dirty: false,
-          bored: false,
-          lonely: false,
-        },
-        evolution: {
-          care_score: 0,
-          neglect_score: 0,
-          open_seconds: 0,
-          last_evolved_at: null,
-        },
-      },
-      personality: {
-        archetype_id: "helper_sprite",
-        archetype_label: "Helper Sprite",
-        vibe: "Playful",
-        summary: "An energetic helper.",
-        prompt: "Playful",
-        traits: {
-          playfulness: 70,
-          chaos: 35,
-          sociability: 72,
-          curiosity: 78,
-          resilience: 66,
-        },
-      },
-      active_quest: null,
-      opportunities: [],
-    },
-    settings: {
-      enabled: true,
-      auto_diagnostics: true,
-      auto_issue_creation: false,
-      personality_prompt: null,
-      autonomous_chats_enabled: true,
-      proactive_enabled: true,
-      message_observation_enabled: false,
-      chat_reactions_enabled: false,
-      housekeeping_enabled: true,
-      humor_enabled: true,
-      humor_level: "light",
-      autonomy_level: "suggest",
-      quiet_mode: false,
-      daily_digest_hour: 18,
-      observers: {
-        task_health: true,
-        trajectory_clutter: true,
-        chat_pattern: false,
-        customization_drift: true,
-        memory_garden: true,
-        mcp_auth: true,
-        git_pressure: true,
-        diagnostic_cluster: true,
-        provider_health: true,
-      },
-    },
-    enabled: true,
-    pulse,
     ...overrides,
   };
 }

@@ -34,10 +34,11 @@ describe("buddy progression is never farmed by activity volume", () => {
       (key) => SIGNALS[key].isError,
     );
     expect(errorSignal).toBeDefined();
+    if (errorSignal === undefined) throw new Error("no error signal");
 
     const next = reduceSemanticState(initial, {
       kind: "signal",
-      signalType: errorSignal as string,
+      signalType: errorSignal,
     });
 
     expect(next.mood.anxiety).toBeGreaterThan(initial.mood.anxiety);

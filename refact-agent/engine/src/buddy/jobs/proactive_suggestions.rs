@@ -145,26 +145,3 @@ fn count_uncommitted_changes(project_root: &std::path::Path) -> Option<usize> {
     let statuses = repo.statuses(Some(&mut opts)).ok()?;
     Some(statuses.iter().filter(|s| !s.status().is_empty()).count())
 }
-
-#[cfg(test)]
-mod tests {
-
-    use crate::worktrees::types::{WorktreeInventory, WorktreeInventorySummary};
-
-    fn inventory(abandoned_clean: usize) -> WorktreeInventory {
-        WorktreeInventory {
-            project_hash: "project".into(),
-            source_workspace_root: std::path::PathBuf::from("/repo"),
-            generated_at: chrono::Utc::now().to_rfc3339(),
-            summary: WorktreeInventorySummary {
-                total: abandoned_clean,
-                total_registered: abandoned_clean,
-                abandoned_clean,
-                clean: abandoned_clean,
-                ..Default::default()
-            },
-            worktrees: vec![],
-            cleanup_candidates: vec![],
-        }
-    }
-}

@@ -1,3 +1,4 @@
+import { isRecord } from "../../../utils/isRecord";
 export type AnalysisSeverity = "Low" | "Medium" | "High" | "Critical";
 
 export interface AnalysisMetric {
@@ -390,10 +391,6 @@ export interface CodeWhyResult extends BaseResult {
     provenance_tags: string[];
   }[];
   related: { from: string; relation: string; to: string }[];
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function str(record: Record<string, unknown>, key: string): string | null {
   const value = record[key];

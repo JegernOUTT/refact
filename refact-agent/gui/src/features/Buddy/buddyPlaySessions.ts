@@ -1,5 +1,6 @@
 import type { BuddyPetState, BuddyScenePose } from "./types";
 import type { BuddySpeechStyle } from "./types";
+import { clamp, finiteOr, seededUnit } from "./buddyWorldDrawHelpers";
 
 export type BuddyPlaySessionKind = "fetch" | "firefly";
 
@@ -64,25 +65,6 @@ const PLAY_MIN_X = 33;
 const PLAY_MAX_X = 67;
 const PLAY_MIN_Y = 70;
 const PLAY_MAX_Y = 84;
-const UINT_MAX = 4_294_967_295;
-
-function finiteOr(value: number | null | undefined, fallback: number): number {
-  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
-}
-
-function clampRange(value: number, min: number, max: number): number {
-  return Math.max(min, Math.min(max, finiteOr(value, min)));
-}
-
-export function playSeededUnit(seed: number, salt: number): number {
-  let value = (finiteOr(seed, 0) + Math.imul(salt + 1, 0x9e3779b9)) >>> 0;
-  value ^= value >>> 16;
-  value = Math.imul(value, 0x85ebca6b) >>> 0;
-  value ^= value >>> 13;
-  value = Math.imul(value, 0xc2b2ae35) >>> 0;
-  value ^= value >>> 16;
-  return (value >>> 0) / UINT_MAX;
-}
 
 export function createFetchSession(nowMs: number): BuddyFetchSession {
   const safeNow = finiteOr(nowMs, 0);
@@ -111,10 +93,10 @@ export function throwFetchBall(
   return {
     ...session,
     phase: "throwing",
-    ballFromX: clampRange(buddyX, PLAY_MIN_X, PLAY_MAX_X),
+    ballFromX: clamp(buddyX, PLAY_MIN_X, PLAY_MAX_X),
     ballFromY: 74,
-    ballToX: clampRange(targetX, PLAY_MIN_X, PLAY_MAX_X),
-    ballToY: clampRange(targetY, PLAY_MIN_Y, PLAY_MAX_Y),
+    ballToX: clamp(targetX, PLAY_MIN_X, PLAY_MAX_X),
+    ballToY: clamp(targetY, PLAY_MIN_Y, PLAY_MAX_Y),
     phaseStartedAtMs: finiteOr(nowMs, 0),
   };
 }
@@ -144,8 +126,8 @@ export function pounceFirefly(
   return {
     ...session,
     phase: "pouncing",
-    targetX: clampRange(targetX, PLAY_MIN_X, PLAY_MAX_X),
-    targetY: clampRange(targetY, PLAY_MIN_Y, PLAY_MAX_Y),
+    targetX: clamp(targetX, PLAY_MIN_X, PLAY_MAX_X),
+    targetY: clamp(targetY, PLAY_MIN_Y, PLAY_MAX_Y),
     phaseStartedAtMs: finiteOr(nowMs, 0),
   };
 }
@@ -192,8 +174,7 @@ export function advanceBuddyPlaySession(
     case "armed":
       return null;
     case "pouncing": {
-      const caught =
-        playSeededUnit(session.seed, session.catches * 7 + 1) < 0.62;
+      const caught = seededUnit(session.seed, session.catches * 7 + 1) < 0.62;
       return {
         ...session,
         phase: "resolved",
@@ -449,7 +430,7 @@ export function fetchBallPositionAt(
   const safeNow = finiteOr(nowMs, 0);
   if (session.phase === "throwing") {
     const duration = Math.max(1, FETCH_PHASE_DURATIONS_MS.throwing);
-    const t = clampRange((safeNow - session.phaseStartedAtMs) / duration, 0, 1);
+    const t = clamp((safeNow - session.phaseStartedAtMs) / duration, 0, 1);
     const x = session.ballFromX + (session.ballToX - session.ballFromX) * t;
     const baseY = session.ballFromY + (session.ballToY - session.ballFromY) * t;
     const arcLift = Math.sin(t * Math.PI) * 9;
@@ -488,7 +469,7 @@ export function maybeCreateGiftMoment(
   if (!intentKind) return null;
   const item = GIFT_BY_INTENT[intentKind];
   if (!item) return null;
-  if (playSeededUnit(seed, 13) >= GIFT_CHANCE) return null;
+  if (seededUnit(seed, 13) >= GIFT_CHANCE) return null;
   return { item, startedAtMs: finiteOr(nowMs, 0) };
 }
 
@@ -517,7 +498,7 @@ export interface BuddyPlayLine {
   lines: readonly ((name: string) => string)[];
 }
 
-export const PLAY_SESSION_LINES: Record<string, BuddyPlayLine> = {
+export const PLAY_SESSION_LINES: Partial<Record<string, BuddyPlayLine>> = {
   "fetch:armed": {
     style: "excite",
     poolKey: "play:fetch:armed",

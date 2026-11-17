@@ -655,15 +655,6 @@ pub fn mark_greeted(state: &mut BuddyState) -> bool {
     true
 }
 
-pub fn mark_tour_completed(state: &mut BuddyState) -> bool {
-    if state.onboarding.tour_completed {
-        return false;
-    }
-    state.onboarding.tour_completed = true;
-    sync_state(state);
-    true
-}
-
 pub fn complete_active_quest(state: &mut BuddyState) -> Option<BuddyQuest> {
     let mut quest = state.active_quest.take()?;
     quest.progress = quest.goal.max(1);

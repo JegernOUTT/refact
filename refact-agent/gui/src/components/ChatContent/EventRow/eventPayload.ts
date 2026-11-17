@@ -1,8 +1,5 @@
 import type { EventMessage } from "../../../services/refact/types";
-
-export function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
+import { isRecord } from "../../../utils/isRecord";
 
 export function eventPayloadRecord(
   event: EventMessage,

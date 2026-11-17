@@ -107,8 +107,3 @@ impl BuddyJob for BuddyIdleSuggesterJob {
         .await
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-}

@@ -38,7 +38,7 @@ export function useBuddyEditorialDelivery<T extends { id: string }>(
     },
   );
   const context =
-    contextQuery.error || contextQuery.isFetching
+    Boolean(contextQuery.error) || contextQuery.isFetching
       ? undefined
       : contextQuery.currentData;
   const project = context?.project;
@@ -70,7 +70,7 @@ export function useBuddyEditorialDelivery<T extends { id: string }>(
       surface === "avatar" ||
       !project ||
       !worker ||
-      !context?.features.editorial
+      !context.features.editorial
     )
       return;
     let active = true;

@@ -30,8 +30,7 @@ use crate::chat::get_or_create_session_with_trajectory;
 use crate::chat::delivery::deliver_to_chat;
 use refact_core::chat_types::{DeliveryOutcome, PendingDelivery, PushMode};
 use crate::worktrees::service::WorktreeService;
-use refact_buddy_core::types::BuddyRuntimeEvent;
-use uuid::Uuid;
+use crate::buddy::actor::make_runtime_event;
 
 /// Timeout for agent inactivity before considering it stuck (20 minutes)
 const AGENT_STUCK_TIMEOUT: Duration = Duration::from_secs(20 * 60);
@@ -263,39 +262,6 @@ pub(crate) async fn notify_planner_blocking_question(
         ),
     )
     .await
-}
-
-fn make_runtime_event(
-    signal_type: &str,
-    title: &str,
-    source: &str,
-    dedupe_key: &str,
-    status: &str,
-    priority: Option<&str>,
-) -> BuddyRuntimeEvent {
-    BuddyRuntimeEvent {
-        id: Uuid::new_v4().to_string(),
-        signal_type: signal_type.to_string(),
-        title: title.to_string(),
-        description: None,
-        source: source.to_string(),
-        status: status.to_string(),
-        failure_category: None,
-        failure_summary: None,
-        progress: None,
-        dedupe_key: Some(dedupe_key.to_string()),
-        priority: priority.unwrap_or("normal").to_string(),
-        created_at: Utc::now().to_rfc3339(),
-        ttl_ms: None,
-        bubble_policy: None,
-        speech_text: None,
-        scene: None,
-        duration_hint: None,
-        persistent: false,
-        controls: Vec::new(),
-        chat_id: None,
-        dismissed: false,
-    }
 }
 
 async fn record_agent_attention(

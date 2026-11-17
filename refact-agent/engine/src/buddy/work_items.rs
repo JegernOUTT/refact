@@ -153,14 +153,6 @@ pub fn problem_summary_from_title(title: &str) -> Option<String> {
     (!summary.is_empty()).then_some(summary)
 }
 
-pub fn is_cosmetic_helper_outcome(
-    outcome_work_id: &str,
-    parent_work_id: Option<&str>,
-) -> Option<String> {
-    let parent = parent_work_id?.trim();
-    (!parent.is_empty() && outcome_work_id.starts_with("helper:")).then(|| parent.to_string())
-}
-
 pub(crate) fn stable_hash(parts: &[&str]) -> String {
     let mut hasher = Sha256::new();
     for part in parts {

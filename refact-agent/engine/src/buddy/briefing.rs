@@ -230,32 +230,3 @@ pub async fn briefing_exists(project_root: &Path, date: &str) -> bool {
         .await
         .unwrap_or(false)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    use crate::buddy::types::{BuddyAction, BuddyOpportunityKind, BuddyOpportunityLinks};
-
-    fn opp(id: &str, priority: BuddyPriority, confidence: f32) -> BuddyOpportunity {
-        let now = Utc::now();
-        BuddyOpportunity {
-            id: id.to_string(),
-            kind: BuddyOpportunityKind::MemoryOpsBatch,
-            summary: format!("card {}", id),
-            priority,
-            confidence,
-            fact_keys: vec![],
-            cooldown_key: format!("k:{}", id),
-            cooldown_secs: 60,
-            status: OpportunityStatus::New,
-            proposed_actions: vec![BuddyAction::Dismiss],
-            humor: None,
-            humor_allowed: false,
-            related: BuddyOpportunityLinks::default(),
-            created_at: now,
-            expires_at: now + chrono::Duration::hours(24),
-            resolved_at: None,
-        }
-    }
-}

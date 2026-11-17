@@ -1,4 +1,4 @@
-use std::path::Path;
+use super::{recent_activity_evidence, trusted_git_output};
 
 use chrono::{Datelike, Local, Timelike, Utc, Weekday};
 
@@ -11,7 +11,6 @@ pub struct BuddyFridayRetroJob;
 
 const COOLDOWN_SECONDS: u64 = 0;
 const PRIORITY: u32 = 31;
-const TRUSTED_COMMAND_PATH: &str = "/usr/local/bin:/usr/bin:/bin";
 
 fn digest_hour(ctx: &BuddyJobContext) -> u32 {
     ctx.settings.daily_digest_hour.unwrap_or(18).min(23) as u32
@@ -38,51 +37,6 @@ fn should_run_at(ctx: &BuddyJobContext, now: chrono::DateTime<Local>) -> bool {
     !week_key_recorded(ctx, &key) && now.weekday() == Weekday::Fri && now.hour() >= digest_hour(ctx)
 }
 
-async fn trusted_git_output(project_root: &Path, args: &[&str]) -> Option<String> {
-    let mut command = tokio::process::Command::new("git");
-    command
-        .arg("-C")
-        .arg(project_root)
-        .args(args)
-        .env("PATH", TRUSTED_COMMAND_PATH)
-        .stdin(std::process::Stdio::null())
-        .kill_on_drop(true);
-    // Bound the git invocation so a hung repo/filesystem cannot stall the Tokio worker.
-    let output = tokio::time::timeout(std::time::Duration::from_secs(10), command.output())
-        .await
-        .ok()?
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if text.is_empty() {
-        None
-    } else {
-        Some(text)
-    }
-}
-
-fn recent_activity_evidence(ctx: &BuddyJobContext) -> String {
-    let activities = ctx
-        .recent_activities
-        .iter()
-        .rev()
-        .take(20)
-        .map(|activity| {
-            format!(
-                "- {} [{}] {} — {}",
-                activity.timestamp, activity.activity_type, activity.title, activity.description
-            )
-        })
-        .collect::<Vec<_>>();
-    if activities.is_empty() {
-        "none".to_string()
-    } else {
-        activities.join("\n")
-    }
-}
-
 async fn weekly_git_evidence(ctx: &BuddyJobContext) -> String {
     trusted_git_output(
         &ctx.project_root,
@@ -102,7 +56,7 @@ async fn build_friday_retro_spec(ctx: &BuddyJobContext) -> AutonomousBuddyChatSp
         project_root,
         digest_hour(ctx),
         weekly_git_evidence(ctx).await,
-        recent_activity_evidence(ctx)
+        recent_activity_evidence(ctx, 20)
     );
     AutonomousBuddyChatSpec::new(
         meta.id,
@@ -146,10 +100,4 @@ impl BuddyJob for BuddyFridayRetroJob {
         }
         result
     }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::path::Path;
 }

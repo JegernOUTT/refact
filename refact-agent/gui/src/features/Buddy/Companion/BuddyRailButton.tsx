@@ -12,7 +12,7 @@ import styles from "./BuddyRailButton.module.css";
 
 export const BUDDY_RAIL_AVATAR_SIZE = 56;
 
-export function buddyRailLabel(count: number, unread = false) {
+function buddyRailLabel(count: number, unread = false) {
   const label =
     count > 0
       ? `Buddy, ${count} ${count === 1 ? "needs" : "need"} you`

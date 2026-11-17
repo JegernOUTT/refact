@@ -22,6 +22,7 @@ import type {
   BuddyOpportunityAcceptResponse,
   BuddySpeechItem,
 } from "../types";
+import { isObjectLike } from "../../../utils/isObjectLike";
 
 export type BuddyControlActionResult =
   | { status: "success" }
@@ -39,12 +40,6 @@ export type BuddyControlActionResult =
 export const BUDDY_ACTION_SUCCESS: BuddyControlActionResult = {
   status: "success",
 };
-
-export function isBuddyActionApplied(
-  result: BuddyControlActionResult,
-): result is { status: "success" } {
-  return result.status === "success";
-}
 
 export function buddyActionResultMessage(
   result: BuddyControlActionResult,
@@ -79,14 +74,10 @@ function actionFeedbackSpeech(
   };
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}
-
 function stringFromUnknown(value: unknown): string | null {
   if (typeof value === "string") return value;
   if (value instanceof Error) return value.message;
-  if (isRecord(value)) {
+  if (isObjectLike(value)) {
     if (typeof value.detail === "string") return value.detail;
     if (typeof value.message === "string") return value.message;
     if (typeof value.error === "string") return value.error;
@@ -97,7 +88,7 @@ function stringFromUnknown(value: unknown): string | null {
 export function formatOpportunityActionError(error: unknown): string {
   const direct = stringFromUnknown(error);
   if (direct) return direct;
-  if (isRecord(error)) {
+  if (isObjectLike(error)) {
     const status =
       typeof error.status === "number" || typeof error.status === "string"
         ? String(error.status)

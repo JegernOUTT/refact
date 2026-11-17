@@ -3,15 +3,7 @@ import { render, screen } from "../../../../utils/test-utils";
 import { BuddyActivityPanel } from "../../BuddyActivityPanel";
 import { BuddyRecentErrorsPanel } from "../../BuddyRecentErrorsPanel";
 import type { BuddyRuntimeEvent } from "../../types";
-
-const CONFIG_STATE = {
-  config: {
-    apiKey: "test",
-    lspPort: 8001,
-    themeProps: {},
-    host: "vscode" as const,
-  },
-};
+import { CONFIG_STATE } from "../../__tests__/buddyHomeFixtures";
 
 describe("buddy UI polish", () => {
   it("non_clickable_activity_rows_are_not_tabbable_buttons", () => {

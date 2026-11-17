@@ -100,8 +100,3 @@ impl BuddyJob for BuddyRefactorHunterJob {
         result
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-}

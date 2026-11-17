@@ -18,20 +18,8 @@ vi.mock("./components/Stream", () => ({
   ),
 }));
 
-vi.mock("./components/HeroBlock/HeroBlock", () => ({
-  HeroBlock: () => <div>Removed hero</div>,
-}));
-
 vi.mock("../Buddy/BuddyDashboardScene", () => ({
   BuddyDashboardScene: () => <section aria-label="Home Buddy" />,
-}));
-
-vi.mock("./components/ContinueSection/ContinueSection", () => ({
-  ContinueSection: () => <div>Removed continue cards</div>,
-}));
-
-vi.mock("./components/AttentionBand/AttentionBand", () => ({
-  AttentionBand: () => <div>Removed attention band</div>,
 }));
 
 describe("Dashboard composition", () => {
@@ -57,7 +45,6 @@ describe("Dashboard composition", () => {
     expect(
       screen.getByRole("region", { name: "Home Buddy" }),
     ).toBeInTheDocument();
-    expect(screen.queryByText(/Removed/)).not.toBeInTheDocument();
     expect(container.querySelector(".rf-stagger > :first-child")).toBe(
       screen.getByRole("region", { name: "Home Buddy" }),
     );

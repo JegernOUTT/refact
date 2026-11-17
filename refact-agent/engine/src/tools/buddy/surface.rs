@@ -10,9 +10,11 @@ use crate::at_commands::at_commands::AtCommandsContext;
 use crate::buddy::actor::{buddy_apply, buddy_enqueue_event, make_runtime_event, BuddyMutation};
 use crate::buddy::jobs::autonomous_chats::redact_and_cap_text;
 use crate::buddy::types::{BuddyActivity, BuddySpeechItem};
-use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
+use crate::call_validation::ContextEnum;
 use crate::global_context::GlobalContext;
-use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
+use crate::tools::tools_description::{Tool, ToolDesc};
+
+use super::{desc, result};
 
 const VALID_MOODS: &[&str] = &[
     "playful",
@@ -49,29 +51,6 @@ pub struct ToolBuddyRuntimeEvent {
     pub config_path: String,
 }
 
-fn desc(
-    config_path: &str,
-    name: &str,
-    display_name: &str,
-    description: &str,
-    input_schema: Value,
-) -> ToolDesc {
-    ToolDesc {
-        name: name.to_string(),
-        display_name: display_name.to_string(),
-        source: ToolSource {
-            source_type: ToolSourceType::Builtin,
-            config_path: config_path.to_string(),
-        },
-        experimental: false,
-        allow_parallel: false,
-        description: description.to_string(),
-        input_schema,
-        output_schema: None,
-        annotations: None,
-    }
-}
-
 fn required_str<'a>(args: &'a HashMap<String, Value>, name: &str) -> Result<&'a str, String> {
     args.get(name)
         .and_then(|v| v.as_str())
@@ -92,22 +71,6 @@ fn validate(value: &str, allowed: &[&str], name: &str) -> Result<(), String> {
     } else {
         Err(format!("invalid {}: {}", name, value))
     }
-}
-
-fn ok_message(
-    tool_call_id: &String,
-    content: impl Into<String>,
-) -> Result<(bool, Vec<ContextEnum>), String> {
-    Ok((
-        false,
-        vec![ContextEnum::ChatMessage(ChatMessage {
-            role: "tool".to_string(),
-            content: ChatContent::SimpleText(content.into()),
-            tool_calls: None,
-            tool_call_id: tool_call_id.clone(),
-            ..Default::default()
-        })],
-    ))
 }
 
 async fn context(ccx: Arc<AMutex<AtCommandsContext>>) -> (Arc<GlobalContext>, String) {
@@ -144,10 +107,10 @@ impl Tool for ToolBuddyLogActivity {
         let icon = cap(optional_str(args, "icon").as_deref().unwrap_or("✨"), 16);
         let (gcx, context_chat_id) = context(ccx).await;
         if !buddy_initialized(gcx.clone()).await {
-            return ok_message(
+            return Ok(result(
                 tool_call_id,
                 "Buddy service not initialized; activity logging ignored",
-            );
+            ));
         }
         let chat_id = optional_str(args, "chat_id")
             .map(|s| cap(&s, 120))
@@ -171,7 +134,7 @@ impl Tool for ToolBuddyLogActivity {
             },
         )
         .await;
-        ok_message(tool_call_id, format!("Activity logged: {}", title))
+        Ok(result(tool_call_id, format!("Activity logged: {}", title)))
     }
 
     fn tool_depends_on(&self) -> Vec<String> {
@@ -206,10 +169,10 @@ impl Tool for ToolBuddySpeak {
         let buddy_arc = gcx.buddy.clone();
         let mut lock = buddy_arc.lock().await;
         let Some(svc) = lock.as_mut() else {
-            return ok_message(
+            return Ok(result(
                 tool_call_id,
                 "Buddy service not initialized; speech ignored",
-            );
+            ));
         };
         svc.update_speech_user_initiated(BuddySpeechItem {
             editorial_delivery_required: false,
@@ -228,7 +191,7 @@ impl Tool for ToolBuddySpeak {
             chat_id: None,
             speech_intent: Some(intent),
         });
-        ok_message(tool_call_id, format!("Spoke: {}", text))
+        Ok(result(tool_call_id, format!("Spoke: {}", text)))
     }
 
     fn tool_depends_on(&self) -> Vec<String> {
@@ -264,10 +227,10 @@ impl Tool for ToolBuddyRuntimeEvent {
             .filter(|s| !s.is_empty());
         let (gcx, _) = context(ccx).await;
         if !buddy_initialized(gcx.clone()).await {
-            return ok_message(
+            return Ok(result(
                 tool_call_id,
                 "Buddy service not initialized; runtime event ignored",
-            );
+            ));
         }
         let signal_type = cap(
             optional_str(args, "signal_type")
@@ -288,40 +251,13 @@ impl Tool for ToolBuddyRuntimeEvent {
         }
         event.description = optional_str(args, "description").map(|s| cap(&s, 240));
         buddy_enqueue_event(crate::app_state::AppState::from_gcx(gcx).await, event).await;
-        ok_message(tool_call_id, format!("Runtime event enqueued: {}", title))
+        Ok(result(
+            tool_call_id,
+            format!("Runtime event enqueued: {}", title),
+        ))
     }
 
     fn tool_depends_on(&self) -> Vec<String> {
         vec![]
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    async fn ccx(gcx: Arc<GlobalContext>) -> Arc<AMutex<AtCommandsContext>> {
-        Arc::new(AMutex::new(
-            AtCommandsContext::new_from_app(
-                crate::app_state::AppState::from_gcx(gcx).await,
-                4000,
-                20,
-                false,
-                vec![],
-                "test-chat".to_string(),
-                None,
-                "test-model".to_string(),
-                None,
-                None,
-            )
-            .await,
-        ))
-    }
-
-    fn args(items: Vec<(&str, Value)>) -> HashMap<String, Value> {
-        items
-            .into_iter()
-            .map(|(key, value)| (key.to_string(), value))
-            .collect()
     }
 }

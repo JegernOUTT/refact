@@ -266,7 +266,7 @@ const AFFECTION_SIGNALS = new Set([
   "skill_learned",
 ]);
 
-function clampRange(
+export function clampRange(
   value: number,
   min: number,
   max: number,

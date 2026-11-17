@@ -11,16 +11,13 @@ import {
   type ToolMessage,
 } from "../../services/refact";
 import { normalizeToolName } from "../../utils/toolNameAliases";
-import {
-  eventPayloadRecord,
-  isRecord,
-  payloadString,
-} from "./EventRow/eventPayload";
+import { eventPayloadRecord, payloadString } from "./EventRow/eventPayload";
 import {
   isProcessStartCall,
   processIdFromExecMetadata,
   processIdFromStartResult,
 } from "./ToolCard/execToolModel";
+import { isRecord } from "../../utils/isRecord";
 
 export type FoldedEventIndex = {
   foldedMessageIndices: ReadonlySet<number>;

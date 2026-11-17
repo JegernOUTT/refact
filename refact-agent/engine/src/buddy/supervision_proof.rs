@@ -815,14 +815,6 @@ pub(crate) mod tests {
         }
     }
 
-    async fn observe_fx(fx: &Fixture) -> SourceObservation {
-        let scope = native_edit_scope_for_chat(&fx.chat_id)
-            .unwrap()
-            .validated_snapshot_scope(&fx.chat_id)
-            .unwrap();
-        observe(&fx.cache_dir, &scope).await.unwrap()
-    }
-
     #[tokio::test]
     async fn target_escape_symlink_and_head_drift_fail_closed() {
         let fx = fixture(&["src/a.rs"]).await;

@@ -424,31 +424,3 @@ fn compute_diff_lines_4h(repo: &git2::Repository) -> Option<u32> {
     }
     Some(lines)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::buddy::types::BuddyFact;
-
-    use crate::ext::competitor_import::types::{
-        Competitor, ImportCandidateSummary, ImportKind, ImportScope, ImportSummary,
-    };
-
-    fn candidate(
-        competitor: Competitor,
-        kind: ImportKind,
-        scope: ImportScope,
-        name: &str,
-    ) -> ImportCandidateSummary {
-        ImportCandidateSummary {
-            competitor,
-            kind,
-            scope,
-            source_root: PathBuf::from("/source"),
-            source_path: PathBuf::from(format!("/source/{name}.md")),
-            dest_name: name.to_string(),
-            destination_path: PathBuf::from(format!("commands/{name}.md")),
-            metadata: serde_json::Value::Null,
-        }
-    }
-}

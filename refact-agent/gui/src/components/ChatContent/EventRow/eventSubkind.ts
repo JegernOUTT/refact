@@ -23,6 +23,7 @@ import {
 } from "lucide-react";
 import { Icon } from "../../ui";
 import { humanizeIdentifier } from "../../../utils/displayNames";
+import { isRecord } from "../../../utils/isRecord";
 
 /** Semantic tone shared by Badge (`tone`) and Icon (`tone`). */
 export type EventTone =
@@ -131,10 +132,6 @@ const SUCCESS_STATUSES = new Set([
   "accepted",
   "applied",
 ]);
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 /** Icon for a subkind; unknown backend subkinds fall back to a neutral glyph. */
 export function eventSubkindIcon(subkind: string): LucideIcon {

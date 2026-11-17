@@ -93,7 +93,6 @@ import type {
   DraftKind,
 } from "../features/Buddy/types";
 import { buildBuddyInvestigationPrompt } from "../features/Buddy/investigation";
-import { withBuddyErrorReport } from "../features/Buddy/BuddyErrorBoundary";
 import {
   createChatWithId,
   markThreadSseError,
@@ -117,12 +116,12 @@ import {
   buildBuddyCrashRecoveryError,
   closeBuddyCrashSession,
   buildBuddyFrontendErrorDedupeKey,
-  installBuddyErrorReporter,
   redactBuddyFrontendErrorText,
   reportBuddyFrontendError,
   resetBuddyFrontendErrorReportCache,
   setBuddyCrashHotSlot,
 } from "../features/Buddy/reportBuddyFrontendError";
+import { withBuddyErrorReport } from "../features/Buddy/withBuddyErrorReport";
 import { BuddyErrorBoundary } from "../features/Buddy/BuddyErrorBoundary";
 import { getOpportunityDismissAction } from "../features/Buddy/buddyOpportunityActions";
 import {
@@ -6157,17 +6156,7 @@ describe("restoreChat buddy_meta handling", () => {
   });
 });
 
-describe("installBuddyErrorReporter and BuddyErrorBoundary integration", () => {
-  test("installBuddyErrorReporter_registers_handlers", () => {
-    const spy = vi.spyOn(window, "addEventListener");
-    const cleanup = installBuddyErrorReporter();
-    const registered = spy.mock.calls.map((c) => c[0]);
-    expect(registered).toContain("error");
-    expect(registered).toContain("unhandledrejection");
-    cleanup();
-    spy.mockRestore();
-  });
-
+describe("BuddyErrorBoundary integration", () => {
   test("BuddyErrorBoundary_calls_reporter", async () => {
     const mod = await import("../features/Buddy/reportBuddyFrontendError");
     const spy = vi

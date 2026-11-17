@@ -648,26 +648,6 @@ export function drawHomePath(args: DrawBuddyWorldBaseArgs): void {
   }
 }
 
-export function drawBuddyLandingPad(args: DrawBuddyWorldBaseArgs): void {
-  const width = safeDimension(args.width, 720);
-  const height = safeDimension(args.height, 260);
-  const x = width / 2;
-  const y = height * 0.735 + wave(args.frame, 30, 0, 1.2, args.reducedMotion);
-
-  fillEllipse(args.ctx, x, y + 18, args.compact ? 48 : 62, 13, "#041412", 0.32);
-  fillEllipse(args.ctx, x, y + 14, args.compact ? 34 : 44, 8, "#4ADE80", 0.16);
-  strokeEllipse(
-    args.ctx,
-    x,
-    y + 13,
-    args.compact ? 27 : 33,
-    6,
-    "#BBF7D0",
-    1,
-    0.12,
-  );
-}
-
 export function drawVitality(args: DrawBuddyWorldBaseArgs): void {
   const width = safeDimension(args.width, 720);
   const height = safeDimension(args.height, 260);

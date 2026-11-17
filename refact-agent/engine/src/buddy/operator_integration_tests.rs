@@ -1,8 +1,5 @@
 //! Scratch-root helpers for Buddy operator-effect tests.
 
-#[path = "../../tests/it/buddy_operator_common/fixtures.rs"]
-mod isolated_fixtures;
-
 use std::path::Path;
 
 use axum::{
@@ -15,7 +12,6 @@ use refact_buddy_core::operator_types::{
 use crate::buddy::{
     actor::BuddyService, operator_store::OperatorStore, outcome_runtime::OutcomeRuntime,
     runtime_queue::RuntimeQueue, settings::BuddySettings, state::default_buddy_state,
-    storage::load_drafts,
 };
 use crate::{app_state::AppState, global_context::tests::make_test_gcx_with_dirs};
 use tempfile::TempDir;
@@ -25,7 +21,6 @@ use tower::ServiceExt;
 pub struct BuddyOperatorHarness {
     project: TempDir,
     user_config: TempDir,
-    shutdown: bool,
 }
 
 impl BuddyOperatorHarness {
@@ -40,7 +35,6 @@ impl BuddyOperatorHarness {
         Self {
             project,
             user_config,
-            shutdown: false,
         }
     }
 
@@ -63,10 +57,6 @@ impl BuddyOperatorHarness {
             events_tx,
             None,
         )
-    }
-
-    pub fn shutdown(&mut self) {
-        self.shutdown = true;
     }
 
     pub fn project_identity(&self) -> ProjectIdentity {

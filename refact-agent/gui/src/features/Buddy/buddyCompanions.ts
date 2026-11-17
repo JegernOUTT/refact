@@ -1,4 +1,5 @@
 import type { BuddyScenePose } from "./types";
+import { clamp, finiteOr, seededUnit } from "./buddyWorldDrawHelpers";
 import type {
   BuddyWorldLayer,
   BuddyWorldPhase,
@@ -71,15 +72,6 @@ const SHIRO_MIN_X = 6;
 const SHIRO_MAX_X = 94;
 const SHIRO_MIN_Y = 70;
 const SHIRO_MAX_Y = 86;
-const UINT_MAX = 4_294_967_295;
-
-function finiteOr(value: number | null | undefined, fallback: number): number {
-  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
-}
-
-function clampRange(value: number, min: number, max: number): number {
-  return Math.max(min, Math.min(max, finiteOr(value, min)));
-}
 
 export function companionSeedFromText(text: string): number {
   let hash = 2166136261;
@@ -88,16 +80,6 @@ export function companionSeedFromText(text: string): number {
     hash = Math.imul(hash, 16777619);
   }
   return hash >>> 0;
-}
-
-export function companionSeededUnit(seed: number, salt: number): number {
-  let value = (finiteOr(seed, 0) + Math.imul(salt + 1, 0x9e3779b9)) >>> 0;
-  value ^= value >>> 16;
-  value = Math.imul(value, 0x85ebca6b) >>> 0;
-  value ^= value >>> 13;
-  value = Math.imul(value, 0xc2b2ae35) >>> 0;
-  value ^= value >>> 16;
-  return (value >>> 0) / UINT_MAX;
 }
 
 export function companionPositionAt(
@@ -125,8 +107,8 @@ export function createShiroState(
   buddyX: number,
   buddyY: number,
 ): ShiroState {
-  const startX = clampRange(buddyX - 9, SHIRO_MIN_X, SHIRO_MAX_X);
-  const startY = clampRange(buddyY + 1, SHIRO_MIN_Y, SHIRO_MAX_Y);
+  const startX = clamp(buddyX - 9, SHIRO_MIN_X, SHIRO_MAX_X);
+  const startY = clamp(buddyY + 1, SHIRO_MIN_Y, SHIRO_MAX_Y);
   return {
     mode: "follow",
     fromX: startX,
@@ -141,7 +123,7 @@ export function createShiroState(
 }
 
 function moveDurationFor(distance: number): number {
-  return clampRange(Math.abs(distance) * 95, 800, 2_600);
+  return clamp(Math.abs(distance) * 95, 800, 2_600);
 }
 
 export function stepShiroState(
@@ -150,8 +132,8 @@ export function stepShiroState(
 ): ShiroState {
   const random = context.random ?? Math.random;
   const position = companionPositionAt(state, context.nowMs);
-  const buddyX = clampRange(context.buddyX, SHIRO_MIN_X, SHIRO_MAX_X);
-  const buddyY = clampRange(context.buddyY, SHIRO_MIN_Y, SHIRO_MAX_Y);
+  const buddyX = clamp(context.buddyX, SHIRO_MIN_X, SHIRO_MAX_X);
+  const buddyY = clamp(context.buddyY, SHIRO_MIN_Y, SHIRO_MAX_Y);
 
   let mode: BuddyShiroMode;
   if (context.storm) mode = "hide";
@@ -198,8 +180,8 @@ export function stepShiroState(
       break;
   }
 
-  targetX = clampRange(targetX, SHIRO_MIN_X, SHIRO_MAX_X);
-  targetY = clampRange(targetY, SHIRO_MIN_Y, SHIRO_MAX_Y);
+  targetX = clamp(targetX, SHIRO_MIN_X, SHIRO_MAX_X);
+  targetY = clamp(targetY, SHIRO_MIN_Y, SHIRO_MAX_Y);
 
   return {
     mode,
@@ -287,7 +269,7 @@ export function sootCompanions(args: SootColonyArgs): BuddyWorldCompanion[] {
         kind: "soot" as const,
         fromX: x,
         fromY: spot.y,
-        toX: clampRange(x + offset, 4, 96),
+        toX: clamp(x + offset, 4, 96),
         toY: spot.y + (scattered ? 1 : 0),
         moveStartMs: 0,
         moveDurationMs: 1,
@@ -299,7 +281,7 @@ export function sootCompanions(args: SootColonyArgs): BuddyWorldCompanion[] {
     });
   }
 
-  if (args.phase === "day" && companionSeededUnit(daySeed, 7) < 0.2) {
+  if (args.phase === "day" && seededUnit(daySeed, 7) < 0.2) {
     return [
       {
         id: "soot-lurker",
@@ -336,7 +318,7 @@ export function kuroDayActive(
   season: BuddyWorldSeason,
 ): boolean {
   if (season !== "autumn") return false;
-  return companionSeededUnit(companionSeedFromText(dayKey), 3) < 0.28;
+  return seededUnit(companionSeedFromText(dayKey), 3) < 0.28;
 }
 
 export interface KuroStepArgs {
@@ -415,3 +397,5 @@ export const KURO_FLEE_LINES: readonly ((name: string) => string)[] = [
   (name) => `${name} watches Kuro escape with exactly one acorn. Audacity.`,
   () => "The crow tax strikes again. One acorn, gone.",
 ];
+
+export { seededUnit as companionSeededUnit };

@@ -1,3 +1,4 @@
+import { isRecord } from "../../../utils/isRecord";
 export interface ToolCallTitle {
   verb: string;
   target?: string;
@@ -61,10 +62,6 @@ const PRIMARY_KEYS = [
 
 const PRIMARY_MAX_CHARS = 80;
 const TITLE_MAX_CHARS = 120;
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 function clip(text: string, max: number): string {
   const normalized = text.replace(/\s+/g, " ").trim();

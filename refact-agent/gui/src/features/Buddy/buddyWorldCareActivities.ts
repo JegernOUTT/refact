@@ -146,11 +146,3 @@ export function careActorIntentKind(action: BuddyCareAction): string {
 export function careActivityTotalMs(activity: BuddyCareActivity): number {
   return Math.max(0, activity.travelMs) + Math.max(0, activity.performMs);
 }
-
-export function pickCareLine(
-  lines: readonly ((name: string) => string)[],
-  name: string,
-): string {
-  const line = lines[Math.floor(Math.random() * lines.length)] ?? lines[0];
-  return line(name);
-}

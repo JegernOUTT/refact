@@ -3,7 +3,6 @@ import {
   BUDDY_CARE_ACTIVITY_DEFS,
   careActivityTotalMs,
   careActorIntentKind,
-  pickCareLine,
 } from "../features/Buddy/buddyWorldCareActivities";
 import type { BuddyCareAction } from "../features/Buddy/types";
 
@@ -74,13 +73,5 @@ describe("buddy world care activities", () => {
         performMs: 5_400,
       }),
     ).toBe(5_400);
-  });
-
-  it("picks a templated line from the pool", () => {
-    const def = BUDDY_CARE_ACTIVITY_DEFS.feed;
-    const rendered = def.startLines.map((line) => line("Pip"));
-    for (let attempt = 0; attempt < 12; attempt += 1) {
-      expect(rendered).toContain(pickCareLine(def.startLines, "Pip"));
-    }
   });
 });

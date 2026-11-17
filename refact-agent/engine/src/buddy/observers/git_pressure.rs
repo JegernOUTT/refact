@@ -25,13 +25,6 @@ fn empty_git_history_report() -> GitHistoryReport {
         commit_cap_hit: false,
     }
 }
-
-#[cfg(test)]
-mod tests {
-
-    use std::path::Path;
-}
-
 fn path_hash(p: &std::path::Path) -> String {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};

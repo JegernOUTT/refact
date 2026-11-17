@@ -16,6 +16,7 @@ import {
   worldWeather,
   type DrawBuddyWorldBaseArgs,
 } from "./buddyWorldDrawHelpers";
+import type { BuddyWorldPhase } from "./buddyWorldModel";
 
 const FOREGROUND_TUFT_CLUSTERS = [
   { x: 12, y: 96, spread: 9, blades: 5, seedBase: 11 },
@@ -23,7 +24,7 @@ const FOREGROUND_TUFT_CLUSTERS = [
   { x: 86, y: 96.5, spread: 10, blades: 6, seedBase: 67 },
 ] as const;
 
-const PHASE_TUFT_COLORS: Record<string, [string, string]> = {
+const PHASE_TUFT_COLORS: Record<BuddyWorldPhase, [string, string]> = {
   morning: ["#14532D", "#166534"],
   day: ["#166534", "#15803D"],
   evening: ["#14442B", "#14532D"],
@@ -34,8 +35,7 @@ function drawForegroundTufts(args: DrawBuddyWorldBaseArgs): void {
   const width = safeDimension(args.width, 720);
   const height = safeDimension(args.height, 260);
   const frame = safeFrame(args.frame);
-  const [darkColor, lightColor] =
-    PHASE_TUFT_COLORS[worldPhase(args.world)] ?? PHASE_TUFT_COLORS.day;
+  const [darkColor, lightColor] = PHASE_TUFT_COLORS[worldPhase(args.world)];
 
   for (const cluster of FOREGROUND_TUFT_CLUSTERS) {
     const baseX = pctX(width, cluster.x);
@@ -70,7 +70,7 @@ function drawForegroundTufts(args: DrawBuddyWorldBaseArgs): void {
   }
 }
 
-const SEASON_DRIFT_COLORS: Record<string, string> = {
+const SEASON_DRIFT_COLORS: Partial<Record<string, string>> = {
   spring: "#F9A8D4",
   summer: "#FDE68A",
   autumn: "#FB923C",

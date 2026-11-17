@@ -1,8 +1,5 @@
 import { PLAN_SYNTHESIS_SEPARATOR } from "../../../features/Chat/Thread/selectors";
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
+import { isRecord } from "../../../utils/isRecord";
 
 function stringListFromValue(value: unknown): string[] {
   if (Array.isArray(value)) {

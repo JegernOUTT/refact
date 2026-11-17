@@ -2314,16 +2314,6 @@ mod tests {
         }
     }
 
-    fn archive(entries: &[(&str, &[u8])]) -> Vec<u8> {
-        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
-        for (name, bytes) in entries {
-            writer
-                .start_file(*name, zip::write::SimpleFileOptions::default())
-                .unwrap();
-            writer.write_all(bytes).unwrap();
-        }
-        writer.finish().unwrap().into_inner()
-    }
     #[test]
     fn cleanup_exact_set_preflight_reference_and_private_directory_guards() {
         let root = tempfile::tempdir().unwrap();

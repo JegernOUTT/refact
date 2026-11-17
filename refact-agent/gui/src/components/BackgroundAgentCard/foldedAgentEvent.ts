@@ -9,10 +9,10 @@ import {
 import { isAgentStatus } from "../ChatContent/foldedEventIndex";
 import {
   eventPayloadRecord,
-  isRecord,
   payloadNumber,
   payloadString,
 } from "../ChatContent/EventRow/eventPayload";
+import { isRecord } from "../../utils/isRecord";
 
 const MERGE_STATUSES: readonly BackgroundAgentMergeStatus[] = [
   "pending",

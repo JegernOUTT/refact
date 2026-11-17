@@ -1,9 +1,7 @@
 import type { BuddyShowcaseKind, BuddyShowcaseRun, Palette } from "./types";
 import type { BuddyWorldState } from "./buddyWorldModel";
 import { BUDDY_SHOWCASE_PHASE_DURATIONS_MS } from "./buddyShowcase";
-
-const TAU = Math.PI * 2;
-const UINT_MAX = 4_294_967_295;
+import { TAU, finiteOrZero, seededUnit } from "./buddyWorldDrawHelpers";
 
 export interface DrawShowcaseEventArgs {
   ctx: CanvasRenderingContext2D;
@@ -23,10 +21,6 @@ type ShowcaseDrawer = (args: DrawShowcaseEventArgs) => void;
 interface Point {
   x: number;
   y: number;
-}
-
-function finiteOrZero(value: number): number {
-  return Number.isFinite(value) ? value : 0;
 }
 
 function pctX(width: number, value: number): number {
@@ -64,16 +58,6 @@ function easeInOut(progress: number): number {
   return progress < 0.5
     ? 2 * progress * progress
     : 1 - Math.pow(-2 * progress + 2, 2) / 2;
-}
-
-function seededUnit(seed: number, salt: number): number {
-  let value = (finiteOrZero(seed) + Math.imul(salt + 1, 0x9e3779b9)) >>> 0;
-  value ^= value >>> 16;
-  value = Math.imul(value, 0x85ebca6b) >>> 0;
-  value ^= value >>> 13;
-  value = Math.imul(value, 0xc2b2ae35) >>> 0;
-  value ^= value >>> 16;
-  return (value >>> 0) / UINT_MAX;
 }
 
 function phaseProgress(run: BuddyShowcaseRun, nowMs?: number): number {

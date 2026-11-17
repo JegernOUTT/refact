@@ -53,16 +53,6 @@ pub fn classify_diagnostic_severity(error: &str) -> DiagnosticSeverity {
     classify_diagnostic_severity_with_default(error, DiagnosticSeverity::High)
 }
 
-pub fn diagnostic_priority_label(error: &str) -> &'static str {
-    if refact_core::retry_policy::classify_user_error(error)
-        == refact_core::retry_policy::UserErrorCategory::StreamCorrupted
-    {
-        "normal"
-    } else {
-        "high"
-    }
-}
-
 pub fn collect_diagnostics_from_error(error: &str) -> DiagnosticContext {
     let severity = classify_diagnostic_severity_with_default(error, DiagnosticSeverity::Low);
     DiagnosticContext {

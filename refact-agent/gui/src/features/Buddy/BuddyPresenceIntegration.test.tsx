@@ -1,5 +1,6 @@
 import { useRef } from "react";
-import { act, fireEvent, render, screen } from "../../utils/test-utils";
+import { act } from "react-dom/test-utils";
+import { fireEvent, render, screen } from "../../utils/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { BuddyCanvas } from "./BuddyCanvas";
 import { BuddyDreamCanvas } from "./BuddyDreamCanvas";
@@ -18,7 +19,9 @@ import { PALETTES, STAGES } from "./constants";
 
 function hidden(value: boolean) {
   Object.defineProperty(document, "hidden", { configurable: true, value });
-  act(() => document.dispatchEvent(new Event("visibilitychange")));
+  act(() => {
+    document.dispatchEvent(new Event("visibilitychange"));
+  });
 }
 function HookHarness() {
   const memory = useRef(createBuddySpeechMemory());
@@ -124,15 +127,23 @@ describe("mounted presence integrations", () => {
     );
     fireEvent.click(screen.getByText("Fetch"));
     fireEvent.click(screen.getByText("Aim"));
-    act(() => vi.advanceTimersByTime(200));
+    act(() => {
+      vi.advanceTimersByTime(200);
+    });
     hidden(true);
     expect(screen.getByRole("status")).toHaveTextContent("hidden");
-    act(() => vi.advanceTimersByTime(60000));
+    act(() => {
+      vi.advanceTimersByTime(60000);
+    });
     hidden(false);
     fireEvent.click(screen.getByText("Resume"));
-    act(() => vi.advanceTimersByTime(749));
+    act(() => {
+      vi.advanceTimersByTime(749);
+    });
     expect(screen.getByRole("status")).toHaveTextContent("throwing");
-    act(() => vi.advanceTimersByTime(1));
+    act(() => {
+      vi.advanceTimersByTime(1);
+    });
     expect(screen.getByRole("status")).toHaveTextContent("chasing");
     view.rerender(
       <BuddyPresencePreviewContext.Provider
@@ -152,7 +163,9 @@ describe("mounted presence integrations", () => {
     fireEvent.click(screen.getByText("Fetch"));
     fireEvent.click(screen.getByText("Aim"));
     hidden(true);
-    act(() => vi.advanceTimersByTime(950));
+    act(() => {
+      vi.advanceTimersByTime(950);
+    });
     expect(screen.getByRole("status")).toHaveTextContent("chasing");
   });
   it.each(["avatar", "world"])(

@@ -327,13 +327,6 @@ pub struct BuddyScheduler {
 }
 
 impl BuddyScheduler {
-    #[cfg(test)]
-    pub(crate) fn with_test_job(job: Box<dyn BuddyJob>) -> Self {
-        Self {
-            jobs: vec![job],
-        }
-    }
-
     pub fn new() -> Self {
         let mut s = Self {
             jobs: vec![],
@@ -923,74 +916,8 @@ impl BuddyScheduler {
 mod tests {
     use super::*;
 
-    struct NoOutputUnrecordedJob {
-        last_result: Option<String>,
-    }
-
-    struct NoOutputRecordedJob {
-        calls: Arc<std::sync::atomic::AtomicUsize>,
-    }
-
     struct ReadyAutonomousJob {
         id: String,
-    }
-
-    #[async_trait::async_trait]
-    impl BuddyJob for NoOutputUnrecordedJob {
-        fn id(&self) -> &str {
-            "no_output_unrecorded"
-        }
-
-        fn cooldown_seconds(&self) -> u64 {
-            0
-        }
-
-        fn priority(&self) -> u32 {
-            0
-        }
-
-        fn records_empty_result(&self) -> bool {
-            false
-        }
-
-        async fn should_run(&self, _gcx: AppState, _ctx: &BuddyJobContext) -> bool {
-            true
-        }
-
-        async fn execute(&self, _gcx: AppState, _ctx: BuddyJobContext) -> BuddyJobResult {
-            BuddyJobResult {
-                last_result: self.last_result.clone(),
-                ..Default::default()
-            }
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl BuddyJob for NoOutputRecordedJob {
-        fn id(&self) -> &str {
-            "no_output_recorded"
-        }
-
-        fn cooldown_seconds(&self) -> u64 {
-            60 * 60
-        }
-
-        fn priority(&self) -> u32 {
-            0
-        }
-
-        fn records_empty_result(&self) -> bool {
-            true
-        }
-
-        async fn should_run(&self, _gcx: AppState, _ctx: &BuddyJobContext) -> bool {
-            true
-        }
-
-        async fn execute(&self, _gcx: AppState, _ctx: BuddyJobContext) -> BuddyJobResult {
-            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            BuddyJobResult::default()
-        }
     }
 
     #[async_trait::async_trait]
@@ -1031,56 +958,6 @@ mod tests {
                 ..Default::default()
             }
         }
-    }
-
-    struct NoIntentSpeechJob;
-
-    #[async_trait::async_trait]
-    impl BuddyJob for NoIntentSpeechJob {
-        fn id(&self) -> &str {
-            "no_intent_speech"
-        }
-
-        fn cooldown_seconds(&self) -> u64 {
-            0
-        }
-
-        fn priority(&self) -> u32 {
-            0
-        }
-
-        async fn should_run(&self, _gcx: AppState, _ctx: &BuddyJobContext) -> bool {
-            true
-        }
-
-        async fn execute(&self, _gcx: AppState, _ctx: BuddyJobContext) -> BuddyJobResult {
-            BuddyJobResult {
-                speech: Some(BuddySpeechItem {
-                    editorial_delivery_required: false,
-                    id: "no-intent-speech".to_string(),
-                    text: "no intent speech".to_string(),
-                    mood: "happy".to_string(),
-                    scope: "global".to_string(),
-                    persistent: false,
-                    ttl_seconds: 10,
-                    dedupe_key: Some("no-intent-speech".to_string()),
-                    speech_intent: None,
-                    created_at: chrono::Utc::now().to_rfc3339(),
-                    controls: vec![],
-                    chat_id: None,
-                }),
-                speech_intent: None,
-                ..Default::default()
-            }
-        }
-    }
-
-    struct SpeechJob {
-        id: String,
-        priority: u32,
-        intent: SpeechIntent,
-        activity_title: String,
-        runtime_event: bool,
     }
 
     struct DeferredSpeechJob {
@@ -1130,69 +1007,6 @@ mod tests {
                 }),
                 runtime_event: Some(planned_speech_runtime_event(self.id(), &candidate)),
                 speech_candidate: Some(candidate),
-                ..Default::default()
-            }
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl BuddyJob for SpeechJob {
-        fn id(&self) -> &str {
-            &self.id
-        }
-
-        fn cooldown_seconds(&self) -> u64 {
-            0
-        }
-
-        fn priority(&self) -> u32 {
-            self.priority
-        }
-
-        async fn should_run(&self, _gcx: AppState, _ctx: &BuddyJobContext) -> bool {
-            true
-        }
-
-        async fn execute(&self, _gcx: AppState, _ctx: BuddyJobContext) -> BuddyJobResult {
-            BuddyJobResult {
-                speech_intent: Some(self.intent),
-                speech: Some(BuddySpeechItem {
-                    editorial_delivery_required: false,
-                    id: format!("speech-{}", self.id),
-                    text: format!("speech {}", self.id),
-                    mood: "happy".to_string(),
-                    scope: "global".to_string(),
-                    persistent: false,
-                    ttl_seconds: 10,
-                    dedupe_key: Some(format!("speech-{}", self.id)),
-                    speech_intent: None,
-                    created_at: chrono::Utc::now().to_rfc3339(),
-                    controls: vec![],
-                    chat_id: None,
-                }),
-                activity: Some(BuddyActivity {
-                    icon: "•".to_string(),
-                    title: self.activity_title.to_string(),
-                    description: self.activity_title.to_string(),
-                    timestamp: chrono::Utc::now().to_rfc3339(),
-                    activity_type: "test".to_string(),
-                    chat_id: None,
-                    failure_category: None,
-                    failure_summary: None,
-                }),
-                runtime_event: self.runtime_event.then(|| {
-                    let title = format!("runtime {}", self.id);
-                    let mut event = crate::buddy::actor::make_runtime_event(
-                        "test_signal",
-                        &title,
-                        self.id(),
-                        &format!("runtime-{}", self.id),
-                        "completed",
-                        None,
-                    );
-                    event.speech_text = Some(format!("runtime speech {}", self.id));
-                    event
-                }),
                 ..Default::default()
             }
         }

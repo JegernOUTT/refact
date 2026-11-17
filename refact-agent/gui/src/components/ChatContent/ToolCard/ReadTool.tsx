@@ -21,12 +21,9 @@ import {
   type ReadToolArgs,
 } from "./readToolPaths";
 import styles from "./ReadTool.module.css";
+import { isRecord } from "../../../utils/isRecord";
 
 const PATHS_FOUND_PREFIX = "Paths found:";
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 interface ReadToolProps {
   toolCall: ToolCall;

@@ -8,11 +8,11 @@ import {
   collapseWhitespace,
   eventPayloadRecord,
   formatDurationMs,
-  isRecord,
   payloadBoolean,
   payloadNumber,
   payloadString,
 } from "./eventPayload";
+import { isRecord } from "../../../utils/isRecord";
 
 export type EventDetailField = {
   label: string;

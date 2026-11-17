@@ -12,6 +12,7 @@ import type {
 } from "../../services/refact/types";
 import { MiniStatusIndicator } from "./ConnectionStatusIndicator";
 import styles from "./ConnectionStatus.module.css";
+import { isRecord } from "../../utils/isRecord";
 
 type IndicatorState = React.ComponentProps<
   typeof MiniStatusIndicator
@@ -43,10 +44,6 @@ function formatCodegraphTooltip(status: RagStatus): string {
   if (!codegraph) return `CodeGraph: ${alive}`;
   const suffix = codegraph.error ? ` · ${codegraph.error}` : "";
   return `CodeGraph: ${alive} · ${codegraph.counts.files} files · ${codegraph.counts.nodes} nodes · ${codegraph.queued} queued${suffix}`;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function formatRagStatusError(error: unknown): string {

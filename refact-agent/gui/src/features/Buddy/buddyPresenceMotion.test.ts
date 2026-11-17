@@ -11,8 +11,6 @@ import {
   resolveBuddyMotionTransition,
   resolveBuddyPresenceLoop,
   shouldDrawPresenceFrame,
-  shouldRunPresenceLoop,
-  shouldSuppressAmbientMotion,
 } from "./buddyPresenceMotion";
 import {
   advanceBuddyPlaySession,
@@ -106,19 +104,6 @@ describe("buddy presence motion grammar", () => {
     });
     expect(stillPreempts.kind).toBe("preempt");
   });
-
-  it("suppresses ambient motion for attention states and open speech layers", () => {
-    expect(shouldSuppressAmbientMotion({ state: "awaiting_decision" })).toBe(
-      true,
-    );
-    expect(shouldSuppressAmbientMotion({ state: "idle" })).toBe(false);
-    expect(
-      shouldSuppressAmbientMotion({ state: "idle", speechVisible: true }),
-    ).toBe(true);
-    expect(
-      shouldSuppressAmbientMotion({ state: "idle", controlsVisible: true }),
-    ).toBe(true);
-  });
 });
 
 describe("presence loop policy", () => {
@@ -202,15 +187,6 @@ describe("presence loop policy", () => {
     });
     expect(lowPower.running).toBe(true);
     expect(lowPower.frameIntervalMs).toBe(PRESENCE_LOW_POWER_FRAME_MS);
-  });
-
-  it("exposes a boolean helper matching the policy", () => {
-    expect(
-      shouldRunPresenceLoop({ mounted: true, documentHidden: false }),
-    ).toBe(true);
-    expect(shouldRunPresenceLoop({ mounted: true, documentHidden: true })).toBe(
-      false,
-    );
   });
 });
 

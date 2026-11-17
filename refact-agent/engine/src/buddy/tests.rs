@@ -2,7 +2,6 @@ use std::sync::Arc;
 use crate::app_state::AppState;
 use chrono::Duration;
 use tokio::sync::broadcast;
-use crate::tasks::types::{BoardCard, TaskMeta, TaskStatus};
 
 use super::actor::BuddyService;
 use super::diagnostics::{DiagnosticContext, DiagnosticSeverity};
@@ -11,12 +10,11 @@ use super::issues::{
     validate_issue_binary, IssueProvider,
 };
 use super::settings::{AutonomyLevel, BuddySettings, HumorLevel};
-use super::state::{add_activity, default_buddy_state};
+use super::state::default_buddy_state;
 use super::types::{
-    BuddyAction, BuddyActivity, BuddyFact, BuddyFactKind, BuddyJobState, BuddyOnboarding,
-    BuddyOpportunity, BuddyOpportunityKind, BuddyOpportunityLinks, BuddyPage, BuddyPriority,
-    BuddyPulse, BuddySuggestion, BuddyState, CustomizationKind, DefaultsKind, DraftKind,
-    InvestigationContext, MarketKind, OpportunityStatus, PulseScope, BuddyWorkflowSummary,
+    BuddyAction, BuddyFactKind, BuddyOpportunity, BuddyOpportunityKind, BuddyOpportunityLinks,
+    BuddyPage, BuddyPriority, BuddyPulse, CustomizationKind, DefaultsKind, DraftKind,
+    InvestigationContext, MarketKind, OpportunityStatus, PulseScope,
 };
 
 fn make_service_with_events() -> (BuddyService, broadcast::Receiver<super::events::BuddyEvent>) {
@@ -904,17 +902,6 @@ async fn runtime_event_secret_fallbacks_use_static_safe_text() {
 // FactStore tests
 // =============================================================================
 
-fn make_fact(key: &str, kind: BuddyFactKind, seen_at: chrono::DateTime<chrono::Utc>) -> BuddyFact {
-    BuddyFact {
-        kind,
-        key: key.to_string(),
-        source: "test",
-        payload: serde_json::json!({"k": key}),
-        seen_at,
-        confidence: 1.0,
-    }
-}
-
 fn make_opportunity(id: &str, cooldown_key: &str) -> BuddyOpportunity {
     let now = chrono::Utc::now();
     BuddyOpportunity {
@@ -1235,90 +1222,9 @@ fn policy_cooldown_drops() {
 // Humor tests
 // =============================================================================
 
-use std::sync::atomic::{AtomicU32, Ordering};
-
-struct CountingGenerator {
-    count: std::sync::Arc<AtomicU32>,
-    lines: Vec<String>,
-}
-
-#[async_trait::async_trait]
-impl super::humor::HumorGenerator for CountingGenerator {
-    async fn generate(
-        &self,
-        _kind: BuddyFactKind,
-        _summary: String,
-        _gcx: AppState,
-    ) -> Vec<String> {
-        self.count.fetch_add(1, Ordering::SeqCst);
-        self.lines.clone()
-    }
-}
-
-struct EmptyGenerator;
-
-#[async_trait::async_trait]
-impl super::humor::HumorGenerator for EmptyGenerator {
-    async fn generate(
-        &self,
-        _kind: BuddyFactKind,
-        _summary: String,
-        _gcx: AppState,
-    ) -> Vec<String> {
-        vec![]
-    }
-}
-
-struct SlowTimeoutGenerator;
-
-#[async_trait::async_trait]
-impl super::humor::HumorGenerator for SlowTimeoutGenerator {
-    async fn generate(
-        &self,
-        _kind: BuddyFactKind,
-        _summary: String,
-        _gcx: AppState,
-    ) -> Vec<String> {
-        tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
-        vec!["too late".to_string()]
-    }
-}
-
 // =============================================================================
 // Observer tests
 // =============================================================================
-
-struct SleepObserver {
-    id: &'static str,
-}
-
-#[async_trait::async_trait]
-impl super::observers::BuddyObserver for SleepObserver {
-    fn id(&self) -> &'static str {
-        self.id
-    }
-
-    fn cadence_seconds(&self) -> u64 {
-        1
-    }
-
-    fn requires_setting(&self, _settings: &BuddySettings) -> bool {
-        true
-    }
-
-    async fn observe(
-        &self,
-        _gcx: AppState,
-        _ctx: &super::observers::ObserverContext,
-    ) -> Vec<BuddyFact> {
-        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-        vec![make_fact(
-            self.id,
-            BuddyFactKind::TaskStuck,
-            chrono::Utc::now(),
-        )]
-    }
-}
 
 #[test]
 fn ephemeral_debug_renders_placeholder() {

@@ -1,3 +1,5 @@
+use super::trusted_git_output;
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
@@ -17,7 +19,6 @@ pub struct BuddyPrIssueMatchmakerJob;
 const COOLDOWN_SECONDS: u64 = 4 * 60 * 60;
 const PRIORITY: u32 = 33;
 const MIN_CHANGED_LINES: u32 = 10;
-const TRUSTED_COMMAND_PATH: &str = "/usr/local/bin:/usr/bin:/bin";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct PrIssueMatchmakerCache {
@@ -84,31 +85,6 @@ fn parse_shortstat_changed_lines(output: &str) -> u32 {
             }
         })
         .sum()
-}
-
-async fn trusted_git_output(project_root: &Path, args: &[&str]) -> Option<String> {
-    let mut command = tokio::process::Command::new("git");
-    command
-        .arg("-C")
-        .arg(project_root)
-        .args(args)
-        .env("PATH", TRUSTED_COMMAND_PATH)
-        .stdin(std::process::Stdio::null())
-        .kill_on_drop(true);
-    // Bound the git invocation so a hung repo/filesystem cannot stall the Tokio worker.
-    let output = tokio::time::timeout(std::time::Duration::from_secs(10), command.output())
-        .await
-        .ok()?
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if text.is_empty() {
-        None
-    } else {
-        Some(text)
-    }
 }
 
 async fn git_diff_shortstat_changed_lines(project_root: &Path) -> u32 {
@@ -221,9 +197,4 @@ impl BuddyJob for BuddyPrIssueMatchmakerJob {
         result.last_result = cache_result(&cache).last_result;
         result
     }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
 }

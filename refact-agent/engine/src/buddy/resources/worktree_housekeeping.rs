@@ -194,7 +194,7 @@ mod tests {
         }
     }
     #[derive(Default)]
-    struct Materials(std::sync::Mutex<Vec<Vec<u8>>>);
+    pub(super) struct Materials(std::sync::Mutex<Vec<Vec<u8>>>);
     impl RecoveryMaterialStore for Materials {
         fn put(&self, bytes: &[u8]) -> Result<String, ResourceError> {
             let mut all = self.0.lock().unwrap();
@@ -213,7 +213,7 @@ mod tests {
                 .ok_or(ResourceError::MaterialUnavailable)
         }
     }
-    fn git(root: &Path, args: &[&str]) {
+    pub(super) fn git(root: &Path, args: &[&str]) {
         let out = std::process::Command::new("git")
             .current_dir(root)
             .args(args)
@@ -542,38 +542,7 @@ mod adapter_regression_tests {
             Ok(self.0.clone())
         }
     }
-    #[derive(Default)]
-    struct Materials(std::sync::Mutex<Vec<Vec<u8>>>);
-    impl RecoveryMaterialStore for Materials {
-        fn put(&self, bytes: &[u8]) -> Result<String, ResourceError> {
-            let mut values = self.0.lock().unwrap();
-            values.push(bytes.to_vec());
-            Ok((values.len() - 1).to_string())
-        }
-        fn get(&self, key: &str) -> Result<Vec<u8>, ResourceError> {
-            self.0
-                .lock()
-                .unwrap()
-                .get(
-                    key.parse::<usize>()
-                        .map_err(|_| ResourceError::MaterialUnavailable)?,
-                )
-                .cloned()
-                .ok_or(ResourceError::MaterialUnavailable)
-        }
-    }
-    fn git(root: &Path, args: &[&str]) {
-        let out = std::process::Command::new("git")
-            .current_dir(root)
-            .args(args)
-            .output()
-            .unwrap();
-        assert!(
-            out.status.success(),
-            "{}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-    }
+    use super::tests::{git, Materials};
     #[tokio::test]
     async fn actual_adapter_quarantine_apply_verify_recover_scratch() {
         let temp = tempfile::tempdir().unwrap();

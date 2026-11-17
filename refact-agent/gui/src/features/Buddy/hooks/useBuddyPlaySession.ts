@@ -185,7 +185,7 @@ export function useBuddyPlaySession(
       setRequestPrompt(null);
       return;
     }
-    if (busy && (session || requestPrompt)) {
+    if (busy && (session !== null || requestPrompt !== null)) {
       setSession(null);
       setSessionLine(null);
       setRequestPrompt(null);
@@ -285,10 +285,10 @@ export function useBuddyPlaySession(
   useEffect(() => {
     const timer = window.setInterval(() => {
       if (
-        session ||
-        requestPrompt ||
-        gift ||
-        suspension ||
+        session !== null ||
+        requestPrompt !== null ||
+        gift !== null ||
+        suspension !== null ||
         (presence.enabled && (document.hidden || workBusy))
       )
         return;
@@ -329,7 +329,7 @@ export function useBuddyPlaySession(
 
   useEffect(() => {
     if (!directorIntentKind || directorIntentStartedAtMs <= 0) return;
-    if (session || suspension || workBusy) return;
+    if (session !== null || suspension !== null || workBusy) return;
     const beats = DIRECTOR_SPEECH_BEATS[directorIntentKind];
     const payoffAtMs =
       beats && beats.length > 0
@@ -385,7 +385,10 @@ export function useBuddyPlaySession(
     pausePlay,
     resumePlay,
     session,
-    sessionLine: session || gift || requestPrompt ? sessionLine : null,
+    sessionLine:
+      session !== null || gift !== null || requestPrompt !== null
+        ? sessionLine
+        : null,
     gift,
     requestPrompt,
     startFetch,

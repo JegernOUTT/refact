@@ -21,8 +21,6 @@ export interface BuddyWorldTokenPalette {
   borderStrong: string;
 }
 
-export type BuddyWorldTokenName = keyof BuddyWorldTokenPalette;
-
 export const TAU = Math.PI * 2;
 export const BUDDY_WORLD_HOME_HOTSPOT = { x: 8.5, y: 67 } as const;
 
@@ -59,28 +57,6 @@ export interface BuddyWorldActor {
   travel: BuddyWorldActorTravel | null;
   nowMs: number;
   intentStartedAtMs?: number | null;
-}
-
-const FALLBACK_TOKEN_PALETTE: BuddyWorldTokenPalette = {
-  accent: "#60A5FA",
-  accentSoft: "rgba(96, 165, 250, 0.16)",
-  success: "#22C55E",
-  warning: "#F59E0B",
-  danger: "#EF4444",
-  foreground: "#FFFFFF",
-  muted: "rgba(255, 255, 255, 0.62)",
-  surface1: "rgba(255, 255, 255, 0.04)",
-  surface2: "rgba(255, 255, 255, 0.06)",
-  surface3: "rgba(255, 255, 255, 0.09)",
-  overlay: "rgba(18, 20, 25, 0.82)",
-  border: "rgba(255, 255, 255, 0.08)",
-  borderStrong: "rgba(255, 255, 255, 0.14)",
-};
-
-export function worldTokenPalette(
-  args: Pick<DrawBuddyWorldBaseArgs, "tokenPalette">,
-): BuddyWorldTokenPalette {
-  return args.tokenPalette ?? FALLBACK_TOKEN_PALETTE;
 }
 
 export function finiteOrZero(value: number): number {

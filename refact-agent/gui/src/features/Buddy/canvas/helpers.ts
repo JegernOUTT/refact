@@ -62,21 +62,6 @@ export function fillPixel(
   softRoundedFill(ctx, x, y, w || 1, h || 1, color);
 }
 
-export function fillRow(
-  ctx: CanvasRenderingContext2D,
-  x: number,
-  y: number,
-  pattern: string,
-  colorMap: Record<string, string>,
-): void {
-  for (let i = 0; i < pattern.length; i++) {
-    const ch = pattern[i];
-    if (ch !== " " && colorMap[ch]) {
-      softRoundedFill(ctx, x + i, y, 1, 1, colorMap[ch]);
-    }
-  }
-}
-
 export function fillRect(
   ctx: CanvasRenderingContext2D,
   x: number,

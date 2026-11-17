@@ -41,6 +41,7 @@ import {
   primaryArgument,
 } from "./genericToolTitle";
 import styles from "./GenericTool.module.css";
+import { isRecord } from "../../../utils/isRecord";
 
 interface EngineAnalysisToolProps {
   toolCall: ToolCall;
@@ -90,10 +91,6 @@ const SCOPE_KEYS = [
   "baseline",
   "task",
 ] as const;
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 function scopeOf(args: Record<string, unknown>): string | undefined {
   for (const key of SCOPE_KEYS) {

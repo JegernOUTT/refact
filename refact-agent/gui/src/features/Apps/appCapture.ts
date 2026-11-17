@@ -1,4 +1,5 @@
-import { AppBridgeError, isRecord, type AppCaptureParams } from "./appSdk";
+import { AppBridgeError, type AppCaptureParams } from "./appSdk";
+import { isRecord } from "../../utils/isRecord";
 
 export const APP_CAPTURE_METHOD = "dom-raster";
 export const APP_CAPTURE_TRUST = "app-reported";

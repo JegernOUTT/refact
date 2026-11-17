@@ -4,7 +4,6 @@ import {
   BUDDY_OPERATOR_STATUS,
   BUDDY_STATUS_MAPS,
   buddyStatus,
-  toBuddyHealth,
   toBuddySeverity,
   toBuddyWorkState,
 } from "../buddyStatus";
@@ -68,8 +67,6 @@ describe("buddy status maps", () => {
     expect(toBuddyWorkState("bogus")).toBeNull();
     expect(toBuddySeverity("normal")).toBe("medium");
     expect(toBuddySeverity("unknown")).toBeNull();
-    expect(toBuddyHealth("unavailable")).toBe("failed");
-    expect(toBuddyHealth(null)).toBeNull();
   });
 });
 

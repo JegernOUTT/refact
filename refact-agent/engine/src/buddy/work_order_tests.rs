@@ -1,6 +1,6 @@
 use super::{OperatorStore, Stored};
 use refact_buddy_core::operator_types::{ArtifactRevision, ProjectIdentity, WorkItem};
-use std::fs;
+
 use std::path::Path;
 use tempfile::TempDir;
 

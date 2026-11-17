@@ -1,5 +1,6 @@
 import { StrictMode } from "react";
-import { act, renderHook } from "@testing-library/react";
+import { act } from "react-dom/test-utils";
+import { renderHook } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useBuddyEditorialDelivery } from "./useBuddyEditorialDelivery";
 
@@ -97,7 +98,7 @@ describe("editorial delivery", () => {
       expect.objectContaining({
         speech_id: candidate.id,
         feedback: "noisy",
-        worker: expect.objectContaining({ epoch: 1 }),
+        worker: expect.objectContaining({ epoch: 1 }) as unknown,
       }),
     );
     expect(result.current.feedbackStatus).toBe(

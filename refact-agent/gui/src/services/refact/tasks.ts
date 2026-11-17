@@ -2,6 +2,7 @@ import { createApi, fetchBaseQuery } from "@reduxjs/toolkit/query/react";
 import { RootState } from "../../app/store";
 import { buildApiUrlFromState } from "./apiUrl";
 import type { GoalSnapshot } from "./types";
+import { isRecord } from "../../utils/isRecord";
 
 export interface TaskMeta {
   id: string;
@@ -126,10 +127,6 @@ export interface CardReviewAttestation {
   reviewer_chat_id: string;
   reviewed_at: string;
   report: CardVerifierReport;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 export function taskErrorMessage(error: unknown): string {

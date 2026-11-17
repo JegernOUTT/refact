@@ -2,7 +2,6 @@ import { createApi, fetchBaseQuery } from "@reduxjs/toolkit/query/react";
 import type { FetchBaseQueryError } from "@reduxjs/toolkit/query";
 import {
   isAutomationCatalog,
-  isRecord,
   isRevision,
   type AutomationCatalog,
   type AutomationDefinition,
@@ -10,6 +9,7 @@ import {
 import type { RootState } from "../../app/store";
 import { isDetailMessage } from "./commands";
 import { buildApiUrlFromState } from "./apiUrl";
+import { isRecord } from "../../utils/isRecord";
 
 export type CronTriggerKind =
   | "cron"

@@ -6,7 +6,7 @@ import type {
   ToolResult,
 } from "../../services/refact";
 import { normalizeToolName } from "../../utils/toolNameAliases";
-import { isRecord } from "./EventRow/eventPayload";
+import { isRecord } from "../../utils/isRecord";
 import {
   execStateIsLive,
   execStateTranscriptStatus,

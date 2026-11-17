@@ -29,6 +29,7 @@ export function useBuddyAttention(
     setRows(empty);
     if (!usable) return;
     const controller = new AbortController();
+    const isAborted = () => controller.signal.aborted;
     let timer: ReturnType<typeof setTimeout> | undefined;
     let failures = 0;
     let stopped = false;
@@ -41,19 +42,19 @@ export function useBuddyAttention(
     };
 
     const poll = async () => {
-      if (running || stopped || controller.signal.aborted) return;
+      if (running || stopped || isAborted()) return;
       if (document.visibilityState !== "visible") return;
       running = true;
       try {
         const snapshot = await getAttention(config, controller.signal);
-        if (controller.signal.aborted) return;
+        if (isAborted()) return;
         if (snapshot.schema_version !== 1)
           throw new Error("Unsupported Buddy attention schema");
         failures = 0;
         setRows(snapshot.rows);
         schedule(ATTENTION_POLL_MS);
       } catch (error) {
-        if (controller.signal.aborted) return;
+        if (isAborted()) return;
         if (error instanceof BuddyRequestError && error.status === 404) {
           stopped = true;
           debugRefact("Buddy attention is unavailable on this engine");
