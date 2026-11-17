@@ -2470,16 +2470,32 @@ async fn run_subchat_with_lease_scoped(
     } else {
         prepare_child_history(&messages, &config)
     };
-    let messages = prepare_subchat_messages(&gcx, messages, &config.model)?;
+    let mut messages = prepare_subchat_messages(&gcx, messages, &config.model)?;
     if should_persist_subchat_trajectory(&config) && !resuming && !config.stateful {
         let thread = trace_thread_from_config(&chat_id, &config);
-        save_trajectory_as_with_intent(
-            gcx.clone(),
-            &thread,
-            &messages,
-            subchat_trajectory_commit_intent(SubchatTrajectoryCommitPhase::Seed),
-        )
-        .await;
+        if messages.iter().any(|message| {
+            message.role == "system"
+                && message
+                    .content
+                    .content_text_only()
+                    .contains(crate::chat::prompts::ARTIFACTS_INSTRUCTIONS_MARKER)
+        }) {
+            crate::chat::trajectories::save_trajectory_as_with_intent_checked(
+                gcx.clone(),
+                &thread,
+                &messages,
+                TrajectoryCommitIntent::Required,
+            )
+            .await?;
+        } else {
+            save_trajectory_as_with_intent(
+                gcx.clone(),
+                &thread,
+                &messages,
+                subchat_trajectory_commit_intent(SubchatTrajectoryCommitPhase::Seed),
+            )
+            .await;
+        }
     }
     let app = AppState::from_gcx(gcx.clone()).await;
     if config.stateful {
@@ -2497,6 +2513,7 @@ async fn run_subchat_with_lease_scoped(
             )
             .await?;
         }
+        expand_subchat_artifacts(&app, &chat_id, &config, &mut messages).await;
         if !resuming {
             let thread = trace_thread_from_config(&chat_id, &config);
             save_subchat_trajectory(
@@ -2507,6 +2524,26 @@ async fn run_subchat_with_lease_scoped(
                 subchat_trajectory_commit_intent(SubchatTrajectoryCommitPhase::Seed),
             )
             .await?;
+        }
+    }
+    if !config.stateful {
+        let had_marker = messages.iter().any(|message| {
+            message.role == "system"
+                && message
+                    .content
+                    .content_text_only()
+                    .contains(crate::chat::prompts::ARTIFACTS_INSTRUCTIONS_MARKER)
+        });
+        expand_subchat_artifacts(&app, &chat_id, &config, &mut messages).await;
+        if had_marker && should_persist_subchat_trajectory(&config) && !resuming {
+            let thread = trace_thread_from_config(&chat_id, &config);
+            save_trajectory_as_with_intent(
+                gcx.clone(),
+                &thread,
+                &messages,
+                subchat_trajectory_commit_intent(SubchatTrajectoryCommitPhase::Seed),
+            )
+            .await;
         }
     }
     let ccx = Arc::new(AMutex::new(
@@ -2714,6 +2751,72 @@ impl Drop for RunnerLeaseGuard {
             ) {
                 tracing::error!(%error, "Runner lease cleanup registration failed");
             }
+        }
+    }
+}
+
+pub(crate) async fn expand_subchat_artifacts(
+    app: &AppState,
+    chat_id: &str,
+    config: &SubchatConfig,
+    messages: &mut [ChatMessage],
+) {
+    let names = match &config.tools {
+        ToolsPolicy::All => subchat_tool_catalog(app.gcx.clone())
+            .await
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect(),
+        ToolsPolicy::Only(names)
+        | ToolsPolicy::Supervised {
+            tools: names, ..
+        } => names.iter().cloned().collect(),
+        ToolsPolicy::None => Default::default(),
+    };
+    let mut changed = false;
+    for message in messages
+        .iter_mut()
+        .filter(|message| message.role == "system")
+    {
+        let text = message.content.content_text_only();
+        if !text.contains(crate::chat::prompts::ARTIFACTS_INSTRUCTIONS_MARKER) {
+            continue;
+        }
+        let rendered = if config.stateful {
+            crate::chat::prompts::expand_artifacts_instructions(
+                app,
+                crate::chat::prompts::ARTIFACTS_INSTRUCTIONS_MARKER,
+                chat_id,
+                &names,
+                &config.mode,
+            )
+            .await
+        } else {
+            let trace =
+                crate::chat::trajectories::find_trajectory_or_buddy_path(app.gcx.clone(), chat_id)
+                    .await;
+            let workspace = trace.map(|path| {
+                crate::python_tool::workspace::PythonWorkspace::from_trajectory(
+                    &path,
+                    chat_id,
+                    app.paths.config_dir.join("python_state.key"),
+                )
+            });
+            crate::chat::prompts::render_artifacts_instructions(
+                crate::chat::prompts::ARTIFACTS_INSTRUCTIONS_MARKER,
+                chat_id,
+                &names,
+                &config.mode,
+                workspace.as_ref(),
+            )
+        };
+        crate::chat::prompts::replace_artifacts_in_content(&mut message.content, &rendered);
+        changed = true;
+    }
+    if changed && config.stateful {
+        let session = app.chat.sessions.read().await.get(chat_id).cloned();
+        if let Some(session) = session {
+            session.lock().await.replace_messages(messages.to_vec());
         }
     }
 }
@@ -7017,6 +7120,119 @@ mod subchat_tests {
         assert!(!log_error.contains("sk-boundarysecretvalue"));
         assert!(!log_error.contains("Authorization: Bearer sk-boundarysecretvalue"));
         assert!(log_error.contains("[REDACTED"));
+    }
+
+    #[tokio::test]
+    async fn tool_config_subagent_artifacts_match_persisted_stateless_trace() {
+        let gcx = make_test_gcx().await;
+        let workspace = tempfile::tempdir().unwrap();
+        *gcx.documents_state.workspace_folders.lock().unwrap() =
+            vec![workspace.path().to_path_buf()];
+        let app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
+        let child = "configured-stateless-artifacts";
+        let mut config = super::test_support::minimal_config(child, "artifact-root");
+        config.stateful = false;
+        config.tools = ToolsPolicy::Only(vec!["create_textdoc".into()]);
+        let mut messages = vec![ChatMessage::new(
+            "system".into(),
+            crate::chat::prompts::ARTIFACTS_INSTRUCTIONS_MARKER.into(),
+        )];
+        let thread = trace_thread_from_config(child, &config);
+        crate::chat::trajectories::save_trajectory_as_with_intent_checked(
+            gcx,
+            &thread,
+            &messages,
+            TrajectoryCommitIntent::Required,
+        )
+        .await
+        .unwrap();
+        messages[0].content = ChatContent::Multimodal(vec![
+            crate::call_validation::MultimodalElement {
+                m_type: "text".into(),
+                m_content: crate::chat::prompts::ARTIFACTS_INSTRUCTIONS_MARKER.into(),
+            },
+            crate::call_validation::MultimodalElement {
+                m_type: "image".into(),
+                m_content: "image-bytes".into(),
+            },
+        ]);
+        super::expand_subchat_artifacts(&app, child, &config, &mut messages).await;
+        let ChatContent::Multimodal(parts) = &messages[0].content else {
+            panic!("lost multimodal system")
+        };
+        assert_eq!(parts[1].m_content, "image-bytes");
+        assert_eq!(parts[1].m_type, "image");
+        let artifacts = crate::python_tool::workspace::PythonWorkspace::for_chat(&app, child)
+            .await
+            .unwrap()
+            .artifacts_dir();
+        let rendered = messages[0].content.content_text_only();
+        assert!(rendered.contains(&artifacts.display().to_string()));
+        assert!(rendered.contains("refact://artifact/configured-stateless-artifacts/"));
+        assert!(!artifacts.exists());
+        assert!(!workspace
+            .path()
+            .join(".refact/trajectories")
+            .join(child)
+            .exists());
+    }
+
+    #[tokio::test]
+    async fn tool_config_subagent_spawn_autonomous_artifacts_expand_after_registered_identity() {
+        let gcx = make_test_gcx().await;
+        let workspace = tempfile::tempdir().unwrap();
+        *gcx.documents_state.workspace_folders.lock().unwrap() =
+            vec![workspace.path().to_path_buf()];
+        let app = crate::app_state::AppState::from_gcx(gcx).await;
+        for child in [
+            "configured-artifact-child",
+            "spawn-artifact-child",
+            "buddy-autonomous-artifacts",
+        ] {
+            let mut config = super::test_support::minimal_config(child, "artifact-root");
+            config.root_chat_id = Some("artifact-root".into());
+            config.runner_lease_token = Some(format!("runner-{child}"));
+            config.abort_flag = Some(Arc::new(AtomicBool::new(false)));
+            config.tools = ToolsPolicy::Only(vec!["create_textdoc".into()]);
+            if child.starts_with("buddy") {
+                config.buddy_meta = Some(crate::buddy::types::BuddyThreadMeta {
+                    is_buddy_chat: true,
+                    buddy_chat_kind: "system".into(),
+                    workflow_id: Some("buddy_daily_digest".into()),
+                    source_chat_id: None,
+                    source_project: None,
+                    source_created_at: None,
+                });
+            }
+            let mut messages = vec![ChatMessage::new(
+                "system".into(),
+                crate::chat::prompts::ARTIFACTS_INSTRUCTIONS_MARKER.into(),
+            )];
+            let _guard =
+                super::install_stateful_subchat_session(&app, child, &config, &messages, None)
+                    .await
+                    .unwrap();
+            super::expand_subchat_artifacts(&app, child, &config, &mut messages).await;
+            let artifacts = crate::python_tool::workspace::PythonWorkspace::for_chat(&app, child)
+                .await
+                .unwrap()
+                .artifacts_dir();
+            let rendered = messages[0].content.content_text_only();
+            assert!(rendered.contains(&artifacts.display().to_string()));
+            assert!(rendered.contains(&format!("refact://artifact/{child}/")));
+            assert!(!rendered.contains(crate::chat::prompts::ARTIFACTS_INSTRUCTIONS_MARKER));
+            assert!(!artifacts.exists());
+            assert!(!workspace
+                .path()
+                .join(".refact/trajectories")
+                .join(child)
+                .exists());
+            let session = app.chat.sessions.read().await.get(child).cloned().unwrap();
+            assert_eq!(
+                session.lock().await.messages[0].content.content_text_only(),
+                rendered
+            );
+        }
     }
 
     #[tokio::test]

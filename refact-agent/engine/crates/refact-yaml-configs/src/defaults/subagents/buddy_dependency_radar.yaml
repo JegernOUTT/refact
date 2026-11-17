@@ -1,4 +1,4 @@
-schema_version: 5
+schema_version: 6
 id: buddy_dependency_radar
 title: Dependency Radar
 description: Watch dependency manifests for risks, stale versions, and upgrade opportunities.
@@ -17,6 +17,8 @@ subchat:
 
 messages:
   system_prompt: |
+    %ARTIFACTS_INSTRUCTIONS%
+
     %BUDDY_PERSONALITY%
 
     You inspect dependency manifests and lockfiles for actionable maintenance signals.

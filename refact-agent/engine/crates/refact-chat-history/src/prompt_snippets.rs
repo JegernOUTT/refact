@@ -86,3 +86,29 @@ Prefer these over plain text descriptions when visual representation would be cl
 pub const HANDOFF_ONLY_INSTRUCTIONS: &str = r#"## Chat Management Tools
 
 **handoff_to_mode(target_mode, reason, ...)** — Transition to a different mode when the workflow changes (e.g., brainstorming/design, implementation planning, task-board execution, explore-only, or quick Q&A). When handing a complete plan to Task Planner, pass the full plan in `initial_plan`."#;
+
+pub const ARTIFACTS_INSTRUCTIONS_FULL: &str = r#"## Artifacts for the user
+
+Artifacts are files you create only for the user to view, read or download: reports, HTML pages, charts and images, CSV or JSON exports, rendered diagrams, generated documents. Save every artifact in this chat's artifacts folder, never in the project tree:
+`{ARTIFACTS_DIR}`
+
+- Write artifacts with your file tools using absolute paths inside this folder, or with Python, where `ARTIFACTS_DIR` is the same folder. File tools create missing folders automatically; in Python, create missing parent folders with `Path(...).mkdir(parents=True, exist_ok=True)`.
+- Source code, tests, configs, repository documentation, AGENTS.md, skills, knowledge and task documents are project files, not artifacts: keep them in their usual project locations. Copy an artifact into the project only when the user asks.
+- Create an artifact only when a file serves the user better than an inline answer: large or downloadable results, standalone reports, data exports, images. Show small visuals inline with mermaid, svg or html fenced blocks instead. Do not create summary documents nobody asked for.
+- Use short descriptive kebab-case names with the correct extension and only letters, digits, `-`, `_`, `.` and `/` (for example `q3-sales-report.html`, `charts/latency-p95.png`). Group multi-file results in a subfolder.
+- When the user asks for changes, update the existing artifact in place. Write a new versioned file such as `q3-sales-report-v2.html` only when the user wants to keep the previous version.
+- Make HTML artifacts self-contained: inline all CSS and JavaScript and embed images as data URIs. The preview blocks network requests and does not load neighbouring files.
+- Delete temporary or intermediate files you created in this folder. Keep artifacts the user has already seen unless they ask you to remove them. The folder is deleted together with this chat.
+- Link every artifact you create or update in your reply: `[Short title](refact://artifact/{CHAT_ID}/<path inside the artifacts folder>)`, for example `[Q3 sales report](refact://artifact/{CHAT_ID}/q3-sales-report.html)`. A link on its own line shows a preview card, a link inside a sentence shows a compact file chip, and the user opens the file by clicking it. Never link artifacts by absolute path or `file://` URL.
+- When a subagent or tool reports artifact links, keep them unchanged in your reply so the user can open them.
+"#;
+
+pub const ARTIFACTS_INSTRUCTIONS_READ_ONLY: &str = r#"## Artifacts for the user
+
+Files created for the user in this chat are stored in its artifacts folder: `{ARTIFACTS_DIR}`. You cannot create files in this mode. Link an existing artifact as `[Short title](refact://artifact/{CHAT_ID}/<path inside the artifacts folder>)` on its own line to show a preview card the user can open by clicking. When a subagent or tool reports artifact links, keep them unchanged in your reply.
+"#;
+
+pub const ARTIFACTS_INSTRUCTIONS_UNAVAILABLE: &str = r#"## Artifacts for the user
+
+This chat has no artifacts folder, so give results inline instead of creating files for the user. When a subagent or tool reports artifact links, keep them unchanged in your reply.
+"#;

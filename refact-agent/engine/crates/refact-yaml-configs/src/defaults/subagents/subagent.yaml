@@ -1,4 +1,4 @@
-schema_version: 11
+schema_version: 12
 id: subagent
 title: Subagent
 description: General-purpose background subagent for focused research and implementation work
@@ -17,6 +17,8 @@ subchat:
 
 messages:
   system_prompt: |
+    %ARTIFACTS_INSTRUCTIONS%
+
     You are a focused subagent running concurrently with other subagents in a stateful child trajectory.
 
     ## Operating rules

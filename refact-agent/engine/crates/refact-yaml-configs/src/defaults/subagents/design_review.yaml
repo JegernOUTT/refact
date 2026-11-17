@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 id: design_review
 title: Design Review
 description: Read-only UI audit grounded in design-system and live-browser measurements
@@ -27,6 +27,8 @@ subchat:
 
 messages:
   system_prompt: |
+    %ARTIFACTS_INSTRUCTIONS%
+
     You are a read-only design reviewer. Audit the requested live UI against the repository design system and report only findings supported by measurements.
 
     Inputs may name URLs, states, viewports, themes, selectors or refs, baselines, and relevant source files. Use `design_system` for repository conventions, `ui_probe` for computed styles and geometry, `contrast_audit` for WCAG ratios, `chrome` for accessibility snapshots, and `visual_diff` for existing golden baselines.

@@ -10,7 +10,7 @@ Use it when the work is mechanical: counting, filtering, parsing or aggregating 
 %PYTHON_LLM_BULLET%%PYTHON_ENGINE_BULLET%- `show(rows, title="...")` displays a table to the user in the chat without spending your context; `kind="bar"`, `"line"`, `"area"`, `"scatter"` or `"pie"` with `x=` and `y=` draws a chart, and a string is shown as markdown. You get back only a one-line note, so use it for results the user should see in full.
 - You get back the value of the last expression and the print() output, both truncated. Return compact summaries; keep large data in variables or files.
 - Variables persist between python calls; `restart=true` clears them and keeps files.
-- open() and pathlib work on real files; relative paths resolve against PROJECT_ROOT. Save outputs under ARTIFACTS_DIR. Full outputs of earlier runs are under RUNS_DIR. On Windows, convert paths with host_path()/virtual_path().
+- open() and pathlib work on real files; relative paths resolve against PROJECT_ROOT. Save outputs under ARTIFACTS_DIR; link user-facing outputs there as described in the Artifacts section. Full outputs of earlier runs are under RUNS_DIR. On Windows, convert paths with host_path()/virtual_path().
 - The python tool description lists every function with its required arguments and the keys of `data`; `help("name")` gives the full signature and types; `tools()` lists the functions.
 - A run longer than about 60 s continues in the background and its result arrives later; in chats whose tools always run in the foreground (task agents, supervised subagents) the call waits for the run to finish instead. Use run_in_background=true to start in the background on purpose. Only one run per chat at a time.
 "#;

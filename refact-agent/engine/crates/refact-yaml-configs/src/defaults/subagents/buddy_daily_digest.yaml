@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 id: buddy_daily_digest
 title: Daily Digest
 description: End-of-day summary of the day's work
@@ -15,6 +15,8 @@ subchat:
   autonomous_no_confirm: true
 messages:
   system_prompt: |
+    %ARTIFACTS_INSTRUCTIONS%
+
     %BUDDY_PERSONALITY%
     You are wrapping up the day. Use only the supplied evidence about recent commits and Buddy activity, then:
     1. Summarize what got done in 2-3 sentences.

@@ -4089,6 +4089,8 @@ async fn run_background_subchat_inner(
     runner_guard: Option<RunnerLeaseGuard>,
 ) -> Result<SubchatResult, String> {
     #[cfg(test)]
+    let mut messages = messages;
+    #[cfg(test)]
     let (mut config, mut runner_guard) = (config, runner_guard);
     #[cfg(test)]
     {
@@ -4120,6 +4122,11 @@ async fn run_background_subchat_inner(
                     )
                     .await?;
                 }
+            }
+            if let Some(chat_id) = config.chat_id.as_deref() {
+                let app = AppState::from_gcx(gcx.clone()).await;
+                crate::subchat::expand_subchat_artifacts(&app, chat_id, &config, &mut messages)
+                    .await;
             }
             let result = runner(gcx, messages, config).await;
             if let Some(guard) = runner_guard.as_mut() {
@@ -4161,7 +4168,14 @@ pub(crate) fn append_python_instructions(
         return;
     }
     let instructions = crate::chat::prompt_snippets::python_tool_instructions(&names, llm, engine);
-    system.content = ChatContent::SimpleText(format!("{}\n\n{}", text.trim_end(), instructions));
+    match &mut system.content {
+        ChatContent::SimpleText(text) => *text = format!("{}\n\n{}", text.trim_end(), instructions),
+        ChatContent::Multimodal(parts) => parts.push(crate::call_validation::MultimodalElement {
+            m_type: "text".into(),
+            m_content: format!("\n\n{instructions}"),
+        }),
+        ChatContent::ContextFiles(_) => {}
+    }
 }
 
 async fn build_messages(
@@ -5757,6 +5771,36 @@ mod python_prompt_tests {
             .content_text_only()
             .contains("Code Mode"));
     }
+    #[test]
+    fn python_instructions_preserve_multimodal_system() {
+        let mut message = ChatMessage::new("system".into(), "".into());
+        message.content = ChatContent::Multimodal(vec![
+            crate::call_validation::MultimodalElement {
+                m_type: "text".into(),
+                m_content: "system".into(),
+            },
+            crate::call_validation::MultimodalElement {
+                m_type: "image".into(),
+                m_content: "image-bytes".into(),
+            },
+        ]);
+        let mut messages = vec![message];
+        append_python_instructions(
+            &mut messages,
+            &crate::subchat::ToolsPolicy::Only(vec!["python".into()]),
+            false,
+            false,
+        );
+        let ChatContent::Multimodal(parts) = &messages[0].content else {
+            panic!("lost multimodal content")
+        };
+        assert_eq!(parts.len(), 3);
+        assert_eq!(parts[0].m_content, "system");
+        assert_eq!(parts[1].m_content, "image-bytes");
+        assert_eq!(parts[1].m_type, "image");
+        assert!(parts[2].m_content.contains("## Python tool (Code Mode)"));
+    }
+
     #[test]
     fn a_restricted_subagent_is_not_told_about_engine() {
         let system = || vec![ChatMessage::new("system".into(), "Subagent.".into())];

@@ -1,4 +1,4 @@
-schema_version: 3
+schema_version: 4
 id: visual_qa
 title: Visual QA
 description: Read-only pre-merge visual regression gate with browser runtime diagnostics
@@ -27,6 +27,8 @@ subchat:
 
 messages:
   system_prompt: |
+    %ARTIFACTS_INSTRUCTIONS%
+
     You are a read-only pre-merge visual QA gate. Run every requested existing golden baseline against the named live UI scenarios and return one unambiguous verdict.
 
     Use `visual_diff` for baseline comparisons, `contrast_audit` for WCAG evidence, and `chrome` for navigation, state setup, console and page-error reports, completed network inspection, and layout-shift measurement. Install a `PerformanceObserver` for layout-shift entries before scenario interactions and record the numeric cumulative score afterward.

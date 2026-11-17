@@ -380,6 +380,128 @@ pub(crate) async fn models_info_snapshot(app: &AppState) -> String {
     )
 }
 
+pub const ARTIFACTS_INSTRUCTIONS_MARKER: &str = "%ARTIFACTS_INSTRUCTIONS%";
+
+fn artifacts_can_write(tool_names: &HashSet<String>, mode_id: &str) -> bool {
+    tool_names.iter().any(|name| {
+        matches!(
+            name.as_str(),
+            "create_textdoc"
+                | "update_textdoc"
+                | "update_textdoc_by_lines"
+                | "update_textdoc_regex"
+                | "update_textdoc_anchored"
+                | "apply_patch"
+                | "python"
+        )
+    }) || (tool_names
+        .iter()
+        .any(|name| matches!(name.as_str(), "shell" | "process_start"))
+        && !matches!(
+            crate::exec::command_policy::baseline_sandbox_mode(Some(mode_id)),
+            crate::exec::types::ExecSandboxMode::ReadOnly
+        ))
+}
+
+pub(crate) fn replace_artifacts_in_content(content: &mut ChatContent, rendered: &str) {
+    match content {
+        ChatContent::SimpleText(text) => {
+            if text.contains(ARTIFACTS_INSTRUCTIONS_MARKER) {
+                *text = text.replace(ARTIFACTS_INSTRUCTIONS_MARKER, rendered);
+            }
+        }
+        ChatContent::Multimodal(parts) => {
+            for part in parts.iter_mut().filter(|part| part.m_type == "text") {
+                if part.m_content.contains(ARTIFACTS_INSTRUCTIONS_MARKER) {
+                    part.m_content = part
+                        .m_content
+                        .replace(ARTIFACTS_INSTRUCTIONS_MARKER, rendered);
+                }
+            }
+        }
+        ChatContent::ContextFiles(_) => {}
+    }
+}
+
+pub async fn expand_artifacts_instructions(
+    app: &AppState,
+    prompt: &str,
+    chat_id: &str,
+    tool_names: &HashSet<String>,
+    mode_id: &str,
+) -> String {
+    if !prompt.contains(ARTIFACTS_INSTRUCTIONS_MARKER) {
+        return prompt.to_owned();
+    }
+    let workspace = if chat_id.is_empty() {
+        None
+    } else {
+        crate::python_tool::workspace::PythonWorkspace::for_chat(app, chat_id)
+            .await
+            .ok()
+    };
+    render_artifacts_instructions(prompt, chat_id, tool_names, mode_id, workspace.as_ref())
+}
+
+pub(crate) fn render_artifacts_instructions(
+    prompt: &str,
+    chat_id: &str,
+    tool_names: &HashSet<String>,
+    mode_id: &str,
+    workspace: Option<&crate::python_tool::workspace::PythonWorkspace>,
+) -> String {
+    let rendered = match workspace {
+        Some(workspace) => {
+            let template = if artifacts_can_write(tool_names, mode_id) {
+                super::prompt_snippets::ARTIFACTS_INSTRUCTIONS_FULL
+            } else {
+                super::prompt_snippets::ARTIFACTS_INSTRUCTIONS_READ_ONLY
+            };
+            template
+                .replace(
+                    "{ARTIFACTS_DIR}",
+                    &workspace.artifacts_dir().display().to_string(),
+                )
+                .replace("{CHAT_ID}", chat_id)
+        }
+        None => super::prompt_snippets::ARTIFACTS_INSTRUCTIONS_UNAVAILABLE.to_string(),
+    };
+    prompt.replace(ARTIFACTS_INSTRUCTIONS_MARKER, rendered.trim_end())
+}
+
+pub async fn rewrite_artifacts_for_fork(
+    app: &AppState,
+    prompt: &str,
+    source_chat_id: &str,
+    destination_chat_id: &str,
+) -> String {
+    let Some(start) = prompt.find("## Artifacts for the user\n") else {
+        return prompt.to_owned();
+    };
+    if source_chat_id.is_empty() || destination_chat_id.is_empty() {
+        return prompt.to_owned();
+    }
+    let (Ok(source), Ok(destination)) = (
+        crate::python_tool::workspace::PythonWorkspace::for_chat(app, source_chat_id).await,
+        crate::python_tool::workspace::PythonWorkspace::for_chat(app, destination_chat_id).await,
+    ) else {
+        return prompt.to_owned();
+    };
+    let end = prompt[start + 3..]
+        .find("\n## ")
+        .map_or(prompt.len(), |offset| start + 3 + offset);
+    let section = prompt[start..end]
+        .replace(
+            &source.artifacts_dir().display().to_string(),
+            &destination.artifacts_dir().display().to_string(),
+        )
+        .replace(
+            &format!("refact://artifact/{source_chat_id}/"),
+            &format!("refact://artifact/{destination_chat_id}/"),
+        );
+    format!("{}{}{}", &prompt[..start], section, &prompt[end..])
+}
+
 pub async fn system_prompt_add_extra_instructions(
     app: AppState,
     system_prompt: String,
@@ -395,7 +517,14 @@ pub async fn system_prompt_add_extra_instructions(
     // If config is globally disabled, treat as if include_project_info is false
     let include_project_info = include_project_info && config.enabled;
 
-    let mut system_prompt = system_prompt.clone();
+    let mut system_prompt = expand_artifacts_instructions(
+        &app,
+        &system_prompt,
+        &chat_meta.chat_id,
+        &tool_names,
+        mode_id,
+    )
+    .await;
 
     if system_prompt.contains(BUDDY_PERSONALITY_MARKER) {
         let buddy_block = buddy_persona_block(app.clone(), mode_id).await;
@@ -824,6 +953,128 @@ mod tests {
             ChatContent::SimpleText(text) => text,
             _ => panic!("system content must be simple text"),
         }
+    }
+
+    #[tokio::test]
+    async fn artifacts_system_multimodal_preserves_non_text_parts() {
+        let (_temp, app, _) = task_memory_test_app("multimodal-artifacts").await;
+        for text in ["no marker", ARTIFACTS_INSTRUCTIONS_MARKER] {
+            let mut message = ChatMessage::new("system".into(), "".into());
+            message.content = ChatContent::Multimodal(vec![
+                call_validation::MultimodalElement {
+                    m_type: "text".into(),
+                    m_content: text.into(),
+                },
+                call_validation::MultimodalElement {
+                    m_type: "image".into(),
+                    m_content: "opaque-image".into(),
+                },
+            ]);
+            let before = serde_json::to_vec(&message).unwrap();
+            let (messages, _) = prepend_the_right_system_prompt_and_maybe_more_initial_messages(
+                app.clone(),
+                vec![message],
+                &ChatMeta {
+                    chat_id: "multimodal-chat".into(),
+                    include_project_info: false,
+                    ..Default::default()
+                },
+                &None,
+                &mut HasRagResults::new(),
+                HashSet::new(),
+                "agent",
+                "model",
+            )
+            .await;
+            if text == "no marker" {
+                assert_eq!(serde_json::to_vec(&messages[0]).unwrap(), before);
+            } else {
+                let ChatContent::Multimodal(parts) = &messages[0].content else {
+                    panic!("lost multimodal content")
+                };
+                assert_eq!(parts.len(), 2);
+                assert!(parts[0]
+                    .m_content
+                    .contains("refact://artifact/multimodal-chat/"));
+                assert_eq!(parts[1].m_type, "image");
+                assert_eq!(parts[1].m_content, "opaque-image");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn artifacts_renderer_variants_and_normal_chat_identity() {
+        let (_temp, app, _) = task_memory_test_app("artifact-renderer").await;
+        let marker = ARTIFACTS_INSTRUCTIONS_MARKER;
+        let names = HashSet::from(["create_textdoc".to_string()]);
+        let full =
+            expand_artifacts_instructions(&app, marker, "artifact-chat", &names, "agent").await;
+        let workspace =
+            crate::python_tool::workspace::PythonWorkspace::for_chat(&app, "artifact-chat")
+                .await
+                .unwrap();
+        assert!(full.contains(&workspace.artifacts_dir().display().to_string()));
+        assert!(full.contains("refact://artifact/artifact-chat/"));
+        assert!(full.contains("Link every artifact"));
+        assert!(!workspace.artifacts_dir().exists());
+        let readonly = expand_artifacts_instructions(
+            &app,
+            marker,
+            "artifact-chat",
+            &HashSet::new(),
+            "explore",
+        )
+        .await;
+        assert!(readonly.contains("You cannot create files in this mode"));
+        for id in ["", "../invalid"] {
+            let unavailable =
+                expand_artifacts_instructions(&app, marker, id, &names, "agent").await;
+            assert!(unavailable.contains("This chat has no artifacts folder"));
+            assert!(!unavailable.contains(marker));
+        }
+        assert_eq!(
+            expand_artifacts_instructions(&app, "unchanged", "", &names, "agent").await,
+            "unchanged"
+        );
+        let meta = ChatMeta {
+            chat_id: "normal-artifacts".into(),
+            include_project_info: false,
+            ..Default::default()
+        };
+        let normal =
+            system_prompt_add_extra_instructions(app, marker.into(), names, &meta, &None, "agent")
+                .await;
+        assert!(normal.contains("refact://artifact/normal-artifacts/"));
+        assert!(!normal.contains(marker));
+    }
+
+    #[test]
+    fn artifacts_write_capabilities_follow_shell_sandbox_and_native_tools() {
+        for name in [
+            "create_textdoc",
+            "update_textdoc",
+            "update_textdoc_by_lines",
+            "update_textdoc_regex",
+            "update_textdoc_anchored",
+            "apply_patch",
+            "python",
+        ] {
+            assert!(artifacts_can_write(
+                &HashSet::from([name.into()]),
+                "explore"
+            ));
+        }
+        for name in ["shell", "process_start"] {
+            let names = HashSet::from([name.into()]);
+            for mode in ["explore", "no_tools", "no-tools", "chat"] {
+                assert!(!artifacts_can_write(&names, mode));
+            }
+            assert!(artifacts_can_write(&names, "agent"));
+        }
+        assert!(!artifacts_can_write(
+            &HashSet::from(["cat".into()]),
+            "agent"
+        ));
     }
 
     async fn task_memory_test_app(task_id: &str) -> (tempfile::TempDir, AppState, PathBuf) {
@@ -1309,6 +1560,22 @@ pub async fn prepend_the_right_system_prompt_and_maybe_more_initial_messages(
         .first()
         .map(|m| m.role == "system")
         .unwrap_or(false);
+    if have_system
+        && messages[0]
+            .content
+            .content_text_only()
+            .contains(ARTIFACTS_INSTRUCTIONS_MARKER)
+    {
+        let rendered = expand_artifacts_instructions(
+            &app,
+            ARTIFACTS_INSTRUCTIONS_MARKER,
+            &chat_meta.chat_id,
+            &tool_names,
+            mode_id,
+        )
+        .await;
+        replace_artifacts_in_content(&mut messages[0].content, &rendered);
+    }
     let have_project_context = messages
         .iter()
         .any(|m| m.role == "context_file" && m.tool_call_id == PROJECT_CONTEXT_MARKER);

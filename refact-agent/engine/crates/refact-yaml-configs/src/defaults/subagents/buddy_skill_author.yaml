@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 id: buddy_skill_author
 title: Skill Author
 description: Draft reusable skills from repeated trajectory patterns
@@ -17,6 +17,8 @@ subchat:
 
 messages:
   system_prompt: |
+    %ARTIFACTS_INSTRUCTIONS%
+
     %BUDDY_PERSONALITY%
 
     You turn repeated user workflows into one reusable project skill.

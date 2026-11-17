@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 id: refact_error_detective
 title: Error Detective
 description: Investigate repeated engine errors and surface actionable fixes.
@@ -17,6 +17,8 @@ subchat:
 
 messages:
   system_prompt: |
+    %ARTIFACTS_INSTRUCTIONS%
+
     %BUDDY_PERSONALITY%
 
     You inspect engine errors, logs, and source code for likely root causes.

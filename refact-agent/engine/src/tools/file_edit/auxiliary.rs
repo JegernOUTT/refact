@@ -374,9 +374,21 @@ pub async fn check_scope_guard(
 ) -> Result<(), String> {
     use crate::agents::path_scope::{self, ScopeOutcome};
 
+    let (app, chat_id) = {
+        let context = ccx.lock().await;
+        context.check_native_edit_scope(edit_path)?;
+        (context.app.clone(), context.chat_id.clone())
+    };
+    if Box::pin(crate::python_tool::workspace::is_own_artifact_path(
+        &app, &chat_id, edit_path,
+    ))
+    .await
+    {
+        return Ok(());
+    }
+
     let (app, task_id, card_id, root) = {
         let ccx_lock = ccx.lock().await;
-        ccx_lock.check_native_edit_scope(edit_path)?;
         let meta = match ccx_lock.task_meta.as_ref() {
             Some(meta) if meta.role == "agents" => meta.clone(),
             _ => return Ok(()),
@@ -781,6 +793,11 @@ pub async fn write_file_with_intent(
             },
             Some(file_text),
         );
+        Box::pin(crate::python_tool::run_output::reconcile_native_artifact_write(&gcx, path))
+            .await
+            .map_err(|e| {
+                format!("File was written, but artifact privacy reconciliation failed: {e}")
+            })?;
     }
 
     Ok((before_text, file_text.to_string()))
@@ -2295,6 +2312,82 @@ mod tests {
                 .await
                 .map(|_| ()),
                 other => panic!("unknown mutation family {other}"),
+            }
+        }
+
+        #[tokio::test]
+        async fn artifacts_strict_scope_allows_only_own_native_mutations() {
+            let f = fixture().await;
+            let ccx = scope_guard_ccx(
+                &f,
+                ScopeGuardMode::Strict,
+                vec!["src/scoped".into()],
+                "agents",
+            )
+            .await;
+            let app = {
+                let mut context = ccx.lock().await;
+                context.execution_scope = None;
+                context.app.clone()
+            };
+            let dir = f.source.join(".refact/trajectories");
+            fs::create_dir_all(&dir).unwrap();
+            for id in ["chat", "other"] {
+                fs::write(
+                    dir.join(format!("{id}.json")),
+                    format!(r#"{{"id":"{id}","messages":[]}}"#),
+                )
+                .unwrap();
+            }
+            let own =
+                crate::python_tool::workspace::PythonWorkspace::existing_for_chat(&app, "chat")
+                    .await
+                    .unwrap()
+                    .unwrap();
+            let other =
+                crate::python_tool::workspace::PythonWorkspace::existing_for_chat(&app, "other")
+                    .await
+                    .unwrap()
+                    .unwrap();
+            fs::create_dir_all(own.artifacts_dir()).unwrap();
+            let supervised = native_scope_ccx(
+                &f,
+                "chat",
+                crate::buddy::supervision_authority::SUPERVISED_WORKTREE_KIND,
+            )
+            .await;
+            assert!(
+                check_scope_guard(&supervised, &own.artifacts_dir().join("denied.rs"))
+                    .await
+                    .unwrap_err()
+                    .contains("supervised edit authority is unavailable")
+            );
+            for family in ["create", "replace", "rename", "delete", "patch"] {
+                let path = own.artifacts_dir().join(format!("{family}.rs"));
+                prepare_family(family, &path).await;
+                check_scope_guard(&ccx, &path).await.unwrap();
+                match family {
+                    "rename" | "delete" => run_family(&f, &ccx, family, &path).await.map(|_| ()),
+                    "create" => tool_create_text_doc_exec(f.gcx.clone(), &args(vec![("path", path_value(&path)), ("content", json!("artifact"))]), false, None, Some(&ccx)).await.map(|_| ()),
+                    "replace" => tool_update_text_doc_exec(f.gcx.clone(), &args(vec![("path", path_value(&path)), ("old_str", json!("body")), ("replacement", json!("changed"))]), false, None, Some(&ccx)).await.map(|_| ()),
+                    "patch" => tool_apply_patch_exec(f.gcx.clone(), &args(vec![("patch", json!(format!("*** Begin Patch\n*** Update File: {}\n@@\n-body\n+changed\n*** End Patch", path.display())))]), false, None, Some(&ccx)).await.map(|_| ()),
+                    _ => unreachable!(),
+                }.unwrap_or_else(|e| panic!("own artifact {family}: {e}"));
+            }
+            assert!(check_scope_guard(&ccx, &f.source.join("random.rs"))
+                .await
+                .is_err());
+            assert!(check_scope_guard(&ccx, &other.artifacts_dir().join("file"))
+                .await
+                .is_err());
+            #[cfg(unix)]
+            {
+                std::os::unix::fs::symlink(&f.outside, own.artifacts_dir().join("escape")).unwrap();
+                assert!(
+                    check_scope_guard(&ccx, &own.artifacts_dir().join("escape/file"))
+                        .await
+                        .is_err()
+                );
             }
         }
 

@@ -142,7 +142,7 @@ pub(super) async fn apply(gcx: Arc<GlobalContext>, plan: &ApplyPatchResult) -> R
                     (result.action == "update").then_some(result.before.as_str()),
                     Some(&result.after),
                 );
-                if let Some(source) = source {
+                if let Some(source) = source.as_ref() {
                     let metadata = tokio::fs::metadata(&source)
                         .await
                         .map_err(|error| error.to_string())?;
@@ -153,7 +153,7 @@ pub(super) async fn apply(gcx: Arc<GlobalContext>, plan: &ApplyPatchResult) -> R
                         .await
                         .map_err(|error| error.to_string())?;
                     guards
-                        .get_mut(&source)
+                        .get_mut(source)
                         .ok_or("missing patch source guard")?
                         .record_bytes(WriteKind::Deleted, None);
                     crate::files_in_workspace::remove_memory_document_for_path(
@@ -165,6 +165,16 @@ pub(super) async fn apply(gcx: Arc<GlobalContext>, plan: &ApplyPatchResult) -> R
             }
             crate::files_in_workspace::remove_memory_document_for_path(gcx.clone(), &result.path)
                 .await;
+            if result.action != "delete" {
+                Box::pin(
+                    crate::python_tool::run_output::reconcile_native_artifact_move(
+                        &gcx,
+                        source.as_deref(),
+                        &result.path,
+                    ),
+                )
+                .await?;
+            }
             Ok(())
         }
         .await;
@@ -199,4 +209,54 @@ pub(super) async fn apply(gcx: Arc<GlobalContext>, plan: &ApplyPatchResult) -> R
         applied += 1;
     }
     super::auxiliary::fast_enqueue_for_edit(gcx, &initial.into_keys().collect::<Vec<_>>()).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn malformed_artifact_ledger_does_not_skip_patch_undo_or_rename_cleanup() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("trajectories/python/native");
+        let destination = workspace.join("artifacts/moved");
+        tokio::fs::create_dir_all(destination.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(workspace.join("privacy_ledger.json"), "malformed")
+            .await
+            .unwrap();
+        let source = temp.path().join("source");
+        tokio::fs::write(&source, "before").await.unwrap();
+        let plan = ApplyPatchResult {
+            file_results: vec![super::super::tool_apply_patch::SingleFileResult {
+                path: destination.clone(),
+                action: "rename",
+                before: "before".into(),
+                after: "after".into(),
+                chunks: vec![crate::call_validation::DiffChunk {
+                    file_name: source.to_string_lossy().into_owned(),
+                    ..Default::default()
+                }],
+            }],
+            all_chunks: vec![],
+            warnings: vec![],
+        };
+        assert!(apply(gcx, &plan).await.is_err());
+        assert_eq!(
+            tokio::fs::read_to_string(&destination).await.unwrap(),
+            "after"
+        );
+        assert!(!source.exists());
+        let history = super::super::undo_history::get_undo_history()
+            .lock()
+            .unwrap();
+        let undo = history.get(&destination).unwrap().last().unwrap();
+        assert!(!undo.existed);
+        assert_eq!(
+            undo.after_digest.as_deref(),
+            Some(crate::file_activity::digest_of("after").as_str())
+        );
+    }
 }

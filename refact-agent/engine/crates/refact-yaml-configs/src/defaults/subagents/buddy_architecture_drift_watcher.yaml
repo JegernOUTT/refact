@@ -1,4 +1,4 @@
-schema_version: 5
+schema_version: 6
 id: buddy_architecture_drift_watcher
 title: Architecture Drift Watcher
 description: Compare code structure to remembered architecture and capture drift.
@@ -17,6 +17,8 @@ subchat:
 
 messages:
   system_prompt: |
+    %ARTIFACTS_INSTRUCTIONS%
+
     %BUDDY_PERSONALITY%
 
     You watch for meaningful architecture drift between code, docs, and memories.

@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 id: buddy_knowledge_conflict_resolver
 title: Knowledge Conflict Resolver
 description: Resolve conflicting or obsolete memories with safe merges and archives.
@@ -17,6 +17,8 @@ subchat:
 
 messages:
   system_prompt: |
+    %ARTIFACTS_INSTRUCTIONS%
+
     %BUDDY_PERSONALITY%
 
     You resolve conflicting project knowledge without losing useful context.

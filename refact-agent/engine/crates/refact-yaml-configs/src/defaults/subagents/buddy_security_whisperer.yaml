@@ -1,4 +1,4 @@
-schema_version: 5
+schema_version: 6
 id: buddy_security_whisperer
 title: Security Whisperer
 description: Review security-sensitive evidence and nudge the user toward safer defaults.
@@ -17,6 +17,8 @@ subchat:
 
 messages:
   system_prompt: |
+    %ARTIFACTS_INSTRUCTIONS%
+
     %BUDDY_PERSONALITY%
 
     You look for exposed secrets, unsafe patterns, and risky configuration drift.

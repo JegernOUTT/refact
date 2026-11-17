@@ -6,6 +6,7 @@ import {
   FileCog,
   FileImage,
   FileJson,
+  FileSpreadsheet,
   FileText,
   type LucideIcon,
 } from "lucide-react";
@@ -20,6 +21,7 @@ const CODE_EXTENSIONS = new Set([
   "go",
   "h",
   "hpp",
+  "htm",
   "html",
   "java",
   "js",
@@ -40,7 +42,8 @@ const CODE_EXTENSIONS = new Set([
   "vue",
 ]);
 
-const TEXT_EXTENSIONS = new Set(["log", "md", "mdx", "rst", "txt"]);
+const TEXT_EXTENSIONS = new Set(["log", "md", "mdx", "pdf", "rst", "txt"]);
+const SPREADSHEET_EXTENSIONS = new Set(["csv", "ods", "tsv", "xls", "xlsx"]);
 const CONFIG_EXTENSIONS = new Set([
   "conf",
   "config",
@@ -82,6 +85,7 @@ export const fileTypeIcon = (name: string): LucideIcon => {
   if (CODE_EXTENSIONS.has(extension)) return FileCode;
   if (extension === "json" || extension === "jsonl") return FileJson;
   if (TEXT_EXTENSIONS.has(extension)) return FileText;
+  if (SPREADSHEET_EXTENSIONS.has(extension)) return FileSpreadsheet;
   if (CONFIG_EXTENSIONS.has(extension)) return FileCog;
   if (IMAGE_EXTENSIONS.has(extension)) return FileImage;
   if (ARCHIVE_EXTENSIONS.has(extension)) return FileArchive;

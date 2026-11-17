@@ -1,4 +1,4 @@
-schema_version: 18
+schema_version: 19
 id: shell
 title: Shell
 description: Execute shell commands for system tasks
@@ -46,6 +46,8 @@ prompt: |
   %TRAJECTORY_LABEL_INSTRUCTIONS%
 
   %RICH_CONTENT_INSTRUCTIONS%
+
+  %ARTIFACTS_INSTRUCTIONS%
 
   %SYSTEM_INFO%
 

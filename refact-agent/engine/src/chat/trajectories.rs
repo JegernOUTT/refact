@@ -2166,6 +2166,29 @@ async fn indexed_candidate_paths_in_dirs(
     let mut paths = Vec::new();
     let app = AppState::from_gcx(gcx.clone()).await;
     for dir in dirs {
+        if READ_ONLY_WORKSPACE_LOOKUP.try_with(|_| ()).is_ok() {
+            let index = match fs::symlink_metadata(dir.join("index.json")).await {
+                Ok(meta) if meta.is_file() && !meta.file_type().is_symlink() => {
+                    fs::read(dir.join("index.json"))
+                        .await
+                        .ok()
+                        .and_then(|bytes| {
+                            serde_json::from_slice::<trajectory_index::TrajectoryIndex>(&bytes).ok()
+                        })
+                }
+                _ => None,
+            };
+            if let Some(index) = index {
+                for entry in index.entries.iter() {
+                    if entry.id == chat_id
+                        && trajectory_index::trajectory_index_entry_is_fresh(dir, entry).await
+                    {
+                        paths.push(trajectory_index::trajectory_file_path_for_entry(dir, entry));
+                    }
+                }
+            }
+            continue;
+        }
         let entries = match trajectory_index::list_trajectory_entries_with_rollout_shared_for(
             &app.chat.trajectory_index_coordinator,
             dir,
@@ -2201,6 +2224,9 @@ async fn indexed_candidate_paths_by_id(
     chat_id: &str,
     caller: trajectory_index::TrajectoryIndexListingCaller,
 ) -> Vec<PathBuf> {
+    if READ_ONLY_WORKSPACE_LOOKUP.try_with(|_| ()).is_ok() {
+        return Vec::new();
+    }
     let app = AppState::from_gcx(gcx.clone()).await;
     let mut paths = Vec::new();
     for (dir, entry) in app
@@ -2219,6 +2245,9 @@ async fn indexed_candidate_paths_by_id(
 }
 
 async fn unsynced_trajectory_dirs(gcx: &Arc<GlobalContext>, dirs: &[PathBuf]) -> Vec<PathBuf> {
+    if READ_ONLY_WORKSPACE_LOOKUP.try_with(|_| ()).is_ok() {
+        return dirs.to_vec();
+    }
     let app = AppState::from_gcx(gcx.clone()).await;
     app.chat
         .trajectory_index_coordinator
@@ -2590,23 +2619,92 @@ pub(crate) async fn python_workspace_trajectory_path(
     {
         return Ok(path);
     }
+    new_python_workspace_trajectory_path(app, chat_id, true).await
+}
+
+pub(crate) async fn existing_python_workspace_trajectory_path(
+    app: &AppState,
+    chat_id: &str,
+) -> Result<Option<PathBuf>, String> {
+    let path = READ_ONLY_WORKSPACE_LOOKUP
+        .scope(
+            (),
+            existing_python_workspace_trajectory_path_inner(app, chat_id),
+        )
+        .await?;
+    if let Some(parent) = path.as_ref().and_then(|path| path.parent()) {
+        real_dir_tree_exists(parent).await?;
+    }
+    Ok(path)
+}
+
+tokio::task_local! {
+    static READ_ONLY_WORKSPACE_LOOKUP: ();
+}
+
+async fn existing_python_workspace_trajectory_path_inner(
+    app: &AppState,
+    chat_id: &str,
+) -> Result<Option<PathBuf>, String> {
+    validate_trajectory_id(chat_id).map_err(|e| e.message)?;
+    if let Some(path) =
+        find_trajectory_path_for_active_chat(app.gcx.clone(), &app.chat.sessions, chat_id).await
+    {
+        return Ok(Some(path));
+    }
+    if !app.chat.sessions.read().await.contains_key(chat_id) {
+        return Ok(None);
+    }
+    new_python_workspace_trajectory_path(app, chat_id, false)
+        .await
+        .map(Some)
+}
+
+async fn new_python_workspace_trajectory_path(
+    app: &AppState,
+    chat_id: &str,
+    create: bool,
+) -> Result<PathBuf, String> {
     let session = app.chat.sessions.read().await.get(chat_id).cloned();
-    if let Some(session) = session {
-        let thread = session.lock().await.thread.clone();
-        if let Some(meta) = thread.task_meta.as_ref() {
+    let thread = match session {
+        Some(session) => Some(session.lock().await.thread.clone()),
+        None => None,
+    };
+    if let Some(meta) = thread.as_ref().and_then(|thread| thread.task_meta.as_ref()) {
+        if create {
             return safe_new_task_trajectory_file(app.gcx.clone(), meta, chat_id).await;
         }
-        if thread.buddy_meta.is_some() {
+        validate_task_trajectory_role(&meta.role)?;
+        validate_task_agent_id(meta.agent_id.as_deref())?;
+        let task_dir = crate::tasks::storage::find_task_dir(app.gcx.clone(), &meta.task_id).await?;
+        return Ok(crate::tasks::storage::get_task_trajectory_dir(
+            &task_dir,
+            &meta.role,
+            meta.agent_id.as_deref(),
+        )
+        .join(format!("{chat_id}.json")));
+    }
+    if thread
+        .as_ref()
+        .is_some_and(|thread| thread.buddy_meta.is_some())
+    {
+        if create {
             return safe_new_buddy_trajectory_file(app.gcx.clone(), chat_id).await;
         }
-        return safe_new_nested_trajectory_file(
-            app.gcx.clone(),
-            chat_id,
-            thread.root_chat_id.as_deref(),
-        )
-        .await;
+        return Ok(get_buddy_conversations_dir(app.gcx.clone())
+            .await?
+            .join(format!("{chat_id}.json")));
     }
-    safe_new_nested_trajectory_file(app.gcx.clone(), chat_id, None).await
+    let root = thread
+        .as_ref()
+        .and_then(|thread| thread.root_chat_id.as_deref());
+    if create {
+        return safe_new_nested_trajectory_file(app.gcx.clone(), chat_id, root).await;
+    }
+    Ok(get_trajectories_dir(app.gcx.clone())
+        .await?
+        .join(chat_folder_name(chat_id, root))
+        .join(format!("{chat_id}.json")))
 }
 
 pub async fn find_trajectory_path_for_active_chat(
@@ -9578,6 +9676,54 @@ async fn allowed_real_dir_symlink_target(_path: &Path) -> Option<PathBuf> {
     None
 }
 
+async fn real_dir_tree_exists(path: &Path) -> Result<bool, String> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        if matches!(component, Component::ParentDir) {
+            return Err("Parent directory component refused".into());
+        }
+        current.push(component.as_os_str());
+        if current.as_os_str().is_empty() {
+            continue;
+        }
+        match fs::symlink_metadata(&current).await {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                if let Some(resolved) = allowed_real_dir_symlink_target(&current).await {
+                    current = resolved;
+                } else {
+                    return Err(format!(
+                        "Refusing to use non-real directory component: {}",
+                        current.display()
+                    ));
+                }
+            }
+            Ok(meta) if !meta.is_dir() => {
+                return Err(format!("Not a directory: {}", current.display()))
+            }
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+    Ok(is_real_dir(path).await)
+}
+
+#[cfg(all(test, unix))]
+#[tokio::test]
+async fn artifacts_readonly_directory_check_preserves_ancestry_policy_without_creation() {
+    let temp = tempfile::tempdir().unwrap();
+    let missing = temp.path().join("missing/child");
+    assert!(!real_dir_tree_exists(&missing).await.unwrap());
+    assert!(!temp.path().join("missing").exists());
+    let real = temp.path().join("real");
+    fs::create_dir(&real).await.unwrap();
+    std::os::unix::fs::symlink(&real, temp.path().join("alias")).unwrap();
+    let alias = temp.path().join("alias/child");
+    assert!(real_dir_tree_exists(&alias).await.is_err());
+    assert!(ensure_real_dir_tree(&alias).await.is_err());
+    assert!(!real.join("child").exists());
+}
+
 pub(crate) async fn ensure_real_dir_tree(path: &Path) -> Result<(), String> {
     let mut current = PathBuf::new();
     for component in path.components() {
@@ -9710,7 +9856,13 @@ async fn canonical_child_path_under_root(root: &Path, child: &Path) -> Result<Pa
 
 async fn safe_trajectory_file_in_dir(dir: &Path, chat_id: &str) -> Option<PathBuf> {
     validate_trajectory_id(chat_id).ok()?;
-    ensure_real_dir_tree(dir).await.ok()?;
+    if READ_ONLY_WORKSPACE_LOOKUP.try_with(|_| ()).is_ok() {
+        if !real_dir_tree_exists(dir).await.ok()? {
+            return None;
+        }
+    } else {
+        ensure_real_dir_tree(dir).await.ok()?;
+    }
     let child = dir.join(format!("{}.json", chat_id));
     if !is_real_file(&child).await {
         return None;

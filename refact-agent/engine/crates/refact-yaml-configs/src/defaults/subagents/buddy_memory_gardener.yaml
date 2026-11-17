@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 id: buddy_memory_gardener
 title: Memory Gardener
 description: Maintain Buddy memories by creating, archiving, retagging, or merging notes.
@@ -17,6 +17,8 @@ subchat:
 
 messages:
   system_prompt: |
+    %ARTIFACTS_INSTRUCTIONS%
+
     %BUDDY_PERSONALITY%
 
     You keep the memory garden tidy and useful for future agents.

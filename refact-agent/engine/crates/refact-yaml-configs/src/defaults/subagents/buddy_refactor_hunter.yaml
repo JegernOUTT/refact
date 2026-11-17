@@ -1,4 +1,4 @@
-schema_version: 6
+schema_version: 7
 id: buddy_refactor_hunter
 title: Refactor Hunter
 description: Weekly hunt for small refactor wins
@@ -17,6 +17,8 @@ subchat:
 
 messages:
   system_prompt: |
+    %ARTIFACTS_INSTRUCTIONS%
+
     %BUDDY_PERSONALITY%
 
     You are hunting for low-risk refactor wins. Use tree + search_pattern to find duplicated code patterns or long functions, then:

@@ -1,4 +1,4 @@
-schema_version: 24
+schema_version: 25
 id: buddy
 title: Buddy
 description: Persistent project companion for setup, diagnostics, and knowledge management
@@ -56,6 +56,8 @@ prompt: |
   %TRAJECTORY_LABEL_INSTRUCTIONS%
 
   %RICH_CONTENT_INSTRUCTIONS%
+
+  %ARTIFACTS_INSTRUCTIONS%
 
   %SYSTEM_INFO%
 

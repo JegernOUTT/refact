@@ -139,13 +139,19 @@ fn names_no_file(error: &std::io::Error) -> bool {
 }
 
 async fn bounded_files(root: &Path) -> Result<Vec<PathBuf>, String> {
+    bounded_files_if_complete(root)
+        .await?
+        .ok_or_else(|| "Python data file enumeration limit exceeded".into())
+}
+
+async fn bounded_files_if_complete(root: &Path) -> Result<Option<Vec<PathBuf>>, String> {
     let mut files = Vec::new();
     let mut pending = vec![(root.to_path_buf(), 0usize)];
     let mut visits = 0usize;
     while let Some((path, depth)) = pending.pop() {
         visits += 1;
         if visits > 10000 || depth > 4 {
-            return Err("Python data file enumeration limit exceeded".into());
+            return Ok(None);
         }
         let meta = tokio::fs::symlink_metadata(&path)
             .await
@@ -164,7 +170,7 @@ async fn bounded_files(root: &Path) -> Result<Vec<PathBuf>, String> {
                 .map_err(|e| e.to_string())?;
             while let Some(entry) = entries.next_entry().await.map_err(|e| e.to_string())? {
                 if visits + pending.len() >= 10000 {
-                    return Err("Python data file enumeration limit exceeded".into());
+                    return Ok(None);
                 }
                 pending.push((entry.path(), depth + 1));
             }
@@ -176,10 +182,10 @@ async fn bounded_files(root: &Path) -> Result<Vec<PathBuf>, String> {
         }
     }
     files.sort();
-    Ok(files)
+    Ok(Some(files))
 }
 
-fn is_reparse_point(meta: &std::fs::Metadata) -> bool {
+pub(crate) fn is_reparse_point(meta: &std::fs::Metadata) -> bool {
     #[cfg(windows)]
     {
         use std::os::windows::fs::MetadataExt;
@@ -215,7 +221,451 @@ pub async fn persist_run_privacy(
     save_ledger(workspace, paths, gcx, zones).await
 }
 
+#[cfg(test)]
+mod native_artifacts_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn native_write_does_not_launder_unknown_artifacts_without_runs() {
+        let temp = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let workspace = temp.path().join("trajectories/python/native");
+        let artifacts = workspace.join("artifacts");
+        tokio::fs::create_dir_all(&artifacts).await.unwrap();
+        tokio::fs::write(artifacts.join("unknown"), "unknown provenance")
+            .await
+            .unwrap();
+        let file = artifacts.join("native");
+        tokio::fs::write(&file, "native").await.unwrap();
+        reconcile_native_artifact_write(&gcx, &file).await.unwrap();
+        assert!(!workspace.join("privacy_ledger.json").exists());
+        assert!(
+            import_parent_ledger(&artifacts, &gcx, &records::new_derived_privacy_zones())
+                .await
+                .unwrap_err()
+                .contains("no privacy ledger")
+        );
+    }
+
+    #[tokio::test]
+    async fn native_move_carries_static_source_zone_for_files_and_directories() {
+        for directory in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let gcx = crate::global_context::tests::make_test_gcx().await;
+            *gcx.documents_state.workspace_folders.lock().unwrap() =
+                vec![temp.path().to_path_buf()];
+            let source = temp.path().join(if directory {
+                "source-dir"
+            } else {
+                "source-only.txt"
+            });
+            let workspace = temp.path().join("trajectories/python/native");
+            let destination = workspace.join("artifacts/moved");
+            tokio::fs::create_dir_all(destination.parent().unwrap())
+                .await
+                .unwrap();
+            let (source_file, destination_file) = if directory {
+                tokio::fs::create_dir_all(source.join("nested"))
+                    .await
+                    .unwrap();
+                (
+                    source.join("nested/source-only.txt"),
+                    destination.join("nested/source-only.txt"),
+                )
+            } else {
+                (source.clone(), destination.clone())
+            };
+            crate::privacy::save_privacy_policy(
+                gcx.clone(),
+                refact_privacy::PrivacyPolicy {
+                    zones: vec![refact_privacy::Zone {
+                        name: "restricted".into(),
+                        patterns: vec![source_file.to_string_lossy().into_owned()],
+                        send_to: vec!["trusted".into()],
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+            tokio::fs::write(&source_file, [0xff, 1, 2]).await.unwrap();
+            assert_eq!(
+                records::observed_file_records_with_derived(
+                    &gcx,
+                    [source_file.clone()],
+                    &records::new_derived_privacy_zones()
+                )
+                .unwrap()[0]
+                    .zone,
+                "restricted"
+            );
+            if directory {
+                tokio::fs::rename(&source, &destination).await.unwrap();
+                reconcile_native_artifact_move(&gcx, Some(&source), &destination)
+                    .await
+                    .unwrap();
+            } else {
+                crate::tools::file_edit::move_file::move_file(
+                    gcx.clone(),
+                    None,
+                    &source,
+                    &destination,
+                    false,
+                )
+                .await
+                .unwrap();
+            }
+            assert!(!source.exists());
+            assert_eq!(
+                records::observed_file_records_with_derived(
+                    &gcx,
+                    [destination_file.clone()],
+                    &records::new_derived_privacy_zones()
+                )
+                .unwrap()[0]
+                    .zone,
+                "normal"
+            );
+            let entries = read_ledger(&workspace).await.unwrap().unwrap();
+            assert_eq!(entries.len(), 1);
+            assert_eq!(entries[0].0, destination_file);
+            assert_eq!(entries[0].1.zone, "restricted");
+            let child = records::new_derived_privacy_zones();
+            import_parent_ledger(&workspace.join("artifacts"), &gcx, &child)
+                .await
+                .unwrap();
+            assert_eq!(
+                records::derived_zone_for_path(&gcx, &destination_file, &child)
+                    .unwrap()
+                    .zone,
+                "restricted"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn native_write_leaves_missing_ledger_when_artifact_scan_is_too_deep() {
+        let temp = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let workspace = temp.path().join("trajectories/python/native");
+        let artifacts = workspace.join("artifacts");
+        tokio::fs::create_dir_all(artifacts.join("one/two/three/four/five"))
+            .await
+            .unwrap();
+        let file = artifacts.join("native");
+        tokio::fs::write(&file, "native").await.unwrap();
+        reconcile_native_artifact_write(&gcx, &file).await.unwrap();
+        assert!(!workspace.join("privacy_ledger.json").exists());
+    }
+
+    #[tokio::test]
+    async fn native_move_carries_source_derived_zone_to_destination() {
+        let temp = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
+        let session = crate::chat::types::ChatSession::new("move-actor".into());
+        let zones = session.derived_privacy_zones.clone();
+        app.chat.sessions.write().await.insert(
+            "move-actor".into(),
+            std::sync::Arc::new(tokio::sync::Mutex::new(session)),
+        );
+        let source = temp.path().join("source");
+        let workspace = temp.path().join("trajectories/python/native");
+        let destination = workspace.join("artifacts/moved");
+        tokio::fs::create_dir_all(destination.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(&source, "sensitive").await.unwrap();
+        zones.write().unwrap().insert(
+            source.clone(),
+            records::DerivedZone {
+                zone: "blocked".into(),
+                origin: Some("original".into()),
+            },
+        );
+        crate::file_activity::TOOL_ACTOR
+            .scope("move-actor".into(), async {
+                crate::tools::file_edit::move_file::move_file(
+                    gcx.clone(),
+                    Some("move-actor"),
+                    &source,
+                    &destination,
+                    false,
+                )
+                .await
+                .unwrap();
+            })
+            .await;
+        assert!(!source.exists());
+        let entries = read_ledger(&workspace).await.unwrap().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].0, destination);
+        assert_eq!(entries[0].1.zone, "blocked");
+        assert_eq!(entries[0].1.origin.as_deref(), Some("original"));
+    }
+
+    #[tokio::test]
+    async fn artifacts_native_write_saves_actor_derived_zone() {
+        let temp = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
+        let session = crate::chat::types::ChatSession::new("native-actor".into());
+        let zones = session.derived_privacy_zones.clone();
+        app.chat.sessions.write().await.insert(
+            "native-actor".into(),
+            std::sync::Arc::new(tokio::sync::Mutex::new(session)),
+        );
+        let workspace = temp.path().join("trajectories/python/native");
+        let file = workspace.join("artifacts/file");
+        tokio::fs::create_dir_all(file.parent().unwrap())
+            .await
+            .unwrap();
+        zones.write().unwrap().insert(
+            file.clone(),
+            records::DerivedZone {
+                zone: "blocked".into(),
+                origin: Some("source".into()),
+            },
+        );
+        crate::file_activity::TOOL_ACTOR
+            .scope("native-actor".into(), async {
+                crate::tools::file_edit::auxiliary::write_file_with_intent(
+                    gcx.clone(),
+                    &file,
+                    &"derived".into(),
+                    false,
+                    None,
+                    crate::file_activity::WriteIntent::Create,
+                )
+                .await
+                .unwrap();
+            })
+            .await;
+        let entries = read_ledger(&workspace).await.unwrap().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].0, file);
+        assert_eq!(entries[0].1.zone, "blocked");
+        assert_eq!(entries[0].1.origin.as_deref(), Some("source"));
+    }
+
+    #[tokio::test]
+    async fn artifacts_native_write_ledger_preserves_fail_closed_runs_and_existing_zones() {
+        let temp = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let workspace = temp.path().join("trajectories/python/native");
+        let artifacts = workspace.join("artifacts");
+        tokio::fs::create_dir_all(&artifacts).await.unwrap();
+        let file = artifacts.join("file.txt");
+        crate::tools::file_edit::auxiliary::write_file_with_intent(
+            gcx.clone(),
+            &file,
+            &"native".into(),
+            false,
+            None,
+            crate::file_activity::WriteIntent::Create,
+        )
+        .await
+        .unwrap();
+        assert!(workspace.join("privacy_ledger.json").is_file());
+        import_parent_ledger(&artifacts, &gcx, &records::new_derived_privacy_zones())
+            .await
+            .unwrap();
+        let zone = records::DerivedZone {
+            zone: "blocked".into(),
+            origin: Some("source".into()),
+        };
+        tokio::fs::write(
+            workspace.join("privacy_ledger.json"),
+            serde_json::to_vec(&vec![(file.clone(), zone)]).unwrap(),
+        )
+        .await
+        .unwrap();
+        crate::tools::file_edit::auxiliary::write_file_with_intent(
+            gcx.clone(),
+            &file,
+            &"updated".into(),
+            false,
+            None,
+            crate::file_activity::WriteIntent::Contextual,
+        )
+        .await
+        .unwrap();
+        let entries = read_ledger(&workspace).await.unwrap().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].1.zone, "blocked");
+        let child = records::new_derived_privacy_zones();
+        import_parent_ledger(&artifacts, &gcx, &child)
+            .await
+            .unwrap();
+        assert_eq!(
+            records::derived_zone_for_path(&gcx, &file, &child)
+                .unwrap()
+                .zone,
+            "blocked"
+        );
+        tokio::fs::remove_file(workspace.join("privacy_ledger.json"))
+            .await
+            .unwrap();
+        tokio::fs::create_dir_all(workspace.join("runs/prior-run"))
+            .await
+            .unwrap();
+        crate::tools::file_edit::auxiliary::write_file_with_intent(
+            gcx.clone(),
+            &file,
+            &"after run".into(),
+            false,
+            None,
+            crate::file_activity::WriteIntent::Contextual,
+        )
+        .await
+        .unwrap();
+        assert!(!workspace.join("privacy_ledger.json").exists());
+        assert!(import_parent_ledger(&artifacts, &gcx, &child)
+            .await
+            .unwrap_err()
+            .contains("no privacy ledger"));
+    }
+}
+
+static LEDGER_WRITE: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+
+pub(crate) async fn reconcile_native_artifact_write(
+    gcx: &std::sync::Arc<crate::global_context::GlobalContext>,
+    path: &Path,
+) -> Result<(), String> {
+    reconcile_native_artifact_move(gcx, None, path).await
+}
+
+pub(crate) async fn reconcile_native_artifact_move(
+    gcx: &std::sync::Arc<crate::global_context::GlobalContext>,
+    source: Option<&Path>,
+    path: &Path,
+) -> Result<(), String> {
+    let Some(artifacts) = path.ancestors().find(|p| {
+        p.file_name().is_some_and(|n| n == "artifacts")
+            && p.parent()
+                .and_then(Path::parent)
+                .is_some_and(|p| p.file_name().is_some_and(|n| n == "python"))
+            && super::workspace::is_python_workspace_path(p)
+    }) else {
+        return Ok(());
+    };
+    let chat_id = artifacts
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|id| id.to_str())
+        .ok_or("Invalid native artifact chat id")?;
+    crate::chat::trajectories::validate_trajectory_id(chat_id).map_err(|e| e.message)?;
+    if chat_id.len() > 128
+        || !chat_id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    {
+        return Err("Invalid native artifact chat id".into());
+    }
+    super::workspace::artifact_path_checked(artifacts, path).await?;
+    let workspace = artifacts.parent().ok_or("Invalid artifact workspace")?;
+    let paths = if tokio::fs::symlink_metadata(path)
+        .await
+        .map_err(|e| e.to_string())?
+        .is_dir()
+    {
+        bounded_files(path).await?
+    } else {
+        vec![path.to_path_buf()]
+    };
+    let app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
+    let session = match crate::file_activity::current_actor() {
+        Some(actor) => app.chat.sessions.read().await.get(&actor).cloned(),
+        None => None,
+    };
+    let zones = match session {
+        Some(session) => session.lock().await.derived_privacy_zones.clone(),
+        None => records::new_derived_privacy_zones(),
+    };
+    let _guard = LEDGER_WRITE
+        .get_or_init(|| tokio::sync::Mutex::new(()))
+        .lock()
+        .await;
+    let ledger = workspace.join("privacy_ledger.json");
+    match tokio::fs::symlink_metadata(&ledger).await {
+        Ok(meta) if meta.file_type().is_symlink() || is_reparse_point(&meta) || !meta.is_file() => {
+            return Err("Native artifact privacy ledger is not a real file".into());
+        }
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            if bounded_files_if_complete(artifacts)
+                .await?
+                .is_none_or(|files| files.iter().any(|file| !paths.contains(file)))
+            {
+                return Ok(());
+            }
+            let runs = workspace.join("runs");
+            match tokio::fs::symlink_metadata(&runs).await {
+                Ok(meta)
+                    if meta.file_type().is_symlink()
+                        || is_reparse_point(&meta)
+                        || !meta.is_dir() =>
+                {
+                    return Err("Native artifact runs directory is not a real directory".into());
+                }
+                Ok(_) => {
+                    if tokio::fs::read_dir(&runs)
+                        .await
+                        .map_err(|e| e.to_string())?
+                        .next_entry()
+                        .await
+                        .map_err(|e| e.to_string())?
+                        .is_some()
+                    {
+                        return Ok(());
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e.to_string()),
+            }
+        }
+        Err(e) => return Err(e.to_string()),
+    }
+    if let Some(source) = source {
+        let policy = gcx.privacy_policy_load.read().unwrap().policy.clone();
+        for destination in &paths {
+            let original = if destination == path {
+                source.to_path_buf()
+            } else {
+                source.join(destination.strip_prefix(path).map_err(|e| e.to_string())?)
+            };
+            if let Some(zone) = records::derived_zone_for_path(gcx, &original, &zones) {
+                records::merge_derived_zones(gcx, &zones, [(destination.clone(), zone)])?;
+            }
+            let reads = records::observed_file_records_with_derived(gcx, [original], &zones)?;
+            records::inherit_observed_write_zones(
+                gcx,
+                &policy,
+                &reads,
+                [destination.clone()],
+                &zones,
+            )?;
+        }
+    }
+    save_ledger_locked(workspace, paths, gcx, &zones).await
+}
+
 pub async fn save_ledger(
+    workspace: &Path,
+    paths: impl IntoIterator<Item = PathBuf>,
+    gcx: &std::sync::Arc<crate::global_context::GlobalContext>,
+    zones: &records::DerivedPrivacyZones,
+) -> Result<(), String> {
+    let _guard = LEDGER_WRITE
+        .get_or_init(|| tokio::sync::Mutex::new(()))
+        .lock()
+        .await;
+    save_ledger_locked(workspace, paths, gcx, zones).await
+}
+
+async fn save_ledger_locked(
     workspace: &Path,
     paths: impl IntoIterator<Item = PathBuf>,
     gcx: &std::sync::Arc<crate::global_context::GlobalContext>,

@@ -1,4 +1,4 @@
-schema_version: 13
+schema_version: 14
 id: brainstorming
 title: Brainstorming
 description: Turn rough ideas into approved designs before planning or implementation
@@ -102,6 +102,8 @@ prompt: |
   %TRAJECTORY_LABEL_INSTRUCTIONS%
 
   %RICH_CONTENT_INSTRUCTIONS%
+
+  %ARTIFACTS_INSTRUCTIONS%
 
   ## Apps overview
   Apps are reusable, project-scoped live HTML/JS panels, opened in workspace dock tabs or from the Apps catalog. Published bundle revisions and view state persist; live internal/external data feeds are managed separately by the engine or automation, not direct sandbox network access. One App can have bindings in multiple chats or standalone views. Bindings and staged context attachments do not automatically send chat messages. Named actions are bounded, permission-checked requests; declarations, visible tools and App code cannot self-grant capabilities or approvals.

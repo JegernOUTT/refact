@@ -1,4 +1,4 @@
-schema_version: 34
+schema_version: 35
 id: design
 title: Design
 description: Evidence-driven UI implementation using the live design system and browser measurements
@@ -67,6 +67,8 @@ prompt: |
   %TRAJECTORY_LABEL_INSTRUCTIONS%
 
   %RICH_CONTENT_INSTRUCTIONS%
+
+  %ARTIFACTS_INSTRUCTIONS%
 
   %CODE_MODE%
   %MODELS_INFO%

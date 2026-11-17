@@ -1,4 +1,4 @@
-schema_version: 18
+schema_version: 19
 id: past_work
 title: Past Work
 description: Search conversation history and project knowledge
@@ -71,6 +71,8 @@ prompt: |
   %TRAJECTORY_LABEL_INSTRUCTIONS%
 
   %RICH_CONTENT_INSTRUCTIONS%
+
+  %ARTIFACTS_INSTRUCTIONS%
 
   %SYSTEM_INFO%
 

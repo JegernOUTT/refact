@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 id: buddy_model_cost_optimizer
 title: Model/Cost Optimizer
 description: Review recent model usage signals and suggest cost-aware defaults.
@@ -17,6 +17,8 @@ subchat:
 
 messages:
   system_prompt: |
+    %ARTIFACTS_INSTRUCTIONS%
+
     %BUDDY_PERSONALITY%
 
     You review model usage evidence for obvious cost or latency improvements.

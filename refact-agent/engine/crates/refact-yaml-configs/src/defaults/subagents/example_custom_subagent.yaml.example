@@ -1,4 +1,4 @@
-schema_version: 2
+schema_version: 3
 id: my_custom_subagent
 title: My Custom Subagent
 description: Example of a user-defined subagent tool
@@ -25,8 +25,12 @@ subchat:
   max_new_tokens: 8000
   temperature: 0.3
 
+# The artifact instructions marker expands to the current chat artifact folder and link guidance.
+# Use refact://artifact/<chat_id>/<rel_path> links for saved deliverables; never hardcode chat IDs.
 messages:
   system_prompt: |
+    %ARTIFACTS_INSTRUCTIONS%
+
     You are a specialized analysis agent. Your job is to provide thorough,
     well-structured analysis based on the query provided.
 

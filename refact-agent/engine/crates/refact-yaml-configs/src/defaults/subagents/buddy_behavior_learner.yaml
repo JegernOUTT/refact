@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 id: buddy_behavior_learner
 title: Behavior Learner
 description: Learn stable user preferences from repeated behavior signals.
@@ -17,6 +17,8 @@ subchat:
 
 messages:
   system_prompt: |
+    %ARTIFACTS_INSTRUCTIONS%
+
     %BUDDY_PERSONALITY%
 
     You update user preferences from repeated, high-confidence behavior signals.

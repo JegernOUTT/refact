@@ -62,6 +62,20 @@ impl PythonWorkspace {
     pub async fn for_chat(app: &AppState, chat_id: &str) -> Result<Self, String> {
         let path =
             crate::chat::trajectories::python_workspace_trajectory_path(app, chat_id).await?;
+        Self::for_trajectory(app, chat_id, path).await
+    }
+
+    pub async fn existing_for_chat(app: &AppState, chat_id: &str) -> Result<Option<Self>, String> {
+        let Some(path) =
+            crate::chat::trajectories::existing_python_workspace_trajectory_path(app, chat_id)
+                .await?
+        else {
+            return Ok(None);
+        };
+        Self::for_trajectory(app, chat_id, path).await.map(Some)
+    }
+
+    async fn for_trajectory(app: &AppState, chat_id: &str, path: PathBuf) -> Result<Self, String> {
         let mut workspace = Self::from_trajectory(
             &path,
             chat_id,
@@ -405,6 +419,81 @@ fn taint_digest(taint: &[Value]) -> Vec<u8> {
     }
     Sha256::digest(serde_json::to_vec(&canonical(&serde_json::json!(taint))).expect("JSON taint"))
         .to_vec()
+}
+
+pub(crate) async fn artifact_path_checked(root: &Path, target: &Path) -> Result<(), String> {
+    let relative = target
+        .strip_prefix(root)
+        .map_err(|_| "Artifact path is outside artifacts directory")?;
+    if relative
+        .components()
+        .any(|c| !matches!(c, std::path::Component::Normal(_)))
+    {
+        return Err("Artifact path contains invalid components".into());
+    }
+    let workspace = root.parent().ok_or("Invalid artifacts directory")?;
+    let python = workspace.parent().ok_or("Invalid Python workspace")?;
+    let mut paths = vec![
+        python.to_path_buf(),
+        workspace.to_path_buf(),
+        root.to_path_buf(),
+    ];
+    let mut current = root.to_path_buf();
+    for component in relative.components() {
+        current.push(component);
+        paths.push(current.clone());
+    }
+    let mut canonical_root = None;
+    for path in paths {
+        match fs::symlink_metadata(&path).await {
+            Ok(meta) => {
+                if meta.file_type().is_symlink() || super::run_output::is_reparse_point(&meta) {
+                    return Err(format!("Linked artifact path refused: {}", path.display()));
+                }
+                let canonical = fs::canonicalize(&path).await.map_err(|e| e.to_string())?;
+                if path == root {
+                    canonical_root = Some(canonical.clone());
+                }
+                if canonical_root
+                    .as_ref()
+                    .is_some_and(|root| !canonical.starts_with(root))
+                {
+                    return Err("Artifact path escapes artifacts directory".into());
+                }
+            }
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                break
+            }
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+    Ok(())
+}
+
+pub(crate) async fn is_own_artifact_path(app: &AppState, chat_id: &str, path: &Path) -> bool {
+    if !is_python_workspace_path(path)
+        || path.components().any(|c| {
+            matches!(
+                c,
+                std::path::Component::ParentDir | std::path::Component::CurDir
+            )
+        })
+    {
+        return false;
+    }
+    let Ok(Some(workspace)) = PythonWorkspace::existing_for_chat(app, chat_id).await else {
+        return false;
+    };
+    let root = workspace.artifacts_dir();
+    path.is_absolute()
+        && path != root
+        && path.starts_with(&root)
+        && artifact_path_checked(&root, path).await.is_ok()
 }
 
 pub async fn parent_artifacts_dir(app: &AppState, chat_id: &str) -> Option<PathBuf> {
@@ -979,6 +1068,168 @@ impl Drop for FailedRunGuard {
 }
 
 static ACTIVE_RUN_PATHS: OnceLock<Mutex<std::collections::HashSet<PathBuf>>> = OnceLock::new();
+
+#[cfg(test)]
+mod artifacts_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn artifacts_lookup_does_not_create_and_ownership_is_exact() {
+        let temp = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![temp.path().into()];
+        let app = AppState::from_gcx(gcx).await;
+        assert!(PythonWorkspace::existing_for_chat(&app, "missing")
+            .await
+            .unwrap()
+            .is_none());
+        assert!(!temp.path().join(".refact").exists());
+        let dir = temp.path().join(".refact/trajectories");
+        fs::create_dir_all(&dir).await.unwrap();
+        for id in ["own", "other"] {
+            fs::write(
+                dir.join(format!("{id}.json")),
+                format!(r#"{{"id":"{id}","messages":[]}}"#),
+            )
+            .await
+            .unwrap();
+        }
+        let own = PythonWorkspace::existing_for_chat(&app, "own")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!own.dir().exists());
+        assert!(is_own_artifact_path(&app, "own", &own.artifacts_dir().join("new/file")).await);
+        assert!(!is_own_artifact_path(&app, "other", &own.artifacts_dir().join("new/file")).await);
+        assert!(!is_own_artifact_path(&app, "own", &temp.path().join("random")).await);
+        own.ensure_dirs().await.unwrap();
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(temp.path(), own.artifacts_dir().join("escape")).unwrap();
+            assert!(
+                !is_own_artifact_path(&app, "own", &own.artifacts_dir().join("escape/file")).await
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn artifacts_symlinked_project_parent_is_supported() {
+        let temp = tempfile::tempdir().unwrap();
+        let real = temp.path().join("real");
+        fs::create_dir_all(real.join("project/python/chat/artifacts"))
+            .await
+            .unwrap();
+        std::os::unix::fs::symlink(&real, temp.path().join("alias")).unwrap();
+        let root = temp.path().join("alias/project/python/chat/artifacts");
+        fs::write(root.join("file"), "ok").await.unwrap();
+        artifact_path_checked(&root, &root.join("file"))
+            .await
+            .unwrap();
+        artifact_path_checked(&root, &root.join("missing/file"))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn artifacts_unsaved_buddy_session_lookup_matches_creating_resolver() {
+        let temp = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![temp.path().into()];
+        let app = AppState::from_gcx(gcx).await;
+        let mut session = crate::chat::types::ChatSession::new("unsaved-buddy".into());
+        session.thread.buddy_meta = Some(crate::chat::types::BuddyThreadMeta {
+            is_buddy_chat: true,
+            buddy_chat_kind: "investigation".into(),
+            workflow_id: None,
+            source_chat_id: None,
+            source_project: None,
+            source_created_at: None,
+        });
+        app.chat.sessions.write().await.insert(
+            "unsaved-buddy".into(),
+            std::sync::Arc::new(tokio::sync::Mutex::new(session)),
+        );
+        let existing = PythonWorkspace::existing_for_chat(&app, "unsaved-buddy")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!temp.path().join(".refact").exists());
+        let creating = PythonWorkspace::for_chat(&app, "unsaved-buddy")
+            .await
+            .unwrap();
+        assert_eq!(existing.dir(), creating.dir());
+        assert_eq!(
+            existing.dir(),
+            temp.path()
+                .join(".refact/buddy/chats/conversations/python/unsaved-buddy")
+        );
+    }
+
+    #[tokio::test]
+    async fn artifacts_unsaved_task_session_lookup_matches_creating_resolver() {
+        let temp = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![temp.path().into()];
+        let task = temp.path().join(".refact/tasks/task");
+        fs::create_dir_all(&task).await.unwrap();
+        let app = AppState::from_gcx(gcx).await;
+        let mut session = crate::chat::types::ChatSession::new("unsaved-task".into());
+        session.thread.task_meta = Some(crate::chat::types::TaskMeta {
+            task_id: "task".into(),
+            role: "agents".into(),
+            agent_id: Some("worker".into()),
+            card_id: None,
+            planner_chat_id: None,
+        });
+        app.chat.sessions.write().await.insert(
+            "unsaved-task".into(),
+            std::sync::Arc::new(tokio::sync::Mutex::new(session)),
+        );
+        let existing = PythonWorkspace::existing_for_chat(&app, "unsaved-task")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!task.join("trajectories").exists());
+        let creating = PythonWorkspace::for_chat(&app, "unsaved-task")
+            .await
+            .unwrap();
+        assert_eq!(existing.dir(), creating.dir());
+        assert_eq!(
+            existing.dir(),
+            task.join("trajectories/agents/worker/python/unsaved-task")
+        );
+    }
+
+    #[tokio::test]
+    async fn artifacts_unsaved_session_lookup_matches_creating_resolver() {
+        let temp = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![temp.path().into()];
+        let app = AppState::from_gcx(gcx).await;
+        let mut session = crate::chat::types::ChatSession::new("unsaved-child".into());
+        session.thread.root_chat_id = Some("unsaved-root".into());
+        app.chat.sessions.write().await.insert(
+            "unsaved-child".into(),
+            std::sync::Arc::new(tokio::sync::Mutex::new(session)),
+        );
+        let existing = PythonWorkspace::existing_for_chat(&app, "unsaved-child")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!temp.path().join(".refact").exists());
+        let creating = PythonWorkspace::for_chat(&app, "unsaved-child")
+            .await
+            .unwrap();
+        assert_eq!(existing.dir(), creating.dir());
+        assert_eq!(
+            existing.dir(),
+            temp.path()
+                .join(".refact/trajectories/unsaved-root/python/unsaved-child")
+        );
+    }
+}
+
 pub struct ActiveRunPath(PathBuf);
 impl ActiveRunPath {
     pub fn new(path: PathBuf) -> Self {

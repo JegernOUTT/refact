@@ -1,4 +1,4 @@
-schema_version: 40
+schema_version: 41
 id: task_planner
 title: Task Planner
 description: Task board management mode
@@ -331,6 +331,8 @@ prompt: |
   %TRAJECTORY_LABEL_INSTRUCTIONS%
 
   %RICH_CONTENT_INSTRUCTIONS%
+
+  %ARTIFACTS_INSTRUCTIONS%
 
   %SYSTEM_INFO%
 

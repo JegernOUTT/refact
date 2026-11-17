@@ -2987,6 +2987,12 @@ async fn build_autonomous_messages(
 
     let max_steps = subagent_config.subchat.max_steps.unwrap_or(1).max(1);
     if system_prompt.contains("%BUDDY_PERSONALITY%") {
+        let artifacts_marker =
+            system_prompt.contains(crate::chat::prompts::ARTIFACTS_INSTRUCTIONS_MARKER);
+        system_prompt = system_prompt.replace(
+            crate::chat::prompts::ARTIFACTS_INSTRUCTIONS_MARKER,
+            "%DEFERRED_ARTIFACTS_INSTRUCTIONS%",
+        );
         system_prompt = crate::chat::prompts::system_prompt_add_extra_instructions(
             gcx.clone(),
             system_prompt,
@@ -2995,11 +3001,20 @@ async fn build_autonomous_messages(
                 .iter()
                 .cloned()
                 .collect::<HashSet<_>>(),
-            &ChatMeta::default(),
+            &ChatMeta {
+                chat_id: run_chat_id.to_string(),
+                ..Default::default()
+            },
             &None,
             "buddy",
         )
         .await;
+        if artifacts_marker {
+            system_prompt = system_prompt.replace(
+                "%DEFERRED_ARTIFACTS_INSTRUCTIONS%",
+                crate::chat::prompts::ARTIFACTS_INSTRUCTIONS_MARKER,
+            );
+        }
         if system_prompt.contains("%BUDDY_PERSONALITY%") {
             system_prompt = system_prompt.replace(
                 "%BUDDY_PERSONALITY%",
@@ -6319,6 +6334,62 @@ mod tests {
         assert!(result.speech.is_none());
         assert!(result.suggestion.is_none());
         assert_eq!(result.last_result.as_deref(), Some(stored.as_str()));
+    }
+
+    #[tokio::test]
+    async fn autonomous_artifacts_use_registered_run_chat_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![dir.path().to_path_buf()];
+        let app = AppState::from_gcx(gcx).await;
+        let run_chat_id = "buddy-artifacts-run";
+        let spec =
+            AutonomousBuddyChatSpec::new("buddy_daily_digest", "Digest", "Prompt", "Evidence");
+        let (mut messages, _, tools) = build_autonomous_messages(app.clone(), &spec, run_chat_id)
+            .await
+            .unwrap();
+        assert!(messages[0]
+            .content
+            .content_text_only()
+            .contains(crate::chat::prompts::ARTIFACTS_INSTRUCTIONS_MARKER));
+        let mut config = crate::subchat::test_support::minimal_config(run_chat_id, "buddy-root");
+        config.tools = crate::subchat::ToolsPolicy::Only(tools);
+        config.mode = "buddy".into();
+        config.buddy_meta = Some(BuddyThreadMeta {
+            is_buddy_chat: true,
+            buddy_chat_kind: "system".into(),
+            workflow_id: Some(spec.workflow_id),
+            source_chat_id: None,
+            source_project: None,
+            source_created_at: None,
+        });
+        config.runner_lease_token = Some("buddy-artifact-runner".into());
+        config.abort_flag = Some(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+            false,
+        )));
+        let _guard = crate::subchat::install_stateful_subchat_session(
+            &app,
+            run_chat_id,
+            &config,
+            &messages,
+            None,
+        )
+        .await
+        .unwrap();
+        crate::subchat::expand_subchat_artifacts(&app, run_chat_id, &config, &mut messages).await;
+        let rendered = messages[0].content.content_text_only();
+        let artifacts = crate::python_tool::workspace::PythonWorkspace::for_chat(&app, run_chat_id)
+            .await
+            .unwrap()
+            .artifacts_dir();
+        assert!(rendered.contains(&artifacts.display().to_string()));
+        assert!(rendered.contains("refact://artifact/buddy-artifacts-run/"));
+        assert!(!rendered.contains(crate::chat::prompts::ARTIFACTS_INSTRUCTIONS_MARKER));
+        assert!(!artifacts.exists());
+        assert!(!dir
+            .path()
+            .join(".refact/trajectories/buddy-artifacts-run")
+            .exists());
     }
 
     #[tokio::test]

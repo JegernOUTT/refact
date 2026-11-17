@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 id: buddy_pr_issue_matchmaker
 title: PR/Issue Matchmaker
 description: Link a meaningful local diff to likely PR or issue context
@@ -15,6 +15,8 @@ subchat:
   autonomous_no_confirm: true
 messages:
   system_prompt: |
+    %ARTIFACTS_INSTRUCTIONS%
+
     %BUDDY_PERSONALITY%
     The local diff is large enough that a related PR or issue may help. Keep the pass lightweight:
     1. Use the supplied changed-file and diff-stat evidence, and inspect only the smallest useful local context.

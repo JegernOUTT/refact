@@ -20,9 +20,15 @@ import {
   normalizeLatexDelimiters,
 } from "./renderUtils";
 import { DialogImage } from "../DialogImage";
+import { parseArtifactLink } from "../../utils/artifactLinks";
+import { ArtifactLinkCard, ArtifactLinkChip } from "./ArtifactLink";
+import {
+  artifactCardFromNode,
+  rehypeArtifactCards,
+} from "./rehypeArtifactCards";
 
 const REMARK_PLUGINS: PluggableList = [remarkBreaks, remarkMath, remarkGfm];
-const REHYPE_PLUGINS: PluggableList = [rehypeKatex];
+const REHYPE_PLUGINS: PluggableList = [rehypeKatex, rehypeArtifactCards];
 const SAFE_URL_PREFIXES = [
   "refact://",
   "http://",
@@ -174,9 +180,23 @@ const _Markdown: React.FC<MarkdownProps> = ({
   inert = false,
 }) => {
   const [linkError, setLinkError] = useState<string | null>(null);
+  const artifactsEnabled = !inert && canHaveInteractiveElements !== false;
 
   const components: Partial<Components> = useMemo(() => {
     return {
+      div({ color: _color, ref: _ref, node, ...props }) {
+        const card = artifactCardFromNode(node);
+        if (!card) return <div {...props} />;
+        const link = parseArtifactLink(card.href);
+        if (!artifactsEnabled || !link) return <p>{props.children}</p>;
+        return (
+          <ArtifactLinkCard
+            link={link}
+            renderMarkdown={renderArtifactExcerpt}
+            title={card.title}
+          />
+        );
+      },
       ol(props) {
         return (
           <ol {...props} className={classNames(styles.list, props.className)} />
@@ -250,6 +270,15 @@ const _Markdown: React.FC<MarkdownProps> = ({
         return <kbd {...props} />;
       },
       a({ color: _color, ref: _ref, node: _node, ...props }) {
+        const artifact = parseArtifactLink(props.href);
+        if (artifact) {
+          if (!artifactsEnabled) return <span>{props.children}</span>;
+          return (
+            <ArtifactLinkChip link={artifact}>
+              {props.children}
+            </ArtifactLinkChip>
+          );
+        }
         if (inert) {
           const href = props.href ?? "";
           const external =
@@ -302,6 +331,7 @@ const _Markdown: React.FC<MarkdownProps> = ({
       },
     };
   }, [
+    artifactsEnabled,
     canHaveInteractiveElements,
     color,
     showLineNumbers,
@@ -338,3 +368,11 @@ const _Markdown: React.FC<MarkdownProps> = ({
 };
 
 export const Markdown = React.memo(_Markdown);
+
+function renderArtifactExcerpt(content: string): React.ReactNode {
+  return (
+    <Markdown canHaveInteractiveElements={false} inert variant="tool">
+      {content}
+    </Markdown>
+  );
+}

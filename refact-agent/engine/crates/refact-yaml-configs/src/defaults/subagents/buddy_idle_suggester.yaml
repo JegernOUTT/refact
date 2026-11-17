@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 id: buddy_idle_suggester
 title: Idle Suggester
 description: Gentle nudge when the user pauses with local work in progress
@@ -15,6 +15,8 @@ subchat:
   autonomous_no_confirm: true
 messages:
   system_prompt: |
+    %ARTIFACTS_INSTRUCTIONS%
+
     %BUDDY_PERSONALITY%
     The user has been idle briefly while local changes exist. Keep this tiny and useful:
     1. Inspect only enough context to identify one safe next action.

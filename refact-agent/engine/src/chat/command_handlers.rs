@@ -1545,7 +1545,7 @@ async fn handle_branch_from_chat(
                 return QueueCommandOutcome::Continue;
             }
         };
-    let (messages_to_copy, root_id, source_worktree, source_before) = {
+    let (mut messages_to_copy, root_id, source_worktree, source_before) = {
         let source_session = source_session_arc.lock().await;
         if crate::buddy::companion::is_companion(&source_session.thread) {
             drop(source_session);
@@ -1752,6 +1752,22 @@ async fn handle_branch_from_chat(
         {
             crate::chat::app_workspace::install_forked_app_workspace(&mut session, forked);
         }
+        drop(sessions);
+        drop(session);
+        for message in &mut messages_to_copy {
+            if message.role == "system" {
+                if let ChatContent::SimpleText(prompt) = &mut message.content {
+                    *prompt = crate::chat::prompts::rewrite_artifacts_for_fork(
+                        &app,
+                        prompt,
+                        &source_chat_id,
+                        &before.id,
+                    )
+                    .await;
+                }
+            }
+        }
+        let mut session = session_arc.lock().await;
         for msg in messages_to_copy {
             session.add_message(msg);
         }
@@ -1769,6 +1785,101 @@ async fn handle_branch_from_chat(
         warn!("Python workspace branch failed: {error}");
     }
     QueueCommandOutcome::Finished
+}
+
+#[cfg(test)]
+mod branch_artifacts_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn branch_rewrites_only_copied_system_artifacts_after_destination_identity() {
+        for frozen in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
+                dir.path().join("cache"),
+                dir.path().join("config"),
+            )
+            .await;
+            gcx.documents_state
+                .workspace_folders
+                .lock()
+                .unwrap()
+                .push(dir.path().to_path_buf());
+            let app = AppState::from_gcx(gcx).await;
+            let source_id = "artifacts-source";
+            let destination_id = "artifacts-destination";
+            let source = Arc::new(AMutex::new(ChatSession::new(source_id.into())));
+            let destination = Arc::new(AMutex::new(ChatSession::new(destination_id.into())));
+            let prefix = frozen.then(|| refact_chat_api::FrozenRequestPrefix {
+                schema_version: 1,
+                created_at: "original".into(),
+                system_prompt: Some("destination-owned frozen system".into()),
+                tools_canonical: Some(serde_json::json!([])),
+            });
+            destination.lock().await.thread.frozen_request_prefix = prefix.clone();
+            {
+                let mut sessions = app.chat.sessions.write().await;
+                sessions.insert(source_id.into(), source.clone());
+                sessions.insert(destination_id.into(), destination.clone());
+            }
+            let source_dir =
+                crate::python_tool::workspace::PythonWorkspace::for_chat(&app, source_id)
+                    .await
+                    .unwrap()
+                    .artifacts_dir();
+            let original = format!(
+                "Original instructions\n## Artifacts for the user\nWrite to {} and refact://artifact/{source_id}/chart.png\n## Other\nKeep refact://artifact/{source_id}/history.png",
+                source_dir.display()
+            );
+            let historical = format!("refact://artifact/{source_id}/historical.png");
+            {
+                let mut session = source.lock().await;
+                session.add_message(ChatMessage::new("system".into(), original.clone()));
+                let mut message = ChatMessage::new("assistant".into(), historical.clone());
+                message.message_id = "branch-end".into();
+                session.add_message(message);
+            }
+            let context = QueueCommandContext {
+                app: app.clone(),
+                session_arc: destination.clone(),
+                request_id: "branch-artifacts".into(),
+                priority: false,
+                native_guard: None,
+                supervision_guard: None,
+                board_operation: AMutex::new(None),
+            };
+            let outcome =
+                handle_branch_from_chat(&context, source_id.into(), "branch-end".into()).await;
+            assert!(matches!(outcome, QueueCommandOutcome::Finished));
+            let destination_dir =
+                crate::python_tool::workspace::PythonWorkspace::for_chat(&app, destination_id)
+                    .await
+                    .unwrap()
+                    .artifacts_dir();
+            let expected = format!(
+                "Original instructions\n## Artifacts for the user\nWrite to {} and refact://artifact/{destination_id}/chart.png\n## Other\nKeep refact://artifact/{source_id}/history.png",
+                destination_dir.display()
+            );
+            let session = destination.lock().await;
+            assert_eq!(session.thread.root_chat_id.as_deref(), Some(source_id));
+            assert_eq!(
+                session.messages[0].content,
+                ChatContent::SimpleText(expected)
+            );
+            assert_eq!(
+                session.messages[1].content,
+                ChatContent::SimpleText(historical)
+            );
+            assert_eq!(
+                serde_json::to_value(&session.thread.frozen_request_prefix).unwrap(),
+                serde_json::to_value(prefix).unwrap()
+            );
+            assert_eq!(
+                source.lock().await.messages[0].content,
+                ChatContent::SimpleText(original)
+            );
+        }
+    }
 }
 
 async fn handle_browser_context_decision(

@@ -1,4 +1,4 @@
-schema_version: 24
+schema_version: 25
 id: setup_knowledge
 title: Seed Knowledge
 description: Guided seeding of durable project knowledge and memory
@@ -23,6 +23,8 @@ prompt: |
   %TRAJECTORY_LABEL_INSTRUCTIONS%
 
   %RICH_CONTENT_INSTRUCTIONS%
+
+  %ARTIFACTS_INSTRUCTIONS%
 
   %SYSTEM_INFO%
 

@@ -1,4 +1,4 @@
-schema_version: 27
+schema_version: 28
 id: plan
 title: Plan
 description: Turn approved designs or requirements into precise implementation plans
@@ -177,6 +177,8 @@ prompt: |
   %TRAJECTORY_LABEL_INSTRUCTIONS%
 
   %RICH_CONTENT_INSTRUCTIONS%
+
+  %ARTIFACTS_INSTRUCTIONS%
 
   %SYSTEM_INFO%
 

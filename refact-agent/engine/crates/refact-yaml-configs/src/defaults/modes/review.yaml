@@ -1,4 +1,4 @@
-schema_version: 36
+schema_version: 37
 id: review
 title: Review
 description: Investigate a change together in a chat-led annotated Review Canvas
@@ -24,6 +24,8 @@ prompt: |
   the substance into the workspace with the review_* tools.
 
   %BUDDY_PERSONALITY%
+
+  %ARTIFACTS_INSTRUCTIONS%
 
   %CODE_MODE%
   %MODELS_INFO%

@@ -227,13 +227,33 @@ impl Tool for ToolMv {
 
             let src_within_project = project_dirs.iter().any(|p| src_true_path.starts_with(p));
             let dst_within_project = project_dirs.iter().any(|p| dst_true_path.starts_with(p));
-            if !src_within_project && !gcx.cmdline.inside_container {
+            let (app, chat_id) = {
+                let context = ccx.lock().await;
+                (context.app.clone(), context.chat_id.clone())
+            };
+            if !src_within_project
+                && !gcx.cmdline.inside_container
+                && !Box::pin(crate::python_tool::workspace::is_own_artifact_path(
+                    &app,
+                    &chat_id,
+                    &src_true_path,
+                ))
+                .await
+            {
                 return Err(format!(
                     "⚠️ Source '{}' is outside project. 💡 mv() only works within workspace",
                     src_str
                 ));
             }
-            if !dst_within_project && !gcx.cmdline.inside_container {
+            if !dst_within_project
+                && !gcx.cmdline.inside_container
+                && !Box::pin(crate::python_tool::workspace::is_own_artifact_path(
+                    &app,
+                    &chat_id,
+                    &dst_true_path,
+                ))
+                .await
+            {
                 return Err(format!(
                     "⚠️ Destination '{}' is outside project. 💡 mv() only works within workspace",
                     dst_str
@@ -324,6 +344,17 @@ impl Tool for ToolMv {
                 .commit(crate::file_activity::WriteKind::Deleted, None);
             remove_memory_documents_under_path(gcx.clone(), &src_true_path).await;
             remove_memory_documents_under_path(gcx.clone(), &dst_true_path).await;
+            Box::pin(
+                crate::python_tool::run_output::reconcile_native_artifact_move(
+                    &gcx,
+                    Some(&src_true_path),
+                    &dst_true_path,
+                ),
+            )
+            .await
+            .map_err(|e| {
+                format!("Directory was moved, but artifact privacy reconciliation failed: {e}")
+            })?;
             (String::new(), String::new())
         } else {
             let actor = ccx.lock().await.chat_id.clone();

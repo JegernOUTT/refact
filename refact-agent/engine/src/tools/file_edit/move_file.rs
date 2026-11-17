@@ -82,7 +82,16 @@ pub async fn move_file(
     destination_guard.commit_bytes(WriteKind::Renamed, Some(&source_bytes));
     source_guard.commit(WriteKind::Deleted, None);
     remove_memory_document_for_path(gcx.clone(), &source.to_path_buf()).await;
-    remove_memory_document_for_path(gcx, &destination.to_path_buf()).await;
+    remove_memory_document_for_path(gcx.clone(), &destination.to_path_buf()).await;
+    Box::pin(
+        crate::python_tool::run_output::reconcile_native_artifact_move(
+            &gcx,
+            Some(source),
+            destination,
+        ),
+    )
+    .await
+    .map_err(|e| format!("File was moved, but artifact privacy reconciliation failed: {e}"))?;
     Ok((
         source_text.unwrap_or_default().into(),
         current_destination

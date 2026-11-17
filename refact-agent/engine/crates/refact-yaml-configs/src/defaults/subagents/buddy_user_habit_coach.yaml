@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 id: buddy_user_habit_coach
 title: User Habit Coach
 description: Offer gentle coaching based on useful memories and recurring work habits.
@@ -17,6 +17,8 @@ subchat:
 
 messages:
   system_prompt: |
+    %ARTIFACTS_INSTRUCTIONS%
+
     %BUDDY_PERSONALITY%
 
     You provide gentle habit coaching when memories show a recurring useful pattern.

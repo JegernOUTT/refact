@@ -1252,6 +1252,30 @@ mod tests {
     }
 
     #[test]
+    fn test_every_default_mode_has_artifact_instructions_once() {
+        let registry = load_default_registry_for_tests();
+        assert!(registry.errors.is_empty(), "{:?}", registry.errors);
+        assert_eq!(registry.modes.len(), 25);
+
+        for (id, mode) in &registry.modes {
+            assert_eq!(
+                mode.prompt.matches("%ARTIFACTS_INSTRUCTIONS%").count(),
+                1,
+                "default mode {id} must include artifact instructions exactly once"
+            );
+            if let Some(rich) = mode.prompt.find("%RICH_CONTENT_INSTRUCTIONS%") {
+                let after_rich = &mode.prompt[rich + "%RICH_CONTENT_INSTRUCTIONS%".len()..];
+                assert!(
+                    after_rich
+                        .trim_start()
+                        .starts_with("%ARTIFACTS_INSTRUCTIONS%"),
+                    "default mode {id} must place artifact instructions after rich content"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn test_default_subagent_is_unified_and_not_yaml_tool_exposed() {
         let registry = load_default_registry_for_tests();
         assert!(registry.errors.is_empty(), "{:?}", registry.errors);
@@ -1260,7 +1284,7 @@ mod tests {
             .subagents
             .get("subagent")
             .expect("subagent should load");
-        assert_eq!(subagent.schema_version, 11);
+        assert_eq!(subagent.schema_version, 12);
         assert!(!subagent.expose_as_tool);
         assert!(subagent.description.contains("background"));
         assert!(subagent

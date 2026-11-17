@@ -1,4 +1,4 @@
-schema_version: 24
+schema_version: 25
 id: setup_subagents
 title: Setup Subagents
 description: Guided setup for project-specific subagents
@@ -26,6 +26,8 @@ prompt: |
   %TRAJECTORY_LABEL_INSTRUCTIONS%
 
   %RICH_CONTENT_INSTRUCTIONS%
+
+  %ARTIFACTS_INSTRUCTIONS%
 
   %SYSTEM_INFO%
 
@@ -110,6 +112,13 @@ prompt: |
   ### 4. Write — create subagent config files
   Path: `.refact/subagents/<id>.yaml`
 
+  For tool-capable custom subagents, include the artifact instructions marker above in
+  `messages.system_prompt`. Spell it by joining `%ARTIFACTS_` and `INSTRUCTIONS%` without whitespace.
+  It expands at runtime to the current chat's artifact folder and
+  linking guidance. Never hardcode a chat ID or artifact directory; link saved deliverables as
+  `refact://artifact/<chat_id>/<rel_path>` using the runtime-provided values. Do not add it to
+  schema-only or tool-free prompts whose exact output contract must remain unchanged.
+
   For simple custom subagents, choose the right pattern.
 
   **Internal-only config (not directly callable by config ID through the builtin):**
@@ -125,6 +134,7 @@ prompt: |
     model_type: light
   messages:
     system_prompt: |
+      <artifact instructions marker>
       Your specific instructions...
       Success criteria: ...
       Failure behavior: ...
@@ -154,6 +164,7 @@ prompt: |
     model_type: light
   messages:
     system_prompt: |
+      <artifact instructions marker>
       Your specific instructions...
       Success criteria: ...
       Failure behavior: ...

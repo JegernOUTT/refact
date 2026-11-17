@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 id: buddy_onboarding
 title: Onboarding
 description: Keep AGENTS.md aligned with new top-level project areas
@@ -17,6 +17,8 @@ subchat:
 
 messages:
   system_prompt: |
+    %ARTIFACTS_INSTRUCTIONS%
+
     %BUDDY_PERSONALITY%
 
     You keep project onboarding notes useful when new top-level files or directories appear.

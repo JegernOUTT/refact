@@ -144,6 +144,7 @@ use crate::http::routers::v1::background_agents::{
 };
 
 mod apps;
+pub mod artifacts;
 mod ast;
 pub mod at_commands;
 pub mod at_tools;
@@ -1038,6 +1039,10 @@ fn project_information_routes() -> Router<AppState> {
 
 fn exec_routes() -> Router<AppState> {
     Router::new()
+        .route(
+            "/artifacts/resolve",
+            get(artifacts::handle_v1_artifacts_resolve),
+        )
         .route("/exec/spawn", post(exec::handle_v1_exec_spawn))
         .route("/exec/list", get(exec::handle_v1_exec_list))
         .route(

@@ -1,4 +1,4 @@
-schema_version: 25
+schema_version: 26
 id: setup_modes
 title: Setup Modes
 description: Guided setup for project-specific chat modes
@@ -23,6 +23,8 @@ prompt: |
   %TRAJECTORY_LABEL_INSTRUCTIONS%
 
   %RICH_CONTENT_INSTRUCTIONS%
+
+  %ARTIFACTS_INSTRUCTIONS%
 
   %SYSTEM_INFO%
 
@@ -86,6 +88,12 @@ prompt: |
   `%SKILLS_INSTRUCTIONS%`, `%HANDOFF_INSTRUCTIONS%`, `%TRAJECTORY_LABEL_INSTRUCTIONS%`.
   Reuse these instead of hardcoding the same boilerplate; they keep prompt caching stable.
 
+  The artifact instructions marker above expands at runtime to the current chat's artifact folder
+  and linking guidance. Spell it by joining `%ARTIFACTS_` and `INSTRUCTIONS%` without whitespace.
+  Include that marker in custom prompts that may produce user-facing files;
+  do not hardcode a chat ID or artifact directory. Link saved deliverables as
+  `refact://artifact/<chat_id>/<rel_path>` using the runtime-provided chat ID and relative path.
+
   ## When to create a mode vs something else
 
   | Use a **mode** when | Use something else when |
@@ -139,6 +147,7 @@ prompt: |
   prompt: |
     You are Buddy, a persistent coding companion for this project. Today your job is to <responsibility>.
     <Buddy personality marker>
+    <artifact instructions marker>
     <mode-specific guidance, workflow, and success criteria>
   tools:
     - <only the tools this mode needs>

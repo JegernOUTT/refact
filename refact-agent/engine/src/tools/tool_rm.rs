@@ -212,7 +212,17 @@ impl Tool for ToolRm {
                 }
 
                 let is_within_project = project_dirs.iter().any(|p| true_path.starts_with(p));
-                if !is_within_project && !gcx.cmdline.inside_container {
+                let (app, chat_id) = {
+                    let context = ccx.lock().await;
+                    (context.app.clone(), context.chat_id.clone())
+                };
+                if !is_within_project
+                    && !gcx.cmdline.inside_container
+                    && !Box::pin(crate::python_tool::workspace::is_own_artifact_path(
+                        &app, &chat_id, &true_path,
+                    ))
+                    .await
+                {
                     return Err(format!(
                     "⚠️ '{}' is outside project directories. 💡 rm() only works within workspace",
                     path_str

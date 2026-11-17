@@ -147,6 +147,7 @@ import {
 } from "../services/refact";
 import { sendChatCommand } from "../services/refact/chatCommands";
 import { filesApi } from "../services/refact/files";
+import { artifactsApi } from "../services/refact/artifacts";
 import { schedulerApi } from "../services/refact/schedulerApi";
 import { taskDocumentsApi } from "../services/refact/taskDocumentsApi";
 import { taskMemoriesApi } from "../services/refact/taskMemoriesApi";
@@ -239,6 +240,7 @@ const WORKSPACE_DIFF_REFRESH_DEBOUNCE_MS = 250;
 type WorkspaceDiffRefreshQueue = {
   parentPaths: Set<string>;
   gitRoots: Set<string>;
+  artifactChatIds: Set<string>;
   timer: ReturnType<typeof setTimeout> | null;
 };
 
@@ -247,16 +249,25 @@ const workspaceDiffRefreshQueues = new WeakMap<
   WorkspaceDiffRefreshQueue
 >();
 
+const ARTIFACT_PATH_CHAT_ID =
+  /[\\/]python[\\/]([A-Za-z0-9_-]{1,128})[\\/]artifacts[\\/]/;
+
+function artifactChatIdFromPath(path: string): string | null {
+  return ARTIFACT_PATH_CHAT_ID.exec(path)?.[1] ?? null;
+}
+
 function scheduleWorkspaceDiffRefresh(
   dispatch: AppDispatch,
   parentPaths: Iterable<string>,
   gitRoot: string,
+  artifactChatIds: Iterable<string>,
 ): void {
   let queue = workspaceDiffRefreshQueues.get(dispatch);
   if (!queue) {
     queue = {
       parentPaths: new Set(),
       gitRoots: new Set(),
+      artifactChatIds: new Set(),
       timer: null,
     };
     workspaceDiffRefreshQueues.set(dispatch, queue);
@@ -264,7 +275,14 @@ function scheduleWorkspaceDiffRefresh(
 
   for (const path of parentPaths) queue.parentPaths.add(path);
   if (gitRoot) queue.gitRoots.add(gitRoot);
-  if (queue.parentPaths.size === 0 && queue.gitRoots.size === 0) return;
+  for (const chatId of artifactChatIds) queue.artifactChatIds.add(chatId);
+  if (
+    queue.parentPaths.size === 0 &&
+    queue.gitRoots.size === 0 &&
+    queue.artifactChatIds.size === 0
+  ) {
+    return;
+  }
   if (queue.timer !== null) clearTimeout(queue.timer);
 
   queue.timer = setTimeout(() => {
@@ -277,10 +295,18 @@ function scheduleWorkspaceDiffRefresh(
       { type: "GitStatus" as const, id },
       { type: "GitDiff" as const, id },
     ]);
+    const artifactTags = [...queue.artifactChatIds].map((id) => ({
+      type: "Artifact" as const,
+      id,
+    }));
     queue.parentPaths.clear();
     queue.gitRoots.clear();
+    queue.artifactChatIds.clear();
     if (treeTags.length > 0) dispatch(filesApi.util.invalidateTags(treeTags));
     if (gitTags.length > 0) dispatch(gitReadApi.util.invalidateTags(gitTags));
+    if (artifactTags.length > 0) {
+      dispatch(artifactsApi.util.invalidateTags(artifactTags));
+    }
   }, WORKSPACE_DIFF_REFRESH_DEBOUNCE_MS);
 }
 
@@ -611,14 +637,19 @@ startListening({
       ...state.filesPanel.expandedDirectories,
     ]);
     const changedParentPaths = new Set<string>();
+    const artifactChatIds = new Set<string>();
     for (const chunk of event.message.content) {
       const parent = parentDirectoryPath(chunk.file_name) ?? "";
       if (loadedTreePaths.has(parent)) changedParentPaths.add(parent);
+      const artifactChatId = artifactChatIdFromPath(chunk.file_name);
+      if (artifactChatId) artifactChatIds.add(artifactChatId);
       if (chunk.file_action === "rename" && chunk.file_name_rename) {
         const renamedParent = parentDirectoryPath(chunk.file_name_rename) ?? "";
         if (loadedTreePaths.has(renamedParent)) {
           changedParentPaths.add(renamedParent);
         }
+        const renamedChatId = artifactChatIdFromPath(chunk.file_name_rename);
+        if (renamedChatId) artifactChatIds.add(renamedChatId);
       }
     }
 
@@ -630,6 +661,7 @@ startListening({
       listenerApi.dispatch,
       changedParentPaths,
       activeGitRoot,
+      artifactChatIds,
     );
   },
 });
@@ -3090,6 +3122,11 @@ startListening({
     listenerApi.dispatch(
       pythonWorkspaceApi.util.invalidateTags([
         { type: "PythonWorkspace", id: event.chat_id },
+      ]),
+    );
+    listenerApi.dispatch(
+      artifactsApi.util.invalidateTags([
+        { type: "Artifact", id: event.chat_id },
       ]),
     );
   },

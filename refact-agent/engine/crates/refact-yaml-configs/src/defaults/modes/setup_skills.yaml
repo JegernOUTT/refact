@@ -1,4 +1,4 @@
-schema_version: 26
+schema_version: 27
 id: setup_skills
 title: Setup Skills
 description: Guided setup for project-specific skills
@@ -26,6 +26,8 @@ prompt: |
   %TRAJECTORY_LABEL_INSTRUCTIONS%
 
   %RICH_CONTENT_INSTRUCTIONS%
+
+  %ARTIFACTS_INSTRUCTIONS%
 
   %SYSTEM_INFO%
 

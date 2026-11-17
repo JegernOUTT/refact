@@ -1,5 +1,5 @@
 import React, { useMemo } from "react";
-import ReactMarkdown, { Components } from "react-markdown";
+import ReactMarkdown, { Components, defaultUrlTransform } from "react-markdown";
 import remarkBreaks from "remark-breaks";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
@@ -9,6 +9,25 @@ import toolStyles from "./ToolMarkdown.module.css";
 import "katex/dist/katex.min.css";
 import classNames from "classnames";
 import { normalizeLatexDelimiters } from "./renderUtils";
+import { parseArtifactLink } from "../../utils/artifactLinks";
+import { ArtifactLinkCard, ArtifactLinkChip } from "./ArtifactLink";
+import {
+  artifactCardFromNode,
+  rehypeArtifactCards,
+} from "./rehypeArtifactCards";
+import { Markdown } from "./Markdown";
+
+function toolUrlTransform(url: string): string {
+  return parseArtifactLink(url) ? url : defaultUrlTransform(url);
+}
+
+function renderArtifactExcerpt(content: string): React.ReactNode {
+  return (
+    <Markdown canHaveInteractiveElements={false} inert variant="tool">
+      {content}
+    </Markdown>
+  );
+}
 
 export type ToolMarkdownProps = Pick<
   React.ComponentProps<typeof ReactMarkdown>,
@@ -36,6 +55,20 @@ export const ToolMarkdown: React.FC<ToolMarkdownProps> = ({
 }) => {
   const components: Partial<Components> = useMemo(() => {
     return {
+      div({ color: _color, ref: _ref, node, ...props }) {
+        const card = artifactCardFromNode(node);
+        if (!card) return <div {...props} />;
+        const link = parseArtifactLink(card.href);
+        if (!link)
+          return <p className={toolStyles.paragraph}>{props.children}</p>;
+        return (
+          <ArtifactLinkCard
+            link={link}
+            renderMarkdown={renderArtifactExcerpt}
+            title={card.title}
+          />
+        );
+      },
       // Paragraphs
       p({ color: _color, ref: _ref, node: _node, ...props }) {
         return <p className={toolStyles.paragraph} {...props} />;
@@ -94,6 +127,14 @@ export const ToolMarkdown: React.FC<ToolMarkdownProps> = ({
       },
       a({ color: _color, ref: _ref, node: _node, ...props }) {
         const href = props.href ?? "";
+        const artifact = parseArtifactLink(href);
+        if (artifact) {
+          return (
+            <ArtifactLinkChip link={artifact}>
+              {props.children}
+            </ArtifactLinkChip>
+          );
+        }
         const isHttpLink =
           href.startsWith("http://") || href.startsWith("https://");
         const isMailtoLink = href.startsWith("mailto:");
@@ -139,7 +180,8 @@ export const ToolMarkdown: React.FC<ToolMarkdownProps> = ({
     <ReactMarkdown
       className={classNames(toolStyles.root, toolStyles[`variant_${variant}`])}
       remarkPlugins={[remarkBreaks, remarkMath, remarkGfm]}
-      rehypePlugins={[rehypeKatex]}
+      rehypePlugins={[rehypeKatex, rehypeArtifactCards]}
+      urlTransform={toolUrlTransform}
       allowedElements={allowedElements}
       unwrapDisallowed={unwrapDisallowed}
       components={components}

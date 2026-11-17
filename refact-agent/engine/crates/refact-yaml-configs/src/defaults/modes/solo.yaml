@@ -1,4 +1,4 @@
-schema_version: 8
+schema_version: 9
 id: solo
 title: Solo
 description: Full coding workflow in one chat, without subagents or orchestration tools
@@ -132,6 +132,8 @@ prompt: |
   %TRAJECTORY_LABEL_INSTRUCTIONS%
 
   %RICH_CONTENT_INSTRUCTIONS%
+
+  %ARTIFACTS_INSTRUCTIONS%
 
   %SYSTEM_INFO%
 
