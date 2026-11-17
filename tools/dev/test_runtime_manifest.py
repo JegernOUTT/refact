@@ -163,15 +163,25 @@ class PublishBlocks(unittest.TestCase):
         self.log = self.tmp / "gh.log"
         gh = self.bin / "gh"
         gh.write_text('#!/bin/sh\necho "$*" >> "$GH_LOG"\ncase "$*" in\n'
+                      '  "release "*) if [ "$GH_REQUIRE_REPO" = 1 ]; then\n'
+                      '    found=0; previous=\n'
+                      '    for arg in "$@"; do\n'
+                      '      if [ "$previous" = --repo ] && [ "$arg" = "$GITHUB_REPOSITORY" ]; then found=1; fi\n'
+                      '      previous=$arg\n'
+                      '    done\n'
+                      '    [ "$found" = 1 ] || { echo "explicit repository required" >&2; exit 2; }\n'
+                      '  fi ;;\nesac\ncase "$*" in\n'
                       '  "api repos/o/r/actions/runs/789 --jq .path") echo ".github/workflows/$WF@refs/heads/main" ;;\n'
-                      '  "release view"*) exit 1 ;;\nesac\n')
+                      '  "api repos/o/r/git/ref/tags/"*) echo "$GH_EXISTING_SHA" ;;\n'
+                      '  "release view"*) [ "$GH_EXISTING_RELEASE" = 1 ] ;;\nesac\n')
         gh.chmod(0o755)
 
     def tearDown(self):
         shutil.rmtree(self.tmp)
 
     def run_block(self, workflow, job, channel, trusted, manifest_sha=None, qualification_sha=None,
-                  qualification_id="42", repository_id="123"):
+                  qualification_id="42", repository_id="123", require_repo=False,
+                  existing_release=False, existing_sha=None):
         manifest = self.tmp / "manifest.json"
         if not (self.dir / rm.MANIFEST_NAME).exists():
             args = produce_args(self.root, self.dir, self.sha, channel)
@@ -185,6 +195,9 @@ class PublishBlocks(unittest.TestCase):
                    SOURCE_DIR=str(self.root),
                    QUALIFICATION_SHA256=qualification_sha if qualification_sha is not None else getattr(self, 'q_sha', ''),
                    QUALIFICATION_ID=qualification_id, REPOSITORY_ID=repository_id,
+                   GH_REQUIRE_REPO="1" if require_repo else "0",
+                   GH_EXISTING_RELEASE="1" if existing_release else "0",
+                   GH_EXISTING_SHA=self.sha if existing_sha is None else existing_sha,
                    CHANNEL=channel, MANIFEST_SHA256=manifest_sha or rm.sha256_file(manifest), GH_TOKEN="x")
         return subprocess.run(["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", step["run"]],
                               env=env, capture_output=True, text=True, cwd=self.tmp)
@@ -200,12 +213,36 @@ class PublishBlocks(unittest.TestCase):
         return trusted
 
     def test_prerelease_publishes_verified_complete_set(self):
-        result = self.run_block("prerelease.yml", "publish", "preview", REPO)
+        result = self.run_block("prerelease.yml", "publish", "preview", REPO, require_repo=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         [create] = self.releases()
         self.assertTrue(create.startswith(f"release create engine/v{VERSION} "))
         self.assertEqual(create.count(str(self.dir)), 19)
         self.assertIn("--prerelease", create)
+        self.assertIn("--latest=false", shlex.split(create))
+        for line in self.log.read_text().splitlines():
+            if line.startswith("release "):
+                args = shlex.split(line)
+                self.assertEqual(args[args.index("--repo") + 1], "o/r")
+
+    def test_prerelease_existing_release_uploads_to_explicit_repository(self):
+        result = self.run_block("prerelease.yml", "publish", "preview", REPO,
+                                require_repo=True, existing_release=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        [upload] = self.releases()
+        args = shlex.split(upload)
+        self.assertEqual(args[:3], ["release", "upload", f"engine/v{VERSION}"])
+        self.assertEqual(args[args.index("--repo") + 1], "o/r")
+        self.assertIn("--clobber", args)
+        self.assertEqual({arg for arg in args if arg.startswith(str(self.dir) + "/")},
+                         {str(path) for path in self.dir.iterdir()})
+
+    def test_prerelease_existing_foreign_source_publishes_nothing(self):
+        result = self.run_block("prerelease.yml", "publish", "preview", REPO,
+                                require_repo=True, existing_release=True, existing_sha="0" * 40)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.releases(), [])
+        self.assertIn("already exists for", result.stderr)
 
     def test_failing_verifier_publishes_nothing(self):
         for body in ("import sys; sys.exit(2)",

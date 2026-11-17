@@ -162,11 +162,11 @@ jobs:
           notes="$RUNNER_TEMP/notes.md"
           printf '%s\n' "UNTESTED $CHANNEL build of $SOURCE_SHA." "" \
             "Tests were NOT run for this prerelease (runtime-manifest.json: \"tests\": \"not_run\")." > "$notes"
-          if gh release view "$tag" > /dev/null 2>&1; then
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
             existing="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" --jq .object.sha)"
             test "$existing" = "$SOURCE_SHA" || { echo "$tag already exists for $existing" >&2; exit 1; }
-            gh release upload "$tag" "${assets[@]}" --clobber
+            gh release upload "$tag" "${assets[@]}" --repo "$GITHUB_REPOSITORY" --clobber
           else
-            gh release create "$tag" "${assets[@]}" --target "$SOURCE_SHA" --prerelease --latest=false \
+            gh release create "$tag" "${assets[@]}" --repo "$GITHUB_REPOSITORY" --target "$SOURCE_SHA" --prerelease --latest=false \
               --title "Refact v$VERSION (UNTESTED $CHANNEL)" --notes-file "$notes"
           fi
