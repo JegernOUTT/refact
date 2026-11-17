@@ -1,6 +1,6 @@
 //! Context-pressure helpers.
 use crate::call_validation::{ChatMessage, ChatUsage};
-use crate::chat::diagnostics::{filter_ui_only_messages, is_ui_only_message};
+use refact_chat_api::diagnostics::is_never_model_visible;
 use crate::chat::history_limit::{pressure_for_used_tokens, ContextPressure};
 use refact_chat_history::trajectory_ops::COMPRESSION_REPORT_ROLE;
 fn pressure_rank(pressure: &ContextPressure) -> usize {
@@ -45,7 +45,7 @@ fn recent_provider_usage_anchor(messages: &[ChatMessage]) -> Option<(usize, usiz
         .enumerate()
         .rev()
         .find_map(|(index, message)| {
-            if message.role != "assistant" || is_ui_only_message(message) {
+            if message.role != "assistant" || is_never_model_visible(message) {
                 return None;
             }
             message
@@ -60,8 +60,9 @@ fn provider_visible_messages(messages: &[ChatMessage]) -> Vec<ChatMessage> {
     let Ok(view) = refact_core::active_context::active_context(messages) else {
         return Vec::new();
     };
-    filter_ui_only_messages(view.messages)
+    view.messages
         .into_iter()
+        .filter(|message| !is_never_model_visible(message))
         .filter(|message| message.role != COMPRESSION_REPORT_ROLE)
         .map(|message| refact_core::edit_results::project_edit_result(&message).into_owned())
         .collect()
@@ -88,4 +89,20 @@ pub(crate) fn estimated_provider_context_pressure_with_usage_for_image_mode(
         .map(|used_tokens| pressure_for_used_tokens(used_tokens, effective_n_ctx))
         .unwrap_or(ContextPressure::Low);
     max_pressure(provider_pressure, usage_pressure)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn provider_pressure_view_excludes_bare_error_content() {
+        let messages = vec![
+            ChatMessage::new("user".into(), "question".into()),
+            ChatMessage::new("error".into(), "ERROR_SECRET".repeat(1000)),
+        ];
+        let visible = provider_visible_messages(&messages);
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].content.content_text_only(), "question");
+    }
 }

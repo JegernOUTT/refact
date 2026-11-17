@@ -436,7 +436,11 @@ fn last_assistant_preview(messages: &[ChatMessage]) -> Option<String> {
     messages
         .iter()
         .rev()
-        .filter(|message| message.role == "assistant" && !is_segment_summary_message(message))
+        .filter(|message| {
+            message.role == "assistant"
+                && !refact_core::chat_types::is_never_model_visible(message)
+                && !is_segment_summary_message(message)
+        })
         .find_map(|message| {
             let text = message.content.content_text_only();
             let preview = sanitize_preview(&text, PREVIEW_CHARS);
@@ -616,6 +620,21 @@ impl Tool for ToolAgentPulse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn assistant_preview_ignores_ui_only_partial() {
+        let mut hidden = ChatMessage::new("assistant".into(), "private partial".into());
+        hidden
+            .extra
+            .insert("_ui_only".into(), serde_json::json!(true));
+        let visible = ChatMessage::new("assistant".into(), "completed answer".into());
+        assert_eq!(
+            last_assistant_preview(&[visible, hidden.clone()]).as_deref(),
+            Some("completed answer")
+        );
+        assert_eq!(last_assistant_preview(&[hidden]), None);
+    }
+
     use crate::app_state::AppState;
     use crate::chat::types::TaskMeta as ThreadTaskMeta;
     use crate::tasks::types::{StatusUpdate, TaskBoard, TaskMeta, TaskStatus};

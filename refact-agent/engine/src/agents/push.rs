@@ -442,13 +442,7 @@ pub(crate) async fn saved_budget_partial(
     let model = crate::caps::resolve_chat_model(caps, destination_model).ok()?;
     crate::agents::launch_spec::clear_current_context(&app.gcx, &saved.messages, &model.base)
         .ok()?;
-    let text = saved
-        .messages
-        .iter()
-        .rev()
-        .filter(|message| message.role == "assistant")
-        .map(|message| message.content.content_text_only())
-        .find(|text| !text.trim().is_empty())?;
+    let text = last_saved_assistant_text(&saved.messages)?;
     let mut message = event(
         EventSubkind::SystemNotice,
         NOTICE_CAP_STOP,
@@ -457,6 +451,17 @@ pub(crate) async fn saved_budget_partial(
     );
     crate::privacy::records::carry_records_into(&mut message, &saved.messages).ok()?;
     Some(message)
+}
+
+fn last_saved_assistant_text(messages: &[refact_core::chat_types::ChatMessage]) -> Option<String> {
+    messages
+        .iter()
+        .rev()
+        .filter(|message| {
+            message.role == "assistant" && !refact_core::chat_types::is_never_model_visible(message)
+        })
+        .map(|message| message.content.content_text_only())
+        .find(|text| !text.trim().is_empty())
 }
 
 fn build_push_message(record: &BackgroundAgent) -> String {
@@ -614,6 +619,25 @@ fn build_push_message(record: &BackgroundAgent) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn saved_partial_ignores_ui_only_assistant() {
+        let mut hidden =
+            refact_core::chat_types::ChatMessage::new("assistant".into(), "private partial".into());
+        hidden
+            .extra
+            .insert("_ui_only".into(), serde_json::json!(true));
+        let visible = refact_core::chat_types::ChatMessage::new(
+            "assistant".into(),
+            "completed answer".into(),
+        );
+        assert_eq!(
+            last_saved_assistant_text(&[visible, hidden.clone()]).as_deref(),
+            Some("completed answer")
+        );
+        assert_eq!(last_saved_assistant_text(&[hidden]), None);
+    }
+
     use crate::agents::types::{BgAgentKind, CreateAgentRequest};
 
     async fn completed_record(kind: BgAgentKind) -> BackgroundAgent {

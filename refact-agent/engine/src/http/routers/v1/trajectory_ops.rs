@@ -489,6 +489,10 @@ fn transition_completed_input(
 ) -> Result<Vec<crate::call_validation::ChatMessage>, String> {
     let active =
         refact_core::active_context::legacy_rebuild_input(messages).map_err(|e| e.to_string())?;
+    let active: Vec<_> = active
+        .into_iter()
+        .filter(|message| !refact_chat_api::diagnostics::is_never_model_visible(message))
+        .collect();
     let (mut prefix, tail) = crate::chat::context_rebuild::split_live_suffix(&active, live_ids);
     if !tail.is_empty() {
         let detail = tail
@@ -1218,6 +1222,20 @@ pub async fn handle_planner_from_transition(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transition_pending_context_never_wraps_bare_error_content() {
+        let messages = vec![
+            ChatMessage::new("user".into(), "pending question".into()),
+            ChatMessage::new("error".into(), "ERROR_SECRET".into()),
+        ];
+        let input =
+            transition_completed_input(&messages, &std::collections::HashSet::new()).unwrap();
+        let text = serde_json::to_string(&input).unwrap();
+        assert!(!text.contains("ERROR_SECRET"));
+        assert!(text.contains("pending question"));
+    }
+
     use refact_chat_api::{GoalAttempt, GoalBudget, GoalProgress, GoalStatus};
     use serde_json::json;
 

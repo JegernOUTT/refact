@@ -181,7 +181,10 @@ impl TrajectoryFileSplitter {
     }
 
     fn should_skip_message(&self, msg: &Value, role: &str) -> bool {
-        if role == COMPRESSION_REPORT_ROLE
+        if msg
+            .as_object()
+            .is_some_and(|extra| refact_core::chat_types::is_never_model_visible_parts(role, extra))
+            || role == COMPRESSION_REPORT_ROLE
             || matches!(role, "context_file" | "cd_instruction" | "system")
         {
             return true;
@@ -294,6 +297,40 @@ pub fn is_trajectory_file(path: &PathBuf, roots: &MemoryPlaneRoots) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn split_excludes_bare_errors_and_ui_only_payloads() {
+        let messages = vec![
+            refact_core::chat_types::ChatMessage::new("user".into(), "keep question".into()),
+            refact_core::chat_types::ChatMessage::new("error".into(), "ERROR_SECRET".into()),
+            {
+                let mut message = refact_core::chat_types::ChatMessage::new(
+                    "assistant".into(),
+                    "UI_SECRET".into(),
+                );
+                message.extra.insert("_ui_only".into(), json!(true));
+                message
+            },
+            refact_core::chat_types::ChatMessage::new(
+                "tool".into(),
+                "ordinary tool failure".into(),
+            ),
+        ];
+        let trajectory = json!({"id":"errors", "messages":messages});
+        let results = TrajectoryFileSplitter::new(10_000)
+            .split(
+                &trajectory.to_string(),
+                &PathBuf::from(".refact/trajectories/errors.json"),
+            )
+            .await
+            .unwrap();
+        let text = split_texts(&results).join("\n");
+        assert!(!text.contains("ERROR_SECRET"));
+        assert!(!text.contains("UI_SECRET"));
+        assert!(text.contains("keep question"));
+        assert!(text.contains("ordinary tool failure"));
+    }
+
     use serde_json::json;
 
     static SPLIT_BYTES_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());

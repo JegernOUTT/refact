@@ -1682,6 +1682,7 @@ async fn start_generation_iteration(
         crate::tasks::goal::hydrate_session_task_goal(gcx.clone(), session_arc).await
     {
         let mut session = session_arc.lock().await;
+        session.append_error_message_deduped(&error);
         session.set_runtime_state(SessionState::Error, Some(error));
         return GenerationAttemptStart::Stop;
     }
@@ -2155,10 +2156,11 @@ async fn handle_tool_step_outcome(
                 return GenerationLoopControl::Continue;
             }
             if let Err(error) = maybe_record_goal_pursuit_progress(app, session_arc.clone()).await {
-                session_arc
-                    .lock()
-                    .await
-                    .set_runtime_state(SessionState::Error, Some(error));
+                {
+                    let mut session = session_arc.lock().await;
+                    session.append_error_message_deduped(&error);
+                    session.set_runtime_state(SessionState::Error, Some(error));
+                }
                 return GenerationLoopControl::Stop;
             }
             if handle_goal_turn_end(app.clone(), session_arc.clone()).await {
@@ -2465,10 +2467,11 @@ pub fn start_generation(
                     return None;
                 }
                 if let Err(error) = super::recovery::install_budget(&session_arc).await {
-                    session_arc
-                        .lock()
-                        .await
-                        .set_runtime_state(SessionState::Error, Some(error));
+                    {
+                        let mut session = session_arc.lock().await;
+                        session.append_error_message_deduped(&error);
+                        session.set_runtime_state(SessionState::Error, Some(error));
+                    }
                     return None;
                 }
                 TurnDepthGuard::enter(app.clone(), session_arc.clone()).await?
@@ -2547,10 +2550,11 @@ pub fn start_generation(
                 drop(operation);
             }
             if let Err(error) = super::recovery::install_budget(&session_arc).await {
-                session_arc
-                    .lock()
-                    .await
-                    .set_runtime_state(SessionState::Error, Some(error));
+                {
+                    let mut session = session_arc.lock().await;
+                    session.append_error_message_deduped(&error);
+                    session.set_runtime_state(SessionState::Error, Some(error));
+                }
                 break;
             }
             let Some(attempt) = super::recovery::within_budget(
@@ -5090,6 +5094,33 @@ mod tests {
                 assert!(cancellation.load(Ordering::SeqCst));
             }
         }
+    }
+
+    #[tokio::test]
+    async fn invalid_recovery_budget_is_persisted_as_plain_runtime_error() {
+        let app = AppState::from_gcx(crate::global_context::tests::make_test_gcx().await).await;
+        let mut session = ChatSession::new("invalid-recovery-budget".into());
+        session.thread.recovery_policy = Some(refact_core::recovery::RecoveryPolicyOverrides {
+            max_retries: Some(101),
+            ..Default::default()
+        });
+        let session = Arc::new(AMutex::new(session));
+        start_generation(app, session.clone()).await;
+        let session = session.lock().await;
+        assert_eq!(session.runtime.state, SessionState::Error);
+        assert!(session.runtime.recovery.is_none());
+        assert_eq!(session.messages.len(), 1);
+        assert_eq!(
+            session.messages[0].role,
+            refact_chat_api::internal_roles::ERROR_ROLE
+        );
+        assert_eq!(
+            session.messages[0].content.content_text_only(),
+            session.runtime.error.clone().unwrap()
+        );
+        assert!(!session.messages[0]
+            .extra
+            .contains_key("recovery_operation_id"));
     }
 
     #[tokio::test]

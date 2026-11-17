@@ -25,6 +25,8 @@ use crate::chat::stream_core::{
 };
 use crate::chat::diagnostics::{make_ui_only_error_message, safe_provider_error_diagnostic};
 use crate::chat::retry_policy::{classify_llm_error_for_retry, sleep_or_abort};
+use refact_chat_api::diagnostics::{append_error_message_deduped, is_never_model_visible};
+use refact_chat_api::internal_roles::ERROR_ROLE;
 use crate::chat::tools::{execute_tools, resolve_tool_call_aliases, ExecuteToolsOptions};
 use crate::chat::types::{TaskMeta, ThreadParams, TrajectoryCommitIntent};
 use crate::worktrees::types::WorktreeMeta;
@@ -399,21 +401,6 @@ fn cap_context_limit_diagnostic(redacted: &str, max_chars: usize) -> String {
     )
 }
 
-fn append_reactive_compaction_diagnostic(
-    messages: &mut Vec<ChatMessage>,
-    error: &str,
-    preserve_last_message: bool,
-) {
-    if preserve_last_message {
-        if let Some(last) = messages.pop() {
-            messages.push(make_ui_only_error_message(error));
-            messages.push(last);
-            return;
-        }
-    }
-    messages.push(make_ui_only_error_message(error));
-}
-
 async fn apply_subchat_reactive_compaction(
     gcx: Arc<GlobalContext>,
     config: &SubchatConfig,
@@ -472,8 +459,11 @@ async fn apply_subchat_reactive_compaction(
             false
         }
     };
-    if !compacted {
-        append_reactive_compaction_diagnostic(messages, error, preserve_last_message);
+
+    if !compacted && SUBCHAT_ERROR_CONTEXT.try_with(|_| ()).is_err() {
+        let last = preserve_last_message.then(|| messages.pop()).flatten();
+        append_error_message_deduped(messages, make_ui_only_error_message(error));
+        messages.extend(last);
     }
 
     emit_parent_compaction_diagnostics(config, error, attempt, compacted).await;
@@ -849,6 +839,7 @@ impl StreamCollector for SubchatProgressCollector {
 
 tokio::task_local! {
     static STREAM_USAGE: Arc<StdMutex<ChatUsage>>;
+    static SUBCHAT_ERROR_CONTEXT: (SubchatConfig, SubchatProgressMessages, String);
 }
 
 /// Runs `fut` so that usage reported while `subchat_stream` streams lands in `sink`,
@@ -2243,13 +2234,20 @@ async fn save_failed_subchat_trajectory(
         return;
     }
 
-    let error = safe_context_limit_error_for_log(error);
-    messages.push(crate::chat::internal_roles::event(
-        crate::chat::internal_roles::EventSubkind::SystemNotice,
-        "subchat.run",
-        json!({"error": error, "tool_name": config.tool_name}),
-        format!("Subchat run failed: {error}"),
-    ));
+    let diagnostic = make_ui_only_error_message(error);
+    if !is_abort_error(error)
+        && !messages.last().is_some_and(|message| {
+            message.role == ERROR_ROLE
+                && (message.content.content_text_only() == diagnostic.content.content_text_only()
+                    || (error.starts_with(OUTPUT_LIMIT_ERROR_PREFIX)
+                        && message
+                            .content
+                            .content_text_only()
+                            .starts_with(OUTPUT_LIMIT_ERROR_PREFIX)))
+        })
+    {
+        append_error_message_deduped(&mut messages, diagnostic);
+    }
 
     let thread = trace_thread_from_config(chat_id, config);
     let app = AppState::from_gcx(gcx).await;
@@ -2358,17 +2356,39 @@ pub(crate) fn prepare_child_history(
 ) -> Vec<ChatMessage> {
     let mut selected = sanitize_messages_for_new_thread(messages);
     if config.history_source_model.as_deref() == Some(config.model.as_str()) {
-        for (target, source) in
-            selected.iter_mut().zip(messages.iter().filter(|message| {
-                !refact_chat_history::trajectory_ops::is_ui_only_message(message)
-            }))
-        {
+        for (target, source) in selected.iter_mut().zip(
+            messages
+                .iter()
+                .filter(|message| !is_never_model_visible(message)),
+        ) {
             target.thinking_blocks = source.thinking_blocks.clone();
             target.reasoning_content = source.reasoning_content.clone();
             target.server_content_blocks = source.server_content_blocks.clone();
         }
     }
     selected
+}
+
+fn prepare_subchat_run_history(
+    messages: Vec<ChatMessage>,
+    config: &SubchatConfig,
+    resuming: bool,
+) -> Vec<ChatMessage> {
+    if resuming {
+        messages
+            .into_iter()
+            .filter(|message| message.role == ERROR_ROLE || !is_never_model_visible(message))
+            .map(|message| {
+                if message.role == ERROR_ROLE {
+                    message
+                } else {
+                    refact_chat_history::trajectory_ops::sanitize_message_for_new_thread(&message)
+                }
+            })
+            .collect()
+    } else {
+        prepare_child_history(&messages, config)
+    }
 }
 
 pub async fn run_subchat(
@@ -2461,15 +2481,13 @@ async fn run_subchat_with_lease_scoped(
     let messages = refact_core::active_context::active_context(&messages)
         .map_err(|e| e.to_string())?
         .messages;
-    let messages = sanitize_messages_for_new_thread(&messages);
+    let resume_history = sanitize_messages_for_new_thread(&messages);
     let resuming = config.stateful
-        && (agent_resume_boundary(&messages, config.background_agent_id.as_deref()).is_some()
-            || previous_agent_cap(&messages, config.background_agent_id.as_deref()).is_some());
-    let messages = if resuming {
-        messages
-    } else {
-        prepare_child_history(&messages, &config)
-    };
+        && (agent_resume_boundary(&resume_history, config.background_agent_id.as_deref())
+            .is_some()
+            || previous_agent_cap(&resume_history, config.background_agent_id.as_deref())
+                .is_some());
+    let messages = prepare_subchat_run_history(messages, &config, resuming);
     let mut messages = prepare_subchat_messages(&gcx, messages, &config.model)?;
     if should_persist_subchat_trajectory(&config) && !resuming && !config.stateful {
         let thread = trace_thread_from_config(&chat_id, &config);
@@ -2577,59 +2595,63 @@ async fn run_subchat_with_lease_scoped(
 
     let progress_messages: SubchatProgressMessages = Arc::new(StdMutex::new(messages.clone()));
 
-    let current_messages_result: Result<(Vec<ChatMessage>, bool), String> = async {
-        let mut messages = messages;
-        loop {
-            let wrap_up = config
-                .wrap_up
-                .as_ref()
-                .filter(|_| !config.ordinary_background_has_unlimited_steps());
-            let (mut completed, aborted) = if let Some(wrap_up) = wrap_up {
-                Box::pin(run_subchat_with_wrap_up(
-                    ccx.clone(),
-                    &config,
-                    messages,
-                    &config.tools,
-                    wrap_up,
-                    &mut _usage,
-                    &progress_messages,
-                ))
-                .await?
-            } else {
-                Box::pin(run_subchat_loop(
-                    ccx.clone(),
-                    &config,
-                    messages,
-                    &config.tools,
-                    &mut _usage,
-                    &progress_messages,
-                ))
-                .await?
-            };
-            if aborted {
-                break Ok((completed, true));
-            }
-            // Outside interruptible-wait boundaries, C becomes eligible after
-            // forced finals and wrap-up. The registry closes acceptance atomically
-            // with this drain so a successful enqueue cannot be stranded on exit.
-            let wake = if let Some(agent_id) = config.background_agent_id.as_deref() {
-                import_runner_local_deliveries(&app, agent_id, &chat_id, &completed).await;
-                let deliveries =
-                    crate::agents::delivery::finish_authorized_turn(&app, agent_id).await?;
-                let wake = append_runner_deliveries(&mut completed, deliveries);
-                crate::agents::delivery::publish_runner_queue(&app, agent_id).await;
-                wake
-            } else {
-                false
-            };
-            persist_subchat_progress(&ccx, &config, &progress_messages, &completed).await?;
-            if !wake {
-                break Ok((completed, false));
-            }
-            messages = completed;
-        }
-    }
-    .await;
+    let current_messages_result: Result<(Vec<ChatMessage>, bool), String> = SUBCHAT_ERROR_CONTEXT
+        .scope(
+            (config.clone(), progress_messages.clone(), chat_id.clone()),
+            async {
+                let mut messages = messages;
+                loop {
+                    let wrap_up = config
+                        .wrap_up
+                        .as_ref()
+                        .filter(|_| !config.ordinary_background_has_unlimited_steps());
+                    let (mut completed, aborted) = if let Some(wrap_up) = wrap_up {
+                        Box::pin(run_subchat_with_wrap_up(
+                            ccx.clone(),
+                            &config,
+                            messages,
+                            &config.tools,
+                            wrap_up,
+                            &mut _usage,
+                            &progress_messages,
+                        ))
+                        .await?
+                    } else {
+                        Box::pin(run_subchat_loop(
+                            ccx.clone(),
+                            &config,
+                            messages,
+                            &config.tools,
+                            &mut _usage,
+                            &progress_messages,
+                        ))
+                        .await?
+                    };
+                    if aborted {
+                        break Ok((completed, true));
+                    }
+                    // Outside interruptible-wait boundaries, C becomes eligible after
+                    // forced finals and wrap-up. The registry closes acceptance atomically
+                    // with this drain so a successful enqueue cannot be stranded on exit.
+                    let wake = if let Some(agent_id) = config.background_agent_id.as_deref() {
+                        import_runner_local_deliveries(&app, agent_id, &chat_id, &completed).await;
+                        let deliveries =
+                            crate::agents::delivery::finish_authorized_turn(&app, agent_id).await?;
+                        let wake = append_runner_deliveries(&mut completed, deliveries);
+                        crate::agents::delivery::publish_runner_queue(&app, agent_id).await;
+                        wake
+                    } else {
+                        false
+                    };
+                    persist_subchat_progress(&ccx, &config, &progress_messages, &completed).await?;
+                    if !wake {
+                        break Ok((completed, false));
+                    }
+                    messages = completed;
+                }
+            },
+        )
+        .await;
     let (mut current_messages, aborted) = match current_messages_result {
         Ok((messages, aborted)) => (messages, aborted),
         Err(e) => {
@@ -3188,6 +3210,25 @@ async fn wait_for_runner_preempt(app: &AppState, agent_id: &str) {
     }
 }
 
+fn merge_retained_subchat_errors(messages: &mut Vec<ChatMessage>) {
+    let _ = SUBCHAT_ERROR_CONTEXT.try_with(|(_, progress, _)| {
+        let retained = match progress.lock() {
+            Ok(slot) => slot,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        for error in retained.iter().filter(|message| message.role == ERROR_ROLE) {
+            if let Some(existing) = messages
+                .iter_mut()
+                .find(|message| message.message_id == error.message_id)
+            {
+                *existing = error.clone();
+            } else {
+                messages.push(error.clone());
+            }
+        }
+    });
+}
+
 async fn runner_model_turn(
     ccx: Arc<AMutex<AtCommandsContext>>,
     config: &SubchatConfig,
@@ -3215,14 +3256,31 @@ async fn runner_model_turn(
             return Err("Aborted".to_string());
         }
         refresh_live_context_window(&ccx, config).await;
+        let _ = SUBCHAT_ERROR_CONTEXT.try_with(|(_, progress, _)| {
+            let mut retained = match progress.lock() {
+                Ok(slot) => slot,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            let common = retained
+                .iter()
+                .zip(messages.iter())
+                .take_while(|(old, current)| {
+                    !old.message_id.is_empty() && old.message_id == current.message_id
+                })
+                .count();
+            retained.truncate(common);
+            retained.extend(messages[common..].iter().cloned());
+        });
+        let projected = refact_core::active_context::active_context(messages)
+            .map_err(|e| e.to_string())?
+            .messages;
+        let projected_len = projected.len();
         let result = {
             let generation = subchat_single_internal(
                 ccx.clone(),
                 &config.model,
                 &config.mode,
-                refact_core::active_context::active_context(messages)
-                    .map_err(|e| e.to_string())?
-                    .messages,
+                projected,
                 tools_subset.clone(),
                 false,
                 config.temperature,
@@ -3245,16 +3303,19 @@ async fn runner_model_turn(
             }
         };
         if let Some(result) = result {
-            let projected_len = refact_core::active_context::active_context(messages)
-                .map_err(|e| e.to_string())?
-                .messages
-                .len();
+            merge_retained_subchat_errors(messages);
             return result.map(|choices| {
                 choices
                     .into_iter()
                     .map(|choice| {
                         let mut raw = messages.clone();
-                        raw.extend(choice.into_iter().skip(projected_len));
+                        let retained_errors = SUBCHAT_ERROR_CONTEXT.try_with(|_| ()).is_ok();
+                        raw.extend(
+                            choice
+                                .into_iter()
+                                .skip(projected_len)
+                                .filter(|message| !retained_errors || message.role != ERROR_ROLE),
+                        );
                         raw
                     })
                     .collect()
@@ -3262,6 +3323,7 @@ async fn runner_model_turn(
         }
         // The cancelled generation has been dropped before touching its context.
         clear_unbound_openai_codex_websocket_session(&chat_id).await;
+        merge_retained_subchat_errors(messages);
         drain_background_agent_inbox(&ccx, messages).await;
         if let Some(agent_id) = agent_id.as_deref() {
             if app.agents.has_preempt(agent_id).await {
@@ -4549,11 +4611,36 @@ mod readiness_consumer_tests {
     }
 }
 
+async fn record_subchat_attempt_error(
+    ccx: &Arc<AMutex<AtCommandsContext>>,
+    messages: &mut Vec<ChatMessage>,
+    error: &str,
+) -> Result<(), String> {
+    let diagnostic = make_ui_only_error_message(error);
+    append_error_message_deduped(messages, diagnostic.clone());
+    if let Ok((config, progress, owner_chat_id)) = SUBCHAT_ERROR_CONTEXT.try_with(Clone::clone) {
+        let owns_context = {
+            let context = ccx.lock().await;
+            owner_chat_id == context.chat_id
+                && config.background_agent_id == context.background_agent_id
+        };
+        if !owns_context {
+            return Ok(());
+        }
+        let mut retained = take_subchat_progress(&progress);
+        append_error_message_deduped(&mut retained, diagnostic);
+        if let Err(error) = persist_subchat_progress(ccx, &config, &progress, &retained).await {
+            warn!(%error, "Failed to persist subchat attempt diagnostic; retained in progress");
+        }
+    }
+    Ok(())
+}
+
 pub(crate) async fn subchat_stream(
     ccx: Arc<AMutex<AtCommandsContext>>,
     model_id: &str,
     mode_id: &str,
-    messages: Vec<ChatMessage>,
+    mut messages: Vec<ChatMessage>,
     tools: Vec<ToolDesc>,
     prepend_system_prompt: bool,
     temperature: Option<f32>,
@@ -4720,6 +4807,9 @@ pub(crate) async fn subchat_stream(
 
     let t1 = std::time::Instant::now();
     let mut llm_request = prepared.llm_request;
+    llm_request
+        .messages
+        .retain(|message| !is_never_model_visible(message));
     let original_reasoning = llm_request.reasoning.clone();
     let mut semantic_retries = 0usize;
     let mut discarded_usage = ChatUsage::default();
@@ -4926,6 +5016,9 @@ pub(crate) async fn subchat_stream(
                     }
                 }
 
+                if !is_abort_error(&error.message) {
+                    record_subchat_attempt_error(&ccx, &mut messages, &error.message).await?;
+                }
                 if should_retry {
                     let provider_wait = error
                         .retry_not_before_ms()
@@ -5009,6 +5102,7 @@ pub(crate) async fn subchat_stream(
 
         if let Ok(choices) = &attempt_result {
             if let Err(error) = convert_results_to_messages(choices.clone(), Vec::new()) {
+                record_subchat_attempt_error(&ccx, &mut messages, &error).await?;
                 let output_limit = error.starts_with(OUTPUT_LIMIT_ERROR_PREFIX);
                 if output_limit || error.starts_with(EMPTY_CHOICE_ERROR_PREFIX) {
                     if let Some(usage) = choices.first().and_then(|choice| choice.usage.as_ref()) {
@@ -5276,7 +5370,7 @@ mod subchat_tests {
         PARENT_COMPACTION_DIAGNOSTIC_REDACTION_LOOKAHEAD_CHARS,
         PARENT_COMPACTION_DIAGNOSTIC_TRUNCATED, PARTIAL_OUTPUT_STREAM_ERROR,
     };
-    use super::{final_step_wrap_up_message, needs_forced_final_answer};
+    use super::{final_step_wrap_up_message, needs_forced_final_answer, ERROR_ROLE};
     use crate::app_state::AppState;
     use crate::chat::diagnostics::{
         SAFE_PROVIDER_ERROR_DIAGNOSTIC_MAX_CHARS, SAFE_PROVIDER_ERROR_DIAGNOSTIC_TRUNCATED,
@@ -5940,6 +6034,23 @@ mod subchat_tests {
         config.history_source_model = Some(config.model.clone());
         let same = super::prepare_child_history(&[message.clone()], &config);
         assert_eq!(same[0].thinking_blocks, message.thinking_blocks);
+        let mut diagnostic = super::make_ui_only_error_message("historical failure");
+        diagnostic
+            .extra
+            .insert("repeat_count".into(), serde_json::json!(3));
+        let retained = super::prepare_subchat_run_history(
+            vec![diagnostic.clone(), message.clone()],
+            &config,
+            true,
+        );
+        assert_eq!(
+            serde_json::to_value(&retained[0]).unwrap(),
+            serde_json::to_value(&diagnostic).unwrap()
+        );
+
+        let with_error = super::prepare_child_history(&[diagnostic, message.clone()], &config);
+        assert_eq!(with_error.len(), 1);
+        assert_eq!(with_error[0].thinking_blocks, message.thinking_blocks);
         config.model = "different/model".into();
         let changed = super::prepare_child_history(&[message.clone()], &config);
         assert!(changed[0].thinking_blocks.is_none());
@@ -5947,6 +6058,281 @@ mod subchat_tests {
             changed[0].extra["launch_context_source"],
             message.extra["launch_context_source"]
         );
+    }
+
+    #[test]
+    fn resumed_history_sanitizes_non_errors_and_preserves_error_artifacts() {
+        let mut assistant = ChatMessage::new("assistant".into(), "answer".into());
+        assistant.thinking_blocks = Some(vec![
+            serde_json::json!({"type":"thinking","signature":"old"}),
+        ]);
+        assistant.reasoning_content = Some("old reasoning".into());
+        assistant.server_content_blocks = vec![serde_json::json!({"type":"text","text":"old"})];
+        assistant.usage = Some(Default::default());
+        assistant.finish_reason = Some("stop".into());
+        assistant
+            .extra
+            .insert("provider_state".into(), serde_json::json!("old"));
+        let diagnostic = super::make_ui_only_error_message("retained failure");
+        let config = test_subchat_config();
+        let resumed =
+            super::prepare_subchat_run_history(vec![assistant, diagnostic.clone()], &config, true);
+        assert_eq!(resumed.len(), 2);
+        assert!(resumed[0].thinking_blocks.is_none());
+        assert!(resumed[0].reasoning_content.is_none());
+        assert!(resumed[0].server_content_blocks.is_empty());
+        assert!(resumed[0].usage.is_none());
+        assert!(resumed[0].finish_reason.is_none());
+        assert!(resumed[0].checkpoints.is_empty());
+        assert!(!resumed[0].extra.contains_key("provider_state"));
+        assert_eq!(
+            serde_json::to_value(&resumed[1]).unwrap(),
+            serde_json::to_value(&diagnostic).unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn preempted_retry_preserves_retained_attempt_error() {
+        let ccx = abort_test_ccx().await;
+        let (app, gcx, chat_id) = {
+            let c = ccx.lock().await;
+            (c.app.clone(), c.global_context.clone(), c.chat_id.clone())
+        };
+        *gcx.privacy_policy_load.write().unwrap() = refact_privacy::PolicyLoad::default();
+        let mut caps = crate::caps::CodeAssistantCaps::default();
+        caps.chat_models.insert(
+            "model".into(),
+            Arc::new(crate::caps::ChatModelRecord {
+                base: crate::caps::BaseModelRecord {
+                    id: "model".into(),
+                    tokenizer: "fake".into(),
+                    n_ctx: 4096,
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+        );
+        {
+            let mut state = app.model.caps.write().await;
+            state.caps = Some(Arc::new(caps));
+            state.last_attempted_ts = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+        }
+        let (agent, _, _) = app
+            .agents
+            .create(crate::agents::types::CreateAgentRequest {
+                parent_chat_id: "parent".into(),
+                parent_root_chat_id: None,
+                parent_tool_call_id: None,
+                kind: crate::agents::types::BgAgentKind::Subagent,
+                config_name: "subagent".into(),
+                title: "preempt retry".into(),
+                prompt: "test".into(),
+                target_files: vec![],
+                model: "model".into(),
+                model_type: None,
+                goal_summary: None,
+                plan_present: false,
+                worktree_id: None,
+                worktree_branch: None,
+            })
+            .await
+            .unwrap();
+        ccx.lock().await.background_agent_id = Some(agent.agent_id.clone());
+        let mut config = test_subchat_config();
+        let workspace = tempfile::tempdir().unwrap();
+        *gcx.documents_state.workspace_folders.lock().unwrap() =
+            vec![workspace.path().to_path_buf()];
+        config.chat_id = Some(chat_id.clone());
+        config.background_agent_id = Some(agent.agent_id.clone());
+        let progress = Arc::new(StdMutex::new(vec![ChatMessage::new(
+            "user".into(),
+            "work".into(),
+        )]));
+        let gate = Arc::new(tokio::sync::Semaphore::new(1));
+        super::install_model_fixture_replies(
+            &chat_id,
+            vec![
+                Ok(super::ChoiceFinal {
+                    finish_reason: Some("length".into()),
+                    ..Default::default()
+                }),
+                Ok(super::ChoiceFinal {
+                    content: "discarded draft".into(),
+                    ..Default::default()
+                }),
+                Ok(super::ChoiceFinal {
+                    content: "done".into(),
+                    ..Default::default()
+                }),
+            ],
+            None,
+            Some(gate.clone()),
+        );
+        let retained = progress.clone();
+        let preempt = async {
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    if super::take_subchat_progress(&retained)
+                        .iter()
+                        .any(|m| m.role == ERROR_ROLE)
+                        && super::model_fixture_requests(&chat_id).len() == 2
+                    {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            app.agents
+                .enqueue_delivery(
+                    &agent.agent_id,
+                    refact_chat_api::PendingDelivery::new(
+                        vec![ChatMessage::new("user".into(), "interrupt".into())],
+                        refact_chat_api::PushMode::Preempt,
+                        "test",
+                        true,
+                    ),
+                )
+                .await
+                .unwrap();
+            gate.add_permits(2);
+        };
+        let run = super::SUBCHAT_ERROR_CONTEXT.scope(
+            (
+                config.clone(),
+                progress.clone(),
+                config
+                    .chat_id
+                    .clone()
+                    .unwrap_or_else(|| "subchat-error-attempts".into()),
+            ),
+            async {
+                let mut messages = vec![ChatMessage::new("user".into(), "work".into())];
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    super::runner_model_turn(ccx, &config, &mut messages, None, false),
+                )
+                .await
+                .unwrap()
+                .unwrap()
+            },
+        );
+        let (choices, ()) = tokio::join!(run, preempt);
+        let fixture = super::take_model_fixture(&chat_id).unwrap();
+        assert_eq!(fixture.requests.len(), 3);
+        let messages = &choices[0];
+        let error_index = messages
+            .iter()
+            .position(|m| m.role == ERROR_ROLE)
+            .expect("preempt lost recorded attempt error");
+        let interrupt_index = messages
+            .iter()
+            .position(|m| m.content.content_text_only() == "interrupt")
+            .unwrap();
+        assert!(error_index < interrupt_index);
+        assert_eq!(messages.last().unwrap().content.content_text_only(), "done");
+    }
+
+    #[tokio::test]
+    async fn unrelated_subchat_failure_does_not_mutate_runner_progress() {
+        let ccx = abort_test_ccx().await;
+        let mut config = test_subchat_config();
+        config.chat_id = Some("parent-runner".into());
+        config.stateful = true;
+        let original = vec![ChatMessage::new("user".into(), "parent work".into())];
+        let progress = Arc::new(StdMutex::new(original.clone()));
+        let mut helper_messages = vec![];
+        super::SUBCHAT_ERROR_CONTEXT
+            .scope(
+                (
+                    config.clone(),
+                    progress.clone(),
+                    config.chat_id.clone().unwrap(),
+                ),
+                async {
+                    super::record_subchat_attempt_error(
+                        &ccx,
+                        &mut helper_messages,
+                        "helper failed",
+                    )
+                    .await
+                    .unwrap();
+                },
+            )
+            .await;
+        assert_eq!(helper_messages.len(), 1);
+        assert_eq!(
+            serde_json::to_value(super::take_subchat_progress(&progress)).unwrap(),
+            serde_json::to_value(original).unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn attempt_save_failure_retains_diagnostic_without_masking_provider_error() {
+        let ccx = abort_test_ccx().await;
+        let mut config = test_subchat_config();
+        config.chat_id = Some(ccx.lock().await.chat_id.clone());
+        config.stateful = true;
+        let progress = Arc::new(StdMutex::new(vec![]));
+        let mut messages = vec![];
+        super::SUBCHAT_ERROR_CONTEXT
+            .scope(
+                (
+                    config.clone(),
+                    progress.clone(),
+                    config.chat_id.clone().unwrap(),
+                ),
+                async {
+                    let result = super::record_subchat_attempt_error(
+                        &ccx,
+                        &mut messages,
+                        "maximum context length exceeded",
+                    )
+                    .await;
+                    assert!(
+                        result.is_ok(),
+                        "persistence must not replace provider error: {result:?}"
+                    );
+                },
+            )
+            .await;
+        assert_eq!(
+            super::take_subchat_progress(&progress)[0]
+                .content
+                .content_text_only(),
+            "maximum context length exceeded"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_trajectory_abort_does_not_create_error_message() {
+        let ccx = abort_test_ccx().await;
+        let gcx = ccx.lock().await.global_context.clone();
+        let workspace = tempfile::tempdir().unwrap();
+        *gcx.documents_state.workspace_folders.lock().unwrap() =
+            vec![workspace.path().to_path_buf()];
+        let progress = Arc::new(StdMutex::new(vec![ChatMessage::new(
+            "user".into(),
+            "work".into(),
+        )]));
+        let config = test_subchat_config();
+        super::save_failed_subchat_trajectory(
+            gcx.clone(),
+            "aborted-no-error",
+            &config,
+            &progress,
+            "Aborted",
+        )
+        .await;
+        let saved = crate::chat::trajectories::load_trajectory_for_chat(gcx, "aborted-no-error")
+            .await
+            .unwrap();
+        assert_eq!(saved.messages.len(), 1);
+        assert_eq!(saved.messages[0].role, "user");
     }
 
     async fn abort_test_ccx(
@@ -6078,6 +6464,164 @@ mod subchat_tests {
     }
 
     #[tokio::test]
+    async fn subchat_attempt_errors_are_durable_and_bare_errors_never_reach_provider() {
+        let ccx = abort_test_ccx().await;
+        ccx.lock().await.chat_id = "subchat-error-attempts".into();
+        let workspace = tempfile::tempdir().unwrap();
+        let (gcx, chat_id) = {
+            let context = ccx.lock().await;
+            (context.global_context.clone(), context.chat_id.clone())
+        };
+        *gcx.documents_state.workspace_folders.lock().unwrap() =
+            vec![workspace.path().to_path_buf()];
+        let mut config = test_subchat_config();
+        config.stateful = false;
+        config.chat_id = Some(chat_id.clone());
+        let original = vec![ChatMessage::new("user".into(), "work".into())];
+        let progress = Arc::new(StdMutex::new(original.clone()));
+        let mut messages = original;
+        super::SUBCHAT_ERROR_CONTEXT
+            .scope(
+                (
+                    config.clone(),
+                    progress.clone(),
+                    config
+                        .chat_id
+                        .clone()
+                        .unwrap_or_else(|| "subchat-error-attempts".into()),
+                ),
+                async {
+                    super::record_subchat_attempt_error(&ccx, &mut messages, "first failure")
+                        .await
+                        .unwrap();
+                    super::record_subchat_attempt_error(&ccx, &mut messages, "first failure")
+                        .await
+                        .unwrap();
+                    super::record_subchat_attempt_error(&ccx, &mut messages, "final failure")
+                        .await
+                        .unwrap();
+                },
+            )
+            .await;
+        save_failed_subchat_trajectory(gcx.clone(), &chat_id, &config, &progress, "final failure")
+            .await;
+        let saved = crate::chat::trajectories::load_trajectory_for_chat(gcx, &chat_id)
+            .await
+            .unwrap();
+        let errors = saved
+            .messages
+            .iter()
+            .filter(|message| message.role == ERROR_ROLE)
+            .collect::<Vec<_>>();
+        assert_eq!(errors.len(), 2);
+        assert_eq!(
+            errors[0].extra.get("repeat_count"),
+            Some(&serde_json::json!(2))
+        );
+        assert_eq!(errors[1].content.content_text_only(), "final failure");
+        let app = ccx.lock().await.app.clone();
+        *app.gcx.privacy_policy_load.write().unwrap() = refact_privacy::PolicyLoad::default();
+        let mut caps = crate::caps::CodeAssistantCaps::default();
+        caps.chat_models.insert(
+            "model".into(),
+            Arc::new(crate::caps::ChatModelRecord {
+                base: crate::caps::BaseModelRecord {
+                    id: "model".into(),
+                    tokenizer: "fake".into(),
+                    n_ctx: 4096,
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+        );
+        {
+            let mut state = app.model.caps.write().await;
+            state.caps = Some(Arc::new(caps));
+            state.last_attempted_ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+        }
+        super::install_model_fixture(
+            &chat_id,
+            vec![super::ChoiceFinal {
+                content: "done".into(),
+                ..Default::default()
+            }],
+            None,
+        );
+        messages.push(ChatMessage::new("error".into(), "bare diagnostic".into()));
+        super::subchat_stream(
+            ccx.clone(),
+            "model",
+            "agent",
+            messages,
+            vec![],
+            false,
+            None,
+            128,
+            None,
+            crate::llm::params::CacheControl::Off,
+            false,
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+        let fixture = super::take_model_fixture(&chat_id).unwrap();
+        assert_eq!(fixture.requests.len(), 1);
+        assert!(fixture.requests[0]
+            .messages
+            .iter()
+            .all(|message| message.role != ERROR_ROLE));
+        super::install_model_fixture_replies(
+            &chat_id,
+            vec![Err("invalid API key".into())],
+            None,
+            None,
+        );
+        let failed = super::SUBCHAT_ERROR_CONTEXT
+            .scope(
+                (
+                    config.clone(),
+                    progress.clone(),
+                    config
+                        .chat_id
+                        .clone()
+                        .unwrap_or_else(|| "subchat-error-attempts".into()),
+                ),
+                super::subchat_stream(
+                    ccx,
+                    "model",
+                    "agent",
+                    super::take_subchat_progress(&progress),
+                    vec![],
+                    false,
+                    None,
+                    128,
+                    None,
+                    crate::llm::params::CacheControl::Off,
+                    false,
+                    None,
+                    false,
+                ),
+            )
+            .await;
+        assert!(failed.is_err());
+        assert_eq!(
+            super::take_subchat_progress(&progress).last().unwrap().role,
+            "error"
+        );
+        assert!(super::take_subchat_progress(&progress)
+            .last()
+            .unwrap()
+            .content
+            .content_text_only()
+            .contains("invalid API key"));
+        super::take_model_fixture(&chat_id);
+    }
+
+    #[tokio::test]
     async fn runner_output_limit_recovery_changes_requests_and_resets_each_turn() {
         let ccx = abort_test_ccx().await;
         ccx.lock().await.chat_id = "subchat-output-limit-recovery".into();
@@ -6160,6 +6704,18 @@ mod subchat_tests {
         let (messages, aborted) = result.unwrap();
         assert!(!aborted);
         assert_eq!(messages.last().unwrap().content.content_text_only(), "done");
+        let errors = messages
+            .iter()
+            .filter(|message| message.role == ERROR_ROLE)
+            .collect::<Vec<_>>();
+        assert_eq!(errors.len(), 3);
+        assert!(errors
+            .iter()
+            .all(|message| message.extra.get("repeat_count") == Some(&serde_json::json!(2))));
+        assert!(fixture.requests.iter().all(|request| request
+            .messages
+            .iter()
+            .all(|message| message.role != ERROR_ROLE)));
         assert_eq!(
             usage.total_tokens, 63,
             "discarded output-limit usage must be retained"
@@ -6532,10 +7088,11 @@ mod subchat_tests {
         let failed_saved = crate::chat::trajectories::load_trajectory_for_chat(gcx, chat_id)
             .await
             .expect("failed subchat snapshot should be durable");
-        assert!(failed_saved.messages.iter().any(|message| message
-            .content
-            .content_text_only()
-            .contains("Subchat run failed")));
+        assert!(failed_saved
+            .messages
+            .iter()
+            .any(|message| message.role == ERROR_ROLE
+                && message.content.content_text_only() == "failed"));
     }
 
     #[test]

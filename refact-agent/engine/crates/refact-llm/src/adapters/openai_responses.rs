@@ -754,7 +754,7 @@ fn convert_to_responses_format(
     let mut pending_user_content: Vec<Value> = Vec::new();
 
     for msg in messages {
-        if msg.extra.get("_ui_only").and_then(Value::as_bool) == Some(true) {
+        if refact_core::chat_types::is_never_model_visible(msg) {
             continue;
         }
         let projected = refact_core::edit_results::project_edit_result(msg);

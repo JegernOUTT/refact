@@ -317,6 +317,20 @@ pub async fn handle_failure(
         let run_id = record.run_id.clone();
         let waiting = record.state == RecoveryState::Waiting;
         s.preserve_interrupted_recovery_output();
+        let mut message =
+            super::diagnostics::make_ui_only_error_message(&record.latest_error.raw_error);
+        message.extra.insert(
+            "error_info".into(),
+            serde_json::to_value(&record.latest_error).expect("recovery error is serializable"),
+        );
+        message.extra.insert(
+            "recovery_operation_id".into(),
+            serde_json::json!(record.operation_id),
+        );
+        message
+            .extra
+            .insert("recovery_run_id".into(), serde_json::json!(record.run_id));
+        s.append_error_message(message);
         s.update_recovery(Some(record));
         s.set_runtime_state(
             if waiting {
@@ -472,6 +486,14 @@ mod tests {
         }
     }
 
+    fn stamped_value(record: &RecoveryRecord) -> serde_json::Value {
+        let mut value = serde_json::to_value(record).unwrap();
+        for attempt in value["attempts"].as_array_mut().unwrap() {
+            attempt["error"] = serde_json::Value::Null;
+        }
+        value
+    }
+
     #[tokio::test(start_paused = true)]
     async fn abort_waiting_recovery_preserves_partial_as_inert_artifact() {
         let policy = RecoveryPolicy::default();
@@ -539,5 +561,208 @@ mod tests {
             RecoveryState::Waiting
         );
         assert_eq!(session.runtime.recovery.as_ref().unwrap().revision, 7);
+    }
+    async fn failure_test_app() -> crate::app_state::AppState {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        crate::app_state::AppState::from_gcx(gcx).await
+    }
+
+    fn stream_error(message: &str) -> super::super::stream_core::LlmStreamError {
+        super::super::stream_core::LlmStreamError {
+            message: message.into(),
+            partial_output_emitted: true,
+            pressure_failure: None,
+            admission_refusal: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_failure_preserves_partial_before_linked_error() {
+        let app = failure_test_app().await;
+        let mut session = ChatSession::new("failure-partial".into());
+        session.recovery_budget = Some(Arc::new(RecoveryBudget::new(RecoveryPolicy {
+            mode: RecoveryMode::Off,
+            ..RecoveryPolicy::default()
+        })));
+        session.start_stream().unwrap();
+        session.draft_message.as_mut().unwrap().content =
+            crate::call_validation::ChatContent::SimpleText("accepted partial".into());
+        let session = Arc::new(Mutex::new(session));
+        let error = stream_error("LLM error (401 Unauthorized): expired token");
+        assert!(!handle_failure(&app, &session, &error).await);
+        let session = session.lock().await;
+        assert_eq!(session.messages.len(), 2);
+        assert_eq!(session.messages[0].role, "assistant");
+        assert_eq!(
+            session.messages[0].content.content_text_only(),
+            "accepted partial"
+        );
+        assert!(super::super::diagnostics::is_ui_only_message(
+            &session.messages[0]
+        ));
+        let record = session.runtime.recovery.as_ref().unwrap();
+        assert_eq!(record.state, RecoveryState::NeedsAction);
+        assert_eq!(record.attempts.len(), 1);
+        let message = &session.messages[1];
+        assert_eq!(message.role, "error");
+        assert_eq!(message.extra["recovery_operation_id"], record.operation_id);
+        assert_eq!(message.extra["recovery_run_id"], record.run_id);
+        assert_eq!(
+            message.extra["error_info"],
+            serde_json::to_value(&record.latest_error).unwrap()
+        );
+        assert_eq!(message.extra["recovery_record"], stamped_value(record));
+        assert!(session.draft_message.is_none());
+    }
+
+    #[tokio::test]
+    async fn handle_failure_collapses_only_same_operation_and_refreshes_run() {
+        let app = failure_test_app().await;
+        let policy = RecoveryPolicy {
+            mode: RecoveryMode::Off,
+            ..RecoveryPolicy::default()
+        };
+        let mut session = ChatSession::new("failure-repeat".into());
+        session.recovery_budget = Some(Arc::new(RecoveryBudget::new(policy.clone())));
+        let mut recovery = record(policy);
+        recovery.state = RecoveryState::Attempting;
+        recovery.manual = false;
+        session.runtime.recovery = Some(recovery);
+        let session = Arc::new(Mutex::new(session));
+        let error = stream_error("LLM error (401 Unauthorized): expired token");
+        assert!(!handle_failure(&app, &session, &error).await);
+        let first_id = {
+            let mut session = session.lock().await;
+            assert_eq!(session.messages.len(), 1);
+            let id = session.messages[0].message_id.clone();
+            let recovery = session.runtime.recovery.as_mut().unwrap();
+            recovery.state = RecoveryState::Attempting;
+            recovery.run_id = "manual-retry-run".into();
+            id
+        };
+        assert!(!handle_failure(&app, &session, &error).await);
+        {
+            let mut session = session.lock().await;
+            assert_eq!(session.messages.len(), 1);
+            assert_eq!(session.messages[0].message_id, first_id);
+            assert_eq!(session.messages[0].extra["repeat_count"], 2);
+            assert_eq!(
+                session.messages[0].extra["recovery_run_id"],
+                "manual-retry-run"
+            );
+            assert_eq!(
+                session.messages[0].extra["recovery_record"]["run_id"],
+                "manual-retry-run"
+            );
+            assert_eq!(session.runtime.recovery.as_ref().unwrap().attempts.len(), 2);
+            session.runtime.recovery = None;
+        }
+        assert!(!handle_failure(&app, &session, &error).await);
+        let session = session.lock().await;
+        assert_eq!(session.messages.len(), 2);
+        assert_ne!(session.messages[1].message_id, first_id);
+        assert_ne!(
+            session.messages[1].extra["recovery_operation_id"],
+            "operation"
+        );
+        assert_eq!(session.messages[0].extra["repeat_count"], 2);
+        assert_eq!(
+            session.messages[1].extra["recovery_record"],
+            stamped_value(session.runtime.recovery.as_ref().unwrap())
+        );
+    }
+
+    #[test]
+    fn recovery_updates_stamp_latest_error_and_archive_without_duplicates() {
+        let mut session = ChatSession::new("recovery-stamping".into());
+        let mut recovery = record(RecoveryPolicy::default());
+        assert!(session.messages.is_empty());
+        session.update_recovery(Some(recovery.clone()));
+        assert_eq!(session.messages.len(), 1);
+        assert_eq!(session.messages[0].content.content_text_only(), "redacted");
+        assert_eq!(
+            session.messages[0].extra["recovery_operation_id"],
+            serde_json::json!(recovery.operation_id)
+        );
+        recovery.state = RecoveryState::Exhausted;
+        recovery.revision += 1;
+        session.update_recovery(Some(recovery.clone()));
+        assert_eq!(session.messages.len(), 1);
+        assert_eq!(
+            session.messages[0].extra["recovery_record"]["state"],
+            "exhausted"
+        );
+        recovery.state = RecoveryState::Succeeded;
+        recovery.revision += 1;
+        session.update_recovery(Some(recovery.clone()));
+        assert_eq!(
+            session.messages[0].extra["recovery_record"]["state"],
+            "succeeded"
+        );
+        session.archive_recovery();
+        assert_eq!(session.messages.len(), 1);
+        let mut empty = ChatSession::new("successful".into());
+        empty.update_recovery(Some(recovery));
+        empty.archive_recovery();
+        assert!(empty.messages.is_empty());
+    }
+
+    #[test]
+    fn stamped_record_drops_attempt_diagnostics_but_runtime_record_keeps_them() {
+        let mut session = ChatSession::new("recovery-stamp-size".into());
+        let mut recovery = record(RecoveryPolicy::default());
+        recovery.retries_used = 2;
+        recovery.attempts = (0..2)
+            .map(|retry_number| RecoveryAttempt {
+                at_ms: 10 + retry_number as u64,
+                retry_number,
+                error: Some(RecoveryError {
+                    raw_error: "x".repeat(2_000),
+                    ..recovery.latest_error.clone()
+                }),
+                outcome: "failed".into(),
+            })
+            .collect();
+        session.update_recovery(Some(recovery.clone()));
+        recovery.revision += 1;
+        recovery.state = RecoveryState::Exhausted;
+        session.update_recovery(Some(recovery.clone()));
+
+        assert_eq!(session.messages.len(), 1);
+        let stamped = &session.messages[0].extra["recovery_record"];
+        assert_eq!(stamped, &stamped_value(&recovery));
+        assert_eq!(stamped["latest_error"]["raw_error"], "redacted");
+        let runtime = session.runtime.recovery.as_ref().unwrap();
+        assert_eq!(
+            serde_json::to_value(runtime).unwrap(),
+            serde_json::to_value(&recovery).unwrap()
+        );
+        assert!(runtime.attempts.iter().all(|attempt| attempt
+            .error
+            .as_ref()
+            .is_some_and(|error| error.raw_error.len() == 2_000)));
+    }
+
+    #[test]
+    fn recovery_archive_fallback_precedes_new_user_and_interrupts_waiting() {
+        let mut session = ChatSession::new("recovery-archive".into());
+        session.runtime.recovery = Some(record(RecoveryPolicy::default()));
+        assert!(session.messages.is_empty());
+        session.archive_recovery();
+        session.add_message(crate::call_validation::ChatMessage::new(
+            "user".into(),
+            "next".into(),
+        ));
+        assert_eq!(session.messages.len(), 2);
+        assert_eq!(session.messages[0].role, "error");
+        assert_eq!(
+            session.messages[0].extra["recovery_record"]["state"],
+            "cancelled"
+        );
+        assert_eq!(
+            session.messages[0].extra["recovery_record"]["terminal_reason"],
+            "superseded"
+        );
+        assert_eq!(session.messages[1].role, "user");
     }
 }

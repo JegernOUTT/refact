@@ -22,7 +22,11 @@ import styles from "./RecoveryCard.module.css";
 import { ModelSelector } from "../Chat/ModelSelector";
 import { RecoveryPolicySettings } from "../ChatForm/RecoveryPolicySettings";
 import { humanizeIdentifier } from "../../utils/displayNames";
-import { collectErrorTexts } from "../../services/refact/recoveryPresentation";
+import {
+  collectErrorEntries,
+  collectErrorTexts,
+} from "../../services/refact/recoveryPresentation";
+import { ErrorRepeat } from "./ErrorMessage";
 import {
   selectRecoveryById,
   selectQueuedItemsById,
@@ -63,12 +67,16 @@ export function RecoveryCard({
   chatId,
   recovery,
   errors = [],
+  earlier = [],
+  represented,
   archived = [],
   submissionKey = "",
 }: {
   chatId: string;
   recovery: RecoveryRecord;
   errors?: ErrorMessage[];
+  earlier?: ErrorMessage[];
+  represented?: ReadonlySet<string>;
   archived?: RecoveryRecord[];
   submissionKey?: string;
 }) {
@@ -214,14 +222,26 @@ export function RecoveryCard({
     setPanel((current) => (current === next ? null : next));
   };
   if (recovery.state === "succeeded") return null;
-  const texts = collectErrorTexts(errors, [recovery, ...archived]);
+  const entries = collectErrorEntries(errors);
+  const recorded = collectErrorTexts([], [recovery, ...archived]).filter(
+    (text) =>
+      !represented?.has(text) && !entries.some((entry) => entry.text === text),
+  );
+  const shown = [...entries, ...recorded.map((text) => ({ text, repeat: 1 }))];
+  const copied = collectErrorTexts(
+    [...earlier, ...errors],
+    [recovery, ...archived],
+  );
   return (
     <section ref={cardRef} className={styles.card} aria-label="Recovery status">
       <div className={styles.main}>
         <div className={styles.summary}>
           <div className={styles.errors} role="alert">
-            {texts.map((text) => (
-              <div key={text}>{text}</div>
+            {shown.map(({ text, repeat }) => (
+              <div key={text}>
+                <span>{text}</span>
+                <ErrorRepeat count={repeat} />
+              </div>
             ))}
           </div>
           <div className={styles.metadata}>
@@ -438,7 +458,7 @@ export function RecoveryCard({
             variant="ghost"
             icon={Copy}
             aria-label="Copy errors"
-            onClick={() => copyToClipboard(texts.join("\n\n"))}
+            onClick={() => copyToClipboard(copied.join("\n\n"))}
           />
         </Tooltip>
       </div>

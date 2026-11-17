@@ -8441,7 +8441,7 @@ fn build_title_generation_context(messages: &[serde_json::Value]) -> String {
         if json_message_is_ui_only(msg) {
             continue;
         }
-        if role == "error" {
+        if role == refact_chat_api::internal_roles::ERROR_ROLE {
             continue;
         }
         if role == refact_chat_history::trajectory_ops::COMPRESSION_REPORT_ROLE
@@ -22811,6 +22811,47 @@ mod tests {
         assert_eq!(loaded.messages[0].role, "user");
         assert_eq!(loaded.messages[1].role, "error");
         assert!(is_ui_only_message(&loaded.messages[1]));
+    }
+
+    #[tokio::test]
+    async fn loading_inflight_recovery_does_not_synthesize_error_messages() {
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, _) = make_app_with_workspace(dir.path()).await;
+        for state in ["waiting", "attempting"] {
+            let chat_id = format!("recovery-load-{state}");
+            let mut session = ChatSession::new(chat_id.clone());
+            session.created_at = "2024-01-01T00:00:00Z".to_string();
+            session.add_message(ChatMessage::new("user".into(), "hello".into()));
+            session.runtime.recovery = Some(
+                serde_json::from_value(json!({
+                    "operation_id": "operation", "run_id": "run", "revision": 1,
+                    "state": state, "policy": refact_core::recovery::RecoveryPolicy::default(),
+                    "policy_source": "thread", "manual": false, "retries_used": 0,
+                    "latest_error": {"category": "Timeout", "title": "Timed out",
+                        "explanation": "Provider timed out", "suggested_action": "Retry",
+                        "is_retryable": true, "raw_error": "previous timeout"},
+                    "next_retry_at_ms": 123, "deadline_at_ms": 456,
+                    "terminal_reason": null, "attempts": []
+                }))
+                .unwrap(),
+            );
+            let expected = serde_json::to_value(&session.messages).unwrap();
+            save_trajectory_snapshot(gcx.clone(), trajectory_snapshot_from_session(&session))
+                .await
+                .unwrap();
+            let loaded = load_trajectory_for_chat(gcx.clone(), &chat_id)
+                .await
+                .unwrap();
+            assert_eq!(serde_json::to_value(&loaded.messages).unwrap(), expected);
+            let recovery = loaded.recovery.unwrap();
+            assert_eq!(
+                recovery.state,
+                refact_core::recovery::RecoveryState::NeedsAction
+            );
+            assert_eq!(recovery.revision, 2);
+            assert_eq!(recovery.terminal_reason.as_deref(), Some("interrupted"));
+            assert!(recovery.next_retry_at_ms.is_none());
+        }
     }
 
     #[tokio::test]

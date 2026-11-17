@@ -407,7 +407,7 @@ fn convert_messages(messages: &[ChatMessage]) -> (String, Vec<Value>) {
     let mut call_names = HashMap::new();
 
     for message in messages {
-        if message.extra.get("_ui_only").and_then(Value::as_bool) == Some(true) {
+        if refact_core::chat_types::is_never_model_visible(message) {
             continue;
         }
         let projected = refact_core::edit_results::project_edit_result(message);

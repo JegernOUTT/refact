@@ -9,6 +9,16 @@ use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use tokenizers::Tokenizer;
 
+pub const ERROR_ROLE: &str = "error";
+
+pub fn is_never_model_visible(message: &ChatMessage) -> bool {
+    is_never_model_visible_parts(&message.role, &message.extra)
+}
+
+pub fn is_never_model_visible_parts(role: &str, extra: &serde_json::Map<String, Value>) -> bool {
+    role == ERROR_ROLE || extra.get("_ui_only").and_then(Value::as_bool) == Some(true)
+}
+
 pub fn serialize_path<S: serde::Serializer>(
     path: &PathBuf,
     serializer: S,

@@ -69,4 +69,42 @@ describe("ErrorMessageCard", () => {
     expect(screen.queryByRole("button")).not.toBeInTheDocument();
     expect(screen.queryByText(/used|sent|remaining/)).not.toBeInTheDocument();
   });
+  test("shows repeat counts and a compact recovered status", () => {
+    render(
+      <ErrorMessageCard
+        errors={[
+          { ...classified, repeat_count: 3 },
+          {
+            role: "error",
+            content: "second failure",
+            extra: {
+              recovery_record: {
+                operation_id: "operation",
+                run_id: "run",
+                revision: 1,
+                state: "succeeded",
+                policy: {
+                  mode: "transient",
+                  max_retries: 2,
+                  delay_ms: 1000,
+                  total_timeout_ms: 60000,
+                },
+                policy_source: "global",
+                manual: false,
+                retries_used: 1,
+                latest_error: classified.error_info,
+                attempts: [],
+              },
+            },
+          },
+        ]}
+      />,
+    );
+    expect(screen.getByTestId("error-repeat-count")).toHaveTextContent("×3");
+    expect(screen.getByLabelText("Repeated 3 times")).toBeVisible();
+    expect(screen.getByTestId("error-recovery-status")).toHaveTextContent(
+      "Recovered after 1 retry",
+    );
+    expect(screen.getByText("second failure")).toBeVisible();
+  });
 });

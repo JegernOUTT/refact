@@ -1467,6 +1467,47 @@ pub async fn memories_search_for_enrichment(
     .await
 }
 
+fn trajectory_matched_content(
+    messages: &[serde_json::Value],
+    ranges: &[(u64, u64)],
+) -> Vec<String> {
+    let mut matched_content = Vec::new();
+    for (start, end) in ranges {
+        let start_idx = *start as usize;
+        let end_idx = (*end as usize).min(messages.len().saturating_sub(1));
+
+        for idx in start_idx..=end_idx {
+            if let Some(msg) = messages.get(idx) {
+                let role = msg
+                    .get("role")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
+                if msg.as_object().is_some_and(|extra| {
+                    refact_core::chat_types::is_never_model_visible_parts(role, extra)
+                }) {
+                    continue;
+                }
+                let content = msg
+                    .get("content")
+                    .map(|v| {
+                        if let Some(s) = v.as_str() {
+                            s.chars().take(500).collect::<String>()
+                        } else {
+                            v.to_string().chars().take(500).collect()
+                        }
+                    })
+                    .unwrap_or_default();
+
+                if !content.is_empty() && role != "system" && role != "context_file" {
+                    matched_content.push(format!("[msg {}] {}: {}", idx, role, content));
+                }
+            }
+        }
+    }
+
+    matched_content
+}
+
 async fn memories_search_inner(
     gcx: Arc<GlobalContext>,
     query: &str,
@@ -1808,35 +1849,7 @@ async fn memories_search_inner(
             None => continue,
         };
 
-        // Extract matched message content
-        let mut matched_content = Vec::new();
-        for (start, end) in &traj_match.matched_ranges {
-            let start_idx = *start as usize;
-            let end_idx = (*end as usize).min(messages.len().saturating_sub(1));
-
-            for idx in start_idx..=end_idx {
-                if let Some(msg) = messages.get(idx) {
-                    let role = msg
-                        .get("role")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("unknown");
-                    let content = msg
-                        .get("content")
-                        .map(|v| {
-                            if let Some(s) = v.as_str() {
-                                s.chars().take(500).collect::<String>()
-                            } else {
-                                v.to_string().chars().take(500).collect()
-                            }
-                        })
-                        .unwrap_or_default();
-
-                    if !content.is_empty() && role != "system" && role != "context_file" {
-                        matched_content.push(format!("[msg {}] {}: {}", idx, role, content));
-                    }
-                }
-            }
-        }
+        let matched_content = trajectory_matched_content(messages, &traj_match.matched_ranges);
 
         if matched_content.is_empty() {
             continue;
@@ -2546,6 +2559,21 @@ pub async fn memories_add_enriched(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn trajectory_matched_content_excludes_never_visible_and_keeps_indices() {
+        let messages = serde_json::json!([
+            {"role":"user","content":"visible"},
+            {"role":"error","content":"secret error"},
+            {"role":"assistant","content":"secret partial","_ui_only":true},
+            {"role":"assistant","content":"answer"}
+        ]);
+        let result = trajectory_matched_content(messages.as_array().unwrap(), &[(0, 3)]);
+        assert_eq!(
+            result,
+            vec!["[msg 0] user: visible", "[msg 3] assistant: answer"]
+        );
+    }
 
     #[tokio::test]
     async fn local_dedup_never_touches_other_project_memory() {

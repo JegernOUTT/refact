@@ -530,6 +530,7 @@ fn historical_context<'a>(
 ) -> Result<Vec<ChatMessage>, String> {
     let messages: Vec<_> = messages
         .into_iter()
+        .filter(|message| !refact_chat_api::diagnostics::is_never_model_visible(message))
         .take(scope.limits.launch_context_messages.saturating_add(1))
         .collect();
     if messages.len() > scope.limits.launch_context_messages
@@ -868,7 +869,7 @@ pub async fn resolve_scoped_launch_spec(
                 }
                 let selected = parent_messages[..end].iter().filter(|message| {
                     message.role != "system"
-                        && !refact_chat_history::trajectory_ops::is_ui_only_message(message)
+                        && !refact_chat_api::diagnostics::is_never_model_visible(message)
                 });
                 let result = historical_context(selected, scope, "completed_prefix");
                 match result {
@@ -1190,6 +1191,36 @@ fn describe_entry(entry: &LaunchContextEntry) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn selected_history_excludes_bare_errors_before_context_conversion() {
+        let root = std::path::PathBuf::from("/workspace");
+        let model = crate::caps::BaseModelRecord {
+            id: "test/model".into(),
+            ..Default::default()
+        };
+        let scope = LaunchScope {
+            caller: WorkCaller {
+                source_root: root.clone(),
+                checkout_root: root,
+                principal: "test".into(),
+                root_chat_id: None,
+                model: Some(model.clone()),
+            },
+            child_model: model,
+            limits: refact_work_core::CoordinationSettings::default(),
+        };
+        let messages = vec![
+            msg("error", "error", "ERROR_SECRET"),
+            msg("user", "user", "question"),
+        ];
+        let selected = historical_context(messages.iter(), &scope, "message_range").unwrap();
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].content.content_text_only(), "question");
+        assert!(!serde_json::to_string(&selected)
+            .unwrap()
+            .contains("ERROR_SECRET"));
+    }
 
     #[tokio::test]
     async fn current_clearance_preserves_old_zone_and_applies_new_path_restrictions() {

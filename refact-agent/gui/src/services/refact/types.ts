@@ -744,6 +744,7 @@ export interface ErrorMessage extends BaseMessage {
   content: string;
   error_info?: UserErrorInfo;
   retry_status?: RetryStatus;
+  repeat_count?: number;
 }
 
 export interface ToolCallMessage extends AssistantMessage {

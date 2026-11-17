@@ -74,11 +74,13 @@ import { selectConfig, selectApiKey } from "../../features/Config/configSlice";
 import { VirtualizedChatList } from "./VirtualizedChatList";
 import { RecoveryCard } from "./RecoveryCard";
 import {
+  collectErrorTexts,
   partitionTranscriptErrors,
   recoveryRecordFromError,
+  recoveryStatusHosts,
   retryableErrorIndex,
-  visibleTranscriptErrors,
 } from "../../services/refact/recoveryPresentation";
+import type { ErrorMessage } from "../../services/refact/types";
 import {
   selectRecoveryById,
   selectQueuedItemsById,
@@ -462,9 +464,61 @@ export const ChatContent: React.FC<ChatContentProps> = ({
     return displayItems.length > 0 ? displayItems.length - 1 : undefined;
   }, [displayItems]);
 
+  const liveRecovery =
+    recovery && recovery.state !== "succeeded" ? recovery : null;
+  const statusHosts = useMemo(() => recoveryStatusHosts(messages), [messages]);
+  const archivedEpisodeRecords = useMemo(
+    () =>
+      episodeErrors.flatMap((error) => {
+        const record = recoveryRecordFromError(error);
+        return record && record.state !== "succeeded" ? [record] : [];
+      }),
+    [episodeErrors],
+  );
+  const liveHost = useMemo(() => {
+    const latest = liveRecovery ? episodeErrors.at(-1) : undefined;
+    const item = latest
+      ? displayItems.find(
+          (candidate) =>
+            candidate.type === "error" && candidate.errors.includes(latest),
+        )
+      : undefined;
+    return item?.type === "error" ? item : null;
+  }, [liveRecovery, episodeErrors, displayItems]);
+  const liveHostIndex = liveHost?.messageIndex ?? -1;
+  const transcriptErrors = useMemo(
+    () =>
+      displayItems.flatMap((item) =>
+        item.type === "error" ? item.errors : [],
+      ),
+    [displayItems],
+  );
+  const liveCardErrors = useMemo(
+    () =>
+      episodeErrors.filter((error) =>
+        liveHost
+          ? liveHost.errors.includes(error)
+          : !transcriptErrors.includes(error),
+      ),
+    [episodeErrors, liveHost, transcriptErrors],
+  );
+  const earlierEpisodeErrors = useMemo(
+    () => episodeErrors.filter((error) => !liveCardErrors.includes(error)),
+    [episodeErrors, liveCardErrors],
+  );
+  const representedErrorTexts = useMemo(
+    () =>
+      new Set(
+        collectErrorTexts(
+          transcriptErrors.filter((error) => !liveCardErrors.includes(error)),
+        ),
+      ),
+    [transcriptErrors, liveCardErrors],
+  );
+
   const retryErrorIndex = useMemo(
     () =>
-      recovery && recovery.state !== "succeeded"
+      liveRecovery
         ? -1
         : retryableErrorIndex(
             displayItems.flatMap((item) =>
@@ -473,7 +527,7 @@ export const ChatContent: React.FC<ChatContentProps> = ({
             turnBoundary,
             episodeErrors,
           ),
-    [recovery, displayItems, turnBoundary, episodeErrors],
+    [liveRecovery, displayItems, turnBoundary, episodeErrors],
   );
 
   const handleProcessCompletedClick = useCallback((processId: string) => {
@@ -485,15 +539,14 @@ export const ChatContent: React.FC<ChatContentProps> = ({
       <>
         <Container className={styles.transcriptFooter}>
           <UncommittedChangesWarning />
-          {recovery && (
+          {liveRecovery && liveHostIndex === -1 && (
             <RecoveryCard
               chatId={chatId}
-              recovery={recovery}
-              errors={episodeErrors}
-              archived={episodeErrors.flatMap((error) => {
-                const record = recoveryRecordFromError(error);
-                return record && record.state !== "succeeded" ? [record] : [];
-              })}
+              recovery={liveRecovery}
+              errors={liveCardErrors}
+              earlier={earlierEpisodeErrors}
+              represented={representedErrorTexts}
+              archived={archivedEpisodeRecords}
               submissionKey={submissionKey}
             />
           )}
@@ -530,8 +583,12 @@ export const ChatContent: React.FC<ChatContentProps> = ({
       </>
     ),
     [
-      recovery,
-      episodeErrors,
+      liveRecovery,
+      liveHostIndex,
+      liveCardErrors,
+      earlierEpisodeErrors,
+      representedErrorTexts,
+      archivedEpisodeRecords,
       submissionKey,
       chatId,
       compressionStatusText,
@@ -548,17 +605,43 @@ export const ChatContent: React.FC<ChatContentProps> = ({
         case "plain_text":
           return <PlainText>{item.content}</PlainText>;
 
-        case "error":
-          return (
-            <ErrorMessageCard
-              errors={visibleTranscriptErrors(item.errors, episodeErrors)}
-              onRetryGeneration={
-                item.messageIndex === retryErrorIndex
-                  ? onRetryGeneration
-                  : undefined
-              }
-            />
+        case "error": {
+          const staticCard = (errors: ErrorMessage[]) =>
+            errors.length > 0 ? (
+              <ErrorMessageCard
+                errors={errors}
+                statusHosts={statusHosts}
+                liveRunId={liveRecovery?.run_id}
+                onRetryGeneration={
+                  item.messageIndex === retryErrorIndex
+                    ? onRetryGeneration
+                    : undefined
+                }
+              />
+            ) : null;
+          if (!liveRecovery || item.messageIndex !== liveHostIndex)
+            return staticCard(item.errors);
+          const position = item.errors.indexOf(
+            episodeErrors[episodeErrors.length - 1],
           );
+          const others = (errors: ErrorMessage[]) =>
+            errors.filter((error) => !episodeErrors.includes(error));
+          return (
+            <>
+              {staticCard(others(item.errors.slice(0, position)))}
+              <RecoveryCard
+                chatId={chatId}
+                recovery={liveRecovery}
+                errors={liveCardErrors}
+                earlier={earlierEpisodeErrors}
+                represented={representedErrorTexts}
+                archived={archivedEpisodeRecords}
+                submissionKey={submissionKey}
+              />
+              {staticCard(others(item.errors.slice(position + 1)))}
+            </>
+          );
+        }
 
         case "assistant":
           return (
@@ -729,6 +812,15 @@ export const ChatContent: React.FC<ChatContentProps> = ({
       onRetryGeneration,
       episodeErrors,
       retryErrorIndex,
+      statusHosts,
+      liveRecovery,
+      liveHostIndex,
+      liveCardErrors,
+      earlierEpisodeErrors,
+      representedErrorTexts,
+      archivedEpisodeRecords,
+      submissionKey,
+      chatId,
       isCompanionChat,
     ],
   );

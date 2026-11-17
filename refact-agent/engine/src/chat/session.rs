@@ -2963,7 +2963,8 @@ impl ChatSession {
                 }
                 role if role == crate::chat::internal_roles::EVENT_ROLE
                     || role == crate::chat::internal_roles::PLAN_ROLE
-                    || role == crate::chat::internal_roles::GOAL_ROLE => {}
+                    || role == crate::chat::internal_roles::GOAL_ROLE
+                    || role == crate::chat::internal_roles::ERROR_ROLE => {}
                 _ => break,
             }
         }
@@ -4709,37 +4710,64 @@ impl ChatSession {
             record.next_retry_at_ms = None;
             record.terminal_reason = Some("superseded".into());
         }
-        if let Some(index) = self.messages.iter().position(|m| {
-            m.extra.get("recovery_run_id").and_then(|v| v.as_str()) == Some(record.run_id.as_str())
-        }) {
-            self.messages[index].extra.insert(
-                "recovery_record".into(),
-                serde_json::to_value(&record).unwrap_or_default(),
-            );
-            self.increment_version();
-            let message = self.messages[index].clone();
-            self.emit(ChatEvent::MessageUpdated {
-                message_id: message.message_id.clone(),
-                message,
-            });
-            return;
+        self.stamp_recovery_record(&record);
+    }
+
+    fn stamp_recovery_record(&mut self, record: &refact_core::recovery::RecoveryRecord) {
+        let mut stamped = record.clone();
+        for attempt in &mut stamped.attempts {
+            attempt.error = None;
         }
-        let mut message = make_ui_only_error_message(&record.latest_error.title);
-        message.extra.insert(
-            "recovery_record".into(),
-            serde_json::to_value(&record).unwrap_or_default(),
-        );
-        message.extra.insert(
-            "recovery_operation_id".into(),
-            serde_json::json!(record.operation_id),
-        );
-        message
-            .extra
-            .insert("recovery_run_id".into(), serde_json::json!(record.run_id));
-        self.add_message(message);
+        let value = serde_json::to_value(&stamped).expect("recovery record is serializable");
+        if let Some(index) = self.messages.iter().rposition(|message| {
+            message.role == refact_chat_api::internal_roles::ERROR_ROLE
+                && message
+                    .extra
+                    .get("recovery_operation_id")
+                    .and_then(|v| v.as_str())
+                    == Some(record.operation_id.as_str())
+        }) {
+            if self.messages[index].extra.get("recovery_record") != Some(&value) {
+                self.messages[index]
+                    .extra
+                    .insert("recovery_record".into(), value);
+                self.messages[index]
+                    .extra
+                    .insert("recovery_run_id".into(), serde_json::json!(record.run_id));
+                self.increment_version();
+                let message = self.messages[index].clone();
+                self.emit(ChatEvent::MessageUpdated {
+                    message_id: message.message_id.clone(),
+                    message,
+                });
+            }
+        } else if record.state != refact_core::recovery::RecoveryState::Succeeded {
+            let diagnostic = if record.latest_error.raw_error.trim().is_empty() {
+                &record.latest_error.title
+            } else {
+                &record.latest_error.raw_error
+            };
+            let mut message = make_ui_only_error_message(diagnostic);
+            message.extra.insert(
+                "error_info".into(),
+                serde_json::to_value(&record.latest_error).expect("recovery error is serializable"),
+            );
+            message.extra.insert(
+                "recovery_operation_id".into(),
+                serde_json::json!(record.operation_id),
+            );
+            message
+                .extra
+                .insert("recovery_run_id".into(), serde_json::json!(record.run_id));
+            message.extra.insert("recovery_record".into(), value);
+            self.add_message(message);
+        }
     }
 
     pub fn update_recovery(&mut self, recovery: Option<refact_core::recovery::RecoveryRecord>) {
+        if let Some(record) = &recovery {
+            self.stamp_recovery_record(record);
+        }
         self.runtime.recovery = recovery.clone();
         self.emit(ChatEvent::RecoveryUpdated {
             recovery,
@@ -4784,50 +4812,52 @@ impl ChatSession {
     /// messages in between, e.g. goal nudges), bump its `repeat_count` and
     /// emit `MessageUpdated` instead of appending another copy.
     pub fn append_error_message_deduped(&mut self, error: &str) {
-        const LOOKBACK_PAST_EVENTS: usize = 4;
-        let fresh = make_ui_only_error_message(error);
-        let fresh_text = fresh.content.content_text_only();
+        self.append_error_message(make_ui_only_error_message(error));
+    }
 
-        let mut candidate_idx: Option<usize> = None;
-        let mut events_skipped = 0usize;
-        for (idx, message) in self.messages.iter().enumerate().rev() {
-            match message.role.as_str() {
-                "event" if events_skipped < LOOKBACK_PAST_EVENTS => {
-                    events_skipped += 1;
-                }
-                "error" => {
-                    if message.content.content_text_only() == fresh_text {
-                        candidate_idx = Some(idx);
-                    }
-                    break;
-                }
-                _ => break,
-            }
-        }
-
-        if let Some(idx) = candidate_idx {
-            let updated = {
-                let message = &mut self.messages[idx];
-                let count = message
-                    .extra
-                    .get("repeat_count")
-                    .and_then(|value| value.as_u64())
-                    .unwrap_or(1);
+    pub(crate) fn error_artifact_fingerprint(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        for message in self
+            .messages
+            .iter()
+            .filter(|message| message.role == refact_chat_api::internal_roles::ERROR_ROLE)
+        {
+            message.message_id.hash(&mut hasher);
+            message.content.content_text_only().hash(&mut hasher);
+            for key in ["repeat_count", "recovery_run_id"] {
                 message
                     .extra
-                    .insert("repeat_count".to_string(), serde_json::json!(count + 1));
-                message.clone()
-            };
-            self.emit(ChatEvent::MessageUpdated {
-                message_id: updated.message_id.clone(),
-                message: updated,
-            });
-            self.increment_version();
-            self.touch();
-            return;
+                    .get(key)
+                    .map(|v| v.to_string())
+                    .hash(&mut hasher);
+            }
+            let record = message.extra.get("recovery_record");
+            for key in ["run_id", "revision", "state"] {
+                record
+                    .and_then(|record| record.get(key))
+                    .map(|v| v.to_string())
+                    .hash(&mut hasher);
+            }
         }
+        hasher.finish()
+    }
 
-        self.add_message(fresh);
+    pub fn append_error_message(&mut self, message: ChatMessage) {
+        let previous_len = self.messages.len();
+        let index =
+            refact_chat_api::diagnostics::append_error_message_deduped(&mut self.messages, message);
+        if index < previous_len {
+            let message = self.messages[index].clone();
+            self.increment_version();
+            self.emit(ChatEvent::MessageUpdated {
+                message_id: message.message_id.clone(),
+                message,
+            });
+            self.touch();
+        } else if let Some(message) = self.messages.pop() {
+            self.add_message(message);
+        }
     }
 
     pub fn finish_stream_with_error(&mut self, error: String) {
@@ -8980,6 +9010,79 @@ mod tests {
         session.clear_pending_tool_calls_for_interruption();
 
         assert!(session.messages[0].tool_calls.is_none());
+    }
+
+    #[test]
+    fn interruption_keeps_answered_tool_calls_across_error_messages() {
+        let mut session = make_session();
+        let tool_call = |id: &str| crate::call_validation::ChatToolCall {
+            id: id.to_string(),
+            index: Some(0),
+            tool_type: "function".to_string(),
+            function: crate::call_validation::ChatToolFunction {
+                name: "shell".to_string(),
+                arguments: "{}".to_string(),
+            },
+            extra_content: None,
+            started_at_ms: None,
+            completed_at_ms: None,
+        };
+        session.add_message(ChatMessage {
+            message_id: "assistant-with-tools".to_string(),
+            role: "assistant".to_string(),
+            tool_calls: Some(vec![tool_call("answered"), tool_call("pending")]),
+            ..Default::default()
+        });
+        session.append_error_message_deduped("goal cannot resume");
+        session.add_message(ChatMessage {
+            role: "tool".to_string(),
+            tool_call_id: "answered".to_string(),
+            content: ChatContent::SimpleText("done".to_string()),
+            ..Default::default()
+        });
+
+        session.clear_pending_tool_calls_for_interruption();
+
+        let retained: Vec<_> = session.messages[0]
+            .tool_calls
+            .as_ref()
+            .expect("answered tool call must survive the abort")
+            .iter()
+            .map(|call| call.id.as_str())
+            .collect();
+        assert_eq!(retained, vec!["answered"]);
+    }
+
+    #[test]
+    fn append_error_message_uses_add_message_bookkeeping() {
+        let mut session = make_session();
+        let mut rx = session.subscribe();
+        let version = session.trajectory_version;
+        let mut message = make_ui_only_error_message("disk full");
+        message.message_id.clear();
+
+        session.append_error_message(message);
+
+        assert_eq!(session.messages.len(), 1);
+        assert!(!session.messages[0].message_id.is_empty());
+        assert_eq!(session.trajectory_version, version + 1);
+        assert!(session.trajectory_dirty);
+        let mut added = None;
+        while let Ok(json) = rx.try_recv() {
+            let envelope: EventEnvelope = serde_json::from_str(&json).unwrap();
+            if let ChatEvent::MessageAdded {
+                message,
+                index,
+            } = envelope.event
+            {
+                added = Some((message.message_id, index));
+            }
+        }
+        assert_eq!(
+            added,
+            Some((session.messages[0].message_id.clone(), 0)),
+            "MessageAdded must carry the persisted id"
+        );
     }
 
     #[test]

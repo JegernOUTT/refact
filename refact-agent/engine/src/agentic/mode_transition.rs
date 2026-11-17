@@ -185,6 +185,7 @@ fn analysis_entries(metadata: &ConversationMetadata) -> Vec<AnalysisEntry<'_>> {
         .annotated_messages
         .iter()
         .enumerate()
+        .filter(|(_, (_, message))| !refact_chat_api::diagnostics::is_never_model_visible(message))
         .map(|(index, (id, message))| AnalysisEntry {
             id,
             message,
@@ -799,6 +800,28 @@ pub async fn assemble_new_chat<T: PathsAccess + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reconstruction_analysis_excludes_bare_errors_and_preserves_source_ids() {
+        let mut hidden = ChatMessage::new("assistant".into(), "UI_SECRET".into());
+        hidden
+            .extra
+            .insert("_ui_only".into(), serde_json::json!(true));
+        let messages = vec![
+            ChatMessage::new("error".into(), "ERROR_SECRET".into()),
+            hidden,
+            ChatMessage::new("user".into(), "question".into()),
+        ];
+        let metadata = extract_conversation_metadata(&messages);
+        let entries = analysis_entries(&metadata);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].id, "MSG_ID:2");
+        let text = render_annotated_messages(&entries, analysis_render_steps(0).next().unwrap());
+        assert!(!text.contains("ERROR_SECRET"));
+        assert!(!text.contains("UI_SECRET"));
+        assert!(text.contains("question"));
+    }
+
     use crate::call_validation::{ChatContent, ChatMessage, ContextFile};
 
     #[test]

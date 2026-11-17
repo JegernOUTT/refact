@@ -8,6 +8,8 @@ use refact_core::string_utils::{redact_sensitive, safe_truncate};
 
 use refact_core::chat_types::{ChatContent, ChatMessage};
 
+use crate::internal_roles::{ERROR_ROLE, EVENT_ROLE};
+
 const UI_ONLY_MARKER: &str = "_ui_only";
 pub const SAFE_PROVIDER_ERROR_DIAGNOSTIC_MAX_CHARS: usize = 2_000;
 pub const SAFE_PROVIDER_ERROR_DIAGNOSTIC_TRUNCATED: &str = "\n...[truncated]";
@@ -17,10 +19,52 @@ pub fn is_ui_only_message(msg: &ChatMessage) -> bool {
     msg.extra.get(UI_ONLY_MARKER).and_then(|v| v.as_bool()) == Some(true)
 }
 
+pub use refact_core::chat_types::is_never_model_visible;
+
+pub fn append_error_message_deduped(
+    messages: &mut Vec<ChatMessage>,
+    message: ChatMessage,
+) -> usize {
+    if message.role == ERROR_ROLE {
+        let mut skipped_events = 0;
+        for index in (0..messages.len()).rev() {
+            let previous = &mut messages[index];
+            if previous.role == EVENT_ROLE && skipped_events < 4 {
+                skipped_events += 1;
+                continue;
+            }
+            if previous.role == ERROR_ROLE
+                && previous.content == message.content
+                && previous.extra.get("recovery_operation_id")
+                    == message.extra.get("recovery_operation_id")
+            {
+                let count = previous
+                    .extra
+                    .get("repeat_count")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(1);
+                previous
+                    .extra
+                    .insert("repeat_count".into(), json!(count.saturating_add(1)));
+                if let Some(run_id) = message.extra.get("recovery_run_id") {
+                    previous
+                        .extra
+                        .insert("recovery_run_id".into(), run_id.clone());
+                }
+                return index;
+            }
+            break;
+        }
+    }
+    let index = messages.len();
+    messages.push(message);
+    index
+}
+
 pub fn filter_ui_only_messages(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
     messages
         .into_iter()
-        .filter(|message| !is_ui_only_message(message))
+        .filter(|message| !is_never_model_visible(message))
         .collect()
 }
 
@@ -136,7 +180,7 @@ pub fn make_ui_only_error_message(error: &str) -> ChatMessage {
 
     ChatMessage {
         message_id: Uuid::new_v4().to_string(),
-        role: "error".to_string(),
+        role: ERROR_ROLE.to_string(),
         content: ChatContent::SimpleText(redacted_error),
         extra,
         ..Default::default()
@@ -184,7 +228,7 @@ pub fn make_ui_only_retry_status_message(
 
     ChatMessage {
         message_id: Uuid::new_v4().to_string(),
-        role: "error".to_string(),
+        role: ERROR_ROLE.to_string(),
         content: ChatContent::SimpleText(summary),
         extra,
         ..Default::default()
@@ -194,6 +238,89 @@ pub fn make_ui_only_retry_status_message(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn error_role_is_never_model_visible_without_ui_marker() {
+        let error = ChatMessage::new(ERROR_ROLE.into(), "legacy failure".into());
+        assert!(!is_ui_only_message(&error));
+        assert!(is_never_model_visible(&error));
+        assert!(filter_ui_only_messages(vec![error]).is_empty());
+        assert!(!is_never_model_visible(&ChatMessage::new(
+            "user".into(),
+            "ok".into()
+        )));
+    }
+
+    fn operation_error(text: &str, operation: &str, run: &str) -> ChatMessage {
+        let mut message = make_ui_only_error_message(text);
+        message
+            .extra
+            .insert("recovery_operation_id".into(), json!(operation));
+        message.extra.insert("recovery_run_id".into(), json!(run));
+        message
+    }
+
+    #[test]
+    fn error_dedupe_keeps_identity_across_four_events_and_refreshes_run() {
+        let first = operation_error("failed", "op", "run-1");
+        let id = first.message_id.clone();
+        let mut messages = vec![first];
+        for _ in 0..4 {
+            messages.push(ChatMessage::new(EVENT_ROLE.into(), "notice".into()));
+        }
+        assert_eq!(
+            append_error_message_deduped(&mut messages, operation_error("failed", "op", "run-2")),
+            0
+        );
+        assert_eq!(messages.len(), 5);
+        assert_eq!(messages[0].message_id, id);
+        assert_eq!(messages[0].extra["repeat_count"], json!(2));
+        assert_eq!(messages[0].extra["recovery_run_id"], json!("run-2"));
+    }
+
+    #[test]
+    fn error_dedupe_stops_at_barriers_different_content_or_operation_and_five_events() {
+        for barrier in ["user", "assistant", "tool", "plan"] {
+            let mut messages = vec![
+                operation_error("failed", "op", "run-1"),
+                ChatMessage::new(barrier.into(), "barrier".into()),
+            ];
+            assert_eq!(
+                append_error_message_deduped(
+                    &mut messages,
+                    operation_error("failed", "op", "run-2")
+                ),
+                2
+            );
+        }
+        for incoming in [
+            operation_error("other", "op", "run-2"),
+            operation_error("failed", "other", "run-2"),
+        ] {
+            let mut messages = vec![operation_error("failed", "op", "run-1")];
+            assert_eq!(append_error_message_deduped(&mut messages, incoming), 1);
+        }
+        let mut messages = vec![
+            operation_error("failed", "op", "run-1"),
+            operation_error("different", "op", "run-1"),
+        ];
+        assert_eq!(
+            append_error_message_deduped(&mut messages, operation_error("failed", "op", "run-2")),
+            2
+        );
+        let mut messages = vec![make_ui_only_error_message("failed")];
+        assert_eq!(
+            append_error_message_deduped(&mut messages, make_ui_only_error_message("failed")),
+            0
+        );
+        for _ in 0..5 {
+            messages.push(ChatMessage::new(EVENT_ROLE.into(), "notice".into()));
+        }
+        assert_eq!(
+            append_error_message_deduped(&mut messages, make_ui_only_error_message("failed")),
+            6
+        );
+    }
 
     fn error_info_raw_error(message: &ChatMessage) -> &str {
         message

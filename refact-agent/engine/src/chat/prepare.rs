@@ -20,7 +20,7 @@ use refact_tool_api::{build_registry_from_names, ToolAliasRegistry, ToolDesc};
 use super::tools::execute_tools;
 use super::types::ThreadParams;
 
-use super::diagnostics::filter_ui_only_messages;
+use refact_chat_api::diagnostics::is_never_model_visible;
 use super::history_limit::fix_and_limit_messages_history;
 use super::linearize::apply_summarization_linearize;
 use super::prompts::prepend_the_right_system_prompt_and_maybe_more_initial_messages;
@@ -202,13 +202,6 @@ fn detach_trailing_review_context(messages: &mut Vec<ChatMessage>) -> Vec<ChatMe
     messages.split_off(review_context_tail_start(messages))
 }
 
-fn remove_visualization_only_messages(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
-    messages
-        .into_iter()
-        .filter(|message| !matches!(message.role.as_str(), "error" | COMPRESSION_REPORT_ROLE))
-        .collect()
-}
-
 pub struct PreparedChat {
     pub llm_request: LlmRequest,
     pub limited_messages: Vec<ChatMessage>,
@@ -364,8 +357,12 @@ pub async fn prepare_chat_passthrough(
     // Boundary projection must precede UI filtering, enrichment, and provider conversion.
     let messages = apply_summarization_linearize(messages)?;
     let mut has_rag_results = HasRagResults::new();
-    let messages = filter_ui_only_messages(messages);
-    let messages = remove_visualization_only_messages(messages);
+    let messages = messages
+        .into_iter()
+        .filter(|message| {
+            !is_never_model_visible(message) && message.role != COMPRESSION_REPORT_ROLE
+        })
+        .collect();
     let tool_names: HashSet<String> = tools.iter().map(|x| x.name.clone()).collect();
 
     // 1. Resolve model early to get reasoning params before history limiting

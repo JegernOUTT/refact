@@ -157,53 +157,14 @@ impl Tool for ToolTrajectoryContext {
         ));
         output.push_str("╰──────────────────────────────────────╯\n\n");
 
-        for (i, msg) in messages.iter().enumerate() {
-            if i < actual_start || i > actual_end {
-                continue;
-            }
-
-            let role = msg
-                .get("role")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown");
-            if matches!(
-                role,
-                "context_file" | "cd_instruction" | "compression_report" | "system"
-            ) {
-                continue;
-            }
-
-            let content_text = extract_content(msg);
-            if content_text.trim().is_empty() {
-                continue;
-            }
-
-            let is_highlighted = i >= msg_start && i <= msg_end;
-            let role_icon = match role {
-                "user" => "👤",
-                "assistant" => "🤖",
-                "tool" => "🔧",
-                _ => "💬",
-            };
-
-            if is_highlighted {
-                output.push_str(&format!(
-                    "┏━ {} [{}] {} ━━━━━━━━━━━━━━━━━━━━━━━\n",
-                    role_icon,
-                    i,
-                    role.to_uppercase()
-                ));
-            } else {
-                output.push_str(&format!(
-                    "┌─ {} [{}] {} ─────────────────────────\n",
-                    role_icon,
-                    i,
-                    role.to_uppercase()
-                ));
-            }
-            output.push_str(&content_text);
-            output.push_str("\n\n");
-        }
+        render_messages(
+            &mut output,
+            messages,
+            actual_start,
+            actual_end,
+            msg_start,
+            msg_end,
+        );
 
         Ok((
             false,
@@ -262,4 +223,86 @@ fn extract_content(msg: &Value) -> String {
     }
 
     String::new()
+}
+
+fn render_messages(
+    output: &mut String,
+    messages: &[Value],
+    actual_start: usize,
+    actual_end: usize,
+    msg_start: usize,
+    msg_end: usize,
+) {
+    for (i, msg) in messages.iter().enumerate() {
+        if i < actual_start || i > actual_end {
+            continue;
+        }
+
+        let role = msg
+            .get("role")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+        if msg
+            .as_object()
+            .is_some_and(|extra| refact_core::chat_types::is_never_model_visible_parts(role, extra))
+        {
+            continue;
+        }
+        if matches!(
+            role,
+            "context_file" | "cd_instruction" | "compression_report" | "system"
+        ) {
+            continue;
+        }
+
+        let content_text = extract_content(msg);
+        if content_text.trim().is_empty() {
+            continue;
+        }
+
+        let is_highlighted = i >= msg_start && i <= msg_end;
+        let role_icon = match role {
+            "user" => "👤",
+            "assistant" => "🤖",
+            "tool" => "🔧",
+            _ => "💬",
+        };
+
+        if is_highlighted {
+            output.push_str(&format!(
+                "┏━ {} [{}] {} ━━━━━━━━━━━━━━━━━━━━━━━\n",
+                role_icon,
+                i,
+                role.to_uppercase()
+            ));
+        } else {
+            output.push_str(&format!(
+                "┌─ {} [{}] {} ─────────────────────────\n",
+                role_icon,
+                i,
+                role.to_uppercase()
+            ));
+        }
+        output.push_str(&content_text);
+        output.push_str("\n\n");
+    }
+}
+
+#[cfg(test)]
+mod visibility_tests {
+    use super::*;
+    #[test]
+    fn trajectory_render_excludes_never_visible_and_preserves_indices() {
+        let messages = serde_json::json!([
+            {"role":"user","content":"visible"},
+            {"role":"error","content":"secret error"},
+            {"role":"assistant","content":"secret partial","_ui_only":true},
+            {"role":"assistant","content":"answer"}
+        ]);
+        let mut output = String::new();
+        render_messages(&mut output, messages.as_array().unwrap(), 0, 3, 0, 3);
+        assert!(output.contains("[0] USER"));
+        assert!(output.contains("[3] ASSISTANT"));
+        assert!(!output.contains("secret"));
+    }
 }

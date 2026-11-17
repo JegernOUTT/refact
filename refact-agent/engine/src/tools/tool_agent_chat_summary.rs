@@ -111,6 +111,7 @@ fn render_message_block(index: usize, message: &ChatMessage) -> String {
 fn linearize_transcript(messages: &[ChatMessage]) -> String {
     let blocks = messages
         .iter()
+        .filter(|message| !refact_chat_api::diagnostics::is_never_model_visible(message))
         .enumerate()
         .map(|(index, message)| render_message_block(index, message))
         .collect::<Vec<_>>();
@@ -538,6 +539,24 @@ impl Tool for ToolAgentChatSummary {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn summary_transcript_excludes_bare_errors_and_ui_only_messages() {
+        let mut hidden = ChatMessage::new("assistant".into(), "UI_SECRET".into());
+        hidden.extra.insert("_ui_only".into(), json!(true));
+        let messages = vec![
+            ChatMessage::new("user".into(), "question".into()),
+            ChatMessage::new("error".into(), "ERROR_SECRET".into()),
+            hidden,
+            ChatMessage::new("tool".into(), "ordinary tool failure".into()),
+        ];
+        let prompt = build_summary_prompt(None, &linearize_transcript(&messages));
+        assert!(!prompt.contains("ERROR_SECRET"));
+        assert!(!prompt.contains("UI_SECRET"));
+        assert!(prompt.contains("question"));
+        assert!(prompt.contains("ordinary tool failure"));
+    }
+
     use crate::app_state::AppState;
     use crate::chat::types::TaskMeta as ThreadTaskMeta;
     use crate::tasks::types::{BoardCard, TaskBoard, TaskMeta, TaskStatus};

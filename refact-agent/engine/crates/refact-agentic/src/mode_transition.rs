@@ -213,6 +213,9 @@ pub fn extract_conversation_metadata(messages: &[ChatMessage]) -> ConversationMe
         metadata
             .annotated_messages
             .push((msg_id.clone(), msg.clone()));
+        if refact_core::chat_types::is_never_model_visible(msg) {
+            continue;
+        }
 
         if msg.role == "context_file" {
             match &msg.content {
@@ -629,6 +632,9 @@ pub fn format_annotated_messages(metadata: &ConversationMetadata) -> String {
     }
 
     for (msg_id, msg) in &metadata.annotated_messages {
+        if refact_core::chat_types::is_never_model_visible(msg) {
+            continue;
+        }
         // Surface which tool produced a `tool` result (e.g. `tool: plan`) so the
         // analysis model can pick the right plan-like artifact to pin.
         let role = if msg.role == "tool" {
@@ -837,6 +843,9 @@ fn resolve_tool_name_for_output(metadata: &ConversationMetadata, tool_call_id: &
 }
 
 fn format_conversation_entry(msg: &ChatMessage, metadata: &ConversationMetadata) -> String {
+    if refact_core::chat_types::is_never_model_visible(msg) {
+        return String::new();
+    }
     match msg.role.as_str() {
         "user" => {
             let text = extract_text_content(&msg.content);
@@ -1703,6 +1712,9 @@ async fn assemble_with_budget(
     let mut preserved_images: Vec<MultimodalElement> = Vec::new();
     for idx in &all_indices {
         if let Some((_, msg)) = metadata.annotated_messages.get(*idx) {
+            if refact_core::chat_types::is_never_model_visible(msg) {
+                continue;
+            }
             let formatted = format_conversation_entry(msg, &metadata);
             let framing_symbols = if conversation_parts.is_empty() {
                 text_symbols("## Previous Conversation\n\n")
@@ -1914,6 +1926,30 @@ async fn read_file_content_safe(path: &str, workspace_dirs: &[PathBuf]) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reconstruction_rendering_excludes_hidden_messages_without_reindexing() {
+        let mut hidden = ChatMessage::new("assistant".into(), "UI_SECRET".into());
+        hidden
+            .extra
+            .insert("_ui_only".into(), serde_json::json!(true));
+        let messages = vec![
+            ChatMessage::new("error".into(), "ERROR_SECRET".into()),
+            hidden,
+            ChatMessage::new("user".into(), "question".into()),
+        ];
+        let metadata = extract_conversation_metadata(&messages);
+        assert_eq!(metadata.annotated_messages.len(), 3);
+        assert_eq!(metadata.annotated_messages[2].0, "MSG_ID:2");
+        let text = format_annotated_messages(&metadata);
+        assert!(!text.contains("ERROR_SECRET"));
+        assert!(!text.contains("UI_SECRET"));
+        assert!(text.contains("question"));
+        assert!(format_conversation_entry(&messages[0], &metadata).is_empty());
+        assert!(format_conversation_entry(&messages[1], &metadata).is_empty());
+        assert!(format_conversation_entry(&messages[2], &metadata).contains("question"));
+    }
+
     use refact_core::chat_types::{ChatToolCall, ChatToolFunction, ContextFile};
 
     #[test]

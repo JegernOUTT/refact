@@ -263,7 +263,8 @@ fn visible_excerpt(message: &ChatMessage) -> Option<String> {
     if !matches!(
         message.role.as_str(),
         "user" | "assistant" | "tool" | "diff" | "context_file" | "goal" | "plan"
-    ) || message.extra.contains_key("privacy_shell")
+    ) || refact_core::chat_types::is_never_model_visible(message)
+        || message.extra.contains_key("privacy_shell")
         || message
             .extra
             .get("ui_only")
@@ -361,7 +362,10 @@ pub async fn prepare_context(
     let records = crate::privacy::records::records_to_carry(&history).map_err(|e| e.to_string())?;
     history = history
         .into_iter()
-        .filter(|m| matches!(m.role.as_str(), "user" | "assistant"))
+        .filter(|m| {
+            matches!(m.role.as_str(), "user" | "assistant")
+                && !refact_core::chat_types::is_never_model_visible(m)
+        })
         .map(|m| {
             let mut clean = ChatMessage::new(m.role, m.content.content_text_only());
             crate::privacy::records::merge_records(&mut clean, records.clone());
@@ -375,6 +379,55 @@ pub async fn prepare_context(
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn companion_prompt_excludes_error_and_ui_only_history() {
+        let root = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![root.path().to_path_buf()];
+        let app = AppState::from_gcx(gcx.clone()).await;
+        let snapshot = TrajectorySnapshot::from_thread_parts(
+            "diagnostic-source".into(),
+            &ThreadParams::default(),
+            vec![ChatMessage::new("user".into(), "public".into())],
+            "original".into(),
+            1,
+        );
+        crate::chat::trajectories::save_trajectory_snapshot(gcx.clone(), snapshot)
+            .await
+            .unwrap();
+        let companion = get_or_create(app, "diagnostic-source").await.unwrap();
+        let loaded =
+            crate::chat::trajectories::load_trajectory_for_chat(gcx.clone(), &companion.chat_id)
+                .await
+                .unwrap();
+        let error = ChatMessage::new("error".into(), "HIDDEN_ERROR".into());
+        let mut partial = ChatMessage::new("assistant".into(), "HIDDEN_PARTIAL".into());
+        partial
+            .extra
+            .insert("_ui_only".into(), serde_json::json!(true));
+        assert!(visible_excerpt(&error).is_none());
+        assert!(visible_excerpt(&partial).is_none());
+        let messages = prepare_context(
+            gcx,
+            &companion.chat_id,
+            &loaded.thread,
+            vec![
+                ChatMessage::new("user".into(), "question".into()),
+                error,
+                partial,
+                ChatMessage::new("assistant".into(), "answer".into()),
+            ],
+        )
+        .await
+        .unwrap();
+        assert_eq!(messages.len(), 4);
+        assert_eq!(messages[2].content.content_text_only(), "question");
+        assert_eq!(messages[3].content.content_text_only(), "answer");
+        assert!(!serde_json::to_string(&messages)
+            .unwrap()
+            .contains("HIDDEN_"));
+    }
+
     use super::*;
     use refact_privacy::{Attribution, FileRecord};
 

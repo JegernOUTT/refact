@@ -6,6 +6,9 @@ use refact_core::chat_types::{ChatContent, ChatMessage, ContextFile};
 use refact_core::provider_types::ImageTokenMode;
 use refact_core::string_utils::redact_sensitive;
 
+use refact_chat_api::diagnostics::is_never_model_visible;
+use refact_chat_api::internal_roles::ERROR_ROLE;
+
 use crate::compression_exemption::{exemption_for, CompressionExemption};
 
 const UI_ONLY_MARKER: &str = "_ui_only";
@@ -18,6 +21,22 @@ pub fn is_ui_only_message(msg: &ChatMessage) -> bool {
 pub fn demote_goal_ownership_for_branch(msgs: &mut [ChatMessage]) {
     for msg in msgs.iter_mut() {
         transform_report_payload(msg, |nested| demote_goal_ownership_for_branch(nested));
+        if msg.role == ERROR_ROLE {
+            if let Some(value) = msg.extra.get_mut("recovery_record") {
+                if let Ok(mut record) =
+                    serde_json::from_value::<refact_chat_api::RecoveryRecord>(value.clone())
+                {
+                    if matches!(
+                        record.state,
+                        refact_core::recovery::RecoveryState::Waiting
+                            | refact_core::recovery::RecoveryState::Attempting
+                    ) {
+                        record.interrupt_on_reload();
+                        *value = serde_json::to_value(record).expect("recovery record serializes");
+                    }
+                }
+            }
+        }
         if msg.role != "goal" {
             continue;
         }
@@ -43,7 +62,7 @@ pub fn demote_goal_ownership_for_branch(msgs: &mut [ChatMessage]) {
 }
 
 pub fn sanitize_message_for_new_thread(m: &ChatMessage) -> ChatMessage {
-    let extra = if is_ui_only_message(m) {
+    let extra = if m.role == ERROR_ROLE || is_ui_only_message(m) {
         m.extra.clone()
     } else {
         preserve_hidden_role_extra(m)
@@ -106,6 +125,7 @@ fn transform_report_payload(msg: &mut ChatMessage, transform: impl FnOnce(&mut V
 
 fn preserve_hidden_role_extra(msg: &ChatMessage) -> serde_json::Map<String, serde_json::Value> {
     let mut extra = match msg.role.as_str() {
+        ERROR_ROLE => msg.extra.clone(),
         "plan" => preserve_extra_key(&msg.extra, "plan"),
         "goal" => preserve_extra_key(&msg.extra, "goal"),
         "event" => preserve_extra_key(&msg.extra, "event"),
@@ -151,7 +171,7 @@ fn preserve_extra_key(
 
 pub fn sanitize_messages_for_new_thread(msgs: &[ChatMessage]) -> Vec<ChatMessage> {
     msgs.iter()
-        .filter(|msg| !is_ui_only_message(msg))
+        .filter(|msg| !is_never_model_visible(msg))
         .map(sanitize_message_for_new_thread)
         .collect()
 }
@@ -202,7 +222,7 @@ fn sanitize_model_switch_with_ids(
     msgs: &mut Vec<ChatMessage>,
     id_mapping: &HashMap<String, String>,
 ) {
-    msgs.retain(|msg| !is_ui_only_message(msg));
+    msgs.retain(|msg| msg.role == ERROR_ROLE || !is_ui_only_message(msg));
 
     for msg in msgs.iter_mut() {
         msg.thinking_blocks = None;
@@ -1069,7 +1089,7 @@ fn compress_active_messages_in_place(
     crate::history_limit::remove_invalid_tool_calls_and_tool_calls_results(messages);
 
     if opts.strip_metering {
-        messages.retain(|msg| !is_ui_only_message(msg));
+        messages.retain(|msg| msg.role == ERROR_ROLE || !is_ui_only_message(msg));
         for msg in messages.iter_mut() {
             msg.usage = None;
             msg.extra = preserve_hidden_role_extra(msg);
@@ -1187,6 +1207,102 @@ mod tests {
         assert!(is_valid_tool_id(&active.messages[2].tool_call_id));
         let clean = sanitize_messages_for_new_thread(&messages);
         assert!(refact_core::active_context::active_context(&clean).is_ok());
+    }
+
+    fn persisted_error() -> ChatMessage {
+        let mut error = refact_chat_api::diagnostics::make_ui_only_error_message("failure");
+        error
+            .extra
+            .insert("repeat_count".into(), serde_json::json!(3));
+        error
+            .extra
+            .insert("recovery_operation_id".into(), serde_json::json!("op"));
+        error
+            .extra
+            .insert("recovery_run_id".into(), serde_json::json!("run"));
+        error.extra.insert(
+            "recovery_record".into(),
+            serde_json::json!({
+                "operation_id": "op", "run_id": "run", "revision": 4,
+                "state": "waiting", "policy": refact_core::recovery::RecoveryPolicy::default(),
+                "policy_source": "thread", "manual": false, "retries_used": 1,
+                "latest_error": error.extra["error_info"], "next_retry_at_ms": 123,
+                "deadline_at_ms": 456, "terminal_reason": null, "attempts": []
+            }),
+        );
+        error
+    }
+
+    #[test]
+    fn error_extra_survives_model_switch_and_strip_metering_but_not_new_thread_context() {
+        let error = persisted_error();
+        let mut messages = vec![
+            make_user_msg("q"),
+            error.clone(),
+            make_ui_only_msg("ephemeral"),
+        ];
+        sanitize_messages_for_model_switch(&mut messages);
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[1].extra, error.extra);
+        assert_eq!(messages[1].message_id, error.message_id);
+        compress_in_place(
+            &mut messages,
+            &CompressOptions {
+                strip_metering: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[1].extra, error.extra);
+        let context = sanitize_messages_for_new_thread(&messages);
+        assert_eq!(context.len(), 1);
+        assert_eq!(context[0].role, "user");
+        assert_eq!(sanitize_message_for_new_thread(&error).extra, error.extra);
+        let mut legacy = error.clone();
+        legacy.extra.remove(UI_ONLY_MARKER);
+        let mut messages = vec![legacy.clone()];
+        sanitize_messages_for_model_switch(&mut messages);
+        compress_in_place(
+            &mut messages,
+            &CompressOptions {
+                strip_metering: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(messages[0].extra, legacy.extra);
+        assert!(sanitize_messages_for_new_thread(&messages).is_empty());
+    }
+
+    #[test]
+    fn branch_normalizes_inflight_error_records_including_nested_payloads() {
+        for state in ["waiting", "attempting"] {
+            let mut error = persisted_error();
+            error.extra.get_mut("recovery_record").unwrap()["state"] = serde_json::json!(state);
+            let mut report = reconstruction(vec![make_user_msg("context")]);
+            report.extra.get_mut("compression_report").unwrap()["payload"]["messages"] =
+                serde_json::json!([error]);
+            let mut messages = vec![error.clone(), report];
+            demote_goal_ownership_for_branch(&mut messages);
+            let nested = &messages[1].extra["compression_report"]["payload"]["messages"][0];
+            for value in [serde_json::to_value(&messages[0]).unwrap(), nested.clone()] {
+                assert_eq!(value["recovery_record"]["state"], "needs_action");
+                assert_eq!(value["recovery_record"]["revision"], 5);
+                assert_eq!(
+                    value["recovery_record"]["next_retry_at_ms"],
+                    serde_json::Value::Null
+                );
+                assert_eq!(value["recovery_record"]["terminal_reason"], "interrupted");
+                assert_eq!(value["repeat_count"], 3);
+            }
+        }
+        let mut error = persisted_error();
+        error.extra.get_mut("recovery_record").unwrap()["state"] = serde_json::json!("succeeded");
+        let original = error.extra.clone();
+        let mut messages = vec![error];
+        demote_goal_ownership_for_branch(&mut messages);
+        assert_eq!(messages[0].extra, original);
     }
 
     fn make_user_msg(content: &str) -> ChatMessage {
@@ -1534,7 +1650,7 @@ mod tests {
         let mut extra = serde_json::Map::new();
         extra.insert(UI_ONLY_MARKER.to_string(), serde_json::Value::Bool(true));
         ChatMessage {
-            role: "error".to_string(),
+            role: "assistant".to_string(),
             content: ChatContent::SimpleText(content.to_string()),
             extra,
             ..Default::default()

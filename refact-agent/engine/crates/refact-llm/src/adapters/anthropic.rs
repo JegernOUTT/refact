@@ -555,7 +555,7 @@ fn convert_to_anthropic(
     let normalized_messages = normalize_tool_results_after_assistant(messages);
 
     for msg in normalized_messages.iter() {
-        if msg.extra.get("_ui_only").and_then(Value::as_bool) == Some(true) {
+        if refact_core::chat_types::is_never_model_visible(msg) {
             continue;
         }
         let projected = refact_core::edit_results::project_edit_result(msg);

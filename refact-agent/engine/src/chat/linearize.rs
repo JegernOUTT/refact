@@ -1,5 +1,5 @@
 use crate::call_validation::ChatMessage;
-use crate::chat::diagnostics::is_ui_only_message;
+use refact_chat_api::diagnostics::is_never_model_visible;
 use refact_core::active_context::active_context;
 use std::collections::HashSet;
 
@@ -64,10 +64,10 @@ pub fn apply_summarization_linearize(
         .messages
         .into_iter()
         .filter(|message| {
-            !is_ui_only_message(message)
+            !is_never_model_visible(message)
                 && !matches!(
                     message.role.as_str(),
-                    "summarization" | "compression_report" | "error"
+                    "summarization" | "compression_report"
                 )
                 && !is_wire_suppressed_goal_pursuit(message)
                 && !(message.role == "cd_instruction"
@@ -99,6 +99,32 @@ fn detach_orphaned_context_files(messages: &mut [ChatMessage]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bare_errors_before_reconstruction_and_in_suffix_never_reach_wire() {
+        use refact_core::active_context::{make_reconstruction_report, ReconstructionMetadata};
+        assert!(make_reconstruction_report(
+            vec![message("error", "REBUILT_ERROR_SECRET")],
+            ReconstructionMetadata::default(),
+        )
+        .is_err());
+        let boundary = make_reconstruction_report(
+            vec![message("user", "question")],
+            ReconstructionMetadata::default(),
+        )
+        .unwrap();
+        let stored = vec![
+            message("error", "ARCHIVED_ERROR_SECRET"),
+            boundary,
+            message("error", "TAIL_ERROR_SECRET"),
+        ];
+        let before = serde_json::to_vec(&stored).unwrap();
+        let wire = apply_summarization_linearize(stored.clone()).unwrap();
+        assert_eq!(wire.len(), 1);
+        assert_eq!(wire[0].content.content_text_only(), "question");
+        assert_eq!(serde_json::to_vec(&stored).unwrap(), before);
+    }
+
     use refact_core::chat_types::ChatContent;
     use serde_json::json;
 

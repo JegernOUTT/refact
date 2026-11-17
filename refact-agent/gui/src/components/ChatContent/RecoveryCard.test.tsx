@@ -153,6 +153,28 @@ describe("RecoveryCard", () => {
     fireEvent.focus(copy);
     expect(await screen.findByRole("tooltip")).toHaveTextContent("Copy errors");
   });
+  it("shows each episode error once with its repeat count", () => {
+    render(
+      <RecoveryCard
+        chatId="chat"
+        recovery={recovery}
+        errors={[
+          { role: "error", content: "offline", repeat_count: 2 },
+          { role: "error", content: "rate limited", repeat_count: 4 },
+          { role: "error", content: "offline" },
+        ]}
+      />,
+    );
+    const alert = screen.getByRole("alert");
+    expect(alert.children).toHaveLength(2);
+    expect(screen.getAllByText("offline")).toHaveLength(1);
+    expect(
+      screen.getByLabelText("Repeated 4 times").parentElement,
+    ).toHaveTextContent("rate limited×4");
+    expect(alert.children[0]).toHaveTextContent("offline×3");
+    fireEvent.click(screen.getByRole("button", { name: "Copy errors" }));
+    expect(mocks.copy).toHaveBeenCalledWith("offline\n\nrate limited");
+  });
   it("keeps labeled options and restores disclosure focus when switching panels", () => {
     render(<RecoveryCard chatId="chat" recovery={recovery} />);
     const options = screen.getByRole("button", { name: "Options" });

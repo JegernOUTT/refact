@@ -214,7 +214,7 @@ fn convert_messages_to_ollama(messages: &[ChatMessage]) -> Vec<Value> {
     // history tool_calls include matching IDs when available. Tool-result images are deferred
     // to the next user message because Ollama expects images on user messages.
     for msg in messages {
-        if msg.extra.get("_ui_only").and_then(Value::as_bool) == Some(true) {
+        if refact_core::chat_types::is_never_model_visible(msg) {
             continue;
         }
         let projected = refact_core::edit_results::project_edit_result(msg);

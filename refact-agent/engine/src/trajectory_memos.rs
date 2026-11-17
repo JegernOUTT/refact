@@ -1214,6 +1214,11 @@ fn build_chat_messages(messages: &[Value]) -> Vec<ChatMessage> {
         .iter()
         .filter_map(|msg| {
             let role = msg.get("role").and_then(|v| v.as_str())?;
+            if msg.as_object().is_some_and(|extra| {
+                refact_core::chat_types::is_never_model_visible_parts(role, extra)
+            }) {
+                return None;
+            }
             if role != "user" && role != "assistant" {
                 return None;
             }
@@ -1611,6 +1616,23 @@ fn candidate_hash(parts: &[&str]) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn memo_inputs_exclude_error_roles_and_ui_only_turns() {
+        let messages = super::build_chat_messages(&[
+            serde_json::json!({"role":"user", "content":"question"}),
+            serde_json::json!({"role":"error", "content":"provider diagnostic"}),
+            serde_json::json!({"role":"assistant", "content":"partial diagnostic", "_ui_only":true}),
+            serde_json::json!({"role":"assistant", "content":"answer"}),
+        ]);
+        assert_eq!(
+            messages
+                .iter()
+                .map(|message| (message.role.as_str(), message.content.content_text_only()))
+                .collect::<Vec<_>>(),
+            vec![("user", "question".into()), ("assistant", "answer".into())]
+        );
+    }
+
     use std::collections::VecDeque;
     use std::sync::atomic::{AtomicUsize, Ordering};
 

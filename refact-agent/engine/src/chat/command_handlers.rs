@@ -758,6 +758,11 @@ async fn handle_retry_from_index(
     let app = context.app.clone();
     let session_arc = context.session_arc.clone();
     let mut session = session_arc.lock().await;
+    if session.runtime.recovery.is_some() {
+        session.archive_recovery();
+        session.update_recovery(None);
+    }
+    session.recovery_budget = None;
     session.truncate_messages(index);
     let parsed_content = parse_content_with_attachments(&content, &attachments);
     let user_message = ChatMessage {
@@ -775,14 +780,6 @@ async fn handle_retry_from_index(
         session_arc.clone(),
         TrajectoryCommitIntent::Checkpoint,
     );
-    {
-        let mut session = session_arc.lock().await;
-        if session.runtime.recovery.is_some() {
-            session.archive_recovery();
-            session.update_recovery(None);
-        }
-        session.recovery_budget = None;
-    }
     context.release_board_operation().await;
     prepare_session_preamble_and_knowledge(app.clone(), session_arc.clone()).await;
     if aborted_before_start_generation(&session_arc).await {
@@ -1244,6 +1241,7 @@ async fn handle_clean_background_processes(
         Err(error) => {
             warn!("CleanBackgroundProcesses failed: {}", error);
             let mut session = session_arc.lock().await;
+            session.append_error_message_deduped(&error);
             let compression_phase = session.compression_phase;
             let compression_reason = session.compression_reason;
             let event = session.runtime_update_event(
@@ -1946,6 +1944,11 @@ async fn handle_browser_context_decision(
 
     {
         let mut session = session_arc.lock().await;
+        if session.runtime.recovery.is_some() {
+            session.archive_recovery();
+            session.update_recovery(None);
+        }
+        session.recovery_budget = None;
 
         if let Some(target) = session
             .queued_user_merge_targets
@@ -2013,14 +2016,6 @@ async fn handle_browser_context_decision(
         session_arc.clone(),
         TrajectoryCommitIntent::Checkpoint,
     );
-    {
-        let mut session = session_arc.lock().await;
-        if session.runtime.recovery.is_some() {
-            session.archive_recovery();
-            session.update_recovery(None);
-        }
-        session.recovery_budget = None;
-    }
     context.release_board_operation().await;
     prepare_session_preamble_and_knowledge(app.clone(), session_arc.clone()).await;
     if aborted_before_start_generation(&session_arc).await {
@@ -2258,18 +2253,10 @@ async fn handle_user_message(
     if !Box::pin(handle_oversized_browser_context(context, &prepared)).await {
         return QueueCommandOutcome::Continue;
     }
-    if !Box::pin(add_user_messages(context, prepared)).await {
-        return QueueCommandOutcome::Continue;
-    }
     let app = context.app.clone();
     let session_arc = context.session_arc.clone();
-    {
-        let mut session = session_arc.lock().await;
-        if session.runtime.recovery.is_some() {
-            session.archive_recovery();
-            session.update_recovery(None);
-        }
-        session.recovery_budget = None;
+    if !Box::pin(add_user_messages(context, prepared)).await {
+        return QueueCommandOutcome::Continue;
     }
     context.release_board_operation().await;
     prepare_session_preamble_and_knowledge(app.clone(), session_arc.clone()).await;
@@ -2446,6 +2433,7 @@ async fn prepare_user_message(
         }
         let compression_phase = session.compression_phase;
         let compression_reason = session.compression_reason;
+        session.append_error_message_deduped(&format!("Message blocked by hook: {}", reason));
         let event = session.runtime_update_event(
             types::SessionState::Error,
             Some(format!("Message blocked by hook: {}", reason)),
@@ -2585,10 +2573,9 @@ async fn handle_oversized_browser_context(
                     let mut session = session_arc.lock().await;
                     session.pending_browser_message = None;
                     session.mark_persisted_runtime_changed();
-                    session.set_runtime_state(
-                    SessionState::Error,
-                    Some(format!("Could not save the browser-context decision: {error}. Resend your message to try again.")),
-                );
+                    let detail = format!("Could not save the browser-context decision: {error}. Resend your message to try again.");
+                    session.append_error_message_deduped(&detail);
+                    session.set_runtime_state(SessionState::Error, Some(detail));
                     return false;
                 }
                 let mut session = session_arc.lock().await;
@@ -2649,6 +2636,11 @@ async fn add_user_messages(context: &QueueCommandContext, prepared: PreparedUser
         let mut session = session_arc.lock().await;
         attention_questions = pending_attention_questions(&app, &session);
         questions_cancelled = session.cancel_pending_questions();
+        if session.runtime.recovery.is_some() {
+            session.archive_recovery();
+            session.update_recovery(None);
+        }
+        session.recovery_budget = None;
 
         if let Some((ctx_messages, _)) = browser_ctx_result {
             session.add_queued_user_context(request_id, ctx_messages.event);
@@ -2805,6 +2797,7 @@ async fn add_user_messages(context: &QueueCommandContext, prepared: PreparedUser
                 accepted: false,
                 result: Some(serde_json::json!({ "error": error.clone() })),
             });
+            session.append_error_message_deduped(&error);
             session.set_runtime_state(SessionState::Error, Some(error));
             session.queue_notify.notify_one();
             return false;
@@ -3171,5 +3164,337 @@ mod queued_browser_tests {
         };
         assert_eq!(parts[0].m_content, "image-bytes");
         assert!(session.queued_user_merge_targets.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod recovery_acceptance_regressions {
+    use super::*;
+
+    fn waiting_recovery() -> refact_core::recovery::RecoveryRecord {
+        use refact_core::recovery::*;
+        RecoveryRecord {
+            operation_id: "operation".into(),
+            run_id: "run".into(),
+            revision: 7,
+            state: RecoveryState::Waiting,
+            policy: RecoveryPolicy::default(),
+            policy_source: RecoveryPolicySource::Thread,
+            manual: false,
+            retries_used: 1,
+            latest_error: RecoveryError {
+                category: "NetworkError".into(),
+                title: "network".into(),
+                explanation: "offline".into(),
+                suggested_action: "retry".into(),
+                is_retryable: true,
+                raw_error: "offline".into(),
+            },
+            next_retry_at_ms: None,
+            deadline_at_ms: None,
+            retry_not_before_ms: None,
+            terminal_reason: None,
+            attempts: vec![],
+        }
+    }
+
+    async fn context(name: &str) -> QueueCommandContext {
+        let app = AppState::from_gcx(crate::global_context::tests::make_test_gcx().await).await;
+        let mut session = ChatSession::new(name.into());
+        session.thread.mode = "chat".into();
+        session.thread.checkpoints_enabled = false;
+        session.thread.include_project_info = false;
+        session.thread.auto_enrichment_enabled = Some(false);
+        session.add_message(ChatMessage::new("system".into(), "test system".into()));
+        session.add_message(ChatMessage::new("user".into(), "first".into()));
+        session.update_recovery(Some(waiting_recovery()));
+        session.recovery_budget = Some(Arc::new(
+            refact_core::recovery::RecoveryBudget::new_manual(Default::default()),
+        ));
+        session
+            .user_interrupt_flag
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let session_arc = Arc::new(AMutex::new(session));
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert(name.into(), session_arc.clone());
+        QueueCommandContext {
+            app,
+            session_arc,
+            request_id: "new-request".into(),
+            priority: true,
+            native_guard: None,
+            supervision_guard: None,
+            board_operation: AMutex::new(None),
+        }
+    }
+
+    async fn pending_question_with_waiter(context: &QueueCommandContext) -> String {
+        let mut session = context.session_arc.lock().await;
+        session
+            .pending_questions
+            .push(refact_chat_api::PendingQuestionSet {
+                tool_call_id: "ask".into(),
+                questions: vec![],
+                asked_at_ms: 1,
+                status: PendingQuestionStatus::Pending,
+                answers: vec![],
+                resolution_id: None,
+                response_protocol_version: 1,
+                response: None,
+            });
+        let waiter = format!("{}:ask", session.chat_id);
+        let admission = context
+            .app
+            .attention()
+            .join(
+                crate::attention::AttentionRequest::new(
+                    crate::attention::AttentionScope::new(session.chat_id.clone(), "test"),
+                    refact_chat_api::QuestionKind::UserInput,
+                    "agent",
+                    "user",
+                    "continue?",
+                ),
+                &waiter,
+                Utc::now(),
+            )
+            .unwrap();
+        assert_eq!(
+            context.app.attention().blocked_runs(&admission.question_id),
+            1
+        );
+        admission.question_id
+    }
+
+    #[tokio::test]
+    async fn accepted_question_cancellation_releases_attention_waiter() {
+        let context = context("accepted-cancel-attention").await;
+        let workspace = tempfile::tempdir().unwrap();
+        *context
+            .app
+            .gcx
+            .documents_state
+            .workspace_folders
+            .lock()
+            .unwrap() = vec![workspace.path().to_path_buf()];
+        let question_id = pending_question_with_waiter(&context).await;
+        assert!(add_user_messages(&context, prepared()).await);
+        assert_eq!(context.app.attention().blocked_runs(&question_id), 0);
+        assert_eq!(
+            context.session_arc.lock().await.pending_questions[0].status,
+            PendingQuestionStatus::Cancelled
+        );
+    }
+
+    fn prepared() -> PreparedUserMessage {
+        PreparedUserMessage {
+            content: serde_json::json!("new user"),
+            attachments: vec![],
+            context_files: vec![],
+            suppress_auto_enrichment: true,
+            client_message_id: None,
+            app_context_ids: vec![],
+            checkpoints: vec![],
+            skill_activation_name: None,
+            skill_context_msg: None,
+            browser_chat_id: "test".into(),
+            browser_ctx_result: None,
+            additional_messages: vec![],
+        }
+    }
+
+    #[tokio::test]
+    async fn retry_archives_before_truncation_without_trailing_fallback() {
+        for index in [2, 3] {
+            let context = context(&format!("retry-recovery-{index}")).await;
+            handle_retry_from_index(&context, index, serde_json::json!("new user"), vec![]).await;
+            let session = context.session_arc.lock().await;
+            let user_index = session
+                .messages
+                .iter()
+                .position(|m| m.content.content_text_only() == "new user")
+                .unwrap();
+            assert!(
+                !session.messages[user_index + 1..]
+                    .iter()
+                    .any(|m| m.role == "error"),
+                "fallback appeared after replacement user"
+            );
+            let errors: Vec<_> = session
+                .messages
+                .iter()
+                .filter(|m| m.role == "error")
+                .collect();
+            assert_eq!(errors.len(), if index == 2 { 0 } else { 1 });
+            if let Some(error) = errors.first() {
+                assert_eq!(error.extra["recovery_record"]["state"], "cancelled");
+                assert_eq!(
+                    error.extra["recovery_record"]["terminal_reason"],
+                    "superseded"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn browser_decision_archives_before_appending_user() {
+        let context = context("browser-archive-order").await;
+        context.session_arc.lock().await.pending_browser_message = Some(PendingBrowserMessage {
+            pending_message_id: "pending".into(),
+            content: serde_json::json!("new user"),
+            attachments: vec![],
+            client_message_id: None,
+            checkpoints: vec![],
+            context_files: vec![],
+            suppress_auto_enrichment: true,
+            skill_activation_name: None,
+            skill_context_msg: None,
+        });
+        let workspace = tempfile::tempdir().unwrap();
+        *context
+            .app
+            .gcx
+            .documents_state
+            .workspace_folders
+            .lock()
+            .unwrap() = vec![workspace.path().to_path_buf()];
+        let mut events = context.session_arc.lock().await.subscribe();
+        handle_browser_context_decision(
+            &context,
+            "pending".into(),
+            false,
+            false,
+            false,
+            false,
+            false,
+            None,
+            None,
+            None,
+        )
+        .await;
+        let mut order = Vec::new();
+        while let Ok(raw) = events.try_recv() {
+            let envelope: refact_chat_api::EventEnvelope = serde_json::from_str(&raw).unwrap();
+            match envelope.event {
+                ChatEvent::MessageAdded {
+                    message, ..
+                } if message.content.content_text_only() == "new user" => order.push("user"),
+                ChatEvent::MessageUpdated {
+                    message, ..
+                } if message.role == "error" => order.push("error"),
+                _ => {}
+            }
+        }
+        assert_eq!(order, ["error", "user"]);
+        let session = context.session_arc.lock().await;
+        assert!(session.runtime.recovery.is_none());
+        let error_index = session
+            .messages
+            .iter()
+            .position(|m| m.role == "error")
+            .unwrap();
+        let user_index = session
+            .messages
+            .iter()
+            .position(|m| m.content.content_text_only() == "new user")
+            .unwrap();
+        assert!(error_index < user_index);
+        assert_eq!(
+            session.messages[error_index].extra["recovery_record"]["state"],
+            "cancelled"
+        );
+    }
+
+    #[tokio::test]
+    async fn accepted_user_archives_before_first_append() {
+        let context = context("accept-recovery").await;
+        assert!(add_user_messages(&context, prepared()).await);
+        let session = context.session_arc.lock().await;
+        assert!(session.runtime.recovery.is_none());
+        assert!(session.recovery_budget.is_none());
+        let error_index = session
+            .messages
+            .iter()
+            .position(|m| m.role == "error")
+            .unwrap();
+        let user_index = session
+            .messages
+            .iter()
+            .position(|m| m.content.content_text_only() == "new user")
+            .unwrap();
+        assert!(error_index < user_index);
+        assert_eq!(
+            session.messages[error_index].extra["recovery_record"]["state"],
+            "cancelled"
+        );
+    }
+
+    #[tokio::test]
+    async fn rejected_app_context_preserves_live_recovery_and_stamp() {
+        let context = context("reject-recovery").await;
+        let (before, budget) = {
+            let session = context.session_arc.lock().await;
+            (
+                serde_json::to_value(&session.messages).unwrap(),
+                session.recovery_budget.clone().unwrap(),
+            )
+        };
+        handle_user_message(
+            &context,
+            serde_json::json!("new user"),
+            vec![],
+            vec![],
+            true,
+            None,
+            vec!["missing-ticket".into()],
+        )
+        .await;
+        let session = context.session_arc.lock().await;
+        assert_eq!(
+            session.runtime.recovery.as_ref().map(|r| r.state),
+            Some(refact_core::recovery::RecoveryState::Waiting)
+        );
+        assert!(Arc::ptr_eq(
+            session.recovery_budget.as_ref().unwrap(),
+            &budget
+        ));
+        assert_eq!(serde_json::to_value(&session.messages).unwrap(), before);
+    }
+
+    #[tokio::test]
+    async fn cancellation_save_failure_keeps_accepted_user_and_archived_recovery() {
+        let context = context("reject-cancel-save-recovery").await;
+        let question_id = pending_question_with_waiter(&context).await;
+        handle_user_message(
+            &context,
+            serde_json::json!("new user"),
+            vec![],
+            vec![],
+            true,
+            None,
+            vec![],
+        )
+        .await;
+        let session = context.session_arc.lock().await;
+        assert!(session.runtime.recovery.is_none());
+        assert!(session.recovery_budget.is_none());
+        assert_eq!(
+            session.pending_questions[0].status,
+            PendingQuestionStatus::Cancelled
+        );
+        assert_eq!(context.app.attention().blocked_runs(&question_id), 0);
+        let prior_error = session.messages.iter().find(|m| m.role == "error").unwrap();
+        assert_eq!(prior_error.extra["recovery_record"]["state"], "cancelled");
+        assert!(session
+            .messages
+            .iter()
+            .any(|m| m.content.content_text_only() == "new user"));
+        assert_eq!(session.runtime.state, SessionState::Error);
+        assert!(session.messages.iter().any(|m| m
+            .content
+            .content_text_only()
+            .starts_with("failed to persist cancelled question answers:")));
     }
 }

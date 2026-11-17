@@ -247,7 +247,30 @@ function loadScenario(scenario: Scenario) {
         ? [{ role: "error", message_id: "standalone", content: multilineError }]
         : scenario === "exhausted" || scenario === "multiple"
           ? [archived]
-          : []),
+          : scenario === "succeeded"
+            ? [
+                {
+                  role: "error" as const,
+                  message_id: "recovered-attempt",
+                  content: transport,
+                  error_info: { ...base.latest_error, raw_error: transport },
+                  recovery_operation_id: record.operation_id,
+                  recovery_run_id: record.run_id,
+                  repeat_count: 2,
+                  _ui_only: true,
+                },
+                {
+                  role: "error" as const,
+                  message_id: "recovered-latest",
+                  content: timeout,
+                  error_info: base.latest_error,
+                  recovery_operation_id: record.operation_id,
+                  recovery_run_id: record.run_id,
+                  recovery_record: record,
+                  _ui_only: true,
+                },
+              ]
+            : []),
     ],
   } as Omit<ChatEventEnvelope, "seq" | "chat_id">);
 }

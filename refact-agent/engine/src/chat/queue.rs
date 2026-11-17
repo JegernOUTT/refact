@@ -391,6 +391,7 @@ fn release_answer_questions_failure(
     error: String,
     emit_snapshot: bool,
 ) {
+    session.append_error_message_deduped(&error);
     session.emit(ChatEvent::Ack {
         client_request_id: client_request_id.to_string(),
         accepted: false,
@@ -1483,6 +1484,7 @@ fn handle_goal_control_command(
 }
 
 fn emit_goal_command_error(session: &mut ChatSession, error: String) {
+    session.append_error_message_deduped(&error);
     let event = session.runtime_update_event(
         SessionState::Error,
         Some(error),
@@ -2043,12 +2045,14 @@ async fn process_command_queue_inner(
                 continue;
             }
         }
+        let error_artifacts = session_arc.lock().await.error_artifact_fingerprint();
         let outcome = Box::pin(command_handlers::handle_queue_command(
             app.clone(),
             session_arc.clone(),
             request,
         ))
         .await;
+        checkpoint_changed_error_artifacts(&app, &session_arc, error_artifacts).await;
         {
             let mut session = session_arc.lock().await;
             let mut queued_ids: std::collections::HashSet<_> = session
@@ -2076,6 +2080,25 @@ async fn process_command_queue_inner(
         // A command finished: land any delivery whose boundary just opened.
         super::delivery::drain_deliveries_at_boundary(app.clone(), session_arc.clone()).await;
     }
+}
+
+async fn checkpoint_changed_error_artifacts(
+    app: &AppState,
+    session_arc: &Arc<AMutex<ChatSession>>,
+    before: u64,
+) -> bool {
+    let changed = {
+        let session = session_arc.lock().await;
+        session.trajectory_dirty && session.error_artifact_fingerprint() != before
+    };
+    if changed {
+        maybe_save_trajectory_background_with_intent(
+            app.clone(),
+            session_arc.clone(),
+            TrajectoryCommitIntent::Checkpoint,
+        );
+    }
+    changed
 }
 
 /// Delivered user-visible messages start a fresh pursuit turn, exactly like a
@@ -2122,7 +2145,11 @@ fn is_goal_hidden_event(msg: &ChatMessage) -> bool {
 fn hidden_role_extra(msg: &ChatMessage) -> serde_json::Map<String, serde_json::Value> {
     if matches!(
         msg.role.as_str(),
-        "plan" | "goal" | "event" | "compression_report"
+        "plan"
+            | "goal"
+            | "event"
+            | "compression_report"
+            | refact_chat_api::internal_roles::ERROR_ROLE
     ) {
         msg.extra.clone()
     } else if msg.role == "assistant" && super::diagnostics::is_ui_only_message(msg) {
@@ -2138,7 +2165,14 @@ fn hidden_role_extra(msg: &ChatMessage) -> serde_json::Map<String, serde_json::V
 fn is_allowed_for_restore(msg: &ChatMessage) -> bool {
     matches!(
         msg.role.as_str(),
-        "user" | "assistant" | "system" | "tool" | "plan" | "goal" | "compression_report"
+        "user"
+            | "assistant"
+            | "system"
+            | "tool"
+            | "plan"
+            | "goal"
+            | "compression_report"
+            | refact_chat_api::internal_roles::ERROR_ROLE
     ) || is_plan_delta_event(msg)
         || is_goal_hidden_event(msg)
 }
@@ -2200,6 +2234,7 @@ pub(crate) fn is_allowed_for_branch(msg: &ChatMessage) -> bool {
             | "plan"
             | "goal"
             | "compression_report"
+            | refact_chat_api::internal_roles::ERROR_ROLE
     ) || is_plan_delta_event(msg)
         || is_goal_hidden_event(msg)
 }
@@ -3051,6 +3086,54 @@ async fn create_checkpoint_async(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn errors_retain_all_extra_through_restore_and_branch() {
+        let mut error = super::super::diagnostics::make_ui_only_error_message("expired token");
+        error.extra.insert("repeat_count".into(), json!(3));
+        error
+            .extra
+            .insert("recovery_operation_id".into(), json!("operation"));
+        error.extra.insert("recovery_run_id".into(), json!("run"));
+        error
+            .extra
+            .insert("future_diagnostic".into(), json!({"detail": [1, 2]}));
+        assert!(is_allowed_for_restore(&error));
+        assert!(is_allowed_for_branch(&error));
+        for copy in [
+            sanitize_message_for_restore(&error),
+            sanitize_message_for_branch(&error),
+        ] {
+            assert_eq!(copy.role, "error");
+            assert_eq!(copy.content, error.content);
+            assert_eq!(copy.extra, error.extra);
+            assert_ne!(copy.message_id, error.message_id);
+        }
+    }
+
+    #[test]
+    fn goal_command_error_is_persisted_without_recovery() {
+        let mut session = ChatSession::new("goal-error".into());
+        let mut rx = session.subscribe();
+        emit_goal_command_error(&mut session, "goal cannot resume".into());
+        assert_eq!(session.runtime.state, SessionState::Idle);
+        assert!(session.runtime.recovery.is_none());
+        assert_eq!(session.messages.len(), 1);
+        assert_eq!(session.messages[0].role, "error");
+        assert_eq!(
+            session.messages[0].content.content_text_only(),
+            "goal cannot resume"
+        );
+        assert!(!session.messages[0]
+            .extra
+            .contains_key("recovery_operation_id"));
+        let events = drain_events(&mut rx);
+        assert!(events.iter().any(|event| matches!(event, ChatEvent::RuntimeUpdated { state: SessionState::Error, error: Some(error), .. } if error == "goal cannot resume")));
+        assert!(events.iter().any(|event| matches!(event, ChatEvent::MessageAdded { message, .. } if message.role == "error")));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, ChatEvent::RecoveryUpdated { .. })));
+    }
+
     #[test]
     fn interrupted_assistant_stays_off_wire_after_branch_and_restore() {
         let mut artifact = ChatMessage {
@@ -4404,6 +4487,86 @@ mod tests {
             client_message_id: client_message_id.map(str::to_string),
             app_context_ids: Vec::new(),
         }
+    }
+
+    #[tokio::test]
+    async fn command_owned_error_is_checkpointed_at_dispatch_boundary() {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
+            dir.path().join("cache"),
+            dir.path().join("config"),
+        )
+        .await;
+        let workspace = dir.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![workspace];
+        let app = AppState::from_gcx(gcx.clone()).await;
+        let chat_id = format!("command-error-checkpoint-{}", Uuid::new_v4());
+        let mut session = ChatSession::new(chat_id.clone());
+        session.thread.checkpoints_enabled = false;
+        session.add_message(ChatMessage::new("user".into(), "hello".into()));
+        session.command_queue.push_back(CommandRequest {
+            native_approval_guard: None,
+            supervision_guard: None,
+            client_request_id: "goal-resume".into(),
+            priority: false,
+            command: ChatCommand::GoalControl {
+                action: "resume".into(),
+            },
+        });
+        let session_arc = Arc::new(AMutex::new(session));
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert(chat_id.clone(), session_arc.clone());
+        let running = session_arc.lock().await.queue_processor_running.clone();
+        running.store(true, Ordering::SeqCst);
+        let processor = tokio::spawn(process_command_queue(
+            app.clone(),
+            session_arc.clone(),
+            running,
+        ));
+        wait_for_queue_to_drain(&session_arc).await;
+        let saved = tokio::time::timeout(QUEUE_TEST_TIMEOUT, async {
+            loop {
+                if let Some(saved) =
+                    super::super::trajectories::load_trajectory_for_chat(gcx.clone(), &chat_id)
+                        .await
+                {
+                    if saved.messages.iter().any(|message| message.role == "error") {
+                        return saved;
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("command-owned error was never checkpointed");
+        let error = saved
+            .messages
+            .iter()
+            .find(|message| message.role == "error")
+            .unwrap();
+        assert!(error
+            .content
+            .content_text_only()
+            .contains("no goal to control"));
+        session_arc.lock().await.close_event_channel();
+        let _ = tokio::time::timeout(QUEUE_TEST_TIMEOUT, processor).await;
+
+        let fingerprint = session_arc.lock().await.error_artifact_fingerprint();
+        session_arc
+            .lock()
+            .await
+            .add_message(ChatMessage::new("user".into(), "no error here".into()));
+        assert!(session_arc.lock().await.trajectory_dirty);
+        assert!(!checkpoint_changed_error_artifacts(&app, &session_arc, fingerprint).await);
+        session_arc
+            .lock()
+            .await
+            .append_error_message_deduped("no goal to control; call set_goal first");
+        assert!(checkpoint_changed_error_artifacts(&app, &session_arc, fingerprint).await);
     }
 
     #[tokio::test]
@@ -5782,8 +5945,14 @@ mod tests {
         assert!(marker.is_file(), "hook did not run");
         {
             let session = session_arc.lock().await;
-            assert_eq!(session.messages.len(), 1);
+            assert_eq!(session.messages.len(), 2);
             assert_eq!(session.messages[0].content.content_text_only(), "first");
+            assert_eq!(session.messages[1].role, "error");
+            assert!(session.messages[1]
+                .content
+                .content_text_only()
+                .contains("Message blocked by hook"));
+            assert!(session.runtime.recovery.is_none());
             assert!(session.queued_user_merge_targets.is_empty());
         }
         let recovery = select_next_command(&session_arc)
@@ -5804,6 +5973,19 @@ mod tests {
         {
             let mut session = session_arc.lock().await;
             session.thread.checkpoints_enabled = false;
+            session.runtime.recovery = Some(
+                serde_json::from_value(json!({
+                    "operation_id": "prior-operation", "run_id": "prior-run", "revision": 1,
+                    "state": "waiting", "policy": refact_core::recovery::RecoveryPolicy::default(),
+                    "policy_source": "thread", "manual": false, "retries_used": 0,
+                    "latest_error": {"category": "Timeout", "title": "Timed out",
+                        "explanation": "Provider timed out", "suggested_action": "Retry",
+                        "is_retryable": true, "raw_error": "previous timeout"},
+                    "next_retry_at_ms": 123, "deadline_at_ms": 456,
+                    "terminal_reason": null, "attempts": []
+                }))
+                .unwrap(),
+            );
             session.command_queue.push_back(CommandRequest {
                 native_approval_guard: None,
                 supervision_guard: None,
@@ -5848,6 +6030,19 @@ mod tests {
 
         {
             let session = session_arc.lock().await;
+            assert_eq!(session.messages[0].role, "error");
+            assert_eq!(
+                session.messages[0].content.content_text_only(),
+                "previous timeout"
+            );
+            assert_eq!(
+                session.messages[0].extra["recovery_record"]["state"],
+                "cancelled"
+            );
+            assert_eq!(
+                session.messages[0].extra["recovery_record"]["terminal_reason"],
+                "superseded"
+            );
             let messages = session
                 .messages
                 .iter()
@@ -6129,9 +6324,21 @@ mod tests {
             session.pending_questions[0].status,
             PendingQuestionStatus::Pending
         );
-        assert!(session.messages.is_empty());
+        assert_eq!(session.messages.len(), 1);
+        assert_eq!(session.messages[0].role, "error");
+        assert_eq!(
+            session.messages[0].content.content_text_only(),
+            "failed to persist question answers: disk full"
+        );
+        assert!(session.runtime.recovery.is_none());
+        assert!(!session.messages[0]
+            .extra
+            .contains_key("recovery_operation_id"));
         assert_eq!(session.runtime.state, SessionState::Error);
         let events = drain_events(&mut rx);
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, ChatEvent::RecoveryUpdated { .. })));
         assert!(events.iter().any(|event| matches!(
             event,
             ChatEvent::Ack {
@@ -6146,7 +6353,7 @@ mod tests {
                 pending_questions,
                 messages,
                 ..
-            } if messages.is_empty()
+            } if messages.len() == 1 && messages[0].role == "error"
                 && pending_questions
                     .iter()
                     .all(|set| set.status == PendingQuestionStatus::Pending)

@@ -31,3 +31,18 @@
   gap: var(--rf-space-1);
   min-width: 0;
 }
+
+.repeat {
+  margin-inline-start: var(--rf-space-2);
+  padding-inline: var(--rf-space-1);
+  border-radius: var(--rf-radius-pill);
+  background: var(--rf-color-accent-soft);
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-1);
+  white-space: nowrap;
+}
+
+.status {
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-1);
+}

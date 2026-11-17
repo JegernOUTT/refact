@@ -6,6 +6,7 @@ use refact_core::chat_types::{ChatContent, ChatMessage};
 
 use crate::GoalBudget;
 
+pub use refact_core::chat_types::ERROR_ROLE;
 pub const EVENT_ROLE: &str = "event";
 pub const PLAN_ROLE: &str = "plan";
 pub const GOAL_ROLE: &str = "goal";

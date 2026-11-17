@@ -270,7 +270,7 @@ Task-owned trajectories keep their own layout under `tasks/<task_id>/trajectorie
 
 #### Internal traces
 
-Every subchat persists, including non-stateful internal ones, except the one-shot `segment_summarize` subchat, whose successful and failed traces are ephemeral. `run_subchat` saves a seed before the loop and `persist_subchat_progress` re-saves after each LLM step and tool step, so an in-progress subagent trajectory can be opened and inspected live; failures save partial work with an `event(system_notice, "subchat.run")` note. The segment-summarizer exception skips all of those trajectory writes without changing its returned messages or errors.
+Every subchat persists, including non-stateful internal ones, except the one-shot `segment_summarize` subchat, whose successful and failed traces are ephemeral. `run_subchat` saves a seed before the loop and `persist_subchat_progress` re-saves after each LLM step and tool step, so an in-progress subagent trajectory can be opened and inspected live; failures save partial work with persisted model-invisible `error` messages at each failed attempt; hard-abort cancellations save partial work without creating an error. The segment-summarizer exception skips all of those trajectory writes without changing its returned messages or errors.
 
 Non-stateful subchats are tagged `link_type = "internal:<feature>"` (`internal_trace_link_type`). `is_internal_trace_link_type` keeps them out of chat history listings while leaving them openable by direct link.
 

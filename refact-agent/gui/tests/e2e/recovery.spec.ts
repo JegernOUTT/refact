@@ -36,9 +36,24 @@ for (const theme of ["dark", "light"]) {
         });
         if (scenario === "succeeded") {
           await expect(panel).toHaveCount(0);
+          const recovered = page.getByRole("region", {
+            name: "Request error",
+            exact: true,
+          });
+          await expect(recovered).toHaveCount(1);
+          await expect(recovered).toContainText("Recovered after 2 retries");
+          await expect(recovered.getByTestId("error-repeat-count")).toHaveText(
+            "×2",
+          );
           continue;
         }
         await expect(panel).toHaveCount(1);
+        if (!standalone)
+          await expect(
+            page.locator('[data-testid="chat-virtuoso-item"]', { has: panel }),
+          ).toHaveCount(
+            scenario === "exhausted" || scenario === "multiple" ? 1 : 0,
+          );
         await panel.scrollIntoViewIfNeeded();
         // The whitespace-only assistant must start with tools, not a padded Markdown box.
         const toolFooter = page.getByTestId("message-footer").last();
@@ -276,12 +291,15 @@ test("compact recovery controls retain keyboard toggles and tooltip names", asyn
   ).toBeVisible();
 });
 
-test("recovery stays unified, toggles close, sends collapse and success disappears", async ({
+test("recovery stays unified inline, toggles close, sends collapse and success leaves errors visible", async ({
   page,
 }) => {
   await page.goto("/tests/e2e/recovery-showcase.html");
   const panel = page.getByRole("region", { name: "Recovery status" });
   await expect(panel).toHaveCount(1);
+  await expect(
+    page.locator('[data-testid="chat-virtuoso-item"]', { has: panel }),
+  ).toHaveAttribute("data-chat-scroll-anchor-key", "archive");
   await expect(
     page.getByRole("button", { name: "Retry", exact: true }),
   ).toHaveCount(1);
@@ -333,10 +351,22 @@ test("recovery stays unified, toggles close, sends collapse and success disappea
     .getByRole("combobox", { name: "Scenario" })
     .selectOption("succeeded");
   await expect(panel).toHaveCount(0);
-  await expect(
-    page.getByRole("region", { name: "Request error", exact: true }),
-  ).toHaveCount(0);
-  await expect(page.getByText(/Recovered|Previous recovery/)).toHaveCount(0);
+  const recovered = page.getByRole("region", {
+    name: "Request error",
+    exact: true,
+  });
+  await expect(recovered).toHaveCount(1);
+  await expect(recovered.getByRole("alert")).toContainText(
+    "error sending request for url",
+  );
+  await expect(recovered.getByRole("alert")).toContainText(
+    "response header timeout after 30s",
+  );
+  await expect(recovered.getByTestId("error-recovery-status")).toHaveText(
+    "Recovered after 2 retries",
+  );
+  await expect(recovered.getByRole("button")).toHaveCount(0);
+  await expect(page.getByText(/Previous recovery/)).toHaveCount(0);
 });
 
 test("recovery controls stay contained at narrow and wide widths", async ({

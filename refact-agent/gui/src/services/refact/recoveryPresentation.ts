@@ -1,5 +1,6 @@
 import { isRecoveryRecord, type RecoveryRecord } from "./chatSubscription";
 import type { ChatMessages, ErrorMessage } from "./types";
+import { humanizeIdentifier } from "../../utils/displayNames";
 
 function object(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === "object" && !Array.isArray(value)
@@ -20,19 +21,53 @@ export function recoveryRecordFromError(
   return isRecoveryRecord(flattened) ? flattened : null;
 }
 
+function recoveryExtra(error: ErrorMessage, key: string): string | null {
+  const nested = error.extra?.[key];
+  if (nonempty(nested)) return nested;
+  const flattened = object(error)?.[key];
+  return nonempty(flattened) ? flattened : null;
+}
+
+export function recoveryOperationIdFromError(
+  error: ErrorMessage,
+): string | null {
+  return (
+    recoveryExtra(error, "recovery_operation_id") ??
+    recoveryRecordFromError(error)?.operation_id ??
+    null
+  );
+}
+
+export function recoveryRunIdFromError(error: ErrorMessage): string | null {
+  return (
+    recoveryExtra(error, "recovery_run_id") ??
+    recoveryRecordFromError(error)?.run_id ??
+    null
+  );
+}
+
+export function errorRepeatCount(error: ErrorMessage): number {
+  const count = error.repeat_count ?? error.extra?.repeat_count;
+  return typeof count === "number" && Number.isSafeInteger(count) && count > 1
+    ? count
+    : 1;
+}
+
 export function normalizeRecoveryErrorMetadata(
   error: ErrorMessage,
 ): ErrorMessage {
   const flattened = object(error);
   const recovery = recoveryRecordFromError(error);
-  if (!recovery || !flattened) return error;
+  const operationId = recoveryOperationIdFromError(error);
+  const runId = recoveryRunIdFromError(error);
+  if (!flattened || (!recovery && !operationId && !runId)) return error;
   return {
     ...error,
     extra: {
       ...error.extra,
-      recovery_record: recovery,
-      recovery_run_id: recovery.run_id,
-      recovery_operation_id: recovery.operation_id,
+      ...(recovery ? { recovery_record: recovery } : {}),
+      ...(runId ? { recovery_run_id: runId } : {}),
+      ...(operationId ? { recovery_operation_id: operationId } : {}),
       ...(typeof flattened._ui_only === "boolean"
         ? { _ui_only: flattened._ui_only }
         : {}),
@@ -40,7 +75,33 @@ export function normalizeRecoveryErrorMetadata(
   };
 }
 
-function messageDiagnostics(error: ErrorMessage): string[] {
+export function recoveryStatusLabel(
+  recovery: RecoveryRecord,
+  liveRunId?: string | null,
+): string | null {
+  if (recovery.state === "succeeded") {
+    const count = recovery.retries_used;
+    if (count === 0) return "Recovered";
+    const unit = recovery.manual
+      ? count === 1
+        ? "new request"
+        : "new requests"
+      : count === 1
+        ? "retry"
+        : "retries";
+    return `Recovered after ${count} ${unit}`;
+  }
+  if (recovery.state === "waiting" || recovery.state === "attempting")
+    return recovery.run_id === liveRunId
+      ? null
+      : humanizeIdentifier("interrupted");
+  return humanizeIdentifier(recovery.terminal_reason ?? recovery.state);
+}
+
+function messageDiagnostics(error: ErrorMessage): {
+  history: string[];
+  own: string[];
+} {
   const recovery = recoveryRecordFromError(error);
   if (recovery) {
     const info = object(error.error_info) ?? object(error.extra?.error_info);
@@ -50,8 +111,7 @@ function messageDiagnostics(error: ErrorMessage): string[] {
       info?.title,
       info?.explanation,
     ]);
-    return [
-      ...recoveryDiagnostics(recovery),
+    const own = [
       ...(nonempty(info?.raw_error) && !labels.has(info.raw_error)
         ? [info.raw_error]
         : []),
@@ -59,8 +119,14 @@ function messageDiagnostics(error: ErrorMessage): string[] {
         ? [error.content]
         : []),
     ];
+    if (own.length > 0) return { history: [], own };
+    const recorded = recoveryDiagnostics(recovery);
+    return { history: recorded.slice(0, -1), own: recorded.slice(-1) };
   }
+  return { history: [], own: plainDiagnostics(error) };
+}
 
+function plainDiagnostics(error: ErrorMessage): string[] {
   const info = object(error.error_info) ?? object(error.extra?.error_info);
   if (info) {
     const raw = info.raw_error;
@@ -106,39 +172,83 @@ function recoveryLabels(recovery: RecoveryRecord): Set<string> {
   );
 }
 
+function recoveryErrorDiagnostic(error: RecoveryRecord["latest_error"]) {
+  return nonempty(error.raw_error)
+    ? error.raw_error
+    : nonempty(error.explanation)
+      ? error.explanation
+      : error.title;
+}
+
 function recoveryDiagnostics(recovery: RecoveryRecord): string[] {
   return [
-    ...recovery.attempts.flatMap((attempt) => {
-      if (!attempt.error) return [];
-      const error = attempt.error;
-      return [
-        nonempty(error.raw_error)
-          ? error.raw_error
-          : nonempty(error.explanation)
-            ? error.explanation
-            : error.title,
-      ];
-    }),
-    nonempty(recovery.latest_error.raw_error)
-      ? recovery.latest_error.raw_error
-      : nonempty(recovery.latest_error.explanation)
-        ? recovery.latest_error.explanation
-        : recovery.latest_error.title,
+    ...recovery.attempts.flatMap((attempt) =>
+      attempt.error ? [recoveryErrorDiagnostic(attempt.error)] : [],
+    ),
+    recoveryErrorDiagnostic(recovery.latest_error),
   ];
+}
+
+export function recoveryStatusHosts(messages: ChatMessages): Set<ErrorMessage> {
+  const latest = new Map<string, ErrorMessage>();
+  messages.forEach((message) => {
+    if (message.role !== "error") return;
+    const record = recoveryRecordFromError(message);
+    const key = recoveryOperationIdFromError(message) ?? record?.run_id;
+    if (key) latest.set(key, message);
+  });
+  return new Set(
+    Array.from(latest.values()).filter(
+      (message) => recoveryRecordFromError(message) !== null,
+    ),
+  );
+}
+
+export function errorRecoveryStatuses(
+  errors: ErrorMessage[],
+  hosts: ReadonlySet<ErrorMessage> | undefined,
+  liveRunId?: string | null,
+): string[] {
+  return Array.from(
+    new Set(
+      errors.flatMap((error) => {
+        if (hosts && !hosts.has(error)) return [];
+        const record = recoveryRecordFromError(error);
+        const label = record && recoveryStatusLabel(record, liveRunId);
+        return label ? [label] : [];
+      }),
+    ),
+  );
+}
+
+export type ErrorTextEntry = { text: string; repeat: number };
+
+export function collectErrorEntries(
+  errors: ErrorMessage[],
+  recoveries: RecoveryRecord[] = [],
+): ErrorTextEntry[] {
+  const counts = new Map<string, number>();
+  const add = (texts: string[], repeat: number) =>
+    texts
+      .filter(nonempty)
+      .forEach((text) => counts.set(text, (counts.get(text) ?? 0) + repeat));
+  errors.forEach((error) => {
+    const { history, own } = messageDiagnostics(error);
+    add(history, 0);
+    add(Array.from(new Set(own)), errorRepeatCount(error));
+  });
+  recoveries.forEach((recovery) => add(recoveryDiagnostics(recovery), 0));
+  return Array.from(counts, ([text, repeat]) => ({
+    text,
+    repeat: Math.max(repeat, 1),
+  }));
 }
 
 export function collectErrorTexts(
   errors: ErrorMessage[],
   recoveries: RecoveryRecord[] = [],
 ): string[] {
-  return Array.from(
-    new Set(
-      [
-        ...errors.flatMap(messageDiagnostics),
-        ...recoveries.flatMap(recoveryDiagnostics),
-      ].filter(nonempty),
-    ),
-  );
+  return collectErrorEntries(errors, recoveries).map((entry) => entry.text);
 }
 
 export function partitionTranscriptErrors(
@@ -157,20 +267,28 @@ export function partitionTranscriptErrors(
   });
   if (!recovery) return { episode: [], boundary };
   const live = recovery.state !== "succeeded";
-  const episode = messages.filter((message, index): message is ErrorMessage => {
-    if (message.role !== "error") return false;
-    const archived = recoveryRecordFromError(message);
-    return (
-      archived?.state !== "succeeded" &&
-      ((live && index > boundary) ||
-        archived?.operation_id === recovery.operation_id ||
-        archived?.run_id === recovery.run_id)
-    );
-  });
+  const linked = (message: ErrorMessage) =>
+    recoveryOperationIdFromError(message) === recovery.operation_id ||
+    recoveryRunIdFromError(message) === recovery.run_id ||
+    recoveryRecordFromError(message)?.run_id === recovery.run_id;
+  const errors = messages.flatMap((message, index) =>
+    message.role === "error" &&
+    recoveryRecordFromError(message)?.state !== "succeeded"
+      ? [{ message, index }]
+      : [],
+  );
+  const episode = errors
+    .filter(({ message, index }) =>
+      recoveryOperationIdFromError(message) === null &&
+      recoveryRunIdFromError(message) === null
+        ? live && index > boundary
+        : linked(message),
+    )
+    .map(({ message }) => message);
   return { episode, boundary };
 }
 
-export function visibleTranscriptErrors(
+function retryableErrors(
   errors: ErrorMessage[],
   episode: readonly ErrorMessage[],
 ): ErrorMessage[] {
@@ -189,8 +307,7 @@ export function retryableErrorIndex(
   return items.reduce(
     (last, item) =>
       item.messageIndex > boundary &&
-      collectErrorTexts(visibleTranscriptErrors(item.errors, episode)).length >
-        0
+      collectErrorTexts(retryableErrors(item.errors, episode)).length > 0
         ? Math.max(last, item.messageIndex)
         : last,
     -1,
