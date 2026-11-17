@@ -7,6 +7,7 @@ import type { IconProps } from "../../components/ui";
 import { useAppDispatch, useAppSelector } from "../../hooks";
 import { popBackTo, push } from "../Pages/pagesSlice";
 import { switchToThread } from "../Chat/Thread";
+import { revealProcessOutput } from "../../components/ChatContent/revealProcessOutput";
 import {
   notificationSeen,
   selectProcessCompletions,
@@ -46,15 +47,7 @@ function exitCodeLabel(notification: ProcessCompletedNotification): string {
 }
 
 function scrollToProcessCard(processId: string, attempts = SCROLL_ATTEMPTS) {
-  const cards = document.querySelectorAll("[data-exec-process-id]");
-  const card = Array.from(cards).find(
-    (item) => item.getAttribute("data-exec-process-id") === processId,
-  );
-  if (card) {
-    card.scrollIntoView({ block: "center", behavior: "smooth" });
-    return;
-  }
-  if (attempts <= 0) return;
+  if (revealProcessOutput(processId) || attempts <= 0) return;
   window.setTimeout(
     () => scrollToProcessCard(processId, attempts - 1),
     SCROLL_RETRY_MS,

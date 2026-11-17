@@ -18,6 +18,7 @@ import * as toolCardsAgenticStories from "../components/ChatContent/ToolCardsAge
 import * as transcriptElementsStories from "../components/ChatContent/TranscriptElements.stories";
 import * as eventRowStories from "../components/ChatContent/EventRow/EventRow.stories";
 import * as chatContentStories from "../components/ChatContent/ChatContent.stories";
+import * as toolRunGroupsStories from "../components/ChatContent/ToolRunGroups.stories";
 import * as chatFormStories from "../components/ChatForm/ChatForm.stories";
 import * as retryFormStories from "../components/ChatForm/RetryForm.stories";
 import * as taskProgressWidgetStories from "../components/TaskProgressWidget/TaskProgressWidget.stories";
@@ -50,6 +51,7 @@ const COVERED_STORY_FILES = [
   "../components/ChatContent/PlanBanner/PlanBanner.stories.tsx",
   "../components/ChatContent/ToolCardsAgentic.stories.tsx",
   "../components/ChatContent/ToolCardsFileOps.stories.tsx",
+  "../components/ChatContent/ToolRunGroups.stories.tsx",
   "../components/ChatContent/TranscriptElements.stories.tsx",
   "../components/ChatForm/ChatForm.stories.tsx",
   "../components/ChatForm/ChatSettingsDropdown.stories.tsx",
@@ -212,6 +214,11 @@ const smokeCases: SmokeCase[] = [
   // happy-dom. The no-crash tier still verifies composition, decorators,
   // effects, MSW setup, play calls, and that rendering leaves a body tree.
   ...casesFrom("ChatContent", composeStories(chatContentStories), "no-crash"),
+  ...casesFrom(
+    "ToolRunGroups",
+    composeStories(toolRunGroupsStories),
+    "no-crash",
+  ),
   ...casesFrom("ChatForm", composeStories(chatFormStories)),
   ...casesFrom("RetryForm", composeStories(retryFormStories)),
   ...casesFrom("TaskProgressWidget", composeStories(taskProgressWidgetStories)),

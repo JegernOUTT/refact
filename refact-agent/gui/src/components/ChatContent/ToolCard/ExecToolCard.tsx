@@ -21,27 +21,21 @@ import { useExecProcessActions } from "./useExecProcessActions";
 import {
   displayProcess,
   durationText,
-  execMetadataFromResult,
   execMeta,
+  execStateIsLive,
+  execStateTranscriptStatus,
   execStatusLabel,
   execTarget,
-  execTranscriptStatus,
   execVerb,
-  foldedProcessOutcome,
   isBusyStatus,
-  isProcessSnapshotTool,
-  isProcessStartCall,
   latestOutputLine,
-  normalizeExecStatus,
   parseProcessArgs,
   persistedOutputPath,
   processListItemStatus,
+  resolveExecState,
   snapshotMeta,
-  snapshotTranscriptStatus,
   withFoldedOutcome,
-  type ExecResultSource,
   type ExecToolName,
-  type ProcessArgs,
 } from "./execToolModel";
 import styles from "./ExecToolCard.module.css";
 
@@ -52,25 +46,6 @@ type ExecToolCardProps = {
 
 const MAX_LISTED_PROCESSES = 20;
 const MAX_TRANSCRIPT_CHARS = 30_000;
-
-type ExecRowKind = "start" | "snapshot" | "action";
-
-function execRowKind(toolName: ExecToolName, args: ProcessArgs): ExecRowKind {
-  if (isProcessStartCall(toolName, args)) return "start";
-  if (isProcessSnapshotTool(toolName)) return "snapshot";
-  if (toolName === "shell_service" && args.action === "status") {
-    return "snapshot";
-  }
-  return "action";
-}
-
-function resultSource(
-  toolName: ExecToolName,
-  kind: ExecRowKind,
-): ExecResultSource {
-  if (kind === "start") return "start";
-  return toolName === "shell" || toolName === "exec" ? "none" : "snapshot";
-}
 
 function useRunningNowMs(isBusy: boolean): number {
   const [nowMs, setNowMs] = useState(() => Date.now());
@@ -93,37 +68,21 @@ export const ExecToolCard: React.FC<ExecToolCardProps> = ({
     () => parseProcessArgs(toolCall.function.arguments),
     [toolCall.function.arguments],
   );
-  const rowKind = execRowKind(toolName, args);
-  const isSnapshot = rowKind === "snapshot";
-  const source = resultSource(toolName, rowKind);
-  const metadata = useMemo(
-    () => execMetadataFromResult(result?.extra, result?.content, source),
-    [result?.extra, result?.content, source],
-  );
-  const pathReferences = getToolEnrichmentPathReferences(result?.extra);
-  const toolFailed = result?.tool_failed === true;
   const foldedEvent = useAppSelector((state) =>
     selectFoldedProcessEvent(state, threadId, toolCall.id),
   );
-  const outcome = useMemo(
-    () => foldedProcessOutcome(foldedEvent),
-    [foldedEvent],
+  const execState = useMemo(
+    () => resolveExecState(toolName, args, result, foldedEvent, isRunning),
+    [toolName, args, result, foldedEvent, isRunning],
   );
+  const { metadata, outcome, status, hasRecordedOutcome } = execState;
+  const isSnapshot = execState.kind === "snapshot";
+  const pathReferences = getToolEnrichmentPathReferences(result?.extra);
   const unrecorded = useUnrecordedResultState(toolCall.id, threadId);
-  const status =
-    outcome?.status ??
-    normalizeExecStatus(
-      metadata,
-      toolName,
-      Boolean(result),
-      toolFailed,
-      isRunning,
-    );
   const process = withFoldedOutcome(
     displayProcess(metadata, args, status),
     outcome,
   );
-  const hasRecordedOutcome = Boolean(result) || outcome !== null;
   const nowMs = useRunningNowMs(isRunning);
   const duration = isSnapshot ? null : durationText(process, nowMs, isRunning);
   const logPath = persistedOutputPath(metadata);
@@ -133,20 +92,17 @@ export const ExecToolCard: React.FC<ExecToolCardProps> = ({
     toolCall.id,
     logPath,
   );
-  const transcriptStatus = !hasRecordedOutcome
-    ? unrecorded.status
-    : isSnapshot && !isRunning
-      ? snapshotTranscriptStatus(status, toolFailed)
-      : execTranscriptStatus(status, isRunning, toolFailed);
+  const transcriptStatus =
+    execStateTranscriptStatus(execState, isRunning) ?? unrecorded.status;
   const statusText = !hasRecordedOutcome
     ? unrecorded.statusLabel ?? execStatusLabel(status)
     : isSnapshot && transcriptStatus === "failed" && isBusyStatus(status)
       ? execStatusLabel("failed")
       : execStatusLabel(status);
-  const liveHint =
-    isRunning || (!isSnapshot && isBusyStatus(status))
-      ? latestOutputLine(metadata, isRunning ? content : null, toolCall)
-      : null;
+  const live = isRunning || execStateIsLive(execState);
+  const liveHint = live
+    ? latestOutputLine(metadata, isRunning ? content : null, toolCall)
+    : null;
   const meta =
     isSnapshot && !isRunning
       ? snapshotMeta(toolName, process, metadata)
@@ -155,7 +111,7 @@ export const ExecToolCard: React.FC<ExecToolCardProps> = ({
     !isSnapshot &&
     Boolean(process.processId) &&
     actions.canReadTranscript &&
-    (isRunning || isBusyStatus(status));
+    live;
   const showStdin = Boolean(
     process.processId && metadata?.tty === true && isBusyStatus(status),
   );

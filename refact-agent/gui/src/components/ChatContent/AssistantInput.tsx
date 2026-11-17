@@ -14,7 +14,10 @@ import {
   WebSearchCitation,
 } from "../../services/refact";
 import { ToolContent } from "./ToolsContent";
-import type { ToolJobResultsByToolId } from "./ChatContentDisplayItems";
+import type {
+  AssistantView,
+  ToolJobResultsByToolId,
+} from "./ChatContentDisplayItems";
 import { fallbackCopying } from "../../utils/fallbackCopying";
 import { ReasoningContent } from "./ReasoningContent";
 import { MessageFooter, MessageWrapper } from "./MessageFooter";
@@ -39,6 +42,16 @@ type ChatInputProps = {
   usage?: Usage | null;
   isStreaming?: boolean;
   threadId?: string;
+  view?: AssistantView;
+};
+
+const FULL_VIEW: Omit<AssistantView, "toolCalls"> = {
+  reasoning: true,
+  prose: true,
+  sources: true,
+  footer: true,
+  serverTools: true,
+  activeTools: true,
 };
 
 const _AssistantInput: React.FC<ChatInputProps> = ({
@@ -59,7 +72,20 @@ const _AssistantInput: React.FC<ChatInputProps> = ({
   usage,
   isStreaming = false,
   threadId,
+  view,
 }) => {
+  const parts = view ?? FULL_VIEW;
+  const visibleToolCalls = view ? view.toolCalls : toolCalls;
+  const visibleJobResults = useMemo(() => {
+    if (!view || !jobResultsByToolId) return jobResultsByToolId;
+    const ids = new Set(view.toolCalls.map((call) => call.id));
+    const entries = Object.entries(jobResultsByToolId).filter(([id]) =>
+      ids.has(id),
+    );
+    return entries.length === Object.keys(jobResultsByToolId).length
+      ? jobResultsByToolId
+      : (Object.fromEntries(entries) as ToolJobResultsByToolId);
+  }, [view, jobResultsByToolId]);
   // Get unique server-executed tool names for display
   const serverToolNames = useMemo(() => {
     if (!serverExecutedTools || serverExecutedTools.length === 0) return [];
@@ -130,11 +156,14 @@ const _AssistantInput: React.FC<ChatInputProps> = ({
   }, [message, handleCopy]);
 
   const hasMessageContent = Boolean(message?.trim());
+  const showReasoning = parts.reasoning && Boolean(combinedReasoning);
+  const showProse = parts.prose && hasMessageContent;
+  const toolsActive = isStreaming && parts.activeTools;
 
   return (
     <MessageWrapper>
-      {combinedReasoning && (
-        <Box mb={!hasMessageContent ? "3" : undefined}>
+      {showReasoning && combinedReasoning && (
+        <Box mb={!showProse ? "3" : undefined} data-assistant-lead="">
           <ReasoningContent
             reasoningContent={combinedReasoning}
             onCopyClick={handleCopy}
@@ -145,12 +174,15 @@ const _AssistantInput: React.FC<ChatInputProps> = ({
         </Box>
       )}
 
-      {!!serverContentBlocks?.length && (
-        <Box mb={!hasMessageContent && !combinedReasoning ? "3" : undefined}>
+      {parts.reasoning && !!serverContentBlocks?.length && (
+        <Box
+          mb={!showProse && !showReasoning ? "3" : undefined}
+          data-assistant-lead=""
+        >
           <ServerContentBlocks blocks={serverContentBlocks} />
         </Box>
       )}
-      {hasMessageContent && (
+      {showProse && (
         <Box py="4">
           {bodyContent ?? (
             <Markdown
@@ -164,90 +196,95 @@ const _AssistantInput: React.FC<ChatInputProps> = ({
         </Box>
       )}
       {/* Server-executed tools indicator with citations */}
-      {(serverToolNames.length > 0 || (citations && citations.length > 0)) && (
-        <div className={styles.serverSourcesCard}>
-          <Flex direction="column" gap="2">
-            {serverToolNames.length > 0 && (
-              <Flex gap="2" align="center">
-                <Icon icon={Globe2} size="sm" tone="muted" />
-                <Text size="2" className={styles.serverSourcesText}>
-                  {serverToolNames.join(", ")}
-                </Text>
-              </Flex>
-            )}
-            {citations && citations.length > 0 && (
-              <Flex
-                direction="column"
-                gap="1"
-                className={styles.serverSourcesList}
-              >
-                <Text
-                  size="1"
-                  weight="medium"
-                  className={styles.serverSourcesText}
+      {parts.sources &&
+        (serverToolNames.length > 0 || (citations && citations.length > 0)) && (
+          <div className={styles.serverSourcesCard}>
+            <Flex direction="column" gap="2">
+              {serverToolNames.length > 0 && (
+                <Flex gap="2" align="center">
+                  <Icon icon={Globe2} size="sm" tone="muted" />
+                  <Text size="2" className={styles.serverSourcesText}>
+                    {serverToolNames.join(", ")}
+                  </Text>
+                </Flex>
+              )}
+              {citations && citations.length > 0 && (
+                <Flex
+                  direction="column"
+                  gap="1"
+                  className={styles.serverSourcesList}
                 >
-                  Sources:
-                </Text>
-                {citations
-                  .filter(
-                    (citation, idx, arr) =>
-                      arr.findIndex((c) => c.url === citation.url) === idx,
-                  )
-                  .filter((citation) => {
-                    try {
-                      const url = new URL(citation.url);
-                      return (
-                        url.protocol === "http:" || url.protocol === "https:"
-                      );
-                    } catch {
-                      return false;
-                    }
-                  })
-                  .map((citation, idx) => (
-                    <Link
-                      key={idx}
-                      href={citation.url}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      size="1"
-                    >
-                      {citation.title}
-                    </Link>
-                  ))}
-              </Flex>
-            )}
-          </Flex>
-        </div>
-      )}
+                  <Text
+                    size="1"
+                    weight="medium"
+                    className={styles.serverSourcesText}
+                  >
+                    Sources:
+                  </Text>
+                  {citations
+                    .filter(
+                      (citation, idx, arr) =>
+                        arr.findIndex((c) => c.url === citation.url) === idx,
+                    )
+                    .filter((citation) => {
+                      try {
+                        const url = new URL(citation.url);
+                        return (
+                          url.protocol === "http:" || url.protocol === "https:"
+                        );
+                      } catch {
+                        return false;
+                      }
+                    })
+                    .map((citation, idx) => (
+                      <Link
+                        key={idx}
+                        href={citation.url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        size="1"
+                      >
+                        {citation.title}
+                      </Link>
+                    ))}
+                </Flex>
+              )}
+            </Flex>
+          </div>
+        )}
 
-      {serverExecutedTools && serverExecutedTools.length > 0 && (
+      {parts.serverTools &&
+        serverExecutedTools &&
+        serverExecutedTools.length > 0 && (
+          <ToolContent
+            toolCalls={serverExecutedTools}
+            contextFilesByToolId={contextFilesByToolId}
+            diffsByToolId={diffsByToolId}
+            isActiveAssistant={toolsActive}
+            threadId={threadId}
+          />
+        )}
+
+      {visibleToolCalls && (!view || visibleToolCalls.length > 0) && (
         <ToolContent
-          toolCalls={serverExecutedTools}
+          toolCalls={visibleToolCalls}
           contextFilesByToolId={contextFilesByToolId}
           diffsByToolId={diffsByToolId}
-          isActiveAssistant={isStreaming}
+          jobResultsByToolId={visibleJobResults}
+          isActiveAssistant={toolsActive}
           threadId={threadId}
         />
       )}
-
-      {toolCalls && (
-        <ToolContent
-          toolCalls={toolCalls}
-          contextFilesByToolId={contextFilesByToolId}
-          diffsByToolId={diffsByToolId}
-          jobResultsByToolId={jobResultsByToolId}
-          isActiveAssistant={isStreaming}
-          threadId={threadId}
+      {parts.footer && (
+        <MessageFooter
+          messageId={messageId}
+          onCopy={hasMessageContent ? handleCopyMessage : undefined}
+          onBranch={onBranch}
+          onDelete={onDelete}
+          usage={usage}
+          overlay={view ? !showProse : !showProse && !showReasoning}
         />
       )}
-      <MessageFooter
-        messageId={messageId}
-        onCopy={hasMessageContent ? handleCopyMessage : undefined}
-        onBranch={onBranch}
-        onDelete={onDelete}
-        usage={usage}
-        overlay={!hasMessageContent && !combinedReasoning}
-      />
     </MessageWrapper>
   );
 };

@@ -205,6 +205,8 @@ The Privacy & Access page is destination-first, not a zone × destination matrix
 
 Dispatches messages to specialized renderers. Iterative processing (not recursive). Groups assistant messages with related diffs + tools.
 
+Tool-run groups: `groupToolRuns` (`toolRunGroups.ts`) runs after `buildDisplayItems` and folds tool activity between visible prose into one `ToolRunGroup` row (state in the CollapsibleStore under `run:<first member key>`). Rules: at least 2 tool calls; the tail segment is never grouped; `ask_questions`/`task_done`/`agent_finish` (client or server-executed) render standalone; prose and citations always stay visible; a prose message's reasoning joins the previous group; interrupted/`_ui_only` assistant messages are never split or grouped. Collapsed groups pin pending confirmations, live/background processes and agents that need you; exec status (named exec tools and any tool rendered as `ExecToolCard` via `extra.exec`) comes from `resolveExecState` in `execToolModel.ts`, shared with `ExecToolCard`, and the failed count also includes terminal non-zero exits. `revealProcessOutput` asks a collapsed owning group to open before scrolling.
+
 Compression visibility rules:
 
 - `compression_report` messages render visibly as `SummarizationMessage` cards via `syntheticCompressionReportMessage()` and should not be hidden as internal roles.

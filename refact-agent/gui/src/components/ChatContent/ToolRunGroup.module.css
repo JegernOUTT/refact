@@ -1,0 +1,100 @@
+.root {
+  display: grid;
+  min-width: 0;
+  color: var(--rf-color-fg);
+  font-family: var(--rf-font-ui);
+  font-size: var(--rf-transcript-body-size);
+  line-height: var(--rf-transcript-body-line);
+}
+
+.row {
+  composes: row from "./TranscriptItem/TranscriptItem.module.css";
+}
+
+.toggle {
+  composes: toggle from "./TranscriptItem/TranscriptItem.module.css";
+}
+
+.icon {
+  composes: icon from "./TranscriptItem/TranscriptItem.module.css";
+}
+
+.summary {
+  composes: title from "./TranscriptItem/TranscriptItem.module.css";
+  display: block;
+  text-overflow: ellipsis;
+}
+
+.verb {
+  font-weight: var(--rf-weight-medium);
+}
+
+.added {
+  color: var(--rf-color-success);
+}
+
+.removed {
+  color: var(--rf-color-danger);
+}
+
+.spacer {
+  composes: spacer from "./TranscriptItem/TranscriptItem.module.css";
+}
+
+.pill {
+  composes: pill from "./TranscriptItem/TranscriptItem.module.css";
+}
+
+.duration {
+  flex: 0 0 auto;
+  color: var(--rf-color-muted);
+  font-size: var(--rf-transcript-meta-size);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.chevron {
+  composes: chevron from "./TranscriptItem/TranscriptItem.module.css";
+}
+
+.root[data-open="true"] > .row > .chevron {
+  transform: rotate(180deg);
+}
+
+.panelGrid {
+  composes: panelGrid from "./TranscriptItem/TranscriptItem.module.css";
+}
+
+.panelShell {
+  composes: panelShell from "./TranscriptItem/TranscriptItem.module.css";
+}
+
+.members {
+  composes: panel from "./TranscriptItem/TranscriptItem.module.css";
+}
+
+.pinned {
+  composes: preview from "./TranscriptItem/TranscriptItem.module.css";
+}
+
+.root .members,
+.root .pinned {
+  display: block;
+  padding-block: 0;
+  padding-inline-start: var(--rf-space-1);
+}
+
+.metaGroup {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: var(--rf-space-2);
+}
+
+.member {
+  min-width: 0;
+}
+
+.member [data-assistant-lead] {
+  margin-bottom: 0;
+}

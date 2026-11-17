@@ -60,6 +60,12 @@ import {
   tryIncrementalDisplayItemsUpdate,
 } from "./ChatContentDisplayItems";
 import { EventRow } from "./EventRow";
+import {
+  groupToolRuns,
+  isInterruptedAssistant,
+  type TranscriptDisplayItem,
+} from "./toolRunGroups";
+import { ToolRunGroup } from "./ToolRunGroup";
 import { revealProcessOutput } from "./revealProcessOutput";
 import { selectSseStatusForChat } from "../../features/Connection";
 import { LogoAnimation } from "../LogoAnimation/LogoAnimation.tsx";
@@ -110,6 +116,7 @@ const ESTIMATED_TEXT_CHROME_PX = 40;
 const ESTIMATED_TOOL_ROW_PX = 70;
 const ESTIMATED_USER_MESSAGE_PX = 100;
 const ESTIMATED_COMPACT_ROW_PX = 48;
+const ESTIMATED_TOOL_RUN_PX = 40;
 const MAX_ESTIMATED_ITEM_HEIGHT_PX = 1200;
 
 function estimateTextHeight(text: string): number {
@@ -126,13 +133,20 @@ function estimateTextHeight(text: string): number {
   );
 }
 
-function estimateDisplayItemHeight(item: DisplayItem): number {
+function estimateDisplayItemHeight(item: TranscriptDisplayItem): number {
   switch (item.type) {
+    case "tool_run":
+      return ESTIMATED_TOOL_RUN_PX;
     case "assistant": {
       const text =
-        typeof item.message.content === "string" ? item.message.content : "";
+        item.view && !item.view.prose
+          ? ""
+          : typeof item.message.content === "string"
+            ? item.message.content
+            : "";
       const toolRows =
-        (item.message.tool_calls?.length ?? 0) * ESTIMATED_TOOL_ROW_PX;
+        (item.view?.toolCalls.length ?? item.message.tool_calls?.length ?? 0) *
+        ESTIMATED_TOOL_ROW_PX;
       if (!text.trim()) return Math.max(toolRows, ESTIMATED_TOOL_ROW_PX);
       return Math.min(
         MAX_ESTIMATED_ITEM_HEIGHT_PX,
@@ -460,9 +474,14 @@ export const ChatContent: React.FC<ChatContentProps> = ({
     return nextItems;
   }, [messages, isStreaming]);
 
+  const transcriptItems = useMemo(
+    () => groupToolRuns(displayItems),
+    [displayItems],
+  );
+
   const initialScrollIndex = useMemo(() => {
-    return displayItems.length > 0 ? displayItems.length - 1 : undefined;
-  }, [displayItems]);
+    return transcriptItems.length > 0 ? transcriptItems.length - 1 : undefined;
+  }, [transcriptItems]);
 
   const liveRecovery =
     recovery && recovery.state !== "succeeded" ? recovery : null;
@@ -646,8 +665,7 @@ export const ChatContent: React.FC<ChatContentProps> = ({
         case "assistant":
           return (
             <>
-              {(item.message.extra?.interrupted === true ||
-                item.message.extra?._ui_only === true) && (
+              {isInterruptedAssistant(item.message) && (
                 <Text size="1">
                   Interrupted output — not included in the next request
                 </Text>
@@ -665,6 +683,7 @@ export const ChatContent: React.FC<ChatContentProps> = ({
                 }
                 reasoningContent={item.message.reasoning_content}
                 thinkingBlocks={item.message.thinking_blocks}
+                view={item.view}
                 toolCalls={item.message.tool_calls}
                 serverExecutedTools={item.message.server_executed_tools}
                 serverContentBlocks={item.message.server_content_blocks}
@@ -825,6 +844,20 @@ export const ChatContent: React.FC<ChatContentProps> = ({
     ],
   );
 
+  const renderTranscriptItem = useCallback(
+    (item: TranscriptDisplayItem): React.ReactNode =>
+      item.type === "tool_run" ? (
+        <ToolRunGroup
+          group={item}
+          threadId={renderChatId}
+          renderMember={renderDisplayItem}
+        />
+      ) : (
+        renderDisplayItem(item)
+      ),
+    [renderChatId, renderDisplayItem],
+  );
+
   if (subscriptionFailure && !snapshotReceived && messages.length === 0) {
     return (
       <Flex
@@ -900,8 +933,8 @@ export const ChatContent: React.FC<ChatContentProps> = ({
           <Box className={styles.transcriptScrollRegion}>
             <VirtualizedChatList
               key={renderChatId}
-              items={displayItems}
-              renderItem={renderDisplayItem}
+              items={transcriptItems}
+              renderItem={renderTranscriptItem}
               estimateItemHeight={estimateDisplayItemHeight}
               initialScrollIndex={initialScrollIndex}
               footer={virtuosoFooter}

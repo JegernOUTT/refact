@@ -360,7 +360,7 @@ const READ_TOOLS = new Set([
   "t_hist_get",
 ]);
 
-const EDIT_TOOLS = new Set([
+export const EDIT_TOOLS: ReadonlySet<string> = new Set([
   "create_textdoc",
   "update_textdoc",
   "replace_textdoc",
@@ -380,7 +380,17 @@ const EDIT_TOOLS = new Set([
   "t_rm",
 ]);
 
-type DisplayItemAssistant = {
+export type AssistantView = {
+  reasoning: boolean;
+  prose: boolean;
+  sources: boolean;
+  footer: boolean;
+  serverTools: boolean;
+  toolCalls: ToolCall[];
+  activeTools: boolean;
+};
+
+export type DisplayItemAssistant = {
   type: "assistant";
   key: string;
   index: number;
@@ -390,6 +400,7 @@ type DisplayItemAssistant = {
   diffsByToolId: Record<string, DiffChunk[]>;
   jobResultsByToolId: ToolJobResultsByToolId;
   isStreaming: boolean;
+  view?: AssistantView;
 };
 
 type DisplayItemUser = {
@@ -626,7 +637,7 @@ function hasItems(value: readonly unknown[] | null | undefined): boolean {
   return Array.isArray(value) && value.length > 0;
 }
 
-function hasThinkingText(message: AssistantMessage): boolean {
+export function hasThinkingText(message: AssistantMessage): boolean {
   return (message.thinking_blocks ?? []).some(
     (block) =>
       Boolean(block.thinking?.trim()) ||

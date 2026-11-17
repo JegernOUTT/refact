@@ -84,6 +84,12 @@ const STATUS_LABELS: Record<ExecDisplayStatus, string> = {
   unknown: "Unknown",
 };
 
+const EXEC_TOOL_NAMES: ReadonlySet<string> = new Set(Object.keys(VERBS));
+
+export function isExecToolName(name: string): name is ExecToolName {
+  return EXEC_TOOL_NAMES.has(name);
+}
+
 export function execVerb(toolName: ExecToolName): string {
   return VERBS[toolName];
 }
@@ -571,6 +577,88 @@ export function foldedProcessOutcome(
     exitCode,
     durationMs: payloadNumber(payload, "duration_ms"),
   };
+}
+
+type ExecRowKind = "start" | "snapshot" | "action";
+
+function execRowKind(toolName: ExecToolName, args: ProcessArgs): ExecRowKind {
+  if (isProcessStartCall(toolName, args)) return "start";
+  if (isProcessSnapshotTool(toolName)) return "snapshot";
+  if (toolName === "shell_service" && args.action === "status") {
+    return "snapshot";
+  }
+  return "action";
+}
+
+function execResultSource(
+  toolName: ExecToolName,
+  kind: ExecRowKind,
+): ExecResultSource {
+  if (kind === "start") return "start";
+  return toolName === "shell" || toolName === "exec" ? "none" : "snapshot";
+}
+
+type ExecResultLike = {
+  extra?: Record<string, unknown>;
+  content?: unknown;
+  tool_failed?: boolean;
+};
+
+export type ExecState = {
+  kind: ExecRowKind;
+  metadata: ExecToolMetadata | null;
+  outcome: FoldedProcessOutcome | null;
+  status: ExecDisplayStatus;
+  toolFailed: boolean;
+  hasRecordedOutcome: boolean;
+};
+
+export function resolveExecState(
+  toolName: ExecToolName,
+  args: ProcessArgs,
+  result: ExecResultLike | undefined,
+  foldedEvent: EventMessage | undefined,
+  isRunning: boolean,
+): ExecState {
+  const kind = execRowKind(toolName, args);
+  const metadata = execMetadataFromResult(
+    result?.extra,
+    result?.content,
+    execResultSource(toolName, kind),
+  );
+  const outcome = foldedProcessOutcome(foldedEvent);
+  const toolFailed = result?.tool_failed === true;
+  const status =
+    outcome?.status ??
+    normalizeExecStatus(
+      metadata,
+      toolName,
+      Boolean(result),
+      toolFailed,
+      isRunning,
+    );
+  return {
+    kind,
+    metadata,
+    outcome,
+    status,
+    toolFailed,
+    hasRecordedOutcome: Boolean(result) || outcome !== null,
+  };
+}
+
+export function execStateTranscriptStatus(
+  state: ExecState,
+  isRunning: boolean,
+): TranscriptStatus | null {
+  if (!state.hasRecordedOutcome) return null;
+  return state.kind === "snapshot" && !isRunning
+    ? snapshotTranscriptStatus(state.status, state.toolFailed)
+    : execTranscriptStatus(state.status, isRunning, state.toolFailed);
+}
+
+export function execStateIsLive(state: ExecState): boolean {
+  return state.kind !== "snapshot" && isBusyStatus(state.status);
 }
 
 export function withFoldedOutcome(

@@ -4,7 +4,7 @@ import { COLLAPSE_ANIMATION_MS } from "../../shared/useDelayedUnmount";
 
 export const TRANSCRIPT_COLLAPSE_FALLBACK_MS = COLLAPSE_ANIMATION_MS;
 
-function isReducedMotionForced(): boolean {
+export function isReducedMotionForced(): boolean {
   if (typeof document === "undefined") return false;
   return document.documentElement.dataset.reducedMotion === "on";
 }
