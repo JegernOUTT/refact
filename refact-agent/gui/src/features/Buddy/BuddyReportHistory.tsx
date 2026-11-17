@@ -52,70 +52,72 @@ export function BuddyReportHistory({
   );
   return (
     <div className={styles.history}>
-      <BuddyDisclosure
-        label="Earlier revisions"
-        open={open}
-        onOpenChange={setOpen}
-        testId="buddy-report-revisions"
-        contentClassName={styles.body}
-      >
-        {history.isFetching && (
-          <BuddyLoading variant="rows" count={2} label="Loading revisions" />
-        )}
-        {history.error && (
-          <BuddyErrorCallout
-            thing="earlier revisions"
-            error={history.error}
-            onRetry={() => void history.refetch()}
-            compact
-          />
-        )}
-        {history.currentData?.data.map(({ value }) =>
-          value.project.canonical_root !== item.project.canonical_root ? (
-            <p key={value.revision} role="alert" className={styles.warning}>
-              This revision belongs to another project.
-            </p>
-          ) : (
-            <BuddyDisclosure
-              key={value.revision}
-              label={`Revision ${value.revision} · ${value.title}`}
-              lazy
-              contentClassName={styles.body}
-            >
-              <p className={styles.text}>{value.conclusion}</p>
-              <BuddyArtifactBody
-                body={stripLeadingTitleHeading(value.body, value.title)}
-              />
-              <p className={styles.hint}>
-                Earlier revision. Actions apply to the current revision only.
+      {artifact.revision > 1 && (
+        <BuddyDisclosure
+          label="Earlier revisions"
+          open={open}
+          onOpenChange={setOpen}
+          testId="buddy-report-revisions"
+          contentClassName={styles.body}
+        >
+          {history.isFetching && (
+            <BuddyLoading variant="rows" count={2} label="Loading revisions" />
+          )}
+          {history.error && (
+            <BuddyErrorCallout
+              thing="earlier revisions"
+              error={history.error}
+              onRetry={() => void history.refetch()}
+              compact
+            />
+          )}
+          {history.currentData?.data.map(({ value }) =>
+            value.project.canonical_root !== item.project.canonical_root ? (
+              <p key={value.revision} role="alert" className={styles.warning}>
+                This revision belongs to another project.
               </p>
-            </BuddyDisclosure>
-          ),
-        )}
-        <div className={styles.pager}>
-          {history.currentData?.next_cursor != null && (
-            <Button
-              size="sm"
-              variant="soft"
-              disabled={history.isFetching}
-              onClick={() =>
-                setCursor(history.currentData?.next_cursor ?? undefined)
-              }
-            >
-              Older revisions
-            </Button>
+            ) : (
+              <BuddyDisclosure
+                key={value.revision}
+                label={`Revision ${value.revision} · ${value.title}`}
+                lazy
+                contentClassName={styles.body}
+              >
+                <p className={styles.text}>{value.conclusion}</p>
+                <BuddyArtifactBody
+                  body={stripLeadingTitleHeading(value.body, value.title)}
+                />
+                <p className={styles.hint}>
+                  Earlier revision. Actions apply to the current revision only.
+                </p>
+              </BuddyDisclosure>
+            ),
           )}
-          {cursor !== undefined && (
-            <Button
-              size="sm"
-              variant="ghost"
-              onClick={() => setCursor(undefined)}
-            >
-              Newest revisions
-            </Button>
-          )}
-        </div>
-      </BuddyDisclosure>
+          <div className={styles.pager}>
+            {history.currentData?.next_cursor != null && (
+              <Button
+                size="sm"
+                variant="soft"
+                disabled={history.isFetching}
+                onClick={() =>
+                  setCursor(history.currentData?.next_cursor ?? undefined)
+                }
+              >
+                Older revisions
+              </Button>
+            )}
+            {cursor !== undefined && (
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() => setCursor(undefined)}
+              >
+                Newest revisions
+              </Button>
+            )}
+          </div>
+        </BuddyDisclosure>
+      )}
       <BuddyDisclosure
         label="Run history"
         summary="Every check, including runs with no change"

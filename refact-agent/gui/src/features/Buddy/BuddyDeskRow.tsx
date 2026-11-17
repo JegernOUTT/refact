@@ -71,6 +71,7 @@ export function DeskRow({
   rowActions,
   selected,
   unread,
+  bare = false,
   onOpen,
   onActionVerb,
 }: {
@@ -81,6 +82,7 @@ export function DeskRow({
   rowActions: RowActions;
   selected: boolean;
   unread: boolean;
+  bare?: boolean;
   onOpen: (item: WorkItem, trigger: HTMLElement) => void;
   onActionVerb: (id: string, verb: string) => void;
 }) {
@@ -139,29 +141,28 @@ export function DeskRow({
       )}
     </>
   );
-  return (
-    <li className={styles.rowItem}>
-      <BuddyRow
-        data-desk-row={item.id}
-        title={<span data-testid="buddy-desk-row-title">{title}</span>}
-        fullTitle={title}
-        titleLines={2}
-        leading={{ tick: buddyStatus("work", workState).tone }}
-        status={item.state !== defaultState || severity ? status : undefined}
-        description={problemSummary(item)}
-        meta={[
-          rowScope(item),
-          showActionVerb && verb !== null ? verb : null,
-          <BuddyTimestamp
-            key="changed"
-            value={item.last_material_change_at}
-            prefix="Changed"
-          />,
-        ]}
-        selected={selected}
-        unread={unread}
-        onClick={(event) => onOpen(item, event.currentTarget)}
-      />
-    </li>
+  const row = (
+    <BuddyRow
+      data-desk-row={item.id}
+      title={<span data-testid="buddy-desk-row-title">{title}</span>}
+      fullTitle={title}
+      titleLines={2}
+      leading={{ tick: buddyStatus("work", workState).tone }}
+      status={item.state !== defaultState || severity ? status : undefined}
+      description={problemSummary(item)}
+      meta={[
+        rowScope(item),
+        showActionVerb && verb !== null ? verb : null,
+        <BuddyTimestamp
+          key="changed"
+          value={item.last_material_change_at}
+          prefix="Changed"
+        />,
+      ]}
+      selected={selected}
+      unread={unread}
+      onClick={(event) => onOpen(item, event.currentTarget)}
+    />
   );
+  return bare ? row : <li className={styles.rowItem}>{row}</li>;
 }

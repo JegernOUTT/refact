@@ -24,7 +24,7 @@ export function BuddyDeskList({
   groups: DeskRecordGroup[];
   openGroups: ReadonlySet<string>;
   onToggleGroup: (key: string, open: boolean) => void;
-  renderRow: (record: OperatorRecord<WorkItem>) => JSX.Element;
+  renderRow: (record: OperatorRecord<WorkItem>, bare?: boolean) => JSX.Element;
 }) {
   const cancelledLabel = `Cancelled · ${plural(
     cancelled.length,
@@ -34,17 +34,16 @@ export function BuddyDeskList({
     <div className={styles.scroller} data-testid="buddy-desk-scroller">
       {primary.length > 0 && listMode === "history" && (
         <ul className={styles.items} aria-label="Reports">
-          {primary.map(renderRow)}
+          {primary.map((record) => renderRow(record))}
         </ul>
       )}
       {primary.length > 0 && listMode === "latest" && (
         <ul className={styles.items} aria-label="Reports">
           {groups.map((group) => (
             <li key={group.key} className={styles.group}>
-              <ul className={styles.items}>{renderRow(group.head)}</ul>
+              {renderRow(group.head, true)}
               {group.others.length > 0 && (
                 <BuddyDisclosure
-                  className={styles.history}
                   label={`${plural(
                     group.others.length,
                     "earlier report",
@@ -53,7 +52,7 @@ export function BuddyDeskList({
                   onOpenChange={(open) => onToggleGroup(group.key, open)}
                 >
                   <ul className={styles.items}>
-                    {group.others.map(renderRow)}
+                    {group.others.map((record) => renderRow(record))}
                   </ul>
                 </BuddyDisclosure>
               )}
@@ -64,7 +63,9 @@ export function BuddyDeskList({
       {cancelled.length > 0 && primary.length === 0 && (
         <section className={styles.cancelled} aria-label="Cancelled reports">
           <p className={styles.groupLabel}>{cancelledLabel}</p>
-          <ul className={styles.items}>{cancelled.map(renderRow)}</ul>
+          <ul className={styles.items}>
+            {cancelled.map((record) => renderRow(record))}
+          </ul>
         </section>
       )}
       {cancelled.length > 0 && primary.length > 0 && (
@@ -75,7 +76,9 @@ export function BuddyDeskList({
           open={openGroups.has(CANCELLED_GROUP)}
           onOpenChange={(open) => onToggleGroup(CANCELLED_GROUP, open)}
         >
-          <ul className={styles.items}>{cancelled.map(renderRow)}</ul>
+          <ul className={styles.items}>
+            {cancelled.map((record) => renderRow(record))}
+          </ul>
         </BuddyDisclosure>
       )}
     </div>

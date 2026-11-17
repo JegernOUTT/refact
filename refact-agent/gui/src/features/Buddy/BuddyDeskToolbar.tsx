@@ -1,4 +1,4 @@
-import type { Ref } from "react";
+import { useId, type Ref } from "react";
 import { Info, Search, X } from "lucide-react";
 import {
   FieldSelect,
@@ -19,7 +19,6 @@ import {
   type DeskListMode,
 } from "./BuddyDeskModel";
 import type { BuddyReportsView } from "./sections/buddyReportsLink";
-import { BuddyScrollRail } from "./ui";
 import styles from "./BuddyDesk.module.css";
 
 const GROUPING_HINT =
@@ -35,10 +34,11 @@ export function BuddyDeskViews({
   viewsRef: Ref<HTMLDivElement>;
 }) {
   return (
-    <BuddyScrollRail railRef={viewsRef} watch={view}>
+    <div ref={viewsRef} className={styles.views}>
       <SegmentedControl
         aria-label="Report views"
         layout="content"
+        className={styles.viewsControl}
         options={DESK_VIEWS.map((value) => ({
           value,
           label: DESK_VIEW_LABELS[value],
@@ -48,7 +48,7 @@ export function BuddyDeskViews({
           if (isDeskView(value)) onChange(value);
         }}
       />
-    </BuddyScrollRail>
+    </div>
   );
 }
 
@@ -121,35 +121,40 @@ export function BuddyDeskListTools({
   grouped: boolean;
   onListMode: (mode: DeskListMode) => void;
 }) {
+  const hintId = useId();
   return (
     <div className={styles.listTools}>
       {showModes && (
-        <BuddyScrollRail watch={listMode}>
-          <SegmentedControl
-            aria-label="List layout"
-            layout="content"
-            size="sm"
-            options={DESK_LIST_MODES}
-            value={listMode}
-            onValueChange={(value) =>
-              onListMode(value === "history" ? "history" : "latest")
-            }
-          />
-        </BuddyScrollRail>
+        <SegmentedControl
+          aria-label="List layout"
+          layout="content"
+          size="sm"
+          options={DESK_LIST_MODES}
+          value={listMode}
+          onValueChange={(value) =>
+            onListMode(value === "history" ? "history" : "latest")
+          }
+        />
       )}
       <span className={styles.countGroup}>
         <span className={styles.count} data-testid="buddy-desk-count">
           {count}
         </span>
         {grouped && (
-          <Tooltip content={GROUPING_HINT}>
-            <IconButton
-              icon={Info}
-              size="sm"
-              variant="ghost"
-              aria-label={GROUPING_HINT}
-            />
-          </Tooltip>
+          <>
+            <span id={hintId} hidden>
+              {GROUPING_HINT}
+            </span>
+            <Tooltip content={GROUPING_HINT}>
+              <IconButton
+                icon={Info}
+                size="sm"
+                variant="ghost"
+                aria-label="About grouping"
+                aria-describedby={hintId}
+              />
+            </Tooltip>
+          </>
         )}
       </span>
     </div>

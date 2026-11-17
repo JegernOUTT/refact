@@ -1,6 +1,7 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
+import { RefreshCw } from "lucide-react";
 import { v4 as uuidv4 } from "uuid";
-import { Button, Text, Tooltip } from "../../components/ui";
+import { Button, IconButton, Text, Tooltip } from "../../components/ui";
 import {
   useGetBuddyDeskActionsQuery,
   useExecuteBuddyDeskActionMutation,
@@ -141,6 +142,7 @@ function ActionControl({
     <Button
       size="sm"
       variant={inline ? "ghost" : lifecycle ? "soft" : "primary"}
+      className={inline || lifecycle ? undefined : styles.primaryButton}
       disabled={disabled || pending || !available}
       aria-describedby={inline ? descriptionId : undefined}
       onClick={() => void run()}
@@ -320,14 +322,17 @@ export function BuddyDeskActions({
         {lifecycle.map((action) => control(action, true))}
         {secondary}
         {!error && !empty && (
-          <Button
-            size="sm"
-            variant="ghost"
-            disabled={isFetching}
-            onClick={() => void refetch()}
-          >
-            Refresh actions
-          </Button>
+          <Tooltip content="Refresh actions">
+            <IconButton
+              icon={RefreshCw}
+              size="sm"
+              variant="ghost"
+              aria-label="Refresh actions"
+              className={styles.refreshActions}
+              disabled={isFetching}
+              onClick={() => void refetch()}
+            />
+          </Tooltip>
         )}
       </div>
       {footnote}

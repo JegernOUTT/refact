@@ -44,6 +44,7 @@ describe("publication-only recovery", () => {
     expect(warning.textContent).toContain(
       "Publication recovery is unavailable",
     );
+    expect(warning.textContent).toContain("Check storage and reload Buddy");
     expect(warning.textContent).toContain("do not rerun side effects");
     expect(warning.textContent).toContain("memory-only");
     expect(warning.textContent).toContain("lost on engine restart");
@@ -83,7 +84,11 @@ describe("publication-only recovery", () => {
     const retry = await screen.findByRole("button", {
       name: "Retry saving commit_message",
     });
-    expect(screen.getByText(/memory-only/)).toBeTruthy();
+    const explain = screen.getByRole("button", { name: "What this means" });
+    expect(explain).toHaveAttribute("aria-expanded", "false");
+    expect(screen.getByText(/memory-only/)).not.toBeVisible();
+    await userEvent.click(explain);
+    expect(screen.getByText(/memory-only/)).toBeVisible();
     await userEvent.click(retry);
     await waitFor(() =>
       expect(screen.queryByRole("button", { name: /Retry saving/ })).toBeNull(),

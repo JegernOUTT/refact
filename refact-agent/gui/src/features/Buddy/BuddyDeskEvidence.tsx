@@ -2,7 +2,6 @@ import type { ArtifactRevision } from "./operatorTypes";
 import {
   BUDDY_TERMS,
   BuddyDisclosure,
-  BuddyEmptyState,
   BuddyTimestamp,
   buddyWorkflowLabel,
   humanizeBuddyIdentifier,
@@ -66,49 +65,43 @@ export function BuddyDeskEvidence({
         Evidence shows what was checked. Verifying it confirms the saved items
         are intact; it doesn&apos;t prove the finding is correct.
       </p>
-      {groups.length === 0 ? (
-        <BuddyEmptyState compact title="No evidence was recorded." />
-      ) : (
-        groups.map((group) => (
-          <section
-            key={group.kind}
-            className={styles.evidenceGroup}
-            aria-label={humanizeBuddyKey(group.kind)}
-          >
-            <h4 className={styles.label}>
-              {humanizeBuddyKey(group.kind)} · {group.items.length}
-            </h4>
-            <ul className={styles.evidence}>
-              {group.items.map((evidence, index) => {
-                return (
-                  <li key={evidence.evidence_id} className={styles.evidenceRow}>
-                    <span className={styles.evidenceName}>
-                      {group.labels[index]}
-                    </span>
-                    <BuddyTimestamp
-                      value={evidence.observed_at}
-                      prefix="Observed"
-                    />
-                  </li>
-                );
-              })}
-            </ul>
-          </section>
-        ))
-      )}
-      {artifact.evidence.length > 0 && (
-        <BuddyDisclosure label={BUDDY_TERMS.technicalDetails} lazy>
-          <pre className={styles.technical}>
-            {[
-              `Revision ${artifact.revision}`,
-              ...artifact.evidence.map(
-                (evidence) =>
-                  `${evidence.source.source_kind}: ${evidence.locator}`,
-              ),
-            ].join("\n")}
-          </pre>
-        </BuddyDisclosure>
-      )}
+      {groups.map((group) => (
+        <section
+          key={group.kind}
+          className={styles.evidenceGroup}
+          aria-label={humanizeBuddyKey(group.kind)}
+        >
+          <h4 className={styles.label}>
+            {humanizeBuddyKey(group.kind)} · {group.items.length}
+          </h4>
+          <ul className={styles.evidence}>
+            {group.items.map((evidence, index) => {
+              return (
+                <li key={evidence.evidence_id} className={styles.evidenceRow}>
+                  <span className={styles.evidenceName}>
+                    {group.labels[index]}
+                  </span>
+                  <BuddyTimestamp
+                    value={evidence.observed_at}
+                    prefix="Observed"
+                  />
+                </li>
+              );
+            })}
+          </ul>
+        </section>
+      ))}
+      <BuddyDisclosure label={BUDDY_TERMS.technicalDetails} lazy>
+        <pre className={styles.technical}>
+          {[
+            `Revision ${artifact.revision}`,
+            ...artifact.evidence.map(
+              (evidence) =>
+                `${evidence.source.source_kind}: ${evidence.locator}`,
+            ),
+          ].join("\n")}
+        </pre>
+      </BuddyDisclosure>
     </BuddyDisclosure>
   );
 }

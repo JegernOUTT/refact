@@ -17,13 +17,13 @@ const work = {
   state: "needs_attention",
   native_sources: [],
   current_artifact_id: "report",
-  current_artifact_revision: 1,
+  current_artifact_revision: 2,
   last_material_change_at: "2026-09-05T00:00:00Z",
 };
 const artifact = {
   schema_version: 1,
   artifact_id: "report",
-  revision: 1,
+  revision: 2,
   project,
   source_run_ids: ["run"],
   title: "Saved assessment",
@@ -110,7 +110,7 @@ for (const width of [240, 360, 768, 1280]) {
                   spec_hash: "hash",
                   work_revision: 1,
                   artifact_id: "report",
-                  artifact_revision: 1,
+                  artifact_revision: 2,
                   label: "Check saved evidence links",
                   description:
                     "Checks stored metadata only; no findings are verified and no fix is applied.",
@@ -125,7 +125,9 @@ for (const width of [240, 360, 768, 1280]) {
         return route.fulfill({ json: envelope(record(artifact)) });
       if (url.pathname === "/v1/buddy/artifacts/report/revisions")
         return route.fulfill({
-          json: envelope([record({ ...artifact, title: "Prior report" })]),
+          json: envelope([
+            record({ ...artifact, revision: 1, title: "Prior report" }),
+          ]),
         });
       if (url.pathname === "/v1/buddy/work/work/snooze") {
         if (request.method() === "POST")
@@ -134,7 +136,7 @@ for (const width of [240, 360, 768, 1280]) {
             project,
             work_id: "work",
             artifact_id: "report",
-            artifact_revision: 1,
+            artifact_revision: 2,
             until: "2099-01-01T00:00:00Z",
           };
         return route.fulfill({ json: envelope(snoozeState) });
@@ -144,14 +146,14 @@ for (const width of [240, 360, 768, 1280]) {
           expect(request.postDataJSON()).toEqual({
             project_id: "scratch",
             artifact_id: "report",
-            artifact_revision: 1,
+            artifact_revision: 2,
           });
           readState = {
             schema_version: 1,
             project,
             work_id: "work",
             artifact_id: "report",
-            last_read_revision: 1,
+            last_read_revision: 2,
             read_at: "2026-09-05T00:00:01Z",
             snoozed_until: null,
             muted: false,
@@ -188,7 +190,7 @@ for (const width of [240, 360, 768, 1280]) {
               spec_hash: "hash",
               work_revision: 1,
               artifact_id: "report",
-              artifact_revision: 1,
+              artifact_revision: 2,
               label: "Check saved evidence links",
               description:
                 "Checks stored metadata only; no findings are verified and no fix is applied.",

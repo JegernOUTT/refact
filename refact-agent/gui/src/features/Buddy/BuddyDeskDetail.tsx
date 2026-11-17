@@ -182,10 +182,12 @@ export function BuddyDeskDetail({
             title={title}
             remainder={remainder}
           />
-          <BuddyDeskEvidence
-            artifact={artifact}
-            persistKey="buddy.reports.detail.evidence"
-          />
+          {artifact.evidence.length > 0 && (
+            <BuddyDeskEvidence
+              artifact={artifact}
+              persistKey="buddy.reports.detail.evidence"
+            />
+          )}
           <BuddySurface
             as="section"
             level="inset"

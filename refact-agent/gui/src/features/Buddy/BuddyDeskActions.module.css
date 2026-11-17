@@ -27,7 +27,7 @@
 .secondary {
   display: flex;
   flex-wrap: wrap;
-  align-items: flex-start;
+  align-items: center;
   gap: var(--rf-space-1) var(--rf-space-2);
   width: 100%;
   min-width: 0;
@@ -35,13 +35,30 @@
   border-top: var(--rf-hairline) solid var(--rf-border);
 }
 
+.refreshActions {
+  margin-inline-start: auto;
+}
+
+.action .primaryButton:not(:disabled) {
+  border-color: var(--rf-color-accent);
+  background: var(--rf-color-accent);
+  color: var(--rf-bg);
+  font-weight: var(--rf-weight-semibold);
+}
+
+.action .primaryButton:hover:not(:disabled) {
+  border-color: var(--rf-color-accent);
+  background: linear-gradient(var(--rf-surface-3), var(--rf-surface-3))
+    var(--rf-color-accent);
+}
+
+.action .primaryButton:disabled {
+  opacity: 1;
+  color: var(--rf-color-muted);
+}
+
 .srOnly {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  overflow: hidden;
-  white-space: nowrap;
-  clip-path: inset(50%);
+  composes: srOnly from "./ui/BuddyStates.module.css";
 }
 
 .description,

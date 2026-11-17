@@ -5,6 +5,11 @@ import {
   type OperatorStatus,
   type PendingPublication,
 } from "../../services/refact/buddyOperator";
+import { BuddyDisclosure } from "./ui";
+
+const SUMMARY = "Some workflow results may be waiting to be saved.";
+const FAILED_SUMMARY =
+  "Publication recovery is unavailable. Check storage and reload Buddy; do not rerun side effects.";
 
 /** Only metadata crosses this boundary; retry never re-executes the workflow. */
 export function BuddyPublicationRecovery({
@@ -39,45 +44,47 @@ export function BuddyPublicationRecovery({
   }, [identity, status.mode, project, worker, recover]);
   if (!project || !worker || (!pending.length && !failed)) return null;
   return (
-    <Callout.Root color="amber" role="status">
-      <Callout.Text>
-        Some workflow results may be waiting to be saved. Retained publications
-        are memory-only and are lost on engine restart, runtime reopen, or
-        project switch; disk-full errors cannot preserve unwritten bytes.
-        Available saved assessments and trajectories remain evidence. Retrying
-        publication does not rerun models or tools.
-      </Callout.Text>
-      <Flex direction="column" gap="2">
-        {failed && (
-          <Text size="2">
-            Publication recovery is unavailable. Check storage and reload Buddy;
-            do not rerun side effects to recover a report.
-          </Text>
-        )}
-        {pending.map((row) => (
-          <Button
-            key={row.run_id}
-            disabled={isLoading}
-            onClick={() => {
-              void recover({
-                endpoint_identity: identity,
-                project,
-                worker,
-                run_id: row.run_id,
-              })
-                .unwrap()
-                .then((rows) => {
-                  setPending(rows);
-                  setFailed(false);
+    <Callout.Root color="amber" role="status" size="1">
+      <Flex direction="column" gap="1">
+        <Flex align="center" gap="2" wrap="wrap">
+          <Callout.Text>{failed ? FAILED_SUMMARY : SUMMARY}</Callout.Text>
+          {pending.map((row) => (
+            <Button
+              key={row.run_id}
+              size="1"
+              disabled={isLoading}
+              onClick={() => {
+                void recover({
+                  endpoint_identity: identity,
+                  project,
+                  worker,
+                  run_id: row.run_id,
                 })
-                .catch(() => {
-                  setFailed(true);
-                });
-            }}
-          >
-            Retry saving {row.workflow_id}
-          </Button>
-        ))}
+                  .unwrap()
+                  .then((rows) => {
+                    setPending(rows);
+                    setFailed(false);
+                  })
+                  .catch(() => {
+                    setFailed(true);
+                  });
+              }}
+            >
+              Retry saving {row.workflow_id}
+            </Button>
+          ))}
+        </Flex>
+        <BuddyDisclosure label="What this means">
+          <Text as="p" size="1">
+            {failed &&
+              "Rerunning a workflow to recover a report repeats its side effects. "}
+            Retained publications are memory-only and are lost on engine
+            restart, runtime reopen, or project switch; disk-full errors cannot
+            preserve unwritten bytes. Available saved assessments and
+            trajectories remain evidence. Retrying publication does not rerun
+            models or tools.
+          </Text>
+        </BuddyDisclosure>
       </Flex>
     </Callout.Root>
   );

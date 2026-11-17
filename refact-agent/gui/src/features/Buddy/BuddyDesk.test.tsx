@@ -66,6 +66,22 @@ const artifact: ArtifactRevision = {
   },
 };
 const record = <T,>(value: T) => ({ value, revision: 1, change_seq: 1 });
+const artifactWithEvidence: ArtifactRevision = {
+  ...artifact,
+  evidence: [
+    {
+      evidence_id: "evidence-1",
+      source: {
+        source_kind: "file",
+        source_id: "Cargo.toml",
+        source_version: "1",
+      },
+      locator: "Cargo.toml:1",
+      observed_at: "2026-09-05T00:00:00Z",
+      digest: null,
+    },
+  ],
+};
 HTMLElement.prototype.hasPointerCapture = () => false;
 HTMLElement.prototype.releasePointerCapture = () => undefined;
 
@@ -1399,10 +1415,12 @@ describe("BuddyDesk", () => {
     let reads = 0;
     server.use(
       http.get("*/v1/buddy/work", () =>
-        HttpResponse.json(envelope([record(item)])),
+        HttpResponse.json(
+          envelope([record({ ...item, current_artifact_revision: 2 })]),
+        ),
       ),
       http.get("*/v1/buddy/artifacts/:id", () =>
-        HttpResponse.json(envelope(record(artifact))),
+        HttpResponse.json(envelope(record({ ...artifact, revision: 2 }))),
       ),
       http.get("*/v1/buddy/artifacts/:id/revisions", () => {
         reads += 1;
@@ -1611,12 +1629,14 @@ describe("BuddyDesk", () => {
     fireEvent.change(screen.getByRole("searchbox"), {
       target: { value: "Second" },
     });
-    expect(
-      screen.queryByRole("button", {
-        name: /Provider setup diagnosis/,
-        hidden: true,
-      }),
-    ).toBeNull();
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("button", {
+          name: /Provider setup diagnosis/,
+          hidden: true,
+        }),
+      ).toBeNull(),
+    );
     expect(
       await screen.findByRole("button", {
         name: /Second diagnosis/,
@@ -3301,7 +3321,7 @@ describe("BuddyDesk", () => {
         HttpResponse.json(envelope([record(item)])),
       ),
       http.get("*/v1/buddy/artifacts/:id", () =>
-        HttpResponse.json(envelope(record(artifact))),
+        HttpResponse.json(envelope(record(artifactWithEvidence))),
       ),
       http.get("*/v1/buddy/work/:id/actions", () =>
         HttpResponse.json(envelope([action])),

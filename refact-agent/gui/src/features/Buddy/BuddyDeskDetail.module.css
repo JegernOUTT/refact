@@ -1,3 +1,5 @@
+@value deskSplitQuery from "./BuddyDesk.module.css";
+
 .detail {
   min-width: 0;
   display: flex;
@@ -41,14 +43,21 @@
   overflow-wrap: anywhere;
 }
 
-@container (max-width: 879px) {
+.header {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding-block: var(--rf-space-1);
+  background: var(--rf-surface-glass);
+  backdrop-filter: blur(var(--rf-blur-overlay));
+}
+
+@container deskSplitQuery {
   .header {
-    position: sticky;
-    top: 0;
-    z-index: 1;
-    padding-block: var(--rf-space-1);
-    background: var(--rf-surface-glass);
-    backdrop-filter: blur(var(--rf-blur-overlay));
+    position: static;
+    padding-block: 0;
+    background: none;
+    backdrop-filter: none;
   }
 }
 

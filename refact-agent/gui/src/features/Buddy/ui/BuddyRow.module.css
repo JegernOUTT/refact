@@ -193,10 +193,5 @@
 }
 
 .srOnly {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  overflow: hidden;
-  white-space: nowrap;
-  clip-path: inset(50%);
+  composes: srOnly from "./BuddyStates.module.css";
 }

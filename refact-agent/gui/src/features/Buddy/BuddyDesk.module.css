@@ -1,8 +1,14 @@
+@value deskSplitQuery: (width >= 880px);
+
 .desk {
   min-width: 0;
 }
 
 .deskBody {
+  --desk-list-max: 28rem;
+  --desk-list-min: 300px;
+  --desk-search-basis: 9rem;
+
   container-type: inline-size;
   gap: var(--rf-space-3);
 }
@@ -20,12 +26,16 @@
   display: flex;
   flex-direction: column;
   gap: var(--rf-space-2);
-  max-inline-size: min(100%, 23rem);
+  max-inline-size: min(100%, var(--desk-list-max));
 }
 
 .detailHint {
   display: none;
   min-width: 0;
+}
+
+.detailHint > * {
+  padding-block: var(--rf-space-3);
 }
 
 .detail {
@@ -36,9 +46,12 @@
   display: none;
 }
 
-@container (min-width: 880px) {
+@container deskSplitQuery {
   .layout {
-    grid-template-columns: minmax(300px, 23rem) minmax(0, 1fr);
+    grid-template-columns: minmax(var(--desk-list-min), var(--desk-list-max)) minmax(
+        0,
+        1fr
+      );
   }
 
   .detailHint {
@@ -62,6 +75,28 @@
   line-height: var(--rf-line-1);
 }
 
+.views {
+  min-width: 0;
+  max-width: 100%;
+  container-type: inline-size;
+}
+
+.views .viewsControl {
+  display: inline-grid;
+  grid-auto-flow: row;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  width: 100%;
+  height: auto;
+}
+
+@container (width >= 23rem) {
+  .views .viewsControl {
+    grid-template-columns: repeat(4, auto);
+    width: max-content;
+    max-width: 100%;
+  }
+}
+
 .filters {
   display: flex;
   flex-wrap: wrap;
@@ -74,8 +109,14 @@
   position: relative;
   display: flex;
   align-items: center;
-  flex: 1 1 20ch;
+  flex: 1 1 var(--desk-search-basis);
   min-width: 0;
+}
+
+.filters > :last-child:not(.search) {
+  flex: 0 1 auto;
+  width: auto;
+  max-width: 100%;
 }
 
 .searchIcon {
@@ -113,6 +154,14 @@
   align-items: center;
   gap: var(--rf-space-1);
   min-width: 0;
+}
+
+.srOnly {
+  composes: srOnly from "./ui/BuddyStates.module.css";
+}
+
+.refreshBusy {
+  cursor: progress;
 }
 
 .count {
