@@ -106,6 +106,17 @@ function installBaseHandlers(settings = daemonSettings()) {
     ),
     http.get("*/daemon/v1/runtime/status", () =>
       HttpResponse.json({
+        running_build: {
+          version: "1.2.3",
+          executable: null,
+          managed: true,
+          dev_build: false,
+        },
+        actions: {
+          select: { available: true, reason: null },
+          resolve: { available: true, reason: null },
+          stage: { available: true, reason: null },
+        },
         status: {
           selection_revision: 0,
           selected: { state: "unknown" },

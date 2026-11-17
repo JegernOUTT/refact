@@ -150,7 +150,57 @@ async fn check_idle(state: &DaemonState) -> Result<(), String> {
     Ok(())
 }
 
-async fn runtime_status(request: Request<Body>) -> Response {
+#[derive(serde::Serialize)]
+struct ActionAvailability {
+    available: bool,
+    reason: Option<&'static str>,
+}
+
+#[derive(serde::Serialize)]
+struct RuntimeActions {
+    select: ActionAvailability,
+    resolve: ActionAvailability,
+    stage: ActionAvailability,
+}
+
+impl RuntimeActions {
+    fn observe(state: &DaemonState, headers: &HeaderMap) -> Self {
+        let configured = native_user_auth_configured(&state.config.auth);
+        let authorized = buddy_user_authorized(state, headers);
+        let action = |platform_supported| {
+            let reason = if !platform_supported {
+                Some("platform_unsupported")
+            } else if !configured {
+                Some("auth_unconfigured")
+            } else if !authorized {
+                Some("unauthenticated")
+            } else {
+                None
+            };
+            ActionAvailability {
+                available: reason.is_none(),
+                reason,
+            }
+        };
+        let directory = crate::daemon::runtime_coordinator::directory_security_supported();
+        Self {
+            select: action(directory),
+            resolve: action(true),
+            stage: action(
+                directory && refact_self_update::runtime_stage::durable_staging_supported(),
+            ),
+        }
+    }
+}
+
+#[derive(serde::Serialize)]
+struct RuntimeStatusResponse {
+    #[serde(flatten)]
+    observed: crate::daemon::runtime_coordinator::StatusResponse,
+    actions: RuntimeActions,
+}
+
+async fn runtime_status(State((state, _)): State<RouteState>, request: Request<Body>) -> Response {
     let query = match Query::<StatusQuery>::try_from_uri(request.uri()) {
         Ok(Query(q)) => q,
         Err(e) => return error(StatusCode::BAD_REQUEST, e.to_string()),
@@ -180,8 +230,17 @@ async fn runtime_status(request: Request<Body>) -> Response {
         Ok(c) => c,
         Err(e) => return error(StatusCode::INTERNAL_SERVER_ERROR, e),
     };
+    let actions = RuntimeActions::observe(&state, request.headers());
+    let key = match key {
+        Some(key) => Some(key),
+        None => state.runtime_stage_key.lock().await.clone(),
+    };
     match tokio::task::spawn_blocking(move || coordinator.status(key)).await {
-        Ok(status) => Json(status).into_response(),
+        Ok(observed) => Json(RuntimeStatusResponse {
+            observed,
+            actions,
+        })
+        .into_response(),
         Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
 }
@@ -259,15 +318,18 @@ async fn prepare(state: Arc<DaemonState>, request: Request<Body>, stage: bool) -
     // neither global mutex is held over public IO; ordinary workers remain live.
     // Core fences publication against selection CAS, not against installed-image changes.
     let result = if stage {
-        coordinator
-            .stage(&transport, revision)
-            .await
-            .map(|r| json!(r))
+        coordinator.stage(&transport, revision).await.map(|r| {
+            let key = StageKey {
+                manifest_digest: r.staged.manifest_digest.clone(),
+                selection_revision: r.staged.selection_revision,
+            };
+            (json!(r), Some(key))
+        })
     } else {
         coordinator
             .resolve(&transport, revision)
             .await
-            .map(|r| json!(r))
+            .map(|r| (json!(r), None))
     };
     let _execution = crate::buddy::resource_execution::execution_gate()
         .lock()
@@ -285,8 +347,29 @@ async fn prepare(state: Arc<DaemonState>, request: Request<Body>, stage: bool) -
         );
     }
     match result {
-        Ok(value) => Json(value).into_response(),
+        Ok((value, key)) => {
+            if let Some(key) = key {
+                let reader = coordinator.clone();
+                let current_revision = tokio::task::spawn_blocking(move || reader.load_selection())
+                    .await
+                    .ok()
+                    .and_then(|loaded| loaded.ok().flatten())
+                    .map(|selection| selection.revision());
+                remember_stage(
+                    &mut *state.runtime_stage_key.lock().await,
+                    current_revision,
+                    key,
+                );
+            }
+            Json(value).into_response()
+        }
         Err(e) => error(StatusCode::CONFLICT, e),
+    }
+}
+
+fn remember_stage(remembered: &mut Option<StageKey>, current_revision: Option<u64>, key: StageKey) {
+    if current_revision == Some(key.selection_revision) {
+        *remembered = Some(key);
     }
 }
 

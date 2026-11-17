@@ -64,7 +64,21 @@ export type RuntimeStatus = {
   running: Observation<RunningProcess>;
 };
 
+export type RuntimeActionAvailability =
+  | { available: true; reason: null }
+  | {
+      available: false;
+      reason: "platform_unsupported" | "auth_unconfigured" | "unauthenticated";
+    };
+
 export type RuntimeStatusResponse = {
+  running_build: {
+    version: string;
+    executable: string | null;
+    managed: boolean;
+    dev_build: boolean;
+  };
+  actions: Record<"select" | "resolve" | "stage", RuntimeActionAvailability>;
   status: RuntimeStatus;
   target: string;
   diagnostics: string[];
@@ -311,7 +325,8 @@ export const runtimeCoordinatorApi = daemonApi
         RuntimeStageResponse,
         RuntimeRevisionRequest
       >({
-        invalidatesTags: invalidateOnConflict,
+        invalidatesTags: (_result, error) =>
+          !error || error.status === 409 ? [RUNTIME_TAG] : [],
         queryFn: async (body, api, _opts, baseQuery) => {
           const { config } = api.getState() as { config: EngineApiConfig };
           const result = await baseQuery({

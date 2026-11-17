@@ -1545,10 +1545,18 @@ async fn read_log_tail(
     )
 }
 
+fn native_user_auth_configured(auth: &crate::daemon::config::AuthConfig) -> bool {
+    auth.enabled
+        && auth.username.as_ref().is_some_and(|s| !s.is_empty())
+        && auth.password.as_ref().is_some_and(|s| !s.is_empty())
+}
+
 /// User credentials are deliberately distinct from daemon/worker/hook bearer tokens.
 fn buddy_user_authorized(state: &DaemonState, headers: &HeaderMap) -> bool {
     use base64::Engine;
-    if !state.config.auth.enabled || headers.get_all("authorization").iter().count() != 1 {
+    if !native_user_auth_configured(&state.config.auth)
+        || headers.get_all("authorization").iter().count() != 1
+    {
         return false;
     }
     let (Some(user), Some(password)) = (
@@ -1557,9 +1565,6 @@ fn buddy_user_authorized(state: &DaemonState, headers: &HeaderMap) -> bool {
     ) else {
         return false;
     };
-    if user.is_empty() || password.is_empty() {
-        return false;
-    }
     let Some(encoded) = headers
         .get("authorization")
         .and_then(|h| h.to_str().ok())

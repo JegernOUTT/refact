@@ -845,3 +845,295 @@ async fn runtime_real_core_resolve_stage_status_keeps_installed_and_workers_unch
     assert_eq!(f.state.supervisor.worker_count().await, 0);
     assert!(!f.state.is_shutting_down());
 }
+
+#[tokio::test]
+#[serial_test::serial(runtime_routes)]
+async fn runtime_status_actions_follow_native_credentials_and_platform_precedence() {
+    let mut f = Fixture::new();
+    for (auth, authenticated) in [
+        (String::new(), false),
+        ("Bearer worker-token".into(), false),
+        ("Basic Zm9yZWlnbjpwdw==".into(), false),
+        (basic(), true),
+    ] {
+        // Exercise the status handler independently of the outer read-auth middleware.
+        let router = routes()
+            .with_state((f.state.clone(), 0))
+            .layer(axum::Extension(f.core.clone()));
+        let r = send(
+            router,
+            "GET",
+            "/daemon/v1/runtime/status",
+            &auth,
+            Body::empty(),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+        let v = value(r).await;
+        for action in ["select", "resolve", "stage"] {
+            let supported = match action {
+                "select" => cfg!(unix),
+                "resolve" => true,
+                "stage" => cfg!(target_os = "linux"),
+                _ => unreachable!(),
+            };
+            let expected = if !supported {
+                json!({"available":false,"reason":"platform_unsupported"})
+            } else if !authenticated {
+                json!({"available":false,"reason":"unauthenticated"})
+            } else {
+                json!({"available":true,"reason":null})
+            };
+            assert_eq!(v["actions"][action], expected, "{action} {auth}");
+        }
+        #[cfg(target_os = "linux")]
+        assert_ne!(v["actions"]["stage"]["reason"], "platform_unsupported");
+        #[cfg(not(target_os = "linux"))]
+        assert_eq!(v["actions"]["stage"]["reason"], "platform_unsupported");
+        assert_eq!(v["running_build"]["version"], crate::version::VERSION);
+        assert_eq!(v["running_build"]["managed"], false);
+    }
+    Arc::get_mut(&mut f.state).unwrap().config.auth.enabled = false;
+    let router = routes()
+        .with_state((f.state.clone(), 0))
+        .layer(axum::Extension(f.core.clone()));
+    let v = value(
+        send(
+            router,
+            "GET",
+            "/daemon/v1/runtime/status",
+            "",
+            Body::empty(),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(
+        v["actions"]["resolve"],
+        json!({"available":false,"reason":"auth_unconfigured"})
+    );
+    #[cfg(unix)]
+    assert_eq!(
+        v["actions"]["select"],
+        json!({"available":false,"reason":"auth_unconfigured"})
+    );
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[tokio::test]
+#[serial_test::serial(runtime_routes)]
+async fn runtime_remembers_only_successful_stage_and_explicit_key_wins() {
+    let f = Fixture::new();
+    f.core
+        .select(
+            serde_json::from_value(json!({"expected_revision":0,"selection":selection()})).unwrap(),
+        )
+        .unwrap();
+    let r = send(
+        f.router()
+            .layer(axum::Extension(Transport(Arc::new(release_fixture(true))))),
+        "POST",
+        "/daemon/v1/runtime/stage",
+        &basic(),
+        r#"{"expected_revision":1}"#,
+    )
+    .await;
+    assert_eq!(r.status(), StatusCode::OK);
+    let staged = value(r).await;
+    let digest = staged["staged"]["manifest_digest"].as_str().unwrap();
+    let status = value(
+        send(
+            f.router(),
+            "GET",
+            "/daemon/v1/runtime/status",
+            &basic(),
+            Body::empty(),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(status["status"]["staged"]["state"], "known");
+    assert_eq!(
+        status["status"]["staged"]["value"]["manifest_digest"],
+        digest
+    );
+    let query = format!(
+        "/daemon/v1/runtime/status?manifest_digest={}&selection_revision=1",
+        "0".repeat(64)
+    );
+    let explicit = value(send(f.router(), "GET", &query, &basic(), Body::empty()).await).await;
+    assert_eq!(explicit["status"]["staged"]["state"], "unknown");
+    let network = Arc::new(NoNetwork(AtomicUsize::new(0)));
+    let failed = send(
+        f.router().layer(axum::Extension(Transport(network))),
+        "POST",
+        "/daemon/v1/runtime/stage",
+        &basic(),
+        r#"{"expected_revision":1}"#,
+    )
+    .await;
+    assert_eq!(failed.status(), StatusCode::CONFLICT);
+    let after_failure = value(
+        send(
+            f.router(),
+            "GET",
+            "/daemon/v1/runtime/status",
+            &basic(),
+            Body::empty(),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(
+        after_failure["status"]["staged"],
+        status["status"]["staged"]
+    );
+    f.core
+        .select(
+            serde_json::from_value(json!({"expected_revision":1,"selection":selection()})).unwrap(),
+        )
+        .unwrap();
+    let reselected = value(
+        send(
+            f.router(),
+            "GET",
+            "/daemon/v1/runtime/status",
+            &basic(),
+            Body::empty(),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(reselected["status"]["staged"]["state"], "unknown");
+    assert!(reselected["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|d| d
+            .as_str()
+            .unwrap()
+            .contains("stage key selection revision differs")));
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[tokio::test]
+#[serial_test::serial(runtime_routes)]
+async fn runtime_stage_replaces_a_key_left_from_before_a_selection_reset() {
+    let f = Fixture::new();
+    f.core
+        .select(
+            serde_json::from_value(json!({"expected_revision":0,"selection":selection()})).unwrap(),
+        )
+        .unwrap();
+    *f.state.runtime_stage_key.lock().await = Some(StageKey {
+        manifest_digest: "f".repeat(64),
+        selection_revision: 2,
+    });
+    let r = send(
+        f.router()
+            .layer(axum::Extension(Transport(Arc::new(release_fixture(true))))),
+        "POST",
+        "/daemon/v1/runtime/stage",
+        &basic(),
+        r#"{"expected_revision":1}"#,
+    )
+    .await;
+    assert_eq!(r.status(), StatusCode::OK);
+    let staged = value(r).await;
+    let digest = staged["staged"]["manifest_digest"].as_str().unwrap();
+    let remembered = f.state.runtime_stage_key.lock().await.clone().unwrap();
+    assert_eq!(remembered.manifest_digest, digest);
+    assert_eq!(remembered.selection_revision, 1);
+    let status = value(
+        send(
+            f.router(),
+            "GET",
+            "/daemon/v1/runtime/status",
+            &basic(),
+            Body::empty(),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(status["status"]["staged"]["state"], "known");
+    assert_eq!(
+        status["status"]["staged"]["value"]["manifest_digest"],
+        digest
+    );
+}
+
+#[test]
+fn remembered_stage_follows_only_the_current_selection_revision() {
+    let key = |digest: &str, selection_revision| StageKey {
+        manifest_digest: digest.repeat(64),
+        selection_revision,
+    };
+    let observed = |remembered: &Option<StageKey>| {
+        remembered
+            .as_ref()
+            .map(|k| (k.manifest_digest.clone(), k.selection_revision))
+    };
+    let mut remembered = Some(key("a", 2));
+    remember_stage(&mut remembered, Some(2), key("b", 1));
+    assert_eq!(observed(&remembered), Some(("a".repeat(64), 2)));
+    remember_stage(&mut remembered, None, key("c", 2));
+    assert_eq!(observed(&remembered), Some(("a".repeat(64), 2)));
+    remember_stage(&mut remembered, Some(3), key("d", 3));
+    assert_eq!(observed(&remembered), Some(("d".repeat(64), 3)));
+    remember_stage(&mut remembered, Some(1), key("e", 1));
+    assert_eq!(observed(&remembered), Some(("e".repeat(64), 1)));
+}
+
+#[tokio::test]
+#[serial_test::serial(runtime_routes)]
+async fn runtime_auth_configuration_requires_enabled_nonempty_user_and_password() {
+    let mut f = Fixture::new();
+    for (enabled, username, password) in [
+        (false, Some("route-user"), Some("route-password")),
+        (true, None, Some("route-password")),
+        (true, Some(""), Some("route-password")),
+        (true, Some("route-user"), None),
+        (true, Some("route-user"), Some("")),
+    ] {
+        let auth = &mut Arc::get_mut(&mut f.state).unwrap().config.auth;
+        auth.enabled = enabled;
+        auth.username = username.map(String::from);
+        auth.password = password.map(String::from);
+        let router = routes()
+            .with_state((f.state.clone(), 0))
+            .layer(axum::Extension(f.core.clone()));
+        let v = value(
+            send(
+                router,
+                "GET",
+                "/daemon/v1/runtime/status",
+                &basic(),
+                Body::empty(),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(v["actions"]["resolve"]["reason"], "auth_unconfigured");
+        #[cfg(unix)]
+        assert_eq!(v["actions"]["select"]["reason"], "auth_unconfigured");
+        #[cfg(not(unix))]
+        assert_eq!(v["actions"]["select"]["reason"], "platform_unsupported");
+        #[cfg(not(target_os = "linux"))]
+        assert_eq!(v["actions"]["stage"]["reason"], "platform_unsupported");
+        for action in ["select", "resolve", "stage"] {
+            assert_eq!(v["actions"][action]["available"], false);
+            assert_eq!(
+                send(
+                    f.router(),
+                    "POST",
+                    &format!("/daemon/v1/runtime/{action}"),
+                    &basic(),
+                    "{}"
+                )
+                .await
+                .status(),
+                StatusCode::UNAUTHORIZED
+            );
+        }
+    }
+}

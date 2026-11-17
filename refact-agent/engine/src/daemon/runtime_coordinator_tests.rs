@@ -433,3 +433,62 @@ async fn unsupported_mutation_security_fails_closed_without_creating_state() {
         Observation::Unknown
     ));
 }
+
+#[test]
+fn running_build_is_observed_without_claiming_installation() {
+    let (_dir, core) = fixture();
+    let response = core.status(None);
+    assert_eq!(response.running_build.version, crate::version::VERSION);
+    assert!(!response.running_build.managed);
+    if let Some(path) = response.running_build.executable {
+        let path = std::path::Path::new(&path);
+        assert!(path.is_absolute());
+        assert_eq!(path.canonicalize().unwrap(), path);
+    } else {
+        assert!(response
+            .diagnostics
+            .iter()
+            .any(|d| d.contains("running executable unavailable")));
+    }
+    assert!(!response
+        .diagnostics
+        .iter()
+        .any(|d| d.contains("daemon reports runtime version")));
+}
+
+#[test]
+fn cargo_fingerprint_is_a_positive_only_directory_signal() {
+    let dir = tempfile::tempdir().unwrap();
+    let executable = dir.path().join("refact");
+    assert!(!has_cargo_fingerprint(&executable));
+    std::fs::write(dir.path().join(".fingerprint"), b"not a directory").unwrap();
+    assert!(!has_cargo_fingerprint(&executable));
+    std::fs::remove_file(dir.path().join(".fingerprint")).unwrap();
+    std::fs::create_dir(dir.path().join(".fingerprint")).unwrap();
+    assert!(has_cargo_fingerprint(&executable));
+}
+
+#[test]
+fn utf8_executable_keeps_valid_paths() {
+    let mut diagnostics = vec![];
+    assert_eq!(
+        utf8_executable(PathBuf::from("/opt/refact/bin/refact"), &mut diagnostics).as_deref(),
+        Some("/opt/refact/bin/refact")
+    );
+    assert!(diagnostics.is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn non_utf8_executable_becomes_a_diagnostic_instead_of_failing_status() {
+    use std::os::unix::ffi::OsStringExt;
+    let mut diagnostics = vec![];
+    let path = PathBuf::from(std::ffi::OsString::from_vec(
+        b"/opt/refact/\xffbin".to_vec(),
+    ));
+    assert_eq!(utf8_executable(path, &mut diagnostics), None);
+    assert_eq!(
+        diagnostics,
+        vec!["running executable path is not valid UTF-8".to_string()]
+    );
+}

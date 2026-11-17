@@ -1,4 +1,5 @@
 import { useState } from "react";
+import type { ReactNode } from "react";
 import type { FetchBaseQueryError } from "@reduxjs/toolkit/query";
 import { Download, FileSearch, ListChecks } from "lucide-react";
 
@@ -27,17 +28,30 @@ import type {
   RuntimeChannel,
   RuntimeSelection,
   RuntimeStageInfo,
-  RuntimeStageKey,
   RuntimeUpdatePlan,
+  RuntimeStatusResponse,
 } from "../../../services/refact/runtimeCoordinator";
 import { SettingsGroup } from "../../Settings/SettingsSection";
 import styles from "./RuntimeCoordinatorSection.module.css";
 
 const DEFAULT_SOURCE = `https://github.com/${RUNTIME_REPOSITORY.owner}/${RUNTIME_REPOSITORY.name}`;
 const AUTH_REQUIRED =
-  "Runtime mutations require native daemon user authentication; authenticate via the daemon interface or use the refact runtime CLI.";
+  "The daemon rejected this change: this view is not signed in as the daemon user. Use the refact runtime CLI in a terminal on the machine running the daemon instead.";
 const CONFLICT_GUIDANCE =
   "Runtime status was refreshed; review it before retrying.";
+
+type RuntimeAction = keyof RuntimeStatusResponse["actions"];
+const RUNTIME_ACTIONS: readonly RuntimeAction[] = [
+  "select",
+  "resolve",
+  "stage",
+];
+const PREPARE_ACTIONS: readonly RuntimeAction[] = ["resolve", "stage"];
+const ACTION_LABELS: Record<RuntimeAction, string> = {
+  select: "Runtime selection",
+  resolve: "Update-plan resolution",
+  stage: "Runtime staging",
+};
 
 const CHANNEL_OPTIONS: { value: RuntimeChannel; label: string }[] = [
   { value: "stable", label: "Stable" },
@@ -117,6 +131,102 @@ function ObservationRow<T>({
   );
 }
 
+function RuntimeGuidance({
+  response,
+  source,
+  channel,
+  selectedManaged,
+}: {
+  response: RuntimeStatusResponse;
+  source: string;
+  channel: RuntimeChannel;
+  selectedManaged: boolean;
+}) {
+  const { actions, status, target } = response;
+  if (Object.values(actions).every((action) => action.available)) return null;
+  const reasons = Object.values(actions).map((action) => action.reason);
+  const cliNeeded =
+    reasons.includes("auth_unconfigured") ||
+    reasons.includes("unauthenticated");
+  const unsupported = (action: RuntimeAction) =>
+    actions[action].reason === "platform_unsupported";
+  const trimmedSource = source.trim();
+  const commandSource = /^[\w:/%.=-]+$/.test(trimmedSource)
+    ? trimmedSource
+    : `'${trimmedSource.replace(/'/g, "'\\''")}'`;
+  const selectLine = parseRuntimeSource(trimmedSource, channel) ? (
+    <code key="select" className={styles.value}>
+      {`refact runtime select --revision ${status.selection_revision} --source ${commandSource} --channel ${channel}`}
+    </code>
+  ) : (
+    <p key="select" className={styles.muted}>
+      Enter a valid runtime source URL to see the select command.
+    </p>
+  );
+  const prepareLines = (revision: string) =>
+    PREPARE_ACTIONS.filter((action) => !unsupported(action)).map((action) => (
+      <code key={action} className={styles.value}>
+        {`refact runtime ${action} --revision ${revision}`}
+      </code>
+    ));
+  let commandLines: ReactNode = null;
+  if (cliNeeded && selectedManaged) {
+    commandLines = (
+      <>
+        <p className={styles.muted}>
+          {`For the current selection (revision ${status.selection_revision}):`}
+        </p>
+        {prepareLines(String(status.selection_revision))}
+        {unsupported("select") ? null : (
+          <>
+            <p className={styles.muted}>
+              To choose a different source instead, run select; it prints the
+              new revision to use with resolve and stage:
+            </p>
+            {selectLine}
+          </>
+        )}
+      </>
+    );
+  } else if (cliNeeded && !unsupported("select")) {
+    commandLines = (
+      <>
+        {selectLine}
+        {prepareLines("<revision printed by select>")}
+      </>
+    );
+  }
+  return (
+    <div
+      role="note"
+      aria-label="Runtime action guidance"
+      className={styles.guidance}
+    >
+      {commandLines === null ? null : reasons.includes("auth_unconfigured") ? (
+        <p className={styles.muted}>
+          Runtime changes need daemon user authentication, which is not
+          configured. Turn on authentication with a username and password in the
+          Daemon settings section; saving there restarts the daemon. Then run
+          these commands in a terminal on the machine running the daemon:
+        </p>
+      ) : reasons.includes("unauthenticated") ? (
+        <p className={styles.muted}>
+          This view is not signed in as the daemon user, so it cannot change the
+          runtime. Run these commands in a terminal on the machine running the
+          daemon; the refact CLI uses the daemon credentials from its
+          configuration:
+        </p>
+      ) : null}
+      {commandLines}
+      {RUNTIME_ACTIONS.filter(unsupported).map((action) => (
+        <p key={action} className={styles.muted}>
+          {`${ACTION_LABELS[action]} is not supported on this daemon's platform (${target}).`}
+        </p>
+      ))}
+    </div>
+  );
+}
+
 function PlanDetails({ plan }: { plan: RuntimeUpdatePlan }) {
   const tested = plan.qualification === "tested";
   return (
@@ -168,11 +278,10 @@ function PlanDetails({ plan }: { plan: RuntimeUpdatePlan }) {
 export function RuntimeCoordinatorSection() {
   const [channel, setChannel] = useState<RuntimeChannel>("stable");
   const [source, setSource] = useState(DEFAULT_SOURCE);
-  const [stageKey, setStageKey] = useState<RuntimeStageKey | null>(null);
   const [plan, setPlan] = useState<RuntimeUpdatePlan | null>(null);
   const [staged, setStaged] = useState<RuntimeStageInfo | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
-  const statusQuery = useGetRuntimeStatusQuery(stageKey ?? undefined);
+  const statusQuery = useGetRuntimeStatusQuery(undefined);
   const [selectRuntime, selectState] = useSelectRuntimeMutation();
   const [resolveRuntime, resolveState] = useResolveRuntimeMutation();
   const [stageRuntime, stageState] = useStageRuntimeMutation();
@@ -190,7 +299,6 @@ export function RuntimeCoordinatorSection() {
   function clearCandidate() {
     setPlan(null);
     setStaged(null);
-    setStageKey(null);
   }
 
   async function select() {
@@ -233,10 +341,6 @@ export function RuntimeCoordinatorSection() {
       }).unwrap();
       setPlan(result.plan);
       setStaged(result.staged);
-      setStageKey({
-        manifest_digest: result.staged.manifest_digest,
-        selection_revision: result.staged.selection_revision,
-      });
     } catch (error) {
       if ((error as FetchBaseQueryError | undefined)?.status === 409) {
         clearCandidate();
@@ -265,15 +369,37 @@ export function RuntimeCoordinatorSection() {
             observation={status?.selected}
             describe={describeSelection}
           />
-          <ObservationRow
-            title="Installed"
-            observation={status?.installed}
-            describe={(installed) =>
-              `${describeIdentity(installed.identity)} · ${
-                installed.absolute_path
-              }`
-            }
-          />
+          {status?.installed.state !== "known" &&
+          response?.running_build.managed === false ? (
+            <div className={styles.observation}>
+              <dt className={styles.term}>Installed</dt>
+              <dd className={styles.detail}>
+                <Badge size="sm" tone="muted" variant="soft">
+                  Unmanaged
+                </Badge>
+                {response.running_build.dev_build ? (
+                  <Badge size="sm" tone="muted" variant="soft">
+                    Dev build
+                  </Badge>
+                ) : null}
+                <p className={`${styles.muted} rf-wrap-anywhere`}>
+                  {response.running_build.executable
+                    ? `${response.running_build.executable} is not installed by the runtime coordinator.`
+                    : "The running runtime is not installed by the runtime coordinator."}
+                </p>
+              </dd>
+            </div>
+          ) : (
+            <ObservationRow
+              title="Installed"
+              observation={status?.installed}
+              describe={(installed) =>
+                `${describeIdentity(installed.identity)} · ${
+                  installed.absolute_path
+                }`
+              }
+            />
+          )}
           <ObservationRow
             title="Staged"
             observation={status?.staged}
@@ -289,7 +415,7 @@ export function RuntimeCoordinatorSection() {
                 ? `PID ${running.pid} · ${describeVersions(
                     running.reported_versions.value,
                   )}`
-                : `PID ${running.pid} · component versions unknown`
+                : `PID ${running.pid} · runtime ${response?.running_build.version}`
             }
           />
         </dl>
@@ -324,7 +450,11 @@ export function RuntimeCoordinatorSection() {
                 onChange={setSource}
               />
               <Button
-                disabled={busy || statusUnavailable}
+                disabled={
+                  busy ||
+                  statusUnavailable ||
+                  !response.actions.select.available
+                }
                 leftIcon={ListChecks}
                 loading={selectState.isLoading}
                 onClick={() => void select()}
@@ -338,7 +468,9 @@ export function RuntimeCoordinatorSection() {
         />
         <div className={styles.actions}>
           <Button
-            disabled={busy || !selectedManaged}
+            disabled={
+              busy || !selectedManaged || !response?.actions.resolve.available
+            }
             leftIcon={FileSearch}
             loading={resolveState.isLoading}
             onClick={() => void resolve()}
@@ -348,7 +480,9 @@ export function RuntimeCoordinatorSection() {
             Resolve update plan
           </Button>
           <Button
-            disabled={busy || !selectedManaged}
+            disabled={
+              busy || !selectedManaged || !response?.actions.stage.available
+            }
             leftIcon={Download}
             loading={stageState.isLoading}
             onClick={() => void stage()}
@@ -358,6 +492,14 @@ export function RuntimeCoordinatorSection() {
             Stage runtime
           </Button>
         </div>
+        {response ? (
+          <RuntimeGuidance
+            response={response}
+            source={source}
+            channel={channel}
+            selectedManaged={selectedManaged}
+          />
+        ) : null}
         {plan ? <PlanDetails plan={plan} /> : null}
         {staged ? (
           <p aria-live="polite" className={styles.notice}>

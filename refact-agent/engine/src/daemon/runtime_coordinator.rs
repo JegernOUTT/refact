@@ -32,11 +32,57 @@ pub struct StageKey {
 #[derive(Debug, Serialize)]
 pub struct StatusResponse {
     pub status: RuntimeStatus,
+    pub running_build: RunningBuild,
     pub target: String,
     pub diagnostics: Vec<String>,
     pub activation_supported: bool,
     pub restart_dispatched: bool,
 }
+#[derive(Debug, Serialize)]
+pub struct RunningBuild {
+    pub version: &'static str,
+    pub executable: Option<String>,
+    /// The coordinator only stages caches; it cannot install or activate the running image.
+    pub managed: bool,
+    pub dev_build: bool,
+}
+
+fn has_cargo_fingerprint(executable: &Path) -> bool {
+    executable
+        .parent()
+        .is_some_and(|parent| parent.join(".fingerprint").is_dir())
+}
+
+fn utf8_executable(path: PathBuf, diagnostics: &mut Vec<String>) -> Option<String> {
+    match path.into_os_string().into_string() {
+        Ok(path) => Some(path),
+        Err(_) => {
+            diagnostics.push("running executable path is not valid UTF-8".into());
+            None
+        }
+    }
+}
+
+impl RunningBuild {
+    fn observe(diagnostics: &mut Vec<String>) -> Self {
+        let executable = match std::env::current_exe().and_then(|p| p.canonicalize()) {
+            Ok(path) => Some(path),
+            Err(e) => {
+                diagnostics.push(format!("running executable unavailable: {e}"));
+                None
+            }
+        };
+        let dev_build =
+            cfg!(debug_assertions) || executable.as_deref().is_some_and(has_cargo_fingerprint);
+        Self {
+            version: crate::version::VERSION,
+            executable: executable.and_then(|path| utf8_executable(path, diagnostics)),
+            managed: false,
+            dev_build,
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct UpdatePlan {
     pub selection_revision: u64,
@@ -138,10 +184,13 @@ impl RuntimeCoordinator {
     /// No mkdir, lock creation, network, process discovery, or daemon startup.
     /// A supplied cache key is informational, and must match the current selection revision.
     pub fn status(&self, key: Option<StageKey>) -> StatusResponse {
+        let mut diagnostics = vec![];
+        let running_build = RunningBuild::observe(&mut diagnostics);
         let mut response = StatusResponse {
             status: RuntimeStatus::default(),
+            running_build,
             target: self.target.clone(),
-            diagnostics: vec![],
+            diagnostics,
             activation_supported: false,
             restart_dispatched: false,
         };
@@ -195,7 +244,6 @@ impl RuntimeCoordinator {
                 pid: std::process::id(),
                 reported_versions: Observation::Unknown,
             });
-        response.diagnostics.push(format!("daemon reports runtime version {}; installed identity and full running component versions are unknown", crate::version::VERSION));
         response
     }
     /// Explicit selection mutation alone prepares the host config parent; never chmod existing dirs.
@@ -372,6 +420,10 @@ fn inspect_ancestors(path: &Path) -> Result<bool> {
     }
     Ok(exists)
 }
+pub fn directory_security_supported() -> bool {
+    cfg!(unix)
+}
+
 fn validate_directory(path: &Path, private: bool) -> Result<()> {
     if !inspect_ancestors(path)? {
         return Err("directory absent".into());

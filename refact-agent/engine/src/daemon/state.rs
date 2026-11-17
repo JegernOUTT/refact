@@ -102,6 +102,7 @@ pub struct DaemonState {
     pub daemon_dir: PathBuf,
     cron_pending: Arc<SyncRwLock<HashMap<String, u64>>>,
     pub update_state: Mutex<DaemonUpdateState>,
+    pub(crate) runtime_stage_key: Mutex<Option<crate::daemon::runtime_coordinator::StageKey>>,
     pub update_check_cache:
         Mutex<Option<(std::time::Instant, refact_self_update::UpdateCheckInfo)>>,
     pub update_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
@@ -300,6 +301,7 @@ impl DaemonState {
 
             cron_pending,
             update_state: Mutex::new(DaemonUpdateState::default()),
+            runtime_stage_key: Mutex::new(None),
             update_check_cache: Mutex::new(None),
             update_task: Mutex::new(None),
             shutdown_tx,

@@ -95,3 +95,9 @@
     grid-template-columns: minmax(0, 1fr);
   }
 }
+
+.guidance {
+  display: grid;
+  min-width: 0;
+  gap: var(--rf-space-2);
+}

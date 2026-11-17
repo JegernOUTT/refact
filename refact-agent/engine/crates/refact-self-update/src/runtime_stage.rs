@@ -63,6 +63,10 @@ fn hash(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 
+pub fn durable_staging_supported() -> bool {
+    cfg!(target_os = "linux")
+}
+
 pub struct StageStore {
     #[cfg(target_os = "linux")]
     root: linux::Directory,
@@ -656,4 +660,13 @@ mod linux {
             ))
         }
     }
+}
+
+#[cfg(test)]
+#[test]
+fn durable_staging_platform_matches_publication_support() {
+    #[cfg(target_os = "linux")]
+    assert!(durable_staging_supported());
+    #[cfg(not(target_os = "linux"))]
+    assert!(!durable_staging_supported());
 }
