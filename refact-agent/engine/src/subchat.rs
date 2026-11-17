@@ -48,7 +48,7 @@ const PARENT_COMPACTION_DIAGNOSTIC_REDACTION_LOOKAHEAD_CHARS: usize = 512;
 const PARENT_COMPACTION_DIAGNOSTIC_TRUNCATED: &str = "\n...[truncated]";
 const PARTIAL_OUTPUT_STREAM_ERROR: &str =
     "Stream interrupted after partial output and all retry attempts failed.";
-const GUARDED_REPORT_INSTRUCTION: &str = "Guarded file contents may be used to complete the task, but do not quote or reproduce them verbatim in the final report.";
+pub(crate) const GUARDED_REPORT_INSTRUCTION: &str = "Guarded file contents may be used to complete the task, but do not quote or reproduce them verbatim in the final report.";
 
 fn partial_output_stream_error_message(original: &str) -> String {
     format!(
@@ -401,6 +401,39 @@ fn cap_context_limit_diagnostic(redacted: &str, max_chars: usize) -> String {
     )
 }
 
+fn subchat_compaction_preamble(messages: &[ChatMessage]) -> Vec<ChatMessage> {
+    messages
+        .iter()
+        .take_while(|message| !crate::chat::prepare::is_preamble_conversation_start(message))
+        .cloned()
+        .collect()
+}
+
+fn prepend_compaction_preamble(
+    preamble: &[ChatMessage],
+    rebuilt: Vec<ChatMessage>,
+) -> Vec<ChatMessage> {
+    let markers: std::collections::HashSet<_> = preamble
+        .iter()
+        .filter(|message| message.role == "context_file")
+        .map(|message| message.tool_call_id.as_str())
+        .filter(|marker| !marker.is_empty())
+        .collect();
+    preamble
+        .iter()
+        .cloned()
+        .map(|mut message| {
+            if message.message_id.is_empty() {
+                message.message_id = uuid::Uuid::new_v4().to_string();
+            }
+            message
+        })
+        .chain(rebuilt.into_iter().filter(|message| {
+            message.role != "context_file" || !markers.contains(message.tool_call_id.as_str())
+        }))
+        .collect()
+}
+
 async fn apply_subchat_reactive_compaction(
     gcx: Arc<GlobalContext>,
     config: &SubchatConfig,
@@ -416,6 +449,11 @@ async fn apply_subchat_reactive_compaction(
         Ok(view) => view.messages,
         Err(_) => return false,
     };
+    let preamble = subchat_compaction_preamble(&input);
+    let preamble_symbols: usize = preamble
+        .iter()
+        .map(crate::agentic::mode_transition::message_symbols)
+        .sum();
     let owner = config.trace_parent.trace_folder_owner();
     let outcome = Box::pin(crate::agentic::mode_transition::reconstruct_context(
         gcx,
@@ -428,7 +466,12 @@ async fn apply_subchat_reactive_compaction(
             chat_model: None,
             abort_flag: config.abort_flag.clone(),
             hints: None,
-            target_budget_symbols: Some(config.n_ctx.saturating_mul(2)),
+            target_budget_symbols: Some(
+                config
+                    .n_ctx
+                    .saturating_mul(2)
+                    .saturating_sub(preamble_symbols),
+            ),
             preserve_goal_messages: true,
             live_agents_scope: config.chat_id.as_deref(),
         },
@@ -436,7 +479,7 @@ async fn apply_subchat_reactive_compaction(
     .await;
     let compacted = match outcome {
         Ok(outcome) => match refact_core::active_context::make_reconstruction_report(
-            outcome.messages,
+            prepend_compaction_preamble(&preamble, outcome.messages),
             refact_core::active_context::ReconstructionMetadata {
                 model: Some(outcome.model),
                 trigger: Some("subchat_context_limit".into()),
@@ -590,6 +633,8 @@ impl TraceParent {
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct SubchatConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_inherited_launch: Option<ThreadParams>,
     #[serde(skip)]
     pub(crate) runner_lease_token: Option<String>,
     #[serde(skip)]
@@ -650,7 +695,10 @@ impl SubchatConfig {
     }
 
     pub fn context_tokens_cap(&self) -> Option<usize> {
-        (!self.implicit_context_window).then_some(self.n_ctx)
+        self.parent_inherited_launch
+            .as_ref()
+            .map(|thread| thread.context_tokens_cap)
+            .unwrap_or_else(|| (!self.implicit_context_window).then_some(self.n_ctx))
     }
 }
 
@@ -914,7 +962,7 @@ fn gate_subchat_boundary(
     }
 }
 
-fn prepare_subchat_messages(
+pub(crate) fn prepare_subchat_messages(
     gcx: &Arc<GlobalContext>,
     messages: Vec<ChatMessage>,
     model_id: &str,
@@ -925,9 +973,19 @@ fn prepare_subchat_messages(
         .map_err(|e| e.to_string())?
         .messages;
     gate_subchat_boundary(gcx, &messages, model_id)?;
-    if refact_privacy::records_from_messages(&messages)
-        .map_err(|error| error.to_string())?
-        .is_empty()
+    let records =
+        refact_privacy::records_from_messages(&messages).map_err(|error| error.to_string())?;
+    let current = crate::privacy::records::declared_file_records(
+        gcx,
+        records
+            .iter()
+            .map(|(_, record)| std::path::PathBuf::from(&record.path)),
+    )?;
+    if !records
+        .iter()
+        .map(|(_, record)| record)
+        .chain(current.iter())
+        .any(|record| record.zone != "normal")
     {
         return Ok(messages);
     }
@@ -1505,6 +1563,7 @@ pub async fn resolve_subchat_config_with_parent(
     let trace_parent = TraceParent::from_parts(parent_id.as_deref(), root_chat_id.as_deref());
 
     Ok(SubchatConfig {
+        parent_inherited_launch: None,
         runner_lease_token: None,
         native_job_fence: None,
         unlimited_configured_steps: false,
@@ -1639,6 +1698,7 @@ pub async fn resolve_subchat_config_with_explicit_params(
     let trace_parent = TraceParent::from_parts(parent_id.as_deref(), root_chat_id.as_deref());
 
     Ok(SubchatConfig {
+        parent_inherited_launch: None,
         runner_lease_token: None,
         native_job_fence: None,
         unlimited_configured_steps: false,
@@ -1767,6 +1827,25 @@ fn stateful_thread_from_config(chat_id: &str, config: &SubchatConfig) -> ThreadP
         context_tokens_cap: config.context_tokens_cap(),
         ..Default::default()
     };
+    if let Some(inherited) = &config.parent_inherited_launch {
+        thread.temperature = inherited.temperature.clone();
+        thread.frequency_penalty = inherited.frequency_penalty.clone();
+        thread.max_tokens = inherited.max_tokens.clone();
+        thread.boost_reasoning = inherited.boost_reasoning.clone();
+        thread.reasoning_effort = inherited.reasoning_effort.clone();
+        thread.thinking_budget = inherited.thinking_budget.clone();
+        thread.parallel_tool_calls = inherited.parallel_tool_calls.clone();
+        thread.context_tokens_cap = inherited.context_tokens_cap.clone();
+        thread.recovery_policy = inherited.recovery_policy.clone();
+        thread.include_project_info = inherited.include_project_info.clone();
+        thread.checkpoints_enabled = inherited.checkpoints_enabled.clone();
+        thread.auto_enrichment_enabled = inherited.auto_enrichment_enabled.clone();
+        thread.auto_compact_enabled = inherited.auto_compact_enabled.clone();
+        thread.auto_compression_cap = inherited.auto_compression_cap.clone();
+        thread.auto_compression_cap_pending = inherited.auto_compression_cap_pending.clone();
+        thread.tool_use = inherited.tool_use.clone();
+        return thread;
+    }
     // SubchatConfig carries the already model-normalized request window.
     thread.resolve_pending_compression_cap(Some(config.n_ctx));
     thread
@@ -2081,6 +2160,14 @@ async fn save_subchat_trajectory(
 }
 
 async fn refresh_live_context_window(ccx: &Arc<AMutex<AtCommandsContext>>, config: &SubchatConfig) {
+    refresh_context_window_for_thread(ccx, config, None).await;
+}
+
+async fn refresh_context_window_for_thread(
+    ccx: &Arc<AMutex<AtCommandsContext>>,
+    config: &SubchatConfig,
+    live_thread: Option<&ThreadParams>,
+) {
     let (app, chat_id) = {
         let context = ccx.lock().await;
         (context.app.clone(), context.chat_id.clone())
@@ -2112,9 +2199,21 @@ async fn refresh_live_context_window(ccx: &Arc<AMutex<AtCommandsContext>>, confi
     if matches!(config.tools, ToolsPolicy::Supervised { .. }) {
         return;
     }
-    let live_cap = session.lock().await.thread.context_tokens_cap;
+    let (live_cap, live_model) = if let Some(thread) = live_thread {
+        (thread.context_tokens_cap, thread.model.clone())
+    } else {
+        let session = session.lock().await;
+        (
+            session.thread.context_tokens_cap,
+            if config.parent_inherited_launch.is_some() {
+                session.thread.model.clone()
+            } else {
+                config.model.clone()
+            },
+        )
+    };
     let model_n_ctx = match try_load_caps_quickly_if_not_present(app.gcx.clone(), 0).await {
-        Ok(caps) => resolve_chat_model(caps, &config.model)
+        Ok(caps) => resolve_chat_model(caps, &live_model)
             .map(|model| model.base.n_ctx)
             .unwrap_or(0),
         Err(_) => 0,
@@ -2307,6 +2406,7 @@ pub(crate) mod test_support {
 
     pub(crate) fn minimal_config(chat_id: &str, parent: &str) -> SubchatConfig {
         SubchatConfig {
+            parent_inherited_launch: None,
             runner_lease_token: None,
             native_job_fence: None,
             unlimited_configured_steps: false,
@@ -3210,6 +3310,11 @@ async fn wait_for_runner_preempt(app: &AppState, agent_id: &str) {
     }
 }
 
+#[cfg(test)]
+tokio::task_local! {
+    static AFTER_RUNNER_THREAD_SNAPSHOT: std::cell::RefCell<Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>;
+}
+
 fn merge_retained_subchat_errors(messages: &mut Vec<ChatMessage>) {
     let _ = SUBCHAT_ERROR_CONTEXT.try_with(|(_, progress, _)| {
         let retained = match progress.lock() {
@@ -3255,7 +3360,22 @@ async fn runner_model_turn(
         if hold_native_pause(&ccx, config).await {
             return Err("Aborted".to_string());
         }
-        refresh_live_context_window(&ccx, config).await;
+        let live_thread = if config.parent_inherited_launch.is_some() {
+            let session = { app.chat.sessions.read().await.get(&chat_id).cloned() }
+                .ok_or("child session unavailable")?;
+            let thread = session.lock().await.thread.clone();
+            Some(thread)
+        } else {
+            None
+        };
+        #[cfg(test)]
+        if let Ok(Some((snapshot_taken, resume))) =
+            AFTER_RUNNER_THREAD_SNAPSHOT.try_with(|gate| gate.borrow_mut().take())
+        {
+            snapshot_taken.notify_one();
+            resume.notified().await;
+        }
+        refresh_context_window_for_thread(&ccx, config, live_thread.as_ref()).await;
         let _ = SUBCHAT_ERROR_CONTEXT.try_with(|(_, progress, _)| {
             let mut retained = match progress.lock() {
                 Ok(slot) => slot,
@@ -3278,18 +3398,35 @@ async fn runner_model_turn(
         let result = {
             let generation = subchat_single_internal(
                 ccx.clone(),
-                &config.model,
-                &config.mode,
+                live_thread
+                    .as_ref()
+                    .map_or(config.model.as_str(), |thread| thread.model.as_str()),
+                live_thread
+                    .as_ref()
+                    .map_or(config.mode.as_str(), |thread| thread.mode.as_str()),
                 projected,
                 tools_subset.clone(),
                 false,
-                config.temperature,
-                config.max_new_tokens,
-                config.reasoning_effort.clone(),
+                if live_thread.is_some() {
+                    None
+                } else {
+                    config.temperature
+                },
+                if live_thread.is_some() {
+                    0
+                } else {
+                    config.max_new_tokens
+                },
+                if live_thread.is_some() {
+                    None
+                } else {
+                    config.reasoning_effort.clone()
+                },
                 config.cache_control,
                 prepend_system_prompt,
                 None,
                 subchat_retries_allowed(config),
+                live_thread.as_ref(),
             );
             tokio::pin!(generation);
             if let Some(agent_id) = agent_id.as_deref() {
@@ -4640,6 +4777,68 @@ pub(crate) async fn subchat_stream(
     ccx: Arc<AMutex<AtCommandsContext>>,
     model_id: &str,
     mode_id: &str,
+    messages: Vec<ChatMessage>,
+    tools: Vec<ToolDesc>,
+    prepend_system_prompt: bool,
+    temperature: Option<f32>,
+    max_new_tokens: usize,
+    reasoning_effort: Option<ReasoningEffort>,
+    cache_control: CacheControl,
+    only_deterministic_messages: bool,
+    progress_tool_call_id: Option<&str>,
+    allow_provider_retries: bool,
+) -> Result<Vec<Vec<ChatMessage>>, String> {
+    let (app, background_agent_id, context_chat_id) = {
+        let context = ccx.lock().await;
+        (
+            context.app.clone(),
+            context.background_agent_id.clone(),
+            context.chat_id.clone(),
+        )
+    };
+    let public_child = background_agent_id
+        .as_deref()
+        .and_then(|id| app.agent_executions.saved_config(id))
+        .is_some_and(|config| config.parent_inherited_launch.is_some());
+    let live_thread = if public_child {
+        let session = {
+            app.chat
+                .sessions
+                .read()
+                .await
+                .get(&context_chat_id)
+                .cloned()
+        }
+        .ok_or("child session unavailable")?;
+        let thread = session.lock().await.thread.clone();
+        Some(thread)
+    } else {
+        None
+    };
+
+    subchat_stream_for_thread(
+        ccx,
+        model_id,
+        mode_id,
+        messages,
+        tools,
+        prepend_system_prompt,
+        temperature,
+        max_new_tokens,
+        reasoning_effort,
+        cache_control,
+        only_deterministic_messages,
+        progress_tool_call_id,
+        allow_provider_retries,
+        live_thread.as_ref(),
+    )
+    .await
+}
+
+async fn subchat_stream_for_thread(
+    ccx: Arc<AMutex<AtCommandsContext>>,
+    model_id: &str,
+    mode_id: &str,
     mut messages: Vec<ChatMessage>,
     tools: Vec<ToolDesc>,
     prepend_system_prompt: bool,
@@ -4650,6 +4849,7 @@ pub(crate) async fn subchat_stream(
     only_deterministic_messages: bool,
     progress_tool_call_id: Option<&str>,
     allow_provider_retries: bool,
+    live_thread: Option<&ThreadParams>,
 ) -> Result<Vec<Vec<ChatMessage>>, String> {
     let (
         gcx,
@@ -4677,12 +4877,23 @@ pub(crate) async fn subchat_stream(
     let caps = try_load_caps_quickly_if_not_present(gcx.clone(), 0)
         .await
         .map_err(|e| format!("no caps: {:?}", e))?;
-    let model_rec = resolve_chat_model(caps, model_id)?;
+    let model_rec = resolve_chat_model(caps.clone(), model_id)?;
 
     let tokenizer_arc = crate::tokens::cached_tokenizer(gcx.clone(), &model_rec.base).await?;
     let budget_tokenizer = tokenizer_arc.clone();
     let t = HasTokenizerAndEot::new(tokenizer_arc);
 
+    let effective_n_ctx = live_thread
+        .map(|thread| {
+            thread.context_tokens_cap.filter(|cap| *cap > 0).unwrap_or(
+                if model_rec.base.n_ctx > 0 {
+                    model_rec.base.n_ctx
+                } else {
+                    effective_n_ctx
+                },
+            )
+        })
+        .unwrap_or(effective_n_ctx);
     let capped_n_ctx = if model_rec.base.n_ctx > 0 {
         effective_n_ctx.min(model_rec.base.n_ctx)
     } else {
@@ -4698,12 +4909,14 @@ pub(crate) async fn subchat_stream(
         chat_remote: false,
         current_config_file: String::new(),
         context_tokens_cap: Some(capped_n_ctx),
-        include_project_info: true,
+        include_project_info: live_thread
+            .as_ref()
+            .map_or(true, |thread| thread.include_project_info),
         request_attempt_id: Uuid::new_v4().to_string(),
         worktree: worktree.clone(),
     };
 
-    let thread = ThreadParams {
+    let thread = live_thread.cloned().unwrap_or_else(|| ThreadParams {
         id: stream_chat_id,
         model: model_id.to_string(),
         mode: mode_id.to_string(),
@@ -4712,17 +4925,29 @@ pub(crate) async fn subchat_stream(
         worktree,
         root_chat_id: stream_root_chat_id,
         ..Default::default()
-    };
+    });
 
-    let mut parameters = SamplingParameters {
-        max_new_tokens,
-        temperature,
-        n: Some(1),
-        reasoning_effort,
-        ..Default::default()
+    let mut parameters = if live_thread.is_some() {
+        crate::chat::prepare::sampling_parameters_for_thread(
+            &caps.user_defaults,
+            &caps.defaults,
+            &thread,
+            &model_rec.base.id,
+        )
+    } else {
+        SamplingParameters {
+            max_new_tokens,
+            temperature,
+            n: Some(1),
+            reasoning_effort,
+            ..Default::default()
+        }
     };
 
     let options = ChatPrepareOptions {
+        parallel_tool_calls: live_thread
+            .as_ref()
+            .and_then(|thread| thread.parallel_tool_calls),
         prepend_system_prompt,
         allow_at_commands: false,
         allow_tool_prerun: false,
@@ -4837,8 +5062,11 @@ pub(crate) async fn subchat_stream(
         });
     let (mut policy, _) =
         crate::runtime_settings::effective_recovery_policy(policy_root.as_deref()).await?;
-    let app = AppState::from_gcx(gcx.clone()).await;
-    if let Some(session) = app.chat.sessions.read().await.get(&stats_chat_id).cloned() {
+    if live_thread.is_some() {
+        if let Some(overrides) = &thread.recovery_policy {
+            policy = overrides.resolve(policy)?;
+        }
+    } else if let Some(session) = app.chat.sessions.read().await.get(&stats_chat_id).cloned() {
         if let Some(overrides) = &session.lock().await.thread.recovery_policy {
             policy = overrides.resolve(policy)?;
         }
@@ -5281,6 +5509,7 @@ async fn subchat_single_internal(
     prepend_system_prompt: bool,
     progress_tool_call_id: Option<&str>,
     allow_provider_retries: bool,
+    live_thread: Option<&ThreadParams>,
 ) -> Result<Vec<Vec<ChatMessage>>, String> {
     let gcx = {
         let cgcx = ccx.lock().await;
@@ -5316,7 +5545,7 @@ async fn subchat_single_internal(
         }
     };
 
-    subchat_stream(
+    subchat_stream_for_thread(
         ccx.clone(),
         model_id,
         mode_id,
@@ -5330,6 +5559,7 @@ async fn subchat_single_internal(
         only_deterministic_messages,
         progress_tool_call_id,
         allow_provider_retries,
+        live_thread,
     )
     .await
 }
@@ -5957,6 +6187,7 @@ mod subchat_tests {
 
     fn test_subchat_config() -> SubchatConfig {
         SubchatConfig {
+            parent_inherited_launch: None,
             runner_lease_token: None,
             native_job_fence: None,
             unlimited_configured_steps: false,
@@ -6461,6 +6692,243 @@ mod subchat_tests {
             .and_then(|event| event.get("source"))
             .and_then(serde_json::Value::as_str)
             == Some(crate::agents::push::NOTICE_CAP_STOP)));
+    }
+
+    #[tokio::test]
+    async fn public_runner_requests_use_live_persisted_settings_not_launch_snapshot() {
+        let ccx = abort_test_ccx().await;
+        let chat_id = "public-live-sampling";
+        let (app, gcx) = {
+            let mut context = ccx.lock().await;
+            context.chat_id = chat_id.into();
+            context.background_agent_id = Some("public-live-agent".into());
+            (context.app.clone(), context.global_context.clone())
+        };
+        let workspace = tempfile::tempdir().unwrap();
+        *gcx.documents_state.workspace_folders.lock().unwrap() =
+            vec![workspace.path().to_path_buf()];
+        *gcx.privacy_policy_load.write().unwrap() = refact_privacy::PolicyLoad::default();
+        let mut caps = CodeAssistantCaps::default();
+        caps.chat_models.insert(
+            "model".into(),
+            Arc::new(ChatModelRecord {
+                base: BaseModelRecord {
+                    id: "model".into(),
+                    tokenizer: "fake".into(),
+                    n_ctx: 4096,
+                    ..Default::default()
+                },
+                supports_tools: true,
+                supports_parallel_tools: true,
+                reasoning_effort_options: Some(vec!["minimal".into(), "high".into()]),
+                ..Default::default()
+            }),
+        );
+        install_caps(gcx.clone(), caps).await;
+        let mut config = test_subchat_config();
+        config.chat_id = Some(chat_id.into());
+        config.background_agent_id = Some("public-live-agent".into());
+        config.parent_inherited_launch = Some(ThreadParams {
+            temperature: Some(0.1),
+            max_tokens: Some(100),
+            ..Default::default()
+        });
+        app.agent_executions
+            .remember_config("public-live-agent", config.clone());
+        let session = Arc::new(tokio::sync::Mutex::new(
+            crate::chat::types::ChatSession::new(chat_id.into()),
+        ));
+        {
+            let mut session = session.lock().await;
+            session.thread = stateful_thread_from_config(chat_id, &config);
+            session.thread.temperature = Some(0.8);
+            session.thread.frequency_penalty = Some(-0.25);
+            session.thread.max_tokens = Some(700);
+            session.thread.reasoning_effort = Some("minimal".into());
+            session.thread.parallel_tool_calls = Some(true);
+        }
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert(chat_id.into(), session.clone());
+        let mut fixture = super::SubchatModelFixture::default();
+        for _ in 0..2 {
+            fixture.responses.push_back(Ok(super::ChoiceFinal {
+                content: "done".into(),
+                finish_reason: Some("stop".into()),
+                ..Default::default()
+            }));
+        }
+        super::insert_model_fixture(chat_id, fixture);
+        for max_tokens in [700, 900] {
+            session.lock().await.thread.max_tokens = Some(max_tokens);
+            super::subchat_stream(
+                ccx.clone(),
+                "model",
+                "agent",
+                vec![
+                    ChatMessage::new("system".into(), "PARENT".into()),
+                    ChatMessage::new("user".into(), "task".into()),
+                ],
+                vec![],
+                false,
+                Some(0.1),
+                100,
+                None,
+                CacheControl::Ephemeral,
+                false,
+                None,
+                true,
+            )
+            .await
+            .unwrap();
+        }
+        let fixture = super::take_model_fixture(chat_id).unwrap();
+        assert_eq!(fixture.requests.len(), 2);
+        for (request, limit) in fixture.requests.iter().zip([700, 900]) {
+            assert_eq!(request.params.temperature, Some(0.8));
+            assert_eq!(request.params.frequency_penalty, Some(-0.25));
+            assert_eq!(request.params.max_tokens, limit);
+            assert_eq!(request.reasoning.to_openai_effort(), Some("minimal"));
+        }
+    }
+
+    #[tokio::test]
+    async fn public_runner_request_keeps_one_live_snapshot_across_param_changes() {
+        let ccx = abort_test_ccx().await;
+        let chat_id = "public-live-snapshot";
+        let (app, gcx) = {
+            let mut context = ccx.lock().await;
+            context.chat_id = chat_id.into();
+            context.background_agent_id = Some("public-snapshot-agent".into());
+            (context.app.clone(), context.global_context.clone())
+        };
+        let workspace = tempfile::tempdir().unwrap();
+        *gcx.documents_state.workspace_folders.lock().unwrap() =
+            vec![workspace.path().to_path_buf()];
+        *gcx.privacy_policy_load.write().unwrap() = refact_privacy::PolicyLoad::default();
+        let mut caps = CodeAssistantCaps::default();
+        caps.chat_models.insert(
+            "model".into(),
+            Arc::new(ChatModelRecord {
+                base: BaseModelRecord {
+                    id: "model".into(),
+                    tokenizer: "fake".into(),
+                    n_ctx: 4096,
+                    ..Default::default()
+                },
+                supports_tools: true,
+                supports_parallel_tools: true,
+                reasoning_effort_options: Some(vec!["minimal".into(), "high".into()]),
+                ..Default::default()
+            }),
+        );
+        for (id, n_ctx) in [("new-model", 8192), ("later-model", 16384)] {
+            let mut model = (*caps.chat_models["model"]).clone();
+            model.base.id = id.into();
+            model.base.n_ctx = n_ctx;
+            caps.chat_models.insert(id.into(), Arc::new(model));
+        }
+        install_caps(gcx.clone(), caps).await;
+        let mut config = test_subchat_config();
+        config.stateful = true;
+        config.runner_lease_token = Some("snapshot-runner".into());
+        config.abort_flag = Some(Arc::new(AtomicBool::new(false)));
+        config.chat_id = Some(chat_id.into());
+        config.background_agent_id = Some("public-snapshot-agent".into());
+        config.parent_inherited_launch = Some(ThreadParams {
+            temperature: Some(0.1),
+            max_tokens: Some(100),
+            ..Default::default()
+        });
+        app.agent_executions
+            .remember_config("public-snapshot-agent", config.clone());
+        let session = Arc::new(tokio::sync::Mutex::new(
+            crate::chat::types::ChatSession::new(chat_id.into()),
+        ));
+        {
+            let mut session = session.lock().await;
+            session.thread = stateful_thread_from_config(chat_id, &config);
+            session
+                .claim_runner(
+                    config.runner_lease_token.clone().unwrap(),
+                    config.abort_flag.clone().unwrap(),
+                )
+                .unwrap();
+            session.thread.model = "new-model".into();
+            session.thread.context_tokens_cap = Some(2048);
+            session.thread.temperature = Some(0.8);
+            session.thread.frequency_penalty = Some(-0.25);
+            session.thread.max_tokens = Some(700);
+            session.thread.reasoning_effort = Some("minimal".into());
+            session.thread.parallel_tool_calls = Some(true);
+        }
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert(chat_id.into(), session.clone());
+        let mut fixture = super::SubchatModelFixture::default();
+        for _ in 0..2 {
+            fixture.responses.push_back(Ok(super::ChoiceFinal {
+                content: "done".into(),
+                finish_reason: Some("stop".into()),
+                ..Default::default()
+            }));
+        }
+        super::insert_model_fixture(chat_id, fixture);
+        let mut messages = vec![
+            ChatMessage::new("system".into(), "PARENT".into()),
+            ChatMessage::new("user".into(), "task".into()),
+        ];
+        super::runner_model_turn(ccx.clone(), &config, &mut messages, Some(vec![]), false)
+            .await
+            .unwrap();
+        let snapshot_taken = Arc::new(tokio::sync::Notify::new());
+        let resume = Arc::new(tokio::sync::Notify::new());
+        super::AFTER_RUNNER_THREAD_SNAPSHOT
+            .scope(
+                std::cell::RefCell::new(Some((snapshot_taken.clone(), resume.clone()))),
+                async {
+                    let turn = super::runner_model_turn(
+                        ccx.clone(),
+                        &config,
+                        &mut messages,
+                        Some(vec![]),
+                        false,
+                    );
+                    let change = async {
+                        snapshot_taken.notified().await;
+                        let mut session = session.lock().await;
+                        session.thread.model = "later-model".into();
+                        session.thread.temperature = Some(0.2);
+                        session.thread.max_tokens = Some(900);
+                        session.thread.context_tokens_cap = Some(1024);
+                        session.thread.parallel_tool_calls = Some(false);
+                        session.thread.recovery_policy =
+                            Some(refact_core::recovery::RecoveryPolicyOverrides {
+                                total_timeout_ms: Some(0),
+                                ..Default::default()
+                            });
+                        resume.notify_one();
+                    };
+                    let (result, ()) = tokio::join!(turn, change);
+                    result.unwrap();
+                },
+            )
+            .await;
+        assert_eq!(ccx.lock().await.n_ctx, 2048);
+        let fixture = super::take_model_fixture(chat_id).unwrap();
+        assert_eq!(fixture.requests.len(), 2);
+        for request in &fixture.requests {
+            assert_eq!(request.model_id, "new-model");
+            assert!(request.parallel_tool_calls);
+            assert_eq!(request.params.temperature, Some(0.8));
+            assert_eq!(request.params.frequency_penalty, Some(-0.25));
+            assert_eq!(request.params.max_tokens, 700);
+            assert_eq!(request.reasoning.to_openai_effort(), Some("minimal"));
+        }
     }
 
     #[tokio::test]
@@ -7378,6 +7846,32 @@ mod subchat_tests {
     }
 
     #[tokio::test]
+    async fn declared_normal_subchat_context_is_guarded_only_after_policy_tightens() {
+        let gcx = make_test_gcx().await;
+        let system = message_with_privacy(
+            "system",
+            "  PARENT SYSTEM\n",
+            vec![privacy_record(".env", "normal")],
+        );
+        let prepared =
+            prepare_subchat_messages(&gcx, vec![system.clone()], "trusted/model").unwrap();
+        assert_eq!(
+            serde_json::to_value(&prepared).unwrap(),
+            serde_json::to_value(vec![system.clone()]).unwrap()
+        );
+        install_privacy_policy(&gcx, "trusted", true);
+        let prepared = prepare_subchat_messages(&gcx, prepared, "trusted/model").unwrap();
+        assert_eq!(
+            prepared[0].content.content_text_only(),
+            GUARDED_REPORT_INSTRUCTION
+        );
+        assert_eq!(
+            serde_json::to_value(&prepared[1]).unwrap(),
+            serde_json::to_value(system).unwrap()
+        );
+    }
+
+    #[tokio::test]
     async fn guarded_subchat_context_gets_non_quotation_instruction() {
         let gcx = make_test_gcx().await;
         install_privacy_policy(&gcx, "trusted", true);
@@ -7495,6 +7989,157 @@ mod subchat_tests {
         assert!(!output.contains("Authorization: Bearer sk-test-secret"));
         assert!(output.contains("[REDACTED"));
         assert!(!output.contains(far_tail));
+    }
+
+    #[test]
+    fn compaction_keeps_exact_preamble_and_drops_rebuilt_marker_duplicates() {
+        let system = ChatMessage::new("system".into(), "  inherited\nverbatim  ".into());
+        let guard = ChatMessage::new("system".into(), GUARDED_REPORT_INSTRUCTION.into());
+        let mut file = ChatMessage::new("context_file".into(), "original project context".into());
+        file.tool_call_id = "project_context".into();
+        let input = vec![
+            guard,
+            system,
+            file.clone(),
+            ChatMessage::new("user".into(), "task".into()),
+        ];
+        let preamble = super::subchat_compaction_preamble(&input);
+        assert_eq!(
+            serde_json::to_value(&preamble).unwrap(),
+            serde_json::to_value(&input[..3]).unwrap()
+        );
+        let mut duplicate = file;
+        duplicate.content = ChatContent::SimpleText("rebuilt duplicate".into());
+        let mut rebuilt_file = ChatMessage::new("context_file".into(), "new context".into());
+        rebuilt_file.tool_call_id = "other".into();
+        let result = super::prepend_compaction_preamble(
+            &preamble,
+            vec![
+                duplicate,
+                rebuilt_file,
+                ChatMessage::new("user".into(), "continue".into()),
+            ],
+        );
+        for (copy, original) in result[..3].iter().zip(&preamble) {
+            assert!(!copy.message_id.is_empty());
+            let mut expected = original.clone();
+            expected.message_id = copy.message_id.clone();
+            assert_eq!(
+                serde_json::to_value(copy).unwrap(),
+                serde_json::to_value(expected).unwrap()
+            );
+        }
+        assert_eq!(result.len(), 5);
+        assert_eq!(result[0].role, "system");
+        assert_eq!(
+            result[1].content.content_text_only(),
+            "  inherited\nverbatim  "
+        );
+        assert!(refact_chat_history::history_limit::validate_chat_history(&result).is_ok());
+    }
+
+    #[test]
+    fn compaction_keeps_unmarked_rebuilt_files_alongside_unmarked_preamble() {
+        let preamble = vec![ChatMessage::new(
+            "context_file".into(),
+            "launch file".into(),
+        )];
+        let rebuilt = vec![ChatMessage::new(
+            "context_file".into(),
+            "reread file".into(),
+        )];
+        let result = super::prepend_compaction_preamble(&preamble, rebuilt);
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[1].content.content_text_only(), "reread file");
+    }
+
+    #[tokio::test]
+    async fn subchat_reactive_compaction_assigns_ids_to_verbatim_preamble() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let gcx = make_test_gcx().await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0; 4096];
+            loop {
+                let n = socket.read(&mut chunk).await.unwrap();
+                assert_ne!(n, 0);
+                request.extend_from_slice(&chunk[..n]);
+                if let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let headers = std::str::from_utf8(&request[..end]).unwrap();
+                    let length = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().unwrap())
+                        })
+                        .unwrap();
+                    if request.len() >= end + 4 + length {
+                        break;
+                    }
+                }
+            }
+            let delta = serde_json::json!({"choices":[{"index":0,"delta":{"content":"<summary>Continue the task.</summary><handoff_message>Finish the task.</handoff_message>"},"finish_reason":null}]});
+            let body = format!("data: {delta}\n\ndata: {{\"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":\"stop\"}}]}}\n\ndata: [DONE]\n\n");
+            socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).as_bytes()).await.unwrap();
+        });
+        let mut caps = CodeAssistantCaps::default();
+        caps.chat_models.insert(
+            "model".into(),
+            Arc::new(ChatModelRecord {
+                base: BaseModelRecord {
+                    id: "model".into(),
+                    tokenizer: "fake".into(),
+                    n_ctx: 200_000,
+                    endpoint: format!("http://{address}/v1/chat/completions"),
+                    ..Default::default()
+                },
+                supports_tools: true,
+                supports_agent: true,
+                ..Default::default()
+            }),
+        );
+        install_caps(gcx.clone(), caps).await;
+        let mut config = test_subchat_config();
+        config.n_ctx = 200_000;
+        let system = message_with_privacy(
+            "system",
+            "  ORIGINAL SYSTEM\n",
+            vec![privacy_record("public.txt", "normal")],
+        );
+        assert!(system.message_id.is_empty());
+        let mut messages = vec![
+            system.clone(),
+            ChatMessage::new("user".into(), "Finish the task".into()),
+        ];
+        let compacted = tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            apply_subchat_reactive_compaction(
+                gcx,
+                &config,
+                &mut messages,
+                "context_length_exceeded",
+                1,
+                false,
+            ),
+        )
+        .await;
+        server.abort();
+        assert!(compacted.expect("compaction timeout"));
+        let active = refact_core::active_context::active_context(&messages)
+            .unwrap()
+            .messages;
+        assert_eq!(active[0].role, "system");
+        assert!(!active[0].message_id.is_empty());
+        let mut expected = system;
+        expected.message_id = active[0].message_id.clone();
+        assert_eq!(
+            serde_json::to_value(&active[0]).unwrap(),
+            serde_json::to_value(expected).unwrap()
+        );
     }
 
     #[tokio::test]
@@ -7679,6 +8324,54 @@ mod subchat_tests {
         assert!(log_error.contains("[REDACTED"));
     }
 
+    #[test]
+    fn parent_inherited_settings_persist_without_legacy_window_normalization() {
+        let mut config = super::test_support::minimal_config("public-child", "root");
+        let inherited = ThreadParams {
+            temperature: Some(0.45),
+            frequency_penalty: Some(-0.2),
+            max_tokens: Some(3210),
+            reasoning_effort: Some("minimal".into()),
+            boost_reasoning: Some(true),
+            thinking_budget: Some(678),
+            parallel_tool_calls: Some(true),
+            context_tokens_cap: Some(2_000_000),
+            auto_compression_cap: Some(3333),
+            auto_compression_cap_pending: true,
+            include_project_info: false,
+            checkpoints_enabled: false,
+            auto_enrichment_enabled: Some(false),
+            auto_compact_enabled: Some(false),
+            tool_use: "cat".into(),
+            ..Default::default()
+        };
+        config.parent_inherited_launch = Some(inherited.clone());
+        config.n_ctx = 100_000;
+        let thread = stateful_thread_from_config("public-child", &config);
+        let expected = serde_json::to_value(inherited).unwrap();
+        let actual = serde_json::to_value(thread).unwrap();
+        for field in [
+            "temperature",
+            "frequency_penalty",
+            "max_tokens",
+            "reasoning_effort",
+            "boost_reasoning",
+            "thinking_budget",
+            "parallel_tool_calls",
+            "context_tokens_cap",
+            "auto_compression_cap",
+            "auto_compression_cap_pending",
+            "include_project_info",
+            "checkpoints_enabled",
+            "auto_enrichment_enabled",
+            "auto_compact_enabled",
+            "tool_use",
+        ] {
+            assert_eq!(actual[field], expected[field], "{field}");
+        }
+        assert_eq!(config.context_tokens_cap(), Some(2_000_000));
+    }
+
     #[tokio::test]
     async fn tool_config_subagent_artifacts_match_persisted_stateless_trace() {
         let gcx = make_test_gcx().await;
@@ -7793,7 +8486,7 @@ mod subchat_tests {
     }
 
     #[tokio::test]
-    async fn general_subagent_context_cap_is_explicit_only_and_follows_live_session() {
+    async fn legacy_subagent_context_cap_is_explicit_only_and_follows_live_session() {
         let gcx = make_test_gcx().await;
         let mut caps = CodeAssistantCaps::default();
         caps.chat_models.insert(
@@ -8040,6 +8733,7 @@ mod subchat_tests {
             planner_chat_id: Some("planner-task-1-1".to_string()),
         };
         let config = SubchatConfig {
+            parent_inherited_launch: None,
             runner_lease_token: None,
             native_job_fence: None,
             unlimited_configured_steps: false,
@@ -8118,6 +8812,7 @@ mod subchat_tests {
             planner_chat_id: Some("planner-task-1-1".to_string()),
         };
         let config = SubchatConfig {
+            parent_inherited_launch: None,
             runner_lease_token: None,
             native_job_fence: None,
             unlimited_configured_steps: false,
@@ -8381,6 +9076,7 @@ mod subchat_tests {
             .await
             .unwrap();
         let config = SubchatConfig {
+            parent_inherited_launch: None,
             runner_lease_token: None,
             native_job_fence: None,
             unlimited_configured_steps: false,

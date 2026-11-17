@@ -2259,6 +2259,7 @@ mod tests {
             .await
             .unwrap();
         let config = crate::subchat::SubchatConfig {
+            parent_inherited_launch: None,
             runner_lease_token: Some("identity-test-runner".into()),
             native_job_fence: None,
             unlimited_configured_steps: false,

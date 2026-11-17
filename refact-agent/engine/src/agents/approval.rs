@@ -794,6 +794,7 @@ pub(crate) mod tests {
         app.agent_executions.remember_config(
             &record.agent_id,
             crate::subchat::SubchatConfig {
+                parent_inherited_launch: None,
                 runner_lease_token: None,
                 native_job_fence: None,
                 unlimited_configured_steps: false,

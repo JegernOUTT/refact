@@ -571,6 +571,7 @@ pub(crate) async fn spawn_worker(
         budget: Some(native_budget(&record)?),
     };
     let request = SpawnRequest {
+        parent_inherited_launch: None,
         completion_push: Default::default(),
         native_supervision_guard: Some(authority::NativeSpawnGuard::mint(
             &record,

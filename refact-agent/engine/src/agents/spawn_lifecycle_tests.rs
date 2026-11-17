@@ -145,6 +145,7 @@ pub(crate) async fn repo_fixture() -> RepoFixture {
 
 pub(crate) fn spawn_request(parent_chat_id: &str, kind: BgAgentKind) -> SpawnRequest {
     SpawnRequest {
+        parent_inherited_launch: None,
         native_supervision_guard: None,
         kind,
         parent_chat_id: parent_chat_id.to_string(),
@@ -427,7 +428,7 @@ async fn spawned_subchat_approval_defaults_never_exceed_parent_authority() {
         (
             "autonomous-parent",
             Some((true, false, false)),
-            (true, true, false),
+            (true, false, false),
         ),
         (
             "dangerous-parent",
@@ -449,11 +450,29 @@ async fn spawned_subchat_approval_defaults_never_exceed_parent_authority() {
                 .await
                 .insert(parent_id.into(), Arc::new(Mutex::new(parent)));
         }
-        let launched = crate::agents::spawn::spawn_background_agent(
-            fixture.app.clone(),
-            spawn_request(parent_id, BgAgentKind::Subagent),
-        )
-        .await;
+        let mut request = spawn_request(parent_id, BgAgentKind::Subagent);
+        if parent_id == "autonomous-parent" {
+            let session = fixture
+                .app
+                .chat
+                .sessions
+                .read()
+                .await
+                .get(parent_id)
+                .cloned()
+                .unwrap();
+            let thread = session.lock().await.thread.clone();
+            request.parent_inherited_launch = Some(crate::agents::spawn::ParentInheritedLaunch {
+                thread,
+                preamble: vec![crate::call_validation::ChatMessage::new(
+                    "system".into(),
+                    "PARENT".into(),
+                )],
+                prompt_source: "parent".into(),
+            });
+        }
+        let launched =
+            crate::agents::spawn::spawn_background_agent(fixture.app.clone(), request).await;
         if authority.is_none() {
             assert!(launched
                 .err()
@@ -3061,6 +3080,251 @@ async fn closed_child_releases_its_slot_and_resumes_the_same_trajectory_next_gen
 
 #[serial(test_runner)]
 #[tokio::test]
+async fn inherited_continuation_accepts_live_model_mode_and_cap_but_legacy_recovery_does_not() {
+    for field in ["model", "mode", "cap", "model_replacement"] {
+        let fixture = repo_fixture().await;
+        let parent_id = "live-config-parent";
+        let mut request = spawn_request(parent_id, BgAgentKind::Subagent);
+        if field == "model_replacement" {
+            std::fs::write(fixture.source.join(".git/info/exclude"), ".refact/\n").unwrap();
+            request.worktree_mode = SpawnWorktreeMode::Isolated {
+                auto_merge: true,
+            };
+        }
+        fixture.install_parent(&request).await;
+        {
+            let mut state = fixture.app.gcx.caps_state.write().await;
+            let mut caps = (**state.caps.as_ref().unwrap()).clone();
+            let mut alternate = (**caps.chat_models.get("openai/gpt-4o").unwrap()).clone();
+            alternate.base.id = "test/live-model".into();
+            caps.chat_models
+                .insert("test/live-model".into(), Arc::new(alternate));
+            state.caps = Some(Arc::new(caps));
+        }
+        request.parent_inherited_launch = Some(crate::agents::spawn::ParentInheritedLaunch {
+            thread: ThreadParams {
+                mode: "agent".into(),
+                ..Default::default()
+            },
+            preamble: vec![ChatMessage::new("system".into(), "PARENT".into())],
+            prompt_source: "parent".into(),
+        });
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let _runner = {
+            let observed = observed.clone();
+            crate::agents::spawn::install_test_runner(Arc::new(move |gcx, mut messages, config| {
+                let observed = observed.clone();
+                Box::pin(async move {
+                    let app = AppState::from_gcx(gcx.clone()).await;
+                    let id = config.chat_id.as_ref().unwrap().clone();
+                    let session = app.chat.sessions.read().await.get(&id).cloned().unwrap();
+                    let thread = session.lock().await.thread.clone();
+                    if let Some(worktree) = &config.worktree {
+                        let generation = app
+                            .agents
+                            .get_any(config.background_agent_id.as_ref().unwrap())
+                            .await
+                            .unwrap()
+                            .run_generation;
+                        std::fs::write(
+                            worktree.root.join(format!("generation-{generation}.txt")),
+                            "done\n",
+                        )
+                        .unwrap();
+                    }
+                    observed.lock().await.push((
+                        config.model.clone(),
+                        config.mode.clone(),
+                        config.context_tokens_cap(),
+                        thread.clone(),
+                    ));
+                    messages.push(ChatMessage::new("assistant".into(), "done".into()));
+                    save_trajectory_as(gcx, &thread, &messages).await;
+                    mirror_subchat_messages_into_session(&app, &id, &messages).await;
+                    finish_stateful_subchat_session(&app, &id, &config).await;
+                    Ok(SubchatResult {
+                        messages,
+                        metering: serde_json::Map::new(),
+                        chat_id: Some(id),
+                        aborted: false,
+                    })
+                })
+            }))
+        };
+        let handle = crate::agents::spawn::spawn_background_agent(fixture.app.clone(), request)
+            .await
+            .unwrap();
+        let agent_id = handle.agent_id.clone();
+        let child_id = handle.child_chat_id.clone();
+        assert_eq!(
+            await_completion(handle).await.status,
+            BgAgentStatus::Completed
+        );
+        wait_until_slot_released(&fixture.app, &child_id).await;
+        let child = fixture
+            .app
+            .chat
+            .sessions
+            .read()
+            .await
+            .get(&child_id)
+            .cloned()
+            .unwrap();
+        let expected = {
+            let mut session = child.lock().await;
+            match field {
+                "model" | "model_replacement" => session.thread.model = "test/live-model".into(),
+                "mode" => session.thread.mode = "ask".into(),
+                "cap" => session.thread.context_tokens_cap = Some(8192),
+                _ => unreachable!(),
+            }
+            session.increment_version();
+            session.thread.clone()
+        };
+        let before = fixture.app.agents.get_any(&agent_id).await.unwrap();
+        if field == "model_replacement" {
+            assert_eq!(before.merge_status.as_deref(), Some("merged"));
+        }
+        crate::agents::spawn::resume_agent(
+            fixture.app.clone(),
+            parent_id,
+            &agent_id,
+            None,
+            before.change_seq,
+            Some("Continue".into()),
+            false,
+        )
+        .await
+        .unwrap();
+        let done = wait_for_record(&fixture.app, parent_id, &agent_id, |record| {
+            record.run_generation == 2 && record.status.is_terminal()
+        })
+        .await;
+        assert_eq!(
+            done.status,
+            BgAgentStatus::Completed,
+            "{field}: {:?}",
+            done.error
+        );
+        assert_eq!(
+            done.model, "openai/gpt-4o",
+            "registry model remains launch metadata"
+        );
+        wait_until_slot_released(&fixture.app, &child_id).await;
+        let observed = observed.lock().await;
+        assert_eq!(observed.len(), 2, "{field}");
+        let (model, mode, cap, thread) = &observed[1];
+        assert_eq!(model, &expected.model);
+        assert_eq!(mode, &expected.mode);
+        assert_eq!(*cap, expected.context_tokens_cap);
+        assert_eq!(thread.model, expected.model);
+        assert_eq!(thread.mode, expected.mode);
+        assert_eq!(thread.context_tokens_cap, expected.context_tokens_cap);
+        drop(observed);
+        fixture.app.chat.sessions.write().await.remove(&child_id);
+        let recovered =
+            crate::agents::spawn::recover_run_config(&fixture.app, parent_id, &agent_id)
+                .await
+                .unwrap()
+                .config;
+        assert_eq!(recovered.model, expected.model);
+        assert_eq!(recovered.mode, expected.mode);
+        assert_eq!(recovered.context_tokens_cap(), expected.context_tokens_cap);
+        fixture
+            .app
+            .agents
+            .flush_pending_writes_for_test()
+            .await
+            .unwrap();
+        let run_path = fixture
+            .cache
+            .join(".refact/background_agents/runs")
+            .join(format!("{agent_id}.2.json"));
+        let bytes = std::fs::read(&run_path).unwrap();
+        for (key, value) in [
+            ("mode", serde_json::json!("")),
+            ("model", serde_json::json!("missing/model")),
+            ("cap", serde_json::json!(0)),
+        ] {
+            let mut invalid: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            let thread_key = if key == "cap" {
+                "context_tokens_cap"
+            } else {
+                key
+            };
+            invalid["config"]["parent_inherited_launch"][thread_key] = value.clone();
+            if key != "cap" {
+                invalid["config"][key] = value;
+            }
+            std::fs::write(&run_path, serde_json::to_vec(&invalid).unwrap()).unwrap();
+            assert!(
+                crate::agents::spawn::recover_run_config(&fixture.app, parent_id, &agent_id)
+                    .await
+                    .is_err(),
+                "invalid {key}"
+            );
+        }
+        std::fs::write(&run_path, bytes).unwrap();
+    }
+
+    for field in ["model", "mode", "cap"] {
+        let fixture = repo_fixture().await;
+        let parent_id = "legacy-live-config-parent";
+        let request = spawn_request(parent_id, BgAgentKind::Subagent);
+        fixture.install_parent(&request).await;
+        {
+            let mut state = fixture.app.gcx.caps_state.write().await;
+            let mut caps = (**state.caps.as_ref().unwrap()).clone();
+            let alternate = caps.chat_models.get("openai/gpt-4o").unwrap().clone();
+            caps.chat_models.insert("test/live-model".into(), alternate);
+            state.caps = Some(Arc::new(caps));
+        }
+        let _runner = crate::agents::spawn::install_test_runner(Arc::new(|_, messages, config| {
+            Box::pin(async move { Ok(completed_result(messages, config)) })
+        }));
+        let handle = crate::agents::spawn::spawn_background_agent(fixture.app.clone(), request)
+            .await
+            .unwrap();
+        let agent_id = handle.agent_id.clone();
+        let child_id = handle.child_chat_id.clone();
+        assert_eq!(
+            await_completion(handle).await.status,
+            BgAgentStatus::Completed
+        );
+        wait_until_slot_released(&fixture.app, &child_id).await;
+        fixture
+            .app
+            .agents
+            .flush_pending_writes_for_test()
+            .await
+            .unwrap();
+        let run_path = fixture
+            .cache
+            .join(".refact/background_agents/runs")
+            .join(format!("{agent_id}.1.json"));
+        let mut invalid: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&run_path).unwrap()).unwrap();
+        match field {
+            "model" => invalid["config"]["model"] = serde_json::json!("test/live-model"),
+            "mode" => invalid["config"]["mode"] = serde_json::json!("ask"),
+            "cap" => {
+                invalid["config"]["n_ctx"] = serde_json::json!(8192);
+                invalid["config"]["implicit_context_window"] = serde_json::json!(false);
+            }
+            _ => unreachable!(),
+        }
+        std::fs::write(&run_path, serde_json::to_vec(&invalid).unwrap()).unwrap();
+        assert!(
+            crate::agents::spawn::recover_run_config(&fixture.app, parent_id, &agent_id)
+                .await
+                .is_err(),
+            "legacy {field}"
+        );
+    }
+}
+
+#[serial(test_runner)]
+#[tokio::test]
 async fn completed_child_takes_a_continued_turn_without_rewriting_its_completion() {
     use std::sync::atomic::{AtomicUsize, Ordering};
     let fixture = repo_fixture().await;
@@ -3090,6 +3354,11 @@ async fn completed_child_takes_a_continued_turn_without_rewriting_its_completion
                 let thread = session.lock().await.thread.clone();
                 let attempt = attempts.fetch_add(1, Ordering::SeqCst);
                 if attempt == 1 {
+                    assert_eq!(thread.temperature, Some(0.83));
+                    assert_eq!(
+                        config.parent_inherited_launch.as_ref().unwrap().temperature,
+                        Some(0.83)
+                    );
                     assert!(messages
                         .iter()
                         .any(|message| message.content.content_text_only() == "first answer"));
@@ -3131,12 +3400,18 @@ async fn completed_child_takes_a_continued_turn_without_rewriting_its_completion
             })
         }))
     };
-    let handle = crate::agents::spawn::spawn_background_agent(
-        fixture.app.clone(),
-        spawn_request(parent_id, BgAgentKind::Subagent),
-    )
-    .await
-    .unwrap();
+    let mut request = spawn_request(parent_id, BgAgentKind::Subagent);
+    request.parent_inherited_launch = Some(crate::agents::spawn::ParentInheritedLaunch {
+        thread: ThreadParams {
+            temperature: Some(0.12),
+            ..Default::default()
+        },
+        preamble: vec![ChatMessage::new("system".into(), "PARENT".into())],
+        prompt_source: "parent".into(),
+    });
+    let handle = crate::agents::spawn::spawn_background_agent(fixture.app.clone(), request)
+        .await
+        .unwrap();
     let agent_id = handle.agent_id.clone();
     let child_chat_id = handle.child_chat_id.clone();
     let completed = await_completion(handle).await;
@@ -3144,6 +3419,20 @@ async fn completed_child_takes_a_continued_turn_without_rewriting_its_completion
     assert_eq!(completed.result_summary.as_deref(), Some("first answer"));
     wait_until_slot_released(&fixture.app, &child_chat_id).await;
 
+    let child_session = fixture
+        .app
+        .chat
+        .sessions
+        .read()
+        .await
+        .get(&child_chat_id)
+        .cloned()
+        .unwrap();
+    {
+        let mut session = child_session.lock().await;
+        session.thread.temperature = Some(0.83);
+        session.increment_version();
+    }
     let before = fixture.app.agents.get_any(&agent_id).await.unwrap();
     let queued = crate::agents::spawn::resume_agent(
         fixture.app.clone(),

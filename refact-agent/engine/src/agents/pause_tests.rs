@@ -119,6 +119,7 @@ async fn control(app: &AppState, caller: &str, agent: &str, action: &str) -> Res
 
 fn config(agent: &str) -> SubchatConfig {
     SubchatConfig {
+        parent_inherited_launch: None,
         runner_lease_token: None,
         native_job_fence: None,
         unlimited_configured_steps: false,

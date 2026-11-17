@@ -1,3 +1,6 @@
+#[cfg(test)]
+use crate::call_validation::SamplingParameters;
+use super::prepare::is_preamble_conversation_start;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
@@ -13,8 +16,7 @@ use crate::subchat::{resolve_subchat_config_with_parent, run_subchat};
 
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{
-    ChatContent, ChatMessage, ChatMeta, ChatUsage, MeteringUsd, SamplingParameters,
-    is_agentic_mode_id,
+    ChatContent, ChatMessage, ChatMeta, ChatUsage, MeteringUsd, is_agentic_mode_id,
 };
 use crate::stats::event::{LlmCallEvent, canonicalize_mode_for_stats, split_model_provider};
 use crate::chat::tool_call_recovery;
@@ -51,6 +53,7 @@ use crate::ext::hooks_runner::{HookPayload, get_project_dir_string, run_observat
 use crate::chat::diagnostics::{make_ui_only_error_message, safe_provider_error_diagnostic};
 use crate::chat::history_limit::ContextPressure;
 use refact_core::llm_types::BaseModelRecord;
+#[cfg(test)]
 use refact_core::provider_types::{ModelTypeDefaults, ProviderDefaults};
 
 const MCP_LAZY_INDEX_MARKER: &str = "mcp_lazy_index";
@@ -344,38 +347,6 @@ fn partial_output_stream_error_message(original: &str) -> String {
     )
 }
 
-fn model_type_defaults_for_thread<'a>(
-    user_defaults: &'a ProviderDefaults,
-    defaults: &crate::caps::DefaultModels,
-    thread: &ThreadParams,
-    model_id: &str,
-) -> &'a ModelTypeDefaults {
-    if thread
-        .task_meta
-        .as_ref()
-        .is_some_and(|meta| meta.role == "agents")
-    {
-        user_defaults.defaults_for_task_planner_agent_model(
-            model_id,
-            &defaults.task_planner_agent_model,
-            &defaults.chat_default_model,
-            &defaults.chat_model_2,
-            &defaults.chat_light_model,
-            &defaults.chat_thinking_model,
-            &defaults.chat_buddy_model,
-        )
-    } else {
-        user_defaults.defaults_for_model(
-            model_id,
-            &defaults.chat_default_model,
-            &defaults.chat_model_2,
-            &defaults.chat_light_model,
-            &defaults.chat_thinking_model,
-            &defaults.chat_buddy_model,
-        )
-    }
-}
-
 async fn user_stop_requested(session_arc: &Arc<AMutex<ChatSession>>) -> bool {
     let session = session_arc.lock().await;
     session.user_interrupt_flag.load(Ordering::SeqCst)
@@ -463,12 +434,6 @@ fn inject_mcp_lazy_hint(session: &mut ChatSession, total: usize) -> bool {
             false
         }
     }
-}
-
-fn is_preamble_conversation_start(message: &ChatMessage) -> bool {
-    message.role == "user"
-        || message.role == "assistant"
-        || message.role == crate::chat::internal_roles::EVENT_ROLE
 }
 
 fn preamble_already_present(active_view: &[ChatMessage], msg: &ChatMessage) -> bool {
@@ -2992,51 +2957,12 @@ pub async fn run_llm_generation(
         worktree: thread.worktree.clone(),
     };
 
-    let model_type_defaults = model_type_defaults_for_thread(
+    let mut parameters = crate::chat::prepare::sampling_parameters_for_thread(
         &caps.user_defaults,
         &caps.defaults,
         &thread,
         &model_rec.base.id,
     );
-    let mut parameters = SamplingParameters {
-        temperature: thread.temperature.or(model_type_defaults.temperature),
-        frequency_penalty: thread.frequency_penalty,
-        max_new_tokens: thread
-            .max_tokens
-            .or(model_type_defaults.max_new_tokens)
-            .unwrap_or(0),
-        boost_reasoning: thread
-            .boost_reasoning
-            .unwrap_or_else(|| model_type_defaults.boost_reasoning.unwrap_or(false)),
-        reasoning_effort: thread
-            .reasoning_effort
-            .as_ref()
-            .and_then(|s| match s.as_str() {
-                "low" => Some(crate::call_validation::ReasoningEffort::Low),
-                "medium" => Some(crate::call_validation::ReasoningEffort::Medium),
-                "high" => Some(crate::call_validation::ReasoningEffort::High),
-                "xhigh" => Some(crate::call_validation::ReasoningEffort::XHigh),
-                "max" => Some(crate::call_validation::ReasoningEffort::Max),
-                _ => None,
-            })
-            .or_else(|| {
-                model_type_defaults
-                    .reasoning_effort
-                    .as_ref()
-                    .and_then(|s| match s.as_str() {
-                        "low" => Some(crate::call_validation::ReasoningEffort::Low),
-                        "medium" => Some(crate::call_validation::ReasoningEffort::Medium),
-                        "high" => Some(crate::call_validation::ReasoningEffort::High),
-                        "xhigh" => Some(crate::call_validation::ReasoningEffort::XHigh),
-                        "max" => Some(crate::call_validation::ReasoningEffort::Max),
-                        _ => None,
-                    })
-            }),
-        thinking_budget: thread
-            .thinking_budget
-            .or(model_type_defaults.thinking_budget),
-        ..Default::default()
-    };
 
     {
         let mut session = session_arc.lock().await;

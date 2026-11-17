@@ -623,6 +623,7 @@ async fn completed_prefix_fork_keeps_parent_wire_bytes_and_thinking_signatures_p
     assert!(resolved.skipped.is_empty(), "{:?}", resolved.skipped);
     assert_eq!(resolved.prepended_messages.len(), 4);
     let config = crate::subchat::SubchatConfig {
+        parent_inherited_launch: None,
         history_source_model: Some(model.into()),
         model: model.into(),
         ..crate::subchat::test_support::minimal_config("subchat-fork", "parent")

@@ -17,6 +17,7 @@ use tokio::sync::{Mutex, Notify};
 
 fn spawn_request(parent_chat_id: &str, title: &str, subchat_depth: usize) -> SpawnRequest {
     SpawnRequest {
+        parent_inherited_launch: None,
         native_supervision_guard: None,
         kind: BgAgentKind::Subagent,
         parent_chat_id: parent_chat_id.to_string(),

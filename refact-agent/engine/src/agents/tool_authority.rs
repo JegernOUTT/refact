@@ -1,3 +1,11 @@
+pub(crate) const SUBAGENT_FORCE_TOOLS: &[&str] = &[
+    "tasks_set",
+    "progress_report",
+    "agents_overview",
+    "agent_message",
+    "validate_goal",
+];
+
 use std::collections::BTreeSet;
 
 use crate::app_state::AppState;
@@ -158,6 +166,30 @@ pub(crate) async fn current_ceiling(
     Ok(ceiling)
 }
 
+pub(crate) async fn child_launch_ceiling(
+    app: &AppState,
+    parent_id: &str,
+    model: &str,
+    mode: &str,
+) -> Result<ToolsPolicy, String> {
+    let ceiling = current_ceiling(app, parent_id, model, mode).await?;
+    let mut tools = match ceiling {
+        ToolsPolicy::Only(tools)
+        | ToolsPolicy::Supervised {
+            tools, ..
+        } => tools,
+        ToolsPolicy::None => Vec::new(),
+        ToolsPolicy::All => return Err("concrete parent authority unavailable".into()),
+    };
+    for name in SUBAGENT_FORCE_TOOLS {
+        if !tools.iter().any(|tool| tool == name) {
+            tools.push((*name).into());
+        }
+    }
+    tools.sort();
+    Ok(ToolsPolicy::Only(tools))
+}
+
 pub(crate) async fn freeze(
     app: &AppState,
     parent_id: &str,
@@ -237,6 +269,38 @@ pub(crate) async fn ensure_context_tool(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn public_child_ceiling_keeps_child_toolset_when_parent_revokes_other_tools() {
+        let (_gcx, app, parent, _workspace) =
+            crate::agents::tests::app_with_parent_session("public-tool-parent").await;
+        parent.lock().await.active_command.allowed_tools = vec!["cat".into()];
+        let accepted = child_launch_ceiling(&app, "public-tool-parent", "model", "agent")
+            .await
+            .unwrap();
+        assert!(accepted.allows_tool("cat"));
+        for tool in SUBAGENT_FORCE_TOOLS {
+            assert!(accepted.allows_tool(tool));
+        }
+        parent.lock().await.thread.mode = "NO_TOOLS".into();
+        let current = child_launch_ceiling(&app, "public-tool-parent", "model", "agent")
+            .await
+            .unwrap();
+        let queued = intersect(&accepted, &current);
+        for tool in SUBAGENT_FORCE_TOOLS {
+            assert!(queued.allows_tool(tool));
+        }
+        assert!(!queued.allows_tool("shell"));
+        assert!(freeze(
+            &app,
+            "public-tool-parent",
+            "model",
+            "agent",
+            &ToolsPolicy::Only(vec!["shell".into()])
+        )
+        .await
+        .is_err());
+    }
 
     #[tokio::test]
     async fn registered_dispatch_enforces_deny_all_and_exact_alias_target() {

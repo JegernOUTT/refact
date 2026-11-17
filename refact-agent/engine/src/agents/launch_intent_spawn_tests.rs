@@ -104,6 +104,7 @@ impl Drop for SettingsReset {
 
 fn request(parent_id: &str) -> SpawnRequest {
     SpawnRequest {
+        parent_inherited_launch: None,
         native_supervision_guard: None,
         kind: BgAgentKind::Subagent,
         parent_chat_id: parent_id.into(),

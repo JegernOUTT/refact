@@ -470,9 +470,11 @@ Known limits:
 ### Background subagents and coordination
 
 `subagent` is the only tool that creates new background agents. It always starts a stateful child
-trajectory and returns immediately; completion is pushed to the parent. Omitting `tools` preserves the
-child's inherit-all policy; an explicit comma-separated list is validated against the registered tool
-catalog. `model_name` selects a concrete configured chat model and takes precedence over `model_type`,
+trajectory and returns immediately; completion is pushed to the parent. Omitted prompt, tools and raw
+settings inherit the parent chat, never `subagent.yaml`. Explicit parameters override inherited values;
+`system_prompt` replaces only system text and approval overrides may only narrow parent flags. Tools
+inherit the parent ceiling plus the always-added child coordination toolset; explicit `tools` must fit
+the parent ceiling. Legacy YAML consumers are unchanged. `model_name` selects a concrete configured chat model and takes precedence over `model_type`,
 whose valid slots are `default`, `light`, `thinking`, `buddy`, `model_2`, and `task_planner`.
 
 The optional `goal` accepts a string or `{content, criteria?, budget?, plan?: {content}}` object; use

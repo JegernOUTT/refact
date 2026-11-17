@@ -66,6 +66,7 @@ async fn fixture(parent_id: &str, hooks_enabled: bool) -> Fixture {
 
 fn request(parent_id: &str) -> SpawnRequest {
     SpawnRequest {
+        parent_inherited_launch: None,
         native_supervision_guard: None,
         kind: BgAgentKind::Subagent,
         parent_chat_id: parent_id.into(),

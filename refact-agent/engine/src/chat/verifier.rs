@@ -2276,6 +2276,7 @@ async fn run_verifier_review(
 ) -> Result<ReviewFindings, String> {
     let model = resolve_verifier_model(gcx.clone()).await?;
     let config = crate::subchat::SubchatConfig {
+        parent_inherited_launch: None,
         runner_lease_token: None,
         native_job_fence: None,
         unlimited_configured_steps: false,

@@ -225,7 +225,10 @@ taxonomy: `component/*`, `type/*`, `P0-critical`/`P1-important`/`P2-nice`,
 ### Background subagents
 
 `subagent` is the unified background-only tool for stateful child trajectories. It returns a child
-trajectory immediately, auto-pushes completion, and inherits all parent tools when `tools` is omitted.
+trajectory immediately and auto-pushes completion. Omitted prompt, tools and raw settings inherit the
+parent chat, not `subagent.yaml`; explicit parameters override them. `system_prompt` replaces only the
+system text, preserving allowlisted project context. Approval overrides may only narrow parent flags.
+The child coordination toolset is always added; explicit `tools` must fit the parent ceiling.
 Callers can select `model_type` or `model_name`, install a goal (whose budget controls child steps) and
 plan, provide `target_files` collision hints, or request an isolated worktree with optional auto-merge.
 Use the registered agent interaction and lifecycle tools documented in the engine guide; new work must not

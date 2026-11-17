@@ -1,3 +1,9 @@
+pub(crate) fn is_preamble_conversation_start(message: &ChatMessage) -> bool {
+    message.role == "user"
+        || message.role == "assistant"
+        || message.role == crate::chat::internal_roles::EVENT_ROLE
+}
+
 use std::sync::Arc;
 use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
@@ -25,6 +31,70 @@ use super::history_limit::fix_and_limit_messages_history;
 use super::linearize::apply_summarization_linearize;
 use super::prompts::prepend_the_right_system_prompt_and_maybe_more_initial_messages;
 use super::config::tokens;
+
+pub(crate) fn model_type_defaults_for_thread<'a>(
+    user_defaults: &'a refact_core::provider_types::ProviderDefaults,
+    defaults: &crate::caps::DefaultModels,
+    thread: &ThreadParams,
+    model_id: &str,
+) -> &'a refact_core::provider_types::ModelTypeDefaults {
+    if thread
+        .task_meta
+        .as_ref()
+        .is_some_and(|meta| meta.role == "agents")
+    {
+        user_defaults.defaults_for_task_planner_agent_model(
+            model_id,
+            &defaults.task_planner_agent_model,
+            &defaults.chat_default_model,
+            &defaults.chat_model_2,
+            &defaults.chat_light_model,
+            &defaults.chat_thinking_model,
+            &defaults.chat_buddy_model,
+        )
+    } else {
+        user_defaults.defaults_for_model(
+            model_id,
+            &defaults.chat_default_model,
+            &defaults.chat_model_2,
+            &defaults.chat_light_model,
+            &defaults.chat_thinking_model,
+            &defaults.chat_buddy_model,
+        )
+    }
+}
+
+pub(crate) fn sampling_parameters_for_thread(
+    user_defaults: &refact_core::provider_types::ProviderDefaults,
+    defaults: &crate::caps::DefaultModels,
+    thread: &ThreadParams,
+    model_id: &str,
+) -> SamplingParameters {
+    let model_defaults = model_type_defaults_for_thread(user_defaults, defaults, thread, model_id);
+    SamplingParameters {
+        temperature: thread.temperature.or(model_defaults.temperature),
+        frequency_penalty: thread.frequency_penalty,
+        max_new_tokens: thread
+            .max_tokens
+            .or(model_defaults.max_new_tokens)
+            .unwrap_or(0),
+        boost_reasoning: thread
+            .boost_reasoning
+            .unwrap_or_else(|| model_defaults.boost_reasoning.unwrap_or(false)),
+        reasoning_effort: thread
+            .reasoning_effort
+            .as_deref()
+            .and_then(ReasoningEffort::from_str_opt)
+            .or_else(|| {
+                model_defaults
+                    .reasoning_effort
+                    .as_deref()
+                    .and_then(ReasoningEffort::from_str_opt)
+            }),
+        thinking_budget: thread.thinking_budget.or(model_defaults.thinking_budget),
+        ..Default::default()
+    }
+}
 
 pub struct CanonicalOpenAiTools {
     pub tools: Vec<Value>,
@@ -1458,5 +1528,79 @@ mod tests {
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0]["provider"], "google_cloud_code");
         assert_eq!(blocks[0]["signature"], "sig-google");
+    }
+}
+
+#[cfg(test)]
+mod thread_sampling_tests {
+    use super::*;
+
+    #[test]
+    fn inherited_reasoning_normalizes_for_nonreasoning_child_model() {
+        let thread = ThreadParams {
+            reasoning_effort: Some("high".into()),
+            boost_reasoning: Some(true),
+            thinking_budget: Some(1234),
+            ..Default::default()
+        };
+        let mut sampling = sampling_parameters_for_thread(
+            &Default::default(),
+            &Default::default(),
+            &thread,
+            "plain/model",
+        );
+        adapt_sampling_for_reasoning_models(&mut sampling, &ChatModelRecord::default());
+        assert_eq!(sampling.reasoning_effort, None);
+        assert_eq!(sampling.thinking_budget, None);
+    }
+
+    #[test]
+    fn shared_sampling_preserves_all_reasoning_efforts_and_raw_overrides() {
+        let mut defaults = refact_core::provider_types::ProviderDefaults::default();
+        defaults.chat.temperature = Some(0.2);
+        defaults.chat.max_new_tokens = Some(5678);
+        defaults.chat.reasoning_effort = Some("high".into());
+        let models = crate::caps::DefaultModels {
+            chat_default_model: "test/model".into(),
+            ..Default::default()
+        };
+        for effort in ["none", "minimal", "low", "medium", "high", "xhigh", "max"] {
+            let parent = ThreadParams {
+                temperature: Some(0.7),
+                frequency_penalty: Some(-0.3),
+                max_tokens: Some(1234),
+                boost_reasoning: Some(true),
+                thinking_budget: Some(345),
+                reasoning_effort: Some(effort.into()),
+                ..Default::default()
+            };
+            let child = parent.clone();
+            let parent_sampling =
+                sampling_parameters_for_thread(&defaults, &models, &parent, "test/model");
+            let child_sampling =
+                sampling_parameters_for_thread(&defaults, &models, &child, "test/model");
+            assert_eq!(
+                serde_json::to_value(&parent_sampling).unwrap(),
+                serde_json::to_value(&child_sampling).unwrap()
+            );
+            assert_eq!(
+                parent_sampling.reasoning_effort,
+                ReasoningEffort::from_str_opt(effort)
+            );
+            assert_eq!(parent_sampling.temperature, Some(0.7));
+            assert_eq!(parent_sampling.frequency_penalty, Some(-0.3));
+            assert_eq!(parent_sampling.max_new_tokens, 1234);
+            assert_eq!(parent_sampling.thinking_budget, Some(345));
+            assert!(parent_sampling.boost_reasoning);
+        }
+        let fallback = sampling_parameters_for_thread(
+            &defaults,
+            &models,
+            &ThreadParams::default(),
+            "test/model",
+        );
+        assert_eq!(fallback.temperature, Some(0.2));
+        assert_eq!(fallback.max_new_tokens, 5678);
+        assert_eq!(fallback.reasoning_effort, Some(ReasoningEffort::High));
     }
 }

@@ -391,6 +391,7 @@ async fn run_summary_subchat(
     let trace_parent = TraceParent::rooted(&parent_chat_id, &root_chat_id);
 
     let config = SubchatConfig {
+        parent_inherited_launch: None,
         runner_lease_token: None,
         native_job_fence: None,
         unlimited_configured_steps: false,

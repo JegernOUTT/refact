@@ -147,7 +147,15 @@ pub fn install_test_runner(runner: TestRunner) -> TestRunnerGuard {
 }
 
 #[derive(Clone)]
+pub struct ParentInheritedLaunch {
+    pub thread: crate::chat::types::ThreadParams,
+    pub preamble: Vec<ChatMessage>,
+    pub prompt_source: String,
+}
+
+#[derive(Clone)]
 pub struct SpawnRequest {
+    pub parent_inherited_launch: Option<ParentInheritedLaunch>,
     pub native_supervision_guard: Option<crate::buddy::supervision_authority::NativeSpawnGuard>,
     pub kind: BgAgentKind,
     pub parent_chat_id: String,
@@ -421,7 +429,8 @@ pub(crate) async fn recover_run_config(
             || previous_config.config.chat_id != config.chat_id
             || previous_config.config.parent_id != config.parent_id
             || previous_config.config.background_agent_id != config.background_agent_id
-            || previous_config.config.model != config.model
+            || (seed.config.parent_inherited_launch.is_none()
+                && previous_config.config.model != config.model)
             || previous_worktree != config.worktree
             || !record.previous_runs.iter().any(|run| {
                 run.run_generation == intent.previous_generation
@@ -479,6 +488,24 @@ pub(crate) async fn recover_run_config(
     }) {
         return Err("invalid previous checkout attachment receipt".into());
     }
+    let inherited = seed.config.parent_inherited_launch.is_some();
+    let runtime_config_matches = if inherited {
+        config
+            .parent_inherited_launch
+            .as_ref()
+            .is_some_and(|thread| {
+                config.model == thread.model
+                    && config.mode == thread.mode
+                    && !config.mode.trim().is_empty()
+                    && config.context_tokens_cap() == thread.context_tokens_cap
+                    && thread.context_tokens_cap.is_none_or(|cap| cap > 0)
+            })
+    } else {
+        config.parent_inherited_launch.is_none()
+            && config.model == seed.config.model
+            && config.mode == seed.config.mode
+            && config.context_tokens_cap() == seed.config.context_tokens_cap()
+    };
     if saved.schema_version != 1
         || seed.schema_version != 1
         || seed.revision != 1
@@ -492,12 +519,10 @@ pub(crate) async fn recover_run_config(
         || config.parent_id.as_deref() != Some(parent_chat_id)
         || seed.config.parent_id != config.parent_id
         || config.background_agent_id.as_deref() != Some(agent_id)
-        || config.model != seed.config.model
-        || config.model != record.model
+        || !runtime_config_matches
+        || seed.config.model != record.model
         || config.root_chat_id != seed.config.root_chat_id
         || config.root_chat_id != record.parent_root_chat_id
-        || config.mode != seed.config.mode
-        || config.context_tokens_cap() != seed.config.context_tokens_cap()
         || config.subchat_depth != seed.config.subchat_depth
         || !config.stateful
         || !seed.config.stateful
@@ -561,9 +586,18 @@ pub(crate) async fn recover_run_config(
         && (parent_thread.auto_approve_editing_tools || parent_thread.autonomous_no_confirm);
     config.auto_approve_dangerous_commands &= seed.config.auto_approve_dangerous_commands
         && super::approval::dangerous_confirmation_enabled(app, parent_chat_id).await;
-    let ceiling =
+    let ceiling = if config.parent_inherited_launch.is_some() {
+        super::tool_authority::child_launch_ceiling(
+            app,
+            parent_chat_id,
+            &config.model,
+            &config.mode,
+        )
+        .await?
+    } else {
         super::tool_authority::current_ceiling(app, parent_chat_id, &config.model, &config.mode)
-            .await?;
+            .await?
+    };
     let authority_migrated = matches!(config.tools, crate::subchat::ToolsPolicy::All);
     config.tools = super::tool_authority::intersect(&config.tools, &ceiling);
     let caps = crate::global_context::try_load_caps_quickly_if_not_present(app.gcx.clone(), 0)
@@ -775,6 +809,17 @@ fn launch_digest(payload: &refact_agents_core::storage::AcceptedLaunchPayload) -
 pub struct LaunchEffective {
     pub schema_version: u32,
     pub revision: u64,
+    pub temperature: Option<f32>,
+    pub frequency_penalty: Option<f32>,
+    pub max_tokens: Option<usize>,
+    pub boost_reasoning: Option<bool>,
+    pub reasoning_effort: Option<String>,
+    pub thinking_budget: Option<usize>,
+    pub parallel_tool_calls: Option<bool>,
+    pub prompt_source: Option<String>,
+    pub prompt_chars: usize,
+    pub inherited_context_markers: Vec<String>,
+    pub child_toolset: Vec<String>,
     pub model: String,
     pub context_tokens_cap: Option<usize>,
     pub n_ctx: usize,
@@ -814,7 +859,7 @@ async fn validate_launch_request(app: &AppState, req: &SpawnRequest) -> Result<P
     let synthetic_config = req.config_name == "test_spawn";
     #[cfg(not(test))]
     let synthetic_config = false;
-    if !synthetic_config {
+    if !synthetic_config && req.parent_inherited_launch.is_none() {
         let config = crate::yaml_configs::customization_registry::get_subagent_config(
             app.gcx.clone(),
             &req.config_name,
@@ -886,6 +931,65 @@ pub async fn preview_launch(app: &AppState, req: &SpawnRequest) -> Result<Launch
         && req.native_supervision_guard.is_none();
     let config = prepared.config;
     Ok(LaunchEffective {
+        temperature: config
+            .parent_inherited_launch
+            .as_ref()
+            .and_then(|thread| thread.temperature.clone()),
+        frequency_penalty: config
+            .parent_inherited_launch
+            .as_ref()
+            .and_then(|thread| thread.frequency_penalty.clone()),
+        max_tokens: config
+            .parent_inherited_launch
+            .as_ref()
+            .and_then(|thread| thread.max_tokens.clone()),
+        boost_reasoning: config
+            .parent_inherited_launch
+            .as_ref()
+            .and_then(|thread| thread.boost_reasoning.clone()),
+        reasoning_effort: config
+            .parent_inherited_launch
+            .as_ref()
+            .and_then(|thread| thread.reasoning_effort.clone()),
+        thinking_budget: config
+            .parent_inherited_launch
+            .as_ref()
+            .and_then(|thread| thread.thinking_budget.clone()),
+        parallel_tool_calls: config
+            .parent_inherited_launch
+            .as_ref()
+            .and_then(|thread| thread.parallel_tool_calls.clone()),
+        prompt_source: req
+            .parent_inherited_launch
+            .as_ref()
+            .map(|launch| launch.prompt_source.clone()),
+        prompt_chars: req
+            .parent_inherited_launch
+            .as_ref()
+            .and_then(|launch| launch.preamble.first())
+            .map_or(0, |message| {
+                message.content.content_text_only().chars().count()
+            }),
+        inherited_context_markers: req
+            .parent_inherited_launch
+            .as_ref()
+            .map(|launch| {
+                launch
+                    .preamble
+                    .iter()
+                    .skip(1)
+                    .map(|message| message.tool_call_id.clone())
+                    .collect()
+            })
+            .unwrap_or_default(),
+        child_toolset: if req.parent_inherited_launch.is_some() {
+            super::tool_authority::SUBAGENT_FORCE_TOOLS
+                .iter()
+                .map(|name| (*name).into())
+                .collect()
+        } else {
+            Vec::new()
+        },
         schema_version: prepared.schema_version,
         revision: prepared.revision,
         context_tokens_cap: config.context_tokens_cap(),
@@ -1544,44 +1648,32 @@ async fn prepare_launch_for_parent_run(
         .as_ref()
         .and_then(|profile| profile.max_steps)
         .map_or(max_steps, |cap| max_steps.min(cap));
-    let resolve_config = async {
-        resolve_subchat_config_with_parent(
-            app.gcx.clone(),
-            &req.config_name,
-            true,
-            Some(child_chat_id.to_string()),
-            Some(req.title.clone()),
-            Some(req.parent_chat_id.clone()),
-            Some(req.kind.as_str().to_string()),
-            req.parent_root_chat_id.clone(),
-            req.tools.clone(),
-            max_steps,
-            false,
-            None,
-            "agent".to_string(),
-            req.parent_task_meta.clone(),
-            req.parent_worktree.clone(),
-            req.parent_tool_call_id.clone(),
-            req.parent_subchat_tx.clone(),
-            None,
-            req.subchat_depth + 1,
-        )
-        .await
-    };
-    #[cfg(test)]
-    let config_result = if req.config_name == "test_spawn" {
-        drop(resolve_config);
-        Ok(SubchatConfig {
+    let mut config = if let Some(inherited) = &req.parent_inherited_launch {
+        let mut effective_thread = inherited.thread.clone();
+        effective_thread.model = req.model.clone();
+        let thread = &effective_thread;
+        let caps = crate::global_context::try_load_caps_quickly_if_not_present(app.gcx.clone(), 0)
+            .await
+            .map_err(|_| "launch model unavailable")?;
+        let model = crate::caps::resolve_chat_model(caps, &req.model)?;
+        if req
+            .context_tokens_cap
+            .is_some_and(|cap| cap == 0 || cap > model.base.n_ctx)
+        {
+            return Err("explicit context_tokens_cap exceeds child model window".into());
+        }
+        SubchatConfig {
+            parent_inherited_launch: Some(thread.clone()),
             runner_lease_token: None,
             native_job_fence: None,
             unlimited_configured_steps: false,
-            history_source_model: None,
+            history_source_model: req.history_source_model.clone(),
             tool_name: req.config_name.clone(),
             stateful: true,
-            autonomous_no_confirm: true,
-            auto_approve_editing_tools: true,
-            auto_approve_dangerous_commands: true,
-            chat_id: Some(child_chat_id.to_string()),
+            autonomous_no_confirm: thread.autonomous_no_confirm,
+            auto_approve_editing_tools: thread.auto_approve_editing_tools,
+            auto_approve_dangerous_commands: thread.auto_approve_dangerous_commands,
+            chat_id: Some(child_chat_id.into()),
             title: Some(req.title.clone()),
             parent_id: Some(req.parent_chat_id.clone()),
             link_type: Some(req.kind.as_str().into()),
@@ -1593,12 +1685,19 @@ async fn prepare_launch_for_parent_run(
             task_meta: req.parent_task_meta.clone(),
             worktree: req.parent_worktree.clone(),
             model: req.model.clone(),
-            mode: "agent".into(),
-            n_ctx: 4096,
-            implicit_context_window: false,
-            max_new_tokens: 512,
-            temperature: None,
-            reasoning_effort: None,
+            mode: thread.mode.clone(),
+            n_ctx: thread
+                .context_tokens_cap
+                .filter(|cap| *cap > 0)
+                .unwrap_or(model.base.n_ctx)
+                .min(model.base.n_ctx),
+            implicit_context_window: thread.context_tokens_cap.is_none(),
+            max_new_tokens: thread.max_tokens.unwrap_or(0),
+            temperature: thread.temperature,
+            reasoning_effort: thread
+                .reasoning_effort
+                .as_deref()
+                .and_then(crate::call_validation::ReasoningEffort::from_str_opt),
             cache_control: crate::llm::params::CacheControl::Ephemeral,
             parent_tool_call_id: req.parent_tool_call_id.clone(),
             parent_subchat_tx: req.parent_subchat_tx.clone(),
@@ -1614,17 +1713,93 @@ async fn prepare_launch_for_parent_run(
                 Some(&req.parent_chat_id),
                 req.parent_root_chat_id.as_deref(),
             ),
-        })
+        }
     } else {
-        resolve_config.await
+        let resolve_config = async {
+            resolve_subchat_config_with_parent(
+                app.gcx.clone(),
+                &req.config_name,
+                true,
+                Some(child_chat_id.to_string()),
+                Some(req.title.clone()),
+                Some(req.parent_chat_id.clone()),
+                Some(req.kind.as_str().to_string()),
+                req.parent_root_chat_id.clone(),
+                req.tools.clone(),
+                max_steps,
+                false,
+                None,
+                "agent".to_string(),
+                req.parent_task_meta.clone(),
+                req.parent_worktree.clone(),
+                req.parent_tool_call_id.clone(),
+                req.parent_subchat_tx.clone(),
+                None,
+                req.subchat_depth + 1,
+            )
+            .await
+        };
+        #[cfg(test)]
+        let config_result = if req.config_name == "test_spawn" {
+            drop(resolve_config);
+            Ok(SubchatConfig {
+                parent_inherited_launch: None,
+                runner_lease_token: None,
+                native_job_fence: None,
+                unlimited_configured_steps: false,
+                history_source_model: None,
+                tool_name: req.config_name.clone(),
+                stateful: true,
+                autonomous_no_confirm: true,
+                auto_approve_editing_tools: true,
+                auto_approve_dangerous_commands: true,
+                chat_id: Some(child_chat_id.to_string()),
+                title: Some(req.title.clone()),
+                parent_id: Some(req.parent_chat_id.clone()),
+                link_type: Some(req.kind.as_str().into()),
+                root_chat_id: req.parent_root_chat_id.clone(),
+                tools: crate::subchat::ToolsPolicy::from_option(req.tools.clone()),
+                max_steps,
+                prepend_system_prompt: false,
+                wrap_up: None,
+                task_meta: req.parent_task_meta.clone(),
+                worktree: req.parent_worktree.clone(),
+                model: req.model.clone(),
+                mode: "agent".into(),
+                n_ctx: 4096,
+                implicit_context_window: false,
+                max_new_tokens: 512,
+                temperature: None,
+                reasoning_effort: None,
+                cache_control: crate::llm::params::CacheControl::Ephemeral,
+                parent_tool_call_id: req.parent_tool_call_id.clone(),
+                parent_subchat_tx: req.parent_subchat_tx.clone(),
+                abort_flag: None,
+                soft_abort: false,
+                activity_stamp: None,
+                background_agent_id: None,
+                subchat_depth: req.subchat_depth + 1,
+                final_step_force_answer: false,
+                buddy_meta: None,
+                step_progress: None,
+                trace_parent: crate::subchat::TraceParent::from_parts(
+                    Some(&req.parent_chat_id),
+                    req.parent_root_chat_id.as_deref(),
+                ),
+            })
+        } else {
+            resolve_config.await
+        };
+        #[cfg(not(test))]
+        let config_result = resolve_config.await;
+        config_result?
     };
-    #[cfg(not(test))]
-    let config_result = resolve_config.await;
-    let mut config = config_result?;
     config.model = req.model.clone();
     config.history_source_model = req.history_source_model.clone();
     let implicit_window = req.config_name == "subagent" && req.native_supervision_guard.is_none();
-    if implicit_window || req.context_tokens_cap.is_some() {
+    if req.parent_inherited_launch.is_none()
+        && (implicit_window || req.context_tokens_cap.is_some())
+    {
         let caps = crate::global_context::try_load_caps_quickly_if_not_present(app.gcx.clone(), 0)
             .await
             .map_err(|_| "launch model unavailable")?;
@@ -1638,39 +1813,52 @@ async fn prepare_launch_for_parent_run(
             implicit_window,
         )?;
     }
-    let configured_consent = crate::yaml_configs::customization_registry::get_subagent_config(
-        app.gcx.clone(),
-        &req.config_name,
-        None,
-    )
-    .await
-    .map(|config| config.subchat.auto_approve_dangerous_commands != Some(false))
-    .unwrap_or(false);
-    #[cfg(test)]
-    let configured_consent = configured_consent || req.config_name == "test_spawn";
-    config.auto_approve_dangerous_commands = configured_consent
-        && super::approval::dangerous_confirmation_enabled(app, &req.parent_chat_id).await;
-    if let Some(profile) = &req.profile {
-        if let Some(effort) = &profile.reasoning_effort {
-            config.reasoning_effort = Some(effort.clone());
+    if req.parent_inherited_launch.is_none() {
+        let configured_consent = crate::yaml_configs::customization_registry::get_subagent_config(
+            app.gcx.clone(),
+            &req.config_name,
+            None,
+        )
+        .await
+        .map(|config| config.subchat.auto_approve_dangerous_commands != Some(false))
+        .unwrap_or(false);
+        #[cfg(test)]
+        let configured_consent = configured_consent || req.config_name == "test_spawn";
+        config.auto_approve_dangerous_commands = configured_consent
+            && super::approval::dangerous_confirmation_enabled(app, &req.parent_chat_id).await;
+        if let Some(profile) = &req.profile {
+            if let Some(effort) = &profile.reasoning_effort {
+                config.reasoning_effort = Some(effort.clone());
+            }
+            config.autonomous_no_confirm &= profile.approval.autonomous_no_confirm.unwrap_or(true);
+            config.auto_approve_editing_tools &=
+                profile.approval.auto_approve_editing_tools.unwrap_or(true);
+            config.auto_approve_dangerous_commands &= profile
+                .approval
+                .auto_approve_dangerous_commands
+                .unwrap_or(true);
         }
-        config.autonomous_no_confirm &= profile.approval.autonomous_no_confirm.unwrap_or(true);
-        config.auto_approve_editing_tools &=
-            profile.approval.auto_approve_editing_tools.unwrap_or(true);
-        config.auto_approve_dangerous_commands &= profile
-            .approval
-            .auto_approve_dangerous_commands
-            .unwrap_or(true);
     }
     narrow_parent_approval(app, req, &mut config).await;
-    config.tools = super::tool_authority::freeze(
-        app,
-        &req.parent_chat_id,
-        &config.model,
-        &config.mode,
-        &config.tools,
-    )
-    .await?;
+    config.tools = if req.parent_inherited_launch.is_some() {
+        let ceiling = super::tool_authority::child_launch_ceiling(
+            app,
+            &req.parent_chat_id,
+            &config.model,
+            &config.mode,
+        )
+        .await?;
+        super::tool_authority::intersect(&config.tools, &ceiling)
+    } else {
+        super::tool_authority::freeze(
+            app,
+            &req.parent_chat_id,
+            &config.model,
+            &config.mode,
+            &config.tools,
+        )
+        .await?
+    };
     if let Some(guard) = &req.native_supervision_guard {
         guard.validate_request(req)?;
         config.autonomous_no_confirm = false;
@@ -1686,17 +1874,42 @@ async fn prepare_launch_for_parent_run(
                 .ok_or("finite goal budget required")?,
         };
     }
-    let mut messages = build_messages(
-        app.clone(),
-        &req.config_name,
-        &req.prompt,
-        req.plan.as_deref(),
-        req.goal.as_ref(),
-    )
-    .await?;
-    let options =
-        crate::python_tool::catalog_binding::BindOptions::for_project(app.gcx.clone()).await;
-    append_python_instructions(&mut messages, &config.tools, options.llm, options.engine);
+    let mut messages = if let Some(inherited) = &req.parent_inherited_launch {
+        let mut messages = inherited.preamble.clone();
+        if let Some(system) = messages.iter_mut().find(|message| message.role == "system") {
+            if let crate::call_validation::ChatContent::SimpleText(text) = &system.content {
+                let rewritten = crate::chat::prompts::rewrite_artifacts_for_fork(
+                    app,
+                    text,
+                    &req.parent_chat_id,
+                    child_chat_id,
+                )
+                .await;
+                system.content = crate::call_validation::ChatContent::SimpleText(rewritten);
+            }
+        }
+        messages.push(event(
+            EventSubkind::SystemNotice,
+            crate::agents::push::NOTICE_SPAWN,
+            serde_json::json!({"config_name": req.config_name}),
+            req.prompt.clone(),
+        ));
+        append_goal_and_plan_messages(&mut messages, req.plan.as_deref(), req.goal.as_ref());
+        messages
+    } else {
+        let mut messages = build_messages(
+            app.clone(),
+            &req.config_name,
+            &req.prompt,
+            req.plan.as_deref(),
+            req.goal.as_ref(),
+        )
+        .await?;
+        let options =
+            crate::python_tool::catalog_binding::BindOptions::for_project(app.gcx.clone()).await;
+        append_python_instructions(&mut messages, &config.tools, options.llm, options.engine);
+        messages
+    };
     let parent = app
         .chat
         .sessions
@@ -1736,11 +1949,20 @@ async fn prepare_launch_for_parent_run(
         ));
     }
     if !context.is_empty() {
-        let index = usize::from(
+        let index = if req.parent_inherited_launch.is_some() {
             messages
-                .first()
-                .is_some_and(|message| message.role == "system"),
-        );
+                .iter()
+                .take_while(|message| {
+                    !crate::chat::prepare::is_preamble_conversation_start(message)
+                })
+                .count()
+        } else {
+            usize::from(
+                messages
+                    .first()
+                    .is_some_and(|message| message.role == "system"),
+            )
+        };
         messages.splice(index..index, context);
     }
     let ordinary_launch = req.parent_tool_call_id.is_some()
@@ -1754,6 +1976,13 @@ async fn prepare_launch_for_parent_run(
             .is_none()
     {
         return Err("prepared launch exceeds configured context bounds".into());
+    }
+    if req.parent_inherited_launch.is_some() {
+        let caps = crate::global_context::try_load_caps_quickly_if_not_present(app.gcx.clone(), 0)
+            .await
+            .map_err(|_| "launch model unavailable")?;
+        let model = crate::caps::resolve_chat_model(caps, &config.model)?;
+        super::launch_spec::clear_current_context(&app.gcx, &messages, &model.base)?;
     }
     let prepared = PreparedLaunch {
         schema_version: 1,
@@ -2210,6 +2439,141 @@ mod accepted_launch_tests {
     }
 
     #[tokio::test]
+    async fn public_launch_rewrites_inherited_artifacts_section_for_the_child() {
+        let (_gcx, app, parent, workspace) =
+            super::super::tests::app_with_parent_session("artifacts-parent").await;
+        let thread = parent.lock().await.thread.clone();
+        let names = std::collections::HashSet::from(["create_textdoc".to_string()]);
+        let parent_prompt = crate::chat::prompts::expand_artifacts_instructions(
+            &app,
+            &format!(
+                "BEFORE\n{}\n## Other\nAFTER",
+                crate::chat::prompts::ARTIFACTS_INSTRUCTIONS_MARKER
+            ),
+            "artifacts-parent",
+            &names,
+            "agent",
+        )
+        .await;
+        assert!(parent_prompt.contains("refact://artifact/artifacts-parent/"));
+        let mut req = super::super::tests::subagent_spawn_request("artifacts-parent", "src/a.rs");
+        req.parent_inherited_launch = Some(ParentInheritedLaunch {
+            thread,
+            preamble: vec![ChatMessage::new("system".into(), parent_prompt.clone())],
+            prompt_source: "parent".into(),
+        });
+        let (prepared, _) = prepare_launch(
+            &app,
+            &req,
+            "subchat-artifacts-child",
+            workspace.path().canonicalize().unwrap(),
+        )
+        .await
+        .unwrap();
+        let child_prompt = prepared.messages[0].content.content_text_only();
+        assert_eq!(
+            child_prompt,
+            crate::chat::prompts::rewrite_artifacts_for_fork(
+                &app,
+                &parent_prompt,
+                "artifacts-parent",
+                "subchat-artifacts-child",
+            )
+            .await
+        );
+        assert!(child_prompt.contains("refact://artifact/subchat-artifacts-child/"));
+        assert!(!child_prompt.contains("refact://artifact/artifacts-parent/"));
+        assert!(child_prompt.starts_with("BEFORE\n"));
+        assert!(child_prompt.ends_with("\n## Other\nAFTER"));
+    }
+
+    #[tokio::test]
+    async fn public_launch_instructions_follow_inherited_preamble_for_nested_children() {
+        let (_gcx, app, parent, workspace) =
+            super::super::tests::app_with_parent_session("preamble-parent").await;
+        let thread = parent.lock().await.thread.clone();
+        let mut preamble = vec![ChatMessage::new("system".into(), "PARENT VERBATIM".into())];
+        for marker in [
+            "project_context",
+            "memories_context",
+            "buddy_project_memory_pulse",
+            "skills_context",
+        ] {
+            let mut file = ChatMessage::new("context_file".into(), marker.into());
+            file.tool_call_id = marker.into();
+            preamble.push(file);
+        }
+        let mut req = super::super::tests::subagent_spawn_request("preamble-parent", "src/a.rs");
+        req.parent_inherited_launch = Some(ParentInheritedLaunch {
+            thread: thread.clone(),
+            preamble: preamble.clone(),
+            prompt_source: "parent".into(),
+        });
+        let (normal, _) = prepare_launch(
+            &app,
+            &req,
+            "subchat-normal-preamble",
+            workspace.path().canonicalize().unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(normal.messages.len(), 6);
+        assert_eq!(
+            serde_json::to_value(&normal.messages[..5]).unwrap(),
+            serde_json::to_value(&preamble).unwrap()
+        );
+        assert_eq!(
+            normal.messages[5].role,
+            crate::chat::internal_roles::EVENT_ROLE
+        );
+        assert!(crate::privacy::records::records_to_carry(&normal.messages)
+            .unwrap()
+            .is_empty());
+        let normal_prepared = crate::subchat::prepare_subchat_messages(
+            &app.gcx,
+            normal.messages.clone(),
+            &normal.config.model,
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(normal_prepared).unwrap(),
+            serde_json::to_value(normal.messages).unwrap()
+        );
+        req.initial_context_messages = vec![ChatMessage::new(
+            "user".into(),
+            "launch spec context".into(),
+        )];
+        req.profile = Some(resolved_profile(1, 4));
+        req.custom_instructions = Some("custom instructions".into());
+        let (prepared, _) = prepare_launch(
+            &app,
+            &req,
+            "subchat-preamble",
+            workspace.path().canonicalize().unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(&prepared.messages[..5]).unwrap(),
+            serde_json::to_value(&preamble).unwrap()
+        );
+        assert_eq!(
+            prepared.messages[5].content.content_text_only(),
+            "launch spec context"
+        );
+        let nested_preamble: Vec<_> = prepared
+            .messages
+            .iter()
+            .take_while(|message| !crate::chat::prepare::is_preamble_conversation_start(message))
+            .cloned()
+            .collect();
+        assert_eq!(
+            serde_json::to_value(nested_preamble).unwrap(),
+            serde_json::to_value(preamble).unwrap()
+        );
+    }
+
+    #[tokio::test]
     #[serial_test::serial(test_runner)]
     async fn prepared_payload_obeys_project_limits_before_record_or_ticket() {
         let (_gcx, app, _parent, workspace) =
@@ -2446,13 +2810,23 @@ async fn revalidate_prepared_launch(
         validate_unscoped_project(app, &prepared.project_root).await?;
     }
     narrow_parent_approval(app, req, &mut prepared.config).await;
-    let ceiling = super::tool_authority::current_ceiling(
-        app,
-        &req.parent_chat_id,
-        &prepared.config.model,
-        &prepared.config.mode,
-    )
-    .await?;
+    let ceiling = if req.parent_inherited_launch.is_some() {
+        super::tool_authority::child_launch_ceiling(
+            app,
+            &req.parent_chat_id,
+            &prepared.config.model,
+            &prepared.config.mode,
+        )
+        .await?
+    } else {
+        super::tool_authority::current_ceiling(
+            app,
+            &req.parent_chat_id,
+            &prepared.config.model,
+            &prepared.config.mode,
+        )
+        .await?
+    };
     prepared.config.tools = super::tool_authority::intersect(&prepared.config.tools, &ceiling);
     let caps = crate::global_context::try_load_caps_quickly_if_not_present(app.gcx.clone(), 0)
         .await
@@ -2689,6 +3063,16 @@ async fn resume_agent_for_parent_run(
         previous_attachment.as_ref(),
         &trajectory,
     )?;
+    if config.parent_inherited_launch.is_some() {
+        if trajectory.thread.mode.trim().is_empty()
+            || trajectory.thread.context_tokens_cap == Some(0)
+        {
+            return Err("live child mode or context cap is invalid".into());
+        }
+        config.parent_inherited_launch = Some(trajectory.thread.clone());
+        config.model = trajectory.thread.model.clone();
+        config.mode = trajectory.thread.mode.clone();
+    }
     config.autonomous_no_confirm &= trajectory.thread.autonomous_no_confirm;
     config.auto_approve_editing_tools &= trajectory.thread.auto_approve_editing_tools;
     config.auto_approve_dangerous_commands &= trajectory.thread.auto_approve_dangerous_commands;

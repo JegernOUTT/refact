@@ -1310,6 +1310,7 @@ mod tests {
             expires_at: Utc::now().timestamp() + 60,
         };
         let request = SpawnRequest {
+            parent_inherited_launch: None,
             completion_push: Default::default(),
             native_supervision_guard: Some(guard.clone()),
             kind: crate::agents::types::BgAgentKind::Subagent,

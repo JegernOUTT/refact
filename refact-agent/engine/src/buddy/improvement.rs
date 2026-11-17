@@ -504,6 +504,7 @@ pub fn spawn_request(
         ));
     }
     Ok(crate::agents::spawn::SpawnRequest {
+        parent_inherited_launch: None,
         completion_push: Default::default(),
         kind: crate::agents::types::BgAgentKind::Subagent,
         parent_chat_id,
