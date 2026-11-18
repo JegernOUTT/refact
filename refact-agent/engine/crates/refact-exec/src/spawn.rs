@@ -29,6 +29,8 @@ use crate::ExecRegistry;
 const PIPE_READ_BYTES: usize = 8192;
 const KILL_REAP_TIMEOUT: Duration = Duration::from_secs(2);
 const KILL_PUMP_DRAIN_TIMEOUT: Duration = Duration::from_millis(500);
+const INITIAL_OWNER_WARNING_INTERVAL: Duration = Duration::from_secs(5);
+const MAX_OWNER_WARNING_INTERVAL: Duration = Duration::from_secs(300);
 #[cfg(not(test))]
 const EXIT_PUMP_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
 #[cfg(test)]
@@ -90,9 +92,12 @@ impl RuntimeChild {
 
     fn start_kill(&mut self) -> Result<(), String> {
         match self {
-            RuntimeChild::Tokio(child) => child
-                .start_kill()
-                .map_err(|error| format!("failed to kill process: {error}")),
+            RuntimeChild::Tokio(child) => match child.start_kill() {
+                Ok(()) => Ok(()),
+                #[cfg(unix)]
+                Err(error) if error.raw_os_error() == Some(libc::ESRCH) => Ok(()),
+                Err(error) => Err(format!("failed to kill process: {error}")),
+            },
             RuntimeChild::Pty(process) => start_kill_pty(process),
         }
     }
@@ -499,25 +504,6 @@ fn pump_pty_output(
     }
 }
 
-async fn finish_pumps_with_timeout(
-    mut stdout_task: AbortOnDropTask,
-    mut stderr_task: AbortOnDropTask,
-    timeout: Duration,
-) -> bool {
-    let drained = wait_pumps_with_timeout(&mut stdout_task, &mut stderr_task, timeout).await;
-    if !drained {
-        stdout_task.0.abort();
-        stderr_task.0.abort();
-        if !stdout_task.0.is_finished() {
-            let _ = (&mut stdout_task.0).await;
-        }
-        if !stderr_task.0.is_finished() {
-            let _ = (&mut stderr_task.0).await;
-        }
-    }
-    drained
-}
-
 async fn wait_pumps_with_timeout(
     stdout_task: &mut AbortOnDropTask,
     stderr_task: &mut AbortOnDropTask,
@@ -573,10 +559,7 @@ fn drop_pty_master(master: Box<dyn MasterPty + Send>) {
 }
 
 async fn kill_and_reap(child: &Arc<Mutex<RuntimeChild>>) -> Result<(), String> {
-    let kill_result = {
-        let mut child = child.lock().await;
-        child.start_kill()
-    };
+    let kill_result = child.lock().await.start_kill();
     let wait_result = tokio::time::timeout(KILL_REAP_TIMEOUT, reap_child_after_kill(child)).await;
     kill_reap_result(kill_result, wait_result)
 }
@@ -589,10 +572,7 @@ async fn kill_and_reap_observed(
     let Some(observation) = observation else {
         return kill_and_reap(child).await;
     };
-    let kill_result = {
-        let mut child = child.lock().await;
-        child.start_kill()
-    };
+    let kill_result = child.lock().await.start_kill();
     let wait_result = tokio::time::timeout(KILL_REAP_TIMEOUT, observation.wait_exit()).await;
     kill_reap_result(kill_result, wait_result)
 }
@@ -603,6 +583,46 @@ async fn kill_and_reap_observed(
     _observation: &Option<()>,
 ) -> Result<(), String> {
     kill_and_reap(child).await
+}
+
+async fn retry_reap(
+    process_id: &ExecProcessId,
+    child: &Arc<Mutex<RuntimeChild>>,
+    #[cfg(target_os = "linux")] observation: &Option<ObservationHandle>,
+    #[cfg(not(target_os = "linux"))] _observation: &Option<()>,
+) -> bool {
+    #[cfg(target_os = "linux")]
+    if let Some(observation) = observation {
+        return match observation.wait_exit().await {
+            Ok(_) => true,
+            Err(error) => {
+                tracing::warn!(%process_id, %error, "exec observer lost root exit; retaining execution guards until runtime retirement");
+                false
+            }
+        };
+    }
+
+    let mut backoff = Duration::from_millis(100);
+    loop {
+        tokio::time::sleep(backoff).await;
+        let pty_result = {
+            let mut child = child.lock().await;
+            child.is_pty().then(|| child.try_wait_exit_code())
+        };
+        match pty_result {
+            Some(Ok(Some(_))) => return true,
+            Some(Ok(None)) => {}
+            Some(Err(error)) => tracing::debug!(%process_id, %error, "exec reap retry failed"),
+            None => match tokio::time::timeout(KILL_REAP_TIMEOUT, reap_child_after_kill(child))
+                .await
+            {
+                Ok(Ok(_)) => return true,
+                Ok(Err(error)) => tracing::debug!(%process_id, %error, "exec reap retry failed"),
+                Err(_) => tracing::debug!(%process_id, "exec reap retry timed out"),
+            },
+        }
+        backoff = (backoff * 2).min(KILL_REAP_TIMEOUT);
+    }
 }
 
 async fn wait_child_by_polling(child: &Arc<Mutex<RuntimeChild>>) -> Result<Option<i32>, String> {
@@ -728,6 +748,10 @@ async fn status_or_timed_out(
     }
 }
 
+fn next_owner_warning_interval(interval: Duration) -> Duration {
+    (interval * 2).min(MAX_OWNER_WARNING_INTERVAL)
+}
+
 async fn monitor_process(
     registry: ExecRegistry,
     process_id: ExecProcessId,
@@ -740,8 +764,8 @@ async fn monitor_process(
     sandboxed: bool,
     #[cfg(target_os = "linux")] observation: Option<ObservationHandle>,
     #[cfg(not(target_os = "linux"))] observation: Option<()>,
-    stdout_task: AbortOnDropTask,
-    stderr_task: AbortOnDropTask,
+    mut stdout_task: AbortOnDropTask,
+    mut stderr_task: AbortOnDropTask,
 ) {
     let mut quiescent = true;
     let (terminal_status, finish_response) = loop {
@@ -860,8 +884,8 @@ async fn monitor_process(
         }
         | ExecStatus::TimedOut
         | ExecStatus::Killed => {
-            quiescent &=
-                finish_pumps_with_timeout(stdout_task, stderr_task, KILL_PUMP_DRAIN_TIMEOUT).await;
+            wait_pumps_with_timeout(&mut stdout_task, &mut stderr_task, KILL_PUMP_DRAIN_TIMEOUT)
+                .await;
             terminal_status
         }
         ExecStatus::Exited {
@@ -878,18 +902,20 @@ async fn monitor_process(
             } else {
                 output_drain_timeout.unwrap_or(EXIT_PUMP_DRAIN_TIMEOUT)
             };
-            let mut stdout_task = stdout_task;
-            let mut stderr_task = stderr_task;
             if wait_pumps_with_timeout(&mut stdout_task, &mut stderr_task, drain_timeout).await {
                 terminal_status
             } else {
+                // Preserve the one-time cleanup of same-group inherited output holders.
                 if let Err(error) = kill_and_reap_observed(&child, &observation).await {
                     quiescent = false;
                     tracing::warn!("exec kill/reap after output drain timeout failed for {process_id}: {error}");
                 }
-                quiescent &=
-                    finish_pumps_with_timeout(stdout_task, stderr_task, KILL_PUMP_DRAIN_TIMEOUT)
-                        .await;
+                wait_pumps_with_timeout(
+                    &mut stdout_task,
+                    &mut stderr_task,
+                    KILL_PUMP_DRAIN_TIMEOUT,
+                )
+                .await;
                 if observation_ended_early {
                     terminal_status
                 } else if child.lock().await.is_pty() {
@@ -905,8 +931,24 @@ async fn monitor_process(
         }
         ExecStatus::Starting | ExecStatus::Running => terminal_status,
     };
+    let observe = async {
+        #[cfg(target_os = "linux")]
+        if let Some(observation) = observation.as_ref() {
+            let _ = observation.wait_status().await;
+        }
+    };
+    tokio::pin!(observe);
+    let mut observation_pending = futures::poll!(&mut observe).is_pending();
+    let settled = quiescent
+        && stdout_task.0.is_finished()
+        && stderr_task.0.is_finished()
+        && !observation_pending;
     let final_snapshot = match control_tx.upgrade() {
         Some(control_tx) => {
+            // Registry waiters can see the terminal state before the command response.
+            if settled {
+                registry.monitor_quiesced(&process_id, &control_tx).await;
+            }
             registry
                 .complete_status(&process_id, &control_tx, terminal_status)
                 .await
@@ -918,17 +960,57 @@ async fn monitor_process(
     if let Err(error) = &final_snapshot {
         tracing::warn!(%process_id, %error, "Process terminal outcome not applied to registered runtime");
     }
-    #[cfg(target_os = "linux")]
-    if let Some(observation) = observation {
-        let _ = observation.wait_status().await;
-    }
-    if quiescent {
-        if let Some(control_tx) = control_tx.upgrade() {
-            registry.monitor_quiesced(&process_id, &control_tx).await;
-        }
-    }
     if let Some(response) = finish_response {
-        let _ = response.send(final_snapshot);
+        let _ = response.send(final_snapshot.clone());
+    }
+    if settled {
+        return;
+    }
+
+    let mut retry_pending = !quiescent;
+    let retry_reap = retry_reap(&process_id, &child, &observation);
+    tokio::pin!(retry_reap);
+    let mut warning_interval = INITIAL_OWNER_WARNING_INTERVAL;
+    let mut next_warning = tokio::time::Instant::now() + warning_interval;
+    loop {
+        let stdout_pending = !stdout_task.0.is_finished();
+        let stderr_pending = !stderr_task.0.is_finished();
+        if quiescent && !stdout_pending && !stderr_pending && !observation_pending {
+            if let Some(control_tx) = control_tx.upgrade() {
+                registry.monitor_quiesced(&process_id, &control_tx).await;
+            }
+            return;
+        }
+        tokio::select! {
+            result = &mut retry_reap, if retry_pending => {
+                retry_pending = false;
+                quiescent = result;
+            }
+            _ = &mut stdout_task.0, if stdout_pending => {},
+            _ = &mut stderr_task.0, if stderr_pending => {},
+            _ = &mut observe, if observation_pending => observation_pending = false,
+            command = control_rx.recv() => match command {
+                Some(ExecProcessCommand::Kill { response } | ExecProcessCommand::Finish { response, .. }) => {
+                    let _ = response.send(final_snapshot.clone());
+                }
+                Some(ExecProcessCommand::Resize { response, .. }) => {
+                    let _ = response.send(Err(format!("process is not running: {process_id}")));
+                }
+                None => return,
+            },
+            _ = tokio::time::sleep_until(next_warning) => {
+                tracing::warn!(
+                    %process_id,
+                    kill_reap_pending = !quiescent,
+                    stdout_pending,
+                    stderr_pending,
+                    observation_pending,
+                    "exec monitor waiting for execution owners to quiesce"
+                );
+                warning_interval = next_owner_warning_interval(warning_interval);
+                next_warning = tokio::time::Instant::now() + warning_interval;
+            }
+        }
     }
 }
 
@@ -2249,7 +2331,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn pump_drain_timeout_aborts_pending_pump_after_other_pump_completed() {
+    async fn pump_drain_timeout_retains_pending_pump_after_other_pump_completed() {
         for completed_is_stdout in [true, false] {
             let (alive_tx, mut alive_rx) = tokio::sync::oneshot::channel::<()>();
             let completed = AbortOnDropTask(tokio::spawn(async {}));
@@ -2257,35 +2339,182 @@ mod tests {
                 let _alive = alive_tx;
                 std::future::pending::<()>().await;
             }));
-            let (stdout_task, stderr_task) = if completed_is_stdout {
+            let (mut stdout_task, mut stderr_task) = if completed_is_stdout {
                 (completed, pending)
             } else {
                 (pending, completed)
             };
 
             assert!(
-                !finish_pumps_with_timeout(stdout_task, stderr_task, Duration::from_millis(500))
-                    .await
+                !wait_pumps_with_timeout(
+                    &mut stdout_task,
+                    &mut stderr_task,
+                    Duration::from_millis(500)
+                )
+                .await
             );
             assert_eq!(
                 alive_rx.try_recv(),
-                Err(tokio::sync::oneshot::error::TryRecvError::Closed)
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
             );
+            drop((stdout_task, stderr_task));
+            assert!(alive_rx.await.is_err());
         }
     }
 
     #[tokio::test(start_paused = true)]
     async fn pump_drain_reports_quiescence_when_both_pumps_complete() {
         let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
-        let stdout_task = AbortOnDropTask(tokio::spawn(async {}));
-        let stderr_task = AbortOnDropTask(tokio::spawn(async move {
+        let mut stdout_task = AbortOnDropTask(tokio::spawn(async {}));
+        let mut stderr_task = AbortOnDropTask(tokio::spawn(async move {
             let _ = release_rx.await;
         }));
         release_tx.send(()).unwrap();
 
         assert!(
-            finish_pumps_with_timeout(stdout_task, stderr_task, Duration::from_millis(500)).await
+            wait_pumps_with_timeout(
+                &mut stdout_task,
+                &mut stderr_task,
+                Duration::from_millis(500)
+            )
+            .await
         );
+    }
+
+    #[cfg(unix)]
+    #[derive(Debug)]
+    struct CountedGroupKill {
+        child: Box<dyn TokioChildWrapper>,
+        attempts: Arc<std::sync::atomic::AtomicUsize>,
+        exit_check_fails: bool,
+    }
+
+    #[cfg(unix)]
+    impl TokioChildWrapper for CountedGroupKill {
+        fn inner(&self) -> &tokio::process::Child {
+            self.child.inner()
+        }
+
+        fn inner_mut(&mut self) -> &mut tokio::process::Child {
+            self.child.inner_mut()
+        }
+
+        fn into_inner(self: Box<Self>) -> tokio::process::Child {
+            self.child.into_inner()
+        }
+
+        fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+            if self.exit_check_fails {
+                Err(std::io::Error::other("test status check failed"))
+            } else {
+                self.child.try_wait()
+            }
+        }
+
+        fn start_kill(&mut self) -> std::io::Result<()> {
+            self.attempts.fetch_add(1, Ordering::SeqCst);
+            self.child.start_kill()
+        }
+    }
+
+    #[cfg(unix)]
+    fn counted_group_kill(script: &str, exit_check_fails: bool) -> CountedGroupKill {
+        let request = ExecSpawnRequest::background(script);
+        CountedGroupKill {
+            child: wrap_command(shell_command(&request, None).unwrap())
+                .spawn()
+                .unwrap(),
+            attempts: Arc::default(),
+            exit_check_fails,
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn first_kill_signals_group_when_exit_check_fails() {
+        let child = counted_group_kill("exec sleep 30", true);
+        let attempts = child.attempts.clone();
+        let child = Arc::new(Mutex::new(RuntimeChild::Tokio(Box::new(child))));
+        let result = kill_and_reap_observed(&child, &None).await;
+        assert_eq!(attempts.load(Ordering::SeqCst), 1, "{result:?}");
+        result.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn first_kill_signals_group_after_root_has_exited() {
+        let mut child = counted_group_kill("exit 0", false);
+        assert!(Box::into_pin(child.child.wait()).await.unwrap().success());
+        let attempts = child.attempts.clone();
+        let child = Arc::new(Mutex::new(RuntimeChild::Tokio(Box::new(child))));
+        let result = kill_and_reap_observed(&child, &None).await;
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        result.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[derive(Debug, Clone, Default)]
+    struct PtyReapProbe {
+        polls: Arc<std::sync::atomic::AtomicUsize>,
+        exited: Arc<AtomicBool>,
+    }
+
+    #[cfg(unix)]
+    impl portable_pty::ChildKiller for PtyReapProbe {
+        fn kill(&mut self) -> std::io::Result<()> {
+            panic!("reconciliation must not signal again");
+        }
+
+        fn clone_killer(&self) -> Box<dyn portable_pty::ChildKiller + Send + Sync> {
+            Box::new(self.clone())
+        }
+    }
+
+    #[cfg(unix)]
+    impl portable_pty::Child for PtyReapProbe {
+        fn try_wait(&mut self) -> std::io::Result<Option<portable_pty::ExitStatus>> {
+            self.polls.fetch_add(1, Ordering::SeqCst);
+            Ok(self
+                .exited
+                .load(Ordering::SeqCst)
+                .then(|| portable_pty::ExitStatus::with_exit_code(0)))
+        }
+
+        fn wait(&mut self) -> std::io::Result<portable_pty::ExitStatus> {
+            panic!("reconciliation must not block on a PTY child");
+        }
+
+        fn process_id(&self) -> Option<u32> {
+            None
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(start_paused = true)]
+    async fn pty_reap_retry_checks_once_per_backoff_tick_without_signalling() {
+        let probe = PtyReapProbe::default();
+        let child = Arc::new(Mutex::new(RuntimeChild::Pty(PtyRuntimeProcess {
+            child: Box::new(probe.clone()),
+            process_id: None,
+            writer: Arc::new(Mutex::new(Box::new(std::io::sink()))),
+            master: None,
+        })));
+        let id = ExecProcessId::new();
+        let mut retry = Box::pin(retry_reap(&id, &child, &None));
+        assert!(futures::poll!(&mut retry).is_pending());
+        assert_eq!(probe.polls.load(Ordering::SeqCst), 0);
+
+        tokio::time::advance(Duration::from_millis(101)).await;
+        assert!(futures::poll!(&mut retry).is_pending());
+        assert_eq!(probe.polls.load(Ordering::SeqCst), 1);
+        probe.exited.store(true, Ordering::SeqCst);
+
+        tokio::time::advance(Duration::from_millis(198)).await;
+        assert!(futures::poll!(&mut retry).is_pending());
+        assert_eq!(probe.polls.load(Ordering::SeqCst), 1);
+        tokio::time::advance(Duration::from_millis(3)).await;
+        assert_eq!(futures::poll!(&mut retry), std::task::Poll::Ready(true));
+        assert_eq!(probe.polls.load(Ordering::SeqCst), 2);
     }
 
     #[cfg(target_os = "linux")]
@@ -2296,6 +2525,413 @@ mod tests {
     impl crate::types::ExecLifecycleGuard for MonitorSettlement {
         fn settle(&self) {
             self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[derive(Debug)]
+    struct TransientKillFailure {
+        child: Box<dyn TokioChildWrapper>,
+        attempts: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[cfg(target_os = "linux")]
+    impl TokioChildWrapper for TransientKillFailure {
+        fn inner(&self) -> &tokio::process::Child {
+            self.child.inner()
+        }
+
+        fn inner_mut(&mut self) -> &mut tokio::process::Child {
+            self.child.inner_mut()
+        }
+
+        fn into_inner(self: Box<Self>) -> tokio::process::Child {
+            self.child.into_inner()
+        }
+
+        fn start_kill(&mut self) -> std::io::Result<()> {
+            let result = self.child.start_kill();
+            if self.attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                result?;
+                Err(std::io::Error::other("transient kill failure"))
+            } else {
+                result
+            }
+        }
+
+        fn wait(
+            &mut self,
+        ) -> Box<
+            dyn std::future::Future<Output = std::io::Result<std::process::ExitStatus>> + Send + '_,
+        > {
+            self.child.wait()
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn late_pumps_settle_monitor_guard_after_terminal_response() {
+        for transient_kill_failure in [false, true] {
+            for pty_reader in [false, true] {
+                for pending_is_stdout in [false, true] {
+                    let registry = ExecRegistry::new();
+                    let request = ExecSpawnRequest::background("sleep 30");
+                    let (meta, id) = build_process_meta(&request).unwrap();
+                    let child = wrap_command(shell_command(&request, None).unwrap())
+                        .spawn()
+                        .unwrap();
+                    let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                    let child: Box<dyn TokioChildWrapper> = if transient_kill_failure {
+                        Box::new(TransientKillFailure {
+                            child,
+                            attempts: attempts.clone(),
+                        })
+                    } else {
+                        child
+                    };
+                    let child = Arc::new(Mutex::new(RuntimeChild::Tokio(child)));
+                    let (control_tx, control_rx) = mpsc::channel(8);
+                    let monitor_tx = control_tx.downgrade();
+                    registry
+                        .register_new_with_runtime(
+                            meta.clone(),
+                            1024,
+                            ExecProcessRuntime {
+                                control_tx,
+                                terminal: Arc::new(Notify::new()),
+                                stdin_writer: None,
+                            },
+                            false,
+                        )
+                        .await
+                        .unwrap();
+                    let guard = Arc::new(MonitorSettlement::default());
+                    registry
+                        .attach_execution_guard(
+                            &registry.execution_handle(&meta).await.unwrap(),
+                            guard.clone(),
+                        )
+                        .await
+                        .unwrap();
+                    let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+                    let pending = if pty_reader {
+                        struct Reader(Option<tokio::sync::oneshot::Receiver<()>>);
+                        impl Read for Reader {
+                            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                                if let Some(release) = self.0.take() {
+                                    let _ = release.blocking_recv();
+                                }
+                                Ok(0)
+                            }
+                        }
+                        pump_pty_output(
+                            registry.clone(),
+                            id.clone(),
+                            ExecOutputStream::Combined,
+                            Box::new(Reader(Some(release_rx))),
+                            None,
+                        )
+                    } else {
+                        AbortOnDropTask(tokio::spawn(async move {
+                            release_rx.await.unwrap();
+                        }))
+                    };
+                    let completed = AbortOnDropTask(tokio::spawn(async {}));
+                    let (stdout, stderr) = if pending_is_stdout {
+                        (pending, completed)
+                    } else {
+                        (completed, pending)
+                    };
+                    registry.mark_started(&id).await.unwrap();
+                    registry
+                        .track_monitor_task(monitor_process(
+                            registry.clone(),
+                            id.clone(),
+                            child,
+                            control_rx,
+                            monitor_tx,
+                            None,
+                            None,
+                            None,
+                            false,
+                            None,
+                            stdout,
+                            stderr,
+                        ))
+                        .await;
+                    let terminal = tokio::time::timeout(Duration::from_secs(3), registry.kill(&id))
+                        .await
+                        .expect("terminal response waited for a pending pump")
+                        .unwrap();
+                    assert_eq!(terminal.status, ExecStatus::Killed);
+                    assert_eq!(guard.0.load(Ordering::SeqCst), 0);
+                    release_tx
+                        .send(())
+                        .expect("pump completion observer was discarded");
+                    tokio::time::timeout(Duration::from_secs(2), registry.join_monitors_for_test())
+                        .await
+                        .expect("late pump did not settle monitor");
+                    assert_eq!(guard.0.load(Ordering::SeqCst), 1);
+                    if transient_kill_failure {
+                        assert_eq!(
+                            attempts.load(Ordering::SeqCst),
+                            1,
+                            "reap retry re-signalled an exited child"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[derive(Clone, Copy)]
+    enum PendingMonitorAction {
+        Settle,
+        Remove,
+        Shutdown,
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn killed_escaped_output_holder(tty: bool, action: PendingMonitorAction) {
+        let registry = ExecRegistry::new();
+        let temp = tempfile::tempdir().unwrap();
+        let ready = temp.path().join("ready");
+        let release = temp.path().join("release");
+        let guard = Arc::new(MonitorSettlement::default());
+        let request = ExecSpawnRequest::background("escaped output holder")
+            .with_argv(vec![
+                "/bin/bash".into(), "--noprofile".into(), "--norc".into(), "-c".into(),
+                r#"trap '' HUP; /usr/bin/setsid /bin/bash --noprofile --norc -c 'printf "%s\n" "$$" > "$1"; for ((i=0;i<250;i++)); do [ -f "$2" ] && exit 0; /bin/sleep 0.02; done' holder "$1" "$2" & wait"#.into(),
+                "parent".into(), ready.to_str().unwrap().into(), release.to_str().unwrap().into(),
+            ])
+            .with_env_policy(ExecEnvPolicy::Exact)
+            .with_tty(tty);
+        let result = registry.spawn(request).await.unwrap();
+        let id = result.snapshot.meta.process_id.clone();
+        registry
+            .attach_execution_guard(
+                &registry
+                    .execution_handle(&result.snapshot.meta)
+                    .await
+                    .unwrap(),
+                guard.clone(),
+            )
+            .await
+            .unwrap();
+        let holder = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Ok(contents) = std::fs::read_to_string(&ready) {
+                    if let Ok(pid) = contents.trim().parse::<u32>() {
+                        break OwnedProcessStat::read(pid).unwrap().expect("live holder");
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("escaped holder handshake timed out");
+        assert_eq!(holder.group, holder.pid as i32);
+        let mut assertions = tokio::spawn({
+            let registry = registry.clone();
+            let guard = guard.clone();
+            let release = release.clone();
+            async move {
+                let terminal = tokio::time::timeout(Duration::from_secs(3), registry.kill(&id))
+                    .await
+                    .expect("terminal publication waited for escaped holder")
+                    .unwrap();
+                assert_eq!(terminal.status, ExecStatus::Killed);
+                assert!(holder
+                    .is_same_live_process(OwnedProcessStat::read(holder.pid).unwrap().as_ref()));
+                assert_eq!(guard.0.load(Ordering::SeqCst), 0);
+                match action {
+                    PendingMonitorAction::Settle => {}
+                    PendingMonitorAction::Remove => {
+                        let removed =
+                            tokio::time::timeout(Duration::from_secs(1), registry.remove(&id))
+                                .await
+                                .expect("remove waited for a reconciling monitor")
+                                .unwrap()
+                                .expect("terminal record must be removed");
+                        assert_eq!(removed.status, terminal.status);
+                        assert!(registry.get(&id).await.is_none());
+                        tokio::time::timeout(
+                            Duration::from_secs(1),
+                            registry.join_monitors_for_test(),
+                        )
+                        .await
+                        .expect("monitor did not retire when the last sender disappeared");
+                        assert_eq!(guard.0.load(Ordering::SeqCst), 0);
+                        return;
+                    }
+                    PendingMonitorAction::Shutdown => {
+                        let summary = registry.cleanup_shutdown(Duration::from_millis(500)).await;
+                        assert_eq!(summary.runtime_stopped_count, 1);
+                        assert_eq!(summary.runtime_timed_out_count, 0);
+                        assert_eq!(summary.removed_count, 1);
+                        assert!(registry.get(&id).await.is_none());
+                        assert_eq!(guard.0.load(Ordering::SeqCst), 0);
+                        return;
+                    }
+                }
+                std::fs::write(release, "exit").unwrap();
+                tokio::time::timeout(Duration::from_secs(2), async {
+                    loop {
+                        if !holder.is_same_live_process(
+                            OwnedProcessStat::read(holder.pid).unwrap().as_ref(),
+                        ) {
+                            break;
+                        }
+                        assert_eq!(guard.0.load(Ordering::SeqCst), 0);
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                    registry.join_monitors_for_test().await;
+                })
+                .await
+                .expect("monitor retained guard after escaped holder exited");
+                assert_eq!(guard.0.load(Ordering::SeqCst), 1);
+            }
+        });
+        let outcome = tokio::time::timeout(Duration::from_secs(7), &mut assertions).await;
+        if outcome.is_err() {
+            assertions.abort();
+            let _ = assertions.await;
+        }
+        std::fs::write(&release, "exit").unwrap();
+        registry.cleanup_shutdown(Duration::from_secs(1)).await;
+        outcome
+            .expect("assertions timed out")
+            .expect("assertions failed");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn killed_escaped_pipe_holder_releases_guard_after_exit() {
+        killed_escaped_output_holder(false, PendingMonitorAction::Settle).await;
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn killed_escaped_pty_holder_releases_guard_after_exit() {
+        killed_escaped_output_holder(true, PendingMonitorAction::Settle).await;
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn remove_reconciling_terminal_monitor_preserves_status() {
+        killed_escaped_output_holder(false, PendingMonitorAction::Remove).await;
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn shutdown_stops_reconciling_terminal_monitor() {
+        killed_escaped_output_holder(false, PendingMonitorAction::Shutdown).await;
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn normal_kill_settles_guard_before_acknowledging() {
+        use tokio::sync::oneshot::{self, error::TryRecvError};
+
+        #[derive(Debug)]
+        struct CheckResponseOrder {
+            response: std::sync::Mutex<oneshot::Receiver<Result<ExecProcessSnapshot, String>>>,
+            settled_before_response: std::sync::atomic::AtomicBool,
+        }
+        impl crate::types::ExecLifecycleGuard for CheckResponseOrder {
+            fn settle(&self) {
+                self.settled_before_response.store(
+                    matches!(
+                        self.response.lock().unwrap().try_recv(),
+                        Err(TryRecvError::Empty)
+                    ),
+                    Ordering::SeqCst,
+                );
+            }
+        }
+
+        let registry = ExecRegistry::new();
+        let request = ExecSpawnRequest::background("exec /bin/sleep 10");
+        let (meta, id) = build_process_meta(&request).unwrap();
+        let child = wrap_command(shell_command(&request, None).unwrap())
+            .spawn()
+            .unwrap();
+        let (control_tx, control_rx) = mpsc::channel(8);
+        registry
+            .register_new_with_runtime(
+                meta.clone(),
+                1024,
+                ExecProcessRuntime {
+                    control_tx: control_tx.clone(),
+                    terminal: Arc::new(Notify::new()),
+                    stdin_writer: None,
+                },
+                false,
+            )
+            .await
+            .unwrap();
+        let (response, receiver) = oneshot::channel();
+        let guard = Arc::new(CheckResponseOrder {
+            response: std::sync::Mutex::new(receiver),
+            settled_before_response: std::sync::atomic::AtomicBool::new(false),
+        });
+        registry
+            .attach_execution_guard(
+                &registry.execution_handle(&meta).await.unwrap(),
+                guard.clone(),
+            )
+            .await
+            .unwrap();
+        registry.mark_started(&id).await.unwrap();
+        control_tx
+            .send(ExecProcessCommand::Kill {
+                response,
+            })
+            .await
+            .unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(3),
+            monitor_process(
+                registry.clone(),
+                id,
+                Arc::new(Mutex::new(RuntimeChild::Tokio(child))),
+                control_rx,
+                control_tx.downgrade(),
+                None,
+                None,
+                None,
+                false,
+                None,
+                AbortOnDropTask(tokio::spawn(async {})),
+                AbortOnDropTask(tokio::spawn(async {})),
+            ),
+        )
+        .await
+        .expect("quiescent monitor did not return");
+        assert!(
+            guard.settled_before_response.load(Ordering::SeqCst),
+            "kill was acknowledged before the guard settled"
+        );
+        assert_eq!(
+            guard
+                .response
+                .lock()
+                .unwrap()
+                .try_recv()
+                .unwrap()
+                .unwrap()
+                .status,
+            ExecStatus::Killed
+        );
+    }
+
+    #[test]
+    fn pending_owner_warning_backoff_doubles_and_caps() {
+        let mut interval = INITIAL_OWNER_WARNING_INTERVAL;
+        for seconds in [5, 10, 20, 40, 80, 160, 300, 300] {
+            assert_eq!(interval, Duration::from_secs(seconds));
+            interval = next_owner_warning_interval(interval);
         }
     }
 
@@ -2420,12 +3056,6 @@ mod tests {
                     pump_drain_timeout_status(Duration::from_millis(100))
                 );
             }
-            tokio::time::timeout(
-                Duration::from_secs(5),
-                task_registry.join_monitors_for_test(),
-            )
-            .await
-            .expect("monitor join timed out");
             if escaped {
                 assert!(
                     captured[1].is_same_live_process(
@@ -2438,8 +3068,26 @@ mod tests {
                     0,
                     "live inherited output must retain guard"
                 );
+                task_registry.remove_record_for_test(&id).await;
+                tokio::time::timeout(
+                    Duration::from_secs(5),
+                    task_registry.join_monitors_for_test(),
+                )
+                .await
+                .expect("monitor join timed out");
+                assert_eq!(
+                    task_guard.0.load(Ordering::SeqCst),
+                    0,
+                    "retiring a pending monitor must not settle its guard"
+                );
                 return;
             }
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                task_registry.join_monitors_for_test(),
+            )
+            .await
+            .expect("monitor join timed out");
             assert_eq!(
                 task_guard.0.load(Ordering::SeqCst),
                 1,

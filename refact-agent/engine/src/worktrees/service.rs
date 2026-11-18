@@ -5,6 +5,35 @@ use std::sync::Arc;
 
 use crate::tool_jobs::scope::{ScopeCoordinator, ScopeKey};
 
+pub const WORKTREE_CHANGE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+pub const WORKTREE_DRAIN_TIMEOUT_PREFIX: &str = "Worktree change did not start";
+
+fn worktree_change_error(error: crate::tool_jobs::ScopeChangeError) -> String {
+    match error {
+        crate::tool_jobs::ScopeChangeError::Unavailable {
+            waited,
+            blockers,
+            ..
+        } => {
+            let executions = blockers
+                .iter()
+                .map(|blocker| {
+                    format!(
+                        "#{} {} (keys {:?})",
+                        blocker.registration_id, blocker.label, blocker.keys
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("; ");
+            format!(
+                "{WORKTREE_DRAIN_TIMEOUT_PREFIX}: these executions in the affected worktree scopes were asked to stop but did not stop within {} s: {executions}. This request did not modify any checkout or branch. Stop those executions or wait for them to finish, then retry.",
+                waited.as_secs()
+            )
+        }
+        error => format!("Worktree change unavailable: {error}"),
+    }
+}
+
 struct ApplicationEffectFence(Arc<ScopeCoordinator>);
 
 impl std::fmt::Debug for ApplicationEffectFence {
@@ -40,9 +69,13 @@ impl WorktreeEffectFence for ApplicationEffectFence {
             }
             let guard = self
                 .0
-                .begin_scope_change_named(&keys, "worktree mutation/delete")
+                .begin_scope_change_drain_bounded(
+                    &keys,
+                    "worktree mutation/delete",
+                    WORKTREE_CHANGE_TIMEOUT,
+                )
                 .await
-                .map_err(|error| format!("Worktree change unavailable: {error}"))?;
+                .map_err(worktree_change_error)?;
             Ok(Arc::new(guard) as EffectGuard)
         })
     }
@@ -86,6 +119,99 @@ mod effect_tests {
             scopes.clone(),
         );
         (temp, service, scopes)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retained_lease_bounds_merge_and_delete_without_mutation() {
+        let (_temp, service, scopes) = fixture();
+        let created = service
+            .create_worktree(crate::worktrees::types::CreateWorktreeRequest::default())
+            .await
+            .unwrap();
+        let meta = &created.worktree.meta;
+        std::fs::write(meta.root.join("candidate.txt"), "keep candidate").unwrap();
+        let head =
+            crate::worktrees::git::run_git(service.source_workspace_root(), &["rev-parse", "main"])
+                .unwrap();
+        let branch_head =
+            crate::worktrees::git::run_git(&meta.root, &["rev-parse", "HEAD"]).unwrap();
+        let key = ScopeKey::Worktree {
+            project: service.source_workspace_root().into(),
+            root: meta.root.clone(),
+        };
+        let lease = scopes
+            .acquire(&[key.clone()], Arc::new(AtomicBool::new(false)))
+            .unwrap();
+        lease.label("tool=shell retained-effect-monitor".into());
+        for merging in [true, false] {
+            let cancelled = Arc::new(AtomicBool::new(false));
+            let active = scopes.acquire(&[key.clone()], cancelled.clone()).unwrap();
+            active.label("tool=python active-effect-job".into());
+            let operation = async {
+                if merging {
+                    service
+                        .fence_merge_worktree(&meta.id, Some("main"))
+                        .await
+                        .map(|_| ())
+                } else {
+                    service
+                        .delete_worktree(&meta.id, true, true)
+                        .await
+                        .map(|_| ())
+                }
+            };
+            tokio::pin!(operation);
+            tokio::select! {
+                result = &mut operation => panic!("mutation before drain: {result:?}"),
+                _ = async {
+                    let real_deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                while std::time::Instant::now() < real_deadline {
+                        if cancelled.load(Ordering::Acquire) {
+                            return;
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                    panic!("fence never asked the active execution to stop");
+                } => {}
+            }
+            tokio::time::advance(WORKTREE_CHANGE_TIMEOUT).await;
+            let error = tokio::time::timeout(std::time::Duration::from_secs(1), operation)
+                .await
+                .expect("fence deadline must return promptly")
+                .unwrap_err();
+            assert!(error.starts_with(WORKTREE_DRAIN_TIMEOUT_PREFIX), "{error}");
+            assert!(error.contains("retained-effect-monitor"), "{error}");
+            assert!(error.contains("active-effect-job"), "{error}");
+            assert!(error.contains("did not stop within 120 s"), "{error}");
+            assert!(
+                error.contains("This request did not modify any checkout or branch."),
+                "{error}"
+            );
+            assert!(error.contains("then retry"), "{error}");
+            assert!(meta.root.exists());
+            assert_eq!(
+                crate::worktrees::git::run_git(
+                    service.source_workspace_root(),
+                    &["rev-parse", "main"]
+                )
+                .unwrap(),
+                head
+            );
+            assert_eq!(
+                crate::worktrees::git::run_git(&meta.root, &["rev-parse", "HEAD"]).unwrap(),
+                branch_head
+            );
+            assert_eq!(
+                std::fs::read_to_string(meta.root.join("candidate.txt")).unwrap(),
+                "keep candidate"
+            );
+            scopes
+                .acquire(&[key.clone()], Arc::new(AtomicBool::new(false)))
+                .unwrap()
+                .settle();
+            active.settle();
+        }
+        lease.settle();
     }
 
     #[tokio::test]

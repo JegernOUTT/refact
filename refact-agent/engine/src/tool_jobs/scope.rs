@@ -27,6 +27,18 @@ pub enum ScopeChangeError {
     Busy,
     InvalidKey,
     Cancelled,
+    Unavailable {
+        operation: String,
+        waited: std::time::Duration,
+        blockers: Vec<ScopeBlocker>,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ScopeBlocker {
+    pub registration_id: u64,
+    pub label: String,
+    pub keys: Vec<ScopeKey>,
 }
 
 #[derive(Default)]
@@ -210,16 +222,26 @@ impl ScopeCoordinator {
 
     pub fn log_blockers(&self, keys: Option<&[ScopeKey]>, operation: &str) {
         let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        let blockers: Vec<_> = state
+        let blockers = Self::blockers(&state, keys);
+        tracing::warn!(operation, ?keys, ?blockers, request = ?state.shutdown_request,
+            "scope drain waiting for execution owners");
+    }
+
+    fn blockers(state: &State, keys: Option<&[ScopeKey]>) -> Vec<ScopeBlocker> {
+        let mut blockers = state
             .jobs
             .iter()
             .filter(|(_, job)| {
                 keys.is_none_or(|keys| job.keys.iter().any(|key| keys.contains(key)))
             })
-            .map(|(id, job)| (id, &job.label, &job.keys))
-            .collect();
-        tracing::warn!(operation, ?keys, ?blockers, request = ?state.shutdown_request,
-            "scope drain waiting for execution owners");
+            .map(|(id, job)| ScopeBlocker {
+                registration_id: *id,
+                label: job.label.clone(),
+                keys: job.keys.clone(),
+            })
+            .collect::<Vec<_>>();
+        blockers.sort_by_key(|blocker| blocker.registration_id);
+        blockers
     }
 
     pub async fn begin_scope_change(
@@ -233,6 +255,25 @@ impl ScopeCoordinator {
         self: &Arc<Self>,
         keys: &[ScopeKey],
         operation: &str,
+    ) -> Result<ScopeChangeGuard, ScopeChangeError> {
+        self.begin_scope_change_inner(keys, operation, None).await
+    }
+
+    pub async fn begin_scope_change_drain_bounded(
+        self: &Arc<Self>,
+        keys: &[ScopeKey],
+        operation: &str,
+        drain_timeout: std::time::Duration,
+    ) -> Result<ScopeChangeGuard, ScopeChangeError> {
+        self.begin_scope_change_inner(keys, operation, Some(drain_timeout))
+            .await
+    }
+
+    async fn begin_scope_change_inner(
+        self: &Arc<Self>,
+        keys: &[ScopeKey],
+        operation: &str,
+        drain_timeout: Option<std::time::Duration>,
     ) -> Result<ScopeChangeGuard, ScopeChangeError> {
         let keys = Self::keys(keys)?;
         loop {
@@ -279,11 +320,13 @@ impl ScopeCoordinator {
             operation: operation.into(),
         };
         tracing::info!(operation, keys = ?guard.keys, "scope fence begin");
+        let drain_started = tokio::time::Instant::now();
+        let deadline = drain_timeout.map(|timeout| drain_started + timeout);
         loop {
             let notified = self.changed.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
-            {
+            let timed_out = {
                 let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
                 if state.shutdown
                     || guard
@@ -300,9 +343,28 @@ impl ScopeCoordinator {
                 {
                     return Ok(guard);
                 }
+                deadline
+                    .filter(|deadline| tokio::time::Instant::now() >= *deadline)
+                    .map(|_| ScopeChangeError::Unavailable {
+                        operation: operation.into(),
+                        waited: drain_started.elapsed(),
+                        blockers: Self::blockers(&state, Some(&guard.keys)),
+                    })
+            };
+            if let Some(error) = timed_out {
+                tracing::warn!(%error, "scope fence drain timed out; reopening scope");
+                drop(guard);
+                return Err(error);
             }
+            let deadline_reached = async {
+                match deadline {
+                    Some(deadline) => tokio::time::sleep_until(deadline).await,
+                    None => std::future::pending().await,
+                }
+            };
             tokio::select! {
                 _ = &mut notified => {},
+                _ = deadline_reached => {},
                 _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {
                     self.log_blockers(Some(&guard.keys), operation);
                 }
@@ -416,7 +478,28 @@ impl ScopeChangeGuard {
 }
 impl std::fmt::Display for ScopeChangeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{self:?}")
+        match self {
+            Self::Unavailable {
+                operation,
+                waited,
+                blockers,
+            } => {
+                write!(
+                    f,
+                    "{operation}: executions in this scope did not stop within {:.3}s after being asked to stop:",
+                    waited.as_secs_f64()
+                )?;
+                for blocker in blockers {
+                    write!(
+                        f,
+                        " #{} {} keys={:?};",
+                        blocker.registration_id, blocker.label, blocker.keys
+                    )?;
+                }
+                Ok(())
+            }
+            _ => write!(f, "{self:?}"),
+        }
     }
 }
 impl std::error::Error for ScopeChangeError {}
@@ -448,11 +531,252 @@ impl Drop for ScopeChangeGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicUsize;
+    use std::task::{Context, Wake, Waker};
+
     fn key() -> ScopeKey {
         ScopeKey::Chat {
             project: "/project".into(),
             chat_id: "chat".into(),
         }
+    }
+
+    const DRAIN: std::time::Duration = std::time::Duration::from_secs(120);
+
+    #[tokio::test(start_paused = true)]
+    async fn drain_timeout_names_every_blocker_and_reopens_domains() {
+        let coordinator = Arc::new(ScopeCoordinator::default());
+        let keys = [key()];
+        let other = ScopeKey::Worktree {
+            project: "/project".into(),
+            root: "/project/wt".into(),
+        };
+        let first = coordinator
+            .acquire(&keys, Arc::new(AtomicBool::new(false)))
+            .unwrap();
+        first.label("tool=shell first-monitor".into());
+        let second = coordinator
+            .acquire(&[key(), other.clone()], Arc::new(AtomicBool::new(false)))
+            .unwrap();
+        second.label("tool=python second-run".into());
+        let unrelated = coordinator
+            .acquire(&[other.clone()], Arc::new(AtomicBool::new(false)))
+            .unwrap();
+        unrelated.label("tool=shell unrelated".into());
+        let mut fence =
+            Box::pin(coordinator.begin_scope_change_drain_bounded(&keys, "test mutation", DRAIN));
+        assert!(futures::poll!(&mut fence).is_pending());
+        tokio::time::advance(DRAIN).await;
+        let error = match futures::poll!(&mut fence) {
+            std::task::Poll::Ready(Err(error)) => error,
+            other => panic!(
+                "drain deadline must fail immediately: {:?}",
+                other.map(|r| r.is_ok())
+            ),
+        };
+        let mut second_keys = vec![key(), other];
+        second_keys.sort();
+        assert_eq!(
+            error,
+            ScopeChangeError::Unavailable {
+                operation: "test mutation".into(),
+                waited: DRAIN,
+                blockers: vec![
+                    ScopeBlocker {
+                        registration_id: first.id,
+                        label: "tool=shell first-monitor".into(),
+                        keys: keys.to_vec(),
+                    },
+                    ScopeBlocker {
+                        registration_id: second.id,
+                        label: "tool=python second-run".into(),
+                        keys: second_keys,
+                    },
+                ],
+            }
+        );
+        let text = error.to_string();
+        assert!(text.contains("tool=shell first-monitor"), "{text}");
+        assert!(text.contains("tool=python second-run"), "{text}");
+        assert!(!text.contains("unrelated"), "{text}");
+        assert!(!text.contains("another scope fence"), "{text}");
+        coordinator
+            .acquire(&keys, Arc::new(AtomicBool::new(false)))
+            .unwrap()
+            .settle();
+        first.settle();
+        second.settle();
+        unrelated.settle();
+        assert!(coordinator.state.lock().unwrap().jobs.is_empty());
+    }
+
+    #[derive(Default)]
+    struct WakeCount(AtomicUsize);
+
+    impl Wake for WakeCount {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn drain_timeout_wakes_all_parked_waiters_before_they_are_polled() {
+        let coordinator = Arc::new(ScopeCoordinator::default());
+        let keys = [key()];
+        let lease = coordinator
+            .acquire(&keys, Arc::new(AtomicBool::new(false)))
+            .unwrap();
+        let mut fence =
+            Box::pin(coordinator.begin_scope_change_drain_bounded(&keys, "test mutation", DRAIN));
+        assert!(futures::poll!(&mut fence).is_pending());
+        tokio::time::advance(DRAIN).await;
+        let mut waiters = std::array::from_fn::<_, 2, _>(|_| {
+            let mut waiter =
+                Box::pin(coordinator.acquire_wait(&keys, Arc::new(AtomicBool::new(false))));
+            let wakes = Arc::new(WakeCount::default());
+            let waker = Waker::from(wakes.clone());
+            assert!(
+                std::future::Future::poll(waiter.as_mut(), &mut Context::from_waker(&waker))
+                    .is_pending()
+            );
+            assert_eq!(wakes.0.load(Ordering::Relaxed), 0);
+            (waiter, wakes)
+        });
+        assert!(matches!(
+            futures::poll!(&mut fence),
+            std::task::Poll::Ready(Err(ScopeChangeError::Unavailable { .. }))
+        ));
+        for (index, (_, wakes)) in waiters.iter().enumerate() {
+            assert_ne!(
+                wakes.0.load(Ordering::Relaxed),
+                0,
+                "waiter {index} was not woken by the timed-out fence"
+            );
+        }
+        for (waiter, _) in &mut waiters {
+            match futures::poll!(waiter) {
+                std::task::Poll::Ready(result) => result.unwrap().settle(),
+                std::task::Poll::Pending => panic!("waiter must be admitted after the timeout"),
+            }
+        }
+        lease.settle();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn lease_released_at_drain_deadline_yields_guard() {
+        let coordinator = Arc::new(ScopeCoordinator::default());
+        let keys = [key()];
+        let lease = coordinator
+            .acquire(&keys, Arc::new(AtomicBool::new(false)))
+            .unwrap();
+        let mut fence =
+            Box::pin(coordinator.begin_scope_change_drain_bounded(&keys, "test mutation", DRAIN));
+        assert!(futures::poll!(&mut fence).is_pending());
+        tokio::time::advance(DRAIN).await;
+        lease.settle();
+        let guard = match futures::poll!(&mut fence) {
+            std::task::Poll::Ready(result) => result.expect("success must win the deadline tie"),
+            std::task::Poll::Pending => panic!("released lease must complete the fence"),
+        };
+        assert!(matches!(
+            coordinator.acquire(&keys, Arc::new(AtomicBool::new(false))),
+            Err(ScopeChangeError::Busy)
+        ));
+        drop(guard);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn drain_bounded_fence_waits_for_another_fence_without_limit() {
+        let coordinator = Arc::new(ScopeCoordinator::default());
+        let keys = [key()];
+        let guard = coordinator.begin_scope_change(&keys).await.unwrap();
+        let mut fence =
+            Box::pin(coordinator.begin_scope_change_drain_bounded(&keys, "second mutation", DRAIN));
+        assert!(futures::poll!(&mut fence).is_pending());
+        tokio::time::advance(DRAIN * 3).await;
+        assert!(futures::poll!(&mut fence).is_pending());
+        drop(guard);
+        let second = tokio::time::timeout(std::time::Duration::from_secs(1), fence)
+            .await
+            .expect("fence must proceed once the other fence releases")
+            .expect("drain with no executions must succeed");
+        assert!(matches!(
+            coordinator.acquire(&keys, Arc::new(AtomicBool::new(false))),
+            Err(ScopeChangeError::Busy)
+        ));
+        drop(second);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn drain_timeout_budget_starts_after_acquiring_all_keys() {
+        let coordinator = Arc::new(ScopeCoordinator::default());
+        let a = key();
+        let b = ScopeKey::Worktree {
+            project: "/project".into(),
+            root: "/project/wt".into(),
+        };
+        let guard = coordinator.begin_scope_change(&[a.clone()]).await.unwrap();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let lease = coordinator.acquire(&[b.clone()], cancel.clone()).unwrap();
+        let keys = [a, b];
+        let mut fence =
+            Box::pin(coordinator.begin_scope_change_drain_bounded(&keys, "second mutation", DRAIN));
+        assert!(futures::poll!(&mut fence).is_pending());
+        tokio::time::advance(DRAIN * 3).await;
+        assert!(futures::poll!(&mut fence).is_pending());
+        assert!(!cancel.load(Ordering::Acquire));
+
+        drop(guard);
+        let after_acquiring = futures::poll!(&mut fence);
+        assert!(
+            cancel.load(Ordering::Acquire),
+            "B's lease was not asked to stop"
+        );
+        assert!(
+            after_acquiring.is_pending(),
+            "waiting on A must not consume B's drain budget"
+        );
+        let one_second = std::time::Duration::from_secs(1);
+        tokio::time::advance(DRAIN - one_second).await;
+        assert!(futures::poll!(&mut fence).is_pending());
+        tokio::time::advance(one_second).await;
+        assert!(matches!(
+            futures::poll!(&mut fence),
+            std::task::Poll::Ready(Err(ScopeChangeError::Unavailable { waited, .. })) if waited == DRAIN
+        ));
+        lease.settle();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn drain_timeout_lists_only_leases_still_active_at_deadline() {
+        let coordinator = Arc::new(ScopeCoordinator::default());
+        let keys = [key()];
+        let released = coordinator.acquire(&keys, Arc::default()).unwrap();
+        released.label("settled before deadline".into());
+        let active = coordinator.acquire(&keys, Arc::default()).unwrap();
+        active.label("still active at deadline".into());
+        let mut fence =
+            Box::pin(coordinator.begin_scope_change_drain_bounded(&keys, "test mutation", DRAIN));
+        assert!(futures::poll!(&mut fence).is_pending());
+        tokio::time::advance(DRAIN / 2).await;
+        released.settle();
+        assert!(futures::poll!(&mut fence).is_pending());
+        tokio::time::advance(DRAIN / 2).await;
+        let std::task::Poll::Ready(Err(ScopeChangeError::Unavailable {
+            blockers, ..
+        })) = futures::poll!(&mut fence)
+        else {
+            panic!("drain must time out with the second lease still active");
+        };
+        assert_eq!(
+            blockers,
+            vec![ScopeBlocker {
+                registration_id: active.id,
+                label: "still active at deadline".into(),
+                keys: keys.to_vec(),
+            }]
+        );
+        active.settle();
     }
 
     #[tokio::test]

@@ -779,7 +779,10 @@ async fn open_session_owned(
             warn!(%chat_id, ?error, "session open refused by job lifecycle barrier");
             Err(match error {
                 crate::tool_jobs::ScopeChangeError::Busy
-                | crate::tool_jobs::ScopeChangeError::Cancelled => SessionOpenError::Busy,
+                | crate::tool_jobs::ScopeChangeError::Cancelled
+                | crate::tool_jobs::ScopeChangeError::Unavailable {
+                    ..
+                } => SessionOpenError::Busy,
                 crate::tool_jobs::ScopeChangeError::Closed => SessionOpenError::Closed,
                 crate::tool_jobs::ScopeChangeError::InvalidKey => {
                     SessionOpenError::failed(chat_id, "invalid chat identity")

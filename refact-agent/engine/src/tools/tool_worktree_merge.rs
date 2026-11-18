@@ -135,6 +135,81 @@ mod tests {
         serde_json::json!({"commit_message":"land isolated changes", "acknowledge_dirty_baseline":true})
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn self_merge_fence_deadline_preserves_checkout_and_releases_transition() {
+        let (_temp, context, session, service) = fixture().await;
+        let meta = session.lock().await.thread.worktree.clone().unwrap();
+        let app = context.lock().await.app.clone();
+        let key = crate::tool_jobs::scope::ScopeKey::Worktree {
+            project: service.source_workspace_root().into(),
+            root: meta.root.clone(),
+        };
+        let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let lease = app
+            .runtime
+            .tool_jobs
+            .scopes
+            .acquire(&[key.clone()], cancelled.clone())
+            .unwrap();
+        lease.label("tool=shell self-merge-retained-monitor".into());
+        std::fs::write(meta.root.join("candidate"), "keep me").unwrap();
+        let head =
+            crate::worktrees::git::run_git(service.source_workspace_root(), &["rev-parse", "main"])
+                .unwrap();
+        let merging = execute(&context, "worktree_merge", merge_args());
+        tokio::pin!(merging);
+        tokio::select! {
+            _ = &mut merging => panic!("merge before drain"),
+            _ = async {
+                let real_deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                while std::time::Instant::now() < real_deadline {
+                    if cancelled.load(std::sync::atomic::Ordering::Acquire) {
+                        return;
+                    }
+                    tokio::task::yield_now().await;
+                }
+                panic!("fence never asked the retained execution to stop");
+            } => {}
+        }
+        tokio::time::advance(crate::worktrees::service::WORKTREE_CHANGE_TIMEOUT).await;
+        let error = tokio::time::timeout(std::time::Duration::from_secs(1), merging)
+            .await
+            .expect("deadline must end the fence promptly")
+            .err()
+            .expect("merge must return fence error");
+        assert!(
+            error.contains(crate::worktrees::service::WORKTREE_DRAIN_TIMEOUT_PREFIX),
+            "{error}"
+        );
+        assert!(error.contains("self-merge-retained-monitor"), "{error}");
+        assert!(
+            error.contains("This request did not modify any checkout or branch."),
+            "{error}"
+        );
+        assert_eq!(
+            crate::worktrees::git::run_git(service.source_workspace_root(), &["rev-parse", "main"])
+                .unwrap(),
+            head
+        );
+        assert!(meta.root.exists());
+        assert_eq!(
+            std::fs::read_to_string(meta.root.join("candidate")).unwrap(),
+            "keep me"
+        );
+        assert_eq!(session.lock().await.thread.worktree.as_ref(), Some(&meta));
+        let _transition =
+            tokio::time::timeout(std::time::Duration::from_secs(1), transition_lock(&session))
+                .await
+                .unwrap();
+        app.runtime
+            .tool_jobs
+            .scopes
+            .acquire(&[key], Arc::new(std::sync::atomic::AtomicBool::new(false)))
+            .unwrap()
+            .settle();
+        lease.settle();
+    }
+
     #[tokio::test]
     async fn self_merge_handoff_allows_bookkeeping_and_persists_project_scope() {
         let (_temp, context, session, service) = fixture().await;

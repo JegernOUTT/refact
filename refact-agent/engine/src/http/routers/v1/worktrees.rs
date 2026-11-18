@@ -104,7 +104,20 @@ fn status_for_error(error: &str) -> StatusCode {
     }
 }
 
+fn merge_busy_error(error: String) -> (StatusCode, Json<Value>) {
+    (
+        StatusCode::CONFLICT,
+        Json(json!({
+            "code": "merge_busy", "error": error, "retryable": true,
+            "request_id": uuid::Uuid::new_v4().to_string(),
+        })),
+    )
+}
+
 fn map_service_error(error: String) -> (StatusCode, Json<Value>) {
+    if error.starts_with(crate::worktrees::service::WORKTREE_DRAIN_TIMEOUT_PREFIX) {
+        return merge_busy_error(error);
+    }
     api_error(status_for_error(&error), error)
 }
 
@@ -338,14 +351,11 @@ pub async fn handle_v1_worktrees_merge(
     .await
     .map(|(response, _, _)| response)
     .map_err(|error| {
-        if error.contains("merge_busy") || error.contains("Timed out waiting") {
-            (
-                StatusCode::CONFLICT,
-                Json(json!({
-                    "code": "merge_busy", "error": error, "retryable": true,
-                    "request_id": uuid::Uuid::new_v4().to_string(),
-                })),
-            )
+        if error.starts_with(crate::worktrees::service::WORKTREE_DRAIN_TIMEOUT_PREFIX)
+            || error.contains("merge_busy")
+            || error.contains("Timed out waiting")
+        {
+            merge_busy_error(error)
         } else {
             map_service_error(error)
         }
@@ -383,6 +393,22 @@ pub async fn handle_v1_worktrees_sync(
 #[cfg(test)]
 mod sync_boundary_tests {
     use super::*;
+
+    #[test]
+    fn drain_timeout_maps_to_retryable_busy_regardless_of_blocker_text() {
+        let error = format!(
+            "{}: these executions in the affected worktree scopes were asked to stop but did not stop within 120 s: #7 tool=shell path not found refusing invalid conflict (keys []). This request did not modify any checkout or branch. Stop those executions or wait for them to finish, then retry.",
+            crate::worktrees::service::WORKTREE_DRAIN_TIMEOUT_PREFIX
+        );
+        let (status, Json(body)) = map_service_error(error.clone());
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["code"], "merge_busy");
+        assert_eq!(body["retryable"], true);
+        assert_eq!(body["error"], error);
+        let (status, Json(body)) = map_service_error("Worktree not found".into());
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["code"], "not_found");
+    }
 
     #[test]
     fn sync_http_uses_strict_tagged_request() {

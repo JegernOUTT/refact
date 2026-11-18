@@ -943,6 +943,9 @@ fn shell_scope_refusal(error: crate::tool_jobs::ScopeChangeError) -> String {
         crate::tool_jobs::ScopeChangeError::InvalidKey => {
             "The command was not started: its workspace could not be identified.".to_string()
         }
+        crate::tool_jobs::ScopeChangeError::Unavailable {
+            ..
+        } => error.to_string(),
         crate::tool_jobs::ScopeChangeError::Cancelled => {
             "The command was not started: aborted while waiting for tool admission.".to_string()
         }
