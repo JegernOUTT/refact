@@ -386,13 +386,18 @@ impl Tool for ToolProcessStart {
                 &mut error_log,
             )
             .await;
+        let workdir = parsed.workdir.as_deref();
         let workspace = if let Some(checkout) = &checkout {
             Some(checkout.root().to_path_buf())
+        } else if let Some(scope) = active_execution_scope(execution_scope.as_ref())
+            .filter(|scope| workdir.is_some_and(|cwd| cwd.starts_with(scope.effective_root())))
+        {
+            Some(normalize_workspace_path(scope.effective_root()))
         } else {
-            match parsed.workdir.clone() {
-                Some(workdir) => workspace_containing_path(gcx.clone(), &workdir)
+            match workdir {
+                Some(workdir) => workspace_containing_path(gcx.clone(), workdir)
                     .await
-                    .or_else(|| Some(normalize_workspace_path(&workdir))),
+                    .or_else(|| Some(normalize_workspace_path(workdir))),
                 None => process_workspace(gcx.clone(), execution_scope.as_ref()).await,
             }
         };
@@ -2733,6 +2738,73 @@ mod tests {
         assert!(!snapshot.meta.tty);
         assert_eq!(snapshot.meta.mode, ExecMode::Background);
         gcx.exec_registry.kill(&process_id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn process_start_uses_worktree_owner_only_for_in_scope_workdir() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        let root = temp.path().join("worktree");
+        let nested = root.join("refact-agent").join("engine");
+        let outside = temp.path().join("worktree-other");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        let (gcx, ccx) = test_ccx().await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![source.clone()];
+        ccx.lock().await.execution_scope = Some(ExecutionScope::from_worktree(
+            &crate::worktrees::types::WorktreeMeta {
+                id: "worktree".into(),
+                kind: "chat".into(),
+                root: root.clone(),
+                source_workspace_root: source.clone(),
+                repo_root: source,
+                branch: None,
+                base_branch: None,
+                base_commit: None,
+                task_id: None,
+                card_id: None,
+                agent_id: None,
+                enforce: true,
+            },
+        ));
+        let mut start = ToolProcessStart {
+            config_path: String::new(),
+        };
+        for (cwd, workspace) in [(&nested, &root), (&outside, &outside)] {
+            let message = run_tool(
+                &mut start,
+                ccx.clone(),
+                make_args_map(vec![
+                    ("command", json!(quick_command("worktree-ready"))),
+                    ("description", json!("Run process in a specified directory")),
+                    ("workdir", json!(cwd.to_str().unwrap())),
+                    ("tty", json!(false)),
+                ]),
+            )
+            .await
+            .unwrap();
+            let process_id = process_id(&message);
+            let snapshot = tokio::time::timeout(
+                Duration::from_millis(wait_completion_timeout_ms()),
+                gcx.exec_registry.wait(&process_id),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(
+                snapshot.status,
+                ExecStatus::Exited {
+                    exit_code: Some(0)
+                }
+            );
+            assert_eq!(snapshot.meta.cwd, Some(dunce::canonicalize(cwd).unwrap()));
+            assert_eq!(snapshot.meta.owner.chat_id.as_deref(), Some("chat"));
+            assert_eq!(
+                snapshot.meta.owner.workspace,
+                Some(normalize_workspace_path(workspace))
+            );
+        }
     }
 
     #[tokio::test]
