@@ -990,6 +990,9 @@ async fn get_or_create_session_under_transition(
         let transition_repair_patch = transition_identity_repaired.then(|| loaded.repair_patch());
         let work_project_root =
             crate::coordination::scope::restored_source_root(&app, &loaded.source_path).await;
+        let restored_planner_path =
+            crate::tasks::custody::is_legacy_owner_candidate(chat_id, &loaded.thread)
+                .then_some(loaded.source_path);
         let mut session = ChatSession::new_with_trajectory(
             chat_id.to_string(),
             loaded.messages,
@@ -1000,6 +1003,7 @@ async fn get_or_create_session_under_transition(
             loaded.goal,
         );
         session.work_project_root = work_project_root;
+        session.restored_planner_path = restored_planner_path;
         let dropped_deliveries = loaded.dropped_deliveries.clone();
         if let Some(agent_id) = app.agents.find_agent_id_by_child_chat_id(chat_id).await {
             if app.agents.has_runtime(&agent_id).await {

@@ -2802,7 +2802,18 @@ async fn add_user_messages(context: &QueueCommandContext, prepared: PreparedUser
             session.queue_notify.notify_one();
             return false;
         }
-    } else {
+    }
+    if context.native_guard.is_none() && context.supervision_guard.is_none() {
+        if let Err(error) = Box::pin(crate::tasks::custody::repair_owner_on_planner_use(
+            &app,
+            &session_arc,
+        ))
+        .await
+        {
+            tracing::warn!(%error, "Legacy planner custody repair deferred");
+        }
+    }
+    if !questions_cancelled {
         maybe_save_trajectory_background_with_intent(
             app.clone(),
             session_arc.clone(),
@@ -2810,6 +2821,175 @@ async fn add_user_messages(context: &QueueCommandContext, prepared: PreparedUser
         );
     }
     true
+}
+
+#[cfg(test)]
+mod legacy_planner_use_tests {
+    use super::*;
+    use crate::tasks::storage;
+    use serde_json::{json, Value};
+
+    const OPENER: &str = "planner-legacy-1";
+    const WINNER: &str = "0334176e-f87d-47fa-bb9c-56993803cddb";
+
+    async fn fixture() -> (tempfile::TempDir, AppState, String, std::path::PathBuf) {
+        let temp = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
+            temp.path().join("cache"),
+            temp.path().join("config"),
+        )
+        .await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![temp.path().to_owned()];
+        let task = storage::create_task(gcx.clone(), "legacy board")
+            .await
+            .unwrap()
+            .id;
+        let dir = storage::find_task_dir(gcx.clone(), &task).await.unwrap();
+        (temp, AppState::from_gcx(gcx).await, task, dir)
+    }
+
+    async fn store(dir: &std::path::Path, task: &str, id: &str, created: &str, extra: Value) {
+        let mut data = json!({"id":id,"mode":"task_planner","model":"","title":"legacy","tool_use":"agent",
+            "messages":[], "created_at":created,"updated_at":"2030-01-01T00:00:00Z",
+            "task_meta":{"task_id":task,"role":"planner"}});
+        data.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        tokio::fs::write(
+            dir.join("trajectories/planner").join(format!("{id}.json")),
+            serde_json::to_vec(&data).unwrap(),
+        )
+        .await
+        .unwrap();
+    }
+
+    async fn open(app: &AppState, id: &str) -> QueueCommandContext {
+        let session_arc =
+            crate::chat::get_or_create_session_with_trajectory(app.clone(), &app.chat.sessions, id)
+                .await
+                .unwrap();
+        QueueCommandContext {
+            app: app.clone(),
+            session_arc,
+            request_id: "send".into(),
+            priority: false,
+            native_guard: None,
+            supervision_guard: None,
+            board_operation: AMutex::new(None),
+        }
+    }
+
+    async fn send(context: &QueueCommandContext) {
+        let prepared = PreparedUserMessage {
+            content: json!("hello"),
+            attachments: vec![],
+            context_files: vec![],
+            suppress_auto_enrichment: true,
+            client_message_id: None,
+            app_context_ids: vec![],
+            checkpoints: vec![],
+            skill_activation_name: None,
+            skill_context_msg: None,
+            browser_chat_id: OPENER.into(),
+            browser_ctx_result: None,
+            additional_messages: vec![],
+        };
+        assert!(Box::pin(add_user_messages(context, prepared)).await);
+    }
+
+    #[tokio::test]
+    async fn actual_planner_send_repairs_latest_valid_saved_planner_not_the_caller() {
+        let (_temp, app, task, dir) = fixture().await;
+        store(&dir, &task, OPENER, "2020-01-01T00:00:00Z", json!({})).await;
+        store(&dir, &task, WINNER, "2026-01-29T13:43:29.349859043+00:00", json!({"link_type":"handoff", "parent_id":"prior", "root_chat_id":OPENER,"updated_at":"2026-01-29T13:43:30Z"})).await;
+        for (id, extra) in [
+            (
+                "linked",
+                json!({"task_meta":{"task_id":task,"role":"linked"}}),
+            ),
+            (
+                "agent",
+                json!({"task_meta":{"task_id":task,"role":"agents"}}),
+            ),
+            (
+                "foreign",
+                json!({"task_meta":{"task_id":"another","role":"planner"}}),
+            ),
+            (
+                "copy",
+                json!({"mode":"review","parent_id":WINNER,"link_type":"mode_transition"}),
+            ),
+            ("corrupt", json!({"messages":[42]})),
+            ("wrong-id", json!({"id":"other"})),
+        ] {
+            store(&dir, &task, id, "2027-01-01T00:00:00Z", extra).await;
+        }
+        let context = open(&app, OPENER).await;
+        let before = storage::load_board(app.gcx.clone(), &task).await.unwrap();
+        assert_eq!(
+            before.owner_chat_id, None,
+            "read-only open must not assign custody"
+        );
+        send(&context).await;
+        let after = storage::load_board(app.gcx.clone(), &task).await.unwrap();
+        assert_eq!(after.owner_chat_id.as_deref(), Some(WINNER));
+        assert_eq!(after.rev, before.rev + 1);
+        assert_eq!(after.owner_epoch, before.owner_epoch + 1);
+        assert_eq!(after.owner_custody.last().unwrap().from, None);
+        assert_eq!(after.owner_custody.last().unwrap().to, WINNER);
+        assert!(context.session_arc.lock().await.goal.is_none());
+        assert!(!dir.join("goal.json").exists());
+    }
+
+    #[tokio::test]
+    async fn actual_planner_send_never_overwrites_existing_or_concurrent_owner() {
+        for race in [false, true] {
+            let (_temp, app, task, dir) = fixture().await;
+            store(&dir, &task, OPENER, "2020-01-01T00:00:00Z", json!({})).await;
+            let context = open(&app, OPENER).await;
+            let selected = Arc::new(tokio::sync::Notify::new());
+            let resume = Arc::new(tokio::sync::Notify::new());
+            let mut use_planner = Box::pin(
+                crate::tasks::custody::OWNER_REPAIR_SELECTED
+                    .scope((selected.clone(), resume.clone()), send(&context)),
+            );
+            if race {
+                tokio::select! {
+                    _ = &mut use_planner => panic!("selection must precede custody publication"),
+                    _ = selected.notified() => {},
+                }
+            }
+            storage::update_board_atomic(app.gcx.clone(), &task, |b| {
+                b.try_transfer_owner("explicit-dangling", 1)
+                    .map_err(|e| e.to_string())
+            })
+            .await
+            .unwrap();
+            let expected = tokio::fs::read(dir.join("board.yaml")).await.unwrap();
+            resume.notify_one();
+            use_planner.await;
+            assert_eq!(
+                tokio::fs::read(dir.join("board.yaml")).await.unwrap(),
+                expected
+            );
+            assert!(!dir.join("goal.json").exists());
+        }
+    }
+
+    #[tokio::test]
+    async fn actual_planner_send_without_eligible_saved_record_keeps_refusal() {
+        let (_temp, app, task, dir) = fixture().await;
+        store(&dir, &task, OPENER, "not-a-persisted-date", json!({})).await;
+        let context = open(&app, OPENER).await;
+        send(&context).await;
+        let board = storage::load_board(app.gcx.clone(), &task).await.unwrap();
+        assert_eq!(board.owner_chat_id, None);
+        assert!(board
+            .require_owner(OPENER)
+            .unwrap_err()
+            .contains("has no owner"));
+        assert!(!dir.join("goal.json").exists());
+    }
 }
 
 #[cfg(test)]

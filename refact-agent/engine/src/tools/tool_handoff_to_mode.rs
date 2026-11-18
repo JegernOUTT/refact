@@ -303,6 +303,50 @@ pub(crate) fn transition_goal(
     Ok(transfer)
 }
 
+#[derive(Debug)]
+pub(crate) enum TransitionCommitError {
+    PlannerOwnershipMoved(String),
+    Failed(String),
+}
+
+impl From<String> for TransitionCommitError {
+    fn from(error: String) -> Self {
+        Self::Failed(error)
+    }
+}
+
+impl From<TransitionCommitError> for String {
+    fn from(error: TransitionCommitError) -> Self {
+        match error {
+            TransitionCommitError::PlannerOwnershipMoved(error)
+            | TransitionCommitError::Failed(error) => error,
+        }
+    }
+}
+
+fn classify_planner_custody_refusal(task_id: &str, error: String) -> TransitionCommitError {
+    let foreign_owner = error
+        .strip_prefix(&format!(
+            "This chat no longer owns task board {task_id}; the current planner chat is "
+        ))
+        .and_then(|owner| owner.strip_suffix(". Continue there or transfer ownership."))
+        .is_some_and(|owner| !owner.is_empty());
+    if foreign_owner
+        || error == "task board mutation requires the owning planner chat"
+        || error == "Task planner owner changed during transfer"
+    {
+        TransitionCommitError::PlannerOwnershipMoved(error)
+    } else {
+        TransitionCommitError::Failed(error)
+    }
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    pub(crate) static AFTER_PLANNER_STAGED:
+        std::cell::RefCell<Option<futures::future::BoxFuture<'static, ()>>>;
+}
+
 /// Stage a goal-free destination, durably relinquish source ownership, then
 /// activate the target. Failures can leave a recoverable inactive target, never
 /// two durable owners. The caller holds the source lock throughout this commit.
@@ -311,13 +355,15 @@ pub(crate) async fn persist_transition(
     source: &mut crate::chat::types::ChatSession,
     snapshot: &TrajectorySnapshot,
     transfer: &crate::agentic::mode_transition::GoalTransferResult,
-) -> Result<(), String> {
+) -> Result<(), TransitionCommitError> {
     let Some(meta) = snapshot
         .task_meta
         .as_ref()
         .filter(|meta| snapshot.mode == "task_planner" && meta.role == "planner")
     else {
-        return persist_goal_transition(gcx, source, snapshot, transfer).await;
+        return persist_goal_transition(gcx, source, snapshot, transfer)
+            .await
+            .map_err(TransitionCommitError::Failed);
     };
     let canonical = crate::tasks::goal::preflight_planner_transition(
         gcx.clone(),
@@ -326,7 +372,8 @@ pub(crate) async fn persist_transition(
         &snapshot.chat_id,
         source.goal.as_ref(),
     )
-    .await?;
+    .await
+    .map_err(|error| classify_planner_custody_refusal(&meta.task_id, error))?;
     let mut destination = snapshot.clone();
     let mut staged = destination.clone();
     staged.goal = None;
@@ -352,13 +399,22 @@ pub(crate) async fn persist_transition(
         snapshot.mode.clone(),
     )?;
     crate::chat::trajectories::save_trajectory_snapshot(gcx.clone(), staged).await?;
+    #[cfg(test)]
+    if let Some(race) = AFTER_PLANNER_STAGED
+        .try_with(|race| race.borrow_mut().take())
+        .ok()
+        .flatten()
+    {
+        race.await;
+    }
     crate::tasks::goal::move_planner_controller(
         gcx.clone(),
         &meta.task_id,
         &source.chat_id,
         &snapshot.chat_id,
     )
-    .await?;
+    .await
+    .map_err(|error| classify_planner_custody_refusal(&meta.task_id, error))?;
     let result = if let Some(record) = canonical {
         destination.goal = record.snapshot(&meta.task_id);
         destination.goal_ledger = record.ledger;
@@ -1192,5 +1248,34 @@ mod task_link_tests {
         .await
         .unwrap_err();
         assert_eq!(error, "A linked task chat cannot become the owning planner; create a new planner chat explicitly");
+    }
+
+    #[test]
+    fn planner_custody_refusals_are_classified_only_when_exact() {
+        for refusal in [
+            "task board mutation requires the owning planner chat",
+            "Task planner owner changed during transfer",
+            "This chat no longer owns task board task-1; the current planner chat is planner-task-1-2. Continue there or transfer ownership.",
+        ] {
+            assert!(matches!(
+                classify_planner_custody_refusal("task-1", refusal.to_string()),
+                TransitionCommitError::PlannerOwnershipMoved(error) if error == refusal
+            ));
+        }
+        for unrelated in [
+            "task board has no owner; claim ownership first",
+            "Task planner owner changed during transfer; refresh before continuing",
+            "Cannot replace an existing task goal with an independent source goal",
+            "Invalid task goal: expected value at line 1 column 1",
+            "owner epoch exhausted",
+            "This chat no longer owns task board task-2; the current planner chat is planner-task-2-2. Continue there or transfer ownership.",
+            "This chat no longer owns task board task-1; the current planner chat is . Continue there or transfer ownership.",
+            "Planner destination planner-task-1-3 retained; activation requires recovery: task board mutation requires the owning planner chat",
+        ] {
+            assert!(matches!(
+                classify_planner_custody_refusal("task-1", unrelated.to_string()),
+                TransitionCommitError::Failed(error) if error == unrelated
+            ));
+        }
     }
 }

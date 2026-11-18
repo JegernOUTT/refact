@@ -1719,6 +1719,56 @@ pub(crate) async fn accept_planner_reply<T>(
     result
 }
 
+pub(super) async fn link_ownerless_planner(
+    gcx: Arc<GlobalContext>,
+    task_id: &str,
+    opener: &str,
+    validate_opener: impl FnOnce() -> Result<(), String>,
+    planner_dir: &Path,
+    entry: &crate::chat::trajectory_index::TrajectoryIndexEntry,
+) -> Result<(), String> {
+    let (dir, guard) = locked_task_dir(gcx.clone(), task_id).await?;
+    let (existing, provenance) = read_board_with_provenance(&gcx, &dir).await?;
+    if existing.owner_chat_id.is_some() {
+        return Ok(());
+    }
+    let planner = entry.id.as_str();
+    if existing
+        .reviewer_chat_ids
+        .iter()
+        .any(|id| id == opener || id == planner)
+    {
+        return Err("Planner reviewer assignment changed; retry".into());
+    }
+    if dir.join("trajectories/planner") != planner_dir
+        || dunce::canonicalize(planner_dir).ok().as_deref() != Some(planner_dir)
+        || entry.file_name != format!("{planner}.json")
+        || !crate::chat::trajectory_index::trajectory_index_entry_is_fresh(planner_dir, entry).await
+    {
+        return Err("Saved planner changed before custody repair; retry".into());
+    }
+    require_regular_task_file(&planner_dir.join(&entry.file_name)).await?;
+    let mut board = existing;
+    board
+        .try_transfer_owner(planner, 0)
+        .map_err(|e| e.to_string())?;
+    board.rev = board.rev.checked_add(1).ok_or("Board revision exhausted")?;
+    validate_board(&board, &board_coordination_at(&dir).await?)?;
+    validate_opener()?;
+    write_board_locked(&gcx, &guard, &dir, &board, &provenance).await?;
+    drop(guard);
+    emit_task_event(
+        gcx,
+        TaskEvent::BoardChanged {
+            task_id: task_id.into(),
+            rev: board.rev,
+            board,
+        },
+    )
+    .await;
+    Ok(())
+}
+
 fn validate_board(
     board: &TaskBoard,
     settings: &refact_work_core::CoordinationSettings,

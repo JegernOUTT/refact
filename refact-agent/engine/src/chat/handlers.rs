@@ -1,14 +1,19 @@
 use axum::extract::Path;
 use axum::extract::State;
 use axum::http::{Response, StatusCode};
-use hyper::Body;
+use futures::StreamExt;
+use hyper::{body::Bytes, Body};
 use serde::Serialize;
 use std::collections::HashMap;
-use std::sync::atomic::Ordering;
+use std::io::{self, Write};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, Mutex, OwnedSemaphorePermit, Semaphore};
+use tokio_util::task::AbortOnDropHandle;
 
 use crate::app_state::AppState;
+use crate::call_validation::ChatMessage;
 use crate::custom_error::ScratchError;
 
 use super::content::{validate_content_with_attachments, validate_context_files};
@@ -31,11 +36,21 @@ pub struct QueuePriorityPatch {
 
 const SNAPSHOT_CHUNK_TARGET_BYTES: usize = 1024 * 1024;
 const SNAPSHOT_CHUNK_MAX_MESSAGES: usize = 32;
+const SNAPSHOTS_PER_RESPONSE: usize = 4;
+
+static SNAPSHOT_PREPARATIONS: std::sync::LazyLock<Arc<Semaphore>> =
+    std::sync::LazyLock::new(|| Arc::new(Semaphore::new(4)));
+static SNAPSHOT_ENCODERS: Semaphore = Semaphore::const_new(2);
+type SnapshotResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 struct SnapshotBootstrap {
-    initial_json: String,
-    chunks: Vec<Vec<crate::call_validation::ChatMessage>>,
-    chunked: bool,
+    initial: Bytes,
+    chunks: Option<SnapshotChunks>,
+}
+
+struct SnapshotChunks {
+    messages: std::vec::IntoIter<ChatMessage>,
+    lengths: Vec<usize>,
 }
 
 #[derive(Serialize)]
@@ -47,7 +62,7 @@ struct SnapshotChunkEnvelope<'a> {
     event_type: &'static str,
     chunk_index: usize,
     chunk_count: usize,
-    messages: &'a [crate::call_validation::ChatMessage],
+    messages: &'a [ChatMessage],
 }
 
 #[derive(Serialize)]
@@ -68,104 +83,338 @@ where
     serializer.serialize_str(&seq.to_string())
 }
 
-fn chunk_snapshot_messages(
-    messages: Vec<crate::call_validation::ChatMessage>,
-) -> Vec<Vec<crate::call_validation::ChatMessage>> {
-    let mut chunks = Vec::new();
-    let mut current = Vec::new();
-    let mut current_bytes = 0usize;
-
-    for message in messages {
-        let message_bytes = serde_json::to_vec(&message)
-            .map(|encoded| encoded.len())
-            .unwrap_or(SNAPSHOT_CHUNK_TARGET_BYTES);
-        if !current.is_empty()
-            && (current.len() >= SNAPSHOT_CHUNK_MAX_MESSAGES
-                || current_bytes.saturating_add(message_bytes) > SNAPSHOT_CHUNK_TARGET_BYTES)
-        {
-            chunks.push(std::mem::take(&mut current));
-            current_bytes = 0;
-        }
-        current_bytes = current_bytes.saturating_add(message_bytes);
-        current.push(message);
-    }
-
-    if !current.is_empty() {
-        chunks.push(current);
-    }
-    chunks
+struct SnapshotWriter<'a, W> {
+    writer: W,
+    cancelled: &'a AtomicBool,
 }
 
-fn serialize_snapshot_bootstrap(
-    chat_id: &str,
+impl<W: Write> Write for SnapshotWriter<'_, W> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if self.cancelled.load(Ordering::Relaxed) {
+            return Err(io::Error::other("snapshot encoding cancelled"));
+        }
+        self.writer.write(bytes)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.writer.flush()
+    }
+}
+
+#[derive(Default)]
+struct SnapshotByteCount(usize);
+
+impl Write for SnapshotByteCount {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.0 = self.0.saturating_add(bytes.len());
+        if self.0 > SNAPSHOT_CHUNK_TARGET_BYTES {
+            return Err(io::Error::other("oversized snapshot message"));
+        }
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+fn snapshot_frame(value: &impl Serialize, cancelled: &AtomicBool) -> serde_json::Result<Bytes> {
+    let mut bytes = b"data: ".to_vec();
+    serde_json::to_writer(
+        SnapshotWriter {
+            writer: &mut bytes,
+            cancelled,
+        },
+        value,
+    )?;
+    bytes.extend_from_slice(b"\n\n");
+    Ok(Bytes::from(bytes))
+}
+
+struct CancelSnapshotOnDrop(Arc<AtomicBool>);
+
+impl Drop for CancelSnapshotOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+}
+
+async fn snapshot_work<T: Send + 'static>(
+    work: impl FnOnce(&AtomicBool) -> T + Send + 'static,
+) -> SnapshotResult<T> {
+    let permit = SNAPSHOT_ENCODERS.acquire().await?;
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let _cancel_on_drop = CancelSnapshotOnDrop(cancelled.clone());
+    let job = AbortOnDropHandle::new(tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        work(&cancelled)
+    }));
+    Ok(job.await?)
+}
+
+#[derive(Default)]
+struct SnapshotChunkPlan {
+    lengths: Vec<usize>,
+    index: usize,
+    current_count: usize,
+    current_bytes: usize,
+}
+
+impl SnapshotChunkPlan {
+    fn measure_batch(&mut self, messages: &[ChatMessage], cancelled: &AtomicBool) {
+        let mut batch_bytes = 0;
+        for message in messages[self.index..]
+            .iter()
+            .take(SNAPSHOT_CHUNK_MAX_MESSAGES)
+        {
+            let mut size = SnapshotByteCount::default();
+            let result = serde_json::to_writer(
+                SnapshotWriter {
+                    writer: &mut size,
+                    cancelled,
+                },
+                message,
+            );
+            if cancelled.load(Ordering::Relaxed) {
+                return;
+            }
+            let bytes = if size.0 > SNAPSHOT_CHUNK_TARGET_BYTES || result.is_ok() {
+                size.0
+            } else {
+                SNAPSHOT_CHUNK_TARGET_BYTES
+            };
+            if self.current_count != 0
+                && (self.current_count == SNAPSHOT_CHUNK_MAX_MESSAGES
+                    || self.current_bytes.saturating_add(bytes) > SNAPSHOT_CHUNK_TARGET_BYTES)
+            {
+                self.lengths.push(self.current_count);
+                self.current_count = 0;
+                self.current_bytes = 0;
+            }
+            self.current_bytes = self.current_bytes.saturating_add(bytes);
+            self.current_count += 1;
+            self.index += 1;
+            batch_bytes += bytes.min(SNAPSHOT_CHUNK_TARGET_BYTES);
+            if batch_bytes >= SNAPSHOT_CHUNK_TARGET_BYTES {
+                break;
+            }
+        }
+    }
+
+    fn finish(mut self) -> Vec<usize> {
+        if self.current_count != 0 {
+            self.lengths.push(self.current_count);
+        }
+        self.lengths
+    }
+}
+
+async fn serialize_snapshot_bootstrap(
+    chat_id: &Arc<str>,
     seq: u64,
     event: ChatEvent,
-    messages: Option<Vec<crate::call_validation::ChatMessage>>,
-) -> Result<SnapshotBootstrap, serde_json::Error> {
-    let Some(messages) = messages else {
-        return Ok(SnapshotBootstrap {
-            initial_json: serde_json::to_string(&EventEnvelope {
-                chat_id: chat_id.to_string(),
-                seq,
-                event,
-            })?,
-            chunks: Vec::new(),
-            chunked: false,
-        });
+    messages: Option<Vec<ChatMessage>>,
+) -> SnapshotResult<SnapshotBootstrap> {
+    let chunks = if let Some(mut messages) = messages {
+        let mut plan = SnapshotChunkPlan::default();
+        while plan.index < messages.len() {
+            #[cfg(test)]
+            let sizing_gate = tests::take_snapshot_sizing_gate(chat_id, seq);
+            (plan, messages) = snapshot_work(move |cancelled| {
+                #[cfg(test)]
+                if let Some(gate) = sizing_gate {
+                    gate.park();
+                }
+                plan.measure_batch(&messages, cancelled);
+                (plan, messages)
+            })
+            .await?;
+        }
+        Some(SnapshotChunks {
+            messages: messages.into_iter(),
+            lengths: plan.finish(),
+        })
+    } else {
+        None
     };
 
-    let message_count = messages.len();
-    let chunks = chunk_snapshot_messages(messages);
-    let mut initial = serde_json::to_value(EventEnvelope {
+    let envelope = EventEnvelope {
         chat_id: chat_id.to_string(),
         seq,
         event,
-    })?;
-    if let Some(object) = initial.as_object_mut() {
-        object.insert("snapshot_chunked".to_string(), serde_json::json!(true));
-        object.insert("chunk_count".to_string(), serde_json::json!(chunks.len()));
-        object.insert(
-            "message_count".to_string(),
-            serde_json::json!(message_count),
+    };
+    let counts = chunks
+        .as_ref()
+        .map(|chunks| (chunks.lengths.len(), chunks.messages.len()));
+    let initial = snapshot_work(move |cancelled| {
+        if let Some((chunk_count, message_count)) = counts {
+            let mut initial = serde_json::to_value(envelope)?;
+            if let Some(object) = initial.as_object_mut() {
+                object.insert("snapshot_chunked".into(), serde_json::json!(true));
+                object.insert("chunk_count".into(), serde_json::json!(chunk_count));
+                object.insert("message_count".into(), serde_json::json!(message_count));
+            }
+            snapshot_frame(&initial, cancelled)
+        } else {
+            snapshot_frame(&envelope, cancelled)
+        }
+    })
+    .await??;
+    Ok(SnapshotBootstrap {
+        initial,
+        chunks,
+    })
+}
+
+fn snapshot_frames(
+    bootstrap: SnapshotBootstrap,
+    chat_id: Arc<str>,
+    seq: u64,
+) -> impl futures::Stream<Item = SnapshotResult<Bytes>> + Send {
+    async_stream::try_stream! {
+        yield bootstrap.initial;
+        if let Some(SnapshotChunks { mut messages, lengths }) = bootstrap.chunks {
+            let chunk_count = lengths.len();
+            let message_count = messages.len();
+            for (chunk_index, count) in lengths.into_iter().enumerate() {
+                let chat_id = chat_id.clone();
+                let frame;
+                let encode = snapshot_work(move |cancelled| {
+                    let frame = snapshot_frame(&SnapshotChunkEnvelope {
+                        chat_id: &chat_id,
+                        seq,
+                        event_type: "snapshot_chunk",
+                        chunk_index,
+                        chunk_count,
+                        messages: &messages.as_slice()[..count],
+                    }, cancelled)?;
+                    messages.by_ref().take(count).for_each(drop);
+                    Ok::<_, serde_json::Error>((messages, frame))
+                });
+                (messages, frame) = AbortOnDropHandle::new(tokio::spawn(encode)).await???;
+                yield frame;
+            }
+            yield snapshot_frame(&SnapshotEndEnvelope {
+                chat_id: &chat_id,
+                seq,
+                event_type: "snapshot_end",
+                chunk_count,
+                message_count,
+            }, &AtomicBool::new(false))?;
+        }
+    }
+}
+
+struct PreparedSubscriptionSnapshot {
+    rx: broadcast::Receiver<Arc<String>>,
+    seq: u64,
+    closed: Arc<AtomicBool>,
+    bootstrap: SnapshotBootstrap,
+}
+
+async fn prepare_subscription_snapshot(
+    app: &AppState,
+    session: &Arc<Mutex<ChatSession>>,
+    chat_id: &Arc<str>,
+    chunked: bool,
+    recovery: bool,
+    response_slots: &Arc<Semaphore>,
+    preparations: Arc<Semaphore>,
+) -> SnapshotResult<Option<(PreparedSubscriptionSnapshot, OwnedSemaphorePermit)>> {
+    let response_slot = response_slots.clone().acquire_owned().await?;
+    let job = prepare_snapshot_job(
+        app.clone(),
+        session.clone(),
+        chat_id.clone(),
+        chunked,
+        recovery,
+        preparations,
+    );
+    Ok(AbortOnDropHandle::new(tokio::spawn(job))
+        .await??
+        .map(|snapshot| (snapshot, response_slot)))
+}
+
+async fn prepare_snapshot_job(
+    app: AppState,
+    session: Arc<Mutex<ChatSession>>,
+    chat_id: Arc<str>,
+    chunked: bool,
+    recovery: bool,
+    preparations: Arc<Semaphore>,
+) -> SnapshotResult<Option<PreparedSubscriptionSnapshot>> {
+    let (_preparing, rx, seq, closed, messages, snapshot) = loop {
+        let preparing = preparations.acquire().await?;
+        let captured = snapshot_work({
+            let session = session.clone();
+            let app = app.clone();
+            move |cancelled| {
+                if cancelled.load(Ordering::Relaxed) {
+                    return Ok(None);
+                }
+                let session = session.try_lock()?;
+                if recovery && session.closed {
+                    return Ok(None);
+                }
+                // Subscribe before reading the sequence and capturing the immutable snapshot.
+                let rx = session.subscribe();
+                let seq = session.event_seq;
+                let messages = chunked.then(|| session.snapshot_messages());
+                let snapshot = snapshot_with_agents_mode(app, &session, !chunked);
+                Ok::<_, tokio::sync::TryLockError>(Some((
+                    rx,
+                    seq,
+                    session.closed_flag.clone(),
+                    messages,
+                    snapshot,
+                )))
+            }
+        })
+        .await?;
+        match captured {
+            Ok(Some((rx, seq, closed, messages, snapshot))) => {
+                break (preparing, rx, seq, closed, messages, snapshot);
+            }
+            Ok(None) => return Ok(None),
+            Err(_) => {
+                drop(preparing);
+                drop(session.lock().await);
+            }
+        }
+    };
+    let (snapshot, background_agents) = snapshot.await;
+    session
+        .lock()
+        .await
+        .upsert_background_agents(background_agents);
+
+    let started_at = perf_diagnostics::is_enabled().then(Instant::now);
+    let result = serialize_snapshot_bootstrap(&chat_id, seq, snapshot, messages).await;
+    if let Some(started_at) = started_at {
+        record_sse_serialize(
+            &chat_id,
+            if result.is_ok() {
+                PerfOutcome::Success
+            } else {
+                PerfOutcome::Failure
+            },
+            started_at
+                .elapsed()
+                .as_micros()
+                .try_into()
+                .unwrap_or(u64::MAX),
+            result
+                .as_ref()
+                .ok()
+                .map(|bootstrap| (bootstrap.initial.len() - b"data: \n\n".len()) as u64),
         );
     }
-    Ok(SnapshotBootstrap {
-        initial_json: serde_json::to_string(&initial)?,
-        chunks,
-        chunked: true,
-    })
-}
-
-fn snapshot_chunk_json(
-    chat_id: &str,
-    seq: u64,
-    chunk_index: usize,
-    chunk_count: usize,
-    messages: &[crate::call_validation::ChatMessage],
-) -> Result<String, serde_json::Error> {
-    serde_json::to_string(&SnapshotChunkEnvelope {
-        chat_id,
+    Ok(Some(PreparedSubscriptionSnapshot {
+        rx,
         seq,
-        event_type: "snapshot_chunk",
-        chunk_index,
-        chunk_count,
-        messages,
-    })
-}
-
-fn snapshot_end_json(
-    chat_id: &str,
-    seq: u64,
-    chunk_count: usize,
-    message_count: usize,
-) -> Result<String, serde_json::Error> {
-    serde_json::to_string(&SnapshotEndEnvelope {
-        chat_id,
-        seq,
-        event_type: "snapshot_end",
-        chunk_count,
-        message_count,
-    })
+        closed,
+        bootstrap: result?,
+    }))
 }
 
 fn command_error_response(status: StatusCode, code: &str, error: String) -> Response<Body> {
@@ -295,7 +544,6 @@ where
     F: Fn(String) -> Fut,
     Fut: std::future::Future<Output = Result<Response<Body>, ScratchError>> + Send + 'static,
 {
-    use futures::StreamExt;
     type ChatBodyStream = std::pin::Pin<Box<dyn futures::Stream<Item = MultiplexItem> + Send>>;
 
     let streams = chat_ids.into_iter().map(|id| {
@@ -369,11 +617,12 @@ pub async fn handle_v1_chats_subscribe_many(
     let per_chat_close = params
         .get("per_chat_close")
         .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"));
+    let response_slots = Arc::new(Semaphore::new(SNAPSHOTS_PER_RESPONSE));
     let body = multiplex_chat_subscriptions(chat_ids, per_chat_close, move |id| {
         let app = app.clone();
         let mut params = params.clone();
         params.insert("chat_id".into(), id);
-        async move { handle_v1_chat_subscribe(State(app), axum::extract::Query(params)).await }
+        subscribe_chat(app, params, response_slots.clone())
     });
     Ok(Response::builder()
         .status(StatusCode::OK)
@@ -387,6 +636,14 @@ pub async fn handle_v1_chats_subscribe_many(
 pub async fn handle_v1_chat_subscribe(
     State(app): State<AppState>,
     axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+) -> Result<Response<Body>, ScratchError> {
+    subscribe_chat(app, params, Arc::new(Semaphore::new(1))).await
+}
+
+async fn subscribe_chat(
+    app: AppState,
+    params: HashMap<String, String>,
+    response_slots: Arc<Semaphore>,
 ) -> Result<Response<Body>, ScratchError> {
     let chat_id = params
         .get("chat_id")
@@ -426,95 +683,48 @@ pub async fn handle_v1_chat_subscribe(
         }
     }
     spawn_pending_background_agent_flush(app.clone(), chat_id.clone());
-    let session = session_arc.lock().await;
-    let mut rx = session.subscribe();
-    let initial_seq = session.event_seq;
-    let initial_messages = chunked_snapshot.then(|| session.snapshot_messages());
-    let snapshot = snapshot_with_agents_mode(app.clone(), &session, !chunked_snapshot);
-    drop(session);
-    let (snapshot, background_agents) = snapshot.await;
+    let chat_id = Arc::<str>::from(chat_id);
+    let (
+        PreparedSubscriptionSnapshot {
+            mut rx,
+            seq,
+            closed,
+            bootstrap,
+        },
+        response_slot,
+    ) = match prepare_subscription_snapshot(
+        &app,
+        &session_arc,
+        &chat_id,
+        chunked_snapshot,
+        false,
+        &response_slots,
+        SNAPSHOT_PREPARATIONS.clone(),
+    )
+    .await
     {
-        let mut session = session_arc.lock().await;
-        session.upsert_background_agents(background_agents);
-    }
-
-    let initial_serialize_started_at = perf_diagnostics::is_enabled().then(Instant::now);
-    let initial_bootstrap =
-        match serialize_snapshot_bootstrap(&chat_id, initial_seq, snapshot, initial_messages) {
-            Ok(bootstrap) => {
-                if let Some(initial_serialize_started_at) = initial_serialize_started_at {
-                    record_sse_serialize(
-                        &chat_id,
-                        PerfOutcome::Success,
-                        initial_serialize_started_at
-                            .elapsed()
-                            .as_micros()
-                            .try_into()
-                            .unwrap_or(u64::MAX),
-                        Some(bootstrap.initial_json.len() as u64),
-                    );
-                }
-                bootstrap
-            }
-            Err(e) => {
-                if let Some(initial_serialize_started_at) = initial_serialize_started_at {
-                    record_sse_serialize(
-                        &chat_id,
-                        PerfOutcome::Failure,
-                        initial_serialize_started_at
-                            .elapsed()
-                            .as_micros()
-                            .try_into()
-                            .unwrap_or(u64::MAX),
-                        None,
-                    );
-                }
-                tracing::error!(
-                    "Failed to serialize initial SSE snapshot for {}: {}",
-                    chat_id,
-                    e
-                );
-                return Err(ScratchError::new(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "snapshot serialization failed".to_string(),
-                ));
-            }
-        };
-
-    let session_for_stream = session_arc.clone();
-    let chat_id_for_stream = chat_id.clone();
-    let closed_flag = session_arc.lock().await.closed_flag.clone();
+        Ok(Some(snapshot)) => snapshot,
+        result => {
+            tracing::error!(%chat_id, error = ?result.err(), "Failed to serialize initial SSE snapshot");
+            return Err(ScratchError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "snapshot serialization failed".to_string(),
+            ));
+        }
+    };
 
     let stream = async_stream::stream! {
-        let initial_chunk_count = initial_bootstrap.chunks.len();
-        let initial_message_count = initial_bootstrap.chunks.iter().map(Vec::len).sum();
-        yield Ok::<_, std::convert::Infallible>(format!("data: {}\n\n", initial_bootstrap.initial_json));
-        for (chunk_index, messages) in initial_bootstrap.chunks.iter().enumerate() {
-            match snapshot_chunk_json(
-                &chat_id_for_stream,
-                initial_seq,
-                chunk_index,
-                initial_chunk_count,
-                messages,
-            ) {
-                Ok(json) => yield Ok(format!("data: {}\n\n", json)),
-                Err(error) => {
-                    tracing::error!(%error, "Failed to serialize initial SSE snapshot chunk");
-                    return;
-                }
-            }
-        }
-        if initial_bootstrap.chunked {
-            match snapshot_end_json(
-                &chat_id_for_stream,
-                initial_seq,
-                initial_chunk_count,
-                initial_message_count,
-            ) {
-                Ok(json) => yield Ok(format!("data: {}\n\n", json)),
-                Err(error) => {
-                    tracing::error!(%error, "Failed to serialize initial SSE snapshot end");
-                    return;
+        {
+            let _response_slot = response_slot;
+            let frames = snapshot_frames(bootstrap, chat_id.clone(), seq);
+            tokio::pin!(frames);
+            while let Some(frame) = frames.next().await {
+                match frame {
+                    Ok(bytes) => yield Ok::<_, std::convert::Infallible>(bytes),
+                    Err(error) => {
+                        tracing::error!(%chat_id, %error, "Failed to stream initial SSE snapshot");
+                        return;
+                    }
                 }
             }
         }
@@ -526,121 +736,37 @@ pub async fn handle_v1_chat_subscribe(
             tokio::select! {
                 result = rx.recv() => {
                     match result {
-                        Ok(json) => {
-                            yield Ok::<_, std::convert::Infallible>(format!("data: {}\n\n", json));
-                        }
+                        Ok(json) => yield Ok(Bytes::from(format!("data: {}\n\n", json))),
                         Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                            let recovery_started_at = perf_diagnostics::is_enabled().then(Instant::now);
-                            tracing::info!("SSE subscriber lagged, skipped {} events, sending fresh snapshot", skipped);
-                            let session = session_for_stream.lock().await;
-                            if session.closed {
-                                break;
+                            let started_at = perf_diagnostics::is_enabled().then(Instant::now);
+                            tracing::info!(%chat_id, skipped, "SSE subscriber lagged, sending fresh snapshot");
+                            let start = prepare_subscription_snapshot(&app, &session_arc, &chat_id, chunked_snapshot, true, &response_slots, SNAPSHOT_PREPARATIONS.clone()).await;
+                            if let Some(started_at) = started_at.filter(|_| !matches!(&start, Ok(None))) {
+                                record_lagged_recovery(
+                                    &chat_id,
+                                    if start.is_ok() { PerfOutcome::Success } else { PerfOutcome::Failure },
+                                    started_at.elapsed().as_micros().try_into().unwrap_or(u64::MAX),
+                                    skipped,
+                                );
                             }
-                            // Re-subscribe BEFORE capturing event_seq so we don't miss events
-                            // emitted between snapshot and the new receiver start.
-                            rx = session.subscribe();
-                            let recovery_seq = session.event_seq;
-                            let recovery_messages = chunked_snapshot.then(|| session.snapshot_messages());
-                            let recovery_snapshot =
-                                snapshot_with_agents_mode(app.clone(), &session, !chunked_snapshot);
-                            drop(session);
-                            let (recovery_snapshot, background_agents) = recovery_snapshot.await;
-                            {
-                                let mut session = session_for_stream.lock().await;
-                                session.upsert_background_agents(background_agents);
-                            }
-                            let recovery_serialize_started_at = recovery_started_at.map(|_| Instant::now());
-                            match serialize_snapshot_bootstrap(
-                                &chat_id_for_stream,
-                                recovery_seq,
-                                recovery_snapshot,
-                                recovery_messages,
-                            ) {
-                                Ok(bootstrap) => {
-                                    if let (Some(recovery_started_at), Some(recovery_serialize_started_at)) =
-                                        (recovery_started_at, recovery_serialize_started_at)
-                                    {
-                                        record_sse_serialize(
-                                            &chat_id_for_stream,
-                                            PerfOutcome::Success,
-                                            recovery_serialize_started_at
-                                                .elapsed()
-                                                .as_micros()
-                                                .try_into()
-                                                .unwrap_or(u64::MAX),
-                                            Some(bootstrap.initial_json.len() as u64),
-                                        );
-                                        record_lagged_recovery(
-                                            &chat_id_for_stream,
-                                            PerfOutcome::Success,
-                                            recovery_started_at
-                                                .elapsed()
-                                                .as_micros()
-                                                .try_into()
-                                                .unwrap_or(u64::MAX),
-                                            skipped as u64,
-                                        );
-                                    }
-                                    let chunk_count = bootstrap.chunks.len();
-                                    let message_count = bootstrap.chunks.iter().map(Vec::len).sum();
-                                    yield Ok::<_, std::convert::Infallible>(format!("data: {}\n\n", bootstrap.initial_json));
-                                    for (chunk_index, messages) in bootstrap.chunks.iter().enumerate() {
-                                        match snapshot_chunk_json(
-                                            &chat_id_for_stream,
-                                            recovery_seq,
-                                            chunk_index,
-                                            chunk_count,
-                                            messages,
-                                        ) {
-                                            Ok(json) => yield Ok(format!("data: {}\n\n", json)),
-                                            Err(error) => {
-                                                tracing::error!(%error, "Failed to serialize SSE recovery snapshot chunk");
-                                                return;
-                                            }
-                                        }
-                                    }
-                                    if bootstrap.chunked {
-                                        match snapshot_end_json(
-                                            &chat_id_for_stream,
-                                            recovery_seq,
-                                            chunk_count,
-                                            message_count,
-                                        ) {
-                                            Ok(json) => yield Ok(format!("data: {}\n\n", json)),
-                                            Err(error) => {
-                                                tracing::error!(%error, "Failed to serialize SSE recovery snapshot end");
-                                                return;
-                                            }
-                                        }
-                                    }
-                                }
-                                Err(e) => {
-                                    if let (Some(recovery_started_at), Some(recovery_serialize_started_at)) =
-                                        (recovery_started_at, recovery_serialize_started_at)
-                                    {
-                                        record_sse_serialize(
-                                            &chat_id_for_stream,
-                                            PerfOutcome::Failure,
-                                            recovery_serialize_started_at
-                                                .elapsed()
-                                                .as_micros()
-                                                .try_into()
-                                                .unwrap_or(u64::MAX),
-                                            None,
-                                        );
-                                        record_lagged_recovery(
-                                            &chat_id_for_stream,
-                                            PerfOutcome::Failure,
-                                            recovery_started_at
-                                                .elapsed()
-                                                .as_micros()
-                                                .try_into()
-                                                .unwrap_or(u64::MAX),
-                                            skipped as u64,
-                                        );
-                                    }
-                                    tracing::error!("Failed to serialize SSE recovery snapshot for {}: {}", chat_id_for_stream, e);
+                            let (PreparedSubscriptionSnapshot { rx: next_rx, seq, bootstrap, .. }, _response_slot) = match start {
+                                Ok(Some(snapshot)) => snapshot,
+                                Ok(None) => break,
+                                Err(error) => {
+                                    tracing::error!(%chat_id, %error, "Failed to serialize SSE recovery snapshot");
                                     break;
+                                }
+                            };
+                            rx = next_rx;
+                            let frames = snapshot_frames(bootstrap, chat_id.clone(), seq);
+                            tokio::pin!(frames);
+                            while let Some(frame) = frames.next().await {
+                                match frame {
+                                    Ok(bytes) => yield Ok(bytes),
+                                    Err(error) => {
+                                        tracing::error!(%chat_id, %error, "Failed to stream SSE recovery snapshot");
+                                        return;
+                                    }
                                 }
                             }
                         }
@@ -648,10 +774,10 @@ pub async fn handle_v1_chat_subscribe(
                     }
                 }
                 _ = heartbeat_interval.tick() => {
-                    if closed_flag.load(std::sync::atomic::Ordering::Relaxed) {
+                    if closed.load(Ordering::Relaxed) {
                         break;
                     }
-                    yield Ok::<_, std::convert::Infallible>(format!(": hb {}\n\n", chrono::Utc::now().timestamp()));
+                    yield Ok(Bytes::from(format!(": hb {}\n\n", chrono::Utc::now().timestamp())));
                 }
             }
         }
@@ -1576,12 +1702,62 @@ pub async fn handle_v1_chat_reprioritize_queued(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::call_validation::{ChatContent, ChatMessage, ChatToolCall, ChatToolFunction};
+    use crate::call_validation::{ChatContent, ChatToolCall, ChatToolFunction};
     use crate::chat::perf_diagnostics::{self, MemoryPerfSink, PerfClock, PerfRecorder};
     use crate::chat::types::SessionState;
     use serde_json::json;
     use std::sync::atomic::{AtomicU64, Ordering};
-    use std::sync::Arc;
+
+    type SizingKey = (String, u64);
+    static SIZING_GATES: std::sync::LazyLock<
+        std::sync::Mutex<HashMap<SizingKey, SnapshotSizingGate>>,
+    > = std::sync::LazyLock::new(Default::default);
+
+    pub(super) struct SnapshotSizingGate {
+        entered: tokio::sync::oneshot::Sender<()>,
+        release: std::sync::mpsc::Receiver<()>,
+    }
+
+    impl SnapshotSizingGate {
+        pub(super) fn park(self) {
+            if self.entered.send(()).is_ok() {
+                match self
+                    .release
+                    .recv_timeout(std::time::Duration::from_secs(15))
+                {
+                    Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {}
+                    Err(error) => panic!("snapshot sizing never released: {error}"),
+                }
+            }
+        }
+    }
+
+    pub(super) fn take_snapshot_sizing_gate(chat_id: &str, seq: u64) -> Option<SnapshotSizingGate> {
+        SIZING_GATES.lock().unwrap().remove(&(chat_id.into(), seq))
+    }
+
+    fn park_snapshot_sizing(
+        chat_id: &str,
+        seq: u64,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        std::sync::mpsc::Sender<()>,
+    ) {
+        let (entered, observed) = tokio::sync::oneshot::channel();
+        let (release, parked) = std::sync::mpsc::channel();
+        assert!(SIZING_GATES
+            .lock()
+            .unwrap()
+            .insert(
+                (chat_id.into(), seq),
+                SnapshotSizingGate {
+                    entered,
+                    release: parked
+                },
+            )
+            .is_none());
+        (observed, release)
+    }
 
     #[test]
     fn chunked_snapshot_bootstrap_preserves_message_order_and_bounds_events() {
@@ -1597,10 +1773,24 @@ mod tests {
             .iter()
             .map(|message| message.content.content_text_only())
             .collect::<Vec<_>>();
-        let chunks = chunk_snapshot_messages(messages);
+        let mut plan = SnapshotChunkPlan::default();
+        let cancelled = AtomicBool::new(false);
+        while plan.index < messages.len() {
+            plan.measure_batch(&messages, &cancelled);
+        }
+        let mut rest = messages.as_slice();
+        let chunks = plan
+            .finish()
+            .into_iter()
+            .map(|len| {
+                let (chunk, tail) = rest.split_at(len);
+                rest = tail;
+                chunk
+            })
+            .collect::<Vec<_>>();
         let actual = chunks
             .iter()
-            .flatten()
+            .flat_map(|chunk| chunk.iter())
             .map(|message| message.content.content_text_only())
             .collect::<Vec<_>>();
 
@@ -1781,6 +1971,193 @@ mod tests {
             "unexpected snapshot after bootstrap: {frame}"
         );
         Some(frame)
+    }
+
+    #[tokio::test]
+    async fn unpolled_snapshot_preparation_releases_process_admission() {
+        let workspace = tempfile::tempdir().unwrap();
+        let app = test_app_with_workspace(workspace.path()).await;
+        let chat_id = Arc::<str>::from("mux-unpolled-preparation");
+        let session = insert_test_session(&app, &chat_id).await;
+        session
+            .lock()
+            .await
+            .messages
+            .push(ChatMessage::new("user".into(), "snapshot".into()));
+        let (entered, release) = park_snapshot_sizing(&chat_id, 0);
+        let preparations = Arc::new(Semaphore::new(1));
+        let response_slots = Arc::new(Semaphore::new(1));
+        let mut prepare = Box::pin(prepare_subscription_snapshot(
+            &app,
+            &session,
+            &chat_id,
+            true,
+            false,
+            &response_slots,
+            preparations.clone(),
+        ));
+        assert!(futures::poll!(&mut prepare).is_pending());
+        let timeout = std::time::Duration::from_secs(10);
+        tokio::time::timeout(timeout, entered)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(preparations.try_acquire().is_err());
+        assert!(response_slots.try_acquire().is_err());
+
+        release.send(()).unwrap();
+        let _process_slot = tokio::time::timeout(timeout, preparations.acquire())
+            .await
+            .expect("an unpolled response must not keep process-wide preparation slots")
+            .unwrap();
+        assert!(response_slots.try_acquire().is_err());
+        drop(prepare);
+        assert!(response_slots.try_acquire().is_ok());
+    }
+
+    #[tokio::test]
+    async fn multiplex_live_sibling_progresses_during_initial_and_recovery_snapshot_sizing() {
+        const LARGE: &str = "mux-sizing-chat";
+        const SIBLING: &str = "mux-sizing-sibling";
+        const INITIAL_SEQ: u64 = 9_007_199_254_740_993;
+        let workspace = tempfile::tempdir().unwrap();
+        let app = test_app_with_workspace(workspace.path()).await;
+        let large = insert_test_session(&app, LARGE).await;
+        let sibling = insert_test_session(&app, SIBLING).await;
+        let make_message = |id: &str, content: String| {
+            let mut message = ChatMessage::new("user".into(), content);
+            message.message_id = id.into();
+            message
+        };
+        let initial = vec![
+            make_message(
+                "oversized",
+                "\"\n".repeat(SNAPSHOT_CHUNK_TARGET_BYTES / 4 + 1),
+            ),
+            make_message("anchored", "before edit".into()),
+        ];
+        {
+            let mut session = large.lock().await;
+            session.event_tx = broadcast::channel(1).0;
+            session.event_seq = INITIAL_SEQ;
+            session.messages = initial.clone();
+        }
+        let (entered, release) = park_snapshot_sizing(LARGE, INITIAL_SEQ);
+        let params = HashMap::from([
+            (
+                "chat_ids".into(),
+                serde_json::to_string(&[LARGE, SIBLING]).unwrap(),
+            ),
+            ("snapshot_chunks".into(), "1".into()),
+            ("per_chat_close".into(), "1".into()),
+        ]);
+        let mut body = handle_v1_chats_subscribe_many(State(app), axum::extract::Query(params))
+            .await
+            .unwrap()
+            .into_body();
+        for event_type in ["snapshot", "snapshot_end"] {
+            let frame = next_mux_frame(&mut body).await.unwrap();
+            assert_eq!(frame["chat_id"], SIBLING);
+            assert_eq!(frame["type"], event_type);
+        }
+
+        async fn after_entered(entered: tokio::sync::oneshot::Receiver<()>) {
+            tokio::time::timeout(std::time::Duration::from_secs(10), entered)
+                .await
+                .expect("snapshot sizing must have started")
+                .unwrap();
+        }
+
+        fn emit_started(session: &mut ChatSession, message_id: &str) {
+            session.emit(ChatEvent::StreamStarted {
+                message_id: message_id.into(),
+            });
+        }
+
+        async fn expect_snapshot_frames(body: &mut Body, seq: u64, expected: &[ChatMessage]) {
+            let seq = seq.to_string();
+            let header = next_mux_frame(body).await.unwrap();
+            assert_eq!(header["chat_id"], LARGE);
+            assert_eq!(header["type"], "snapshot");
+            assert_eq!(header["seq"], seq);
+            assert_eq!(header["snapshot_chunked"], true);
+            assert_eq!(header["messages"], json!([]));
+            assert_eq!(header["message_count"], expected.len());
+            assert_eq!(header["chunk_count"], 2);
+            let mut actual = Vec::new();
+            for chunk_index in 0..2 {
+                let chunk = next_mux_frame(body).await.unwrap();
+                assert_eq!(chunk["chat_id"], LARGE);
+                assert_eq!(chunk["type"], "snapshot_chunk");
+                assert_eq!(chunk["seq"], seq);
+                assert_eq!(chunk["chunk_index"], chunk_index);
+                assert_eq!(chunk["chunk_count"], 2);
+                actual.extend(chunk["messages"].as_array().unwrap().iter().cloned());
+            }
+            assert_eq!(json!(actual), json!(expected));
+            let end = next_mux_frame(body).await.unwrap();
+            assert_eq!(
+                end,
+                json!({ "chat_id": LARGE, "type": "snapshot_end", "seq": seq,
+                "chunk_count": 2, "message_count": expected.len() })
+            );
+        }
+
+        let (frame, ()) = tokio::join!(next_mux_frame(&mut body), async {
+            after_entered(entered).await;
+            {
+                let mut session = large.lock().await;
+                session.messages[1].content = ChatContent::SimpleText("after edit".into());
+                emit_started(&mut session, "queued-after-initial");
+            }
+            emit_started(&mut *sibling.lock().await, "during-initial-sizing");
+        });
+        assert_eq!(
+            frame.unwrap(),
+            json!({"chat_id": SIBLING, "type": "stream_started",
+            "seq": "1", "message_id": "during-initial-sizing"})
+        );
+        release.send(()).unwrap();
+        expect_snapshot_frames(&mut body, INITIAL_SEQ, &initial).await;
+        assert_eq!(
+            next_mux_frame(&mut body).await.unwrap(),
+            json!({"chat_id": LARGE,
+            "type": "stream_started", "seq": (INITIAL_SEQ + 1).to_string(),
+            "message_id": "queued-after-initial"})
+        );
+
+        let (recovery_seq, recovered) = {
+            let mut session = large.lock().await;
+            session
+                .messages
+                .push(make_message("new", "added before recovery".into()));
+            for id in ["discarded-1", "discarded-2", "discarded-3"] {
+                emit_started(&mut session, id);
+            }
+            (session.event_seq, session.messages.clone())
+        };
+        let (entered, release) = park_snapshot_sizing(LARGE, recovery_seq);
+        let (frame, ()) = tokio::join!(next_mux_frame(&mut body), async {
+            after_entered(entered).await;
+            emit_started(&mut *large.lock().await, "queued-after-recovery");
+            emit_started(&mut *sibling.lock().await, "during-recovery-sizing");
+        });
+        assert_eq!(
+            frame.unwrap(),
+            json!({"chat_id": SIBLING, "type": "stream_started",
+            "seq": "2", "message_id": "during-recovery-sizing"})
+        );
+        release.send(()).unwrap();
+        expect_snapshot_frames(&mut body, recovery_seq, &recovered).await;
+        assert_eq!(
+            next_mux_frame(&mut body).await.unwrap(),
+            json!({"chat_id": LARGE,
+            "type": "stream_started", "seq": (recovery_seq + 1).to_string(),
+            "message_id": "queued-after-recovery"})
+        );
+        drop(body);
+        assert_eq!(large.lock().await.event_tx.receiver_count(), 0);
+        assert_eq!(sibling.lock().await.event_tx.receiver_count(), 0);
     }
 
     #[tokio::test]

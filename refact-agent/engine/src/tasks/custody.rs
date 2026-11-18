@@ -1,12 +1,14 @@
 use std::sync::Arc;
 
 use crate::app_state::AppState;
+use crate::chat::types::{ChatSession, ThreadParams};
 use crate::global_context::GlobalContext;
 use super::types::TaskBoard;
 
 #[cfg(test)]
 tokio::task_local! {
     pub(crate) static REBIND_FAILURE: bool;
+    pub(crate) static OWNER_REPAIR_SELECTED: (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>);
 }
 
 pub(crate) fn current_planner_chat_id(board: &TaskBoard) -> Option<String> {
@@ -14,6 +16,167 @@ pub(crate) fn current_planner_chat_id(board: &TaskBoard) -> Option<String> {
         .owner_chat_id
         .clone()
         .filter(|owner| !owner.trim().is_empty())
+}
+
+pub(crate) fn is_legacy_owner_candidate(id: &str, thread: &ThreadParams) -> bool {
+    let Some(meta) = thread.task_meta.as_ref() else {
+        return false;
+    };
+    let mode = crate::yaml_configs::customization_registry::map_legacy_mode_to_id(&thread.mode);
+    meta.role == "planner"
+        && meta.agent_id.is_none()
+        && meta.card_id.is_none()
+        && meta
+            .planner_chat_id
+            .as_deref()
+            .is_none_or(|planner| planner == id)
+        && thread.buddy_meta.is_none()
+        && !matches!(mode, "" | "task_agent")
+        && match thread.link_type.as_deref() {
+            None => thread.parent_id.is_none(),
+            Some("handoff" | "mode_transition" | "branch") => mode == "task_planner",
+            _ => false,
+        }
+}
+
+pub(crate) async fn repair_owner_on_planner_use(
+    app: &AppState,
+    session_arc: &Arc<tokio::sync::Mutex<ChatSession>>,
+) -> Result<(), String> {
+    use crate::chat::{trajectories, trajectory_index};
+    let (path, chat_id, meta, source) = {
+        let session = session_arc.lock().await;
+        let Some(path) = &session.restored_planner_path else {
+            return Ok(());
+        };
+        if session.closed || !is_legacy_owner_candidate(&session.chat_id, &session.thread) {
+            return Ok(());
+        }
+        let Some(source) = crate::coordination::scope::session_source_root(&session) else {
+            return Ok(());
+        };
+        (
+            path.clone(),
+            session.chat_id.clone(),
+            session.thread.task_meta.clone().unwrap(),
+            source,
+        )
+    };
+    if super::storage::bound_task_active() || crate::file_activity::current_actor().is_some() {
+        return Ok(());
+    }
+    let gcx = &app.gcx;
+    let task = &meta.task_id;
+    let binding = super::storage::TaskDirectoryBinding::capture(gcx.clone(), &source, task).await?;
+    let board = binding
+        .scope(super::storage::load_board(gcx.clone(), task))
+        .await?;
+    if board.owner_chat_id.is_none() && !board.reviewer_chat_ids.contains(&chat_id) {
+        let dir = binding
+            .scope(super::storage::find_task_dir(gcx.clone(), task))
+            .await?
+            .join("trajectories/planner");
+        if dunce::canonicalize(&dir).ok().as_ref() != Some(&dir)
+            || path != dir.join(format!("{chat_id}.json"))
+        {
+            return Ok(());
+        }
+        super::storage::require_regular_task_file(&path).await?;
+        let entries = trajectory_index::list_trajectory_entries_with_rollout_shared_for(
+            &app.chat.trajectory_index_coordinator,
+            &dir,
+            None,
+            trajectory_index::TrajectoryIndexListingCaller::ChatPathLookup,
+        )
+        .await?;
+        let mut candidates: Vec<_> = entries
+            .iter()
+            .filter_map(|entry| {
+                if trajectories::validate_trajectory_id(&entry.id).is_err()
+                    || entry.file_name != format!("{}.json", entry.id)
+                    || board.reviewer_chat_ids.contains(&entry.id)
+                {
+                    return None;
+                }
+                Some((
+                    chrono::DateTime::parse_from_rfc3339(&entry.created_at).ok()?,
+                    &entry.id,
+                    entry,
+                ))
+            })
+            .collect();
+        candidates.sort_unstable_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(a.1)));
+        for (created, id, entry) in candidates {
+            let candidate_path = dir.join(&entry.file_name);
+            if super::storage::require_regular_task_file(&candidate_path)
+                .await
+                .is_err()
+            {
+                continue;
+            }
+            let Some(saved) = trajectories::load_trajectory_for_chat(gcx.clone(), id).await else {
+                continue;
+            };
+            if saved.source_path != candidate_path
+                || !is_legacy_owner_candidate(id, &saved.thread)
+                || !saved
+                    .thread
+                    .task_meta
+                    .as_ref()
+                    .is_some_and(|saved_meta| saved_meta.task_id == *task)
+            {
+                continue;
+            }
+            if chrono::DateTime::parse_from_rfc3339(&saved.created_at).ok() != Some(created) {
+                return Err("Saved planner creation order changed; retry".into());
+            }
+            #[cfg(test)]
+            if let Ok((selected, resume)) = OWNER_REPAIR_SELECTED.try_with(Clone::clone) {
+                selected.notify_one();
+                resume.notified().await;
+            }
+            binding
+                .scope(super::storage::link_ownerless_planner(
+                    gcx.clone(),
+                    task,
+                    &chat_id,
+                    || {
+                        let sessions = gcx
+                            .chat_sessions
+                            .try_read()
+                            .map_err(|_| "Session registry is busy; retry")?;
+                        if !sessions
+                            .get(&chat_id)
+                            .is_some_and(|current| Arc::ptr_eq(current, session_arc))
+                        {
+                            return Err("Restored planner session changed; retry".into());
+                        }
+                        let session = session_arc
+                            .try_lock()
+                            .map_err(|_| "Planner session is busy; retry")?;
+                        if session.closed
+                            || session
+                                .closed_flag
+                                .load(std::sync::atomic::Ordering::Acquire)
+                            || session.restored_planner_path.as_ref() != Some(&path)
+                            || session.thread.task_meta.as_ref() != Some(&meta)
+                            || crate::coordination::scope::session_source_root(&session).as_ref()
+                                != Some(&source)
+                            || !is_legacy_owner_candidate(&chat_id, &session.thread)
+                        {
+                            return Err("Restored planner identity changed; retry".into());
+                        }
+                        Ok(())
+                    },
+                    &dir,
+                    entry,
+                ))
+                .await?;
+            break;
+        }
+    }
+    session_arc.lock().await.restored_planner_path = None;
+    Ok(())
 }
 
 pub(crate) async fn rebind_task_agents(

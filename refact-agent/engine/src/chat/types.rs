@@ -374,6 +374,7 @@ pub struct ChatSession {
     pub last_activity: Instant,
     /// Trusted creation/restoration project; not request-editable thread metadata.
     pub(crate) work_project_root: Option<std::path::PathBuf>,
+    pub(crate) restored_planner_path: Option<std::path::PathBuf>,
     pub(crate) work_provenance: crate::coordination::provenance::WorkProvenance,
     pub work_capsule_state: crate::coordination::capsule::CapsuleState,
     pub(crate) work_catalog_signature: String,

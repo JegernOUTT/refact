@@ -12,14 +12,16 @@ use crate::chat::trajectory_ops::{CompressOptions, TransformStats, compress_in_p
 #[cfg(test)]
 use crate::call_validation::ChatMessage;
 use crate::agentic::mode_transition::{
-    GoalTransferResult, ReconstructionRequest, reconstruct_context,
+    GoalTransferResult, ReconstructionOutcome, ReconstructionRequest, reconstruct_context,
     insert_goal_messages_before_plan,
 };
 #[cfg(test)]
 use crate::agentic::mode_transition::transfer_goal_ownership;
 use crate::chat::types::SessionState;
 use crate::chat::trajectories::transitioned_task_meta;
-use crate::tools::tool_handoff_to_mode::{persist_transition, transition_goal, transition_report};
+use crate::tools::tool_handoff_to_mode::{
+    persist_transition, transition_goal, transition_report, TransitionCommitError,
+};
 
 struct TransitionReservation {
     session: Arc<tokio::sync::Mutex<crate::chat::types::ChatSession>>,
@@ -742,7 +744,7 @@ async fn commit_transition_snapshot(
     snapshot: TrajectorySnapshot,
     transferred_goal: &GoalTransferResult,
     reservation: Option<&TransitionReservation>,
-) -> Result<(), String> {
+) -> Result<(), TransitionCommitError> {
     let mut session = session_arc.lock().await;
     if session.trajectory_version != source_version
         || !crate::chat::context_rebuild::explicit_context_ready(&session)
@@ -756,13 +758,50 @@ async fn commit_transition_snapshot(
         })
         || (reservation.is_none() && session.pending_mode_handoff.is_some())
     {
-        return Err("Source trajectory changed during reconstruction".to_string());
+        return Err(TransitionCommitError::Failed(
+            "Source trajectory changed during reconstruction".to_string(),
+        ));
     }
     let source_id = session.chat_id.clone();
     persist_transition(gcx.clone(), &mut session, &snapshot, transferred_goal).await?;
     drop(session);
     let app = AppState::from_gcx(gcx).await;
-    crate::python_tool::workspace::PythonWorkspace::fork(&app, &source_id, &snapshot.chat_id).await
+    crate::python_tool::workspace::PythonWorkspace::fork(&app, &source_id, &snapshot.chat_id)
+        .await
+        .map_err(TransitionCommitError::Failed)
+}
+
+fn transition_commit_failure(error: TransitionCommitError) -> ScratchError {
+    match error {
+        TransitionCommitError::PlannerOwnershipMoved(error) => {
+            ScratchError::new(StatusCode::CONFLICT, error)
+        }
+        TransitionCommitError::Failed(error) => {
+            ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, error)
+        }
+    }
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    static PLANNER_RECONSTRUCTION: std::cell::RefCell<
+        Option<futures::future::BoxFuture<'static, Result<ReconstructionOutcome, String>>>,
+    >;
+}
+
+async fn reconstruct_planner_context(
+    gcx: Arc<GlobalContext>,
+    request: ReconstructionRequest<'_>,
+) -> Result<ReconstructionOutcome, String> {
+    #[cfg(test)]
+    if let Some(rebuilt) = PLANNER_RECONSTRUCTION
+        .try_with(|rebuilt| rebuilt.borrow_mut().take())
+        .ok()
+        .flatten()
+    {
+        return rebuilt.await;
+    }
+    reconstruct_context(gcx, request).await
 }
 
 #[cfg(test)]
@@ -965,7 +1004,7 @@ pub async fn handle_mode_transition_apply(
         Some(&reservation),
     )
     .await
-    .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    .map_err(transition_commit_failure)?;
 
     let response = ModeTransitionApplyResponse {
         new_chat_id,
@@ -1068,7 +1107,7 @@ pub async fn handle_planner_from_transition(
     .await
     .map_err(|error| ScratchError::new(StatusCode::CONFLICT, error))?;
 
-    let rebuilt = reconstruct_context(
+    let rebuilt = reconstruct_planner_context(
         gcx.clone(),
         ReconstructionRequest {
             messages: &reconstruction_input,
@@ -1202,7 +1241,7 @@ pub async fn handle_planner_from_transition(
         Some(&reservation),
     )
     .await
-    .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    .map_err(transition_commit_failure)?;
 
     let response = ModeTransitionApplyResponse {
         new_chat_id,
@@ -1666,10 +1705,13 @@ mod tests {
         let version = session.lock().await.trajectory_version;
         let transferred = transfer_goal_ownership(&[], None, &[], "source", "target", "agent", 1);
         let snapshot = transition_identity_snapshot("mode_transition");
-        let error =
+        let TransitionCommitError::Failed(error) =
             commit_transition_snapshot(gcx, session, version + 1, snapshot, &transferred, None)
                 .await
-                .unwrap_err();
+                .unwrap_err()
+        else {
+            panic!("a stale source is not a planner ownership conflict");
+        };
         assert!(error.contains("Source trajectory changed"));
     }
 
@@ -1749,9 +1791,13 @@ mod tests {
             "agent".into(),
         )
         .unwrap();
-        let error = persist_transition(gcx.clone(), &mut source, &snapshot, &transfer)
-            .await
-            .unwrap_err();
+        let TransitionCommitError::Failed(error) =
+            persist_transition(gcx.clone(), &mut source, &snapshot, &transfer)
+                .await
+                .unwrap_err()
+        else {
+            panic!("a source save failure is not a planner ownership conflict");
+        };
         assert!(error.contains("inactive destination staged-target"));
         assert_eq!(serde_json::to_vec(&source.messages).unwrap(), before);
         assert!(source.goal.as_ref().unwrap().active);
@@ -1796,7 +1842,10 @@ mod tests {
             Some(&reservation),
         )
         .await;
-        assert!(result.unwrap_err().contains("Source trajectory changed"));
+        assert!(matches!(
+            result,
+            Err(TransitionCommitError::Failed(error)) if error.contains("Source trajectory changed")
+        ));
     }
 
     #[tokio::test]
@@ -2304,6 +2353,245 @@ mod tests {
 
         assert_eq!(err.status_code, StatusCode::BAD_REQUEST);
         assert_eq!(err.message, "Only task_planner chats can be created here");
+    }
+
+    async fn planner_restart_fixture() -> (
+        tempfile::TempDir,
+        AppState,
+        String,
+        Arc<tokio::sync::Mutex<crate::chat::types::ChatSession>>,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
+            dir.path().join("cache"),
+            dir.path().join("config"),
+        )
+        .await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![dir.path().to_path_buf()];
+        let task = crate::tasks::storage::create_task(gcx.clone(), "Planner restart race")
+            .await
+            .unwrap();
+        crate::tasks::storage::update_board_atomic(gcx.clone(), &task.id, |board| {
+            board.authorize_owner("restart-source")
+        })
+        .await
+        .unwrap();
+        let mut source = crate::chat::types::ChatSession::new("restart-source".into());
+        source.thread.mode = "task_planner".into();
+        source.thread.model = "model".into();
+        source.thread.task_meta = Some(crate::chat::types::TaskMeta {
+            task_id: task.id.clone(),
+            role: "planner".into(),
+            planner_chat_id: Some("restart-source".into()),
+            ..Default::default()
+        });
+        source.add_message(ChatMessage::new("user".into(), "Plan the release".into()));
+        let source = Arc::new(tokio::sync::Mutex::new(source));
+        gcx.chat_sessions
+            .write()
+            .await
+            .insert("restart-source".into(), source.clone());
+        (dir, AppState::from_gcx(gcx).await, task.id, source)
+    }
+
+    fn reconstructed_planner_context(
+    ) -> futures::future::BoxFuture<'static, Result<ReconstructionOutcome, String>> {
+        Box::pin(async {
+            Ok::<_, String>(ReconstructionOutcome {
+                messages: vec![ChatMessage::new(
+                    "user".into(),
+                    "Continue the release plan".into(),
+                )],
+                decisions: Default::default(),
+                model: "model".into(),
+                budget: crate::agentic::mode_transition::TransitionContextBudget {
+                    previous_symbols: 0,
+                    total_symbols: 0,
+                    files_symbols: 0,
+                    messages_symbols: 0,
+                    max_images: 0,
+                },
+                reread_paths: Vec::new(),
+            })
+        })
+    }
+
+    async fn create_concurrent_planner(app: AppState, task_id: String) -> String {
+        let created = crate::http::routers::v1::tasks::handle_create_planner_chat(
+            State(app),
+            Path(task_id),
+            hyper::body::Bytes::new(),
+        )
+        .await
+        .unwrap();
+        created.0["chat_id"].as_str().unwrap().to_string()
+    }
+
+    async fn restart_planner(app: AppState, task_id: String) -> ScratchError {
+        handle_planner_from_transition(
+            State(app),
+            Path(task_id),
+            hyper::body::Bytes::from_static(br#"{"source_chat_id":"restart-source"}"#),
+        )
+        .await
+        .unwrap_err()
+    }
+
+    async fn assert_restart_source_released(
+        source: &Arc<tokio::sync::Mutex<crate::chat::types::ChatSession>>,
+        messages: &serde_json::Value,
+    ) {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while source.lock().await.pending_mode_handoff.is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("restart reservation must be released");
+        let source = source.lock().await;
+        assert_eq!(&serde_json::to_value(&source.messages).unwrap(), messages);
+        assert!(source.goal.is_none());
+    }
+
+    #[tokio::test]
+    async fn planner_restart_conflicts_when_new_planner_takes_board_during_reconstruction() {
+        let (_dir, app, task, source) = planner_restart_fixture().await;
+        let messages = serde_json::to_value(&source.lock().await.messages).unwrap();
+        let (owner_tx, owner_rx) = tokio::sync::oneshot::channel();
+        let (race_app, race_task) = (app.clone(), task.clone());
+        let reconstruction: futures::future::BoxFuture<'static, _> = Box::pin(async move {
+            owner_tx
+                .send(create_concurrent_planner(race_app, race_task).await)
+                .unwrap();
+            reconstructed_planner_context().await
+        });
+        let error = PLANNER_RECONSTRUCTION
+            .scope(
+                std::cell::RefCell::new(Some(reconstruction)),
+                restart_planner(app.clone(), task.clone()),
+            )
+            .await;
+        let new_owner = owner_rx.await.unwrap();
+
+        assert_eq!(error.status_code, StatusCode::CONFLICT);
+        assert_eq!(
+            error.message,
+            "task board mutation requires the owning planner chat"
+        );
+        let board = crate::tasks::storage::load_board(app.gcx.clone(), &task)
+            .await
+            .unwrap();
+        assert_eq!(board.owner_chat_id.as_deref(), Some(new_owner.as_str()));
+        let planners =
+            crate::tasks::storage::list_task_trajectories(app.gcx.clone(), &task, "planner", None)
+                .await
+                .unwrap();
+        assert_eq!(
+            planners
+                .iter()
+                .map(|planner| planner.id.as_str())
+                .collect::<Vec<_>>(),
+            vec![new_owner.as_str()]
+        );
+        assert_eq!(
+            app.gcx
+                .chat_sessions
+                .read()
+                .await
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec!["restart-source".to_string()]
+        );
+        assert_restart_source_released(&source, &messages).await;
+    }
+
+    #[tokio::test]
+    async fn planner_restart_conflicts_when_new_planner_takes_board_after_staging() {
+        let (_dir, app, task, source) = planner_restart_fixture().await;
+        let messages = serde_json::to_value(&source.lock().await.messages).unwrap();
+        let (owner_tx, owner_rx) = tokio::sync::oneshot::channel();
+        let (race_app, race_task) = (app.clone(), task.clone());
+        let staged_race: futures::future::BoxFuture<'static, ()> = Box::pin(async move {
+            owner_tx
+                .send(create_concurrent_planner(race_app, race_task).await)
+                .unwrap();
+        });
+        let error = crate::tools::tool_handoff_to_mode::AFTER_PLANNER_STAGED
+            .scope(
+                std::cell::RefCell::new(Some(staged_race)),
+                PLANNER_RECONSTRUCTION.scope(
+                    std::cell::RefCell::new(Some(reconstructed_planner_context())),
+                    restart_planner(app.clone(), task.clone()),
+                ),
+            )
+            .await;
+        let new_owner = owner_rx.await.unwrap();
+
+        assert_eq!(error.status_code, StatusCode::CONFLICT);
+        assert_eq!(
+            error.message,
+            format!(
+                "This chat no longer owns task board {task}; the current planner chat is {new_owner}. Continue there or transfer ownership."
+            )
+        );
+        let board = crate::tasks::storage::load_board(app.gcx.clone(), &task)
+            .await
+            .unwrap();
+        assert_eq!(board.owner_chat_id.as_deref(), Some(new_owner.as_str()));
+        let planners =
+            crate::tasks::storage::list_task_trajectories(app.gcx.clone(), &task, "planner", None)
+                .await
+                .unwrap();
+        let retained = planners
+            .iter()
+            .filter(|planner| planner.id != new_owner)
+            .collect::<Vec<_>>();
+        assert_eq!(retained.len(), 1);
+        let staged =
+            crate::chat::trajectories::load_trajectory_for_chat(app.gcx.clone(), &retained[0].id)
+                .await
+                .unwrap();
+        assert!(staged.goal.is_none());
+        assert_restart_source_released(&source, &messages).await;
+    }
+
+    #[tokio::test]
+    async fn planner_restart_keeps_server_error_for_unrelated_commit_preflight_failure() {
+        let (_dir, app, task, source) = planner_restart_fixture().await;
+        let messages = serde_json::to_value(&source.lock().await.messages).unwrap();
+        let task_dir = crate::tasks::storage::find_task_dir(app.gcx.clone(), &task)
+            .await
+            .unwrap();
+        let reconstruction: futures::future::BoxFuture<'static, _> = Box::pin(async move {
+            tokio::fs::write(task_dir.join("goal.json"), b"not a task goal")
+                .await
+                .unwrap();
+            reconstructed_planner_context().await
+        });
+        let error = PLANNER_RECONSTRUCTION
+            .scope(
+                std::cell::RefCell::new(Some(reconstruction)),
+                restart_planner(app.clone(), task.clone()),
+            )
+            .await;
+
+        assert_eq!(error.status_code, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(error.message.starts_with("Invalid task goal"));
+        let board = crate::tasks::storage::load_board(app.gcx.clone(), &task)
+            .await
+            .unwrap();
+        assert_eq!(board.owner_chat_id.as_deref(), Some("restart-source"));
+        assert!(crate::tasks::storage::list_task_trajectories(
+            app.gcx.clone(),
+            &task,
+            "planner",
+            None
+        )
+        .await
+        .unwrap()
+        .is_empty());
+        assert_restart_source_released(&source, &messages).await;
     }
 
     #[tokio::test]
